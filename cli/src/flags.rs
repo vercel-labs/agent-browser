@@ -41,6 +41,9 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
     let mut result = Vec::new();
     let mut skip_next = false;
 
+    // Global flags that should be stripped from command args
+    const GLOBAL_FLAGS: &[&str] = &["--json", "--full", "--headed", "--debug"];
+
     for arg in args.iter() {
         if skip_next {
             skip_next = false;
@@ -50,9 +53,11 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
             skip_next = true;
             continue;
         }
-        if !arg.starts_with("--") && arg != "-f" {
-            result.push(arg.clone());
+        // Only strip known global flags, not command-specific flags
+        if GLOBAL_FLAGS.contains(&arg.as_str()) || arg == "-f" {
+            continue;
         }
+        result.push(arg.clone());
     }
     result
 }
