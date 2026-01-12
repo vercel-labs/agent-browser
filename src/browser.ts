@@ -596,12 +596,13 @@ export class BrowserManager {
       }
     }
 
-    this.cdpPort = requestedCdpPort;
-
-    if (this.cdpPort) {
-      await this.connectViaCDP(this.cdpPort);
+    if (requestedCdpPort) {
+      await this.connectViaCDP(requestedCdpPort);
+      this.cdpPort = requestedCdpPort;
       return;
     }
+
+    this.cdpPort = requestedCdpPort;
 
     // Select browser type
     const browserType = options.browser ?? 'chromium';
