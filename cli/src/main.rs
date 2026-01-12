@@ -170,10 +170,28 @@ fn main() {
 
     // Connect via CDP if --cdp flag is set
     if let Some(ref port) = flags.cdp {
-        let cdp_port: u16 = match port.parse() {
-            Ok(p) if p > 0 => p,
-            _ => {
-                let msg = format!("Invalid CDP port: {}", port);
+        let cdp_port: u16 = match port.parse::<u32>() {
+            Ok(p) if p == 0 => {
+                let msg = "Invalid CDP port: port must be greater than 0".to_string();
+                if flags.json {
+                    println!(r#"{{"success":false,"error":"{}"}}"#, msg);
+                } else {
+                    eprintln!("\x1b[31m✗\x1b[0m {}", msg);
+                }
+                exit(1);
+            }
+            Ok(p) if p > 65535 => {
+                let msg = format!("Invalid CDP port: {} is out of range (valid range: 1-65535)", p);
+                if flags.json {
+                    println!(r#"{{"success":false,"error":"{}"}}"#, msg);
+                } else {
+                    eprintln!("\x1b[31m✗\x1b[0m {}", msg);
+                }
+                exit(1);
+            }
+            Ok(p) => p as u16,
+            Err(_) => {
+                let msg = format!("Invalid CDP port: '{}' is not a valid number. Port must be a number between 1 and 65535", port);
                 if flags.json {
                     println!(r#"{{"success":false,"error":"{}"}}"#, msg);
                 } else {
