@@ -11,6 +11,9 @@ pub struct Flags {
     pub cdp: Option<String>,
     pub extensions: Vec<String>,
     pub proxy: Option<String>,
+    pub proxy_bypass: Option<String>,
+    pub args: Option<String>,
+    pub user_agent: Option<String>,
     pub provider: Option<String>,
 }
 
@@ -30,7 +33,10 @@ pub fn parse_flags(args: &[String]) -> Flags {
         executable_path: env::var("AGENT_BROWSER_EXECUTABLE_PATH").ok(),
         cdp: None,
         extensions: extensions_env,
-        proxy: None,
+        proxy: env::var("AGENT_BROWSER_PROXY").ok(),
+        proxy_bypass: env::var("AGENT_BROWSER_PROXY_BYPASS").ok(),
+        args: env::var("AGENT_BROWSER_ARGS").ok(),
+        user_agent: None,
         provider: env::var("AGENT_BROWSER_PROVIDER").ok(),
     };
 
@@ -77,6 +83,24 @@ pub fn parse_flags(args: &[String]) -> Flags {
                     i += 1;
                 }
             }
+            "--proxy-bypass" => {
+                if let Some(s) = args.get(i + 1) {
+                    flags.proxy_bypass = Some(s.clone());
+                    i += 1;
+                }
+            }
+            "--args" => {
+                if let Some(s) = args.get(i + 1) {
+                    flags.args = Some(s.clone());
+                    i += 1;
+                }
+            }
+            "--user-agent" => {
+                if let Some(s) = args.get(i + 1) {
+                    flags.user_agent = Some(s.clone());
+                    i += 1;
+                }
+            }
             "-p" | "--provider" => {
                 if let Some(p) = args.get(i + 1) {
                     flags.provider = Some(p.clone());
@@ -97,7 +121,19 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
     // Global flags that should be stripped from command args
     const GLOBAL_FLAGS: &[&str] = &["--json", "--full", "--headed", "--debug"];
     // Global flags that take a value (need to skip the next arg too)
-    const GLOBAL_FLAGS_WITH_VALUE: &[&str] = &["--session", "--headers", "--executable-path", "--cdp", "--extension", "--proxy", "-p", "--provider"];
+    const GLOBAL_FLAGS_WITH_VALUE: &[&str] = &[
+        "--session",
+        "--headers",
+        "--executable-path",
+        "--cdp",
+        "--extension",
+        "--proxy",
+        "--proxy-bypass",
+        "--args",
+        "--user-agent",
+        "-p",
+        "--provider",
+    ];
 
     for arg in args.iter() {
         if skip_next {
@@ -141,7 +177,10 @@ mod tests {
             r#"{"Authorization": "Bearer token"}"#.to_string(),
         ];
         let flags = parse_flags(&input);
-        assert_eq!(flags.headers, Some(r#"{"Authorization": "Bearer token"}"#.to_string()));
+        assert_eq!(
+            flags.headers,
+            Some(r#"{"Authorization": "Bearer token"}"#.to_string())
+        );
     }
 
     #[test]
@@ -188,14 +227,16 @@ mod tests {
         assert_eq!(flags.headers, Some(r#"{"Auth":"token"}"#.to_string()));
         assert!(flags.json);
         assert!(flags.headed);
-        
+
         let clean = clean_args(&input);
         assert_eq!(clean, vec!["open", "example.com"]);
     }
 
     #[test]
     fn test_parse_executable_path_flag() {
-        let flags = parse_flags(&args("--executable-path /path/to/chromium open example.com"));
+        let flags = parse_flags(&args(
+            "--executable-path /path/to/chromium open example.com",
+        ));
         assert_eq!(flags.executable_path, Some("/path/to/chromium".to_string()));
     }
 
@@ -207,19 +248,25 @@ mod tests {
 
     #[test]
     fn test_clean_args_removes_executable_path() {
-        let cleaned = clean_args(&args("--executable-path /path/to/chromium open example.com"));
+        let cleaned = clean_args(&args(
+            "--executable-path /path/to/chromium open example.com",
+        ));
         assert_eq!(cleaned, vec!["open", "example.com"]);
     }
 
     #[test]
     fn test_clean_args_removes_executable_path_with_other_flags() {
-        let cleaned = clean_args(&args("--json --executable-path /path/to/chromium --headed open example.com"));
+        let cleaned = clean_args(&args(
+            "--json --executable-path /path/to/chromium --headed open example.com",
+        ));
         assert_eq!(cleaned, vec!["open", "example.com"]);
     }
 
     #[test]
     fn test_parse_flags_with_session_and_executable_path() {
-        let flags = parse_flags(&args("--session test --executable-path /custom/chrome open example.com"));
+        let flags = parse_flags(&args(
+            "--session test --executable-path /custom/chrome open example.com",
+        ));
         assert_eq!(flags.session, "test");
         assert_eq!(flags.executable_path, Some("/custom/chrome".to_string()));
     }

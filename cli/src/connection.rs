@@ -167,6 +167,10 @@ pub fn ensure_daemon(
     headed: bool,
     executable_path: Option<&str>,
     extensions: &[String],
+    args: Option<&str>,
+    user_agent: Option<&str>,
+    proxy: Option<&str>,
+    proxy_bypass: Option<&str>,
 ) -> Result<DaemonResult, String> {
     if is_daemon_running(session) && daemon_ready(session) {
         return Ok(DaemonResult {
@@ -199,7 +203,7 @@ pub fn ensure_daemon(
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        
+
         let mut cmd = Command::new("node");
         cmd.arg(daemon_path)
             .env("AGENT_BROWSER_DAEMON", "1")
@@ -215,6 +219,22 @@ pub fn ensure_daemon(
 
         if !extensions.is_empty() {
             cmd.env("AGENT_BROWSER_EXTENSIONS", extensions.join(","));
+        }
+
+        if let Some(a) = args {
+            cmd.env("AGENT_BROWSER_ARGS", a);
+        }
+
+        if let Some(ua) = user_agent {
+            cmd.env("AGENT_BROWSER_USER_AGENT", ua);
+        }
+
+        if let Some(p) = proxy {
+            cmd.env("AGENT_BROWSER_PROXY", p);
+        }
+
+        if let Some(pb) = proxy_bypass {
+            cmd.env("AGENT_BROWSER_PROXY_BYPASS", pb);
         }
 
         // Create new process group and session to fully detach
@@ -256,10 +276,26 @@ pub fn ensure_daemon(
             cmd.env("AGENT_BROWSER_EXTENSIONS", extensions.join(","));
         }
 
+        if let Some(a) = args {
+            cmd.env("AGENT_BROWSER_ARGS", a);
+        }
+
+        if let Some(ua) = user_agent {
+            cmd.env("AGENT_BROWSER_USER_AGENT", ua);
+        }
+
+        if let Some(p) = proxy {
+            cmd.env("AGENT_BROWSER_PROXY", p);
+        }
+
+        if let Some(pb) = proxy_bypass {
+            cmd.env("AGENT_BROWSER_PROXY_BYPASS", pb);
+        }
+
         // CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS
         const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
         const DETACHED_PROCESS: u32 = 0x00000008;
-        
+
         cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -270,7 +306,9 @@ pub fn ensure_daemon(
 
     for _ in 0..50 {
         if daemon_ready(session) {
-            return Ok(DaemonResult { already_running: false });
+            return Ok(DaemonResult {
+                already_running: false,
+            });
         }
         thread::sleep(Duration::from_millis(100));
     }

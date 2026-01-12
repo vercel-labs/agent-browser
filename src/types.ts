@@ -22,6 +22,8 @@ export interface LaunchCommand extends BaseCommand {
     username?: string;
     password?: string;
   };
+  args?: string[];
+  userAgent?: string;
   provider?: string;
 }
 

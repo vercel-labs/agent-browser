@@ -863,14 +863,18 @@ export class BrowserManager {
     if (hasExtensions) {
       const extPaths = options.extensions!.join(',');
       const session = process.env.AGENT_BROWSER_SESSION || 'default';
+      // Combine extension args with custom args
+      const extArgs = [`--disable-extensions-except=${extPaths}`, `--load-extension=${extPaths}`];
+      const allArgs = options.args ? [...extArgs, ...options.args] : extArgs;
       context = await launcher.launchPersistentContext(
         path.join(os.tmpdir(), `agent-browser-ext-${session}`),
         {
           headless: false,
           executablePath: options.executablePath,
-          args: [`--disable-extensions-except=${extPaths}`, `--load-extension=${extPaths}`],
+          args: allArgs,
           viewport,
           extraHTTPHeaders: options.headers,
+          userAgent: options.userAgent,
           ...(options.proxy && { proxy: options.proxy }),
         }
       );
@@ -879,11 +883,13 @@ export class BrowserManager {
       this.browser = await launcher.launch({
         headless: options.headless ?? true,
         executablePath: options.executablePath,
+        args: options.args,
       });
       this.cdpPort = null;
       context = await this.browser.newContext({
         viewport,
         extraHTTPHeaders: options.headers,
+        userAgent: options.userAgent,
         ...(options.proxy && { proxy: options.proxy }),
       });
     }
