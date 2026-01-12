@@ -112,6 +112,47 @@ interface SnapshotData {
 }
 
 /**
+ * Convert Playwright errors to AI-friendly messages
+ */
+function toAIFriendlyError(error: unknown, selector: string): Error {
+  const message = error instanceof Error ? error.message : String(error);
+
+  // Handle strict mode violation (multiple elements match)
+  if (message.includes('strict mode violation')) {
+    // Extract count if available
+    const countMatch = message.match(/resolved to (\d+) elements/);
+    const count = countMatch ? countMatch[1] : 'multiple';
+
+    return new Error(
+      `Selector "${selector}" matched ${count} elements. ` +
+        `Run 'snapshot' to get updated refs, or use a more specific CSS selector.`
+    );
+  }
+
+  // Handle element not found
+  if (
+    message.includes('waiting for') &&
+    (message.includes('to be visible') || message.includes('Timeout'))
+  ) {
+    return new Error(
+      `Element "${selector}" not found or not visible. ` +
+        `Run 'snapshot' to see current page elements.`
+    );
+  }
+
+  // Handle element not interactable
+  if (message.includes('intercepts pointer events') || message.includes('not visible')) {
+    return new Error(
+      `Element "${selector}" is not interactable (may be hidden or covered). ` +
+        `Try scrolling it into view or check if a modal/overlay is blocking it.`
+    );
+  }
+
+  // Return original error for unknown cases
+  return error instanceof Error ? error : new Error(message);
+}
+
+/**
  * Execute a command and return a response
  */
 export async function executeCommand(command: Command, browser: BrowserManager): Promise<Response> {
@@ -384,11 +425,15 @@ async function handleClick(command: ClickCommand, browser: BrowserManager): Prom
   // Support both refs (@e1) and regular selectors
   const locator = browser.getLocator(command.selector);
 
-  await locator.click({
-    button: command.button,
-    clickCount: command.clickCount,
-    delay: command.delay,
-  });
+  try {
+    await locator.click({
+      button: command.button,
+      clickCount: command.clickCount,
+      delay: command.delay,
+    });
+  } catch (error) {
+    throw toAIFriendlyError(error, command.selector);
+  }
 
   return successResponse(command.id, { clicked: true });
 }
@@ -396,13 +441,17 @@ async function handleClick(command: ClickCommand, browser: BrowserManager): Prom
 async function handleType(command: TypeCommand, browser: BrowserManager): Promise<Response> {
   const locator = browser.getLocator(command.selector);
 
-  if (command.clear) {
-    await locator.fill('');
-  }
+  try {
+    if (command.clear) {
+      await locator.fill('');
+    }
 
-  await locator.pressSequentially(command.text, {
-    delay: command.delay,
-  });
+    await locator.pressSequentially(command.text, {
+      delay: command.delay,
+    });
+  } catch (error) {
+    throw toAIFriendlyError(error, command.selector);
+  }
 
   return successResponse(command.id, { typed: true });
 }
@@ -556,14 +605,22 @@ async function handleSelect(command: SelectCommand, browser: BrowserManager): Pr
   const locator = browser.getLocator(command.selector);
   const values = Array.isArray(command.values) ? command.values : [command.values];
 
-  await locator.selectOption(values);
+  try {
+    await locator.selectOption(values);
+  } catch (error) {
+    throw toAIFriendlyError(error, command.selector);
+  }
 
   return successResponse(command.id, { selected: values });
 }
 
 async function handleHover(command: HoverCommand, browser: BrowserManager): Promise<Response> {
   const locator = browser.getLocator(command.selector);
-  await locator.hover();
+  try {
+    await locator.hover();
+  } catch (error) {
+    throw toAIFriendlyError(error, command.selector);
+  }
 
   return successResponse(command.id, { hovered: true });
 }
@@ -643,26 +700,42 @@ async function handleWindowNew(
 
 async function handleFill(command: FillCommand, browser: BrowserManager): Promise<Response> {
   const locator = browser.getLocator(command.selector);
-  await locator.fill(command.value);
+  try {
+    await locator.fill(command.value);
+  } catch (error) {
+    throw toAIFriendlyError(error, command.selector);
+  }
   return successResponse(command.id, { filled: true });
 }
 
 async function handleCheck(command: CheckCommand, browser: BrowserManager): Promise<Response> {
   const locator = browser.getLocator(command.selector);
-  await locator.check();
+  try {
+    await locator.check();
+  } catch (error) {
+    throw toAIFriendlyError(error, command.selector);
+  }
   return successResponse(command.id, { checked: true });
 }
 
 async function handleUncheck(command: UncheckCommand, browser: BrowserManager): Promise<Response> {
   const locator = browser.getLocator(command.selector);
-  await locator.uncheck();
+  try {
+    await locator.uncheck();
+  } catch (error) {
+    throw toAIFriendlyError(error, command.selector);
+  }
   return successResponse(command.id, { unchecked: true });
 }
 
 async function handleUpload(command: UploadCommand, browser: BrowserManager): Promise<Response> {
   const locator = browser.getLocator(command.selector);
   const files = Array.isArray(command.files) ? command.files : [command.files];
-  await locator.setInputFiles(files);
+  try {
+    await locator.setInputFiles(files);
+  } catch (error) {
+    throw toAIFriendlyError(error, command.selector);
+  }
   return successResponse(command.id, { uploaded: files });
 }
 
@@ -671,13 +744,21 @@ async function handleDoubleClick(
   browser: BrowserManager
 ): Promise<Response> {
   const locator = browser.getLocator(command.selector);
-  await locator.dblclick();
+  try {
+    await locator.dblclick();
+  } catch (error) {
+    throw toAIFriendlyError(error, command.selector);
+  }
   return successResponse(command.id, { clicked: true });
 }
 
 async function handleFocus(command: FocusCommand, browser: BrowserManager): Promise<Response> {
   const locator = browser.getLocator(command.selector);
-  await locator.focus();
+  try {
+    await locator.focus();
+  } catch (error) {
+    throw toAIFriendlyError(error, command.selector);
+  }
   return successResponse(command.id, { focused: true });
 }
 

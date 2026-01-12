@@ -403,6 +403,50 @@ The daemon starts automatically on first command and persists between commands f
 | Linux x64 | ✅ Native Rust | Node.js |
 | Windows | - | Node.js |
 
+## Usage with AI Agents
+
+### Just ask the agent
+
+The simplest approach - just tell your agent to use it:
+
+```
+Use agent-browser to test the login flow. Run agent-browser --help to see available commands.
+```
+
+The `--help` output is comprehensive and most agents can figure it out from there.
+
+### AGENTS.md / CLAUDE.md
+
+For more consistent results, add to your project or global instructions file:
+
+```markdown
+## Browser Automation
+
+Use `agent-browser` for web automation. Run `agent-browser --help` for all commands.
+
+Core workflow:
+1. `agent-browser open <url>` - Navigate to page
+2. `agent-browser snapshot -i` - Get interactive elements with refs (@e1, @e2)
+3. `agent-browser click @e1` / `fill @e2 "text"` - Interact using refs
+4. Re-snapshot after page changes
+```
+
+### Claude Code Skill
+
+For Claude Code, a [skill](https://platform.claude.com/docs/en/agents-and-tools/agent-skills/best-practices) provides richer context:
+
+```bash
+cp -r node_modules/agent-browser/skills/browsing-web .claude/skills/
+```
+
+Or download:
+
+```bash
+mkdir -p .claude/skills/browsing-web
+curl -o .claude/skills/browsing-web/SKILL.md \
+  https://raw.githubusercontent.com/vercel-labs/agent-browser/main/skills/browsing-web/SKILL.md
+```
+
 ## License
 
 Apache-2.0

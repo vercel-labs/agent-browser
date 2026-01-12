@@ -24,6 +24,8 @@ export interface RefMap {
     selector: string;
     role: string;
     name?: string;
+    /** Index for disambiguation when multiple elements have same role+name */
+    nth?: number;
   };
 }
 
@@ -129,7 +131,7 @@ const STRUCTURAL_ROLES = new Set([
 function buildSelector(role: string, name?: string): string {
   if (name) {
     const escapedName = name.replace(/"/g, '\\"');
-    return `getByRole('${role}', { name: "${escapedName}" })`;
+    return `getByRole('${role}', { name: "${escapedName}", exact: true })`;
   }
   return `getByRole('${role}')`;
 }
@@ -162,11 +164,59 @@ export async function getEnhancedSnapshot(
 }
 
 /**
+ * Track role+name combinations to detect duplicates
+ */
+interface RoleNameTracker {
+  counts: Map<string, number>;
+  /** Maps role+name key to array of ref IDs that use it */
+  refsByKey: Map<string, string[]>;
+  getKey(role: string, name?: string): string;
+  getNextIndex(role: string, name?: string): number;
+  trackRef(role: string, name: string | undefined, ref: string): void;
+  /** Get all role+name keys that have duplicates */
+  getDuplicateKeys(): Set<string>;
+}
+
+function createRoleNameTracker(): RoleNameTracker {
+  const counts = new Map<string, number>();
+  const refsByKey = new Map<string, string[]>();
+  return {
+    counts,
+    refsByKey,
+    getKey(role: string, name?: string): string {
+      return `${role}:${name ?? ''}`;
+    },
+    getNextIndex(role: string, name?: string): number {
+      const key = this.getKey(role, name);
+      const current = counts.get(key) ?? 0;
+      counts.set(key, current + 1);
+      return current;
+    },
+    trackRef(role: string, name: string | undefined, ref: string): void {
+      const key = this.getKey(role, name);
+      const refs = refsByKey.get(key) ?? [];
+      refs.push(ref);
+      refsByKey.set(key, refs);
+    },
+    getDuplicateKeys(): Set<string> {
+      const duplicates = new Set<string>();
+      for (const [key, refs] of refsByKey) {
+        if (refs.length > 1) {
+          duplicates.add(key);
+        }
+      }
+      return duplicates;
+    },
+  };
+}
+
+/**
  * Process ARIA snapshot: add refs and apply filters
  */
 function processAriaTree(ariaTree: string, refs: RefMap, options: SnapshotOptions): string {
   const lines = ariaTree.split('\n');
   const result: string[] = [];
+  const tracker = createRoleNameTracker();
 
   // For interactive-only mode, we collect just interactive elements
   if (options.interactive) {
@@ -179,30 +229,42 @@ function processAriaTree(ariaTree: string, refs: RefMap, options: SnapshotOption
 
       if (INTERACTIVE_ROLES.has(roleLower)) {
         const ref = nextRef();
+        const nth = tracker.getNextIndex(roleLower, name);
+        tracker.trackRef(roleLower, name, ref);
         refs[ref] = {
           selector: buildSelector(roleLower, name),
           role: roleLower,
           name,
+          nth, // Always store nth, we'll use it for duplicates
         };
 
         let enhanced = `- ${role}`;
         if (name) enhanced += ` "${name}"`;
         enhanced += ` [ref=${ref}]`;
+        // Only show nth in output if it's > 0 (for readability)
+        if (nth > 0) enhanced += ` [nth=${nth}]`;
         if (suffix && suffix.includes('[')) enhanced += suffix;
 
         result.push(enhanced);
       }
     }
+
+    // Post-process: remove nth from refs that don't have duplicates
+    removeNthFromNonDuplicates(refs, tracker);
+
     return result.join('\n') || '(no interactive elements)';
   }
 
   // Normal processing with depth/compact filters
   for (const line of lines) {
-    const processed = processLine(line, refs, options);
+    const processed = processLine(line, refs, options, tracker);
     if (processed !== null) {
       result.push(processed);
     }
   }
+
+  // Post-process: remove nth from refs that don't have duplicates
+  removeNthFromNonDuplicates(refs, tracker);
 
   // If compact mode, remove empty structural elements
   if (options.compact) {
@@ -210,6 +272,22 @@ function processAriaTree(ariaTree: string, refs: RefMap, options: SnapshotOption
   }
 
   return result.join('\n');
+}
+
+/**
+ * Remove nth from refs that ended up not having duplicates
+ * This keeps single-element locators simple (no unnecessary .nth(0))
+ */
+function removeNthFromNonDuplicates(refs: RefMap, tracker: RoleNameTracker): void {
+  const duplicateKeys = tracker.getDuplicateKeys();
+
+  for (const [ref, data] of Object.entries(refs)) {
+    const key = tracker.getKey(data.role, data.name);
+    if (!duplicateKeys.has(key)) {
+      // Not a duplicate, remove nth to keep locator simple
+      delete refs[ref].nth;
+    }
+  }
 }
 
 /**
@@ -223,7 +301,12 @@ function getIndentLevel(line: string): number {
 /**
  * Process a single line: add ref if needed, filter if requested
  */
-function processLine(line: string, refs: RefMap, options: SnapshotOptions): string | null {
+function processLine(
+  line: string,
+  refs: RefMap,
+  options: SnapshotOptions,
+  tracker: RoleNameTracker
+): string | null {
   const depth = getIndentLevel(line);
 
   // Check max depth
@@ -273,17 +356,22 @@ function processLine(line: string, refs: RefMap, options: SnapshotOptions): stri
 
   if (shouldHaveRef) {
     const ref = nextRef();
+    const nth = tracker.getNextIndex(roleLower, name);
+    tracker.trackRef(roleLower, name, ref);
 
     refs[ref] = {
       selector: buildSelector(roleLower, name),
       role: roleLower,
       name,
+      nth, // Always store nth, we'll clean up non-duplicates later
     };
 
     // Build enhanced line with ref
     let enhanced = `${prefix}${role}`;
     if (name) enhanced += ` "${name}"`;
     enhanced += ` [ref=${ref}]`;
+    // Only show nth in output if it's > 0 (for readability)
+    if (nth > 0) enhanced += ` [nth=${nth}]`;
     if (suffix) enhanced += suffix;
 
     return enhanced;

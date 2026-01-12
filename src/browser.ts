@@ -95,12 +95,20 @@ export class BrowserManager {
 
     const page = this.getPage();
 
-    // Parse the selector and create locator
+    // Build locator with exact: true to avoid substring matches
+    let locator: Locator;
     if (refData.name) {
-      return page.getByRole(refData.role as any, { name: refData.name });
+      locator = page.getByRole(refData.role as any, { name: refData.name, exact: true });
     } else {
-      return page.getByRole(refData.role as any);
+      locator = page.getByRole(refData.role as any);
     }
+
+    // If an nth index is stored (for disambiguation), use it
+    if (refData.nth !== undefined) {
+      locator = locator.nth(refData.nth);
+    }
+
+    return locator;
   }
 
   /**

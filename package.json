@@ -1,26 +1,30 @@
 {
   "name": "agent-browser",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Headless browser automation CLI for AI agents",
   "type": "module",
   "main": "dist/daemon.js",
   "files": [
     "dist",
     "bin",
-    "scripts"
+    "scripts",
+    "skills"
   ],
   "bin": {
     "agent-browser": "./bin/agent-browser"
   },
   "scripts": {
     "prepare": "husky",
+    "version:sync": "node scripts/sync-version.js",
+    "version": "npm run version:sync && git add cli/Cargo.toml",
     "build": "tsc",
-    "build:native": "cargo build --release --manifest-path cli/Cargo.toml && node scripts/copy-native.js",
-    "build:linux": "docker compose -f docker/docker-compose.yml run --rm build-linux",
-    "build:macos": "(cargo build --release --manifest-path cli/Cargo.toml --target aarch64-apple-darwin & cargo build --release --manifest-path cli/Cargo.toml --target x86_64-apple-darwin & wait) && cp cli/target/aarch64-apple-darwin/release/agent-browser bin/agent-browser-darwin-arm64 && cp cli/target/x86_64-apple-darwin/release/agent-browser bin/agent-browser-darwin-x64",
-    "build:windows": "docker compose -f docker/docker-compose.yml run --rm build-windows",
-    "build:all-platforms": "(npm run build:linux & npm run build:windows & wait) && npm run build:macos",
+    "build:native": "npm run version:sync && cargo build --release --manifest-path cli/Cargo.toml && node scripts/copy-native.js",
+    "build:linux": "npm run version:sync && docker compose -f docker/docker-compose.yml run --rm build-linux",
+    "build:macos": "npm run version:sync && (cargo build --release --manifest-path cli/Cargo.toml --target aarch64-apple-darwin & cargo build --release --manifest-path cli/Cargo.toml --target x86_64-apple-darwin & wait) && cp cli/target/aarch64-apple-darwin/release/agent-browser bin/agent-browser-darwin-arm64 && cp cli/target/x86_64-apple-darwin/release/agent-browser bin/agent-browser-darwin-x64",
+    "build:windows": "npm run version:sync && docker compose -f docker/docker-compose.yml run --rm build-windows",
+    "build:all-platforms": "npm run version:sync && (npm run build:linux & npm run build:windows & wait) && npm run build:macos",
     "build:docker": "docker build -t agent-browser-builder -f docker/Dockerfile.build .",
+    "release": "npm run version:sync && npm run build && npm run build:all-platforms && npm publish",
     "start": "node dist/daemon.js",
     "dev": "tsx src/daemon.ts",
     "typecheck": "tsc --noEmit",
