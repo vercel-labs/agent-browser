@@ -38,7 +38,9 @@ fn parse_proxy(proxy_str: &str) -> serde_json::Value {
 
     let creds = &rest[..at_pos];
     let Some(colon_pos) = creds.find(':') else {
-        return json!({ "server": proxy_str });
+        // Found @ but no : in credentials - return server without credentials
+        let server_part = &rest[at_pos + 1..];
+        return json!({ "server": format!("{}{}", protocol, server_part) });
     };
 
     let username = &creds[..colon_pos];
@@ -184,7 +186,7 @@ fn main() {
         });
         if let Some(ref proxy_str) = flags.proxy {
             let proxy_obj = parse_proxy(proxy_str);
-            launch_cmd.as_object_mut().unwrap().insert(
+            launch_cmd.as_object_mut().expect("json! macro guarantees object type").insert(
                 "proxy".to_string(),
                 proxy_obj
             );
