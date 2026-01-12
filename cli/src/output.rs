@@ -223,6 +223,13 @@ Setup:
   install                    Install browser binaries
   install --with-deps        Also install system dependencies (Linux)
 
+Skill (Claude Code integration):
+  skill install              Install skill to Claude Code (~/.claude/skills/)
+  skill install --project    Install to project scope (.claude/skills/)
+  skill uninstall --force    Remove installed skill
+  skill status               Check installation status
+  skill show                 View skill documentation
+
 Snapshot Options:
   -i, --interactive          Only interactive elements
   -c, --compact              Remove empty structural elements

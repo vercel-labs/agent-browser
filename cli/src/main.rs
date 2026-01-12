@@ -3,6 +3,7 @@ mod connection;
 mod flags;
 mod install;
 mod output;
+mod skill;
 
 use serde_json::json;
 use std::env;
@@ -22,6 +23,7 @@ use connection::{ensure_daemon, send_command};
 use flags::{clean_args, parse_flags};
 use install::run_install;
 use output::{print_help, print_response};
+use skill::run_skill;
 
 fn run_session(args: &[String], session: &str, json_mode: bool) {
     let subcommand = args.get(1).map(|s| s.as_str());
@@ -113,6 +115,12 @@ fn main() {
     // Handle session separately (doesn't need daemon)
     if clean.get(0).map(|s| s.as_str()) == Some("session") {
         run_session(&clean, &flags.session, flags.json);
+        return;
+    }
+
+    // Handle skill separately (doesn't need daemon)
+    if clean.get(0).map(|s| s.as_str()) == Some("skill") {
+        run_skill(&clean, flags.json);
         return;
     }
 
