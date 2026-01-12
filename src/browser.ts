@@ -575,24 +575,37 @@ export class BrowserManager {
   }
 
   /**
+   * Check if an existing CDP connection is still alive
+   * by verifying we can access browser contexts and pages
+   */
+  private isCdpConnectionAlive(): boolean {
+    if (!this.browser) return false;
+    try {
+      const contexts = this.browser.contexts();
+      return contexts.length > 0 && contexts[0].pages().length > 0;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
    * Launch the browser with the specified options
    * If already launched, this is a no-op (browser stays open)
    */
   async launch(options: LaunchCommand): Promise<void> {
     const requestedCdpPort = options.cdpPort ?? null;
 
-    // If already launched and still connected
+    // Check if we need to close existing browser before relaunching
     if (this.browser) {
-      if (this.browser.isConnected()) {
-        // If CDP port changed, need to reconnect
-        if (this.cdpPort !== requestedCdpPort) {
-          await this.close();
-        } else {
-          return;
-        }
-      } else {
-        // Browser disconnected, clean up stale state before reconnecting
+      if (!this.browser.isConnected()) {
         await this.close();
+      } else if (this.cdpPort !== requestedCdpPort) {
+        await this.close();
+      } else if (this.cdpPort !== null && !this.isCdpConnectionAlive()) {
+        await this.close();
+      } else {
+        // Connected, same port, and (non-CDP or CDP alive) - keep existing
+        return;
       }
     }
 
@@ -640,15 +653,12 @@ export class BrowserManager {
       throw new Error('cdpPort is required for CDP connection');
     }
 
-    let browser: Browser;
-    try {
-      browser = await chromium.connectOverCDP(`http://localhost:${cdpPort}`);
-    } catch {
+    const browser = await chromium.connectOverCDP(`http://localhost:${cdpPort}`).catch(() => {
       throw new Error(
         `Failed to connect via CDP on port ${cdpPort}. ` +
           `Make sure the app is running with --remote-debugging-port=${cdpPort}`
       );
-    }
+    });
 
     // Validate and set up state, cleaning up browser connection if anything fails
     try {
