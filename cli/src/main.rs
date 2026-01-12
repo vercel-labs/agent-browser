@@ -80,7 +80,8 @@ fn run_session(args: &[String], session: &str, json_mode: bool) {
                                     let running = unsafe { libc::kill(pid as i32, 0) == 0 };
                                     #[cfg(windows)]
                                     let running = unsafe {
-                                        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+                                        let handle =
+                                            OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
                                         if handle != 0 {
                                             CloseHandle(handle);
                                             true
@@ -192,7 +193,16 @@ fn main() {
         }
     };
 
-    let daemon_result = match ensure_daemon(&flags.session, flags.headed, flags.executable_path.as_deref(), &flags.extensions) {
+    let daemon_result = match ensure_daemon(
+        &flags.session,
+        flags.headed,
+        flags.executable_path.as_deref(),
+        &flags.extensions,
+        flags.args.as_deref(),
+        flags.user_agent.as_deref(),
+        flags.proxy.as_deref(),
+        flags.proxy_bypass.as_deref(),
+    ) {
         Ok(result) => result,
         Err(e) => {
             if flags.json {
@@ -204,15 +214,27 @@ fn main() {
         }
     };
 
-    // Warn if executable_path was specified but daemon was already running
-    if daemon_result.already_running && (flags.executable_path.is_some() || !flags.extensions.is_empty()) {
-        if !flags.json {
-            if flags.executable_path.is_some() {
-                eprintln!("{} --executable-path ignored: daemon already running. Use 'agent-browser close' first to restart with new path.", color::warning_indicator());
-            }
-            if !flags.extensions.is_empty() {
-                eprintln!("{} --extension ignored: daemon already running. Use 'agent-browser close' first to restart with extensions.", color::warning_indicator());
-            }
+    // Warn if launch-time options were specified but daemon was already running
+    if daemon_result.already_running {
+        let has_extensions = !flags.extensions.is_empty();
+        let ignored_flags: Vec<&str> = [
+            flags.executable_path.as_ref().map(|_| "--executable-path"),
+            if has_extensions { Some("--extension") } else { None },
+            flags.args.as_ref().map(|_| "--args"),
+            flags.user_agent.as_ref().map(|_| "--user-agent"),
+            flags.proxy.as_ref().map(|_| "--proxy"),
+            flags.proxy_bypass.as_ref().map(|_| "--proxy-bypass"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+
+        if !ignored_flags.is_empty() && !flags.json {
+            eprintln!(
+                "{} {} ignored: daemon already running. Use 'agent-browser close' first to restart with new options.",
+                color::warning_indicator(),
+                ignored_flags.join(", ")
+            );
         }
     }
 

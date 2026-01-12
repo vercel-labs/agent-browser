@@ -30,6 +30,8 @@ const launchSchema = baseCommandSchema.extend({
       password: z.string().optional(),
     })
     .optional(),
+  args: z.array(z.string()).optional(),
+  userAgent: z.string().optional(),
 });
 
 const navigateSchema = baseCommandSchema.extend({
