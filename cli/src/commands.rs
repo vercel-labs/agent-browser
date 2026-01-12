@@ -773,7 +773,13 @@ fn parse_set(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                 context: "set headers".to_string(),
                 usage: "set headers <json>",
             })?;
-            Ok(json!({ "id": id, "action": "headers", "headers": headers_json }))
+            // Parse the JSON string into an object
+            let headers: serde_json::Value = serde_json::from_str(headers_json)
+                .map_err(|_| ParseError::MissingArguments {
+                    context: "set headers".to_string(),
+                    usage: "set headers <json> (must be valid JSON object)",
+                })?;
+            Ok(json!({ "id": id, "action": "headers", "headers": headers }))
         }
         Some("credentials") | Some("auth") => {
             let user = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
@@ -1054,6 +1060,45 @@ mod tests {
         let cmd = parse_command(&args("open api.example.com"), &flags).unwrap();
         // Invalid JSON should result in no headers field (graceful handling)
         assert!(cmd.get("headers").is_none());
+    }
+
+    // === Set Headers Tests ===
+
+    #[test]
+    fn test_set_headers_parses_json() {
+        let input: Vec<String> = vec![
+            "set".to_string(),
+            "headers".to_string(),
+            r#"{"Authorization":"Bearer token"}"#.to_string(),
+        ];
+        let cmd = parse_command(&input, &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "headers");
+        // Headers should be an object, not a string
+        assert!(cmd["headers"].is_object());
+        assert_eq!(cmd["headers"]["Authorization"], "Bearer token");
+    }
+
+    #[test]
+    fn test_set_headers_with_multiple_values() {
+        let input: Vec<String> = vec![
+            "set".to_string(),
+            "headers".to_string(),
+            r#"{"Authorization": "Bearer token", "X-Custom": "value"}"#.to_string(),
+        ];
+        let cmd = parse_command(&input, &default_flags()).unwrap();
+        assert_eq!(cmd["headers"]["Authorization"], "Bearer token");
+        assert_eq!(cmd["headers"]["X-Custom"], "value");
+    }
+
+    #[test]
+    fn test_set_headers_invalid_json_error() {
+        let input: Vec<String> = vec![
+            "set".to_string(),
+            "headers".to_string(),
+            "not-valid-json".to_string(),
+        ];
+        let result = parse_command(&input, &default_flags());
+        assert!(result.is_err());
     }
 
     #[test]
