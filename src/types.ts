@@ -414,6 +414,20 @@ export interface BringToFrontCommand extends BaseCommand {
   action: 'bringtofront';
 }
 
+// Popup/new window detection commands
+export interface PopupWaitCommand extends BaseCommand {
+  action: 'popup_wait';
+  timeout?: number;
+}
+
+export interface PopupListCommand extends BaseCommand {
+  action: 'popup_list';
+}
+
+export interface PopupClearCommand extends BaseCommand {
+  action: 'popup_clear';
+}
+
 // Wait for JS function to return truthy
 export interface WaitForFunctionCommand extends BaseCommand {
   action: 'waitforfunction';
@@ -924,7 +938,10 @@ export type Command =
   | ScreencastStopCommand
   | InputMouseCommand
   | InputKeyboardCommand
-  | InputTouchCommand;
+  | InputTouchCommand
+  | PopupWaitCommand
+  | PopupListCommand
+  | PopupClearCommand;
 
 // Response types
 export interface SuccessResponse<T = unknown> {
@@ -1044,6 +1061,25 @@ export interface ElementStyleInfo {
 
 export interface StylesData {
   elements: ElementStyleInfo[];
+}
+
+// Popup response types
+export interface PopupInfo {
+  index: number;
+  url: string;
+  timestamp: number;
+  openerUrl: string;
+}
+
+export interface PopupWaitData {
+  index: number;
+  url: string;
+  title: string;
+}
+
+export interface PopupListData {
+  popups: PopupInfo[];
+  count: number;
 }
 
 // Browser state
