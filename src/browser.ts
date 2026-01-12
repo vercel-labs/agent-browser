@@ -598,11 +598,8 @@ export class BrowserManager {
 
     if (requestedCdpPort) {
       await this.connectViaCDP(requestedCdpPort);
-      this.cdpPort = requestedCdpPort;
       return;
     }
-
-    this.cdpPort = requestedCdpPort;
 
     // Select browser type
     const browserType = options.browser ?? 'chromium';
@@ -643,8 +640,9 @@ export class BrowserManager {
       throw new Error('cdpPort is required for CDP connection');
     }
 
+    let browser: Browser;
     try {
-      this.browser = await chromium.connectOverCDP(`http://localhost:${cdpPort}`);
+      browser = await chromium.connectOverCDP(`http://localhost:${cdpPort}`);
     } catch {
       throw new Error(
         `Failed to connect via CDP on port ${cdpPort}. ` +
@@ -652,27 +650,38 @@ export class BrowserManager {
       );
     }
 
-    const contexts = this.browser.contexts();
-    if (contexts.length === 0) {
-      throw new Error('No browser context found. Make sure the app has an open window.');
-    }
+    // Validate and set up state, cleaning up browser connection if anything fails
+    try {
+      const contexts = browser.contexts();
+      if (contexts.length === 0) {
+        throw new Error('No browser context found. Make sure the app has an open window.');
+      }
 
-    for (const context of contexts) {
-      this.contexts.push(context);
-      this.setupContextTracking(context);
-    }
+      const allPages = contexts.flatMap((context) => context.pages());
+      if (allPages.length === 0) {
+        throw new Error('No page found. Make sure the app has loaded content.');
+      }
 
-    const allPages = contexts.flatMap((context) => context.pages());
-    if (allPages.length === 0) {
-      throw new Error('No page found. Make sure the app has loaded content.');
-    }
+      // All validation passed - commit state
+      this.browser = browser;
+      this.cdpPort = cdpPort;
 
-    for (const page of allPages) {
-      this.pages.push(page);
-      this.setupPageTracking(page);
-    }
+      for (const context of contexts) {
+        this.contexts.push(context);
+        this.setupContextTracking(context);
+      }
 
-    this.activePageIndex = 0;
+      for (const page of allPages) {
+        this.pages.push(page);
+        this.setupPageTracking(page);
+      }
+
+      this.activePageIndex = 0;
+    } catch (error) {
+      // Clean up browser connection if validation or setup failed
+      await browser.close().catch(() => {});
+      throw error;
+    }
   }
 
   /**
