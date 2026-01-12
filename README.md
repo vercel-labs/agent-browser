@@ -204,7 +204,7 @@ agent-browser window new              # New window
 Detect and interact with JavaScript-opened windows (window.open, target="_blank"):
 
 ```bash
-agent-browser popup wait [timeout]    # Wait for popup (default 30s)
+agent-browser popup wait [timeout]    # Wait for popup (default 5s)
 agent-browser popup list              # List detected popups
 agent-browser popup clear             # Clear popup history
 ```
@@ -217,7 +217,7 @@ agent-browser click "a[target='_blank']"
 
 # Wait for the popup to open
 agent-browser popup wait
-# Returns: {"index": 1, "url": "https://...", "switched": true}
+# Returns: {"index": 1, "url": "https://...", "title": "Page Title"}
 
 # Now on the new tab - interact normally
 agent-browser snapshot -i
