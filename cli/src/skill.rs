@@ -1,3 +1,4 @@
+use serde_json::json;
 use std::env;
 use std::fs;
 use std::io::{self, Write};
@@ -180,9 +181,12 @@ pub fn run_skill(args: &[String], json_mode: bool) {
                     let target = get_skill_target_dir(scope);
                     if json_mode {
                         println!(
-                            r#"{{"success":true,"message":"Skill installed to {} scope","path":"{}"}}"#,
-                            scope.as_str(),
-                            target.display()
+                            "{}",
+                            json!({
+                                "success": true,
+                                "message": format!("Skill installed to {} scope", scope.as_str()),
+                                "path": target.display().to_string()
+                            })
                         );
                     } else {
                         println!("\x1b[32m✓\x1b[0m Skill installed to {} scope", scope.as_str());
@@ -191,7 +195,7 @@ pub fn run_skill(args: &[String], json_mode: bool) {
                 }
                 Err(e) => {
                     if json_mode {
-                        println!(r#"{{"success":false,"error":"{}"}}"#, e);
+                        println!("{}", json!({"success": false, "error": e}));
                     } else {
                         eprintln!("\x1b[31m✗\x1b[0m {}", e);
                     }
@@ -205,8 +209,11 @@ pub fn run_skill(args: &[String], json_mode: bool) {
                 Ok(()) => {
                     if json_mode {
                         println!(
-                            r#"{{"success":true,"message":"Skill uninstalled from {} scope"}}"#,
-                            scope.as_str()
+                            "{}",
+                            json!({
+                                "success": true,
+                                "message": format!("Skill uninstalled from {} scope", scope.as_str())
+                            })
                         );
                     } else {
                         println!("\x1b[32m✓\x1b[0m Skill uninstalled from {} scope", scope.as_str());
@@ -214,7 +221,7 @@ pub fn run_skill(args: &[String], json_mode: bool) {
                 }
                 Err(e) => {
                     if json_mode {
-                        println!(r#"{{"success":false,"error":"{}"}}"#, e);
+                        println!("{}", json!({"success": false, "error": e}));
                     } else {
                         eprintln!("\x1b[31m✗\x1b[0m {}", e);
                     }
@@ -231,11 +238,20 @@ pub fn run_skill(args: &[String], json_mode: bool) {
 
             if json_mode {
                 println!(
-                    r#"{{"success":true,"data":{{"user":{{"installed":{},"path":"{}"}},"project":{{"installed":{},"path":"{}"}}}}}}"#,
-                    user_installed,
-                    user_path.display(),
-                    project_installed,
-                    project_path.display()
+                    "{}",
+                    json!({
+                        "success": true,
+                        "data": {
+                            "user": {
+                                "installed": user_installed,
+                                "path": user_path.display().to_string()
+                            },
+                            "project": {
+                                "installed": project_installed,
+                                "path": project_path.display().to_string()
+                            }
+                        }
+                    })
                 );
             } else {
                 println!("Skill installation status:");
@@ -256,9 +272,14 @@ pub fn run_skill(args: &[String], json_mode: bool) {
                         Ok(content) => {
                             if json_mode {
                                 println!(
-                                    r#"{{"success":true,"data":{{"path":"{}","content":{}}}}}"#,
-                                    skill_file.display(),
-                                    serde_json::to_string(&content).unwrap_or_default()
+                                    "{}",
+                                    json!({
+                                        "success": true,
+                                        "data": {
+                                            "path": skill_file.display().to_string(),
+                                            "content": content
+                                        }
+                                    })
                                 );
                             } else {
                                 println!("{}", content);
@@ -266,7 +287,13 @@ pub fn run_skill(args: &[String], json_mode: bool) {
                         }
                         Err(e) => {
                             if json_mode {
-                                println!(r#"{{"success":false,"error":"Failed to read skill file: {}"}}"#, e);
+                                println!(
+                                    "{}",
+                                    json!({
+                                        "success": false,
+                                        "error": format!("Failed to read skill file: {}", e)
+                                    })
+                                );
                             } else {
                                 eprintln!("\x1b[31m✗\x1b[0m Failed to read skill file: {}", e);
                             }
@@ -276,7 +303,10 @@ pub fn run_skill(args: &[String], json_mode: bool) {
                 }
                 None => {
                     if json_mode {
-                        println!(r#"{{"success":false,"error":"Could not find skill source files"}}"#);
+                        println!(
+                            "{}",
+                            json!({"success": false, "error": "Could not find skill source files"})
+                        );
                     } else {
                         eprintln!("\x1b[31m✗\x1b[0m Could not find skill source files");
                     }
@@ -287,7 +317,15 @@ pub fn run_skill(args: &[String], json_mode: bool) {
 
         None | Some("help") | Some("--help") | Some("-h") => {
             if json_mode {
-                println!(r#"{{"success":true,"data":{{"commands":["install","uninstall","status","show"]}}}}"#);
+                println!(
+                    "{}",
+                    json!({
+                        "success": true,
+                        "data": {
+                            "commands": ["install", "uninstall", "status", "show"]
+                        }
+                    })
+                );
             } else {
                 print_skill_help();
             }
@@ -296,8 +334,12 @@ pub fn run_skill(args: &[String], json_mode: bool) {
         Some(unknown) => {
             if json_mode {
                 println!(
-                    r#"{{"success":false,"error":"Unknown skill subcommand: {}","valid":["install","uninstall","status","show"]}}"#,
-                    unknown
+                    "{}",
+                    json!({
+                        "success": false,
+                        "error": format!("Unknown skill subcommand: {}", unknown),
+                        "valid": ["install", "uninstall", "status", "show"]
+                    })
                 );
             } else {
                 eprintln!("\x1b[31m✗\x1b[0m Unknown skill subcommand: {}", unknown);
