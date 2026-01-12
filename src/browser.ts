@@ -579,19 +579,27 @@ export class BrowserManager {
    * If already launched, this is a no-op (browser stays open)
    */
   async launch(options: LaunchCommand): Promise<void> {
-    // If already launched and still connected, don't relaunch
+    const requestedCdpPort = options.cdpPort ?? null;
+
+    // If already launched and still connected
     if (this.browser) {
       if (this.browser.isConnected()) {
-        return;
+        // If CDP port changed, need to reconnect
+        if (this.cdpPort !== requestedCdpPort) {
+          await this.close();
+        } else {
+          return;
+        }
+      } else {
+        // Browser disconnected, clean up stale state before reconnecting
+        await this.close();
       }
-      // Browser disconnected, clean up stale state before reconnecting
-      await this.close();
     }
 
-    this.cdpPort = options.cdpPort ?? null;
+    this.cdpPort = requestedCdpPort;
 
-    if (options.cdpPort) {
-      await this.connectViaCDP(options.cdpPort);
+    if (this.cdpPort) {
+      await this.connectViaCDP(this.cdpPort);
       return;
     }
 
