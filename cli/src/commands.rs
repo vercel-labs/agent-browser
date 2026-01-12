@@ -643,6 +643,17 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
             }
         }
 
+        // === Popup (JavaScript-opened windows) ===
+        "popup" => match rest.get(0).map(|s| *s) {
+            Some("wait") => {
+                let timeout = rest.get(1).and_then(|s| s.parse::<i32>().ok());
+                Ok(json!({ "id": id, "action": "popup_wait", "timeout": timeout }))
+            }
+            Some("list") => Ok(json!({ "id": id, "action": "popup_list" })),
+            Some("clear") => Ok(json!({ "id": id, "action": "popup_clear" })),
+            _ => Ok(json!({ "id": id, "action": "popup_list" })),
+        }
+
         // === Frame ===
         "frame" => {
             if rest.get(0).map(|s| *s) == Some("main") {

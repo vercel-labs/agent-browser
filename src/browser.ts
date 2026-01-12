@@ -63,6 +63,13 @@ interface PageError {
   timestamp: number;
 }
 
+interface PopupEvent {
+  index: number;
+  url: string;
+  timestamp: number;
+  openerUrl: string;
+}
+
 /**
  * Manages the Playwright browser lifecycle with multiple tabs/windows
  */
@@ -102,6 +109,12 @@ export class BrowserManager {
   private recordingPage: Page | null = null;
   private recordingOutputPath: string = '';
   private recordingTempDir: string = '';
+
+  // Popup tracking
+  private popupHistory: PopupEvent[] = [];
+  private lastPopupPage: Page | null = null;
+  private popupResolvers: Array<(page: Page) => void> = [];
+  private isCreatingExplicitPage: boolean = false;
 
   /**
    * Check if browser is launched
@@ -1130,10 +1143,19 @@ export class BrowserManager {
     }
 
     context.setDefaultTimeout(60000);
+
+    // Listen for popups/new pages opened by JavaScript
+    context.on('page', (newPage: Page) => {
+      this.handlePopup(newPage);
+    });
     this.contexts.push(context);
     this.setupContextTracking(context);
 
+    // Create initial page (mark as explicit to prevent recording as popup)
+    this.isCreatingExplicitPage = true;
     const page = context.pages()[0] ?? (await context.newPage());
+    this.isCreatingExplicitPage = false;
+
     // Only add if not already tracked (setupContextTracking may have already added it via 'page' event)
     if (!this.pages.includes(page)) {
       this.pages.push(page);
@@ -1262,6 +1284,112 @@ export class BrowserManager {
   }
 
   /**
+   * Handle a popup/new page opened by JavaScript (window.open, target="_blank", etc.)
+   * This is called by the context 'page' event listener
+   */
+  private handlePopup(newPage: Page): void {
+    // Don't add if it's already in our pages array (e.g., from newTab())
+    if (this.pages.includes(newPage)) {
+      return;
+    }
+
+    // Get opener URL before adding to array
+    const openerUrl = this.pages.length > 0 ? this.pages[this.activePageIndex].url() : '';
+
+    // Add to pages array
+    this.pages.push(newPage);
+    const newIndex = this.pages.length - 1;
+
+    // Set up tracking
+    this.setupPageTracking(newPage);
+
+    // Only record as popup if this wasn't an explicit page creation (newTab/newWindow)
+    if (!this.isCreatingExplicitPage) {
+      // Record popup event
+      const popupEvent: PopupEvent = {
+        index: newIndex,
+        url: newPage.url(),
+        timestamp: Date.now(),
+        openerUrl,
+      };
+      this.popupHistory.push(popupEvent);
+      this.lastPopupPage = newPage;
+
+      // Resolve any waiting promises
+      const resolver = this.popupResolvers.shift();
+      if (resolver) {
+        resolver(newPage);
+      }
+    }
+  }
+
+  /**
+   * Wait for a popup to be opened by JavaScript
+   * Returns the new page when it opens, or times out
+   */
+  async waitForPopup(timeout: number = 5000): Promise<{ index: number; url: string; title: string }> {
+    // If there's already a pending popup, return it immediately
+    if (this.lastPopupPage && !this.popupResolvers.length) {
+      const page = this.lastPopupPage;
+      this.lastPopupPage = null;
+      const index = this.pages.indexOf(page);
+      return {
+        index,
+        url: page.url(),
+        title: await page.title().catch(() => ''),
+      };
+    }
+
+    // Wait for popup with timeout
+    const page = await Promise.race([
+      new Promise<Page>((resolve) => {
+        this.popupResolvers.push(resolve);
+      }),
+      new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error(`Timeout waiting for popup after ${timeout}ms`)), timeout);
+      }),
+    ]);
+
+    const index = this.pages.indexOf(page);
+    return {
+      index,
+      url: page.url(),
+      title: await page.title().catch(() => ''),
+    };
+  }
+
+  /**
+   * Check if any popups have been detected
+   */
+  hasPopups(): boolean {
+    return this.popupHistory.length > 0;
+  }
+
+  /**
+   * Get popup history
+   */
+  getPopupHistory(): PopupEvent[] {
+    return [...this.popupHistory];
+  }
+
+  /**
+   * Get the last popup page info
+   */
+  getLastPopup(): PopupEvent | null {
+    return this.popupHistory.length > 0
+      ? this.popupHistory[this.popupHistory.length - 1]
+      : null;
+  }
+
+  /**
+   * Clear popup history
+   */
+  clearPopupHistory(): void {
+    this.popupHistory = [];
+    this.lastPopupPage = null;
+  }
+
+  /**
    * Create a new tab in the current context
    */
   async newTab(): Promise<{ index: number; total: number }> {
@@ -1273,7 +1401,12 @@ export class BrowserManager {
     await this.invalidateCDPSession();
 
     const context = this.contexts[0]; // Use first context for tabs
+
+    // Mark as explicit page creation to prevent handlePopup from recording it as a popup
+    this.isCreatingExplicitPage = true;
     const page = await context.newPage();
+    this.isCreatingExplicitPage = false;
+
     // Only add if not already tracked (setupContextTracking may have already added it via 'page' event)
     if (!this.pages.includes(page)) {
       this.pages.push(page);
@@ -1299,10 +1432,20 @@ export class BrowserManager {
       viewport: viewport ?? { width: 1280, height: 720 },
     });
     context.setDefaultTimeout(60000);
+
+    // Set up popup listener for new context
+    context.on('page', (newPage: Page) => {
+      this.handlePopup(newPage);
+    });
+
     this.contexts.push(context);
     this.setupContextTracking(context);
 
+    // Mark as explicit page creation to prevent handlePopup from recording it as a popup
+    this.isCreatingExplicitPage = true;
     const page = await context.newPage();
+    this.isCreatingExplicitPage = false;
+
     // Only add if not already tracked (setupContextTracking may have already added it via 'page' event)
     if (!this.pages.includes(page)) {
       this.pages.push(page);

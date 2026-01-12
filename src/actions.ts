@@ -107,6 +107,11 @@ import type {
   RecordingStartCommand,
   RecordingStopCommand,
   RecordingRestartCommand,
+  PopupWaitCommand,
+  PopupListCommand,
+  PopupClearCommand,
+  PopupWaitData,
+  PopupListData,
   NavigateData,
   ScreenshotData,
   EvaluateData,
@@ -455,6 +460,12 @@ export async function executeCommand(command: Command, browser: BrowserManager):
         return await handleRecordingStop(command, browser);
       case 'recording_restart':
         return await handleRecordingRestart(command, browser);
+      case 'popup_wait':
+        return await handlePopupWait(command, browser);
+      case 'popup_list':
+        return await handlePopupList(command, browser);
+      case 'popup_clear':
+        return await handlePopupClear(command, browser);
       default: {
         // TypeScript narrows to never here, but we handle it for safety
         const unknownCommand = command as { id: string; action: string };
@@ -2040,4 +2051,33 @@ async function handleRecordingRestart(
     previousPath: result.previousPath,
     stopped: result.stopped,
   });
+}
+
+// Popup handlers
+
+async function handlePopupWait(
+  command: PopupWaitCommand,
+  browser: BrowserManager
+): Promise<Response<PopupWaitData>> {
+  const result = await browser.waitForPopup(command.timeout);
+  return successResponse(command.id, result);
+}
+
+async function handlePopupList(
+  command: PopupListCommand,
+  browser: BrowserManager
+): Promise<Response<PopupListData>> {
+  const popups = browser.getPopupHistory();
+  return successResponse(command.id, {
+    popups,
+    count: popups.length,
+  });
+}
+
+async function handlePopupClear(
+  command: PopupClearCommand,
+  browser: BrowserManager
+): Promise<Response> {
+  browser.clearPopupHistory();
+  return successResponse(command.id, { cleared: true });
 }
