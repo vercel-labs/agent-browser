@@ -14,6 +14,35 @@ use flags::{clean_args, parse_flags};
 use install::run_install;
 use output::{print_help, print_response};
 
+fn parse_proxy(proxy_str: &str) -> serde_json::Value {
+    // Parse URL format: http://user:pass@host:port or http://host:port
+    let Some(protocol_end) = proxy_str.find("://") else {
+        return json!({ "server": proxy_str });
+    };
+    let protocol = &proxy_str[..protocol_end + 3];
+
+    // Check for credentials (user:pass@host format)
+    let rest = &proxy_str[protocol_end + 3..];
+    let Some(at_pos) = rest.rfind('@') else {
+        return json!({ "server": proxy_str });
+    };
+
+    let creds = &rest[..at_pos];
+    let Some(colon_pos) = creds.find(':') else {
+        return json!({ "server": proxy_str });
+    };
+
+    let username = &creds[..colon_pos];
+    let password = &creds[colon_pos + 1..];
+    let server_part = &rest[at_pos + 1..];
+
+    json!({
+        "server": format!("{}{}", protocol, server_part),
+        "username": username,
+        "password": password
+    })
+}
+
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
     let flags = parse_flags(&args);
@@ -52,12 +81,23 @@ fn main() {
         exit(1);
     }
 
-    // If --headed flag is set, send launch command first to switch to headed mode
-    if flags.headed {
-        let launch_cmd = json!({ "id": gen_id(), "action": "launch", "headless": false });
+    // If --headed flag or --proxy is set, send launch command first to configure browser
+    if flags.headed || flags.proxy.is_some() {
+        let mut launch_cmd = json!({
+            "id": gen_id(),
+            "action": "launch",
+            "headless": !flags.headed
+        });
+        if let Some(ref proxy_str) = flags.proxy {
+            let proxy_obj = parse_proxy(proxy_str);
+            launch_cmd.as_object_mut().unwrap().insert(
+                "proxy".to_string(),
+                proxy_obj
+            );
+        }
         if let Err(e) = send_command(launch_cmd, &flags.session) {
             if !flags.json {
-                eprintln!("\x1b[33m⚠\x1b[0m Could not switch to headed mode: {}", e);
+                eprintln!("\x1b[33m⚠\x1b[0m Could not configure browser: {}", e);
             }
         }
     }

@@ -514,9 +514,10 @@ export class BrowserManager {
       headless: options.headless ?? true,
     });
 
-    // Create context with viewport
+    // Create context with viewport and proxy
     const context = await this.browser.newContext({
       viewport: options.viewport ?? { width: 1280, height: 720 },
+      ...(options.proxy && { proxy: options.proxy }),
     });
 
     // Set default timeout to 10 seconds (Playwright default is 30s)

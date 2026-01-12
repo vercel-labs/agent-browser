@@ -12,6 +12,12 @@ export interface LaunchCommand extends BaseCommand {
   headless?: boolean;
   viewport?: { width: number; height: number };
   browser?: 'chromium' | 'firefox' | 'webkit';
+  proxy?: {
+    server: string;
+    bypass?: string;
+    username?: string;
+    password?: string;
+  };
 }
 
 export interface NavigateCommand extends BaseCommand {

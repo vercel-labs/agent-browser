@@ -6,6 +6,7 @@ pub struct Flags {
     pub headed: bool,
     pub debug: bool,
     pub session: String,
+    pub proxy: Option<String>,
 }
 
 pub fn parse_flags(args: &[String]) -> Flags {
@@ -15,6 +16,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
         headed: false,
         debug: false,
         session: env::var("AGENT_BROWSER_SESSION").unwrap_or_else(|_| "default".to_string()),
+        proxy: None,
     };
 
     let mut i = 0;
@@ -27,6 +29,12 @@ pub fn parse_flags(args: &[String]) -> Flags {
             "--session" => {
                 if let Some(s) = args.get(i + 1) {
                     flags.session = s.clone();
+                    i += 1;
+                }
+            }
+            "--proxy" => {
+                if let Some(p) = args.get(i + 1) {
+                    flags.proxy = Some(p.clone());
                     i += 1;
                 }
             }
@@ -49,7 +57,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
             skip_next = false;
             continue;
         }
-        if arg == "--session" {
+        if arg == "--session" || arg == "--proxy" {
             skip_next = true;
             continue;
         }
