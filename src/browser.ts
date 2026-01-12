@@ -108,7 +108,7 @@ export class BrowserManager {
   private popupHistory: PopupEvent[] = [];
   private lastPopupPage: Page | null = null;
   private popupResolvers: Array<(page: Page) => void> = [];
-  private isCreatingExplicitPage: boolean = false;
+  private explicitlyCreatedPages: WeakSet<Page> = new WeakSet();
 
   /**
    * Check if browser is launched
@@ -729,9 +729,8 @@ export class BrowserManager {
     this.contexts.push(context);
 
     // Create initial page (mark as explicit to prevent recording as popup)
-    this.isCreatingExplicitPage = true;
     const page = context.pages()[0] ?? (await context.newPage());
-    this.isCreatingExplicitPage = false;
+    this.explicitlyCreatedPages.add(page);
 
     // Only add if handlePopup hasn't already added it
     if (!this.pages.includes(page)) {
@@ -856,7 +855,7 @@ export class BrowserManager {
     this.setupPageTracking(newPage);
 
     // Only record as popup if this wasn't an explicit page creation (newTab/newWindow)
-    if (!this.isCreatingExplicitPage) {
+    if (!this.explicitlyCreatedPages.has(newPage)) {
       // Record popup event
       const popupEvent: PopupEvent = {
         index: newIndex,
@@ -893,12 +892,23 @@ export class BrowserManager {
     }
 
     // Wait for popup with timeout
+    let resolver: ((page: Page) => void) | undefined;
     const page = await Promise.race([
       new Promise<Page>((resolve) => {
+        resolver = resolve;
         this.popupResolvers.push(resolve);
       }),
       new Promise<never>((_, reject) => {
-        setTimeout(() => reject(new Error(`Timeout waiting for popup after ${timeout}ms`)), timeout);
+        setTimeout(() => {
+          // Clean up the orphaned resolver when timeout fires
+          if (resolver) {
+            const index = this.popupResolvers.indexOf(resolver);
+            if (index !== -1) {
+              this.popupResolvers.splice(index, 1);
+            }
+          }
+          reject(new Error(`Timeout waiting for popup after ${timeout}ms`));
+        }, timeout);
       }),
     ]);
 
@@ -955,9 +965,8 @@ export class BrowserManager {
     const context = this.contexts[0]; // Use first context for tabs
 
     // Mark as explicit page creation to prevent handlePopup from recording it as a popup
-    this.isCreatingExplicitPage = true;
     const page = await context.newPage();
-    this.isCreatingExplicitPage = false;
+    this.explicitlyCreatedPages.add(page);
 
     // Only add the page if handlePopup hasn't already added it
     // (the context.on('page') listener may have already added it)
@@ -996,9 +1005,8 @@ export class BrowserManager {
     this.contexts.push(context);
 
     // Mark as explicit page creation to prevent handlePopup from recording it as a popup
-    this.isCreatingExplicitPage = true;
     const page = await context.newPage();
-    this.isCreatingExplicitPage = false;
+    this.explicitlyCreatedPages.add(page);
 
     // Only add the page if handlePopup hasn't already added it
     if (!this.pages.includes(page)) {
