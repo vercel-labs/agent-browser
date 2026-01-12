@@ -576,14 +576,18 @@ export class BrowserManager {
 
   /**
    * Check if an existing CDP connection is still alive
-   * by verifying we can access browser contexts and pages
+   * by verifying we can access browser contexts and that at least one has pages
    */
   private isCdpConnectionAlive(): boolean {
     if (!this.browser) return false;
     try {
       const contexts = this.browser.contexts();
-      return contexts.length > 0 && contexts[0].pages().length > 0;
-    } catch {
+      if (contexts.length === 0) return false;
+      // Check if any context has pages (not just the first one)
+      const hasPages = contexts.some((context) => context.pages().length > 0);
+      return hasPages;
+    } catch (error) {
+      // If we can't access contexts or pages, connection is not alive
       return false;
     }
   }
