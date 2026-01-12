@@ -170,10 +170,23 @@ fn main() {
 
     // Connect via CDP if --cdp flag is set
     if let Some(ref port) = flags.cdp {
+        let cdp_port: u16 = match port.parse() {
+            Ok(p) if p > 0 => p,
+            _ => {
+                let msg = format!("Invalid CDP port: {}", port);
+                if flags.json {
+                    println!(r#"{{"success":false,"error":"{}"}}"#, msg);
+                } else {
+                    eprintln!("\x1b[31m✗\x1b[0m {}", msg);
+                }
+                exit(1);
+            }
+        };
+
         let launch_cmd = json!({
             "id": gen_id(),
             "action": "launch",
-            "cdpPort": port.parse::<u16>().unwrap_or(9222)
+            "cdpPort": cdp_port
         });
 
         let err = match send_command(launch_cmd, &flags.session) {

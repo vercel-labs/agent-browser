@@ -644,7 +644,10 @@ export class BrowserManager {
       throw new Error('No browser context found. Make sure the app has an open window.');
     }
 
-    this.contexts.push(...contexts);
+    for (const context of contexts) {
+      this.contexts.push(context);
+      this.setupContextTracking(context);
+    }
 
     const allPages = contexts.flatMap((context) => context.pages());
     if (allPages.length === 0) {
@@ -660,7 +663,7 @@ export class BrowserManager {
   }
 
   /**
-   * Set up console and error tracking for a page
+   * Set up console, error, and close tracking for a page
    */
   private setupPageTracking(page: Page): void {
     page.on('console', (msg) => {
@@ -676,6 +679,26 @@ export class BrowserManager {
         message: error.message,
         timestamp: Date.now(),
       });
+    });
+
+    page.on('close', () => {
+      const index = this.pages.indexOf(page);
+      if (index !== -1) {
+        this.pages.splice(index, 1);
+        if (this.activePageIndex >= this.pages.length) {
+          this.activePageIndex = Math.max(0, this.pages.length - 1);
+        }
+      }
+    });
+  }
+
+  /**
+   * Set up tracking for new pages in a context (for CDP connections)
+   */
+  private setupContextTracking(context: BrowserContext): void {
+    context.on('page', (page) => {
+      this.pages.push(page);
+      this.setupPageTracking(page);
     });
   }
 
