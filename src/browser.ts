@@ -39,6 +39,7 @@ interface PageError {
  */
 export class BrowserManager {
   private browser: Browser | null = null;
+  private cdpPort: number | null = null;
   private contexts: BrowserContext[] = [];
   private pages: Page[] = [];
   private activePageIndex: number = 0;
@@ -583,6 +584,13 @@ export class BrowserManager {
       return;
     }
 
+    this.cdpPort = options.cdpPort ?? null;
+
+    if (options.cdpPort) {
+      await this.connectViaCDP(options.cdpPort);
+      return;
+    }
+
     // Select browser type
     const browserType = options.browser ?? 'chromium';
     const launcher =
@@ -612,6 +620,43 @@ export class BrowserManager {
 
     // Automatically start console and error tracking
     this.setupPageTracking(page);
+  }
+
+  /**
+   * Connect to a running browser via CDP (Chrome DevTools Protocol)
+   */
+  private async connectViaCDP(cdpPort: number | undefined): Promise<void> {
+    if (!cdpPort) {
+      throw new Error('cdpPort is required for CDP connection');
+    }
+
+    try {
+      this.browser = await chromium.connectOverCDP(`http://localhost:${cdpPort}`);
+    } catch {
+      throw new Error(
+        `Failed to connect via CDP on port ${cdpPort}. ` +
+          `Make sure the app is running with --remote-debugging-port=${cdpPort}`
+      );
+    }
+
+    const contexts = this.browser.contexts();
+    if (contexts.length === 0) {
+      throw new Error('No browser context found. Make sure the app has an open window.');
+    }
+
+    this.contexts.push(...contexts);
+
+    const allPages = contexts.flatMap((context) => context.pages());
+    if (allPages.length === 0) {
+      throw new Error('No page found. Make sure the app has loaded content.');
+    }
+
+    for (const page of allPages) {
+      this.pages.push(page);
+      this.setupPageTracking(page);
+    }
+
+    this.activePageIndex = 0;
   }
 
   /**
@@ -760,6 +805,7 @@ export class BrowserManager {
       this.browser = null;
     }
 
+    this.cdpPort = null;
     this.activePageIndex = 0;
     this.refMap = {};
     this.lastSnapshot = '';

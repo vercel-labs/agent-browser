@@ -1194,6 +1194,7 @@ Options:
   --json                     JSON output
   --full, -f                 Full page screenshot
   --headed                   Show browser window (not headless)
+  --cdp <port>               Connect via CDP (Chrome DevTools Protocol)
   --debug                    Debug output
 
 Examples:
@@ -1204,6 +1205,7 @@ Examples:
   agent-browser find role button click --name Submit
   agent-browser get text @e1
   agent-browser screenshot --full
+  agent-browser --cdp 9222 snapshot      # Connect via CDP port
 "#
     );
 }

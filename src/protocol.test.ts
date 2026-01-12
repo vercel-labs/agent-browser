@@ -461,6 +461,24 @@ describe('parseCommand', () => {
         expect(result.command.headless).toBe(false);
       }
     });
+
+    it('should parse launch with cdpPort', () => {
+      const result = parseCommand(cmd({ id: '1', action: 'launch', cdpPort: 9222 }));
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.command.cdpPort).toBe(9222);
+      }
+    });
+
+    it('should reject launch with invalid cdpPort', () => {
+      const result = parseCommand(cmd({ id: '1', action: 'launch', cdpPort: -1 }));
+      expect(result.success).toBe(false);
+    });
+
+    it('should reject launch with non-numeric cdpPort', () => {
+      const result = parseCommand(cmd({ id: '1', action: 'launch', cdpPort: 'invalid' }));
+      expect(result.success).toBe(false);
+    });
   });
 
   describe('mouse actions', () => {
