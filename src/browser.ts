@@ -608,8 +608,7 @@ export class BrowserManager {
 
     // Reuse existing browser if possible
     if (this.browser) {
-      if (!cdpPort) return;
-      if (this.needsCdpReconnect(cdpPort)) {
+      if (cdpPort && this.needsCdpReconnect(cdpPort)) {
         await this.close();
       } else {
         return;
@@ -852,21 +851,28 @@ export class BrowserManager {
    * Close the browser and clean up
    */
   async close(): Promise<void> {
-    for (const page of this.pages) {
-      await page.close().catch(() => {});
+    // CDP: only disconnect, don't close external app's pages
+    if (this.cdpPort !== null) {
+      if (this.browser) {
+        await this.browser.close().catch(() => {});
+        this.browser = null;
+      }
+    } else {
+      // Regular browser: close everything
+      for (const page of this.pages) {
+        await page.close().catch(() => {});
+      }
+      for (const context of this.contexts) {
+        await context.close().catch(() => {});
+      }
+      if (this.browser) {
+        await this.browser.close().catch(() => {});
+        this.browser = null;
+      }
     }
+
     this.pages = [];
-
-    for (const context of this.contexts) {
-      await context.close().catch(() => {});
-    }
     this.contexts = [];
-
-    if (this.browser) {
-      await this.browser.close().catch(() => {});
-      this.browser = null;
-    }
-
     this.cdpPort = null;
     this.activePageIndex = 0;
     this.refMap = {};
