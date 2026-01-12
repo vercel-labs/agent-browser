@@ -120,6 +120,28 @@ describe('BrowserManager', () => {
       expect(testCookie?.value).toBe('value');
     });
 
+    it('should set cookie with domain', async () => {
+      const page = browser.getPage();
+      const context = page.context();
+      await context.addCookies([{ name: 'domainCookie', value: 'domainValue', domain: 'example.com', path: '/' }]);
+      const cookies = await context.cookies();
+      const testCookie = cookies.find((c) => c.name === 'domainCookie');
+      expect(testCookie?.value).toBe('domainValue');
+    });
+
+    it('should set multiple cookies at once', async () => {
+      const page = browser.getPage();
+      const context = page.context();
+      await context.clearCookies();
+      await context.addCookies([
+        { name: 'cookie1', value: 'value1', url: 'https://example.com' },
+        { name: 'cookie2', value: 'value2', url: 'https://example.com' },
+      ]);
+      const cookies = await context.cookies();
+      expect(cookies.find((c) => c.name === 'cookie1')?.value).toBe('value1');
+      expect(cookies.find((c) => c.name === 'cookie2')?.value).toBe('value2');
+    });
+
     it('should clear cookies', async () => {
       const page = browser.getPage();
       const context = page.context();
@@ -129,18 +151,81 @@ describe('BrowserManager', () => {
     });
   });
 
-  describe('storage via evaluate', () => {
-    it('should set and get localStorage', async () => {
+  describe('localStorage operations', () => {
+    it('should set and get localStorage item', async () => {
       const page = browser.getPage();
+      await page.goto('https://example.com');
       await page.evaluate(() => localStorage.setItem('testKey', 'testValue'));
       const value = await page.evaluate(() => localStorage.getItem('testKey'));
       expect(value).toBe('testValue');
+    });
+
+    it('should get all localStorage items', async () => {
+      const page = browser.getPage();
+      await page.evaluate(() => {
+        localStorage.clear();
+        localStorage.setItem('key1', 'value1');
+        localStorage.setItem('key2', 'value2');
+      });
+      const storage = await page.evaluate(() => {
+        const items: Record<string, string> = {};
+        for (let i = 0; i < localStorage.length; i++) {
+          const key = localStorage.key(i);
+          if (key) items[key] = localStorage.getItem(key) || '';
+        }
+        return items;
+      });
+      expect(storage.key1).toBe('value1');
+      expect(storage.key2).toBe('value2');
     });
 
     it('should clear localStorage', async () => {
       const page = browser.getPage();
       await page.evaluate(() => localStorage.clear());
       const value = await page.evaluate(() => localStorage.getItem('testKey'));
+      expect(value).toBeNull();
+    });
+
+    it('should return null for non-existent key', async () => {
+      const page = browser.getPage();
+      await page.evaluate(() => localStorage.clear());
+      const value = await page.evaluate(() => localStorage.getItem('nonexistent'));
+      expect(value).toBeNull();
+    });
+  });
+
+  describe('sessionStorage operations', () => {
+    it('should set and get sessionStorage item', async () => {
+      const page = browser.getPage();
+      await page.goto('https://example.com');
+      await page.evaluate(() => sessionStorage.setItem('sessionKey', 'sessionValue'));
+      const value = await page.evaluate(() => sessionStorage.getItem('sessionKey'));
+      expect(value).toBe('sessionValue');
+    });
+
+    it('should get all sessionStorage items', async () => {
+      const page = browser.getPage();
+      await page.evaluate(() => {
+        sessionStorage.clear();
+        sessionStorage.setItem('skey1', 'svalue1');
+        sessionStorage.setItem('skey2', 'svalue2');
+      });
+      const storage = await page.evaluate(() => {
+        const items: Record<string, string> = {};
+        for (let i = 0; i < sessionStorage.length; i++) {
+          const key = sessionStorage.key(i);
+          if (key) items[key] = sessionStorage.getItem(key) || '';
+        }
+        return items;
+      });
+      expect(storage.skey1).toBe('svalue1');
+      expect(storage.skey2).toBe('svalue2');
+    });
+
+    it('should clear sessionStorage', async () => {
+      const page = browser.getPage();
+      await page.evaluate(() => sessionStorage.clear());
+      const value = await page.evaluate(() => sessionStorage.getItem('sessionKey'));
       expect(value).toBeNull();
     });
   });

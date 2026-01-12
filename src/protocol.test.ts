@@ -112,9 +112,22 @@ describe('parseCommand', () => {
     it('should parse cookies_get', () => {
       const result = parseCommand(cmd({ id: '1', action: 'cookies_get' }));
       expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.command.action).toBe('cookies_get');
+      }
     });
 
-    it('should parse cookies_set', () => {
+    it('should parse cookies_get with urls filter', () => {
+      const result = parseCommand(
+        cmd({ id: '1', action: 'cookies_get', urls: ['https://example.com'] })
+      );
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.command.urls).toEqual(['https://example.com']);
+      }
+    });
+
+    it('should parse cookies_set with minimal cookie', () => {
       const result = parseCommand(
         cmd({
           id: '1',
@@ -123,18 +136,127 @@ describe('parseCommand', () => {
         })
       );
       expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.command.action).toBe('cookies_set');
+        expect(result.command.cookies).toHaveLength(1);
+        expect(result.command.cookies[0].name).toBe('session');
+        expect(result.command.cookies[0].value).toBe('abc123');
+      }
+    });
+
+    it('should parse cookies_set with full cookie options', () => {
+      const result = parseCommand(
+        cmd({
+          id: '1',
+          action: 'cookies_set',
+          cookies: [
+            {
+              name: 'auth',
+              value: 'token123',
+              domain: 'example.com',
+              path: '/',
+              expires: Date.now() / 1000 + 3600,
+              httpOnly: true,
+              secure: true,
+              sameSite: 'Strict',
+            },
+          ],
+        })
+      );
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.command.cookies[0].httpOnly).toBe(true);
+        expect(result.command.cookies[0].secure).toBe(true);
+        expect(result.command.cookies[0].sameSite).toBe('Strict');
+      }
+    });
+
+    it('should parse cookies_set with multiple cookies', () => {
+      const result = parseCommand(
+        cmd({
+          id: '1',
+          action: 'cookies_set',
+          cookies: [
+            { name: 'cookie1', value: 'value1' },
+            { name: 'cookie2', value: 'value2' },
+          ],
+        })
+      );
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.command.cookies).toHaveLength(2);
+      }
+    });
+
+    it('should reject cookies_set without cookies array', () => {
+      const result = parseCommand(cmd({ id: '1', action: 'cookies_set' }));
+      expect(result.success).toBe(false);
+    });
+
+    it('should accept cookies_set with empty cookies array', () => {
+      // Empty array is technically valid (no-op)
+      const result = parseCommand(cmd({ id: '1', action: 'cookies_set', cookies: [] }));
+      expect(result.success).toBe(true);
+    });
+
+    it('should reject cookies_set with cookie missing name', () => {
+      const result = parseCommand(
+        cmd({ id: '1', action: 'cookies_set', cookies: [{ value: 'test' }] })
+      );
+      expect(result.success).toBe(false);
+    });
+
+    it('should reject cookies_set with cookie missing value', () => {
+      const result = parseCommand(
+        cmd({ id: '1', action: 'cookies_set', cookies: [{ name: 'test' }] })
+      );
+      expect(result.success).toBe(false);
+    });
+
+    it('should reject cookies_set with invalid sameSite value', () => {
+      const result = parseCommand(
+        cmd({
+          id: '1',
+          action: 'cookies_set',
+          cookies: [{ name: 'test', value: 'val', sameSite: 'Invalid' }],
+        })
+      );
+      expect(result.success).toBe(false);
     });
 
     it('should parse cookies_clear', () => {
       const result = parseCommand(cmd({ id: '1', action: 'cookies_clear' }));
       expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.command.action).toBe('cookies_clear');
+      }
     });
   });
 
   describe('storage', () => {
-    it('should parse storage_get', () => {
+    it('should parse storage_get for localStorage', () => {
       const result = parseCommand(cmd({ id: '1', action: 'storage_get', type: 'local' }));
       expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.command.action).toBe('storage_get');
+        expect(result.command.type).toBe('local');
+      }
+    });
+
+    it('should parse storage_get for sessionStorage', () => {
+      const result = parseCommand(cmd({ id: '1', action: 'storage_get', type: 'session' }));
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.command.type).toBe('session');
+      }
+    });
+
+    it('should parse storage_get with specific key', () => {
+      const result = parseCommand(cmd({ id: '1', action: 'storage_get', type: 'local', key: 'mykey' }));
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.command.key).toBe('mykey');
+      }
     });
 
     it('should parse storage_set', () => {
@@ -148,6 +270,59 @@ describe('parseCommand', () => {
         })
       );
       expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.command.action).toBe('storage_set');
+        expect(result.command.key).toBe('test');
+        expect(result.command.value).toBe('value');
+      }
+    });
+
+    it('should reject storage_set without key', () => {
+      const result = parseCommand(
+        cmd({
+          id: '1',
+          action: 'storage_set',
+          type: 'local',
+          value: 'value',
+        })
+      );
+      expect(result.success).toBe(false);
+    });
+
+    it('should reject storage_set without value', () => {
+      const result = parseCommand(
+        cmd({
+          id: '1',
+          action: 'storage_set',
+          type: 'local',
+          key: 'test',
+        })
+      );
+      expect(result.success).toBe(false);
+    });
+
+    it('should parse storage_clear for localStorage', () => {
+      const result = parseCommand(cmd({ id: '1', action: 'storage_clear', type: 'local' }));
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.command.action).toBe('storage_clear');
+        expect(result.command.type).toBe('local');
+      }
+    });
+
+    it('should parse storage_clear for sessionStorage', () => {
+      const result = parseCommand(cmd({ id: '1', action: 'storage_clear', type: 'session' }));
+      expect(result.success).toBe(true);
+    });
+
+    it('should reject storage_get without type', () => {
+      const result = parseCommand(cmd({ id: '1', action: 'storage_get' }));
+      expect(result.success).toBe(false);
+    });
+
+    it('should reject storage_get with invalid type', () => {
+      const result = parseCommand(cmd({ id: '1', action: 'storage_get', type: 'invalid' }));
+      expect(result.success).toBe(false);
     });
   });
 

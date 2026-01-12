@@ -198,7 +198,17 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Option<Value> {
                 let op = rest.get(1).unwrap_or(&"get");
                 let key = rest.get(2);
                 let value = rest.get(3);
-                Some(json!({ "id": id, "action": "storage", "storageType": storage_type, "operation": op, "key": key, "value": value }))
+                match *op {
+                    "set" => Some(json!({ "id": id, "action": "storage_set", "type": storage_type, "key": key?, "value": value? })),
+                    "clear" => Some(json!({ "id": id, "action": "storage_clear", "type": storage_type })),
+                    _ => {
+                        let mut cmd = json!({ "id": id, "action": "storage_get", "type": storage_type });
+                        if let Some(k) = key {
+                            cmd.as_object_mut().unwrap().insert("key".to_string(), json!(k));
+                        }
+                        Some(cmd)
+                    }
+                }
             }
             _ => None,
         },
@@ -207,10 +217,13 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Option<Value> {
         "cookies" => {
             let op = rest.get(0).unwrap_or(&"get");
             match *op {
-                "get" => Some(json!({ "id": id, "action": "cookies", "operation": "get", "name": rest.get(1) })),
-                "set" => Some(json!({ "id": id, "action": "cookies", "operation": "set", "name": rest.get(1)?, "value": rest.get(2)? })),
-                "clear" => Some(json!({ "id": id, "action": "cookies", "operation": "clear" })),
-                _ => Some(json!({ "id": id, "action": "cookies", "operation": "get" })),
+                "set" => {
+                    let name = rest.get(1)?;
+                    let value = rest.get(2)?;
+                    Some(json!({ "id": id, "action": "cookies_set", "cookies": [{ "name": name, "value": value }] }))
+                }
+                "clear" => Some(json!({ "id": id, "action": "cookies_clear" })),
+                _ => Some(json!({ "id": id, "action": "cookies_get" })),
             }
         }
 
@@ -353,5 +366,273 @@ fn parse_set(rest: &[&str], id: &str) -> Option<Value> {
             Some(json!({ "id": id, "action": "media", "colorScheme": color, "reducedMotion": reduced }))
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn default_flags() -> Flags {
+        Flags {
+            session: "test".to_string(),
+            json: false,
+            full: false,
+            headed: false,
+            debug: false,
+        }
+    }
+
+    fn args(s: &str) -> Vec<String> {
+        s.split_whitespace().map(String::from).collect()
+    }
+
+    // === Cookies Tests ===
+
+    #[test]
+    fn test_cookies_get() {
+        let cmd = parse_command(&args("cookies"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "cookies_get");
+    }
+
+    #[test]
+    fn test_cookies_get_explicit() {
+        let cmd = parse_command(&args("cookies get"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "cookies_get");
+    }
+
+    #[test]
+    fn test_cookies_set() {
+        let cmd = parse_command(&args("cookies set mycookie myvalue"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "cookies_set");
+        assert_eq!(cmd["cookies"][0]["name"], "mycookie");
+        assert_eq!(cmd["cookies"][0]["value"], "myvalue");
+    }
+
+    #[test]
+    fn test_cookies_set_missing_value() {
+        let result = parse_command(&args("cookies set mycookie"), &default_flags());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_cookies_clear() {
+        let cmd = parse_command(&args("cookies clear"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "cookies_clear");
+    }
+
+    // === Storage Tests ===
+
+    #[test]
+    fn test_storage_local_get() {
+        let cmd = parse_command(&args("storage local"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "storage_get");
+        assert_eq!(cmd["type"], "local");
+        assert!(cmd.get("key").is_none());
+    }
+
+    #[test]
+    fn test_storage_local_get_key() {
+        let cmd = parse_command(&args("storage local get mykey"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "storage_get");
+        assert_eq!(cmd["type"], "local");
+        assert_eq!(cmd["key"], "mykey");
+    }
+
+    #[test]
+    fn test_storage_session_get() {
+        let cmd = parse_command(&args("storage session"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "storage_get");
+        assert_eq!(cmd["type"], "session");
+    }
+
+    #[test]
+    fn test_storage_local_set() {
+        let cmd = parse_command(&args("storage local set mykey myvalue"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "storage_set");
+        assert_eq!(cmd["type"], "local");
+        assert_eq!(cmd["key"], "mykey");
+        assert_eq!(cmd["value"], "myvalue");
+    }
+
+    #[test]
+    fn test_storage_session_set() {
+        let cmd = parse_command(&args("storage session set skey svalue"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "storage_set");
+        assert_eq!(cmd["type"], "session");
+        assert_eq!(cmd["key"], "skey");
+        assert_eq!(cmd["value"], "svalue");
+    }
+
+    #[test]
+    fn test_storage_set_missing_value() {
+        let result = parse_command(&args("storage local set mykey"), &default_flags());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_storage_local_clear() {
+        let cmd = parse_command(&args("storage local clear"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "storage_clear");
+        assert_eq!(cmd["type"], "local");
+    }
+
+    #[test]
+    fn test_storage_session_clear() {
+        let cmd = parse_command(&args("storage session clear"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "storage_clear");
+        assert_eq!(cmd["type"], "session");
+    }
+
+    #[test]
+    fn test_storage_invalid_type() {
+        let result = parse_command(&args("storage invalid"), &default_flags());
+        assert!(result.is_none());
+    }
+
+    // === Navigation Tests ===
+
+    #[test]
+    fn test_navigate_with_https() {
+        let cmd = parse_command(&args("open https://example.com"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "navigate");
+        assert_eq!(cmd["url"], "https://example.com");
+    }
+
+    #[test]
+    fn test_navigate_without_protocol() {
+        let cmd = parse_command(&args("open example.com"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "navigate");
+        assert_eq!(cmd["url"], "https://example.com");
+    }
+
+    #[test]
+    fn test_back() {
+        let cmd = parse_command(&args("back"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "back");
+    }
+
+    #[test]
+    fn test_forward() {
+        let cmd = parse_command(&args("forward"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "forward");
+    }
+
+    #[test]
+    fn test_reload() {
+        let cmd = parse_command(&args("reload"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "reload");
+    }
+
+    // === Core Actions ===
+
+    #[test]
+    fn test_click() {
+        let cmd = parse_command(&args("click #button"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "click");
+        assert_eq!(cmd["selector"], "#button");
+    }
+
+    #[test]
+    fn test_fill() {
+        let cmd = parse_command(&args("fill #input hello world"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "fill");
+        assert_eq!(cmd["selector"], "#input");
+        assert_eq!(cmd["value"], "hello world");
+    }
+
+    #[test]
+    fn test_type_command() {
+        let cmd = parse_command(&args("type #input some text"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "type");
+        assert_eq!(cmd["selector"], "#input");
+        assert_eq!(cmd["text"], "some text");
+    }
+
+    // === Tabs ===
+
+    #[test]
+    fn test_tab_new() {
+        let cmd = parse_command(&args("tab new"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "tab_new");
+    }
+
+    #[test]
+    fn test_tab_list() {
+        let cmd = parse_command(&args("tab list"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "tab_list");
+    }
+
+    #[test]
+    fn test_tab_switch() {
+        let cmd = parse_command(&args("tab 2"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "tab_switch");
+        assert_eq!(cmd["index"], 2);
+    }
+
+    #[test]
+    fn test_tab_close() {
+        let cmd = parse_command(&args("tab close"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "tab_close");
+    }
+
+    // === Screenshot ===
+
+    #[test]
+    fn test_screenshot() {
+        let cmd = parse_command(&args("screenshot"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "screenshot");
+    }
+
+    #[test]
+    fn test_screenshot_full_page() {
+        let mut flags = default_flags();
+        flags.full = true;
+        let cmd = parse_command(&args("screenshot"), &flags).unwrap();
+        assert_eq!(cmd["action"], "screenshot");
+        assert_eq!(cmd["fullPage"], true);
+    }
+
+    // === Snapshot ===
+
+    #[test]
+    fn test_snapshot() {
+        let cmd = parse_command(&args("snapshot"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "snapshot");
+    }
+
+    #[test]
+    fn test_snapshot_interactive() {
+        let cmd = parse_command(&args("snapshot -i"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "snapshot");
+        assert_eq!(cmd["interactive"], true);
+    }
+
+    #[test]
+    fn test_snapshot_compact() {
+        let cmd = parse_command(&args("snapshot --compact"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "snapshot");
+        assert_eq!(cmd["compact"], true);
+    }
+
+    #[test]
+    fn test_snapshot_depth() {
+        let cmd = parse_command(&args("snapshot -d 3"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "snapshot");
+        assert_eq!(cmd["maxDepth"], 3);
+    }
+
+    // === Unknown command ===
+
+    #[test]
+    fn test_unknown_command() {
+        let result = parse_command(&args("unknowncommand"), &default_flags());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_empty_args() {
+        let result = parse_command(&[], &default_flags());
+        assert!(result.is_none());
     }
 }

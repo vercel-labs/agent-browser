@@ -791,7 +791,15 @@ async function handleCookiesSet(
 ): Promise<Response> {
   const page = browser.getPage();
   const context = page.context();
-  await context.addCookies(command.cookies);
+  // Auto-fill URL for cookies that don't have domain/path/url set
+  const pageUrl = page.url();
+  const cookies = command.cookies.map((cookie) => {
+    if (!cookie.url && !cookie.domain && !cookie.path) {
+      return { ...cookie, url: pageUrl };
+    }
+    return cookie;
+  });
+  await context.addCookies(cookies);
   return successResponse(command.id, { set: true });
 }
 
