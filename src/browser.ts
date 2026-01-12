@@ -583,13 +583,20 @@ export class BrowserManager {
     try {
       const contexts = this.browser.contexts();
       if (contexts.length === 0) return false;
-      // Check if any context has pages (not just the first one)
-      const hasPages = contexts.some((context) => context.pages().length > 0);
-      return hasPages;
-    } catch (error) {
-      // If we can't access contexts or pages, connection is not alive
+      return contexts.some((context) => context.pages().length > 0);
+    } catch {
       return false;
     }
+  }
+
+  /**
+   * Check if CDP connection needs to be re-established
+   */
+  private needsCdpReconnect(cdpPort: number): boolean {
+    if (!this.browser?.isConnected()) return true;
+    if (this.cdpPort !== cdpPort) return true;
+    if (!this.isCdpConnectionAlive()) return true;
+    return false;
   }
 
   /**
@@ -597,24 +604,20 @@ export class BrowserManager {
    * If already launched, this is a no-op (browser stays open)
    */
   async launch(options: LaunchCommand): Promise<void> {
-    const requestedCdpPort = options.cdpPort ?? null;
+    const cdpPort = options.cdpPort;
 
-    // Check if we need to close existing browser before relaunching
+    // Reuse existing browser if possible
     if (this.browser) {
-      if (!this.browser.isConnected()) {
-        await this.close();
-      } else if (this.cdpPort !== requestedCdpPort) {
-        await this.close();
-      } else if (this.cdpPort !== null && !this.isCdpConnectionAlive()) {
+      if (!cdpPort) return;
+      if (this.needsCdpReconnect(cdpPort)) {
         await this.close();
       } else {
-        // Connected, same port, and (non-CDP or CDP alive) - keep existing
         return;
       }
     }
 
-    if (requestedCdpPort) {
-      await this.connectViaCDP(requestedCdpPort);
+    if (cdpPort) {
+      await this.connectViaCDP(cdpPort);
       return;
     }
 
