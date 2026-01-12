@@ -579,9 +579,13 @@ export class BrowserManager {
    * If already launched, this is a no-op (browser stays open)
    */
   async launch(options: LaunchCommand): Promise<void> {
-    // If already launched, don't relaunch
+    // If already launched and still connected, don't relaunch
     if (this.browser) {
-      return;
+      if (this.browser.isConnected()) {
+        return;
+      }
+      // Browser disconnected, clean up stale state before reconnecting
+      await this.close();
     }
 
     this.cdpPort = options.cdpPort ?? null;
