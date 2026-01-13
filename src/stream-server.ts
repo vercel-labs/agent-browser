@@ -304,26 +304,32 @@ export class StreamServer {
    * Start screencasting
    */
   private async startScreencast(): Promise<void> {
+    // Set flag immediately to prevent race conditions with concurrent calls
     if (this.isScreencasting) return;
-
-    // Check if browser is launched
-    if (!this.browser.isLaunched()) {
-      throw new Error('Browser not launched');
-    }
-
-    await this.browser.startScreencast((frame) => this.broadcastFrame(frame), {
-      format: 'jpeg',
-      quality: 80,
-      maxWidth: 1280,
-      maxHeight: 720,
-      everyNthFrame: 1,
-    });
-
     this.isScreencasting = true;
 
-    // Notify all clients
-    for (const client of this.clients) {
-      this.sendStatus(client);
+    try {
+      // Check if browser is launched
+      if (!this.browser.isLaunched()) {
+        throw new Error('Browser not launched');
+      }
+
+      await this.browser.startScreencast((frame) => this.broadcastFrame(frame), {
+        format: 'jpeg',
+        quality: 80,
+        maxWidth: 1280,
+        maxHeight: 720,
+        everyNthFrame: 1,
+      });
+
+      // Notify all clients
+      for (const client of this.clients) {
+        this.sendStatus(client);
+      }
+    } catch (error) {
+      // Reset flag on failure so caller can retry
+      this.isScreencasting = false;
+      throw error;
     }
   }
 

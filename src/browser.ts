@@ -84,6 +84,7 @@ export class BrowserManager {
   private screencastActive: boolean = false;
   private screencastSessionId: number = 0;
   private frameCallback: ((frame: ScreencastFrame) => void) | null = null;
+  private screencastFrameHandler: ((params: any) => void) | null = null;
 
   /**
    * Check if browser is launched
@@ -952,8 +953,8 @@ export class BrowserManager {
     this.frameCallback = callback;
     this.screencastActive = true;
 
-    // Listen for screencast frames
-    cdp.on('Page.screencastFrame', async (params: any) => {
+    // Create and store the frame handler so we can remove it later
+    this.screencastFrameHandler = async (params: any) => {
       const frame: ScreencastFrame = {
         data: params.data,
         metadata: params.metadata,
@@ -967,7 +968,10 @@ export class BrowserManager {
       if (this.frameCallback) {
         this.frameCallback(frame);
       }
-    });
+    };
+
+    // Listen for screencast frames
+    cdp.on('Page.screencastFrame', this.screencastFrameHandler);
 
     // Start the screencast
     await cdp.send('Page.startScreencast', {
@@ -990,12 +994,18 @@ export class BrowserManager {
     try {
       const cdp = await this.getCDPSession();
       await cdp.send('Page.stopScreencast');
+
+      // Remove the event listener to prevent accumulation
+      if (this.screencastFrameHandler) {
+        cdp.off('Page.screencastFrame', this.screencastFrameHandler);
+      }
     } catch {
       // Ignore errors when stopping
     }
 
     this.screencastActive = false;
     this.frameCallback = null;
+    this.screencastFrameHandler = null;
   }
 
   /**
