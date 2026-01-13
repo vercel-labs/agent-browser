@@ -18,7 +18,9 @@ git clone https://github.com/vercel-labs/agent-browser
 cd agent-browser
 pnpm install
 pnpm build
-agent-browser install
+pnpm build:native
+./bin/agent-browser install
+pnpm link --global
 ```
 
 ### Linux Dependencies
