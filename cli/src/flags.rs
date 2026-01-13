@@ -9,9 +9,15 @@ pub struct Flags {
     pub headers: Option<String>,
     pub executable_path: Option<String>,
     pub cdp: Option<String>,
+    pub extensions: Vec<String>,
 }
 
 pub fn parse_flags(args: &[String]) -> Flags {
+    let extensions_env = env::var("AGENT_BROWSER_EXTENSIONS")
+        .ok()
+        .map(|s| s.split(',').map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect::<Vec<_>>())
+        .unwrap_or_default();
+
     let mut flags = Flags {
         json: false,
         full: false,
@@ -21,6 +27,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
         headers: None,
         executable_path: env::var("AGENT_BROWSER_EXECUTABLE_PATH").ok(),
         cdp: None,
+        extensions: extensions_env,
     };
 
     let mut i = 0;
@@ -54,6 +61,12 @@ pub fn parse_flags(args: &[String]) -> Flags {
                     i += 1;
                 }
             }
+            "--extension" => {
+                if let Some(s) = args.get(i + 1) {
+                    flags.extensions.push(s.clone());
+                    i += 1;
+                }
+            }
             _ => {}
         }
         i += 1;
@@ -68,7 +81,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
     // Global flags that should be stripped from command args
     const GLOBAL_FLAGS: &[&str] = &["--json", "--full", "--headed", "--debug"];
     // Global flags that take a value (need to skip the next arg too)
-    const GLOBAL_FLAGS_WITH_VALUE: &[&str] = &["--session", "--headers", "--executable-path", "--cdp"];
+    const GLOBAL_FLAGS_WITH_VALUE: &[&str] = &["--session", "--headers", "--executable-path", "--cdp", "--extension"];
 
     for arg in args.iter() {
         if skip_next {

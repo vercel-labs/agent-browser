@@ -15,6 +15,7 @@ export interface LaunchCommand extends BaseCommand {
   headers?: Record<string, string>;
   executablePath?: string;
   cdpPort?: number;
+  extensions?: string[];
 }
 
 export interface NavigateCommand extends BaseCommand {
