@@ -593,11 +593,19 @@ export class BrowserManager {
 
     if (options.userDataDir) {
       // Use persistent context for user data directory (preserves login sessions, cookies, etc.)
+      // Need to pass --profile-directory arg to use the correct Chrome profile
+      // Use channel: 'chrome' to use the installed Chrome instead of bundled Chromium
+      // Chrome 136+ requires --disable-features=DevToolsDebuggingRestrictions for profile loading
       context = await launcher.launchPersistentContext(options.userDataDir, {
         headless: options.headless ?? true,
+        channel: options.executablePath ? undefined : 'chrome',
         executablePath: options.executablePath,
         viewport: options.viewport ?? { width: 1280, height: 720 },
         extraHTTPHeaders: options.headers,
+        args: [
+          '--profile-directory=Default',
+          '--disable-features=DevToolsDebuggingRestrictions',
+        ],
       });
       this.persistentContext = context;
     } else {
