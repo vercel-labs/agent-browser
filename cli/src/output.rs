@@ -1253,6 +1253,35 @@ Examples:
 "##
         }
 
+        // === Popup (JavaScript-opened windows) ===
+        "popup" => r##"
+agent-browser popup - Handle JavaScript-opened popup windows
+
+Usage: agent-browser popup <operation> [args]
+
+Detect and manage popup windows opened via JavaScript (window.open, target="_blank").
+
+Operations:
+  wait [timeout]       Wait for a popup to open (default: 5000ms)
+  list                 List all detected popups (default)
+  clear                Clear popup tracking
+
+Notes:
+  - Popups are windows opened by page JavaScript, not browser UI
+  - wait is useful before interacting with a popup
+  - After popup opens, use tab commands to switch to it
+
+Global Options:
+  --json               Output as JSON
+  --session <name>     Use specific session
+
+Examples:
+  agent-browser popup wait              # Wait up to 5s for popup
+  agent-browser popup wait 10000        # Wait up to 10s
+  agent-browser popup list              # Show detected popups
+  agent-browser popup clear             # Clear popup tracking
+"##,
+
         // === Frame ===
         "frame" => {
             r##"
@@ -1611,6 +1640,11 @@ Storage:
 
 Tabs:
   tab [new|list|close|<n>]   Manage tabs
+
+Popups:  agent-browser popup <action>
+  wait [timeout]             Wait for popup (default 5s)
+  list                       List detected popups
+  clear                      Clear popup tracking
 
 Debug:
   trace start|stop [path]    Record trace
