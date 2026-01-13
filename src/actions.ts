@@ -660,7 +660,14 @@ async function handleTabNew(
   command: TabNewCommand,
   browser: BrowserManager
 ): Promise<Response<TabNewData>> {
-  const result = await browser.newTab(command.url);
+  const result = await browser.newTab();
+
+  // Navigate to URL if provided (same pattern as handleNavigate)
+  if (command.url) {
+    const page = browser.getPage();
+    await page.goto(command.url, { waitUntil: 'domcontentloaded' });
+  }
+
   return successResponse(command.id, result);
 }
 
