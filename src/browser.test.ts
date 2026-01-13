@@ -32,6 +32,25 @@ describe('BrowserManager', () => {
         })
       ).rejects.toThrow();
     });
+
+    it('should be no-op when relaunching with same options', async () => {
+      const browserInstance = browser.getBrowser();
+      await browser.launch({ id: 'test', action: 'launch', headless: true });
+      expect(browser.getBrowser()).toBe(browserInstance);
+    });
+
+    it('should reconnect when CDP port changes', async () => {
+      const newBrowser = new BrowserManager();
+      await newBrowser.launch({ id: 'test', action: 'launch', headless: true });
+      expect(newBrowser.getBrowser()).not.toBeNull();
+
+      await expect(
+        newBrowser.launch({ id: 'test', action: 'launch', cdpPort: 59999 })
+      ).rejects.toThrow();
+
+      expect(newBrowser.getBrowser()).toBeNull();
+      await newBrowser.close();
+    });
   });
 
   describe('navigation', () => {

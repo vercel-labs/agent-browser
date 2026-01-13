@@ -302,6 +302,7 @@ agent-browser snapshot -i -c -d 5         # Combine options
 | `--name, -n` | Locator name filter |
 | `--exact` | Exact text match |
 | `--headed` | Show browser window (not headless) |
+| `--cdp <port>` | Connect via Chrome DevTools Protocol |
 | `--debug` | Debug output |
 
 ## Selectors
@@ -458,6 +459,25 @@ export async function handler() {
   // ... use browser
 }
 ```
+
+## CDP Mode
+
+Connect to an existing browser via Chrome DevTools Protocol:
+
+```bash
+# Connect to Electron app
+agent-browser --cdp 9222 snapshot
+
+# Connect to Chrome with remote debugging
+# (Start Chrome with: google-chrome --remote-debugging-port=9222)
+agent-browser --cdp 9222 open about:blank
+```
+
+This enables control of:
+- Electron apps
+- Chrome/Chromium instances with remote debugging
+- WebView2 applications
+- Any browser exposing a CDP endpoint
 
 ## Architecture
 

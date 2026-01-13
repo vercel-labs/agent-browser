@@ -168,12 +168,72 @@ fn main() {
         }
     }
 
-    // If --headed flag is set, send launch command first to switch to headed mode
-    if flags.headed {
-        let launch_cmd = json!({ "id": gen_id(), "action": "launch", "headless": false });
+    // Connect via CDP if --cdp flag is set
+    if let Some(ref port) = flags.cdp {
+        let cdp_port: u16 = match port.parse::<u32>() {
+            Ok(p) if p == 0 => {
+                let msg = "Invalid CDP port: port must be greater than 0".to_string();
+                if flags.json {
+                    println!(r#"{{"success":false,"error":"{}"}}"#, msg);
+                } else {
+                    eprintln!("\x1b[31m✗\x1b[0m {}", msg);
+                }
+                exit(1);
+            }
+            Ok(p) if p > 65535 => {
+                let msg = format!("Invalid CDP port: {} is out of range (valid range: 1-65535)", p);
+                if flags.json {
+                    println!(r#"{{"success":false,"error":"{}"}}"#, msg);
+                } else {
+                    eprintln!("\x1b[31m✗\x1b[0m {}", msg);
+                }
+                exit(1);
+            }
+            Ok(p) => p as u16,
+            Err(_) => {
+                let msg = format!("Invalid CDP port: '{}' is not a valid number. Port must be a number between 1 and 65535", port);
+                if flags.json {
+                    println!(r#"{{"success":false,"error":"{}"}}"#, msg);
+                } else {
+                    eprintln!("\x1b[31m✗\x1b[0m {}", msg);
+                }
+                exit(1);
+            }
+        };
+
+        let launch_cmd = json!({
+            "id": gen_id(),
+            "action": "launch",
+            "cdpPort": cdp_port
+        });
+
+        let err = match send_command(launch_cmd, &flags.session) {
+            Ok(resp) if resp.success => None,
+            Ok(resp) => Some(resp.error.unwrap_or_else(|| "CDP connection failed".to_string())),
+            Err(e) => Some(e.to_string()),
+        };
+
+        if let Some(msg) = err {
+            if flags.json {
+                println!(r#"{{"success":false,"error":"{}"}}"#, msg);
+            } else {
+                eprintln!("\x1b[31m✗\x1b[0m {}", msg);
+            }
+            exit(1);
+        }
+    }
+
+    // Launch headed browser if --headed flag is set (without CDP)
+    if flags.headed && flags.cdp.is_none() {
+        let launch_cmd = json!({
+            "id": gen_id(),
+            "action": "launch",
+            "headless": false
+        });
+
         if let Err(e) = send_command(launch_cmd, &flags.session) {
             if !flags.json {
-                eprintln!("\x1b[33m⚠\x1b[0m Could not switch to headed mode: {}", e);
+                eprintln!("\x1b[33m⚠\x1b[0m Could not launch headed browser: {}", e);
             }
         }
     }
