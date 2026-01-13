@@ -303,6 +303,7 @@ agent-browser snapshot -i -c -d 5         # Combine options
 | `--exact` | Exact text match |
 | `--headed` | Show browser window (not headless) |
 | `--cdp <port>` | Connect via Chrome DevTools Protocol |
+| `--video <dir>` | Record video to directory (must be set at launch; saved as .webm on close) |
 | `--debug` | Debug output |
 
 ## Selectors

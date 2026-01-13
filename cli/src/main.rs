@@ -223,17 +223,21 @@ fn main() {
         }
     }
 
-    // Launch headed browser if --headed flag is set (without CDP)
-    if flags.headed && flags.cdp.is_none() {
-        let launch_cmd = json!({
+    // Launch browser if --headed or --video flag is set (without CDP)
+    if (flags.headed || flags.video.is_some()) && flags.cdp.is_none() {
+        let mut launch_cmd = json!({
             "id": gen_id(),
             "action": "launch",
-            "headless": false
+            "headless": !flags.headed
         });
+
+        if let Some(ref video_path) = flags.video {
+            launch_cmd["video"] = json!(video_path);
+        }
 
         if let Err(e) = send_command(launch_cmd, &flags.session) {
             if !flags.json {
-                eprintln!("\x1b[33m⚠\x1b[0m Could not launch headed browser: {}", e);
+                eprintln!("\x1b[33m⚠\x1b[0m Could not launch browser: {}", e);
             }
         }
     }

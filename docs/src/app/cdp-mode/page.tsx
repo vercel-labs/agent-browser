@@ -68,6 +68,10 @@ agent-browser --cdp 9222 open about:blank`} />
               <td>CDP connection port</td>
             </tr>
             <tr>
+              <td><code>--video &lt;dir&gt;</code></td>
+              <td>Record video to directory (must be set at launch; saved as .webm on close)</td>
+            </tr>
+            <tr>
               <td><code>--debug</code></td>
               <td>Debug output</td>
             </tr>

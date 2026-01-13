@@ -11,6 +11,7 @@ import {
   type Request,
   type Route,
   type Locator,
+  BrowserContextOptions,
 } from 'playwright-core';
 import type { LaunchCommand } from './types.js';
 import { type RefMap, type EnhancedSnapshot, getEnhancedSnapshot, parseRef } from './snapshot.js';
@@ -634,11 +635,20 @@ export class BrowserManager {
     });
     this.cdpPort = null;
 
-    // Create context with viewport and optional headers
-    const context = await this.browser.newContext({
-      viewport: options.viewport ?? { width: 1280, height: 720 },
+    // Create context with viewport, optional headers, and video recording
+    const defaultViewport = { width: 1280, height: 720 };
+    const contextOptions = {
+      viewport: options.viewport ?? defaultViewport,
       extraHTTPHeaders: options.headers,
-    });
+      ...(options.video && {
+        recordVideo: {
+          dir: options.video,
+          size: options.viewport ?? defaultViewport,
+        },
+      }),
+    } satisfies BrowserContextOptions;
+
+    const context = await this.browser.newContext(contextOptions);
 
     // Set default timeout to 10 seconds (Playwright default is 30s)
     context.setDefaultTimeout(10000);
