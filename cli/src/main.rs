@@ -149,7 +149,7 @@ fn main() {
         }
     };
 
-    let daemon_result = match ensure_daemon(&flags.session, flags.headed, flags.executable_path.as_deref()) {
+    let daemon_result = match ensure_daemon(&flags.session, flags.headed, flags.executable_path.as_deref(), flags.state.as_deref(), flags.persist) {
         Ok(result) => result,
         Err(e) => {
             if flags.json {
@@ -165,6 +165,13 @@ fn main() {
     if daemon_result.already_running && flags.executable_path.is_some() {
         if !flags.json {
             eprintln!("\x1b[33m⚠\x1b[0m --executable-path ignored: daemon already running. Use 'agent-browser close' first to restart with new path.");
+        }
+    }
+
+    // Warn if state/persist was specified but daemon was already running
+    if daemon_result.already_running && (flags.state.is_some() || flags.persist) {
+        if !flags.json {
+            eprintln!("\x1b[33m⚠\x1b[0m --state/--persist ignored: daemon already running. Use 'agent-browser close' first to restart with persistence.");
         }
     }
 

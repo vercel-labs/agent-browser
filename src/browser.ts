@@ -594,10 +594,10 @@ export class BrowserManager {
       executablePath: options.executablePath,
     });
 
-    // Create context with viewport and optional headers
     const context = await this.browser.newContext({
       viewport: options.viewport ?? { width: 1280, height: 720 },
       extraHTTPHeaders: options.headers,
+      storageState: options.storageState,
     });
 
     // Set default timeout to 10 seconds (Playwright default is 30s)

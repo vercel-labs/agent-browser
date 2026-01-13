@@ -8,6 +8,8 @@ pub struct Flags {
     pub session: String,
     pub headers: Option<String>,
     pub executable_path: Option<String>,
+    pub state: Option<String>,
+    pub persist: bool,
 }
 
 pub fn parse_flags(args: &[String]) -> Flags {
@@ -19,6 +21,8 @@ pub fn parse_flags(args: &[String]) -> Flags {
         session: env::var("AGENT_BROWSER_SESSION").unwrap_or_else(|_| "default".to_string()),
         headers: None,
         executable_path: env::var("AGENT_BROWSER_EXECUTABLE_PATH").ok(),
+        state: env::var("AGENT_BROWSER_STATE").ok(),
+        persist: env::var("AGENT_BROWSER_PERSIST").map(|v| v == "1").unwrap_or(false),
     };
 
     let mut i = 0;
@@ -46,6 +50,13 @@ pub fn parse_flags(args: &[String]) -> Flags {
                     i += 1;
                 }
             }
+            "--state" => {
+                if let Some(s) = args.get(i + 1) {
+                    flags.state = Some(s.clone());
+                    i += 1;
+                }
+            }
+            "--persist" | "-p" => flags.persist = true,
             _ => {}
         }
         i += 1;
@@ -58,9 +69,9 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
     let mut skip_next = false;
 
     // Global flags that should be stripped from command args
-    const GLOBAL_FLAGS: &[&str] = &["--json", "--full", "--headed", "--debug"];
+    const GLOBAL_FLAGS: &[&str] = &["--json", "--full", "--headed", "--debug", "--persist", "-p"];
     // Global flags that take a value (need to skip the next arg too)
-    const GLOBAL_FLAGS_WITH_VALUE: &[&str] = &["--session", "--headers", "--executable-path"];
+    const GLOBAL_FLAGS_WITH_VALUE: &[&str] = &["--session", "--headers", "--executable-path", "--state"];
 
     for arg in args.iter() {
         if skip_next {

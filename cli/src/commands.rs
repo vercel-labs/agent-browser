@@ -901,6 +901,8 @@ mod tests {
             debug: false,
             headers: None,
             executable_path: None,
+            state: None,
+            persist: false,
         }
     }
 

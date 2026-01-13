@@ -6,6 +6,31 @@ import { BrowserManager } from './browser.js';
 import { parseCommand, serializeResponse, errorResponse } from './protocol.js';
 import { executeCommand } from './actions.js';
 
+function getStateDir(): string {
+  return path.join(os.homedir(), '.agent-browser', 'sessions');
+}
+
+function getDefaultStatePath(session: string): string {
+  return path.join(getStateDir(), `${session}.json`);
+}
+
+function getStatePath(): string | undefined {
+  if (process.env.AGENT_BROWSER_STATE) {
+    return process.env.AGENT_BROWSER_STATE;
+  }
+  if (process.env.AGENT_BROWSER_PERSIST === '1') {
+    return getDefaultStatePath(process.env.AGENT_BROWSER_SESSION || 'default');
+  }
+  return undefined;
+}
+
+function ensureStateDir(): void {
+  const dir = getStateDir();
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+}
+
 // Platform detection
 const isWindows = process.platform === 'win32';
 
@@ -158,16 +183,30 @@ export async function startDaemon(): Promise<void> {
             parseResult.command.action !== 'launch' &&
             parseResult.command.action !== 'close'
           ) {
+            const statePath = getStatePath();
+            const storageState = statePath && fs.existsSync(statePath) ? statePath : undefined;
             await browser.launch({
               id: 'auto',
               action: 'launch',
               headless: true,
               executablePath: process.env.AGENT_BROWSER_EXECUTABLE_PATH,
+              storageState,
             });
           }
 
           // Handle close command specially
           if (parseResult.command.action === 'close') {
+            // Auto-save state before closing if persistence is enabled
+            const statePath = getStatePath();
+            if (statePath && browser.isLaunched()) {
+              try {
+                ensureStateDir();
+                await browser.saveStorageState(statePath);
+              } catch {
+                // Ignore save errors on close
+              }
+            }
+
             const response = await executeCommand(parseResult.command, browser);
             socket.write(serializeResponse(response) + '\n');
 
@@ -223,10 +262,20 @@ export async function startDaemon(): Promise<void> {
     process.exit(1);
   });
 
-  // Handle shutdown signals
   const shutdown = async () => {
     if (shuttingDown) return;
     shuttingDown = true;
+
+    const statePath = getStatePath();
+    if (statePath && browser.isLaunched()) {
+      try {
+        ensureStateDir();
+        await browser.saveStorageState(statePath);
+      } catch {
+        // Ignore save errors on shutdown
+      }
+    }
+
     await browser.close();
     server.close();
     cleanupSocket();
