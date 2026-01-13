@@ -40,6 +40,7 @@ interface PageError {
 export class BrowserManager {
   private browser: Browser | null = null;
   private cdpPort: number | null = null;
+  private headless: boolean = true;
   private contexts: BrowserContext[] = [];
   private pages: Page[] = [];
   private activePageIndex: number = 0;
@@ -609,8 +610,10 @@ export class BrowserManager {
     if (this.browser) {
       const switchingFromCdpToBrowser = !cdpPort && this.cdpPort !== null;
       const needsCdpReconnect = !!cdpPort && this.needsCdpReconnect(cdpPort);
+      const requestedHeadless = options.headless ?? true;
+      const switchingHeadlessMode = !cdpPort && this.headless !== requestedHeadless;
 
-      if (switchingFromCdpToBrowser || needsCdpReconnect) {
+      if (switchingFromCdpToBrowser || needsCdpReconnect || switchingHeadlessMode) {
         await this.close();
       } else {
         return;
@@ -628,11 +631,13 @@ export class BrowserManager {
       browserType === 'firefox' ? firefox : browserType === 'webkit' ? webkit : chromium;
 
     // Launch browser
+    const headless = options.headless ?? true;
     this.browser = await launcher.launch({
-      headless: options.headless ?? true,
+      headless,
       executablePath: options.executablePath,
     });
     this.cdpPort = null;
+    this.headless = headless;
 
     // Create context with viewport and optional headers
     const context = await this.browser.newContext({
@@ -877,6 +882,7 @@ export class BrowserManager {
     this.pages = [];
     this.contexts = [];
     this.cdpPort = null;
+    this.headless = true;
     this.activePageIndex = 0;
     this.refMap = {};
     this.lastSnapshot = '';
