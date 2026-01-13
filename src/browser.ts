@@ -630,6 +630,7 @@ export class BrowserManager {
       headless: options.headless ?? true,
       executablePath: options.executablePath,
     });
+    this.cdpPort = null;
 
     // Create context with viewport and optional headers
     const context = await this.browser.newContext({
