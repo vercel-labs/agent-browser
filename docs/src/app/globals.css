@@ -1,0 +1,182 @@
+@import "tailwindcss";
+
+:root {
+  --background: #000000;
+  --foreground: #ededed;
+  --muted: #888888;
+  --border: #222222;
+  --accent: #ededed;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-muted: var(--muted);
+  --color-border: var(--border);
+  --color-accent: var(--accent);
+  --font-sans: var(--font-geist);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-geist), system-ui, sans-serif;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #333;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #444;
+}
+
+/* Code blocks */
+pre {
+  background: #111 !important;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.875rem;
+  overflow-x: auto;
+  font-family: var(--font-geist-mono), monospace;
+  font-size: 0.8125rem;
+  line-height: 1.7;
+}
+
+.code-block pre {
+  margin: 0;
+}
+
+.code-block {
+  margin-bottom: 1.25rem;
+}
+
+@media (max-width: 640px) {
+  pre {
+    font-size: 0.75rem;
+    padding: 0.75rem;
+  }
+}
+
+code {
+  font-family: var(--font-geist-mono), monospace;
+}
+
+:not(pre) > code {
+  background: #1a1a1a;
+  padding: 0.125rem 0.375rem;
+  border-radius: 3px;
+  font-size: 0.875em;
+}
+
+/* Prose */
+.prose {
+  max-width: 100%;
+}
+
+.prose h1 {
+  font-size: 1.5rem;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  margin-bottom: 0.5rem;
+  color: #fff;
+}
+
+@media (min-width: 640px) {
+  .prose h1 {
+    font-size: 1.75rem;
+  }
+}
+
+.prose h2 {
+  font-size: 0.875rem;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-top: 3rem;
+  margin-bottom: 1rem;
+}
+
+.prose h3 {
+  font-size: 0.875rem;
+  font-weight: 500;
+  margin-top: 2rem;
+  margin-bottom: 0.75rem;
+  color: #ccc;
+}
+
+.prose p {
+  margin-bottom: 1.25rem;
+  line-height: 1.7;
+  color: var(--muted);
+  font-size: 0.9375rem;
+}
+
+.prose ul, .prose ol {
+  margin-bottom: 1.25rem;
+  padding-left: 1.25rem;
+}
+
+.prose li {
+  margin-bottom: 0.5rem;
+  color: var(--muted);
+  font-size: 0.9375rem;
+  line-height: 1.6;
+}
+
+.prose li strong {
+  color: #ccc;
+  font-weight: 500;
+}
+
+.prose a {
+  color: var(--foreground);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.prose a:hover {
+  color: #fff;
+}
+
+.prose table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1.5rem 0;
+  font-size: 0.8125rem;
+}
+
+.prose th, .prose td {
+  text-align: left;
+  padding: 0.625rem 0.875rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.prose th {
+  font-weight: 500;
+  color: var(--muted);
+  text-transform: uppercase;
+  font-size: 0.75rem;
+  letter-spacing: 0.025em;
+}
+
+.prose td {
+  color: var(--muted);
+}
+
+.prose td code {
+  color: var(--foreground);
+}

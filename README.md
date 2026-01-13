@@ -18,9 +18,9 @@ git clone https://github.com/vercel-labs/agent-browser
 cd agent-browser
 pnpm install
 pnpm build
-pnpm build:native
-./bin/agent-browser install
-pnpm link --global
+pnpm build:native   # Requires Rust (https://rustup.rs)
+pnpm link --global  # Makes agent-browser available globally
+agent-browser install
 ```
 
 ### Linux Dependencies
