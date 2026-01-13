@@ -367,7 +367,13 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
         // === Tabs ===
         "tab" => {
             match rest.get(0).map(|s| *s) {
-                Some("new") => Ok(json!({ "id": id, "action": "tab_new", "url": rest.get(1) })),
+                Some("new") => {
+                    let mut cmd = json!({ "id": id, "action": "tab_new" });
+                    if let Some(url) = rest.get(1) {
+                        cmd["url"] = json!(url);
+                    }
+                    Ok(cmd)
+                }
                 Some("list") => Ok(json!({ "id": id, "action": "tab_list" })),
                 Some("close") => {
                     Ok(json!({ "id": id, "action": "tab_close", "index": rest.get(1).and_then(|s| s.parse::<i32>().ok()) }))
@@ -1152,6 +1158,14 @@ mod tests {
     fn test_tab_new() {
         let cmd = parse_command(&args("tab new"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "tab_new");
+        assert!(cmd.get("url").is_none(), "url should not be present when not provided");
+    }
+
+    #[test]
+    fn test_tab_new_with_url() {
+        let cmd = parse_command(&args("tab new https://example.com"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "tab_new");
+        assert_eq!(cmd["url"], "https://example.com");
     }
 
     #[test]
