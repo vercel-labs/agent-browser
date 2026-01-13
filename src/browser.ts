@@ -12,6 +12,8 @@ import {
   type Route,
   type Locator,
 } from 'playwright-core';
+import path from 'node:path';
+import os from 'node:os';
 import type { LaunchCommand } from './types.js';
 import { type RefMap, type EnhancedSnapshot, getEnhancedSnapshot, parseRef } from './snapshot.js';
 
@@ -40,6 +42,7 @@ interface PageError {
 export class BrowserManager {
   private browser: Browser | null = null;
   private cdpPort: number | null = null;
+  private isPersistentContext: boolean = false;
   private contexts: BrowserContext[] = [];
   private pages: Page[] = [];
   private activePageIndex: number = 0;
@@ -58,7 +61,7 @@ export class BrowserManager {
    * Check if browser is launched
    */
   isLaunched(): boolean {
-    return this.browser !== null;
+    return this.browser !== null || this.isPersistentContext;
   }
 
   /**
@@ -605,12 +608,16 @@ export class BrowserManager {
    */
   async launch(options: LaunchCommand): Promise<void> {
     const cdpPort = options.cdpPort;
+    const hasExtensions = !!options.extensions?.length;
 
-    if (this.browser) {
-      const switchingFromCdpToBrowser = !cdpPort && this.cdpPort !== null;
-      const needsCdpReconnect = !!cdpPort && this.needsCdpReconnect(cdpPort);
+    if (hasExtensions && cdpPort) {
+      throw new Error('Extensions cannot be used with CDP connection');
+    }
 
-      if (switchingFromCdpToBrowser || needsCdpReconnect) {
+    if (this.isLaunched()) {
+      const needsRelaunch =
+        (!cdpPort && this.cdpPort !== null) || (!!cdpPort && this.needsCdpReconnect(cdpPort));
+      if (needsRelaunch) {
         await this.close();
       } else {
         return;
@@ -622,35 +629,45 @@ export class BrowserManager {
       return;
     }
 
-    // Select browser type
     const browserType = options.browser ?? 'chromium';
+    if (hasExtensions && browserType !== 'chromium') {
+      throw new Error('Extensions are only supported in Chromium');
+    }
+
     const launcher =
       browserType === 'firefox' ? firefox : browserType === 'webkit' ? webkit : chromium;
+    const viewport = options.viewport ?? { width: 1280, height: 720 };
 
-    // Launch browser
-    this.browser = await launcher.launch({
-      headless: options.headless ?? true,
-      executablePath: options.executablePath,
-    });
-    this.cdpPort = null;
+    let context: BrowserContext;
+    if (hasExtensions) {
+      const extPaths = options.extensions!.join(',');
+      const session = process.env.AGENT_BROWSER_SESSION || 'default';
+      context = await launcher.launchPersistentContext(
+        path.join(os.tmpdir(), `agent-browser-ext-${session}`),
+        {
+          headless: false,
+          executablePath: options.executablePath,
+          args: [`--disable-extensions-except=${extPaths}`, `--load-extension=${extPaths}`],
+          viewport,
+          extraHTTPHeaders: options.headers,
+        }
+      );
+      this.isPersistentContext = true;
+    } else {
+      this.browser = await launcher.launch({
+        headless: options.headless ?? true,
+        executablePath: options.executablePath,
+      });
+      this.cdpPort = null;
+      context = await this.browser.newContext({ viewport, extraHTTPHeaders: options.headers });
+    }
 
-    // Create context with viewport and optional headers
-    const context = await this.browser.newContext({
-      viewport: options.viewport ?? { width: 1280, height: 720 },
-      extraHTTPHeaders: options.headers,
-    });
-
-    // Set default timeout to 10 seconds (Playwright default is 30s)
     context.setDefaultTimeout(10000);
-
     this.contexts.push(context);
 
-    // Create initial page
-    const page = await context.newPage();
+    const page = context.pages()[0] ?? (await context.newPage());
     this.pages.push(page);
     this.activePageIndex = 0;
-
-    // Automatically start console and error tracking
     this.setupPageTracking(page);
   }
 
@@ -877,6 +894,7 @@ export class BrowserManager {
     this.pages = [];
     this.contexts = [];
     this.cdpPort = null;
+    this.isPersistentContext = false;
     this.activePageIndex = 0;
     this.refMap = {};
     this.lastSnapshot = '';

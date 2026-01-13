@@ -149,7 +149,7 @@ fn main() {
         }
     };
 
-    let daemon_result = match ensure_daemon(&flags.session, flags.headed, flags.executable_path.as_deref()) {
+    let daemon_result = match ensure_daemon(&flags.session, flags.headed, flags.executable_path.as_deref(), &flags.extensions) {
         Ok(result) => result,
         Err(e) => {
             if flags.json {
@@ -162,9 +162,15 @@ fn main() {
     };
 
     // Warn if executable_path was specified but daemon was already running
-    if daemon_result.already_running && flags.executable_path.is_some() {
+    if daemon_result.already_running && (flags.executable_path.is_some() || !flags.extensions.is_empty()) {
         if !flags.json {
             eprintln!("\x1b[33m⚠\x1b[0m --executable-path ignored: daemon already running. Use 'agent-browser close' first to restart with new path.");
+            if flags.executable_path.is_some() {
+                eprintln!("\x1b[33m⚠\x1b[0m --executable-path ignored: daemon already running. Use 'agent-browser close' first to restart with new path.");
+            }
+            if !flags.extensions.is_empty() {
+                eprintln!("\x1b[33m⚠\x1b[0m --extension ignored: daemon already running. Use 'agent-browser close' first to restart with extensions.");
+            }
         }
     }
 

@@ -158,11 +158,17 @@ export async function startDaemon(): Promise<void> {
             parseResult.command.action !== 'launch' &&
             parseResult.command.action !== 'close'
           ) {
+            const extensions = process.env.AGENT_BROWSER_EXTENSIONS
+              ? process.env.AGENT_BROWSER_EXTENSIONS.split(',')
+                  .map((p) => p.trim())
+                  .filter(Boolean)
+              : undefined;
             await browser.launch({
               id: 'auto',
               action: 'launch',
               headless: true,
               executablePath: process.env.AGENT_BROWSER_EXECUTABLE_PATH,
+              extensions: extensions,
             });
           }
 
