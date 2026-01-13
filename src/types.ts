@@ -705,6 +705,7 @@ export interface CloseCommand extends BaseCommand {
 // Tab/Window commands
 export interface TabNewCommand extends BaseCommand {
   action: 'tab_new';
+  url?: string;
 }
 
 export interface TabListCommand extends BaseCommand {

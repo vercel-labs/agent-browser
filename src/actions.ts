@@ -26,6 +26,7 @@ import type {
   SelectCommand,
   HoverCommand,
   ContentCommand,
+  TabNewCommand,
   TabSwitchCommand,
   TabCloseCommand,
   WindowNewCommand,
@@ -656,10 +657,10 @@ async function handleClose(
 }
 
 async function handleTabNew(
-  command: Command & { action: 'tab_new' },
+  command: TabNewCommand,
   browser: BrowserManager
 ): Promise<Response<TabNewData>> {
-  const result = await browser.newTab();
+  const result = await browser.newTab(command.url);
   return successResponse(command.id, result);
 }
 

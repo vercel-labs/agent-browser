@@ -746,7 +746,7 @@ export class BrowserManager {
   /**
    * Create a new tab in the current context
    */
-  async newTab(): Promise<{ index: number; total: number }> {
+  async newTab(url?: string): Promise<{ index: number; total: number }> {
     if (!this.browser || this.contexts.length === 0) {
       throw new Error('Browser not launched');
     }
@@ -758,6 +758,11 @@ export class BrowserManager {
 
     // Set up tracking for the new page
     this.setupPageTracking(page);
+
+    // Navigate to URL if provided
+    if (url) {
+      await page.goto(url, { waitUntil: 'domcontentloaded' });
+    }
 
     return { index: this.activePageIndex, total: this.pages.length };
   }
