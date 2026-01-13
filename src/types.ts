@@ -14,6 +14,7 @@ export interface LaunchCommand extends BaseCommand {
   browser?: 'chromium' | 'firefox' | 'webkit';
   headers?: Record<string, string>;
   executablePath?: string;
+  userDataDir?: string;
 }
 
 export interface NavigateCommand extends BaseCommand {

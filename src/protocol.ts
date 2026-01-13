@@ -18,6 +18,7 @@ const launchSchema = baseCommandSchema.extend({
     })
     .optional(),
   browser: z.enum(['chromium', 'firefox', 'webkit']).optional(),
+  userDataDir: z.string().optional(),
 });
 
 const navigateSchema = baseCommandSchema.extend({

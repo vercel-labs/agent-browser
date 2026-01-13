@@ -39,6 +39,7 @@ interface PageError {
  */
 export class BrowserManager {
   private browser: Browser | null = null;
+  private persistentContext: BrowserContext | null = null; // For user-data-dir mode
   private contexts: BrowserContext[] = [];
   private pages: Page[] = [];
   private activePageIndex: number = 0;
@@ -57,7 +58,7 @@ export class BrowserManager {
    * Check if browser is launched
    */
   isLaunched(): boolean {
-    return this.browser !== null;
+    return this.browser !== null || this.persistentContext !== null;
   }
 
   /**
@@ -579,7 +580,7 @@ export class BrowserManager {
    */
   async launch(options: LaunchCommand): Promise<void> {
     // If already launched, don't relaunch
-    if (this.browser) {
+    if (this.browser || this.persistentContext) {
       return;
     }
 
@@ -588,25 +589,44 @@ export class BrowserManager {
     const launcher =
       browserType === 'firefox' ? firefox : browserType === 'webkit' ? webkit : chromium;
 
-    // Launch browser
-    this.browser = await launcher.launch({
-      headless: options.headless ?? true,
-      executablePath: options.executablePath,
-    });
+    let context: BrowserContext;
 
-    // Create context with viewport and optional headers
-    const context = await this.browser.newContext({
-      viewport: options.viewport ?? { width: 1280, height: 720 },
-      extraHTTPHeaders: options.headers,
-    });
+    if (options.userDataDir) {
+      // Use persistent context for user data directory (preserves login sessions, cookies, etc.)
+      context = await launcher.launchPersistentContext(options.userDataDir, {
+        headless: options.headless ?? true,
+        executablePath: options.executablePath,
+        viewport: options.viewport ?? { width: 1280, height: 720 },
+        extraHTTPHeaders: options.headers,
+      });
+      this.persistentContext = context;
+    } else {
+      // Standard launch: separate browser and context
+      this.browser = await launcher.launch({
+        headless: options.headless ?? true,
+        executablePath: options.executablePath,
+      });
+
+      // Create context with viewport and optional headers
+      context = await this.browser.newContext({
+        viewport: options.viewport ?? { width: 1280, height: 720 },
+        extraHTTPHeaders: options.headers,
+      });
+    }
 
     // Set default timeout to 10 seconds (Playwright default is 30s)
     context.setDefaultTimeout(10000);
 
     this.contexts.push(context);
 
-    // Create initial page
-    const page = await context.newPage();
+    // Create initial page (persistent context may already have pages)
+    let page: Page;
+    const existingPages = context.pages();
+    if (existingPages.length > 0) {
+      page = existingPages[0];
+    } else {
+      page = await context.newPage();
+    }
     this.pages.push(page);
     this.activePageIndex = 0;
 
@@ -758,6 +778,11 @@ export class BrowserManager {
     if (this.browser) {
       await this.browser.close().catch(() => {});
       this.browser = null;
+    }
+
+    if (this.persistentContext) {
+      await this.persistentContext.close().catch(() => {});
+      this.persistentContext = null;
     }
 
     this.activePageIndex = 0;

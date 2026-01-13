@@ -161,8 +161,9 @@ export async function startDaemon(): Promise<void> {
             await browser.launch({
               id: 'auto',
               action: 'launch',
-              headless: true,
+              headless: !process.env.AGENT_BROWSER_HEADED,
               executablePath: process.env.AGENT_BROWSER_EXECUTABLE_PATH,
+              userDataDir: process.env.AGENT_BROWSER_USER_DATA_DIR,
             });
           }
 

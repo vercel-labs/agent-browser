@@ -159,7 +159,7 @@ pub struct DaemonResult {
     pub already_running: bool,
 }
 
-pub fn ensure_daemon(session: &str, headed: bool, executable_path: Option<&str>) -> Result<DaemonResult, String> {
+pub fn ensure_daemon(session: &str, headed: bool, executable_path: Option<&str>, user_data_dir: Option<&str>) -> Result<DaemonResult, String> {
     if is_daemon_running(session) && daemon_ready(session) {
         return Ok(DaemonResult { already_running: true });
     }
@@ -182,7 +182,7 @@ pub fn ensure_daemon(session: &str, headed: bool, executable_path: Option<&str>)
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        
+
         let mut cmd = Command::new("node");
         cmd.arg(daemon_path)
             .env("AGENT_BROWSER_DAEMON", "1")
@@ -194,6 +194,10 @@ pub fn ensure_daemon(session: &str, headed: bool, executable_path: Option<&str>)
 
         if let Some(path) = executable_path {
             cmd.env("AGENT_BROWSER_EXECUTABLE_PATH", path);
+        }
+
+        if let Some(path) = user_data_dir {
+            cmd.env("AGENT_BROWSER_USER_DATA_DIR", path);
         }
 
         // Create new process group and session to fully detach
@@ -232,6 +236,10 @@ pub fn ensure_daemon(session: &str, headed: bool, executable_path: Option<&str>)
 
         if let Some(path) = executable_path {
             cmd.env("AGENT_BROWSER_EXECUTABLE_PATH", path);
+        }
+
+        if let Some(path) = user_data_dir {
+            cmd.env("AGENT_BROWSER_USER_DATA_DIR", path);
         }
 
         // CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS
