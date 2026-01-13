@@ -606,9 +606,11 @@ export class BrowserManager {
   async launch(options: LaunchCommand): Promise<void> {
     const cdpPort = options.cdpPort;
 
-    // Reuse existing browser if possible
     if (this.browser) {
-      if (cdpPort && this.needsCdpReconnect(cdpPort)) {
+      const switchingFromCdpToBrowser = !cdpPort && this.cdpPort !== null;
+      const needsCdpReconnect = !!cdpPort && this.needsCdpReconnect(cdpPort);
+
+      if (switchingFromCdpToBrowser || needsCdpReconnect) {
         await this.close();
       } else {
         return;
