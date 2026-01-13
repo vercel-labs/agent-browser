@@ -113,8 +113,9 @@ interface SnapshotData {
 
 /**
  * Convert Playwright errors to AI-friendly messages
+ * @internal Exported for testing
  */
-function toAIFriendlyError(error: unknown, selector: string): Error {
+export function toAIFriendlyError(error: unknown, selector: string): Error {
   const message = error instanceof Error ? error.message : String(error);
 
   // Handle strict mode violation (multiple elements match)
@@ -129,7 +130,24 @@ function toAIFriendlyError(error: unknown, selector: string): Error {
     );
   }
 
-  // Handle element not found
+  // Handle element not interactable (must be checked BEFORE timeout case)
+  // This includes cases where an overlay/modal blocks the element
+  if (message.includes('intercepts pointer events')) {
+    return new Error(
+      `Element "${selector}" is blocked by another element (likely a modal or overlay). ` +
+        `Try dismissing any modals/cookie banners first.`
+    );
+  }
+
+  // Handle element not visible
+  if (message.includes('not visible') && !message.includes('Timeout')) {
+    return new Error(
+      `Element "${selector}" is not visible. ` +
+        `Try scrolling it into view or check if it's hidden.`
+    );
+  }
+
+  // Handle element not found (timeout waiting for element)
   if (
     message.includes('waiting for') &&
     (message.includes('to be visible') || message.includes('Timeout'))
@@ -137,14 +155,6 @@ function toAIFriendlyError(error: unknown, selector: string): Error {
     return new Error(
       `Element "${selector}" not found or not visible. ` +
         `Run 'snapshot' to see current page elements.`
-    );
-  }
-
-  // Handle element not interactable
-  if (message.includes('intercepts pointer events') || message.includes('not visible')) {
-    return new Error(
-      `Element "${selector}" is not interactable (may be hidden or covered). ` +
-        `Try scrolling it into view or check if a modal/overlay is blocking it.`
     );
   }
 
