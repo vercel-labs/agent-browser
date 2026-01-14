@@ -104,7 +104,9 @@ fn get_port_for_session(session: &str) -> u16 {
     for c in session.chars() {
         hash = ((hash << 5).wrapping_sub(hash)).wrapping_add(c as i32);
     }
-    49152 + ((hash.abs() as u16) % 16383)
+    // Correct logic: first take absolute modulo, then cast to u16
+    // Using unsigned_abs() to safely handle i32::MIN
+    49152 + ((hash.unsigned_abs() as u32 % 16383) as u16)
 }
 
 #[cfg(unix)]
@@ -227,13 +229,10 @@ pub fn ensure_daemon(
     {
         use std::os::windows::process::CommandExt;
         
-        // On Windows, use cmd.exe to run node to ensure proper PATH resolution.
-        // This handles cases where node.exe isn't directly in PATH but node.cmd is.
-        // Pass the entire command as a single string to /c to handle paths with spaces.
-        let cmd_string = format!("node \"{}\"", daemon_path.display());
-        let mut cmd = Command::new("cmd");
-        cmd.arg("/c")
-            .arg(&cmd_string)
+        // On Windows, call node directly. Command::new handles PATH resolution (node.exe or node.cmd)
+        // and automatically quotes arguments containing spaces.
+        let mut cmd = Command::new("node");
+        cmd.arg(daemon_path)
             .env("AGENT_BROWSER_DAEMON", "1")
             .env("AGENT_BROWSER_SESSION", session);
 
