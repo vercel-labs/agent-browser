@@ -10,6 +10,7 @@ pub struct Flags {
     pub executable_path: Option<String>,
     pub cdp: Option<String>,
     pub extensions: Vec<String>,
+    pub profile: Option<String>,
 }
 
 pub fn parse_flags(args: &[String]) -> Flags {
@@ -28,6 +29,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
         executable_path: env::var("AGENT_BROWSER_EXECUTABLE_PATH").ok(),
         cdp: None,
         extensions: extensions_env,
+        profile: env::var("AGENT_BROWSER_PROFILE").ok(),
     };
 
     let mut i = 0;
@@ -67,6 +69,12 @@ pub fn parse_flags(args: &[String]) -> Flags {
                     i += 1;
                 }
             }
+            "--profile" => {
+                if let Some(s) = args.get(i + 1) {
+                    flags.profile = Some(s.clone());
+                    i += 1;
+                }
+            }
             _ => {}
         }
         i += 1;
@@ -81,7 +89,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
     // Global flags that should be stripped from command args
     const GLOBAL_FLAGS: &[&str] = &["--json", "--full", "--headed", "--debug"];
     // Global flags that take a value (need to skip the next arg too)
-    const GLOBAL_FLAGS_WITH_VALUE: &[&str] = &["--session", "--headers", "--executable-path", "--cdp", "--extension"];
+    const GLOBAL_FLAGS_WITH_VALUE: &[&str] = &["--session", "--headers", "--executable-path", "--cdp", "--extension", "--profile"];
 
     for arg in args.iter() {
         if skip_next {

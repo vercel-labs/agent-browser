@@ -16,6 +16,7 @@ export interface LaunchCommand extends BaseCommand {
   executablePath?: string;
   cdpPort?: number;
   extensions?: string[];
+  profile?: string; // Path to persistent browser profile directory
 }
 
 export interface NavigateCommand extends BaseCommand {

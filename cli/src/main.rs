@@ -161,14 +161,17 @@ fn main() {
         }
     };
 
-    // Warn if executable_path was specified but daemon was already running
-    if daemon_result.already_running && (flags.executable_path.is_some() || !flags.extensions.is_empty()) {
+    // Warn if executable_path, profile, or extensions were specified but daemon was already running
+    if daemon_result.already_running && (flags.executable_path.is_some() || !flags.extensions.is_empty() || flags.profile.is_some()) {
         if !flags.json {
             if flags.executable_path.is_some() {
                 eprintln!("\x1b[33m⚠\x1b[0m --executable-path ignored: daemon already running. Use 'agent-browser close' first to restart with new path.");
             }
             if !flags.extensions.is_empty() {
                 eprintln!("\x1b[33m⚠\x1b[0m --extension ignored: daemon already running. Use 'agent-browser close' first to restart with extensions.");
+            }
+            if flags.profile.is_some() {
+                eprintln!("\x1b[33m⚠\x1b[0m --profile ignored: daemon already running. Use 'agent-browser close' first to restart with profile.");
             }
         }
     }
@@ -229,16 +232,22 @@ fn main() {
     }
 
     // Launch headed browser if --headed flag is set (without CDP)
-    if flags.headed && flags.cdp.is_none() {
-        let launch_cmd = json!({
+    // Also launch with profile if --profile is set
+    if (flags.headed || flags.profile.is_some()) && flags.cdp.is_none() {
+        let mut launch_cmd = json!({
             "id": gen_id(),
             "action": "launch",
-            "headless": false
+            "headless": !flags.headed
         });
+
+        // Add profile path if specified
+        if let Some(ref profile_path) = flags.profile {
+            launch_cmd["profile"] = json!(profile_path);
+        }
 
         if let Err(e) = send_command(launch_cmd, &flags.session) {
             if !flags.json {
-                eprintln!("\x1b[33m⚠\x1b[0m Could not launch headed browser: {}", e);
+                eprintln!("\x1b[33m⚠\x1b[0m Could not launch browser: {}", e);
             }
         }
     }
