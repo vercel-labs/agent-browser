@@ -104,7 +104,7 @@ fn get_port_for_session(session: &str) -> u16 {
     for c in session.chars() {
         hash = ((hash << 5).wrapping_sub(hash)).wrapping_add(c as i32);
     }
-    49152 + ((hash.abs() as u16) % 16383)
+    49152 + ((hash.abs() % 16383) as u16)
 }
 
 #[cfg(unix)]
