@@ -1303,10 +1303,11 @@ async function handleStateLoad(
   command: Command & { action: 'state_load'; path: string },
   browser: BrowserManager
 ): Promise<Response> {
-  // Storage state is loaded at context creation
+  const result = await browser.loadStorageState(command.path);
   return successResponse(command.id, {
-    note: 'Storage state must be loaded at browser launch. Use --state flag.',
     path: command.path,
+    cookiesLoaded: result.cookiesLoaded,
+    originsLoaded: result.originsLoaded,
   });
 }
 
