@@ -1,5 +1,6 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { BrowserManager } from './browser.js';
+import { chromium } from 'playwright-core';
 
 describe('BrowserManager', () => {
   let browser: BrowserManager;
@@ -390,6 +391,35 @@ describe('BrowserManager', () => {
       const cdp2 = await browser.getCDPSession();
       expect(cdp1).toBe(cdp2);
     });
+
+    it('should filter out pages with empty URLs during CDP connection', async () => {
+      const mockBrowser = {
+        contexts: () => [
+          {
+            pages: () => [
+              { url: () => 'http://example.com', on: vi.fn() },
+              { url: () => '', on: vi.fn() }, // This page should be filtered out
+              { url: () => 'http://anothersite.com', on: vi.fn() },
+            ],
+            on: vi.fn(),
+          },
+        ],
+        close: vi.fn(),
+      };
+      const spy = vi.spyOn(chromium, 'connectOverCDP').mockResolvedValue(mockBrowser as any);
+
+      const cdpBrowser = new BrowserManager();
+      await cdpBrowser.launch({ cdpPort: 9222 });
+
+      // Should have 2 pages, not 3
+      expect(cdpBrowser.getPages().length).toBe(2);
+
+      // Verify that the empty URL page is not in the list
+      const urls = cdpBrowser.getPages().map((p) => p.url());
+      expect(urls).not.toContain('');
+      expect(urls).toContain('http://example.com');
+      spy.mockRestore();
+    });
   });
 
   describe('screencast', () => {
@@ -405,7 +435,7 @@ describe('BrowserManager', () => {
       expect(browser.isScreencasting()).toBe(true);
 
       // Wait a bit for at least one frame
-      await new Promise((resolve) => setTimeout(resolve, 200));
+      await new Promise((resolve) => setTimeout(resolve, 1000));
 
       await browser.stopScreencast();
       expect(browser.isScreencasting()).toBe(false);
