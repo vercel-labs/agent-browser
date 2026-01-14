@@ -24,37 +24,32 @@ use install::run_install;
 use output::{print_command_help, print_help, print_response};
 
 fn parse_proxy(proxy_str: &str) -> serde_json::Value {
-    // Parse URL format: http://user:pass@host:port or http://host:port
     let Some(protocol_end) = proxy_str.find("://") else {
         return json!({ "server": proxy_str });
     };
     let protocol = &proxy_str[..protocol_end + 3];
-
-    // Check for credentials (user:pass@host format)
     let rest = &proxy_str[protocol_end + 3..];
+
     let Some(at_pos) = rest.rfind('@') else {
         return json!({ "server": proxy_str });
     };
 
     let creds = &rest[..at_pos];
     let server_part = &rest[at_pos + 1..];
+    let server = format!("{}{}", protocol, server_part);
 
     let Some(colon_pos) = creds.find(':') else {
-        // Username only - preserve with empty password
         return json!({
-            "server": format!("{}{}", protocol, server_part),
+            "server": server,
             "username": creds,
             "password": ""
         });
     };
 
-    let username = &creds[..colon_pos];
-    let password = &creds[colon_pos + 1..];
-
     json!({
-        "server": format!("{}{}", protocol, server_part),
-        "username": username,
-        "password": password
+        "server": server,
+        "username": &creds[..colon_pos],
+        "password": &creds[colon_pos + 1..]
     })
 }
 
