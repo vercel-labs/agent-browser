@@ -694,7 +694,7 @@ export class BrowserManager {
       context = await this.browser.newContext({ viewport, extraHTTPHeaders: options.headers });
     }
 
-    context.setDefaultTimeout(10000);
+    context.setDefaultTimeout(60000);
     this.contexts.push(context);
 
     const page = context.pages()[0] ?? (await context.newPage());
@@ -828,7 +828,7 @@ export class BrowserManager {
     const context = await this.browser.newContext({
       viewport: viewport ?? { width: 1280, height: 720 },
     });
-    context.setDefaultTimeout(10000);
+    context.setDefaultTimeout(60000);
     this.contexts.push(context);
 
     const page = await context.newPage();

@@ -174,16 +174,23 @@ pub fn ensure_daemon(
     let exe_path = env::current_exe().map_err(|e| e.to_string())?;
     let exe_dir = exe_path.parent().unwrap();
 
-    let daemon_paths = [
+    let mut daemon_paths = vec![
         exe_dir.join("daemon.js"),
         exe_dir.join("../dist/daemon.js"),
         PathBuf::from("dist/daemon.js"),
     ];
 
+    // Check AGENT_BROWSER_HOME environment variable
+    if let Ok(home) = env::var("AGENT_BROWSER_HOME") {
+        let home_path = PathBuf::from(&home);
+        daemon_paths.insert(0, home_path.join("dist/daemon.js"));
+        daemon_paths.insert(1, home_path.join("daemon.js"));
+    }
+
     let daemon_path = daemon_paths
         .iter()
         .find(|p| p.exists())
-        .ok_or("Daemon not found. Run from project directory or ensure daemon.js is alongside binary.")?;
+        .ok_or("Daemon not found. Set AGENT_BROWSER_HOME environment variable or run from project directory.")?;
 
     // Spawn daemon as a fully detached background process
     #[cfg(unix)]
