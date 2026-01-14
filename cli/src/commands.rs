@@ -80,7 +80,14 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
             } else {
                 format!("https://{}", url)
             };
-            Ok(json!({ "id": id, "action": "navigate", "url": url }))
+            let mut nav_cmd = json!({ "id": id, "action": "navigate", "url": url });
+            // If --headers flag is set, include headers (scoped to this origin)
+            if let Some(ref headers_json) = flags.headers {
+                if let Ok(headers) = serde_json::from_str::<serde_json::Value>(headers_json) {
+                    nav_cmd["headers"] = headers;
+                }
+            }
+            Ok(nav_cmd)
         }
         "back" => Ok(json!({ "id": id, "action": "back" })),
         "forward" => Ok(json!({ "id": id, "action": "forward" })),
@@ -212,6 +219,44 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
 
         // === Wait ===
         "wait" => {
+            // Check for --url flag: wait --url "**/dashboard"
+            if let Some(idx) = rest.iter().position(|&s| s == "--url" || s == "-u") {
+                let url = rest.get(idx + 1).ok_or_else(|| ParseError::MissingArguments {
+                    context: "wait --url".to_string(),
+                    usage: "wait --url <pattern>",
+                })?;
+                return Ok(json!({ "id": id, "action": "waitforurl", "url": url }));
+            }
+            
+            // Check for --load flag: wait --load networkidle
+            if let Some(idx) = rest.iter().position(|&s| s == "--load" || s == "-l") {
+                let state = rest.get(idx + 1).ok_or_else(|| ParseError::MissingArguments {
+                    context: "wait --load".to_string(),
+                    usage: "wait --load <state>",
+                })?;
+                return Ok(json!({ "id": id, "action": "waitforloadstate", "state": state }));
+            }
+            
+            // Check for --fn flag: wait --fn "window.ready === true"
+            if let Some(idx) = rest.iter().position(|&s| s == "--fn" || s == "-f") {
+                let expr = rest.get(idx + 1).ok_or_else(|| ParseError::MissingArguments {
+                    context: "wait --fn".to_string(),
+                    usage: "wait --fn <expression>",
+                })?;
+                return Ok(json!({ "id": id, "action": "waitforfunction", "expression": expr }));
+            }
+            
+            // Check for --text flag: wait --text "Welcome"
+            if let Some(idx) = rest.iter().position(|&s| s == "--text" || s == "-t") {
+                let text = rest.get(idx + 1).ok_or_else(|| ParseError::MissingArguments {
+                    context: "wait --text".to_string(),
+                    usage: "wait --text <text>",
+                })?;
+                // Use getByText locator to wait for text to appear
+                return Ok(json!({ "id": id, "action": "wait", "selector": format!("text={}", text) }));
+            }
+            
+            // Default: selector or timeout
             if let Some(arg) = rest.get(0) {
                 if arg.parse::<u64>().is_ok() {
                     Ok(json!({ "id": id, "action": "wait", "timeout": arg.parse::<u64>().unwrap() }))
@@ -221,7 +266,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
             } else {
                 Err(ParseError::MissingArguments {
                     context: "wait".to_string(),
-                    usage: "wait <selector|ms>",
+                    usage: "wait <selector|ms|--url|--load|--fn|--text>",
                 })
             }
         }
@@ -728,7 +773,13 @@ fn parse_set(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                 context: "set headers".to_string(),
                 usage: "set headers <json>",
             })?;
-            Ok(json!({ "id": id, "action": "headers", "headers": headers_json }))
+            // Parse the JSON string into an object
+            let headers: serde_json::Value = serde_json::from_str(headers_json)
+                .map_err(|_| ParseError::MissingArguments {
+                    context: "set headers".to_string(),
+                    usage: "set headers <json> (must be valid JSON object)",
+                })?;
+            Ok(json!({ "id": id, "action": "headers", "headers": headers }))
         }
         Some("credentials") | Some("auth") => {
             let user = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
@@ -848,6 +899,10 @@ mod tests {
             full: false,
             headed: false,
             debug: false,
+            headers: None,
+            executable_path: None,
+            extensions: Vec::new(),
+            cdp: None,
         }
     }
 
@@ -975,6 +1030,81 @@ mod tests {
     }
 
     #[test]
+    fn test_navigate_with_headers() {
+        let mut flags = default_flags();
+        flags.headers = Some(r#"{"Authorization": "Bearer token"}"#.to_string());
+        let cmd = parse_command(&args("open api.example.com"), &flags).unwrap();
+        assert_eq!(cmd["action"], "navigate");
+        assert_eq!(cmd["url"], "https://api.example.com");
+        assert_eq!(cmd["headers"]["Authorization"], "Bearer token");
+    }
+
+    #[test]
+    fn test_navigate_with_multiple_headers() {
+        let mut flags = default_flags();
+        flags.headers = Some(r#"{"Authorization": "Bearer token", "X-Custom": "value"}"#.to_string());
+        let cmd = parse_command(&args("open api.example.com"), &flags).unwrap();
+        assert_eq!(cmd["headers"]["Authorization"], "Bearer token");
+        assert_eq!(cmd["headers"]["X-Custom"], "value");
+    }
+
+    #[test]
+    fn test_navigate_without_headers_flag() {
+        let cmd = parse_command(&args("open example.com"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "navigate");
+        // headers should not be present when flag is not set
+        assert!(cmd.get("headers").is_none());
+    }
+
+    #[test]
+    fn test_navigate_with_invalid_headers_json() {
+        let mut flags = default_flags();
+        flags.headers = Some("not valid json".to_string());
+        let cmd = parse_command(&args("open api.example.com"), &flags).unwrap();
+        // Invalid JSON should result in no headers field (graceful handling)
+        assert!(cmd.get("headers").is_none());
+    }
+
+    // === Set Headers Tests ===
+
+    #[test]
+    fn test_set_headers_parses_json() {
+        let input: Vec<String> = vec![
+            "set".to_string(),
+            "headers".to_string(),
+            r#"{"Authorization":"Bearer token"}"#.to_string(),
+        ];
+        let cmd = parse_command(&input, &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "headers");
+        // Headers should be an object, not a string
+        assert!(cmd["headers"].is_object());
+        assert_eq!(cmd["headers"]["Authorization"], "Bearer token");
+    }
+
+    #[test]
+    fn test_set_headers_with_multiple_values() {
+        let input: Vec<String> = vec![
+            "set".to_string(),
+            "headers".to_string(),
+            r#"{"Authorization": "Bearer token", "X-Custom": "value"}"#.to_string(),
+        ];
+        let cmd = parse_command(&input, &default_flags()).unwrap();
+        assert_eq!(cmd["headers"]["Authorization"], "Bearer token");
+        assert_eq!(cmd["headers"]["X-Custom"], "value");
+    }
+
+    #[test]
+    fn test_set_headers_invalid_json_error() {
+        let input: Vec<String> = vec![
+            "set".to_string(),
+            "headers".to_string(),
+            "not-valid-json".to_string(),
+        ];
+        let result = parse_command(&input, &default_flags());
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn test_back() {
         let cmd = parse_command(&args("back"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "back");
@@ -1088,6 +1218,57 @@ mod tests {
         let cmd = parse_command(&args("snapshot -d 3"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "snapshot");
         assert_eq!(cmd["maxDepth"], 3);
+    }
+
+    // === Wait ===
+
+    #[test]
+    fn test_wait_selector() {
+        let cmd = parse_command(&args("wait #element"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "wait");
+        assert_eq!(cmd["selector"], "#element");
+    }
+
+    #[test]
+    fn test_wait_timeout() {
+        let cmd = parse_command(&args("wait 5000"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "wait");
+        assert_eq!(cmd["timeout"], 5000);
+    }
+
+    #[test]
+    fn test_wait_url() {
+        let cmd = parse_command(&args("wait --url **/dashboard"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "waitforurl");
+        assert_eq!(cmd["url"], "**/dashboard");
+    }
+
+    #[test]
+    fn test_wait_load() {
+        let cmd = parse_command(&args("wait --load networkidle"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "waitforloadstate");
+        assert_eq!(cmd["state"], "networkidle");
+    }
+
+    #[test]
+    fn test_wait_load_missing_state() {
+        let result = parse_command(&args("wait --load"), &default_flags());
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ParseError::MissingArguments { .. }));
+    }
+
+    #[test]
+    fn test_wait_fn() {
+        let cmd = parse_command(&args("wait --fn window.ready"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "waitforfunction");
+        assert_eq!(cmd["expression"], "window.ready");
+    }
+
+    #[test]
+    fn test_wait_text() {
+        let cmd = parse_command(&args("wait --text Welcome"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "wait");
+        assert_eq!(cmd["selector"], "text=Welcome");
     }
 
     // === Unknown command ===

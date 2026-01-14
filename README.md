@@ -18,6 +18,8 @@ git clone https://github.com/vercel-labs/agent-browser
 cd agent-browser
 pnpm install
 pnpm build
+pnpm build:native   # Requires Rust (https://rustup.rs)
+pnpm link --global  # Makes agent-browser available globally
 agent-browser install
 ```
 
@@ -55,13 +57,13 @@ agent-browser find role button click --name "Submit"
 ### Core Commands
 
 ```bash
-agent-browser open <url>              # Navigate to URL
+agent-browser open <url>              # Navigate to URL (aliases: goto, navigate)
 agent-browser click <sel>             # Click element
 agent-browser dblclick <sel>          # Double-click element
 agent-browser focus <sel>             # Focus element
 agent-browser type <sel> <text>       # Type into element
 agent-browser fill <sel> <text>       # Clear and fill
-agent-browser press <key>             # Press key (Enter, Tab, Control+a)
+agent-browser press <key>             # Press key (Enter, Tab, Control+a) (alias: key)
 agent-browser keydown <key>           # Hold key down
 agent-browser keyup <key>             # Release key
 agent-browser hover <sel>             # Hover element
@@ -69,14 +71,14 @@ agent-browser select <sel> <val>      # Select dropdown option
 agent-browser check <sel>             # Check checkbox
 agent-browser uncheck <sel>           # Uncheck checkbox
 agent-browser scroll <dir> [px]       # Scroll (up/down/left/right)
-agent-browser scrollintoview <sel>    # Scroll element into view
+agent-browser scrollintoview <sel>    # Scroll element into view (alias: scrollinto)
 agent-browser drag <src> <tgt>        # Drag and drop
 agent-browser upload <sel> <files>    # Upload files
 agent-browser screenshot [path]       # Take screenshot (--full for full page)
 agent-browser pdf <path>              # Save as PDF
 agent-browser snapshot                # Accessibility tree with refs (best for AI)
 agent-browser eval <js>               # Run JavaScript
-agent-browser close                   # Close browser
+agent-browser close                   # Close browser (aliases: quit, exit)
 ```
 
 ### Get Info
@@ -129,9 +131,9 @@ agent-browser find nth 2 "a" text
 ### Wait
 
 ```bash
-agent-browser wait <selector>         # Wait for element
-agent-browser wait <ms>               # Wait for time
-agent-browser wait --text "Welcome"   # Wait for text
+agent-browser wait <selector>         # Wait for element to be visible
+agent-browser wait <ms>               # Wait for time (milliseconds)
+agent-browser wait --text "Welcome"   # Wait for text to appear
 agent-browser wait --url "**/dash"    # Wait for URL pattern
 agent-browser wait --load networkidle # Wait for load state
 agent-browser wait --fn "window.ready === true"  # Wait for JS condition
@@ -253,6 +255,10 @@ AGENT_BROWSER_SESSION=agent1 agent-browser click "#btn"
 
 # List active sessions
 agent-browser session list
+# Output:
+# Active sessions:
+# -> default
+#    agent1
 
 # Show current session
 agent-browser session
@@ -289,11 +295,14 @@ agent-browser snapshot -i -c -d 5         # Combine options
 | Option | Description |
 |--------|-------------|
 | `--session <name>` | Use isolated session (or `AGENT_BROWSER_SESSION` env) |
+| `--headers <json>` | Set HTTP headers scoped to the URL's origin |
+| `--executable-path <path>` | Custom browser executable (or `AGENT_BROWSER_EXECUTABLE_PATH` env) |
 | `--json` | JSON output (for agents) |
 | `--full, -f` | Full page screenshot |
 | `--name, -n` | Locator name filter |
 | `--exact` | Exact text match |
 | `--headed` | Show browser window (not headless) |
+| `--cdp <port>` | Connect via Chrome DevTools Protocol |
 | `--debug` | Debug output |
 
 ## Selectors
@@ -383,6 +392,200 @@ agent-browser open example.com --headed
 
 This opens a visible browser window instead of running headless.
 
+## Authenticated Sessions
+
+Use `--headers` to set HTTP headers for a specific origin, enabling authentication without login flows:
+
+```bash
+# Headers are scoped to api.example.com only
+agent-browser open api.example.com --headers '{"Authorization": "Bearer <token>"}'
+
+# Requests to api.example.com include the auth header
+agent-browser snapshot -i --json
+agent-browser click @e2
+
+# Navigate to another domain - headers are NOT sent (safe!)
+agent-browser open other-site.com
+```
+
+This is useful for:
+- **Skipping login flows** - Authenticate via headers instead of UI
+- **Switching users** - Start new sessions with different auth tokens
+- **API testing** - Access protected endpoints directly
+- **Security** - Headers are scoped to the origin, not leaked to other domains
+
+To set headers for multiple origins, use `--headers` with each `open` command:
+
+```bash
+agent-browser open api.example.com --headers '{"Authorization": "Bearer token1"}'
+agent-browser open api.acme.com --headers '{"Authorization": "Bearer token2"}'
+```
+
+For global headers (all domains), use `set headers`:
+
+```bash
+agent-browser set headers '{"X-Custom-Header": "value"}'
+```
+
+## Custom Browser Executable
+
+Use a custom browser executable instead of the bundled Chromium. This is useful for:
+- **Serverless deployment**: Use lightweight Chromium builds like `@sparticuz/chromium` (~50MB vs ~684MB)
+- **System browsers**: Use an existing Chrome/Chromium installation
+- **Custom builds**: Use modified browser builds
+
+### CLI Usage
+
+```bash
+# Via flag
+agent-browser --executable-path /path/to/chromium open example.com
+
+# Via environment variable
+AGENT_BROWSER_EXECUTABLE_PATH=/path/to/chromium agent-browser open example.com
+```
+
+### Serverless Example (Vercel/AWS Lambda)
+
+```typescript
+import chromium from '@sparticuz/chromium';
+import { BrowserManager } from 'agent-browser';
+
+export async function handler() {
+  const browser = new BrowserManager();
+  await browser.launch({
+    executablePath: await chromium.executablePath(),
+    headless: true,
+  });
+  // ... use browser
+}
+```
+
+## CDP Mode
+
+Connect to an existing browser via Chrome DevTools Protocol:
+
+```bash
+# Connect to Electron app
+agent-browser --cdp 9222 snapshot
+
+# Connect to Chrome with remote debugging
+# (Start Chrome with: google-chrome --remote-debugging-port=9222)
+agent-browser --cdp 9222 open about:blank
+```
+
+This enables control of:
+- Electron apps
+- Chrome/Chromium instances with remote debugging
+- WebView2 applications
+- Any browser exposing a CDP endpoint
+
+## Streaming (Browser Preview)
+
+Stream the browser viewport via WebSocket for live preview or "pair browsing" where a human can watch and interact alongside an AI agent.
+
+### Enable Streaming
+
+Set the `AGENT_BROWSER_STREAM_PORT` environment variable:
+
+```bash
+AGENT_BROWSER_STREAM_PORT=9223 agent-browser open example.com
+```
+
+This starts a WebSocket server on the specified port that streams the browser viewport and accepts input events.
+
+### WebSocket Protocol
+
+Connect to `ws://localhost:9223` to receive frames and send input:
+
+**Receive frames:**
+```json
+{
+  "type": "frame",
+  "data": "<base64-encoded-jpeg>",
+  "metadata": {
+    "deviceWidth": 1280,
+    "deviceHeight": 720,
+    "pageScaleFactor": 1,
+    "offsetTop": 0,
+    "scrollOffsetX": 0,
+    "scrollOffsetY": 0
+  }
+}
+```
+
+**Send mouse events:**
+```json
+{
+  "type": "input_mouse",
+  "eventType": "mousePressed",
+  "x": 100,
+  "y": 200,
+  "button": "left",
+  "clickCount": 1
+}
+```
+
+**Send keyboard events:**
+```json
+{
+  "type": "input_keyboard",
+  "eventType": "keyDown",
+  "key": "Enter",
+  "code": "Enter"
+}
+```
+
+**Send touch events:**
+```json
+{
+  "type": "input_touch",
+  "eventType": "touchStart",
+  "touchPoints": [{ "x": 100, "y": 200 }]
+}
+```
+
+### Programmatic API
+
+For advanced use, control streaming directly via the protocol:
+
+```typescript
+import { BrowserManager } from 'agent-browser';
+
+const browser = new BrowserManager();
+await browser.launch({ headless: true });
+await browser.navigate('https://example.com');
+
+// Start screencast
+await browser.startScreencast((frame) => {
+  // frame.data is base64-encoded image
+  // frame.metadata contains viewport info
+  console.log('Frame received:', frame.metadata.deviceWidth, 'x', frame.metadata.deviceHeight);
+}, {
+  format: 'jpeg',
+  quality: 80,
+  maxWidth: 1280,
+  maxHeight: 720,
+});
+
+// Inject mouse events
+await browser.injectMouseEvent({
+  type: 'mousePressed',
+  x: 100,
+  y: 200,
+  button: 'left',
+});
+
+// Inject keyboard events
+await browser.injectKeyboardEvent({
+  type: 'keyDown',
+  key: 'Enter',
+  code: 'Enter',
+});
+
+// Stop when done
+await browser.stopScreencast();
+```
+
 ## Architecture
 
 agent-browser uses a client-daemon architecture:
@@ -393,15 +596,17 @@ agent-browser uses a client-daemon architecture:
 
 The daemon starts automatically on first command and persists between commands for fast subsequent operations.
 
+**Browser Engine:** Uses Chromium by default. The daemon also supports Firefox and WebKit via the Playwright protocol.
+
 ## Platforms
 
 | Platform | Binary | Fallback |
 |----------|--------|----------|
-| macOS ARM64 | ✅ Native Rust | Node.js |
-| macOS x64 | ✅ Native Rust | Node.js |
-| Linux ARM64 | ✅ Native Rust | Node.js |
-| Linux x64 | ✅ Native Rust | Node.js |
-| Windows | - | Node.js |
+| macOS ARM64 | Native Rust | Node.js |
+| macOS x64 | Native Rust | Node.js |
+| Linux ARM64 | Native Rust | Node.js |
+| Linux x64 | Native Rust | Node.js |
+| Windows x64 | Native Rust | Node.js |
 
 ## Usage with AI Agents
 
@@ -436,15 +641,15 @@ Core workflow:
 For Claude Code, a [skill](https://platform.claude.com/docs/en/agents-and-tools/agent-skills/best-practices) provides richer context:
 
 ```bash
-cp -r node_modules/agent-browser/skills/browsing-web .claude/skills/
+cp -r node_modules/agent-browser/skills/agent-browser .claude/skills/
 ```
 
 Or download:
 
 ```bash
-mkdir -p .claude/skills/browsing-web
-curl -o .claude/skills/browsing-web/SKILL.md \
-  https://raw.githubusercontent.com/vercel-labs/agent-browser/main/skills/browsing-web/SKILL.md
+mkdir -p .claude/skills/agent-browser
+curl -o .claude/skills/agent-browser/SKILL.md \
+  https://raw.githubusercontent.com/vercel-labs/agent-browser/main/skills/agent-browser/SKILL.md
 ```
 
 ## License

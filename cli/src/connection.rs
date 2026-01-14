@@ -153,9 +153,22 @@ fn daemon_ready(session: &str) -> bool {
     }
 }
 
-pub fn ensure_daemon(session: &str, headed: bool) -> Result<(), String> {
+/// Result of ensure_daemon indicating whether a new daemon was started
+pub struct DaemonResult {
+    /// True if we connected to an existing daemon, false if we started a new one
+    pub already_running: bool,
+}
+
+pub fn ensure_daemon(
+    session: &str,
+    headed: bool,
+    executable_path: Option<&str>,
+    extensions: &[String],
+) -> Result<DaemonResult, String> {
     if is_daemon_running(session) && daemon_ready(session) {
-        return Ok(());
+        return Ok(DaemonResult {
+            already_running: true,
+        });
     }
 
     let exe_path = env::current_exe().map_err(|e| e.to_string())?;
@@ -186,6 +199,14 @@ pub fn ensure_daemon(session: &str, headed: bool) -> Result<(), String> {
             cmd.env("AGENT_BROWSER_HEADED", "1");
         }
 
+        if let Some(path) = executable_path {
+            cmd.env("AGENT_BROWSER_EXECUTABLE_PATH", path);
+        }
+
+        if !extensions.is_empty() {
+            cmd.env("AGENT_BROWSER_EXTENSIONS", extensions.join(","));
+        }
+
         // Create new process group and session to fully detach
         unsafe {
             cmd.pre_exec(|| {
@@ -206,13 +227,26 @@ pub fn ensure_daemon(session: &str, headed: bool) -> Result<(), String> {
     {
         use std::os::windows::process::CommandExt;
         
-        let mut cmd = Command::new("node");
-        cmd.arg(daemon_path)
+        // On Windows, use cmd.exe to run node to ensure proper PATH resolution.
+        // This handles cases where node.exe isn't directly in PATH but node.cmd is.
+        // Pass the entire command as a single string to /c to handle paths with spaces.
+        let cmd_string = format!("node \"{}\"", daemon_path.display());
+        let mut cmd = Command::new("cmd");
+        cmd.arg("/c")
+            .arg(&cmd_string)
             .env("AGENT_BROWSER_DAEMON", "1")
             .env("AGENT_BROWSER_SESSION", session);
 
         if headed {
             cmd.env("AGENT_BROWSER_HEADED", "1");
+        }
+
+        if let Some(path) = executable_path {
+            cmd.env("AGENT_BROWSER_EXECUTABLE_PATH", path);
+        }
+
+        if !extensions.is_empty() {
+            cmd.env("AGENT_BROWSER_EXTENSIONS", extensions.join(","));
         }
 
         // CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS
@@ -229,7 +263,7 @@ pub fn ensure_daemon(session: &str, headed: bool) -> Result<(), String> {
 
     for _ in 0..50 {
         if daemon_ready(session) {
-            return Ok(());
+            return Ok(DaemonResult { already_running: false });
         }
         thread::sleep(Duration::from_millis(100));
     }

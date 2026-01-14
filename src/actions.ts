@@ -1,5 +1,5 @@
 import type { Page, Frame } from 'playwright-core';
-import type { BrowserManager } from './browser.js';
+import type { BrowserManager, ScreencastFrame } from './browser.js';
 import type {
   Command,
   Response,
@@ -94,6 +94,11 @@ import type {
   MultiSelectCommand,
   WaitForDownloadCommand,
   ResponseBodyCommand,
+  ScreencastStartCommand,
+  ScreencastStopCommand,
+  InputMouseCommand,
+  InputKeyboardCommand,
+  InputTouchCommand,
   NavigateData,
   ScreenshotData,
   EvaluateData,
@@ -102,8 +107,24 @@ import type {
   TabNewData,
   TabSwitchData,
   TabCloseData,
+  ScreencastStartData,
+  ScreencastStopData,
+  InputEventData,
 } from './types.js';
 import { successResponse, errorResponse } from './protocol.js';
+
+// Callback for screencast frames - will be set by the daemon when streaming is active
+let screencastFrameCallback: ((frame: ScreencastFrame) => void) | null = null;
+
+/**
+ * Set the callback for screencast frames
+ * This is called by the daemon to set up frame streaming
+ */
+export function setScreencastFrameCallback(
+  callback: ((frame: ScreencastFrame) => void) | null
+): void {
+  screencastFrameCallback = callback;
+}
 
 // Snapshot response type
 interface SnapshotData {
@@ -113,8 +134,9 @@ interface SnapshotData {
 
 /**
  * Convert Playwright errors to AI-friendly messages
+ * @internal Exported for testing
  */
-function toAIFriendlyError(error: unknown, selector: string): Error {
+export function toAIFriendlyError(error: unknown, selector: string): Error {
   const message = error instanceof Error ? error.message : String(error);
 
   // Handle strict mode violation (multiple elements match)
@@ -129,7 +151,24 @@ function toAIFriendlyError(error: unknown, selector: string): Error {
     );
   }
 
-  // Handle element not found
+  // Handle element not interactable (must be checked BEFORE timeout case)
+  // This includes cases where an overlay/modal blocks the element
+  if (message.includes('intercepts pointer events')) {
+    return new Error(
+      `Element "${selector}" is blocked by another element (likely a modal or overlay). ` +
+        `Try dismissing any modals/cookie banners first.`
+    );
+  }
+
+  // Handle element not visible
+  if (message.includes('not visible') && !message.includes('Timeout')) {
+    return new Error(
+      `Element "${selector}" is not visible. ` +
+        `Try scrolling it into view or check if it's hidden.`
+    );
+  }
+
+  // Handle element not found (timeout waiting for element)
   if (
     message.includes('waiting for') &&
     (message.includes('to be visible') || message.includes('Timeout'))
@@ -137,14 +176,6 @@ function toAIFriendlyError(error: unknown, selector: string): Error {
     return new Error(
       `Element "${selector}" not found or not visible. ` +
         `Run 'snapshot' to see current page elements.`
-    );
-  }
-
-  // Handle element not interactable
-  if (message.includes('intercepts pointer events') || message.includes('not visible')) {
-    return new Error(
-      `Element "${selector}" is not interactable (may be hidden or covered). ` +
-        `Try scrolling it into view or check if a modal/overlay is blocking it.`
     );
   }
 
@@ -386,6 +417,16 @@ export async function executeCommand(command: Command, browser: BrowserManager):
         return await handleWaitForDownload(command, browser);
       case 'responsebody':
         return await handleResponseBody(command, browser);
+      case 'screencast_start':
+        return await handleScreencastStart(command, browser);
+      case 'screencast_stop':
+        return await handleScreencastStop(command, browser);
+      case 'input_mouse':
+        return await handleInputMouse(command, browser);
+      case 'input_keyboard':
+        return await handleInputKeyboard(command, browser);
+      case 'input_touch':
+        return await handleInputTouch(command, browser);
       default: {
         // TypeScript narrows to never here, but we handle it for safety
         const unknownCommand = command as { id: string; action: string };
@@ -411,6 +452,12 @@ async function handleNavigate(
   browser: BrowserManager
 ): Promise<Response<NavigateData>> {
   const page = browser.getPage();
+
+  // If headers are provided, set up scoped headers for this origin
+  if (command.headers && Object.keys(command.headers).length > 0) {
+    await browser.setScopedHeaders(command.url, command.headers);
+  }
+
   await page.goto(command.url, {
     waitUntil: command.waitUntil ?? 'load',
   });
@@ -672,7 +719,7 @@ async function handleTabSwitch(
   command: TabSwitchCommand,
   browser: BrowserManager
 ): Promise<Response<TabSwitchData>> {
-  const result = browser.switchTo(command.index);
+  const result = await browser.switchTo(command.index);
   const page = browser.getPage();
   return successResponse(command.id, {
     ...result,
@@ -1762,4 +1809,80 @@ async function handleResponseBody(
     status: response.status(),
     body: parsed,
   });
+}
+
+// Screencast and input injection handlers
+
+async function handleScreencastStart(
+  command: ScreencastStartCommand,
+  browser: BrowserManager
+): Promise<Response<ScreencastStartData>> {
+  if (!screencastFrameCallback) {
+    throw new Error('Screencast frame callback not set. Start the streaming server first.');
+  }
+
+  await browser.startScreencast(screencastFrameCallback, {
+    format: command.format,
+    quality: command.quality,
+    maxWidth: command.maxWidth,
+    maxHeight: command.maxHeight,
+    everyNthFrame: command.everyNthFrame,
+  });
+
+  return successResponse(command.id, {
+    started: true,
+    format: command.format ?? 'jpeg',
+    quality: command.quality ?? 80,
+  });
+}
+
+async function handleScreencastStop(
+  command: ScreencastStopCommand,
+  browser: BrowserManager
+): Promise<Response<ScreencastStopData>> {
+  await browser.stopScreencast();
+  return successResponse(command.id, { stopped: true });
+}
+
+async function handleInputMouse(
+  command: InputMouseCommand,
+  browser: BrowserManager
+): Promise<Response<InputEventData>> {
+  await browser.injectMouseEvent({
+    type: command.type,
+    x: command.x,
+    y: command.y,
+    button: command.button,
+    clickCount: command.clickCount,
+    deltaX: command.deltaX,
+    deltaY: command.deltaY,
+    modifiers: command.modifiers,
+  });
+  return successResponse(command.id, { injected: true });
+}
+
+async function handleInputKeyboard(
+  command: InputKeyboardCommand,
+  browser: BrowserManager
+): Promise<Response<InputEventData>> {
+  await browser.injectKeyboardEvent({
+    type: command.type,
+    key: command.key,
+    code: command.code,
+    text: command.text,
+    modifiers: command.modifiers,
+  });
+  return successResponse(command.id, { injected: true });
+}
+
+async function handleInputTouch(
+  command: InputTouchCommand,
+  browser: BrowserManager
+): Promise<Response<InputEventData>> {
+  await browser.injectTouchEvent({
+    type: command.type,
+    touchPoints: command.touchPoints,
+    modifiers: command.modifiers,
+  });
+  return successResponse(command.id, { injected: true });
 }

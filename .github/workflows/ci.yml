@@ -83,3 +83,106 @@ jobs:
 
       - name: Build release binary
         run: cargo build --release --manifest-path cli/Cargo.toml --target ${{ matrix.target }}
+
+      - name: Run Rust tests
+        run: cargo test --manifest-path cli/Cargo.toml --target ${{ matrix.target }}
+
+  windows-integration:
+    name: Windows Integration Test
+    runs-on: windows-latest
+    needs: rust
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            cli/target/
+          key: windows-cargo-x86_64-pc-windows-msvc-${{ hashFiles('cli/Cargo.lock') }}
+          restore-keys: |
+            windows-cargo-x86_64-pc-windows-msvc-
+
+      - name: Build Rust CLI
+        run: cargo build --release --manifest-path cli/Cargo.toml --target x86_64-pc-windows-msvc
+
+      - name: Install npm dependencies
+        run: pnpm install
+
+      - name: Build TypeScript
+        run: pnpm build
+
+      - name: Copy CLI binary to bin directory
+        run: |
+          Copy-Item cli/target/x86_64-pc-windows-msvc/release/agent-browser.exe bin/agent-browser-win32-x64.exe
+
+      - name: Test agent-browser install command
+        run: |
+          $env:PATH = "$pwd\bin;$env:PATH"
+          bin/agent-browser-win32-x64.exe install
+        shell: pwsh
+
+      - name: Verify Chromium was installed
+        run: |
+          $playwrightPath = "$env:LOCALAPPDATA\ms-playwright"
+          if (Test-Path $playwrightPath) {
+            Write-Host "Playwright browsers installed at: $playwrightPath"
+            Get-ChildItem $playwrightPath -Recurse -Depth 2 | Select-Object -First 20
+          } else {
+            Write-Error "Playwright browsers not found!"
+            exit 1
+          }
+        shell: pwsh
+
+  serverless-chromium:
+    name: Serverless Chromium (@sparticuz/chromium)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Install @sparticuz/chromium
+        run: pnpm add -D @sparticuz/chromium
+
+      - name: Build TypeScript
+        run: pnpm build
+
+      - name: Run serverless integration test
+        run: pnpm exec vitest run test/serverless.test.ts

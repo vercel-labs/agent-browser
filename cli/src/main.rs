@@ -21,38 +21,7 @@ use commands::{gen_id, parse_command, ParseError};
 use connection::{ensure_daemon, send_command};
 use flags::{clean_args, parse_flags};
 use install::run_install;
-use output::{print_help, print_response};
-
-fn parse_proxy(proxy_str: &str) -> serde_json::Value {
-    // Parse URL format: http://user:pass@host:port or http://host:port
-    let Some(protocol_end) = proxy_str.find("://") else {
-        return json!({ "server": proxy_str });
-    };
-    let protocol = &proxy_str[..protocol_end + 3];
-
-    // Check for credentials (user:pass@host format)
-    let rest = &proxy_str[protocol_end + 3..];
-    let Some(at_pos) = rest.rfind('@') else {
-        return json!({ "server": proxy_str });
-    };
-
-    let creds = &rest[..at_pos];
-    let Some(colon_pos) = creds.find(':') else {
-        // Found @ but no : in credentials - return server without credentials
-        let server_part = &rest[at_pos + 1..];
-        return json!({ "server": format!("{}{}", protocol, server_part) });
-    };
-
-    let username = &creds[..colon_pos];
-    let password = &creds[colon_pos + 1..];
-    let server_part = &rest[at_pos + 1..];
-
-    json!({
-        "server": format!("{}{}", protocol, server_part),
-        "username": username,
-        "password": password
-    })
-}
+use output::{print_command_help, print_help, print_response};
 
 fn run_session(args: &[String], session: &str, json_mode: bool) {
     let subcommand = args.get(1).map(|s| s.as_str());
@@ -129,7 +98,19 @@ fn main() {
     let flags = parse_flags(&args);
     let clean = clean_args(&args);
 
-    if clean.is_empty() || args.iter().any(|a| a == "--help" || a == "-h") {
+    let has_help = args.iter().any(|a| a == "--help" || a == "-h");
+
+    if clean.is_empty() {
+        print_help();
+        return;
+    }
+
+    if has_help {
+        if let Some(cmd) = clean.get(0) {
+            if print_command_help(cmd) {
+                return;
+            }
+        }
         print_help();
         return;
     }
@@ -168,32 +149,96 @@ fn main() {
         }
     };
 
-    if let Err(e) = ensure_daemon(&flags.session, flags.headed) {
-        if flags.json {
-            println!(r#"{{"success":false,"error":"{}"}}"#, e);
-        } else {
-            eprintln!("\x1b[31m✗\x1b[0m {}", e);
+    let daemon_result = match ensure_daemon(&flags.session, flags.headed, flags.executable_path.as_deref(), &flags.extensions) {
+        Ok(result) => result,
+        Err(e) => {
+            if flags.json {
+                println!(r#"{{"success":false,"error":"{}"}}"#, e);
+            } else {
+                eprintln!("\x1b[31m✗\x1b[0m {}", e);
+            }
+            exit(1);
         }
-        exit(1);
+    };
+
+    // Warn if executable_path was specified but daemon was already running
+    if daemon_result.already_running && (flags.executable_path.is_some() || !flags.extensions.is_empty()) {
+        if !flags.json {
+            if flags.executable_path.is_some() {
+                eprintln!("\x1b[33m⚠\x1b[0m --executable-path ignored: daemon already running. Use 'agent-browser close' first to restart with new path.");
+            }
+            if !flags.extensions.is_empty() {
+                eprintln!("\x1b[33m⚠\x1b[0m --extension ignored: daemon already running. Use 'agent-browser close' first to restart with extensions.");
+            }
+        }
     }
 
-    // If --headed flag or --proxy is set, send launch command first to configure browser
-    if flags.headed || flags.proxy.is_some() {
-        let mut launch_cmd = json!({
+    // Connect via CDP if --cdp flag is set
+    if let Some(ref port) = flags.cdp {
+        let cdp_port: u16 = match port.parse::<u32>() {
+            Ok(p) if p == 0 => {
+                let msg = "Invalid CDP port: port must be greater than 0".to_string();
+                if flags.json {
+                    println!(r#"{{"success":false,"error":"{}"}}"#, msg);
+                } else {
+                    eprintln!("\x1b[31m✗\x1b[0m {}", msg);
+                }
+                exit(1);
+            }
+            Ok(p) if p > 65535 => {
+                let msg = format!("Invalid CDP port: {} is out of range (valid range: 1-65535)", p);
+                if flags.json {
+                    println!(r#"{{"success":false,"error":"{}"}}"#, msg);
+                } else {
+                    eprintln!("\x1b[31m✗\x1b[0m {}", msg);
+                }
+                exit(1);
+            }
+            Ok(p) => p as u16,
+            Err(_) => {
+                let msg = format!("Invalid CDP port: '{}' is not a valid number. Port must be a number between 1 and 65535", port);
+                if flags.json {
+                    println!(r#"{{"success":false,"error":"{}"}}"#, msg);
+                } else {
+                    eprintln!("\x1b[31m✗\x1b[0m {}", msg);
+                }
+                exit(1);
+            }
+        };
+
+        let launch_cmd = json!({
             "id": gen_id(),
             "action": "launch",
-            "headless": !flags.headed
+            "cdpPort": cdp_port
         });
-        if let Some(ref proxy_str) = flags.proxy {
-            let proxy_obj = parse_proxy(proxy_str);
-            launch_cmd.as_object_mut().expect("json! macro guarantees object type").insert(
-                "proxy".to_string(),
-                proxy_obj
-            );
+
+        let err = match send_command(launch_cmd, &flags.session) {
+            Ok(resp) if resp.success => None,
+            Ok(resp) => Some(resp.error.unwrap_or_else(|| "CDP connection failed".to_string())),
+            Err(e) => Some(e.to_string()),
+        };
+
+        if let Some(msg) = err {
+            if flags.json {
+                println!(r#"{{"success":false,"error":"{}"}}"#, msg);
+            } else {
+                eprintln!("\x1b[31m✗\x1b[0m {}", msg);
+            }
+            exit(1);
         }
+    }
+
+    // Launch headed browser if --headed flag is set (without CDP)
+    if flags.headed && flags.cdp.is_none() {
+        let launch_cmd = json!({
+            "id": gen_id(),
+            "action": "launch",
+            "headless": false
+        });
+
         if let Err(e) = send_command(launch_cmd, &flags.session) {
             if !flags.json {
-                eprintln!("\x1b[33m⚠\x1b[0m Could not configure browser: {}", e);
+                eprintln!("\x1b[33m⚠\x1b[0m Could not launch headed browser: {}", e);
             }
         }
     }

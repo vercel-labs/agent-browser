@@ -12,18 +12,17 @@ export interface LaunchCommand extends BaseCommand {
   headless?: boolean;
   viewport?: { width: number; height: number };
   browser?: 'chromium' | 'firefox' | 'webkit';
-  proxy?: {
-    server: string;
-    bypass?: string;
-    username?: string;
-    password?: string;
-  };
+  headers?: Record<string, string>;
+  executablePath?: string;
+  cdpPort?: number;
+  extensions?: string[];
 }
 
 export interface NavigateCommand extends BaseCommand {
   action: 'navigate';
   url: string;
   waitUntil?: 'load' | 'domcontentloaded' | 'networkidle';
+  headers?: Record<string, string>;
 }
 
 export interface ClickCommand extends BaseCommand {
@@ -460,6 +459,49 @@ export interface ResponseBodyCommand extends BaseCommand {
   timeout?: number;
 }
 
+// Screencast commands for streaming browser viewport
+export interface ScreencastStartCommand extends BaseCommand {
+  action: 'screencast_start';
+  format?: 'jpeg' | 'png';
+  quality?: number; // 0-100, jpeg only
+  maxWidth?: number;
+  maxHeight?: number;
+  everyNthFrame?: number;
+}
+
+export interface ScreencastStopCommand extends BaseCommand {
+  action: 'screencast_stop';
+}
+
+// Input injection commands for pair browsing
+export interface InputMouseCommand extends BaseCommand {
+  action: 'input_mouse';
+  type: 'mousePressed' | 'mouseReleased' | 'mouseMoved' | 'mouseWheel';
+  x: number;
+  y: number;
+  button?: 'left' | 'right' | 'middle' | 'none';
+  clickCount?: number;
+  deltaX?: number;
+  deltaY?: number;
+  modifiers?: number;
+}
+
+export interface InputKeyboardCommand extends BaseCommand {
+  action: 'input_keyboard';
+  type: 'keyDown' | 'keyUp' | 'char';
+  key?: string;
+  code?: string;
+  text?: string;
+  modifiers?: number;
+}
+
+export interface InputTouchCommand extends BaseCommand {
+  action: 'input_touch';
+  type: 'touchStart' | 'touchEnd' | 'touchMove' | 'touchCancel';
+  touchPoints: Array<{ x: number; y: number; id?: number }>;
+  modifiers?: number;
+}
+
 // Video recording
 export interface VideoStartCommand extends BaseCommand {
   action: 'video_start';
@@ -843,7 +885,12 @@ export type Command =
   | InsertTextCommand
   | MultiSelectCommand
   | WaitForDownloadCommand
-  | ResponseBodyCommand;
+  | ResponseBodyCommand
+  | ScreencastStartCommand
+  | ScreencastStopCommand
+  | InputMouseCommand
+  | InputKeyboardCommand
+  | InputTouchCommand;
 
 // Response types
 export interface SuccessResponse<T = unknown> {
@@ -909,6 +956,20 @@ export interface TabSwitchData {
 export interface TabCloseData {
   closed: number;
   remaining: number;
+}
+
+export interface ScreencastStartData {
+  started: boolean;
+  format: string;
+  quality: number;
+}
+
+export interface ScreencastStopData {
+  stopped: boolean;
+}
+
+export interface InputEventData {
+  injected: boolean;
 }
 
 // Browser state

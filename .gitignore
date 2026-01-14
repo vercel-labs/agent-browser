@@ -42,3 +42,9 @@ yarn.lock
 
 # opensrc - source code for packages
 opensrc/
+
+# Docs site
+docs/node_modules/
+docs/.next/
+docs/out/
+docs/package-lock.json
