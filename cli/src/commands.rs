@@ -1188,6 +1188,13 @@ mod tests {
     }
 
     #[test]
+    fn test_screenshot_path() {
+        let cmd = parse_command(&args("screenshot out.png"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "screenshot");
+        assert_eq!(cmd["path"], "out.png");
+    }
+
+    #[test]
     fn test_screenshot_full_page() {
         let mut flags = default_flags();
         flags.full = true;

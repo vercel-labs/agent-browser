@@ -33,8 +33,7 @@ agent-browser snapshot -i
 
 # Interact using refs
 agent-browser click @e2
-agent-browser screenshot                  # Base64 png to stdout
-agent-browser screenshot page.png         # Save to file
+agent-browser screenshot page.png
 agent-browser close`} />
 
         <h2>Why refs?</h2>

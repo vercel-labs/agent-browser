@@ -40,8 +40,7 @@ agent-browser snapshot                    # Get accessibility tree with refs
 agent-browser click @e2                   # Click by ref from snapshot
 agent-browser fill @e3 "test@example.com" # Fill by ref
 agent-browser get text @e1                # Get text by ref
-agent-browser screenshot                  # Base64 png to stdout
-agent-browser screenshot page.png         # Save to file
+agent-browser screenshot page.png
 agent-browser close
 ```
 
@@ -75,7 +74,7 @@ agent-browser scroll <dir> [px]       # Scroll (up/down/left/right)
 agent-browser scrollintoview <sel>    # Scroll element into view (alias: scrollinto)
 agent-browser drag <src> <tgt>        # Drag and drop
 agent-browser upload <sel> <files>    # Upload files
-agent-browser screenshot [path]       # Screenshot (base64 to stdout if no path)
+agent-browser screenshot [path]       # Take screenshot (--full for full page)
 agent-browser pdf <path>              # Save as PDF
 agent-browser snapshot                # Accessibility tree with refs (best for AI)
 agent-browser eval <js>               # Run JavaScript

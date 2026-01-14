@@ -18,7 +18,7 @@ agent-browser select <sel> <val>      # Select dropdown option
 agent-browser check <sel>             # Check checkbox
 agent-browser uncheck <sel>           # Uncheck checkbox
 agent-browser scroll <dir> [px]       # Scroll (up/down/left/right)
-agent-browser screenshot [path]       # Screenshot (base64 to stdout if no path)
+agent-browser screenshot [path]       # Screenshot (--full for full page)
 agent-browser snapshot                # Accessibility tree with refs
 agent-browser eval <js>               # Run JavaScript
 agent-browser close                   # Close browser`} />
