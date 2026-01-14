@@ -1535,6 +1535,7 @@ Options:
                              e.g., --proxy "http://user:pass@127.0.0.1:7890"
   --proxy-bypass <hosts>     Bypass proxy for these hosts (or AGENT_BROWSER_PROXY_BYPASS)
                              e.g., --proxy-bypass "localhost,*.internal.com"
+  --ignore-https-errors      Ignore HTTPS certificate errors
   -p, --provider <name>      Cloud browser provider (or AGENT_BROWSER_PROVIDER env)
   --json                     JSON output
   --full, -f                 Full page screenshot

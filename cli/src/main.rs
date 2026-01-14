@@ -200,6 +200,7 @@ fn main() {
         flags.user_agent.as_deref(),
         flags.proxy.as_deref(),
         flags.proxy_bypass.as_deref(),
+        flags.ignore_https_errors,
     ) {
         Ok(result) => result,
         Err(e) => {
@@ -317,6 +318,10 @@ fn main() {
             })
         };
 
+        if flags.ignore_https_errors {
+            launch_cmd["ignoreHTTPSErrors"] = json!(true);
+        }
+
         let err = match send_command(launch_cmd, &flags.session) {
             Ok(resp) if resp.success => None,
             Ok(resp) => Some(
@@ -399,6 +404,10 @@ fn main() {
                 .filter(|s| !s.is_empty())
                 .collect();
             cmd_obj.insert("args".to_string(), json!(args_vec));
+        }
+
+        if flags.ignore_https_errors {
+            launch_cmd["ignoreHTTPSErrors"] = json!(true);
         }
 
         if let Err(e) = send_command(launch_cmd, &flags.session) {

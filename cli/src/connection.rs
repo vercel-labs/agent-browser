@@ -194,6 +194,7 @@ pub fn ensure_daemon(
     user_agent: Option<&str>,
     proxy: Option<&str>,
     proxy_bypass: Option<&str>,
+    ignore_https_errors: bool,
 ) -> Result<DaemonResult, String> {
     if is_daemon_running(session) && daemon_ready(session) {
         return Ok(DaemonResult {
@@ -266,6 +267,10 @@ pub fn ensure_daemon(
             cmd.env("AGENT_BROWSER_PROXY_BYPASS", pb);
         }
 
+        if ignore_https_errors {
+            cmd.env("AGENT_BROWSER_IGNORE_HTTPS_ERRORS", "1");
+        }
+
         // Create new process group and session to fully detach
         unsafe {
             cmd.pre_exec(|| {
@@ -319,6 +324,10 @@ pub fn ensure_daemon(
 
         if let Some(pb) = proxy_bypass {
             cmd.env("AGENT_BROWSER_PROXY_BYPASS", pb);
+        }
+
+         if ignore_https_errors {
+            cmd.env("AGENT_BROWSER_IGNORE_HTTPS_ERRORS", "1");
         }
 
         // CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS
