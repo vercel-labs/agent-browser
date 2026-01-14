@@ -21,7 +21,7 @@ use commands::{gen_id, parse_command, ParseError};
 use connection::{ensure_daemon, send_command};
 use flags::{clean_args, parse_flags};
 use install::run_install;
-use output::{print_command_help, print_help, print_response};
+use output::{print_command_help, print_help, print_response, print_version};
 
 fn run_session(args: &[String], session: &str, json_mode: bool) {
     let subcommand = args.get(1).map(|s| s.as_str());
@@ -112,6 +112,11 @@ fn main() {
             }
         }
         print_help();
+        return;
+    }
+
+    if args.iter().any(|a| a == "--version") {
+        print_version();
         return;
     }
 

@@ -1,5 +1,9 @@
 use crate::connection::Response;
 
+pub fn print_version() {
+    println!("agent-browser {}", env!("CARGO_PKG_VERSION"));
+}
+
 pub fn print_response(resp: &Response, json_mode: bool) {
     if json_mode {
         println!("{}", serde_json::to_string(resp).unwrap_or_default());
