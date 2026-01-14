@@ -589,6 +589,81 @@ export class BrowserManager {
   }
 
   /**
+   * Load storage state (cookies, localStorage, etc.) at runtime
+   */
+  async loadStorageState(path: string): Promise<{ cookiesLoaded: number; originsLoaded: number }> {
+    const fs = await import('fs');
+    const context = this.contexts[0];
+    if (!context) {
+      throw new Error('No browser context available');
+    }
+
+    // Parse storage state file with proper error handling
+    let stateData: {
+      cookies?: Array<Record<string, unknown>>;
+      origins?: Array<{ origin: string; localStorage: Array<{ name: string; value: string }> }>;
+    };
+    try {
+      const fileContent = await fs.promises.readFile(path, 'utf8');
+      stateData = JSON.parse(fileContent);
+    } catch (error) {
+      if (error instanceof SyntaxError) {
+        throw new Error(`Failed to parse storage state file: Invalid JSON at ${path}`);
+      }
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        throw new Error(`Storage state file not found: ${path}`);
+      }
+      if ((error as NodeJS.ErrnoException).code === 'EACCES') {
+        throw new Error(`Permission denied reading storage state file: ${path}`);
+      }
+      throw new Error(
+        `Failed to load storage state: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
+    }
+
+    let cookiesLoaded = 0;
+    let originsLoaded = 0;
+
+    // Load cookies
+    if (stateData.cookies && stateData.cookies.length > 0) {
+      await context.addCookies(stateData.cookies);
+      cookiesLoaded = stateData.cookies.length;
+    }
+
+    // Load localStorage for each origin
+    // localStorage is origin-specific and can only be accessed from that origin
+    if (stateData.origins && stateData.origins.length > 0) {
+      const page = this.getPage();
+      const currentUrl = page.url();
+
+      for (const origin of stateData.origins) {
+        if (origin.localStorage && origin.localStorage.length > 0) {
+          try {
+            // Navigate to the origin to set localStorage in the correct context
+            await page.goto(origin.origin, { waitUntil: 'domcontentloaded' });
+            for (const item of origin.localStorage) {
+              await page.evaluate(
+                `localStorage.setItem(${JSON.stringify(item.name)}, ${JSON.stringify(item.value)})`
+              );
+            }
+            originsLoaded++;
+          } catch (error) {
+            // If navigation fails for an origin, log but continue
+            console.warn(`Failed to load localStorage for origin ${origin.origin}:`, error);
+          }
+        }
+      }
+
+      // Navigate back to the original URL if we changed pages
+      if (currentUrl && currentUrl !== 'about:blank' && page.url() !== currentUrl) {
+        await page.goto(currentUrl, { waitUntil: 'domcontentloaded' }).catch(() => {});
+      }
+    }
+
+    return { cookiesLoaded, originsLoaded };
+  }
+
+  /**
    * Get all pages
    */
   getPages(): Page[] {
@@ -691,7 +766,11 @@ export class BrowserManager {
         executablePath: options.executablePath,
       });
       this.cdpPort = null;
-      context = await this.browser.newContext({ viewport, extraHTTPHeaders: options.headers });
+      context = await this.browser.newContext({
+        viewport,
+        extraHTTPHeaders: options.headers,
+        storageState: options.storageState,
+      });
     }
 
     context.setDefaultTimeout(10000);
@@ -701,6 +780,13 @@ export class BrowserManager {
     this.pages.push(page);
     this.activePageIndex = 0;
     this.setupPageTracking(page);
+    this.setupContextTracking(context);
+
+    // For persistent contexts (with extensions), storageState must be loaded manually
+    // since launchPersistentContext doesn't support the storageState option
+    if (this.isPersistentContext && options.storageState) {
+      await this.loadStorageState(options.storageState);
+    }
   }
 
   /**
