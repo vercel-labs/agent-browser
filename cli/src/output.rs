@@ -1197,6 +1197,7 @@ Options:
   --headed                   Show browser window (not headless)
   --cdp <port>               Connect via CDP (Chrome DevTools Protocol)
   --debug                    Debug output
+  --version, -V              Show version
 
 Environment:
   AGENT_BROWSER_SESSION          Session name (default: "default")
@@ -1214,4 +1215,8 @@ Examples:
   agent-browser --cdp 9222 snapshot      # Connect via CDP port
 "#
     );
+}
+
+pub fn print_version() {
+    println!("agent-browser {}", env!("CARGO_PKG_VERSION"));
 }
