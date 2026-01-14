@@ -140,6 +140,11 @@ pub fn print_response(resp: &Response, json_mode: bool) {
             println!("\x1b[32m✓\x1b[0m Screenshot saved to {}", path);
             return;
         }
+        // Screenshot base64
+        if let Some(base64) = data.get("base64").and_then(|v| v.as_str()) {
+            println!("{}", base64);
+            return;
+        }
         // Default success
         println!("\x1b[32m✓\x1b[0m Done");
     }

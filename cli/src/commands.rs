@@ -273,7 +273,11 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
 
         // === Screenshot/PDF ===
         "screenshot" => {
-            Ok(json!({ "id": id, "action": "screenshot", "path": rest.get(0), "fullPage": flags.full }))
+            let mut cmd = json!({ "id": id, "action": "screenshot", "fullPage": flags.full });
+            if let Some(path) = rest.get(0) {
+                cmd["path"] = json!(path);
+            }
+            Ok(cmd)
         }
         "pdf" => {
             let path = rest.get(0).ok_or_else(|| ParseError::MissingArguments {
@@ -1180,6 +1184,7 @@ mod tests {
     fn test_screenshot() {
         let cmd = parse_command(&args("screenshot"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "screenshot");
+        assert!(cmd.get("path").is_none());
     }
 
     #[test]
