@@ -67,7 +67,7 @@ agent-browser get url             # Get current URL
 
 ### Screenshots
 ```bash
-agent-browser screenshot          # Base64 png to stdout
+agent-browser screenshot          # Screenshot to stdout
 agent-browser screenshot path.png # Save to file
 agent-browser screenshot --full   # Full page
 ```

@@ -74,7 +74,7 @@ agent-browser scroll <dir> [px]       # Scroll (up/down/left/right)
 agent-browser scrollintoview <sel>    # Scroll element into view (alias: scrollinto)
 agent-browser drag <src> <tgt>        # Drag and drop
 agent-browser upload <sel> <files>    # Upload files
-agent-browser screenshot [path]       # Take screenshot (--full for full page)
+agent-browser screenshot [path]       # Take screenshot (--full for full page, base64 png to stdout if no path)
 agent-browser pdf <path>              # Save as PDF
 agent-browser snapshot                # Accessibility tree with refs (best for AI)
 agent-browser eval <js>               # Run JavaScript
