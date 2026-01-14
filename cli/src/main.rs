@@ -186,7 +186,7 @@ fn main() {
         }
     };
 
-    let daemon_result = match ensure_daemon(&flags.session, flags.headed, flags.executable_path.as_deref(), &flags.extensions) {
+    let daemon_result = match ensure_daemon(&flags.session, flags.headed, flags.executable_path.as_deref(), &flags.extensions, flags.ignore_https_errors) {
         Ok(result) => result,
         Err(e) => {
             if flags.json {
@@ -243,11 +243,15 @@ fn main() {
             }
         };
 
-        let launch_cmd = json!({
+        let mut launch_cmd = json!({
             "id": gen_id(),
             "action": "launch",
             "cdpPort": cdp_port
         });
+
+        if flags.ignore_https_errors {
+            launch_cmd["ignoreHTTPSErrors"] = json!(true);
+        }
 
         let err = match send_command(launch_cmd, &flags.session) {
             Ok(resp) if resp.success => None,
@@ -278,6 +282,10 @@ fn main() {
             launch_cmd.as_object_mut()
                 .expect("json! macro guarantees object type")
                 .insert("proxy".to_string(), proxy_obj);
+        }
+
+        if flags.ignore_https_errors {
+            launch_cmd["ignoreHTTPSErrors"] = json!(true);
         }
 
         if let Err(e) = send_command(launch_cmd, &flags.session) {

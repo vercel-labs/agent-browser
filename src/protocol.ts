@@ -30,6 +30,7 @@ const launchSchema = baseCommandSchema.extend({
       password: z.string().optional(),
     })
     .optional(),
+  ignoreHTTPSErrors: z.boolean().optional(),
 });
 
 const navigateSchema = baseCommandSchema.extend({

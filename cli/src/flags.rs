@@ -11,6 +11,7 @@ pub struct Flags {
     pub cdp: Option<String>,
     pub extensions: Vec<String>,
     pub proxy: Option<String>,
+    pub ignore_https_errors: bool,
 }
 
 pub fn parse_flags(args: &[String]) -> Flags {
@@ -30,6 +31,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
         cdp: None,
         extensions: extensions_env,
         proxy: None,
+        ignore_https_errors: false,
     };
 
     let mut i = 0;
@@ -75,6 +77,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
                     i += 1;
                 }
             }
+            "--ignore-https-errors" => flags.ignore_https_errors = true,
             _ => {}
         }
         i += 1;
@@ -87,7 +90,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
     let mut skip_next = false;
 
     // Global flags that should be stripped from command args
-    const GLOBAL_FLAGS: &[&str] = &["--json", "--full", "--headed", "--debug"];
+    const GLOBAL_FLAGS: &[&str] = &["--json", "--full", "--headed", "--debug", "--ignore-https-errors"];
     // Global flags that take a value (need to skip the next arg too)
     const GLOBAL_FLAGS_WITH_VALUE: &[&str] = &["--session", "--headers", "--executable-path", "--cdp", "--extension", "--proxy"];
 

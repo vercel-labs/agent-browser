@@ -691,6 +691,7 @@ export class BrowserManager {
           viewport,
           extraHTTPHeaders: options.headers,
           ...(options.proxy && { proxy: options.proxy }),
+          ignoreHTTPSErrors: options.ignoreHTTPSErrors ?? false,
         }
       );
       this.isPersistentContext = true;
@@ -704,6 +705,7 @@ export class BrowserManager {
         viewport,
         extraHTTPHeaders: options.headers,
         ...(options.proxy && { proxy: options.proxy }),
+        ignoreHTTPSErrors: options.ignoreHTTPSErrors ?? false,
       });
     }
 
