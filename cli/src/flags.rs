@@ -76,7 +76,13 @@ pub fn parse_flags(args: &[String]) -> ParsedFlags {
                     flags.executable_path = Some(s.clone());
                     i += 1;
                 }
-            }
+            },
+            "--extension" => {
+                if let Some(s) = args.get(i + 1) {
+                    flags.extensions.push(s.clone());
+                    i += 1;
+                }
+            },
             "--cdp" => {
                 if let Some(s) = args.get(i + 1) {
                     flags.cdp = Some(s.clone());

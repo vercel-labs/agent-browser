@@ -620,6 +620,391 @@ describe('parseCommand', () => {
     });
   });
 
+  describe('screencast', () => {
+    it('should parse screencast_start with defaults', () => {
+      const result = parseCommand(cmd({ id: '1', action: 'screencast_start' }));
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.command.action).toBe('screencast_start');
+      }
+    });
+
+    it('should parse screencast_start with all options', () => {
+      const result = parseCommand(
+        cmd({
+          id: '1',
+          action: 'screencast_start',
+          format: 'png',
+          quality: 90,
+          maxWidth: 1920,
+          maxHeight: 1080,
+          everyNthFrame: 2,
+        })
+      );
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.command.format).toBe('png');
+        expect(result.command.quality).toBe(90);
+        expect(result.command.maxWidth).toBe(1920);
+        expect(result.command.maxHeight).toBe(1080);
+        expect(result.command.everyNthFrame).toBe(2);
+      }
+    });
+
+    it('should reject screencast_start with invalid format', () => {
+      const result = parseCommand(cmd({ id: '1', action: 'screencast_start', format: 'gif' }));
+      expect(result.success).toBe(false);
+    });
+
+    it('should reject screencast_start with quality out of range', () => {
+      const result = parseCommand(cmd({ id: '1', action: 'screencast_start', quality: 150 }));
+      expect(result.success).toBe(false);
+    });
+
+    it('should reject screencast_start with negative maxWidth', () => {
+      const result = parseCommand(cmd({ id: '1', action: 'screencast_start', maxWidth: -100 }));
+      expect(result.success).toBe(false);
+    });
+
+    it('should parse screencast_stop', () => {
+      const result = parseCommand(cmd({ id: '1', action: 'screencast_stop' }));
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.command.action).toBe('screencast_stop');
+      }
+    });
+  });
+
+  describe('input injection', () => {
+    describe('input_mouse', () => {
+      it('should parse mousePressed event', () => {
+        const result = parseCommand(
+          cmd({
+            id: '1',
+            action: 'input_mouse',
+            type: 'mousePressed',
+            x: 100,
+            y: 200,
+            button: 'left',
+          })
+        );
+        expect(result.success).toBe(true);
+        if (result.success) {
+          expect(result.command.action).toBe('input_mouse');
+          expect(result.command.type).toBe('mousePressed');
+          expect(result.command.x).toBe(100);
+          expect(result.command.y).toBe(200);
+          expect(result.command.button).toBe('left');
+        }
+      });
+
+      it('should parse mouseReleased event', () => {
+        const result = parseCommand(
+          cmd({
+            id: '1',
+            action: 'input_mouse',
+            type: 'mouseReleased',
+            x: 100,
+            y: 200,
+          })
+        );
+        expect(result.success).toBe(true);
+      });
+
+      it('should parse mouseMoved event', () => {
+        const result = parseCommand(
+          cmd({
+            id: '1',
+            action: 'input_mouse',
+            type: 'mouseMoved',
+            x: 150,
+            y: 250,
+          })
+        );
+        expect(result.success).toBe(true);
+      });
+
+      it('should parse mouseWheel event with deltas', () => {
+        const result = parseCommand(
+          cmd({
+            id: '1',
+            action: 'input_mouse',
+            type: 'mouseWheel',
+            x: 100,
+            y: 200,
+            deltaX: 0,
+            deltaY: 100,
+          })
+        );
+        expect(result.success).toBe(true);
+        if (result.success) {
+          expect(result.command.deltaX).toBe(0);
+          expect(result.command.deltaY).toBe(100);
+        }
+      });
+
+      it('should parse mouse event with modifiers', () => {
+        const result = parseCommand(
+          cmd({
+            id: '1',
+            action: 'input_mouse',
+            type: 'mousePressed',
+            x: 100,
+            y: 200,
+            modifiers: 6, // Ctrl + Meta
+          })
+        );
+        expect(result.success).toBe(true);
+        if (result.success) {
+          expect(result.command.modifiers).toBe(6);
+        }
+      });
+
+      it('should parse mouse event with clickCount', () => {
+        const result = parseCommand(
+          cmd({
+            id: '1',
+            action: 'input_mouse',
+            type: 'mousePressed',
+            x: 100,
+            y: 200,
+            clickCount: 2,
+          })
+        );
+        expect(result.success).toBe(true);
+        if (result.success) {
+          expect(result.command.clickCount).toBe(2);
+        }
+      });
+
+      it('should reject input_mouse with invalid type', () => {
+        const result = parseCommand(
+          cmd({
+            id: '1',
+            action: 'input_mouse',
+            type: 'invalid',
+            x: 100,
+            y: 200,
+          })
+        );
+        expect(result.success).toBe(false);
+      });
+
+      it('should reject input_mouse without x coordinate', () => {
+        const result = parseCommand(
+          cmd({
+            id: '1',
+            action: 'input_mouse',
+            type: 'mousePressed',
+            y: 200,
+          })
+        );
+        expect(result.success).toBe(false);
+      });
+
+      it('should reject input_mouse without y coordinate', () => {
+        const result = parseCommand(
+          cmd({
+            id: '1',
+            action: 'input_mouse',
+            type: 'mousePressed',
+            x: 100,
+          })
+        );
+        expect(result.success).toBe(false);
+      });
+    });
+
+    describe('input_keyboard', () => {
+      it('should parse keyDown event', () => {
+        const result = parseCommand(
+          cmd({
+            id: '1',
+            action: 'input_keyboard',
+            type: 'keyDown',
+            key: 'Enter',
+            code: 'Enter',
+          })
+        );
+        expect(result.success).toBe(true);
+        if (result.success) {
+          expect(result.command.action).toBe('input_keyboard');
+          expect(result.command.type).toBe('keyDown');
+          expect(result.command.key).toBe('Enter');
+          expect(result.command.code).toBe('Enter');
+        }
+      });
+
+      it('should parse keyUp event', () => {
+        const result = parseCommand(
+          cmd({
+            id: '1',
+            action: 'input_keyboard',
+            type: 'keyUp',
+            key: 'a',
+          })
+        );
+        expect(result.success).toBe(true);
+      });
+
+      it('should parse char event with text', () => {
+        const result = parseCommand(
+          cmd({
+            id: '1',
+            action: 'input_keyboard',
+            type: 'char',
+            text: 'hello',
+          })
+        );
+        expect(result.success).toBe(true);
+        if (result.success) {
+          expect(result.command.text).toBe('hello');
+        }
+      });
+
+      it('should parse keyboard event with modifiers', () => {
+        const result = parseCommand(
+          cmd({
+            id: '1',
+            action: 'input_keyboard',
+            type: 'keyDown',
+            key: 'c',
+            modifiers: 2, // Ctrl
+          })
+        );
+        expect(result.success).toBe(true);
+        if (result.success) {
+          expect(result.command.modifiers).toBe(2);
+        }
+      });
+
+      it('should reject input_keyboard with invalid type', () => {
+        const result = parseCommand(
+          cmd({
+            id: '1',
+            action: 'input_keyboard',
+            type: 'invalid',
+          })
+        );
+        expect(result.success).toBe(false);
+      });
+    });
+
+    describe('input_touch', () => {
+      it('should parse touchStart event', () => {
+        const result = parseCommand(
+          cmd({
+            id: '1',
+            action: 'input_touch',
+            type: 'touchStart',
+            touchPoints: [{ x: 100, y: 200 }],
+          })
+        );
+        expect(result.success).toBe(true);
+        if (result.success) {
+          expect(result.command.action).toBe('input_touch');
+          expect(result.command.type).toBe('touchStart');
+          expect(result.command.touchPoints).toHaveLength(1);
+          expect(result.command.touchPoints[0].x).toBe(100);
+          expect(result.command.touchPoints[0].y).toBe(200);
+        }
+      });
+
+      it('should parse touchEnd event', () => {
+        const result = parseCommand(
+          cmd({
+            id: '1',
+            action: 'input_touch',
+            type: 'touchEnd',
+            touchPoints: [],
+          })
+        );
+        expect(result.success).toBe(true);
+      });
+
+      it('should parse touchMove event', () => {
+        const result = parseCommand(
+          cmd({
+            id: '1',
+            action: 'input_touch',
+            type: 'touchMove',
+            touchPoints: [{ x: 150, y: 250 }],
+          })
+        );
+        expect(result.success).toBe(true);
+      });
+
+      it('should parse touchCancel event', () => {
+        const result = parseCommand(
+          cmd({
+            id: '1',
+            action: 'input_touch',
+            type: 'touchCancel',
+            touchPoints: [],
+          })
+        );
+        expect(result.success).toBe(true);
+      });
+
+      it('should parse multi-touch event', () => {
+        const result = parseCommand(
+          cmd({
+            id: '1',
+            action: 'input_touch',
+            type: 'touchStart',
+            touchPoints: [
+              { x: 100, y: 200, id: 0 },
+              { x: 300, y: 400, id: 1 },
+            ],
+          })
+        );
+        expect(result.success).toBe(true);
+        if (result.success) {
+          expect(result.command.touchPoints).toHaveLength(2);
+        }
+      });
+
+      it('should parse touch event with modifiers', () => {
+        const result = parseCommand(
+          cmd({
+            id: '1',
+            action: 'input_touch',
+            type: 'touchStart',
+            touchPoints: [{ x: 100, y: 200 }],
+            modifiers: 8, // Shift
+          })
+        );
+        expect(result.success).toBe(true);
+        if (result.success) {
+          expect(result.command.modifiers).toBe(8);
+        }
+      });
+
+      it('should reject input_touch with invalid type', () => {
+        const result = parseCommand(
+          cmd({
+            id: '1',
+            action: 'input_touch',
+            type: 'invalid',
+            touchPoints: [],
+          })
+        );
+        expect(result.success).toBe(false);
+      });
+
+      it('should reject input_touch without touchPoints', () => {
+        const result = parseCommand(
+          cmd({
+            id: '1',
+            action: 'input_touch',
+            type: 'touchStart',
+          })
+        );
+        expect(result.success).toBe(false);
+      });
+    });
+  });
+
   describe('invalid commands', () => {
     it('should reject unknown action', () => {
       const result = parseCommand(cmd({ id: '1', action: 'unknown' }));

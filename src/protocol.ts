@@ -611,6 +611,55 @@ const responseBodySchema = baseCommandSchema.extend({
   timeout: z.number().positive().optional(),
 });
 
+// Screencast schemas for streaming browser viewport
+const screencastStartSchema = baseCommandSchema.extend({
+  action: z.literal('screencast_start'),
+  format: z.enum(['jpeg', 'png']).optional(),
+  quality: z.number().min(0).max(100).optional(),
+  maxWidth: z.number().positive().optional(),
+  maxHeight: z.number().positive().optional(),
+  everyNthFrame: z.number().positive().optional(),
+});
+
+const screencastStopSchema = baseCommandSchema.extend({
+  action: z.literal('screencast_stop'),
+});
+
+// Input injection schemas for pair browsing
+const inputMouseSchema = baseCommandSchema.extend({
+  action: z.literal('input_mouse'),
+  type: z.enum(['mousePressed', 'mouseReleased', 'mouseMoved', 'mouseWheel']),
+  x: z.number(),
+  y: z.number(),
+  button: z.enum(['left', 'right', 'middle', 'none']).optional(),
+  clickCount: z.number().positive().optional(),
+  deltaX: z.number().optional(),
+  deltaY: z.number().optional(),
+  modifiers: z.number().optional(),
+});
+
+const inputKeyboardSchema = baseCommandSchema.extend({
+  action: z.literal('input_keyboard'),
+  type: z.enum(['keyDown', 'keyUp', 'char']),
+  key: z.string().optional(),
+  code: z.string().optional(),
+  text: z.string().optional(),
+  modifiers: z.number().optional(),
+});
+
+const inputTouchSchema = baseCommandSchema.extend({
+  action: z.literal('input_touch'),
+  type: z.enum(['touchStart', 'touchEnd', 'touchMove', 'touchCancel']),
+  touchPoints: z.array(
+    z.object({
+      x: z.number(),
+      y: z.number(),
+      id: z.number().optional(),
+    })
+  ),
+  modifiers: z.number().optional(),
+});
+
 const pressSchema = baseCommandSchema.extend({
   action: z.literal('press'),
   key: z.string().min(1),
@@ -826,6 +875,11 @@ const commandSchema = z.discriminatedUnion('action', [
   multiSelectSchema,
   waitForDownloadSchema,
   responseBodySchema,
+  screencastStartSchema,
+  screencastStopSchema,
+  inputMouseSchema,
+  inputKeyboardSchema,
+  inputTouchSchema,
 ]);
 
 // Parse result type

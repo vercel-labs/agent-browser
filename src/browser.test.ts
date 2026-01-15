@@ -378,4 +378,256 @@ describe('BrowserManager', () => {
       await expect(browser.clearScopedHeaders('https://never-set.com')).resolves.not.toThrow();
     });
   });
+
+  describe('CDP session', () => {
+    it('should create CDP session on demand', async () => {
+      const cdp = await browser.getCDPSession();
+      expect(cdp).toBeDefined();
+    });
+
+    it('should reuse existing CDP session', async () => {
+      const cdp1 = await browser.getCDPSession();
+      const cdp2 = await browser.getCDPSession();
+      expect(cdp1).toBe(cdp2);
+    });
+  });
+
+  describe('screencast', () => {
+    it('should report screencasting state correctly', () => {
+      expect(browser.isScreencasting()).toBe(false);
+    });
+
+    it('should start screencast', async () => {
+      const frames: Array<{ data: string }> = [];
+      await browser.startScreencast((frame) => {
+        frames.push(frame);
+      });
+      expect(browser.isScreencasting()).toBe(true);
+
+      // Wait a bit for at least one frame
+      await new Promise((resolve) => setTimeout(resolve, 200));
+
+      await browser.stopScreencast();
+      expect(browser.isScreencasting()).toBe(false);
+      expect(frames.length).toBeGreaterThan(0);
+    });
+
+    it('should start screencast with custom options', async () => {
+      const frames: Array<{ data: string }> = [];
+      await browser.startScreencast(
+        (frame) => {
+          frames.push(frame);
+        },
+        {
+          format: 'png',
+          quality: 100,
+          maxWidth: 800,
+          maxHeight: 600,
+          everyNthFrame: 1,
+        }
+      );
+      expect(browser.isScreencasting()).toBe(true);
+
+      // Wait for a frame
+      await new Promise((resolve) => setTimeout(resolve, 200));
+
+      await browser.stopScreencast();
+      expect(frames.length).toBeGreaterThan(0);
+    });
+
+    it('should throw when starting screencast twice', async () => {
+      await browser.startScreencast(() => {});
+      await expect(browser.startScreencast(() => {})).rejects.toThrow('Screencast already active');
+      await browser.stopScreencast();
+    });
+
+    it('should handle stop when not screencasting', async () => {
+      // Should not throw
+      await expect(browser.stopScreencast()).resolves.not.toThrow();
+    });
+  });
+
+  describe('tab switch invalidates CDP session', () => {
+    // Clean up any extra tabs before each test
+    beforeEach(async () => {
+      // Close all tabs except the first one
+      const tabs = await browser.listTabs();
+      for (let i = tabs.length - 1; i > 0; i--) {
+        await browser.closeTab(i);
+      }
+      // Ensure we're on tab 0
+      await browser.switchTo(0);
+      // Stop any active screencast
+      if (browser.isScreencasting()) {
+        await browser.stopScreencast();
+      }
+    });
+
+    it('should not invalidate CDP when switching to same tab', async () => {
+      // Get CDP session for current tab
+      const cdp1 = await browser.getCDPSession();
+
+      // Switch to same tab - should NOT invalidate
+      await browser.switchTo(0);
+
+      // Should be the same session
+      const cdp2 = await browser.getCDPSession();
+      expect(cdp2).toBe(cdp1);
+    });
+
+    it('should invalidate CDP session on tab switch', async () => {
+      // Get CDP session for tab 0
+      const cdp1 = await browser.getCDPSession();
+      expect(cdp1).toBeDefined();
+
+      // Create new tab - this switches to the new tab automatically
+      await browser.newTab();
+
+      // Get CDP session - should be different since we're on a new page
+      const cdp2 = await browser.getCDPSession();
+      expect(cdp2).toBeDefined();
+
+      // Sessions should be different objects (different pages have different CDP sessions)
+      expect(cdp2).not.toBe(cdp1);
+    });
+
+    it('should stop screencast on tab switch', async () => {
+      // Start screencast on tab 0
+      await browser.startScreencast(() => {});
+      expect(browser.isScreencasting()).toBe(true);
+
+      // Create new tab and switch
+      await browser.newTab();
+      await browser.switchTo(1);
+
+      // Screencast should be stopped (it's page-specific)
+      expect(browser.isScreencasting()).toBe(false);
+    });
+  });
+
+  describe('input injection', () => {
+    it('should inject mouse move event', async () => {
+      await expect(
+        browser.injectMouseEvent({
+          type: 'mouseMoved',
+          x: 100,
+          y: 100,
+        })
+      ).resolves.not.toThrow();
+    });
+
+    it('should inject mouse click events', async () => {
+      await expect(
+        browser.injectMouseEvent({
+          type: 'mousePressed',
+          x: 100,
+          y: 100,
+          button: 'left',
+          clickCount: 1,
+        })
+      ).resolves.not.toThrow();
+
+      await expect(
+        browser.injectMouseEvent({
+          type: 'mouseReleased',
+          x: 100,
+          y: 100,
+          button: 'left',
+        })
+      ).resolves.not.toThrow();
+    });
+
+    it('should inject mouse wheel event', async () => {
+      await expect(
+        browser.injectMouseEvent({
+          type: 'mouseWheel',
+          x: 100,
+          y: 100,
+          deltaX: 0,
+          deltaY: 100,
+        })
+      ).resolves.not.toThrow();
+    });
+
+    it('should inject keyboard events', async () => {
+      await expect(
+        browser.injectKeyboardEvent({
+          type: 'keyDown',
+          key: 'a',
+          code: 'KeyA',
+        })
+      ).resolves.not.toThrow();
+
+      await expect(
+        browser.injectKeyboardEvent({
+          type: 'keyUp',
+          key: 'a',
+          code: 'KeyA',
+        })
+      ).resolves.not.toThrow();
+    });
+
+    it('should inject char event', async () => {
+      // CDP char events only accept single characters
+      await expect(
+        browser.injectKeyboardEvent({
+          type: 'char',
+          text: 'h',
+        })
+      ).resolves.not.toThrow();
+    });
+
+    it('should inject keyboard with modifiers', async () => {
+      await expect(
+        browser.injectKeyboardEvent({
+          type: 'keyDown',
+          key: 'c',
+          code: 'KeyC',
+          modifiers: 2, // Ctrl
+        })
+      ).resolves.not.toThrow();
+    });
+
+    it('should inject touch events', async () => {
+      await expect(
+        browser.injectTouchEvent({
+          type: 'touchStart',
+          touchPoints: [{ x: 100, y: 100 }],
+        })
+      ).resolves.not.toThrow();
+
+      await expect(
+        browser.injectTouchEvent({
+          type: 'touchMove',
+          touchPoints: [{ x: 150, y: 150 }],
+        })
+      ).resolves.not.toThrow();
+
+      await expect(
+        browser.injectTouchEvent({
+          type: 'touchEnd',
+          touchPoints: [],
+        })
+      ).resolves.not.toThrow();
+    });
+
+    it('should inject multi-touch events', async () => {
+      await expect(
+        browser.injectTouchEvent({
+          type: 'touchStart',
+          touchPoints: [
+            { x: 100, y: 100, id: 0 },
+            { x: 200, y: 200, id: 1 },
+          ],
+        })
+      ).resolves.not.toThrow();
+
+      await expect(
+        browser.injectTouchEvent({
+          type: 'touchEnd',
+          touchPoints: [],
+        })
+      ).resolves.not.toThrow();
+    });
+  });
 });

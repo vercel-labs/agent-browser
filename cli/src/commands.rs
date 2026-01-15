@@ -1000,6 +1000,7 @@ mod tests {
             debug: false,
             headers: None,
             executable_path: None,
+            extensions: Vec::new(),
             cdp: None,
             session_name: None,
         }

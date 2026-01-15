@@ -1287,11 +1287,17 @@ Options:
   --session-name <name>      Auto-save/load auth state (or AGENT_BROWSER_SESSION_NAME env)
   --headers <json>           HTTP headers scoped to URL's origin (for auth)
   --executable-path <path>   Custom browser executable (or AGENT_BROWSER_EXECUTABLE_PATH)
+  --extension <path>         Load browser extensions (repeatable).
   --json                     JSON output
   --full, -f                 Full page screenshot
   --headed                   Show browser window (not headless)
   --cdp <port>               Connect via CDP (Chrome DevTools Protocol)
   --debug                    Debug output
+
+Environment:
+  AGENT_BROWSER_SESSION          Session name (default: "default")
+  AGENT_BROWSER_EXECUTABLE_PATH  Custom browser executable path
+  AGENT_BROWSER_STREAM_PORT      Enable WebSocket streaming on port (e.g., 9223)
 
 Examples:
   agent-browser open example.com

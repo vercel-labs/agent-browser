@@ -162,9 +162,16 @@ pub struct DaemonResult {
     pub already_running: bool,
 }
 
-pub fn ensure_daemon(session: &str, headed: bool, executable_path: Option<&str>, session_name: Option<&str>) -> Result<DaemonResult, String> {
+pub fn ensure_daemon(
+    session: &str,
+    headed: bool,
+    executable_path: Option<&str>,
+    extensions: &[String],
+) -> Result<DaemonResult, String> {
     if is_daemon_running(session) && daemon_ready(session) {
-        return Ok(DaemonResult { already_running: true });
+        return Ok(DaemonResult {
+            already_running: true,
+        });
     }
 
     let exe_path = env::current_exe().map_err(|e| e.to_string())?;
