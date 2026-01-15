@@ -141,3 +141,20 @@ agent-browser open example.com --headed  # Show browser window
 agent-browser console                    # View console messages
 agent-browser errors                     # View page errors
 ```
+
+## Playwriter mode (browser extension)
+
+Control your existing Chrome browser instead of launching a new one using [playwriter](https://playwriter.dev):
+
+1. Install the [playwriter extension](https://chromewebstore.google.com/detail/playwriter-mcp/jfeammnjpkecdekppnclgkkffahnhfhe)
+2. Click the extension icon on tabs you want to control (icon turns green)
+3. Start the relay server: `npx playwriter serve --host 127.0.0.1`
+4. Use `--cdp 19988`:
+
+```bash
+agent-browser --cdp 19988 snapshot
+agent-browser --cdp 19988 click @e1
+agent-browser --cdp 19988 fill @e2 "text"
+```
+
+Benefits: automate pages you're already on, no browser window jumping, reuse existing extensions, bypass bot detection by disconnecting temporarily.
