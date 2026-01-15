@@ -243,10 +243,14 @@ fn main() {
         }
     }
 
-    match send_command(cmd, &flags.session) {
+    match send_command(cmd.clone(), &flags.session) {
         Ok(resp) => {
             let success = resp.success;
-            print_response(&resp, flags.json);
+            // Extract action for context-specific output handling
+            let action = cmd
+                .get("action")
+                .and_then(|v| v.as_str());
+            print_response(&resp, flags.json, action);
             if !success {
                 exit(1);
             }
