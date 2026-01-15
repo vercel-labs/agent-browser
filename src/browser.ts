@@ -713,8 +713,19 @@ export class BrowserManager {
     }
 
     // Build CDP endpoint URL
-    // If it's a number, assume localhost; if it's a string, use it as-is (should be a full URL)
-    const cdpUrl = typeof cdpPort === 'number' ? `http://localhost:${cdpPort}` : cdpPort;
+    // If it's a number, assume localhost
+    // If it's a numeric string (e.g., "9222"), treat it as a port and use localhost
+    // If it's a string starting with http://, https://, ws://, or wss://, use it as-is
+    let cdpUrl: string;
+    if (typeof cdpPort === 'number') {
+      cdpUrl = `http://localhost:${cdpPort}`;
+    } else if (/^\d+$/.test(cdpPort)) {
+      // Numeric string - treat as port number
+      cdpUrl = `http://localhost:${cdpPort}`;
+    } else {
+      // Full URL string - use as-is
+      cdpUrl = cdpPort;
+    }
 
     const browser = await chromium.connectOverCDP(cdpUrl).catch((err) => {
       throw new Error(
