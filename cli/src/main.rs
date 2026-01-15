@@ -174,42 +174,52 @@ fn main() {
     }
 
     // Connect via CDP if --cdp flag is set
-    if let Some(ref port) = flags.cdp {
-        let cdp_port: u16 = match port.parse::<u32>() {
-            Ok(p) if p == 0 => {
-                let msg = "Invalid CDP port: port must be greater than 0".to_string();
-                if flags.json {
-                    println!(r#"{{"success":false,"error":"{}"}}"#, msg);
-                } else {
-                    eprintln!("\x1b[31m✗\x1b[0m {}", msg);
+    if let Some(ref cdp_value) = flags.cdp {
+        // Check if it's a URL (starts with http://, https://, ws://, or wss://) or a port number
+        let cdp_param: serde_json::Value = if cdp_value.starts_with("http://") 
+            || cdp_value.starts_with("https://")
+            || cdp_value.starts_with("ws://")
+            || cdp_value.starts_with("wss://") {
+            // It's a full URL - use as string
+            json!(cdp_value)
+        } else {
+            // Try to parse as port number
+            match cdp_value.parse::<u32>() {
+                Ok(p) if p == 0 => {
+                    let msg = "Invalid CDP port: port must be greater than 0".to_string();
+                    if flags.json {
+                        println!(r#"{{"success":false,"error":"{}"}}"#, msg);
+                    } else {
+                        eprintln!("\x1b[31m✗\x1b[0m {}", msg);
+                    }
+                    exit(1);
                 }
-                exit(1);
-            }
-            Ok(p) if p > 65535 => {
-                let msg = format!("Invalid CDP port: {} is out of range (valid range: 1-65535)", p);
-                if flags.json {
-                    println!(r#"{{"success":false,"error":"{}"}}"#, msg);
-                } else {
-                    eprintln!("\x1b[31m✗\x1b[0m {}", msg);
+                Ok(p) if p > 65535 => {
+                    let msg = format!("Invalid CDP port: {} is out of range (valid range: 1-65535)", p);
+                    if flags.json {
+                        println!(r#"{{"success":false,"error":"{}"}}"#, msg);
+                    } else {
+                        eprintln!("\x1b[31m✗\x1b[0m {}", msg);
+                    }
+                    exit(1);
                 }
-                exit(1);
-            }
-            Ok(p) => p as u16,
-            Err(_) => {
-                let msg = format!("Invalid CDP port: '{}' is not a valid number. Port must be a number between 1 and 65535", port);
-                if flags.json {
-                    println!(r#"{{"success":false,"error":"{}"}}"#, msg);
-                } else {
-                    eprintln!("\x1b[31m✗\x1b[0m {}", msg);
+                Ok(p) => json!(p as u16),
+                Err(_) => {
+                    let msg = format!("Invalid CDP value: '{}'. Must be a port number (1-65535) or a full URL (http://host:port, https://host:port, ws://host:port, or wss://host:port)", cdp_value);
+                    if flags.json {
+                        println!(r#"{{"success":false,"error":"{}"}}"#, msg);
+                    } else {
+                        eprintln!("\x1b[31m✗\x1b[0m {}", msg);
+                    }
+                    exit(1);
                 }
-                exit(1);
             }
         };
 
         let launch_cmd = json!({
             "id": gen_id(),
             "action": "launch",
-            "cdpPort": cdp_port
+            "cdpPort": cdp_param
         });
 
         let err = match send_command(launch_cmd, &flags.session) {

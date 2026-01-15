@@ -14,7 +14,7 @@ export interface LaunchCommand extends BaseCommand {
   browser?: 'chromium' | 'firefox' | 'webkit';
   headers?: Record<string, string>;
   executablePath?: string;
-  cdpPort?: number;
+  cdpPort?: number | string; // Support both port number and full CDP URL
   extensions?: string[];
 }
 

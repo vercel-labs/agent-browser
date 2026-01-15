@@ -18,7 +18,36 @@ const launchSchema = baseCommandSchema.extend({
     })
     .optional(),
   browser: z.enum(['chromium', 'firefox', 'webkit']).optional(),
-  cdpPort: z.number().positive().optional(),
+  cdpPort: z
+    .union([
+      z.number().positive(),
+      z.string().refine(
+        (val) => {
+          // Accept port numbers as strings, or full URLs
+          if (/^\d+$/.test(val)) {
+            const port = parseInt(val, 10);
+            return port > 0 && port <= 65535;
+          }
+          // Check if it's a valid URL (HTTP, HTTPS, WS, or WSS)
+          try {
+            const url = new URL(val);
+            return (
+              url.protocol === 'http:' ||
+              url.protocol === 'https:' ||
+              url.protocol === 'ws:' ||
+              url.protocol === 'wss:'
+            );
+          } catch {
+            return false;
+          }
+        },
+        {
+          message:
+            'Must be a port number (1-65535) or a valid URL (http://, https://, ws://, or wss://)',
+        }
+      ),
+    ])
+    .optional(),
 });
 
 const navigateSchema = baseCommandSchema.extend({

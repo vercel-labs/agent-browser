@@ -66,7 +66,7 @@ interface PageError {
  */
 export class BrowserManager {
   private browser: Browser | null = null;
-  private cdpPort: number | null = null;
+  private cdpPort: number | string | null = null;
   private isPersistentContext: boolean = false;
   private contexts: BrowserContext[] = [];
   private pages: Page[] = [];
@@ -627,7 +627,7 @@ export class BrowserManager {
   /**
    * Check if CDP connection needs to be re-established
    */
-  private needsCdpReconnect(cdpPort: number): boolean {
+  private needsCdpReconnect(cdpPort: number | string): boolean {
     if (!this.browser?.isConnected()) return true;
     if (this.cdpPort !== cdpPort) return true;
     if (!this.isCdpConnectionAlive()) return true;
@@ -705,16 +705,23 @@ export class BrowserManager {
 
   /**
    * Connect to a running browser via CDP (Chrome DevTools Protocol)
+   * Supports both local (port number) and remote (full URL) connections
    */
-  private async connectViaCDP(cdpPort: number | undefined): Promise<void> {
+  private async connectViaCDP(cdpPort: number | string | undefined): Promise<void> {
     if (!cdpPort) {
       throw new Error('cdpPort is required for CDP connection');
     }
 
-    const browser = await chromium.connectOverCDP(`http://localhost:${cdpPort}`).catch(() => {
+    // Build CDP endpoint URL
+    // If it's a number, assume localhost; if it's a string, use it as-is (should be a full URL)
+    const cdpUrl = typeof cdpPort === 'number' ? `http://localhost:${cdpPort}` : cdpPort;
+
+    const browser = await chromium.connectOverCDP(cdpUrl).catch((err) => {
       throw new Error(
-        `Failed to connect via CDP on port ${cdpPort}. ` +
-          `Make sure the app is running with --remote-debugging-port=${cdpPort}`
+        `Failed to connect via CDP to ${cdpUrl}. ` +
+          (typeof cdpPort === 'number'
+            ? `Make sure the app is running with --remote-debugging-port=${cdpPort}`
+            : `Make sure the CDP endpoint is accessible and the browser is running with remote debugging enabled`)
       );
     });
 
