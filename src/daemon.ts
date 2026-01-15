@@ -5,7 +5,15 @@ import * as os from 'os';
 import { BrowserManager } from './browser.js';
 import { parseCommand, serializeResponse, errorResponse } from './protocol.js';
 import { executeCommand } from './actions.js';
-import { StreamServer } from './stream-server.js';
+import {
+  getSessionsDir,
+  ensureSessionsDir,
+  getEncryptionKey,
+  encryptData,
+  isEncryptedPayload,
+  decryptData,
+  ENCRYPTION_KEY_ENV,
+} from './state-utils.js';
 
 // Platform detection
 const isWindows = process.platform === 'win32';
@@ -18,6 +26,129 @@ let streamServer: StreamServer | null = null;
 
 // Default stream port (can be overridden with AGENT_BROWSER_STREAM_PORT)
 const DEFAULT_STREAM_PORT = 9223;
+
+/**
+ * Save state to file with optional encryption.
+ */
+async function saveStateToFile(
+  browser: BrowserManager,
+  filepath: string
+): Promise<{ encrypted: boolean }> {
+  // First get the storage state from Playwright
+  const context = browser.getContext();
+  if (!context) {
+    throw new Error('No browser context available');
+  }
+
+  const state = await context.storageState();
+  const jsonData = JSON.stringify(state, null, 2);
+
+  const key = getEncryptionKey();
+  if (key) {
+    const encrypted = encryptData(jsonData, key);
+    fs.writeFileSync(filepath, JSON.stringify(encrypted, null, 2));
+    return { encrypted: true };
+  }
+
+  fs.writeFileSync(filepath, jsonData);
+  return { encrypted: false };
+}
+
+/**
+ * Load state from file with automatic decryption.
+ */
+function loadStateFromFile(filepath: string): object {
+  const content = fs.readFileSync(filepath, 'utf-8');
+  const parsed = JSON.parse(content);
+
+  if (isEncryptedPayload(parsed)) {
+    const key = getEncryptionKey();
+    if (!key) {
+      throw new Error(
+        `State file is encrypted but ${ENCRYPTION_KEY_ENV} is not set. ` +
+          `Set the environment variable to decrypt.`
+      );
+    }
+    const decrypted = decryptData(parsed, key);
+    return JSON.parse(decrypted);
+  }
+
+  return parsed;
+}
+
+/**
+ * Get the auto-save state file path for current session
+ * Pattern: {SESSION_NAME}-{SESSION_ID}.json
+ */
+function getAutoStateFilePath(sessionName: string, sessionId: string): string | null {
+  if (!sessionName) return null;
+  const sessionsDir = ensureSessionsDir();
+  return path.join(sessionsDir, `${sessionName}-${sessionId}.json`);
+}
+
+/**
+ * Check if auto-state file exists
+ */
+function autoStateFileExists(sessionName: string, sessionId: string): boolean {
+  const filePath = getAutoStateFilePath(sessionName, sessionId);
+  return filePath ? fs.existsSync(filePath) : false;
+}
+
+// Auto-expiration configuration
+const AUTO_EXPIRE_ENV = 'AGENT_BROWSER_STATE_EXPIRE_DAYS';
+const DEFAULT_EXPIRE_DAYS = 30;
+
+/**
+ * Clean up expired state files (files older than N days).
+ * Called on daemon startup.
+ */
+function cleanupExpiredStates(): void {
+  const expireDaysStr = process.env[AUTO_EXPIRE_ENV];
+  const expireDays = expireDaysStr ? parseInt(expireDaysStr, 10) : DEFAULT_EXPIRE_DAYS;
+
+  // Skip if set to 0 or negative (disabled)
+  if (isNaN(expireDays) || expireDays <= 0) {
+    return;
+  }
+
+  const sessionsDir = getSessionsDir();
+  if (!fs.existsSync(sessionsDir)) {
+    return;
+  }
+
+  const now = Date.now();
+  const maxAge = expireDays * 24 * 60 * 60 * 1000;
+  let deletedCount = 0;
+
+  try {
+    const files = fs.readdirSync(sessionsDir).filter((f) => f.endsWith('.json'));
+
+    for (const file of files) {
+      const filepath = path.join(sessionsDir, file);
+      try {
+        const stats = fs.statSync(filepath);
+        const age = now - stats.mtime.getTime();
+
+        if (age > maxAge) {
+          fs.unlinkSync(filepath);
+          deletedCount++;
+        }
+      } catch {
+        // Ignore individual file errors
+      }
+    }
+
+    if (deletedCount > 0 && process.env.AGENT_BROWSER_DEBUG === '1') {
+      console.error(
+        `[DEBUG] Auto-expired ${deletedCount} state file(s) older than ${expireDays} days`
+      );
+    }
+  } catch (err) {
+    if (process.env.AGENT_BROWSER_DEBUG === '1') {
+      console.error(`[DEBUG] Failed to clean up expired states:`, err);
+    }
+  }
+}
 
 /**
  * Set the current session
@@ -144,6 +275,9 @@ export async function startDaemon(options?: { streamPort?: number }): Promise<vo
   // Clean up any stale socket
   cleanupSocket();
 
+  // Clean up expired state files on startup
+  cleanupExpiredStates();
+
   const browser = new BrowserManager();
   let shuttingDown = false;
 
@@ -170,10 +304,11 @@ export async function startDaemon(options?: { streamPort?: number }): Promise<vo
       buffer += data.toString();
 
       // Process complete lines
-      while (buffer.includes('\n')) {
-        const newlineIdx = buffer.indexOf('\n');
-        const line = buffer.substring(0, newlineIdx);
-        buffer = buffer.substring(newlineIdx + 1);
+      // Use indexOf directly instead of includes() + indexOf() to avoid double scan
+      let newlineIdx: number;
+      while ((newlineIdx = buffer.indexOf('\n')) !== -1) {
+        const line = buffer.slice(0, newlineIdx);
+        buffer = buffer.slice(newlineIdx + 1);
 
         if (!line.trim()) continue;
 
@@ -192,22 +327,63 @@ export async function startDaemon(options?: { streamPort?: number }): Promise<vo
             parseResult.command.action !== 'launch' &&
             parseResult.command.action !== 'close'
           ) {
-            const extensions = process.env.AGENT_BROWSER_EXTENSIONS
-              ? process.env.AGENT_BROWSER_EXTENSIONS.split(',')
-                  .map((p) => p.trim())
-                  .filter(Boolean)
+            // Check for auto-load state
+            const sessionName = process.env.AGENT_BROWSER_SESSION_NAME;
+            const sessionId = process.env.AGENT_BROWSER_SESSION || 'default';
+            const autoStatePath = sessionName
+              ? getAutoStateFilePath(sessionName, sessionId)
               : undefined;
+
             await browser.launch({
               id: 'auto',
               action: 'launch',
               headless: true,
               executablePath: process.env.AGENT_BROWSER_EXECUTABLE_PATH,
-              extensions: extensions,
+              autoStateFilePath:
+                autoStatePath && fs.existsSync(autoStatePath) ? autoStatePath : undefined,
             });
+          }
+
+          // Handle explicit launch with auto-load state
+          if (parseResult.command.action === 'launch') {
+            const sessionName = process.env.AGENT_BROWSER_SESSION_NAME;
+            const sessionId = process.env.AGENT_BROWSER_SESSION || 'default';
+
+            if (sessionName && !parseResult.command.autoStateFilePath) {
+              const autoStatePath = getAutoStateFilePath(sessionName, sessionId);
+              if (autoStatePath && fs.existsSync(autoStatePath)) {
+                parseResult.command.autoStateFilePath = autoStatePath;
+              }
+            }
           }
 
           // Handle close command specially
           if (parseResult.command.action === 'close') {
+            // Auto-save state before closing
+            const sessionName = process.env.AGENT_BROWSER_SESSION_NAME;
+            const sessionId = process.env.AGENT_BROWSER_SESSION || 'default';
+
+            if (sessionName && browser.isLaunched()) {
+              const autoStatePath = getAutoStateFilePath(sessionName, sessionId);
+              if (autoStatePath) {
+                try {
+                  const { encrypted } = await saveStateToFile(browser, autoStatePath);
+                  // Set file permissions to owner read/write only (0o600)
+                  fs.chmodSync(autoStatePath, 0o600);
+                  if (process.env.AGENT_BROWSER_DEBUG === '1') {
+                    console.error(
+                      `Auto-saved session state: ${autoStatePath}${encrypted ? ' (encrypted)' : ''}`
+                    );
+                  }
+                } catch (err) {
+                  // Non-blocking: don't fail close if save fails
+                  if (process.env.AGENT_BROWSER_DEBUG === '1') {
+                    console.error(`Failed to auto-save session state:`, err);
+                  }
+                }
+              }
+            }
+
             const response = await executeCommand(parseResult.command, browser);
             socket.write(serializeResponse(response) + '\n');
 
@@ -223,6 +399,13 @@ export async function startDaemon(options?: { streamPort?: number }): Promise<vo
           }
 
           const response = await executeCommand(parseResult.command, browser);
+
+          // Add any launch warnings to the response
+          const warnings = browser.getAndClearWarnings();
+          if (warnings.length > 0 && response.success && response.data) {
+            (response.data as Record<string, unknown>).warnings = warnings;
+          }
+
           socket.write(serializeResponse(response) + '\n');
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);

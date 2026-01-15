@@ -107,9 +107,17 @@ agent-browser frame main              # Back to main frame`} />
 agent-browser trace stop [path]       # Stop and save trace
 agent-browser console                 # View console messages
 agent-browser errors                  # View page errors
-agent-browser highlight <sel>         # Highlight element
-agent-browser state save <path>       # Save auth state
-agent-browser state load <path>       # Load auth state`} />
+agent-browser highlight <sel>         # Highlight element`} />
+
+        <h2>State management</h2>
+        <CodeBlock code={`agent-browser state save <path>       # Save auth state to file
+agent-browser state load <path>       # Load auth state from file
+agent-browser state list              # List saved state files
+agent-browser state show <file>       # Show state summary
+agent-browser state rename <old> <new> # Rename state file
+agent-browser state clear [name]      # Clear states for session name
+agent-browser state clear --all       # Clear all saved states
+agent-browser state clean --older-than <days>  # Delete old states`} />
 
         <h2>Navigation</h2>
         <CodeBlock code={`agent-browser back                    # Go back

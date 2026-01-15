@@ -98,11 +98,14 @@ fn get_port_path(session: &str) -> PathBuf {
     tmp.join(format!("agent-browser-{}.port", session))
 }
 
+/// Hash a session name to a port number in the dynamic port range (49152-65535).
+/// Uses bytes() instead of chars() for performance since session names are ASCII.
 #[cfg(windows)]
+#[inline]
 fn get_port_for_session(session: &str) -> u16 {
     let mut hash: i32 = 0;
-    for c in session.chars() {
-        hash = ((hash << 5).wrapping_sub(hash)).wrapping_add(c as i32);
+    for b in session.bytes() {
+        hash = ((hash << 5).wrapping_sub(hash)).wrapping_add(b as i32);
     }
     49152 + ((hash.abs() as u16) % 16383)
 }
@@ -203,8 +206,18 @@ pub fn ensure_daemon(
             cmd.env("AGENT_BROWSER_EXECUTABLE_PATH", path);
         }
 
-        if !extensions.is_empty() {
-            cmd.env("AGENT_BROWSER_EXTENSIONS", extensions.join(","));
+        if let Some(name) = session_name {
+            cmd.env("AGENT_BROWSER_SESSION_NAME", name);
+        }
+
+        // Forward encryption key if set
+        if let Ok(key) = env::var("AGENT_BROWSER_ENCRYPTION_KEY") {
+            cmd.env("AGENT_BROWSER_ENCRYPTION_KEY", key);
+        }
+
+        // Forward debug flag if set
+        if let Ok(debug) = env::var("AGENT_BROWSER_DEBUG") {
+            cmd.env("AGENT_BROWSER_DEBUG", debug);
         }
 
         // Create new process group and session to fully detach
@@ -245,8 +258,18 @@ pub fn ensure_daemon(
             cmd.env("AGENT_BROWSER_EXECUTABLE_PATH", path);
         }
 
-        if !extensions.is_empty() {
-            cmd.env("AGENT_BROWSER_EXTENSIONS", extensions.join(","));
+        if let Some(name) = session_name {
+            cmd.env("AGENT_BROWSER_SESSION_NAME", name);
+        }
+
+        // Forward encryption key if set
+        if let Ok(key) = env::var("AGENT_BROWSER_ENCRYPTION_KEY") {
+            cmd.env("AGENT_BROWSER_ENCRYPTION_KEY", key);
+        }
+
+        // Forward debug flag if set
+        if let Ok(debug) = env::var("AGENT_BROWSER_DEBUG") {
+            cmd.env("AGENT_BROWSER_DEBUG", debug);
         }
 
         // CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS

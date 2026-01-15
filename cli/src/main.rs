@@ -3,6 +3,7 @@ mod connection;
 mod flags;
 mod install;
 mod output;
+mod validation;
 
 use serde_json::json;
 use std::env;
@@ -95,8 +96,22 @@ fn run_session(args: &[String], session: &str, json_mode: bool) {
 
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
-    let flags = parse_flags(&args);
+    let parsed = parse_flags(&args);
+    let flags = parsed.flags;
     let clean = clean_args(&args);
+
+    // Report any validation errors and exit
+    if !parsed.errors.is_empty() {
+        for error in &parsed.errors {
+            eprintln!("\x1b[31m✗\x1b[0m {}", error);
+        }
+        exit(1);
+    }
+
+    // Export session_name to environment for daemon to pick up
+    if let Some(ref name) = flags.session_name {
+        env::set_var("AGENT_BROWSER_SESSION_NAME", name);
+    }
 
     let has_help = args.iter().any(|a| a == "--help" || a == "-h");
 
@@ -136,6 +151,7 @@ fn main() {
                     ParseError::UnknownCommand { .. } => "unknown_command",
                     ParseError::UnknownSubcommand { .. } => "unknown_subcommand",
                     ParseError::MissingArguments { .. } => "missing_arguments",
+                    ParseError::InvalidSessionName { .. } => "invalid_session_name",
                 };
                 println!(
                     r#"{{"success":false,"error":"{}","type":"{}"}}"#,
@@ -149,7 +165,7 @@ fn main() {
         }
     };
 
-    let daemon_result = match ensure_daemon(&flags.session, flags.headed, flags.executable_path.as_deref(), &flags.extensions) {
+    let daemon_result = match ensure_daemon(&flags.session, flags.headed, flags.executable_path.as_deref(), flags.session_name.as_deref()) {
         Ok(result) => result,
         Err(e) => {
             if flags.json {

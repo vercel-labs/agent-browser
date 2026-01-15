@@ -15,7 +15,8 @@ export interface LaunchCommand extends BaseCommand {
   headers?: Record<string, string>;
   executablePath?: string;
   cdpPort?: number;
-  extensions?: string[];
+  // Auto-load state file for session persistence
+  autoStateFilePath?: string;
 }
 
 export interface NavigateCommand extends BaseCommand {
@@ -545,6 +546,33 @@ export interface StorageStateLoadCommand extends BaseCommand {
   path: string;
 }
 
+// State management commands (v2)
+export interface StateListCommand extends BaseCommand {
+  action: 'state_list';
+}
+
+export interface StateClearCommand extends BaseCommand {
+  action: 'state_clear';
+  sessionName?: string; // Optional: clear specific session, otherwise current
+  all?: boolean; // Clear all sessions
+}
+
+export interface StateShowCommand extends BaseCommand {
+  action: 'state_show';
+  filename: string;
+}
+
+export interface StateCleanCommand extends BaseCommand {
+  action: 'state_clean';
+  days: number; // Delete states older than N days
+}
+
+export interface StateRenameCommand extends BaseCommand {
+  action: 'state_rename';
+  oldName: string; // Current filename (without .json extension)
+  newName: string; // New filename (without .json extension)
+}
+
 // Console logs
 export interface ConsoleCommand extends BaseCommand {
   action: 'console';
@@ -841,6 +869,11 @@ export type Command =
   | HarStopCommand
   | StorageStateSaveCommand
   | StorageStateLoadCommand
+  | StateListCommand
+  | StateClearCommand
+  | StateShowCommand
+  | StateCleanCommand
+  | StateRenameCommand
   | ConsoleCommand
   | ErrorsCommand
   | KeyboardCommand

@@ -14,6 +14,17 @@ pub fn print_response(resp: &Response, json_mode: bool) {
         return;
     }
 
+    // Print any warnings first (e.g., decryption failures)
+    if let Some(data) = &resp.data {
+        if let Some(warnings) = data.get("warnings").and_then(|v| v.as_array()) {
+            for warning in warnings {
+                if let Some(msg) = warning.as_str() {
+                    eprintln!("\x1b[33m⚠\x1b[0m {}", msg);
+                }
+            }
+        }
+    }
+
     if let Some(data) = &resp.data {
         // Navigation response
         if let Some(url) = data.get("url").and_then(|v| v.as_str()) {
@@ -135,9 +146,81 @@ pub fn print_response(resp: &Response, json_mode: bool) {
             println!("\x1b[32m✓\x1b[0m Browser closed");
             return;
         }
+        // State show (check before generic path check)
+        if let Some(summary) = data.get("summary") {
+            if let Some(filename) = data.get("filename").and_then(|v| v.as_str()) {
+                println!("\x1b[1m{}\x1b[0m", filename);
+            }
+            let cookies = summary.get("cookiesCount").and_then(|v| v.as_i64()).unwrap_or(0);
+            let origins = summary.get("originsCount").and_then(|v| v.as_i64()).unwrap_or(0);
+            println!("  Cookies: {}", cookies);
+            println!("  Origins: {}", origins);
+            if let Some(domains) = summary.get("domains").and_then(|v| v.as_array()) {
+                let domain_strs: Vec<&str> = domains
+                    .iter()
+                    .filter_map(|d| d.as_str())
+                    .collect();
+                if !domain_strs.is_empty() {
+                    println!("  Domains: {}", domain_strs.join(", "));
+                }
+            }
+            return;
+        }
         // Screenshot path
         if let Some(path) = data.get("path").and_then(|v| v.as_str()) {
             println!("\x1b[32m✓\x1b[0m Screenshot saved to {}", path);
+            return;
+        }
+        // State list
+        if let Some(files) = data.get("files").and_then(|v| v.as_array()) {
+            if let Some(dir) = data.get("directory").and_then(|v| v.as_str()) {
+                println!("\x1b[1mSaved states in {}\x1b[0m", dir);
+            }
+            if files.is_empty() {
+                println!("\x1b[2m  No state files found\x1b[0m");
+            } else {
+                for file in files {
+                    let filename = file.get("filename").and_then(|v| v.as_str()).unwrap_or("");
+                    let size = file.get("size").and_then(|v| v.as_i64()).unwrap_or(0);
+                    let modified = file.get("modified").and_then(|v| v.as_str()).unwrap_or("");
+                    let encrypted = file.get("encrypted").and_then(|v| v.as_bool()).unwrap_or(false);
+                    // Format size
+                    let size_str = if size > 1024 {
+                        format!("{:.1}KB", size as f64 / 1024.0)
+                    } else {
+                        format!("{}B", size)
+                    };
+                    // Format date (just show date part)
+                    let date_str = modified.split('T').next().unwrap_or(modified);
+                    // Show lock icon if encrypted
+                    let enc_str = if encrypted { " [encrypted]" } else { "" };
+                    println!("  {} \x1b[2m({}, {}){}\x1b[0m", filename, size_str, date_str, enc_str);
+                }
+            }
+            return;
+        }
+        // State rename
+        if let Some(true) = data.get("renamed").and_then(|v| v.as_bool()) {
+            let old_name = data.get("oldName").and_then(|v| v.as_str()).unwrap_or("");
+            let new_name = data.get("newName").and_then(|v| v.as_str()).unwrap_or("");
+            println!("\x1b[32m✓\x1b[0m Renamed {} -> {}", old_name, new_name);
+            return;
+        }
+        // State clear / clean
+        if let Some(deleted) = data.get("deleted").and_then(|v| v.as_array()) {
+            if deleted.is_empty() {
+                println!("\x1b[32m✓\x1b[0m No files deleted");
+            } else {
+                println!("\x1b[32m✓\x1b[0m Deleted {} file(s):", deleted.len());
+                for file in deleted {
+                    if let Some(name) = file.as_str() {
+                        println!("  - {}", name);
+                    }
+                }
+            }
+            if let Some(kept) = data.get("keptCount").and_then(|v| v.as_i64()) {
+                println!("\x1b[2m  {} file(s) kept\x1b[0m", kept);
+            }
             return;
         }
         // Default success
@@ -1173,6 +1256,18 @@ Debug:
   errors [--clear]           View page errors
   highlight <sel>            Highlight element
 
+State Management:
+  state list                 List saved state files
+  state show <file>          Show state file details
+  state clear [name]         Clear states for session name
+  state clear --all          Clear all saved states
+  state clean --older-than <days>  Delete old state files
+  state rename <old> <new>   Rename a state file
+
+Environment Variables:
+  AGENT_BROWSER_ENCRYPTION_KEY     64-char hex key for state encryption (AES-256-GCM)
+  AGENT_BROWSER_STATE_EXPIRE_DAYS  Auto-delete states older than N days (default: 30)
+
 Sessions:
   session                    Show current session name
   session list               List active sessions
@@ -1189,6 +1284,7 @@ Snapshot Options:
 
 Options:
   --session <name>           Isolated session (or AGENT_BROWSER_SESSION env)
+  --session-name <name>      Auto-save/load auth state (or AGENT_BROWSER_SESSION_NAME env)
   --headers <json>           HTTP headers scoped to URL's origin (for auth)
   --executable-path <path>   Custom browser executable (or AGENT_BROWSER_EXECUTABLE_PATH)
   --extension <path>         Load browser extensions (repeatable).
@@ -1211,6 +1307,7 @@ Examples:
   agent-browser find role button click --name Submit
   agent-browser get text @e1
   agent-browser screenshot --full
+  agent-browser --session-name twitter open twitter.com --headed  # Auto-save auth
   agent-browser --cdp 9222 snapshot      # Connect via CDP port
 "#
     );

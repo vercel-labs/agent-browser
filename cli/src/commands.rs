@@ -1,6 +1,7 @@
 use serde_json::{json, Value};
 
 use crate::flags::Flags;
+use crate::validation::{is_valid_session_name, session_name_error};
 
 /// Error type for command parsing with contextual information
 #[derive(Debug)]
@@ -17,6 +18,8 @@ pub enum ParseError {
         context: String,
         usage: &'static str,
     },
+    /// Invalid session name (path traversal or invalid characters)
+    InvalidSessionName { name: String },
 }
 
 impl ParseError {
@@ -40,6 +43,9 @@ impl ParseError {
                     "Missing arguments for: {}\nUsage: agent-browser {}",
                     context, usage
                 )
+            }
+            ParseError::InvalidSessionName { name } => {
+                session_name_error(name)
             }
         }
     }
@@ -461,7 +467,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
 
         // === State ===
         "state" => {
-            const VALID: &[&str] = &["save", "load"];
+            const VALID: &[&str] = &["save", "load", "list", "clear", "show", "clean", "rename"];
             match rest.get(0).map(|s| *s) {
                 Some("save") => {
                     let path = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
@@ -477,13 +483,106 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                     })?;
                     Ok(json!({ "id": id, "action": "state_load", "path": path }))
                 }
+                Some("list") => {
+                    Ok(json!({ "id": id, "action": "state_list" }))
+                }
+                Some("clear") => {
+                    // state clear [name] or state clear --all
+                    let mut session_name: Option<&str> = None;
+                    let mut all = false;
+                    
+                    let mut i = 1;
+                    while i < rest.len() {
+                        match rest[i] {
+                            "--all" | "-a" => {
+                                all = true;
+                            }
+                            arg if !arg.starts_with('-') => {
+                                session_name = Some(arg);
+                            }
+                            _ => {}
+                        }
+                        i += 1;
+                    }
+                    
+                    // Validate session name if provided
+                    if let Some(name) = session_name {
+                        if !is_valid_session_name(name) {
+                            return Err(ParseError::InvalidSessionName { name: name.to_string() });
+                        }
+                    }
+                    
+                    let mut cmd = json!({ "id": id, "action": "state_clear" });
+                    if all {
+                        cmd["all"] = json!(true);
+                    }
+                    if let Some(name) = session_name {
+                        cmd["sessionName"] = json!(name);
+                    }
+                    Ok(cmd)
+                }
+                Some("show") => {
+                    let filename = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
+                        context: "state show".to_string(),
+                        usage: "state show <filename>",
+                    })?;
+                    Ok(json!({ "id": id, "action": "state_show", "filename": filename }))
+                }
+                Some("clean") => {
+                    // state clean --older-than <days>
+                    let mut days: Option<i64> = None;
+                    
+                    let mut i = 1;
+                    while i < rest.len() {
+                        match rest[i] {
+                            "--older-than" => {
+                                if let Some(d) = rest.get(i + 1) {
+                                    days = d.parse().ok();
+                                    i += 1;
+                                }
+                            }
+                            _ => {}
+                        }
+                        i += 1;
+                    }
+                    
+                    let days = days.ok_or_else(|| ParseError::MissingArguments {
+                        context: "state clean".to_string(),
+                        usage: "state clean --older-than <days>",
+                    })?;
+                    
+                    Ok(json!({ "id": id, "action": "state_clean", "days": days }))
+                }
+                Some("rename") => {
+                    let old_name = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
+                        context: "state rename".to_string(),
+                        usage: "state rename <old-name> <new-name>",
+                    })?;
+                    let new_name = rest.get(2).ok_or_else(|| ParseError::MissingArguments {
+                        context: "state rename".to_string(),
+                        usage: "state rename <old-name> <new-name>",
+                    })?;
+                    // Strip .json extension if provided
+                    let old_name = old_name.trim_end_matches(".json");
+                    let new_name = new_name.trim_end_matches(".json");
+                    
+                    // Validate both session names
+                    if !is_valid_session_name(old_name) {
+                        return Err(ParseError::InvalidSessionName { name: old_name.to_string() });
+                    }
+                    if !is_valid_session_name(new_name) {
+                        return Err(ParseError::InvalidSessionName { name: new_name.to_string() });
+                    }
+                    
+                    Ok(json!({ "id": id, "action": "state_rename", "oldName": old_name, "newName": new_name }))
+                }
                 Some(sub) => Err(ParseError::UnknownSubcommand {
                     subcommand: sub.to_string(),
                     valid_options: VALID,
                 }),
                 None => Err(ParseError::MissingArguments {
                     context: "state".to_string(),
-                    usage: "state <save|load> <path>",
+                    usage: "state <save|load|list|clear|show|clean|rename> ...",
                 }),
             }
         }
@@ -903,6 +1002,7 @@ mod tests {
             executable_path: None,
             extensions: Vec::new(),
             cdp: None,
+            session_name: None,
         }
     }
 
@@ -1315,5 +1415,140 @@ mod tests {
         let err = result.unwrap_err();
         assert!(matches!(err, ParseError::MissingArguments { .. }));
         assert!(err.format().contains("get text"));
+    }
+
+    // === State Management Tests ===
+
+    #[test]
+    fn test_state_save() {
+        let cmd = parse_command(&args("state save /tmp/state.json"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "state_save");
+        assert_eq!(cmd["path"], "/tmp/state.json");
+    }
+
+    #[test]
+    fn test_state_load() {
+        let cmd = parse_command(&args("state load /tmp/state.json"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "state_load");
+        assert_eq!(cmd["path"], "/tmp/state.json");
+    }
+
+    #[test]
+    fn test_state_list() {
+        let cmd = parse_command(&args("state list"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "state_list");
+    }
+
+    #[test]
+    fn test_state_clear_all() {
+        let cmd = parse_command(&args("state clear --all"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "state_clear");
+        assert_eq!(cmd["all"], true);
+    }
+
+    #[test]
+    fn test_state_clear_session_name() {
+        let cmd = parse_command(&args("state clear myproject"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "state_clear");
+        assert_eq!(cmd["sessionName"], "myproject");
+    }
+
+    #[test]
+    fn test_state_clear_empty() {
+        let cmd = parse_command(&args("state clear"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "state_clear");
+        assert!(cmd.get("all").is_none());
+        assert!(cmd.get("sessionName").is_none());
+    }
+
+    #[test]
+    fn test_state_show() {
+        let cmd = parse_command(&args("state show myfile.json"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "state_show");
+        assert_eq!(cmd["filename"], "myfile.json");
+    }
+
+    #[test]
+    fn test_state_show_missing_filename() {
+        let result = parse_command(&args("state show"), &default_flags());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_state_clean() {
+        let cmd = parse_command(&args("state clean --older-than 7"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "state_clean");
+        assert_eq!(cmd["days"], 7);
+    }
+
+    #[test]
+    fn test_state_clean_missing_days() {
+        let result = parse_command(&args("state clean"), &default_flags());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_state_unknown_subcommand() {
+        let result = parse_command(&args("state foo"), &default_flags());
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, ParseError::UnknownSubcommand { .. }));
+    }
+
+    #[test]
+    fn test_state_rename() {
+        let cmd = parse_command(&args("state rename old-name new-name"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "state_rename");
+        assert_eq!(cmd["oldName"], "old-name");
+        assert_eq!(cmd["newName"], "new-name");
+    }
+
+    #[test]
+    fn test_state_rename_strips_json_extension() {
+        let cmd =
+            parse_command(&args("state rename old.json new.json"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "state_rename");
+        assert_eq!(cmd["oldName"], "old");
+        assert_eq!(cmd["newName"], "new");
+    }
+
+    #[test]
+    fn test_state_rename_missing_args() {
+        let result = parse_command(&args("state rename old-name"), &default_flags());
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, ParseError::MissingArguments { .. }));
+    }
+
+    #[test]
+    fn test_state_clear_invalid_session_name_path_traversal() {
+        let result = parse_command(&args("state clear ../etc/passwd"), &default_flags());
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, ParseError::InvalidSessionName { .. }));
+    }
+
+    #[test]
+    fn test_state_clear_invalid_session_name_special_chars() {
+        let result = parse_command(&args("state clear my@session"), &default_flags());
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, ParseError::InvalidSessionName { .. }));
+    }
+
+    #[test]
+    fn test_state_rename_invalid_old_name() {
+        let result = parse_command(&args("state rename ../bad new-name"), &default_flags());
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, ParseError::InvalidSessionName { .. }));
+    }
+
+    #[test]
+    fn test_state_rename_invalid_new_name() {
+        let result = parse_command(&args("state rename good-name my/bad"), &default_flags());
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, ParseError::InvalidSessionName { .. }));
     }
 }

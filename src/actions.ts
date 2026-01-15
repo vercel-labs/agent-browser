@@ -1,5 +1,15 @@
+import * as fs from 'fs';
+import * as path from 'path';
+import * as os from 'os';
 import type { Page, Frame } from 'playwright-core';
-import type { BrowserManager, ScreencastFrame } from './browser.js';
+import type { BrowserManager } from './browser.js';
+import {
+  getSessionsDir,
+  readStateFile,
+  writeStateFile,
+  isValidSessionName,
+  isEncryptedPayload,
+} from './state-utils.js';
 import type {
   Command,
   Response,
@@ -53,6 +63,11 @@ import type {
   TraceStopCommand,
   HarStopCommand,
   StorageStateSaveCommand,
+  StateListCommand,
+  StateClearCommand,
+  StateShowCommand,
+  StateCleanCommand,
+  StateRenameCommand,
   ConsoleCommand,
   ErrorsCommand,
   KeyboardCommand,
@@ -327,6 +342,16 @@ export async function executeCommand(command: Command, browser: BrowserManager):
         return await handleStateSave(command, browser);
       case 'state_load':
         return await handleStateLoad(command, browser);
+      case 'state_list':
+        return await handleStateList(command);
+      case 'state_clear':
+        return await handleStateClear(command);
+      case 'state_show':
+        return await handleStateShow(command);
+      case 'state_clean':
+        return await handleStateClean(command);
+      case 'state_rename':
+        return await handleStateRename(command);
       case 'console':
         return await handleConsole(command, browser);
       case 'errors':
@@ -1303,10 +1328,224 @@ async function handleStateLoad(
   command: Command & { action: 'state_load'; path: string },
   browser: BrowserManager
 ): Promise<Response> {
-  // Storage state is loaded at context creation
+  // Check if browser is already launched
+  if (browser.isLaunched()) {
+    return errorResponse(
+      command.id,
+      'Cannot load state while browser is running. Close browser first, then relaunch with loaded state.'
+    );
+  }
+
+  // Validate file exists
+  if (!fs.existsSync(command.path)) {
+    return errorResponse(command.id, `State file not found: ${command.path}`);
+  }
+
+  // Launch browser with loaded state
+  await browser.launch({
+    id: command.id,
+    action: 'launch',
+    headless: true,
+    autoStateFilePath: command.path,
+  });
+
   return successResponse(command.id, {
-    note: 'Storage state must be loaded at browser launch. Use --state flag.',
+    loaded: true,
     path: command.path,
+  });
+}
+
+async function handleStateList(command: StateListCommand): Promise<Response> {
+  const sessionsDir = getSessionsDir();
+
+  // Ensure directory exists
+  if (!fs.existsSync(sessionsDir)) {
+    return successResponse(command.id, { files: [] });
+  }
+
+  const files = fs.readdirSync(sessionsDir);
+  const stateFiles = files
+    .filter((f) => f.endsWith('.json'))
+    .map((filename) => {
+      const filepath = path.join(sessionsDir, filename);
+      const stats = fs.statSync(filepath);
+
+      // Check if file is encrypted
+      let encrypted = false;
+      try {
+        const content = fs.readFileSync(filepath, 'utf-8');
+        const parsed = JSON.parse(content);
+        encrypted = isEncryptedPayload(parsed);
+      } catch {
+        // Ignore parse errors
+      }
+
+      return {
+        filename,
+        path: filepath,
+        size: stats.size,
+        modified: stats.mtime.toISOString(),
+        encrypted,
+      };
+    })
+    .sort((a, b) => new Date(b.modified).getTime() - new Date(a.modified).getTime());
+
+  return successResponse(command.id, { files: stateFiles, directory: sessionsDir });
+}
+
+async function handleStateClear(command: StateClearCommand): Promise<Response> {
+  const sessionsDir = getSessionsDir();
+
+  // Validate session name if provided to prevent path traversal
+  if (command.sessionName && !isValidSessionName(command.sessionName)) {
+    return errorResponse(
+      command.id,
+      'Invalid session name. Use only letters, numbers, dashes, and underscores.'
+    );
+  }
+
+  // Ensure directory exists
+  if (!fs.existsSync(sessionsDir)) {
+    return successResponse(command.id, { deleted: [] });
+  }
+
+  const deleted: string[] = [];
+
+  if (command.all) {
+    // Delete all state files
+    const files = fs.readdirSync(sessionsDir).filter((f) => f.endsWith('.json'));
+    for (const file of files) {
+      fs.unlinkSync(path.join(sessionsDir, file));
+      deleted.push(file);
+    }
+  } else if (command.sessionName) {
+    // Delete files matching the session name pattern
+    const files = fs.readdirSync(sessionsDir);
+    for (const file of files) {
+      if (file.startsWith(`${command.sessionName}-`) && file.endsWith('.json')) {
+        fs.unlinkSync(path.join(sessionsDir, file));
+        deleted.push(file);
+      }
+    }
+  }
+
+  return successResponse(command.id, { deleted });
+}
+
+async function handleStateShow(command: StateShowCommand): Promise<Response> {
+  const sessionsDir = getSessionsDir();
+
+  // Validate filename - must end in .json and have a valid base name
+  const baseName = command.filename.replace(/\.json$/, '');
+  if (!command.filename.endsWith('.json') || !isValidSessionName(baseName)) {
+    return errorResponse(
+      command.id,
+      'Invalid filename. Use only letters, numbers, dashes, and underscores (with .json extension).'
+    );
+  }
+
+  const filepath = path.join(sessionsDir, command.filename);
+
+  if (!fs.existsSync(filepath)) {
+    return errorResponse(command.id, `State file not found: ${command.filename}`);
+  }
+
+  try {
+    const { data: state, wasEncrypted } = readStateFile(filepath);
+    const stats = fs.statSync(filepath);
+
+    // Extract summary info from storage state (with type assertions)
+    const stateObj = state as {
+      cookies?: Array<{ domain: string }>;
+      origins?: unknown[];
+    };
+    const cookiesCount = stateObj.cookies?.length || 0;
+    const originsCount = stateObj.origins?.length || 0;
+
+    // Get unique domains from cookies
+    const domains = [...new Set((stateObj.cookies || []).map((c) => c.domain))];
+
+    return successResponse(command.id, {
+      filename: command.filename,
+      path: filepath,
+      size: stats.size,
+      modified: stats.mtime.toISOString(),
+      encrypted: wasEncrypted,
+      summary: {
+        cookiesCount,
+        originsCount,
+        domains,
+      },
+      state,
+    });
+  } catch (e) {
+    return errorResponse(command.id, `Failed to parse state file: ${(e as Error).message}`);
+  }
+}
+
+async function handleStateClean(command: StateCleanCommand): Promise<Response> {
+  const sessionsDir = getSessionsDir();
+
+  // Ensure directory exists
+  if (!fs.existsSync(sessionsDir)) {
+    return successResponse(command.id, { deleted: [], keptCount: 0 });
+  }
+
+  const now = Date.now();
+  const maxAge = command.days * 24 * 60 * 60 * 1000; // Convert days to milliseconds
+  const deleted: string[] = [];
+  let keptCount = 0;
+
+  const files = fs.readdirSync(sessionsDir).filter((f) => f.endsWith('.json'));
+
+  for (const file of files) {
+    const filepath = path.join(sessionsDir, file);
+    const stats = fs.statSync(filepath);
+    const age = now - stats.mtime.getTime();
+
+    if (age > maxAge) {
+      fs.unlinkSync(filepath);
+      deleted.push(file);
+    } else {
+      keptCount++;
+    }
+  }
+
+  return successResponse(command.id, { deleted, keptCount, days: command.days });
+}
+
+async function handleStateRename(command: StateRenameCommand): Promise<Response> {
+  const sessionsDir = getSessionsDir();
+
+  // Validate names - no path traversal, only alphanumeric with dashes/underscores
+  if (!isValidSessionName(command.oldName) || !isValidSessionName(command.newName)) {
+    return errorResponse(
+      command.id,
+      'Invalid name. Use only letters, numbers, dashes, and underscores.'
+    );
+  }
+
+  const oldPath = path.join(sessionsDir, `${command.oldName}.json`);
+  const newPath = path.join(sessionsDir, `${command.newName}.json`);
+
+  // Check source exists
+  if (!fs.existsSync(oldPath)) {
+    return errorResponse(command.id, `State file not found: ${command.oldName}.json`);
+  }
+
+  // Check destination doesn't exist
+  if (fs.existsSync(newPath)) {
+    return errorResponse(command.id, `Destination already exists: ${command.newName}.json`);
+  }
+
+  // Rename the file
+  fs.renameSync(oldPath, newPath);
+
+  return successResponse(command.id, {
+    renamed: true,
+    oldName: `${command.oldName}.json`,
+    newName: `${command.newName}.json`,
+    path: newPath,
   });
 }
 

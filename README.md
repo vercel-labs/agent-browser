@@ -222,8 +222,53 @@ agent-browser console --clear         # Clear console
 agent-browser errors                  # View page errors
 agent-browser errors --clear          # Clear errors
 agent-browser highlight <sel>         # Highlight element
-agent-browser state save <path>       # Save auth state
-agent-browser state load <path>       # Load auth state
+```
+
+### State Management
+
+```bash
+agent-browser state save <path>       # Save auth state to file
+agent-browser state load <path>       # Load auth state from file
+agent-browser state list              # List all saved state files
+agent-browser state show <file>       # Show details of a state file
+agent-browser state clear [name]      # Clear state files for session name
+agent-browser state clear --all       # Clear all saved state files
+agent-browser state clean --older-than <days>  # Delete old state files
+agent-browser state rename <old> <new>  # Rename a state file
+```
+
+#### State Encryption
+
+Protect sensitive session data with AES-256-GCM encryption:
+
+```bash
+# Generate a secure 256-bit key
+openssl rand -hex 32
+# Output: a1b2c3d4e5f6...  (64 hex characters)
+
+# Set the encryption key (add to your shell profile for persistence)
+export AGENT_BROWSER_ENCRYPTION_KEY="a1b2c3d4e5f6..."
+
+# Now all saved states are automatically encrypted
+agent-browser --session-name twitter open twitter.com --headed
+# After login, close browser
+agent-browser close
+
+# State file is encrypted - safe to backup/sync
+agent-browser state list
+# twitter-default.json (1.2KB, 2026-01-14) [encrypted]
+```
+
+#### Auto-Expiration
+
+State files are automatically deleted after 30 days by default:
+
+```bash
+# Change expiration (in days) - set to 0 to disable
+export AGENT_BROWSER_STATE_EXPIRE_DAYS=7
+
+# Or manually clean old files
+agent-browser state clean --older-than 30
 ```
 
 ### Navigation
@@ -270,6 +315,147 @@ Each session has its own:
 - Navigation history
 - Authentication state
 
+## Automatic Session Persistence
+
+Stay logged in across browser restarts with zero configuration:
+
+```bash
+# Set session name - that's it!
+agent-browser --session-name twitter open twitter.com --headed
+# ... login to Twitter ...
+agent-browser close  # Auto-saves authentication
+
+# Next time: already logged in!
+agent-browser --session-name twitter open twitter.com
+agent-browser snapshot  # See authenticated content
+```
+
+Or use environment variable:
+
+```bash
+export AGENT_BROWSER_SESSION_NAME=twitter
+agent-browser open twitter.com  # Auto-loads saved auth
+```
+
+### How It Works
+
+When `AGENT_BROWSER_SESSION_NAME` is set (via `--session-name` flag or env var), agent-browser automatically:
+1. **On Launch**: Checks for saved state in `~/.agent-browser/sessions/`
+2. **If Found**: Loads cookies and storage (you stay logged in)
+3. **On Close**: Saves current state for next time
+
+**Without `--session-name`**: Browser runs in ephemeral mode - no state is saved or loaded. Each session starts fresh.
+
+### Session Name Rules
+
+Session names must contain only alphanumeric characters, hyphens, and underscores. This prevents path traversal attacks and ensures safe file naming:
+
+```bash
+# Valid session names
+agent-browser --session-name my-project open example.com
+agent-browser --session-name test_session_v2 open example.com
+agent-browser --session-name MyApp123 open example.com
+
+# Invalid (rejected with error)
+agent-browser --session-name "../bad" open example.com     # path traversal
+agent-browser --session-name "my session" open example.com # spaces not allowed
+agent-browser --session-name "foo/bar" open example.com    # slashes not allowed
+```
+
+### Multiple Accounts
+
+Use different session names for different accounts:
+
+```bash
+# Personal Twitter
+agent-browser --session-name twitter-personal open twitter.com
+
+# Work Twitter  
+agent-browser --session-name twitter-work open twitter.com
+```
+
+### Switching Between Accounts
+
+Switch accounts by changing the session name:
+
+```bash
+# Login to account 1
+agent-browser --session-name twitter-account1 open twitter.com --headed
+# ... login ...
+agent-browser close
+
+# Login to account 2
+agent-browser --session-name twitter-account2 open twitter.com --headed
+# ... login ...
+agent-browser close
+
+# Switch between them anytime
+agent-browser --session-name twitter-account1 open twitter.com  # Account 1
+agent-browser close
+agent-browser --session-name twitter-account2 open twitter.com  # Account 2
+```
+
+### Combining with --session
+
+Combine `--session-name` with `--session` for complete isolation:
+
+```bash
+# Agent 1: Personal Gmail
+agent-browser --session-name gmail --session agent1 open gmail.com
+
+# Agent 2: Work Gmail
+agent-browser --session-name gmail-work --session agent2 open gmail.com
+```
+
+Each combination gets its own state file:
+- `~/.agent-browser/sessions/gmail-agent1.json`
+- `~/.agent-browser/sessions/gmail-work-agent2.json`
+
+### Logging Out / Clearing Sessions
+
+Several ways to logout or start fresh:
+
+```bash
+# Method 1: Use state management commands
+agent-browser state list                          # See all saved states
+agent-browser state show twitter-default.json     # View state details
+agent-browser state clear twitter                 # Clear all twitter-* states
+agent-browser state clear --all                   # Clear ALL saved states
+agent-browser state clean --older-than 30         # Delete states older than 30 days
+agent-browser state rename old-name new-name      # Rename a state file
+
+# Method 2: Delete the state file manually
+rm ~/.agent-browser/sessions/twitter-default.json
+
+# Method 3: Clear cookies via browser
+agent-browser --session-name twitter open twitter.com
+agent-browser cookies clear
+agent-browser close  # Saves state without cookies
+
+# Method 4: Use a new session name (fresh state)
+agent-browser --session-name twitter-fresh open twitter.com
+
+# Method 5: Run without --session-name (ephemeral, nothing saved)
+agent-browser open twitter.com  # Completely fresh, no persistence
+```
+
+### Starting Fresh (No Persistence)
+
+To run without any session persistence, simply omit `--session-name`:
+
+```bash
+# Ephemeral mode - no state saved or loaded
+agent-browser open twitter.com
+agent-browser close  # Nothing saved
+agent-browser open twitter.com  # Fresh browser again
+```
+
+### Security Notes
+
+- State files contain cookies and may include authentication tokens
+- Location: `~/.agent-browser/sessions/` (auto-created with 0600 permissions)
+- **Never commit state files to version control**
+
 ## Snapshot Options
 
 The `snapshot` command supports filtering to reduce output size:
@@ -295,6 +481,7 @@ agent-browser snapshot -i -c -d 5         # Combine options
 | Option | Description |
 |--------|-------------|
 | `--session <name>` | Use isolated session (or `AGENT_BROWSER_SESSION` env) |
+| `--session-name <name>` | Auto-save/load auth state (or `AGENT_BROWSER_SESSION_NAME` env) |
 | `--headers <json>` | Set HTTP headers scoped to the URL's origin |
 | `--executable-path <path>` | Custom browser executable (or `AGENT_BROWSER_EXECUTABLE_PATH` env) |
 | `--json` | JSON output (for agents) |
@@ -304,6 +491,17 @@ agent-browser snapshot -i -c -d 5         # Combine options
 | `--headed` | Show browser window (not headless) |
 | `--cdp <port>` | Connect via Chrome DevTools Protocol |
 | `--debug` | Debug output |
+
+## Environment Variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `AGENT_BROWSER_SESSION` | Session name for browser isolation | `default` |
+| `AGENT_BROWSER_SESSION_NAME` | Session name for state persistence | - |
+| `AGENT_BROWSER_EXECUTABLE_PATH` | Custom browser binary path | - |
+| `AGENT_BROWSER_ENCRYPTION_KEY` | 64-char hex key for AES-256-GCM encryption | - |
+| `AGENT_BROWSER_STATE_EXPIRE_DAYS` | Auto-delete states older than N days | `30` |
+| `AGENT_BROWSER_DEBUG` | Enable debug output (`1` to enable) | - |
 
 ## Selectors
 
@@ -634,6 +832,41 @@ Core workflow:
 2. `agent-browser snapshot -i` - Get interactive elements with refs (@e1, @e2)
 3. `agent-browser click @e1` / `fill @e2 "text"` - Interact using refs
 4. Re-snapshot after page changes
+
+Session persistence (stay logged in):
+- Use `--session-name <name>` to auto-save/load authentication
+- State files: `~/.agent-browser/sessions/{name}-default.json`
+- Without `--session-name`: ephemeral mode (fresh browser each time)
+```
+
+### Session Persistence for Agents
+
+AI agents can maintain authenticated sessions across runs:
+
+```bash
+# First run: Login and save
+agent-browser --session-name twitter open twitter.com --headed
+# ... agent performs login ...
+agent-browser close  # Auto-saves to ~/.agent-browser/sessions/twitter-default.json
+
+# Subsequent runs: Already authenticated
+agent-browser --session-name twitter open twitter.com
+agent-browser snapshot -i  # See authenticated content
+```
+
+**For multi-account agents:**
+
+```bash
+# Agent managing multiple accounts
+agent-browser --session-name twitter-bot1 open twitter.com  # Account 1
+agent-browser --session-name twitter-bot2 open twitter.com  # Account 2
+```
+
+**Ephemeral mode (no persistence):**
+
+```bash
+# Run without --session-name for fresh browser each time
+agent-browser open twitter.com
 ```
 
 ### Claude Code Skill

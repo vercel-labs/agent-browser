@@ -1021,4 +1021,89 @@ describe('parseCommand', () => {
       expect(result.success).toBe(false);
     });
   });
+
+  describe('state management', () => {
+    it('should parse state_list command', () => {
+      const result = parseCommand(cmd({ id: '1', action: 'state_list' }));
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.command.action).toBe('state_list');
+      }
+    });
+
+    it('should parse state_clear command with all flag', () => {
+      const result = parseCommand(cmd({ id: '1', action: 'state_clear', all: true }));
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.command.action).toBe('state_clear');
+        expect(result.command.all).toBe(true);
+      }
+    });
+
+    it('should parse state_clear command with sessionName', () => {
+      const result = parseCommand(cmd({ id: '1', action: 'state_clear', sessionName: 'twitter' }));
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.command.action).toBe('state_clear');
+        expect(result.command.sessionName).toBe('twitter');
+      }
+    });
+
+    it('should parse state_show command', () => {
+      const result = parseCommand(
+        cmd({ id: '1', action: 'state_show', filename: 'twitter-default.json' })
+      );
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.command.action).toBe('state_show');
+        expect(result.command.filename).toBe('twitter-default.json');
+      }
+    });
+
+    it('should reject state_show without filename', () => {
+      const result = parseCommand(cmd({ id: '1', action: 'state_show' }));
+      expect(result.success).toBe(false);
+    });
+
+    it('should parse state_clean command', () => {
+      const result = parseCommand(cmd({ id: '1', action: 'state_clean', days: 30 }));
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.command.action).toBe('state_clean');
+        expect(result.command.days).toBe(30);
+      }
+    });
+
+    it('should reject state_clean without days', () => {
+      const result = parseCommand(cmd({ id: '1', action: 'state_clean' }));
+      expect(result.success).toBe(false);
+    });
+
+    it('should reject state_clean with invalid days', () => {
+      const result = parseCommand(cmd({ id: '1', action: 'state_clean', days: -1 }));
+      expect(result.success).toBe(false);
+    });
+
+    it('should parse state_rename command', () => {
+      const result = parseCommand(
+        cmd({ id: '1', action: 'state_rename', oldName: 'twitter', newName: 'twitter-backup' })
+      );
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.command.action).toBe('state_rename');
+        expect(result.command.oldName).toBe('twitter');
+        expect(result.command.newName).toBe('twitter-backup');
+      }
+    });
+
+    it('should reject state_rename without oldName', () => {
+      const result = parseCommand(cmd({ id: '1', action: 'state_rename', newName: 'test' }));
+      expect(result.success).toBe(false);
+    });
+
+    it('should reject state_rename without newName', () => {
+      const result = parseCommand(cmd({ id: '1', action: 'state_rename', oldName: 'test' }));
+      expect(result.success).toBe(false);
+    });
+  });
 });
