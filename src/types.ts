@@ -523,6 +523,12 @@ export interface RecordingStopCommand extends BaseCommand {
   action: 'recording_stop';
 }
 
+export interface RecordingRestartCommand extends BaseCommand {
+  action: 'recording_restart';
+  path: string;
+  url?: string;
+}
+
 // Tracing
 export interface TraceStartCommand extends BaseCommand {
   action: 'trace_start';
@@ -848,6 +854,7 @@ export type Command =
   | VideoStopCommand
   | RecordingStartCommand
   | RecordingStopCommand
+  | RecordingRestartCommand
   | TraceStartCommand
   | TraceStopCommand
   | HarStartCommand
@@ -990,6 +997,13 @@ export interface RecordingStopData {
   path: string;
   frames: number;
   error?: string;
+}
+
+export interface RecordingRestartData {
+  started: boolean;
+  path: string;
+  previousPath?: string;
+  stopped: boolean;
 }
 
 export interface InputEventData {

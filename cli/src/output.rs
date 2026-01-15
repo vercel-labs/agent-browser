@@ -146,6 +146,16 @@ pub fn print_response(resp: &Response, json_mode: bool) {
                 return;
             }
         }
+        // Recording restart (has "stopped" field - from recording_restart action)
+        if data.get("stopped").is_some() {
+            let path = data.get("path").and_then(|v| v.as_str()).unwrap_or("unknown");
+            if let Some(prev_path) = data.get("previousPath").and_then(|v| v.as_str()) {
+                println!("\x1b[32m✓\x1b[0m Recording restarted: {} (previous saved to {})", path, prev_path);
+            } else {
+                println!("\x1b[32m✓\x1b[0m Recording started: {}", path);
+            }
+            return;
+        }
         // Recording stop (has "frames" field - from recording_stop action)
         if data.get("frames").is_some() {
             if let Some(path) = data.get("path").and_then(|v| v.as_str()) {
@@ -1009,14 +1019,16 @@ agent-browser record - Record browser session to video
 
 Usage: agent-browser record start <path.webm> [url]
        agent-browser record stop
+       agent-browser record restart <path.webm> [url]
 
 Record the browser to a WebM video file using Playwright's native recording.
 Creates a fresh browser context but preserves cookies and localStorage.
 If no URL is provided, automatically navigates to your current page.
 
 Operations:
-  start <path> [url]   Start recording (defaults to current URL if omitted)
-  stop                 Stop recording and save video
+  start <path> [url]     Start recording (defaults to current URL if omitted)
+  stop                   Stop recording and save video
+  restart <path> [url]   Stop current recording (if any) and start a new one
 
 Global Options:
   --json               Output as JSON
@@ -1032,6 +1044,9 @@ Examples:
 
   # Or specify a different URL
   agent-browser record start ./demo.webm https://example.com
+
+  # Restart recording with a new file (stops previous, starts new)
+  agent-browser record restart ./take2.webm
 "##,
 
         // === Console/Errors ===

@@ -101,6 +101,7 @@ import type {
   InputTouchCommand,
   RecordingStartCommand,
   RecordingStopCommand,
+  RecordingRestartCommand,
   NavigateData,
   ScreenshotData,
   EvaluateData,
@@ -113,6 +114,7 @@ import type {
   ScreencastStopData,
   RecordingStartData,
   RecordingStopData,
+  RecordingRestartData,
   InputEventData,
 } from './types.js';
 import { successResponse, errorResponse } from './protocol.js';
@@ -435,6 +437,8 @@ export async function executeCommand(command: Command, browser: BrowserManager):
         return await handleRecordingStart(command, browser);
       case 'recording_stop':
         return await handleRecordingStop(command, browser);
+      case 'recording_restart':
+        return await handleRecordingRestart(command, browser);
       default: {
         // TypeScript narrows to never here, but we handle it for safety
         const unknownCommand = command as { id: string; action: string };
@@ -1914,4 +1918,17 @@ async function handleRecordingStop(
 ): Promise<Response<RecordingStopData>> {
   const result = await browser.stopRecording();
   return successResponse(command.id, result);
+}
+
+async function handleRecordingRestart(
+  command: RecordingRestartCommand,
+  browser: BrowserManager
+): Promise<Response<RecordingRestartData>> {
+  const result = await browser.restartRecording(command.path, command.url);
+  return successResponse(command.id, {
+    started: true,
+    path: command.path,
+    previousPath: result.previousPath,
+    stopped: result.stopped,
+  });
 }

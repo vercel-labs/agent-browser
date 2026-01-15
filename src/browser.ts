@@ -1128,7 +1128,9 @@ export class BrowserManager {
    */
   async startRecording(outputPath: string, url?: string): Promise<void> {
     if (this.recordingContext) {
-      throw new Error('Recording already in progress');
+      throw new Error(
+        "Recording already in progress. Run 'record stop' first, or use 'record restart' to stop and start a new recording."
+      );
     }
 
     if (!this.browser) {
@@ -1300,6 +1302,34 @@ export class BrowserManager {
       const message = error instanceof Error ? error.message : String(error);
       return { path: outputPath, frames: 0, error: message };
     }
+  }
+
+  /**
+   * Restart recording - stops current recording (if any) and starts a new one.
+   * Convenience method that combines stopRecording and startRecording.
+   *
+   * @param outputPath - Path to the output video file (must be .webm)
+   * @param url - Optional URL to navigate to (defaults to current page URL)
+   * @returns Result from stopping the previous recording (if any)
+   */
+  async restartRecording(
+    outputPath: string,
+    url?: string
+  ): Promise<{ previousPath?: string; stopped: boolean }> {
+    let previousPath: string | undefined;
+    let stopped = false;
+
+    // Stop current recording if active
+    if (this.recordingContext) {
+      const result = await this.stopRecording();
+      previousPath = result.path;
+      stopped = true;
+    }
+
+    // Start new recording
+    await this.startRecording(outputPath, url);
+
+    return { previousPath, stopped };
   }
 
   /**

@@ -446,7 +446,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
 
         // === Recording (Playwright native video recording) ===
         "record" => {
-            const VALID: &[&str] = &["start", "stop"];
+            const VALID: &[&str] = &["start", "stop", "restart"];
             match rest.get(0).map(|s| *s) {
                 Some("start") => {
                     let path = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
@@ -468,13 +468,32 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                     Ok(cmd)
                 }
                 Some("stop") => Ok(json!({ "id": id, "action": "recording_stop" })),
+                Some("restart") => {
+                    let path = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
+                        context: "record restart".to_string(),
+                        usage: "record restart <output.webm> [url]",
+                    })?;
+                    // Optional URL parameter
+                    let url = rest.get(2);
+                    let mut cmd = json!({ "id": id, "action": "recording_restart", "path": path });
+                    if let Some(u) = url {
+                        // Add https:// prefix if needed
+                        let url_str = if u.starts_with("http") {
+                            u.to_string()
+                        } else {
+                            format!("https://{}", u)
+                        };
+                        cmd["url"] = json!(url_str);
+                    }
+                    Ok(cmd)
+                }
                 Some(sub) => Err(ParseError::UnknownSubcommand {
                     subcommand: sub.to_string(),
                     valid_options: VALID,
                 }),
                 None => Err(ParseError::MissingArguments {
                     context: "record".to_string(),
-                    usage: "record <start|stop> [path] [url]",
+                    usage: "record <start|stop|restart> [path] [url]",
                 }),
             }
         }
