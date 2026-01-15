@@ -140,7 +140,8 @@ fn is_daemon_running(session: &str) -> bool {
 fn daemon_ready(session: &str) -> bool {
     #[cfg(unix)]
     {
-        get_socket_path(session).exists()
+        let socket_path = get_socket_path(session);
+        UnixStream::connect(&socket_path).is_ok()
     }
     #[cfg(windows)]
     {
