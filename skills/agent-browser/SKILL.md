@@ -250,3 +250,10 @@ agent-browser highlight @e1              # Highlight element
 agent-browser trace start                # Start recording trace
 agent-browser trace stop trace.zip       # Stop and save trace
 ```
+
+## HTTPS Certificate Errors
+
+For sites with self-signed or invalid certificates:
+```bash
+agent-browser open https://localhost:8443 --ignore-https-errors
+```
