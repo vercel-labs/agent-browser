@@ -502,7 +502,7 @@ export interface InputTouchCommand extends BaseCommand {
   modifiers?: number;
 }
 
-// Video recording
+// Video recording (Playwright native - requires launch-time setup)
 export interface VideoStartCommand extends BaseCommand {
   action: 'video_start';
   path: string;
@@ -510,6 +510,17 @@ export interface VideoStartCommand extends BaseCommand {
 
 export interface VideoStopCommand extends BaseCommand {
   action: 'video_stop';
+}
+
+// Screen recording (Playwright native - creates fresh recording context)
+export interface RecordingStartCommand extends BaseCommand {
+  action: 'recording_start';
+  path: string;
+  url?: string;
+}
+
+export interface RecordingStopCommand extends BaseCommand {
+  action: 'recording_stop';
 }
 
 // Tracing
@@ -835,6 +846,8 @@ export type Command =
   | BoundingBoxCommand
   | VideoStartCommand
   | VideoStopCommand
+  | RecordingStartCommand
+  | RecordingStopCommand
   | TraceStartCommand
   | TraceStopCommand
   | HarStartCommand
@@ -966,6 +979,17 @@ export interface ScreencastStartData {
 
 export interface ScreencastStopData {
   stopped: boolean;
+}
+
+export interface RecordingStartData {
+  started: boolean;
+  path: string;
+}
+
+export interface RecordingStopData {
+  path: string;
+  frames: number;
+  error?: string;
 }
 
 export interface InputEventData {

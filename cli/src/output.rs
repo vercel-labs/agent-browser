@@ -135,7 +135,31 @@ pub fn print_response(resp: &Response, json_mode: bool) {
             println!("\x1b[32m✓\x1b[0m Browser closed");
             return;
         }
-        // Screenshot path
+        // Recording start (has "started" field)
+        if let Some(started) = data.get("started").and_then(|v| v.as_bool()) {
+            if started {
+                if let Some(path) = data.get("path").and_then(|v| v.as_str()) {
+                    println!("\x1b[32m✓\x1b[0m Recording started: {}", path);
+                } else {
+                    println!("\x1b[32m✓\x1b[0m Recording started");
+                }
+                return;
+            }
+        }
+        // Recording stop (has "frames" field - from recording_stop action)
+        if data.get("frames").is_some() {
+            if let Some(path) = data.get("path").and_then(|v| v.as_str()) {
+                if let Some(error) = data.get("error").and_then(|v| v.as_str()) {
+                    println!("\x1b[33m⚠\x1b[0m Recording saved to {} - {}", path, error);
+                } else {
+                    println!("\x1b[32m✓\x1b[0m Recording saved to {}", path);
+                }
+            } else {
+                println!("\x1b[32m✓\x1b[0m Recording stopped");
+            }
+            return;
+        }
+        // Screenshot path (no "started" or "frames" field)
         if let Some(path) = data.get("path").and_then(|v| v.as_str()) {
             println!("\x1b[32m✓\x1b[0m Screenshot saved to {}", path);
             return;
@@ -979,6 +1003,40 @@ Examples:
   agent-browser trace stop ./debug-trace.zip
 "##,
 
+        // === Record (video) ===
+        "record" => r##"
+agent-browser record - Record browser session to video
+
+Usage: agent-browser record start <path.webm> [url]
+       agent-browser record stop
+
+Record the browser to a WebM video file using Playwright's native recording.
+Creates a fresh browser context for recording - page state is not preserved.
+
+Operations:
+  start <path> [url]   Start recording (optionally navigate to URL)
+  stop                 Stop recording and save video
+
+Note: Recording creates a new browser context. For smooth demos, explore
+the page first to plan your actions, then start recording.
+
+Global Options:
+  --json               Output as JSON
+  --session <name>     Use specific session
+
+Examples:
+  agent-browser record start ./demo.webm https://example.com
+  agent-browser click @e1
+  agent-browser record stop
+
+  # Two-phase workflow for smooth recordings:
+  agent-browser open https://example.com
+  agent-browser snapshot -i            # Explore and plan
+  agent-browser record start ./demo.webm https://example.com
+  agent-browser click @e3              # Execute planned actions
+  agent-browser record stop
+"##,
+
         // === Console/Errors ===
         "console" => r##"
 agent-browser console - View console logs
@@ -1169,6 +1227,8 @@ Tabs:
 
 Debug:
   trace start|stop [path]    Record trace
+  record start <path> [url]  Start video recording (WebM)
+  record stop                Stop and save video
   console [--clear]          View console logs
   errors [--clear]           View page errors
   highlight <sel>            Highlight element

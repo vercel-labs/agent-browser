@@ -12,9 +12,11 @@ import {
   type Route,
   type Locator,
   type CDPSession,
+  type Video,
 } from 'playwright-core';
 import path from 'node:path';
 import os from 'node:os';
+import { existsSync, mkdirSync } from 'node:fs';
 import type { LaunchCommand } from './types.js';
 import { type RefMap, type EnhancedSnapshot, getEnhancedSnapshot, parseRef } from './snapshot.js';
 
@@ -88,6 +90,12 @@ export class BrowserManager {
   private screencastSessionId: number = 0;
   private frameCallback: ((frame: ScreencastFrame) => void) | null = null;
   private screencastFrameHandler: ((params: any) => void) | null = null;
+
+  // Video recording (Playwright native)
+  private recordingContext: BrowserContext | null = null;
+  private recordingPage: Page | null = null;
+  private recordingOutputPath: string = '';
+  private recordingTempDir: string = '';
 
   /**
    * Check if browser is launched
@@ -1104,9 +1112,156 @@ export class BrowserManager {
   }
 
   /**
+   * Check if video recording is currently active
+   */
+  isRecording(): boolean {
+    return this.recordingContext !== null;
+  }
+
+  /**
+   * Start recording to a video file using Playwright's native video recording.
+   * Creates a fresh browser context with video recording enabled.
+   *
+   * @param outputPath - Path to the output video file (will be .webm)
+   * @param url - Optional URL to navigate to after starting recording
+   */
+  async startRecording(outputPath: string, url?: string): Promise<void> {
+    if (this.recordingContext) {
+      throw new Error('Recording already in progress');
+    }
+
+    if (!this.browser) {
+      throw new Error('Browser not launched. Call launch first.');
+    }
+
+    // Check if output file already exists
+    if (existsSync(outputPath)) {
+      throw new Error(`Output file already exists: ${outputPath}`);
+    }
+
+    // Ensure output path ends with .webm (Playwright native format)
+    if (!outputPath.endsWith('.webm')) {
+      outputPath = outputPath.replace(/\.[^.]+$/, '.webm');
+      if (!outputPath.endsWith('.webm')) {
+        outputPath += '.webm';
+      }
+    }
+
+    // Create a temp directory for video recording
+    const session = process.env.AGENT_BROWSER_SESSION || 'default';
+    this.recordingTempDir = path.join(
+      os.tmpdir(),
+      `agent-browser-recording-${session}-${Date.now()}`
+    );
+    mkdirSync(this.recordingTempDir, { recursive: true });
+
+    this.recordingOutputPath = outputPath;
+
+    // Create a new context with video recording enabled
+    const viewport = { width: 1280, height: 720 };
+    this.recordingContext = await this.browser.newContext({
+      viewport,
+      recordVideo: {
+        dir: this.recordingTempDir,
+        size: viewport,
+      },
+    });
+    this.recordingContext.setDefaultTimeout(10000);
+
+    // Create a page in the recording context
+    this.recordingPage = await this.recordingContext.newPage();
+
+    // Add the recording context and page to our managed lists
+    this.contexts.push(this.recordingContext);
+    this.pages.push(this.recordingPage);
+    this.activePageIndex = this.pages.length - 1;
+
+    // Set up page tracking
+    this.setupPageTracking(this.recordingPage);
+
+    // Invalidate CDP session since we switched pages
+    await this.invalidateCDPSession();
+
+    // Navigate to URL if provided
+    if (url) {
+      await this.recordingPage.goto(url, { waitUntil: 'load' });
+    }
+  }
+
+  /**
+   * Stop recording and save the video file
+   * @returns Recording result with path
+   */
+  async stopRecording(): Promise<{ path: string; frames: number; error?: string }> {
+    if (!this.recordingContext || !this.recordingPage) {
+      return { path: '', frames: 0, error: 'No recording in progress' };
+    }
+
+    const outputPath = this.recordingOutputPath;
+
+    try {
+      // Get the video object before closing the page
+      const video = this.recordingPage.video();
+
+      // Remove recording page/context from our managed lists before closing
+      const pageIndex = this.pages.indexOf(this.recordingPage);
+      if (pageIndex !== -1) {
+        this.pages.splice(pageIndex, 1);
+      }
+      const contextIndex = this.contexts.indexOf(this.recordingContext);
+      if (contextIndex !== -1) {
+        this.contexts.splice(contextIndex, 1);
+      }
+
+      // Close the page to finalize the video
+      await this.recordingPage.close();
+
+      // Save the video to the desired output path
+      if (video) {
+        await video.saveAs(outputPath);
+      }
+
+      // Close the recording context
+      await this.recordingContext.close();
+
+      // Reset recording state
+      this.recordingContext = null;
+      this.recordingPage = null;
+      this.recordingOutputPath = '';
+      this.recordingTempDir = '';
+
+      // Adjust active page index
+      if (this.pages.length > 0) {
+        this.activePageIndex = Math.min(this.activePageIndex, this.pages.length - 1);
+      } else {
+        this.activePageIndex = 0;
+      }
+
+      // Invalidate CDP session since we may have switched pages
+      await this.invalidateCDPSession();
+
+      return { path: outputPath, frames: 0 }; // Playwright doesn't expose frame count
+    } catch (error) {
+      // Reset state on error
+      this.recordingContext = null;
+      this.recordingPage = null;
+      this.recordingOutputPath = '';
+      this.recordingTempDir = '';
+
+      const message = error instanceof Error ? error.message : String(error);
+      return { path: outputPath, frames: 0, error: message };
+    }
+  }
+
+  /**
    * Close the browser and clean up
    */
   async close(): Promise<void> {
+    // Stop recording if active (saves video)
+    if (this.recordingContext) {
+      await this.stopRecording();
+    }
+
     // Stop screencast if active
     if (this.screencastActive) {
       await this.stopScreencast();

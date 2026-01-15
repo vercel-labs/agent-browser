@@ -99,6 +99,8 @@ import type {
   InputMouseCommand,
   InputKeyboardCommand,
   InputTouchCommand,
+  RecordingStartCommand,
+  RecordingStopCommand,
   NavigateData,
   ScreenshotData,
   EvaluateData,
@@ -109,6 +111,8 @@ import type {
   TabCloseData,
   ScreencastStartData,
   ScreencastStopData,
+  RecordingStartData,
+  RecordingStopData,
   InputEventData,
 } from './types.js';
 import { successResponse, errorResponse } from './protocol.js';
@@ -427,6 +431,10 @@ export async function executeCommand(command: Command, browser: BrowserManager):
         return await handleInputKeyboard(command, browser);
       case 'input_touch':
         return await handleInputTouch(command, browser);
+      case 'recording_start':
+        return await handleRecordingStart(command, browser);
+      case 'recording_stop':
+        return await handleRecordingStop(command, browser);
       default: {
         // TypeScript narrows to never here, but we handle it for safety
         const unknownCommand = command as { id: string; action: string };
@@ -1885,4 +1893,25 @@ async function handleInputTouch(
     modifiers: command.modifiers,
   });
   return successResponse(command.id, { injected: true });
+}
+
+// Recording handlers (Playwright native video recording)
+
+async function handleRecordingStart(
+  command: RecordingStartCommand,
+  browser: BrowserManager
+): Promise<Response<RecordingStartData>> {
+  await browser.startRecording(command.path, command.url);
+  return successResponse(command.id, {
+    started: true,
+    path: command.path,
+  });
+}
+
+async function handleRecordingStop(
+  command: RecordingStopCommand,
+  browser: BrowserManager
+): Promise<Response<RecordingStopData>> {
+  const result = await browser.stopRecording();
+  return successResponse(command.id, result);
 }

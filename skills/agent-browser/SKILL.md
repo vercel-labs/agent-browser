@@ -28,7 +28,7 @@ agent-browser close             # Close browser
 ```bash
 agent-browser open <url>      # Navigate to URL
 agent-browser back            # Go back
-agent-browser forward         # Go forward  
+agent-browser forward         # Go forward
 agent-browser reload          # Reload page
 agent-browser close           # Close browser
 ```
@@ -71,6 +71,14 @@ agent-browser screenshot          # Screenshot to stdout
 agent-browser screenshot path.png # Save to file
 agent-browser screenshot --full   # Full page
 ```
+
+### Video recording
+```bash
+agent-browser record start ./demo.webm https://example.com   # Start recording at URL
+agent-browser click @e1                                      # Perform actions
+agent-browser record stop                                    # Stop and save video
+```
+Recording creates a fresh browser context. For smooth demos, explore the page first to plan your actions, then start recording and execute them quickly.
 
 ### Wait
 ```bash
@@ -137,7 +145,9 @@ agent-browser get text @e1 --json
 ## Debugging
 
 ```bash
-agent-browser open example.com --headed  # Show browser window
-agent-browser console                    # View console messages
-agent-browser errors                     # View page errors
+agent-browser open example.com --headed              # Show browser window
+agent-browser console                                # View console messages
+agent-browser errors                                 # View page errors
+agent-browser record start ./debug.webm example.com  # Record session video
+agent-browser record stop                            # Save recording
 ```
