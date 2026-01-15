@@ -198,10 +198,11 @@ fn which_exists(cmd: &str) -> bool {
 
 fn package_exists_apt(pkg: &str) -> bool {
     Command::new("apt-cache")
-        .arg("search")
-        .arg("--names-only")
-        .arg(format!("^{}$", pkg))
-        .output()
-        .map(|o| !o.stdout.is_empty())
+        .arg("show")
+        .arg(pkg)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
         .unwrap_or(false)
 }
