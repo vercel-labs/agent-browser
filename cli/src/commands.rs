@@ -1367,6 +1367,29 @@ mod tests {
     }
 
     #[test]
+    fn test_record_restart() {
+        let cmd = parse_command(&args("record restart output.webm"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "recording_restart");
+        assert_eq!(cmd["path"], "output.webm");
+        assert!(cmd.get("url").is_none());
+    }
+
+    #[test]
+    fn test_record_restart_with_url() {
+        let cmd = parse_command(&args("record restart demo.webm https://example.com"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "recording_restart");
+        assert_eq!(cmd["path"], "demo.webm");
+        assert_eq!(cmd["url"], "https://example.com");
+    }
+
+    #[test]
+    fn test_record_restart_missing_path() {
+        let result = parse_command(&args("record restart"), &default_flags());
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ParseError::MissingArguments { .. }));
+    }
+
+    #[test]
     fn test_record_invalid_subcommand() {
         let result = parse_command(&args("record foo"), &default_flags());
         assert!(result.is_err());
