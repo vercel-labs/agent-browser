@@ -198,14 +198,17 @@ fn main() {
         }
     };
 
-    // Warn if executable_path was specified but daemon was already running
-    if daemon_result.already_running && (flags.executable_path.is_some() || !flags.extensions.is_empty()) {
+    // Warn if executable_path/extensions/ignore_https_errors was specified but daemon was already running
+    if daemon_result.already_running && (flags.executable_path.is_some() || !flags.extensions.is_empty() || flags.ignore_https_errors) {
         if !flags.json {
             if flags.executable_path.is_some() {
                 eprintln!("{} --executable-path ignored: daemon already running. Use 'agent-browser close' first to restart with new path.", color::warning_indicator());
             }
             if !flags.extensions.is_empty() {
                 eprintln!("{} --extension ignored: daemon already running. Use 'agent-browser close' first to restart with extensions.", color::warning_indicator());
+            }
+            if flags.ignore_https_errors {
+                eprintln!("\x1b[33m⚠\x1b[0m --ignore-https-errors ignored: daemon already running. Use 'agent-browser close' first to restart with this option.");
             }
         }
     }
