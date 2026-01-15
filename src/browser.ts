@@ -16,7 +16,7 @@ import {
 } from 'playwright-core';
 import path from 'node:path';
 import os from 'node:os';
-import { existsSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync } from 'node:fs';
 import type { LaunchCommand } from './types.js';
 import { type RefMap, type EnhancedSnapshot, getEnhancedSnapshot, parseRef } from './snapshot.js';
 
@@ -1260,6 +1260,11 @@ export class BrowserManager {
         await video.saveAs(outputPath);
       }
 
+      // Clean up temp directory
+      if (this.recordingTempDir) {
+        rmSync(this.recordingTempDir, { recursive: true, force: true });
+      }
+
       // Close the recording context
       await this.recordingContext.close();
 
@@ -1281,6 +1286,11 @@ export class BrowserManager {
 
       return { path: outputPath, frames: 0 }; // Playwright doesn't expose frame count
     } catch (error) {
+      // Clean up temp directory on error
+      if (this.recordingTempDir) {
+        rmSync(this.recordingTempDir, { recursive: true, force: true });
+      }
+
       // Reset state on error
       this.recordingContext = null;
       this.recordingPage = null;
