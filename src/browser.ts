@@ -1140,12 +1140,11 @@ export class BrowserManager {
       throw new Error(`Output file already exists: ${outputPath}`);
     }
 
-    // Ensure output path ends with .webm (Playwright native format)
+    // Validate output path is .webm (Playwright native format)
     if (!outputPath.endsWith('.webm')) {
-      outputPath = outputPath.replace(/\.[^.]+$/, '.webm');
-      if (!outputPath.endsWith('.webm')) {
-        outputPath += '.webm';
-      }
+      throw new Error(
+        'Playwright native recording only supports WebM format. Please use a .webm extension.'
+      );
     }
 
     // Auto-capture current URL if none provided
