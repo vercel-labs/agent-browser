@@ -224,6 +224,7 @@ fn main() {
             flags.user_agent.as_ref().map(|_| "--user-agent"),
             flags.proxy.as_ref().map(|_| "--proxy"),
             flags.proxy_bypass.as_ref().map(|_| "--proxy-bypass"),
+            flags.ignore_https_errors.then(|| "--ignore-https-errors"),
         ]
         .into_iter()
         .flatten()
@@ -235,6 +236,10 @@ fn main() {
                 color::warning_indicator(),
                 ignored_flags.join(", ")
             );
+        }
+
+        if flags.ignore_https_errors {
+            eprintln!("\x1b[33m⚠\x1b[0m --ignore-https-errors ignored: daemon already running. Use 'agent-browser close' first to restart with this option.");
         }
     }
 
