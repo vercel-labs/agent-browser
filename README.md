@@ -334,6 +334,7 @@ agent-browser snapshot -i -c -d 5         # Combine options
 | `--exact` | Exact text match |
 | `--headed` | Show browser window (not headless) |
 | `--cdp <port>` | Connect via Chrome DevTools Protocol |
+| `--ignore-https-errors` | Ignore HTTPS certificate errors (useful for self-signed certs) |
 | `--debug` | Debug output |
 
 ## Selectors

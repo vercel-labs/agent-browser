@@ -347,3 +347,10 @@ Usage:
 ./templates/authenticated-session.sh https://app.example.com/login
 ./templates/capture-workflow.sh https://example.com ./output
 ```
+
+## HTTPS Certificate Errors
+
+For sites with self-signed or invalid certificates:
+```bash
+agent-browser open https://localhost:8443 --ignore-https-errors
+```
