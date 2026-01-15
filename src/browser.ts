@@ -1121,9 +1121,10 @@ export class BrowserManager {
   /**
    * Start recording to a video file using Playwright's native video recording.
    * Creates a fresh browser context with video recording enabled.
+   * Automatically captures current URL and transfers cookies/storage if no URL provided.
    *
    * @param outputPath - Path to the output video file (will be .webm)
-   * @param url - Optional URL to navigate to after starting recording
+   * @param url - Optional URL to navigate to (defaults to current page URL)
    */
   async startRecording(outputPath: string, url?: string): Promise<void> {
     if (this.recordingContext) {
@@ -1147,6 +1148,44 @@ export class BrowserManager {
       }
     }
 
+    // Auto-capture current URL if none provided
+    const currentPage = this.pages.length > 0 ? this.pages[this.activePageIndex] : null;
+    const currentContext = this.contexts.length > 0 ? this.contexts[0] : null;
+    if (!url && currentPage) {
+      const currentUrl = currentPage.url();
+      if (currentUrl && currentUrl !== 'about:blank') {
+        url = currentUrl;
+      }
+    }
+
+    // Capture state from current context (cookies + storage)
+    let storageState:
+      | {
+          cookies: Array<{
+            name: string;
+            value: string;
+            domain: string;
+            path: string;
+            expires: number;
+            httpOnly: boolean;
+            secure: boolean;
+            sameSite: 'Strict' | 'Lax' | 'None';
+          }>;
+          origins: Array<{
+            origin: string;
+            localStorage: Array<{ name: string; value: string }>;
+          }>;
+        }
+      | undefined;
+
+    if (currentContext) {
+      try {
+        storageState = await currentContext.storageState();
+      } catch {
+        // Ignore errors - context might be closed or invalid
+      }
+    }
+
     // Create a temp directory for video recording
     const session = process.env.AGENT_BROWSER_SESSION || 'default';
     this.recordingTempDir = path.join(
@@ -1157,7 +1196,7 @@ export class BrowserManager {
 
     this.recordingOutputPath = outputPath;
 
-    // Create a new context with video recording enabled
+    // Create a new context with video recording enabled and restored state
     const viewport = { width: 1280, height: 720 };
     this.recordingContext = await this.browser.newContext({
       viewport,
@@ -1165,6 +1204,7 @@ export class BrowserManager {
         dir: this.recordingTempDir,
         size: viewport,
       },
+      storageState,
     });
     this.recordingContext.setDefaultTimeout(10000);
 
@@ -1182,7 +1222,7 @@ export class BrowserManager {
     // Invalidate CDP session since we switched pages
     await this.invalidateCDPSession();
 
-    // Navigate to URL if provided
+    // Navigate to URL if provided or captured
     if (url) {
       await this.recordingPage.goto(url, { waitUntil: 'load' });
     }

@@ -74,11 +74,11 @@ agent-browser screenshot --full   # Full page
 
 ### Video recording
 ```bash
-agent-browser record start ./demo.webm https://example.com   # Start recording at URL
-agent-browser click @e1                                      # Perform actions
-agent-browser record stop                                    # Stop and save video
+agent-browser record start ./demo.webm   # Start recording (uses current URL + state)
+agent-browser click @e1                  # Perform actions
+agent-browser record stop                # Stop and save video
 ```
-Recording creates a fresh browser context. For smooth demos, explore the page first to plan your actions, then start recording and execute them quickly.
+Recording creates a fresh context but preserves cookies/storage from your session. If no URL is provided, it automatically returns to your current page. For smooth demos, explore first, then start recording.
 
 ### Wait
 ```bash
@@ -148,6 +148,6 @@ agent-browser get text @e1 --json
 agent-browser open example.com --headed              # Show browser window
 agent-browser console                                # View console messages
 agent-browser errors                                 # View page errors
-agent-browser record start ./debug.webm example.com  # Record session video
+agent-browser record start ./debug.webm   # Record from current page
 agent-browser record stop                            # Save recording
 ```

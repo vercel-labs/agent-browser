@@ -1011,30 +1011,27 @@ Usage: agent-browser record start <path.webm> [url]
        agent-browser record stop
 
 Record the browser to a WebM video file using Playwright's native recording.
-Creates a fresh browser context for recording - page state is not preserved.
+Creates a fresh browser context but preserves cookies and localStorage.
+If no URL is provided, automatically navigates to your current page.
 
 Operations:
-  start <path> [url]   Start recording (optionally navigate to URL)
+  start <path> [url]   Start recording (defaults to current URL if omitted)
   stop                 Stop recording and save video
-
-Note: Recording creates a new browser context. For smooth demos, explore
-the page first to plan your actions, then start recording.
 
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
 
 Examples:
-  agent-browser record start ./demo.webm https://example.com
-  agent-browser click @e1
-  agent-browser record stop
-
-  # Two-phase workflow for smooth recordings:
-  agent-browser open https://example.com
+  # Record from current page (preserves login state)
+  agent-browser open https://app.example.com/dashboard
   agent-browser snapshot -i            # Explore and plan
-  agent-browser record start ./demo.webm https://example.com
+  agent-browser record start ./demo.webm
   agent-browser click @e3              # Execute planned actions
   agent-browser record stop
+
+  # Or specify a different URL
+  agent-browser record start ./demo.webm https://example.com
 "##,
 
         // === Console/Errors ===
