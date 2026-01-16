@@ -1131,6 +1131,7 @@ Core Commands:
   pdf <path>                 Save as PDF
   snapshot                   Accessibility tree with refs (for AI)
   eval <js>                  Run JavaScript
+  connect <port>             Connect to browser via CDP (e.g., connect 9222)
   close                      Close browser
 
 Navigation:

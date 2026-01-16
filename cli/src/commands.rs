@@ -323,6 +323,19 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
         // === Close ===
         "close" | "quit" | "exit" => Ok(json!({ "id": id, "action": "close" })),
 
+        // === Connect (CDP) ===
+        "connect" => {
+            let port_str = rest.get(0).ok_or_else(|| ParseError::MissingArguments {
+                context: "connect".to_string(),
+                usage: "connect <port>",
+            })?;
+            let port: u16 = port_str.parse().map_err(|_| ParseError::MissingArguments {
+                context: format!("connect: invalid port '{}'", port_str),
+                usage: "connect <port>",
+            })?;
+            Ok(json!({ "id": id, "action": "launch", "cdpPort": port }))
+        }
+
         // === Get ===
         "get" => parse_get(&rest, &id),
 

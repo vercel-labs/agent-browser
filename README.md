@@ -78,6 +78,7 @@ agent-browser screenshot [path]       # Take screenshot (--full for full page)
 agent-browser pdf <path>              # Save as PDF
 agent-browser snapshot                # Accessibility tree with refs (best for AI)
 agent-browser eval <js>               # Run JavaScript
+agent-browser connect <port>          # Connect to browser via CDP
 agent-browser close                   # Close browser (aliases: quit, exit)
 ```
 
@@ -465,12 +466,16 @@ export async function handler() {
 Connect to an existing browser via Chrome DevTools Protocol:
 
 ```bash
-# Connect to Electron app
-agent-browser --cdp 9222 snapshot
+# Start Chrome with: google-chrome --remote-debugging-port=9222
 
-# Connect to Chrome with remote debugging
-# (Start Chrome with: google-chrome --remote-debugging-port=9222)
-agent-browser --cdp 9222 open about:blank
+# Connect once, then run commands without --cdp
+agent-browser connect 9222
+agent-browser snapshot
+agent-browser tab
+agent-browser close
+
+# Or pass --cdp on each command
+agent-browser --cdp 9222 snapshot
 ```
 
 This enables control of:
