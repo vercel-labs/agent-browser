@@ -91,7 +91,7 @@ pub fn print_response(resp: &Response, json_mode: bool) {
             return;
         }
         // Console logs
-        if let Some(logs) = data.get("logs").and_then(|v| v.as_array()) {
+        if let Some(logs) = data.get("messages").and_then(|v| v.as_array()) {
             for log in logs {
                 let level = log.get("type").and_then(|v| v.as_str()).unwrap_or("log");
                 let text = log.get("text").and_then(|v| v.as_str()).unwrap_or("");
@@ -1264,11 +1264,13 @@ Options:
   --headers <json>           HTTP headers scoped to URL's origin (for auth)
   --executable-path <path>   Custom browser executable (or AGENT_BROWSER_EXECUTABLE_PATH)
   --extension <path>         Load browser extensions (repeatable).
+  --proxy <url>              Proxy server (http://[user:pass@]host:port)
   --json                     JSON output
   --full, -f                 Full page screenshot
   --headed                   Show browser window (not headless)
   --cdp <port>               Connect via CDP (Chrome DevTools Protocol)
   --debug                    Debug output
+  --version, -V              Show version
 
 Environment:
   AGENT_BROWSER_SESSION          Session name (default: "default")
@@ -1286,4 +1288,8 @@ Examples:
   agent-browser --cdp 9222 snapshot      # Connect via CDP port
 "#
     );
+}
+
+pub fn print_version() {
+    println!("agent-browser {}", env!("CARGO_PKG_VERSION"));
 }

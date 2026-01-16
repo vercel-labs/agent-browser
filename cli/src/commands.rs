@@ -957,6 +957,7 @@ mod tests {
             executable_path: None,
             extensions: Vec::new(),
             cdp: None,
+            proxy: None,
         }
     }
 

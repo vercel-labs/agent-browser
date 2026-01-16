@@ -19,6 +19,17 @@ const launchSchema = baseCommandSchema.extend({
     .optional(),
   browser: z.enum(['chromium', 'firefox', 'webkit']).optional(),
   cdpPort: z.number().positive().optional(),
+  executablePath: z.string().optional(),
+  extensions: z.array(z.string()).optional(),
+  headers: z.record(z.string()).optional(),
+  proxy: z
+    .object({
+      server: z.string().min(1),
+      bypass: z.string().optional(),
+      username: z.string().optional(),
+      password: z.string().optional(),
+    })
+    .optional(),
 });
 
 const navigateSchema = baseCommandSchema.extend({
