@@ -652,6 +652,23 @@ curl -o .claude/skills/agent-browser/SKILL.md \
   https://raw.githubusercontent.com/vercel-labs/agent-browser/main/skills/agent-browser/SKILL.md
 ```
 
+## Integrations
+
+### Browser Use
+
+[Browser Use](https://browser-use.com) provides cloud browser infrastructure for AI agents. Use it when running agent-browser in environments where a local browser isn't available (serverless, CI/CD, etc.).
+
+To enable Browser Use, set these environment variables:
+
+```bash
+export AGENT_BROWSER_PROVIDER=browseruse
+export BROWSER_USE_API_KEY="your-api-key"
+```
+
+When both variables are set, agent-browser automatically connects to a Browser Use cloud session instead of launching a local browser. All commands work identically.
+
+Get your API key from the [Browser Use Cloud Dashboard](https://cloud.browser-use.com/settings?tab=api-keys).
+
 ## License
 
 Apache-2.0
