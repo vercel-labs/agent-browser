@@ -1,6 +1,6 @@
 use crate::connection::Response;
 
-pub fn print_response(resp: &Response, json_mode: bool) {
+pub fn print_response(resp: &Response, json_mode: bool, action: Option<&str>) {
     if json_mode {
         println!("{}", serde_json::to_string(resp).unwrap_or_default());
         return;
@@ -135,9 +135,37 @@ pub fn print_response(resp: &Response, json_mode: bool) {
             println!("\x1b[32m✓\x1b[0m Browser closed");
             return;
         }
-        // Screenshot path
+        // Path-based operations (screenshot/pdf/trace/har/download/state/video)
         if let Some(path) = data.get("path").and_then(|v| v.as_str()) {
-            println!("\x1b[32m✓\x1b[0m Screenshot saved to {}", path);
+            match action.unwrap_or("") {
+                "screenshot" => println!("\x1b[32m✓\x1b[0m Screenshot saved to {}", path),
+                "pdf" => println!("\x1b[32m✓\x1b[0m PDF saved to {}", path),
+                "trace_stop" => println!("\x1b[32m✓\x1b[0m Trace saved to {}", path),
+                "har_stop" => println!("\x1b[32m✓\x1b[0m HAR saved to {}", path),
+                "download" | "waitfordownload" => println!("\x1b[32m✓\x1b[0m Download saved to {}", path),
+                "video_stop" => println!("\x1b[32m✓\x1b[0m Video saved to {}", path),
+                "state_save" => println!("\x1b[32m✓\x1b[0m State saved to {}", path),
+                "state_load" => {
+                    if let Some(note) = data.get("note").and_then(|v| v.as_str()) {
+                        println!("{}", note);
+                    }
+                    println!("\x1b[32m✓\x1b[0m State path set to {}", path);
+                }
+                // video_start and other commands that provide a path with a note
+                "video_start" => {
+                    if let Some(note) = data.get("note").and_then(|v| v.as_str()) {
+                        println!("{}", note);
+                    }
+                    println!("Path: {}", path);
+                }
+                _ => println!("\x1b[32m✓\x1b[0m Saved to {}", path),
+            }
+            return;
+        }
+
+        // Informational note
+        if let Some(note) = data.get("note").and_then(|v| v.as_str()) {
+            println!("{}", note);
             return;
         }
         // Default success
