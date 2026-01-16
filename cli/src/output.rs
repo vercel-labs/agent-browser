@@ -91,7 +91,7 @@ pub fn print_response(resp: &Response, json_mode: bool) {
             return;
         }
         // Console logs
-        if let Some(logs) = data.get("logs").and_then(|v| v.as_array()) {
+        if let Some(logs) = data.get("messages").and_then(|v| v.as_array()) {
             for log in logs {
                 let level = log.get("type").and_then(|v| v.as_str()).unwrap_or("log");
                 let text = log.get("text").and_then(|v| v.as_str()).unwrap_or("");
