@@ -1,3 +1,4 @@
+mod color;
 mod commands;
 mod connection;
 mod flags;
@@ -107,7 +108,7 @@ fn run_session(args: &[String], session: &str, json_mode: bool) {
             } else {
                 println!("Active sessions:");
                 for s in &sessions {
-                    let marker = if s == session { "→" } else { " " };
+                    let marker = if s == session { color::cyan("→") } else { " ".to_string() };
                     println!("{} {}", marker, s);
                 }
             }
@@ -179,7 +180,7 @@ fn main() {
                     error_type
                 );
             } else {
-                eprintln!("\x1b[31m{}\x1b[0m", e.format());
+                eprintln!("{}", color::red(&e.format()));
             }
             exit(1);
         }
@@ -191,7 +192,7 @@ fn main() {
             if flags.json {
                 println!(r#"{{"success":false,"error":"{}"}}"#, e);
             } else {
-                eprintln!("\x1b[31m✗\x1b[0m {}", e);
+                eprintln!("{} {}", color::error_indicator(), e);
             }
             exit(1);
         }
@@ -201,10 +202,10 @@ fn main() {
     if daemon_result.already_running && (flags.executable_path.is_some() || !flags.extensions.is_empty()) {
         if !flags.json {
             if flags.executable_path.is_some() {
-                eprintln!("\x1b[33m⚠\x1b[0m --executable-path ignored: daemon already running. Use 'agent-browser close' first to restart with new path.");
+                eprintln!("{} --executable-path ignored: daemon already running. Use 'agent-browser close' first to restart with new path.", color::warning_indicator());
             }
             if !flags.extensions.is_empty() {
-                eprintln!("\x1b[33m⚠\x1b[0m --extension ignored: daemon already running. Use 'agent-browser close' first to restart with extensions.");
+                eprintln!("{} --extension ignored: daemon already running. Use 'agent-browser close' first to restart with extensions.", color::warning_indicator());
             }
         }
     }
@@ -217,7 +218,7 @@ fn main() {
                 if flags.json {
                     println!(r#"{{"success":false,"error":"{}"}}"#, msg);
                 } else {
-                    eprintln!("\x1b[31m✗\x1b[0m {}", msg);
+                    eprintln!("{} {}", color::error_indicator(), msg);
                 }
                 exit(1);
             }
@@ -226,7 +227,7 @@ fn main() {
                 if flags.json {
                     println!(r#"{{"success":false,"error":"{}"}}"#, msg);
                 } else {
-                    eprintln!("\x1b[31m✗\x1b[0m {}", msg);
+                    eprintln!("{} {}", color::error_indicator(), msg);
                 }
                 exit(1);
             }
@@ -236,7 +237,7 @@ fn main() {
                 if flags.json {
                     println!(r#"{{"success":false,"error":"{}"}}"#, msg);
                 } else {
-                    eprintln!("\x1b[31m✗\x1b[0m {}", msg);
+                    eprintln!("{} {}", color::error_indicator(), msg);
                 }
                 exit(1);
             }
@@ -258,7 +259,7 @@ fn main() {
             if flags.json {
                 println!(r#"{{"success":false,"error":"{}"}}"#, msg);
             } else {
-                eprintln!("\x1b[31m✗\x1b[0m {}", msg);
+                eprintln!("{} {}", color::error_indicator(), msg);
             }
             exit(1);
         }
@@ -281,7 +282,7 @@ fn main() {
 
         if let Err(e) = send_command(launch_cmd, &flags.session) {
             if !flags.json {
-                eprintln!("\x1b[33m⚠\x1b[0m Could not configure browser: {}", e);
+                eprintln!("{} Could not configure browser: {}", color::warning_indicator(), e);
             }
         }
     }
@@ -298,7 +299,7 @@ fn main() {
             if flags.json {
                 println!(r#"{{"success":false,"error":"{}"}}"#, e);
             } else {
-                eprintln!("\x1b[31m✗\x1b[0m {}", e);
+                eprintln!("{} {}", color::error_indicator(), e);
             }
             exit(1);
         }

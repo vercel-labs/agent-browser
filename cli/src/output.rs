@@ -1,3 +1,4 @@
+use crate::color;
 use crate::connection::Response;
 
 pub fn print_response(resp: &Response, json_mode: bool) {
@@ -8,7 +9,8 @@ pub fn print_response(resp: &Response, json_mode: bool) {
 
     if !resp.success {
         eprintln!(
-            "\x1b[31m✗\x1b[0m {}",
+            "{} {}",
+            color::error_indicator(),
             resp.error.as_deref().unwrap_or("Unknown error")
         );
         return;
@@ -18,8 +20,8 @@ pub fn print_response(resp: &Response, json_mode: bool) {
         // Navigation response
         if let Some(url) = data.get("url").and_then(|v| v.as_str()) {
             if let Some(title) = data.get("title").and_then(|v| v.as_str()) {
-                println!("\x1b[32m✓\x1b[0m \x1b[1m{}\x1b[0m", title);
-                println!("\x1b[2m  {}\x1b[0m", url);
+                println!("{} {}", color::success_indicator(), color::bold(title));
+                println!("  {}", color::dim(url));
                 return;
             }
             println!("{}", url);
@@ -85,7 +87,7 @@ pub fn print_response(resp: &Response, json_mode: bool) {
                     .unwrap_or("Untitled");
                 let url = tab.get("url").and_then(|v| v.as_str()).unwrap_or("");
                 let active = tab.get("active").and_then(|v| v.as_bool()).unwrap_or(false);
-                let marker = if active { "→" } else { " " };
+                let marker = if active { color::cyan("→") } else { " ".to_string() };
                 println!("{} [{}] {} - {}", marker, i, title, url);
             }
             return;
@@ -95,13 +97,7 @@ pub fn print_response(resp: &Response, json_mode: bool) {
             for log in logs {
                 let level = log.get("type").and_then(|v| v.as_str()).unwrap_or("log");
                 let text = log.get("text").and_then(|v| v.as_str()).unwrap_or("");
-                let color = match level {
-                    "error" => "\x1b[31m",
-                    "warning" => "\x1b[33m",
-                    "info" => "\x1b[36m",
-                    _ => "\x1b[0m",
-                };
-                println!("{}[{}]\x1b[0m {}", color, level, text);
+                println!("{} {}", color::console_level_prefix(level), text);
             }
             return;
         }
@@ -109,7 +105,7 @@ pub fn print_response(resp: &Response, json_mode: bool) {
         if let Some(errors) = data.get("errors").and_then(|v| v.as_array()) {
             for err in errors {
                 let msg = err.get("message").and_then(|v| v.as_str()).unwrap_or("");
-                println!("\x1b[31m✗\x1b[0m {}", msg);
+                println!("{} {}", color::error_indicator(), msg);
             }
             return;
         }
@@ -132,16 +128,16 @@ pub fn print_response(resp: &Response, json_mode: bool) {
         }
         // Closed
         if data.get("closed").is_some() {
-            println!("\x1b[32m✓\x1b[0m Browser closed");
+            println!("{} Browser closed", color::success_indicator());
             return;
         }
         // Recording start (has "started" field)
         if let Some(started) = data.get("started").and_then(|v| v.as_bool()) {
             if started {
                 if let Some(path) = data.get("path").and_then(|v| v.as_str()) {
-                    println!("\x1b[32m✓\x1b[0m Recording started: {}", path);
+                    println!("{} Recording started: {}", color::success_indicator(), path);
                 } else {
-                    println!("\x1b[32m✓\x1b[0m Recording started");
+                    println!("{} Recording started", color::success_indicator());
                 }
                 return;
             }
@@ -150,9 +146,9 @@ pub fn print_response(resp: &Response, json_mode: bool) {
         if data.get("stopped").is_some() {
             let path = data.get("path").and_then(|v| v.as_str()).unwrap_or("unknown");
             if let Some(prev_path) = data.get("previousPath").and_then(|v| v.as_str()) {
-                println!("\x1b[32m✓\x1b[0m Recording restarted: {} (previous saved to {})", path, prev_path);
+                println!("{} Recording restarted: {} (previous saved to {})", color::success_indicator(), path, prev_path);
             } else {
-                println!("\x1b[32m✓\x1b[0m Recording started: {}", path);
+                println!("{} Recording started: {}", color::success_indicator(), path);
             }
             return;
         }
@@ -160,22 +156,22 @@ pub fn print_response(resp: &Response, json_mode: bool) {
         if data.get("frames").is_some() {
             if let Some(path) = data.get("path").and_then(|v| v.as_str()) {
                 if let Some(error) = data.get("error").and_then(|v| v.as_str()) {
-                    println!("\x1b[33m⚠\x1b[0m Recording saved to {} - {}", path, error);
+                    println!("{} Recording saved to {} - {}", color::warning_indicator(), path, error);
                 } else {
-                    println!("\x1b[32m✓\x1b[0m Recording saved to {}", path);
+                    println!("{} Recording saved to {}", color::success_indicator(), path);
                 }
             } else {
-                println!("\x1b[32m✓\x1b[0m Recording stopped");
+                println!("{} Recording stopped", color::success_indicator());
             }
             return;
         }
         // Screenshot path (no "started" or "frames" field)
         if let Some(path) = data.get("path").and_then(|v| v.as_str()) {
-            println!("\x1b[32m✓\x1b[0m Screenshot saved to {}", path);
+            println!("{} Screenshot saved to {}", color::success_indicator(), color::green(path));
             return;
         }
         // Default success
-        println!("\x1b[32m✓\x1b[0m Done");
+        println!("{} Done", color::success_indicator());
     }
 }
 
