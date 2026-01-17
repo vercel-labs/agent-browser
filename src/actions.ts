@@ -1436,8 +1436,8 @@ async function handleInputValue(
   command: InputValueCommand,
   browser: BrowserManager
 ): Promise<Response> {
-  const page = browser.getPage();
-  const value = await page.locator(command.selector).inputValue();
+  const locator = browser.getLocator(command.selector);
+  const value = await locator.inputValue();
   return successResponse(command.id, { value });
 }
 
