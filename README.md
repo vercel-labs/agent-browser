@@ -678,16 +678,24 @@ Get your API key and project ID from the [Browserbase Dashboard](https://browser
 
 [Browser Use](https://browser-use.com) provides cloud browser infrastructure for AI agents. Use it when running agent-browser in environments where a local browser isn't available (serverless, CI/CD, etc.).
 
-To enable Browser Use, set these environment variables:
+To enable Browser Use, use the `-p` flag:
+
+```bash
+export BROWSER_USE_API_KEY="your-api-key"
+agent-browser -p browseruse open https://example.com
+```
+
+Or use environment variables for CI/scripts:
 
 ```bash
 export AGENT_BROWSER_PROVIDER=browseruse
 export BROWSER_USE_API_KEY="your-api-key"
+agent-browser open https://example.com
 ```
 
-When both variables are set, agent-browser automatically connects to a Browser Use cloud session instead of launching a local browser. All commands work identically.
+When enabled, agent-browser connects to a Browser Use cloud session instead of launching a local browser. All commands work identically.
 
-Get your API key from the [Browser Use Cloud Dashboard](https://cloud.browser-use.com/settings?tab=api-keys).
+Get your API key from the [Browser Use Cloud Dashboard](https://cloud.browser-use.com/settings?tab=api-keys). Free credits are available to get started, with pay-as-you-go pricing after.
 
 ## License
 
