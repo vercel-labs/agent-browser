@@ -335,11 +335,26 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
 
         // === Screenshot/PDF ===
         "screenshot" => {
-            let mut cmd = json!({ "id": id, "action": "screenshot", "fullPage": flags.full });
-            if let Some(path) = rest.get(0) {
-                cmd["path"] = json!(path);
-            }
-            Ok(cmd)
+            // screenshot [selector] [path]
+            // selector: @ref or CSS selector
+            // path: file path (contains / or . or ends with known extension)
+            let (selector, path) = match (rest.get(0), rest.get(1)) {
+                (Some(first), Some(second)) => {
+                    // Two args: first is selector, second is path
+                    (Some(*first), Some(*second))
+                }
+                (Some(first), None) => {
+                    // One arg: check if it looks like a path
+                    let is_path = first.contains('/') || first.contains('.') || first.ends_with(".png") || first.ends_with(".jpg") || first.ends_with(".jpeg");
+                    if is_path {
+                        (None, Some(*first))
+                    } else {
+                        (Some(*first), None)
+                    }
+                }
+                _ => (None, None),
+            };
+            Ok(json!({ "id": id, "action": "screenshot", "path": path, "selector": selector, "fullPage": flags.full }))
         }
         "pdf" => {
             let path = rest.get(0).ok_or_else(|| ParseError::MissingArguments {
