@@ -216,6 +216,27 @@ fn main() {
         }
     }
 
+    // Validate mutually exclusive options
+    if flags.cdp.is_some() && flags.provider.is_some() {
+        let msg = "Cannot use --cdp and -p/--provider together";
+        if flags.json {
+            println!(r#"{{"success":false,"error":"{}"}}"#, msg);
+        } else {
+            eprintln!("\x1b[31m✗\x1b[0m {}", msg);
+        }
+        exit(1);
+    }
+
+    if flags.provider.is_some() && !flags.extensions.is_empty() {
+        let msg = "Cannot use --extension with -p/--provider (extensions require local browser)";
+        if flags.json {
+            println!(r#"{{"success":false,"error":"{}"}}"#, msg);
+        } else {
+            eprintln!("\x1b[31m✗\x1b[0m {}", msg);
+        }
+        exit(1);
+    }
+
     // Connect via CDP if --cdp flag is set
     if let Some(ref port) = flags.cdp {
         let cdp_port: u16 = match port.parse::<u32>() {

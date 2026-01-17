@@ -662,7 +662,7 @@ export class BrowserManager {
    * Close a Browser Use session via API
    */
   private async closeBrowserUseSession(sessionId: string, apiKey: string): Promise<void> {
-    await fetch(`https://api.browser-use.com/api/v2/browsers/${sessionId}`, {
+    const response = await fetch(`https://api.browser-use.com/api/v2/browsers/${sessionId}`, {
       method: 'PATCH',
       headers: {
         'Content-Type': 'application/json',
@@ -670,6 +670,10 @@ export class BrowserManager {
       },
       body: JSON.stringify({ action: 'stop' }),
     });
+
+    if (!response.ok) {
+      throw new Error(`Failed to close Browser Use session: ${response.statusText}`);
+    }
   }
 
   /**
@@ -756,7 +760,20 @@ export class BrowserManager {
       throw new Error(`Failed to create Browser Use session: ${response.statusText}`);
     }
 
-    const session = (await response.json()) as { id: string; cdpUrl: string };
+    let session: { id: string; cdpUrl: string };
+    try {
+      session = (await response.json()) as { id: string; cdpUrl: string };
+    } catch (error) {
+      throw new Error(
+        `Failed to parse Browser Use session response: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+
+    if (!session.id || !session.cdpUrl) {
+      throw new Error(
+        `Invalid Browser Use session response: missing ${!session.id ? 'id' : 'cdpUrl'}`
+      );
+    }
 
     const browser = await chromium.connectOverCDP(session.cdpUrl).catch(() => {
       throw new Error('Failed to connect to Browser Use session via CDP');
