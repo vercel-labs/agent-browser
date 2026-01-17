@@ -660,19 +660,12 @@ export class BrowserManager {
 
   /**
    * Connect to Browser Use remote browser via CDP.
-   * Returns true if connected, false if provider not enabled.
-   * Requires explicit opt-in via AGENT_BROWSER_PROVIDER=browseruse
+   * Requires BROWSER_USE_API_KEY environment variable.
    */
-  private async connectToBrowserUse(): Promise<boolean> {
-    // Require explicit provider flag (follows --session / AGENT_BROWSER_SESSION pattern)
-    const provider = process.env.AGENT_BROWSER_PROVIDER;
-    if (provider !== 'browseruse') {
-      return false;
-    }
-
+  private async connectToBrowserUse(): Promise<void> {
     const browserUseApiKey = process.env.BROWSER_USE_API_KEY;
     if (!browserUseApiKey) {
-      throw new Error('BROWSER_USE_API_KEY is required when AGENT_BROWSER_PROVIDER=browseruse');
+      throw new Error('BROWSER_USE_API_KEY is required when using browseruse as a provider');
     }
 
     const response = await fetch('https://api.browser-use.com/api/v2/browsers', {
@@ -717,8 +710,6 @@ export class BrowserManager {
       this.activePageIndex = 0;
       this.setupPageTracking(page);
       this.setupContextTracking(context);
-
-      return true;
     } catch (error) {
       await this.closeBrowserUseSession(session.id, browserUseApiKey).catch((sessionError) => {
         console.error('Failed to close Browser Use session during cleanup:', sessionError);
@@ -754,8 +745,10 @@ export class BrowserManager {
       return;
     }
 
-    // Try connecting to Browser Use if credentials are available
-    if (await this.connectToBrowserUse()) {
+    // Connect to Browser Use if provider flag is set (-p browseruse or AGENT_BROWSER_PROVIDER=browseruse)
+    const provider = options.provider ?? process.env.AGENT_BROWSER_PROVIDER;
+    if (provider === 'browseruse') {
+      await this.connectToBrowserUse();
       return;
     }
 
