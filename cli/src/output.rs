@@ -130,6 +130,40 @@ pub fn print_response(resp: &Response, json_mode: bool) {
             );
             return;
         }
+        // Element styles
+        if let Some(elements) = data.get("elements").and_then(|v| v.as_array()) {
+            for (i, el) in elements.iter().enumerate() {
+                let tag = el.get("tag").and_then(|v| v.as_str()).unwrap_or("?");
+                let text = el.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                println!("[{}] {} \"{}\"", i, tag, text);
+                
+                if let Some(box_data) = el.get("box") {
+                    let w = box_data.get("width").and_then(|v| v.as_i64()).unwrap_or(0);
+                    let h = box_data.get("height").and_then(|v| v.as_i64()).unwrap_or(0);
+                    let x = box_data.get("x").and_then(|v| v.as_i64()).unwrap_or(0);
+                    let y = box_data.get("y").and_then(|v| v.as_i64()).unwrap_or(0);
+                    println!("    box: {}x{} at ({}, {})", w, h, x, y);
+                }
+                
+                if let Some(styles) = el.get("styles") {
+                    let font_size = styles.get("fontSize").and_then(|v| v.as_str()).unwrap_or("");
+                    let font_weight = styles.get("fontWeight").and_then(|v| v.as_str()).unwrap_or("");
+                    let font_family = styles.get("fontFamily").and_then(|v| v.as_str()).unwrap_or("");
+                    let color = styles.get("color").and_then(|v| v.as_str()).unwrap_or("");
+                    let bg = styles.get("backgroundColor").and_then(|v| v.as_str()).unwrap_or("");
+                    let radius = styles.get("borderRadius").and_then(|v| v.as_str()).unwrap_or("");
+                    
+                    println!("    font: {} {} {}", font_size, font_weight, font_family);
+                    println!("    color: {}", color);
+                    println!("    background: {}", bg);
+                    if radius != "0px" {
+                        println!("    border-radius: {}", radius);
+                    }
+                }
+                println!();
+            }
+            return;
+        }
         // Closed
         if data.get("closed").is_some() {
             println!("\x1b[32m✓\x1b[0m Browser closed");
@@ -676,6 +710,7 @@ Subcommands:
   url                        Get current URL
   count <selector>           Count matching elements
   box <selector>             Get bounding box (x, y, width, height)
+  styles <selector>          Get computed styles of elements
 
 Global Options:
   --json               Output as JSON
@@ -690,6 +725,8 @@ Examples:
   agent-browser get url
   agent-browser get count "li.item"
   agent-browser get box "#header"
+  agent-browser get styles "button"
+  agent-browser get styles @e1
 "##,
 
         // === Is ===
@@ -1209,7 +1246,7 @@ Navigation:
   reload                     Reload page
 
 Get Info:  agent-browser get <what> [selector]
-  text, html, value, attr <name>, title, url, count, box
+  text, html, value, attr <name>, title, url, count, box, styles
 
 Check State:  agent-browser is <what> <selector>
   visible, enabled, checked

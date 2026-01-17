@@ -316,6 +316,12 @@ export interface BoundingBoxCommand extends BaseCommand {
   selector: string;
 }
 
+// Computed styles
+export interface StylesCommand extends BaseCommand {
+  action: 'styles';
+  selector: string;
+}
+
 // More semantic locators
 export interface GetByAltTextCommand extends BaseCommand {
   action: 'getbyalttext';
@@ -856,6 +862,7 @@ export type Command =
   | IsCheckedCommand
   | CountCommand
   | BoundingBoxCommand
+  | StylesCommand
   | VideoStartCommand
   | VideoStopCommand
   | RecordingStartCommand
@@ -1014,6 +1021,28 @@ export interface RecordingRestartData {
 
 export interface InputEventData {
   injected: boolean;
+}
+
+// Element styles data
+export interface ElementStyleInfo {
+  tag: string;
+  text: string | null;
+  box: { x: number; y: number; width: number; height: number };
+  styles: {
+    fontSize: string;
+    fontWeight: string;
+    fontFamily: string;
+    color: string;
+    backgroundColor: string;
+    borderRadius: string;
+    border: string | null;
+    boxShadow: string | null;
+    padding: string;
+  };
+}
+
+export interface StylesData {
+  elements: ElementStyleInfo[];
 }
 
 // Browser state

@@ -549,7 +549,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
 }
 
 fn parse_get(rest: &[&str], id: &str) -> Result<Value, ParseError> {
-    const VALID: &[&str] = &["text", "html", "value", "attr", "url", "title", "count", "box"];
+    const VALID: &[&str] = &["text", "html", "value", "attr", "url", "title", "count", "box", "styles"];
     
     match rest.get(0).map(|s| *s) {
         Some("text") => {
@@ -600,13 +600,20 @@ fn parse_get(rest: &[&str], id: &str) -> Result<Value, ParseError> {
             })?;
             Ok(json!({ "id": id, "action": "boundingbox", "selector": sel }))
         }
+        Some("styles") => {
+            let sel = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
+                context: "get styles".to_string(),
+                usage: "get styles <selector>",
+            })?;
+            Ok(json!({ "id": id, "action": "styles", "selector": sel }))
+        }
         Some(sub) => Err(ParseError::UnknownSubcommand {
             subcommand: sub.to_string(),
             valid_options: VALID,
         }),
         None => Err(ParseError::MissingArguments {
             context: "get".to_string(),
-            usage: "get <text|html|value|attr|url|title|count|box> [args...]",
+            usage: "get <text|html|value|attr|url|title|count|box|styles> [args...]",
         }),
     }
 }

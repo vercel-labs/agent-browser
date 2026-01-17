@@ -306,6 +306,11 @@ const boundingBoxSchema = baseCommandSchema.extend({
   selector: z.string().min(1),
 });
 
+const stylesSchema = baseCommandSchema.extend({
+  action: z.literal('styles'),
+  selector: z.string().min(1),
+});
+
 const videoStartSchema = baseCommandSchema.extend({
   action: z.literal('video_start'),
   path: z.string().min(1),
@@ -819,6 +824,7 @@ const commandSchema = z.discriminatedUnion('action', [
   isCheckedSchema,
   countSchema,
   boundingBoxSchema,
+  stylesSchema,
   videoStartSchema,
   videoStopSchema,
   recordingStartSchema,
