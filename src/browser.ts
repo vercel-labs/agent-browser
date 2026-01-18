@@ -70,6 +70,8 @@ export class BrowserManager {
   private browser: Browser | null = null;
   private cdpPort: number | null = null;
   private isPersistentContext: boolean = false;
+  private browserUseSessionId: string | null = null;
+  private browserUseApiKey: string | null = null;
   private contexts: BrowserContext[] = [];
   private pages: Page[] = [];
   private activePageIndex: number = 0;
@@ -643,6 +645,97 @@ export class BrowserManager {
   }
 
   /**
+   * Close a Browser Use session via API
+   */
+  private async closeBrowserUseSession(sessionId: string, apiKey: string): Promise<void> {
+    const response = await fetch(`https://api.browser-use.com/api/v2/browsers/${sessionId}`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Browser-Use-API-Key': apiKey,
+      },
+      body: JSON.stringify({ action: 'stop' }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Failed to close Browser Use session: ${response.statusText}`);
+    }
+  }
+
+  /**
+   * Connect to Browser Use remote browser via CDP.
+   * Requires BROWSER_USE_API_KEY environment variable.
+   */
+  private async connectToBrowserUse(): Promise<void> {
+    const browserUseApiKey = process.env.BROWSER_USE_API_KEY;
+    if (!browserUseApiKey) {
+      throw new Error('BROWSER_USE_API_KEY is required when using browseruse as a provider');
+    }
+
+    const response = await fetch('https://api.browser-use.com/api/v2/browsers', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Browser-Use-API-Key': browserUseApiKey,
+      },
+      body: JSON.stringify({}),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Failed to create Browser Use session: ${response.statusText}`);
+    }
+
+    let session: { id: string; cdpUrl: string };
+    try {
+      session = (await response.json()) as { id: string; cdpUrl: string };
+    } catch (error) {
+      throw new Error(
+        `Failed to parse Browser Use session response: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+
+    if (!session.id || !session.cdpUrl) {
+      throw new Error(
+        `Invalid Browser Use session response: missing ${!session.id ? 'id' : 'cdpUrl'}`
+      );
+    }
+
+    const browser = await chromium.connectOverCDP(session.cdpUrl).catch(() => {
+      throw new Error('Failed to connect to Browser Use session via CDP');
+    });
+
+    try {
+      const contexts = browser.contexts();
+      let context: BrowserContext;
+      let page: Page;
+
+      if (contexts.length === 0) {
+        context = await browser.newContext();
+        page = await context.newPage();
+      } else {
+        context = contexts[0];
+        const pages = context.pages();
+        page = pages[0] ?? (await context.newPage());
+      }
+
+      this.browserUseSessionId = session.id;
+      this.browserUseApiKey = browserUseApiKey;
+      this.browser = browser;
+      context.setDefaultTimeout(60000);
+      this.contexts.push(context);
+      this.pages.push(page);
+      this.activePageIndex = 0;
+      this.setupPageTracking(page);
+      this.setupContextTracking(context);
+    } catch (error) {
+      await this.closeBrowserUseSession(session.id, browserUseApiKey).catch((sessionError) => {
+        console.error('Failed to close Browser Use session during cleanup:', sessionError);
+      });
+      throw error;
+    }
+  }
+
+  /**
    * Launch the browser with the specified options
    * If already launched, this is a no-op (browser stays open)
    */
@@ -666,6 +759,13 @@ export class BrowserManager {
 
     if (cdpPort) {
       await this.connectViaCDP(cdpPort);
+      return;
+    }
+
+    // Connect to Browser Use if provider flag is set (-p browseruse or AGENT_BROWSER_PROVIDER=browseruse)
+    const provider = options.provider ?? process.env.AGENT_BROWSER_PROVIDER;
+    if (provider === 'browseruse') {
+      await this.connectToBrowserUse();
       return;
     }
 
@@ -1359,8 +1459,15 @@ export class BrowserManager {
       this.cdpSession = null;
     }
 
-    // CDP: only disconnect, don't close external app's pages
-    if (this.cdpPort !== null) {
+    if (this.browserUseSessionId && this.browserUseApiKey) {
+      await this.closeBrowserUseSession(this.browserUseSessionId, this.browserUseApiKey).catch(
+        (error) => {
+          console.error('Failed to close Browser Use session:', error);
+        }
+      );
+      this.browser = null;
+    } else if (this.cdpPort !== null) {
+      // CDP: only disconnect, don't close external app's pages
       if (this.browser) {
         await this.browser.close().catch(() => {});
         this.browser = null;
@@ -1382,6 +1489,8 @@ export class BrowserManager {
     this.pages = [];
     this.contexts = [];
     this.cdpPort = null;
+    this.browserUseSessionId = null;
+    this.browserUseApiKey = null;
     this.isPersistentContext = false;
     this.activePageIndex = 0;
     this.refMap = {};
