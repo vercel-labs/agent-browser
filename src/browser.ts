@@ -68,7 +68,7 @@ interface PageError {
  */
 export class BrowserManager {
   private browser: Browser | null = null;
-  private cdpPort: number | null = null;
+  private cdpEndpoint: string | null = null; // stores port number or full URL
   private isPersistentContext: boolean = false;
   private contexts: BrowserContext[] = [];
   private pages: Page[] = [];
@@ -635,9 +635,9 @@ export class BrowserManager {
   /**
    * Check if CDP connection needs to be re-established
    */
-  private needsCdpReconnect(cdpPort: number): boolean {
+  private needsCdpReconnect(cdpEndpoint: string): boolean {
     if (!this.browser?.isConnected()) return true;
-    if (this.cdpPort !== cdpPort) return true;
+    if (this.cdpEndpoint !== cdpEndpoint) return true;
     if (!this.isCdpConnectionAlive()) return true;
     return false;
   }
@@ -647,16 +647,18 @@ export class BrowserManager {
    * If already launched, this is a no-op (browser stays open)
    */
   async launch(options: LaunchCommand): Promise<void> {
-    const cdpPort = options.cdpPort;
+    // Determine CDP endpoint: prefer cdpUrl over cdpPort for flexibility
+    const cdpEndpoint = options.cdpUrl ?? (options.cdpPort ? String(options.cdpPort) : undefined);
     const hasExtensions = !!options.extensions?.length;
 
-    if (hasExtensions && cdpPort) {
+    if (hasExtensions && cdpEndpoint) {
       throw new Error('Extensions cannot be used with CDP connection');
     }
 
     if (this.isLaunched()) {
       const needsRelaunch =
-        (!cdpPort && this.cdpPort !== null) || (!!cdpPort && this.needsCdpReconnect(cdpPort));
+        (!cdpEndpoint && this.cdpEndpoint !== null) ||
+        (!!cdpEndpoint && this.needsCdpReconnect(cdpEndpoint));
       if (needsRelaunch) {
         await this.close();
       } else {
@@ -664,8 +666,8 @@ export class BrowserManager {
       }
     }
 
-    if (cdpPort) {
-      await this.connectViaCDP(cdpPort);
+    if (cdpEndpoint) {
+      await this.connectViaCDP(cdpEndpoint);
       return;
     }
 
@@ -699,7 +701,7 @@ export class BrowserManager {
         headless: options.headless ?? true,
         executablePath: options.executablePath,
       });
-      this.cdpPort = null;
+      this.cdpEndpoint = null;
       context = await this.browser.newContext({
         viewport,
         extraHTTPHeaders: options.headers,
@@ -718,16 +720,39 @@ export class BrowserManager {
 
   /**
    * Connect to a running browser via CDP (Chrome DevTools Protocol)
+   * @param cdpEndpoint Either a port number (as string) or a full WebSocket URL (ws:// or wss://)
    */
-  private async connectViaCDP(cdpPort: number | undefined): Promise<void> {
-    if (!cdpPort) {
-      throw new Error('cdpPort is required for CDP connection');
+  private async connectViaCDP(cdpEndpoint: string | undefined): Promise<void> {
+    if (!cdpEndpoint) {
+      throw new Error('CDP endpoint is required for CDP connection');
     }
 
-    const browser = await chromium.connectOverCDP(`http://localhost:${cdpPort}`).catch(() => {
+    // Determine the connection URL:
+    // - If it starts with ws://, wss://, http://, or https://, use it directly
+    // - If it's a numeric string (e.g., "9222"), treat as port for localhost
+    // - Otherwise, treat it as a port number for localhost
+    let cdpUrl: string;
+    if (
+      cdpEndpoint.startsWith('ws://') ||
+      cdpEndpoint.startsWith('wss://') ||
+      cdpEndpoint.startsWith('http://') ||
+      cdpEndpoint.startsWith('https://')
+    ) {
+      cdpUrl = cdpEndpoint;
+    } else if (/^\d+$/.test(cdpEndpoint)) {
+      // Numeric string - treat as port number (handles JSON serialization quirks)
+      cdpUrl = `http://localhost:${cdpEndpoint}`;
+    } else {
+      // Unknown format - still try as port for backward compatibility
+      cdpUrl = `http://localhost:${cdpEndpoint}`;
+    }
+
+    const browser = await chromium.connectOverCDP(cdpUrl).catch(() => {
       throw new Error(
-        `Failed to connect via CDP on port ${cdpPort}. ` +
-          `Make sure the app is running with --remote-debugging-port=${cdpPort}`
+        `Failed to connect via CDP to ${cdpUrl}. ` +
+          (cdpUrl.includes('localhost')
+            ? `Make sure the app is running with --remote-debugging-port=${cdpEndpoint}`
+            : 'Make sure the remote browser is accessible and the URL is correct.')
       );
     });
 
@@ -747,7 +772,7 @@ export class BrowserManager {
 
       // All validation passed - commit state
       this.browser = browser;
-      this.cdpPort = cdpPort;
+      this.cdpEndpoint = cdpEndpoint;
 
       for (const context of contexts) {
         this.contexts.push(context);
@@ -1360,7 +1385,7 @@ export class BrowserManager {
     }
 
     // CDP: only disconnect, don't close external app's pages
-    if (this.cdpPort !== null) {
+    if (this.cdpEndpoint !== null) {
       if (this.browser) {
         await this.browser.close().catch(() => {});
         this.browser = null;
@@ -1381,7 +1406,7 @@ export class BrowserManager {
 
     this.pages = [];
     this.contexts = [];
-    this.cdpPort = null;
+    this.cdpEndpoint = null;
     this.isPersistentContext = false;
     this.activePageIndex = 0;
     this.refMap = {};
