@@ -1440,8 +1440,6 @@ export class BrowserManager {
       this.cdpSession = null;
     }
 
-    // CDP: only disconnect, don't close external app's pages
-    if (this.cdpPort !== null) {
     if (this.browserbaseSessionId && this.browserbaseApiKey) {
       await this.closeBrowserbaseSession(this.browserbaseSessionId, this.browserbaseApiKey).catch(
         (error) => {
