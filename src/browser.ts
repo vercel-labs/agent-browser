@@ -741,9 +741,7 @@ export class BrowserManager {
       }
 
       // Filter out pages with empty URLs, which can cause Playwright to hang
-      const allPages = contexts
-        .flatMap((context) => context.pages())
-        .filter((page) => page.url());
+      const allPages = contexts.flatMap((context) => context.pages()).filter((page) => page.url());
 
       if (allPages.length === 0) {
         throw new Error('No page found. Make sure the app has loaded content.');
