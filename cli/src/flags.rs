@@ -11,6 +11,9 @@ pub struct Flags {
     pub cdp: Option<String>,
     pub extensions: Vec<String>,
     pub proxy: Option<String>,
+    pub codegen: bool,
+    pub codegen_output: Option<String>,
+    pub codegen_code_only: bool,
 }
 
 pub fn parse_flags(args: &[String]) -> Flags {
@@ -30,6 +33,9 @@ pub fn parse_flags(args: &[String]) -> Flags {
         cdp: None,
         extensions: extensions_env,
         proxy: None,
+        codegen: env::var("AGENT_BROWSER_CODEGEN").map(|v| v == "1").unwrap_or(false),
+        codegen_output: env::var("AGENT_BROWSER_CODEGEN_OUTPUT").ok(),
+        codegen_code_only: env::var("AGENT_BROWSER_CODEGEN_CODE_ONLY").map(|v| v == "1").unwrap_or(false),
     };
 
     let mut i = 0;
@@ -75,6 +81,14 @@ pub fn parse_flags(args: &[String]) -> Flags {
                     i += 1;
                 }
             }
+            "--codegen" => flags.codegen = true,
+            "--codegen-output" => {
+                if let Some(p) = args.get(i + 1) {
+                    flags.codegen_output = Some(p.clone());
+                    i += 1;
+                }
+            }
+            "--code-only" => flags.codegen_code_only = true,
             _ => {}
         }
         i += 1;
@@ -87,9 +101,10 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
     let mut skip_next = false;
 
     // Global flags that should be stripped from command args
-    const GLOBAL_FLAGS: &[&str] = &["--json", "--full", "--headed", "--debug"];
+    // Note: --code-only is NOT stripped here because it's also a command-specific flag for `codegen start`
+    const GLOBAL_FLAGS: &[&str] = &["--json", "--full", "--headed", "--debug", "--codegen"];
     // Global flags that take a value (need to skip the next arg too)
-    const GLOBAL_FLAGS_WITH_VALUE: &[&str] = &["--session", "--headers", "--executable-path", "--cdp", "--extension", "--proxy"];
+    const GLOBAL_FLAGS_WITH_VALUE: &[&str] = &["--session", "--headers", "--executable-path", "--cdp", "--extension", "--proxy", "--codegen-output"];
 
     for arg in args.iter() {
         if skip_next {

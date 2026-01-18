@@ -17,8 +17,9 @@ import {
 import path from 'node:path';
 import os from 'node:os';
 import { existsSync, mkdirSync, rmSync } from 'node:fs';
-import type { LaunchCommand } from './types.js';
+import type { LaunchCommand, Command, Response } from './types.js';
 import { type RefMap, type EnhancedSnapshot, getEnhancedSnapshot, parseRef } from './snapshot.js';
+import { CodegenRecorder, type CodegenOptions, type CodegenResult } from './codegen.js';
 
 // Screencast frame data from CDP
 export interface ScreencastFrame {
@@ -96,6 +97,9 @@ export class BrowserManager {
   private recordingPage: Page | null = null;
   private recordingOutputPath: string = '';
   private recordingTempDir: string = '';
+
+  // Codegen recording (Playwright code generation)
+  private codegenRecorder: CodegenRecorder | null = null;
 
   /**
    * Check if browser is launched
@@ -1340,10 +1344,78 @@ export class BrowserManager {
   }
 
   /**
+   * Check if codegen recording is currently active
+   */
+  isCodegenActive(): boolean {
+    return this.codegenRecorder !== null;
+  }
+
+  /**
+   * Start codegen recording
+   * @param options - Codegen options (path, codeOnly, cwd)
+   */
+  startCodegen(options: CodegenOptions): void {
+    if (this.codegenRecorder) {
+      throw new Error("Codegen recording already in progress. Run 'codegen stop' first.");
+    }
+    this.codegenRecorder = new CodegenRecorder(options);
+  }
+
+  /**
+   * Stop codegen recording and optionally save to file
+   * @param noSave - If true, don't save to file, just return the code
+   * @returns Result with path (empty if noSave) and action count
+   */
+  stopCodegen(noSave?: boolean): CodegenResult {
+    if (!this.codegenRecorder) {
+      throw new Error('No codegen recording in progress.');
+    }
+
+    const result = noSave ? this.codegenRecorder.generate() : this.codegenRecorder.save();
+    this.codegenRecorder = null;
+    return result;
+  }
+
+  /**
+   * Record an action for codegen (if active)
+   * @param command - The command that was executed
+   * @param response - The response from the command
+   * @param originalCommand - Optional original CLI command string
+   */
+  recordCodegenAction(command: Command, response: Response, originalCommand?: string): void {
+    if (!this.codegenRecorder) {
+      return;
+    }
+    this.codegenRecorder.recordAction(command, response, this.refMap, originalCommand);
+  }
+
+  /**
+   * Get codegen recording status
+   */
+  getCodegenStatus(): {
+    recording: boolean;
+    actionCount?: number;
+    startedAt?: string;
+    path?: string;
+  } {
+    if (!this.codegenRecorder) {
+      return { recording: false };
+    }
+    return this.codegenRecorder.getStatus();
+  }
+
+  /**
    * Close the browser and clean up
    */
-  async close(): Promise<void> {
-    // Stop recording if active (saves video)
+  async close(): Promise<{ codegenResult?: CodegenResult }> {
+    let codegenResult: CodegenResult | undefined;
+
+    // Stop codegen recording if active (saves code)
+    if (this.codegenRecorder) {
+      codegenResult = this.stopCodegen();
+    }
+
+    // Stop video recording if active (saves video)
     if (this.recordingContext) {
       await this.stopRecording();
     }
@@ -1387,5 +1459,7 @@ export class BrowserManager {
     this.refMap = {};
     this.lastSnapshot = '';
     this.frameCallback = null;
+
+    return { codegenResult };
   }
 }

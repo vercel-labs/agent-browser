@@ -338,6 +338,23 @@ const recordingRestartSchema = baseCommandSchema.extend({
   url: z.string().min(1).optional(),
 });
 
+// Codegen (Playwright code generation)
+const codegenStartSchema = baseCommandSchema.extend({
+  action: z.literal('codegen_start'),
+  path: z.string().optional(),
+  codeOnly: z.boolean().optional(),
+  cwd: z.string().optional(),
+});
+
+const codegenStopSchema = baseCommandSchema.extend({
+  action: z.literal('codegen_stop'),
+  noSave: z.boolean().optional(),
+});
+
+const codegenStatusSchema = baseCommandSchema.extend({
+  action: z.literal('codegen_status'),
+});
+
 const traceStartSchema = baseCommandSchema.extend({
   action: z.literal('trace_start'),
   screenshots: z.boolean().optional(),
@@ -832,6 +849,9 @@ const commandSchema = z.discriminatedUnion('action', [
   recordingStartSchema,
   recordingStopSchema,
   recordingRestartSchema,
+  codegenStartSchema,
+  codegenStopSchema,
+  codegenStatusSchema,
   traceStartSchema,
   traceStopSchema,
   harStartSchema,

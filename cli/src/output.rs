@@ -181,14 +181,69 @@ pub fn print_response(resp: &Response, json_mode: bool) {
             }
             return;
         }
-        // Closed
+        // Closed (may include codegen result)
         if data.get("closed").is_some() {
-            println!("{} Browser closed", color::success_indicator());
+            if let Some(codegen) = data.get("codegen") {
+                let path = codegen.get("path").and_then(|v| v.as_str()).unwrap_or("unknown");
+                let count = codegen.get("actionCount").and_then(|v| v.as_i64()).unwrap_or(0);
+                println!("{} Browser closed", color::success_indicator());
+                println!("{} Codegen saved to {} ({} actions)", color::success_indicator(), color::green(path), count);
+            } else {
+                println!("{} Browser closed", color::success_indicator());
+            }
             return;
         }
-        // Recording start (has "started" field)
+        // Codegen start (has "started" and "codeOnly" fields - distinguishes from recording_start)
+        if data.get("started").is_some() && data.get("codeOnly").is_some() {
+            let path = data.get("path").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let code_only = data.get("codeOnly").and_then(|v| v.as_bool()).unwrap_or(false);
+            let format = if code_only { "TypeScript" } else { "JSON" };
+            println!("{} Codegen recording started", color::success_indicator());
+            println!("  Output: {} ({})", path, format);
+            return;
+        }
+        // Codegen status (has "recording" and may have "startedAt")
+        if data.get("recording").is_some() {
+            let recording = data.get("recording").and_then(|v| v.as_bool()).unwrap_or(false);
+            if recording {
+                let count = data.get("actionCount").and_then(|v| v.as_i64()).unwrap_or(0);
+                let started = data.get("startedAt").and_then(|v| v.as_str()).unwrap_or("unknown");
+                let path = data.get("path").and_then(|v| v.as_str()).unwrap_or("unknown");
+                println!("{} Codegen recording active", color::success_indicator());
+                println!("  Path: {}", path);
+                println!("  Started: {}", started);
+                println!("  Actions: {}", count);
+            } else {
+                println!("{} No codegen recording active", color::dim("i"));
+            }
+            return;
+        }
+        // Codegen stop (has actionCount but no frames)
+        if data.get("actionCount").is_some() && data.get("frames").is_none() {
+            let count = data.get("actionCount").and_then(|v| v.as_i64()).unwrap_or(0);
+            let code_only = data.get("codeOnly").and_then(|v| v.as_bool()).unwrap_or(false);
+            let no_save = data.get("noSave").and_then(|v| v.as_bool()).unwrap_or(false);
+            let format = if code_only { "TypeScript" } else { "JSON" };
+            
+            if no_save {
+                println!("{} Codegen completed ({} actions, {} format, not saved to file)", color::success_indicator(), count, format);
+            } else {
+                let path = data.get("path").and_then(|v| v.as_str()).unwrap_or("unknown");
+                println!("{} Codegen saved to {} ({} actions, {} format)", color::success_indicator(), color::green(path), count, format);
+            }
+            
+            // Print the generated code for AI-readable output
+            if let Some(code) = data.get("code").and_then(|v| v.as_str()) {
+                println!();
+                println!("{}", color::dim("--- Generated Playwright Code ---"));
+                println!("{}", code);
+                println!("{}", color::dim("--- End Generated Code ---"));
+            }
+            return;
+        }
+        // Recording start (has "started" field but NOT "codeOnly")
         if let Some(started) = data.get("started").and_then(|v| v.as_bool()) {
-            if started {
+            if started && data.get("codeOnly").is_none() {
                 if let Some(path) = data.get("path").and_then(|v| v.as_str()) {
                     println!("{} Recording started: {}", color::success_indicator(), path);
                 } else {
@@ -1109,6 +1164,72 @@ Examples:
   agent-browser record restart ./take2.webm
 "##,
 
+        // === Codegen (Playwright code generation) ===
+        "codegen" => r##"
+agent-browser codegen - Generate Playwright code from actions
+
+Usage: agent-browser codegen start [path] [--code-only]
+       agent-browser codegen stop [--no-save]
+       agent-browser codegen status
+
+Record browser actions and generate Playwright TypeScript code.
+Each successful action is recorded with its equivalent Playwright code.
+Output includes both the original CLI command and the generated code.
+
+Operations:
+  start [path]           Start recording (path defaults to timestamp-based name)
+    --code-only          Output only code (TypeScript), not JSON
+  stop                   Stop recording and save to file
+    --no-save            Output code to CLI without saving to file
+  status                 Check if recording is active
+
+Output Formats:
+  JSON (default):        Includes metadata, commands, and code
+  Code-only:             Just the Playwright TypeScript code
+
+Global Options:
+  --json               Output as JSON
+  --session <name>     Use specific session
+
+Flag-based Recording (Alternative):
+  --codegen              Auto-start recording when daemon starts
+  --codegen-output       Custom output path
+  --code-only            Use code-only format
+
+Examples:
+  # Basic usage
+  agent-browser codegen start
+  agent-browser open example.com
+  agent-browser click @e1
+  agent-browser fill @e2 "hello"
+  agent-browser codegen stop
+  # Output: codegen-2026-01-18T10-30-00.json
+
+  # With custom path
+  agent-browser codegen start login-test.json
+  # ... actions ...
+  agent-browser codegen stop
+
+  # Code-only format (TypeScript)
+  agent-browser codegen start login-test.ts --code-only
+  # ... actions ...
+  agent-browser codegen stop
+
+  # Output to CLI only (no file saved)
+  agent-browser codegen start --code-only
+  # ... actions ...
+  agent-browser codegen stop --no-save
+  # Code is printed to CLI but no file is created
+
+  # Check status
+  agent-browser codegen status
+
+  # Flag-based (records entire session)
+  agent-browser --codegen open example.com
+  # ... actions ...
+  agent-browser close  # Auto-saves codegen
+"##,
+
         // === Console/Errors ===
         "console" => r##"
 agent-browser console - View console logs
@@ -1302,6 +1423,9 @@ Debug:
   trace start|stop [path]    Record trace
   record start <path> [url]  Start video recording (WebM)
   record stop                Stop and save video
+  codegen start [path]       Start Playwright code generation
+  codegen stop               Stop and save generated code
+  codegen status             Check codegen recording status
   console [--clear]          View console logs
   errors [--clear]           View page errors
   highlight <sel>            Highlight element
@@ -1330,6 +1454,9 @@ Options:
   --full, -f                 Full page screenshot
   --headed                   Show browser window (not headless)
   --cdp <port>               Connect via CDP (Chrome DevTools Protocol)
+  --codegen                  Auto-start Playwright code generation
+  --codegen-output <path>    Custom output path for codegen
+  --code-only                Output only code (no JSON wrapper)
   --debug                    Debug output
   --version, -V              Show version
 

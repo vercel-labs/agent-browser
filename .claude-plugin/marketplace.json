@@ -9,7 +9,7 @@
   "plugins": [
     {
       "name": "agent-browser",
-      "description": "Automates browser interactions for web testing, form filling, screenshots, and data extraction",
+      "description": "Automates browser interactions for web testing, form filling, screenshots, data extraction, and generating Playwright test code",
       "source": "./",
       "strict": false,
       "skills": ["./skills/agent-browser"],

@@ -19,7 +19,7 @@ use windows_sys::Win32::Foundation::CloseHandle;
 use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
 
 use commands::{gen_id, parse_command, ParseError};
-use connection::{ensure_daemon, send_command};
+use connection::{ensure_daemon, send_command, DaemonOptions};
 use flags::{clean_args, parse_flags};
 use install::run_install;
 use output::{print_command_help, print_help, print_response, print_version};
@@ -192,7 +192,20 @@ fn main() {
         }
     };
 
-    let daemon_result = match ensure_daemon(&flags.session, flags.headed, flags.executable_path.as_deref(), &flags.extensions) {
+    // Get current working directory for codegen
+    let cwd = env::current_dir().ok().map(|p| p.to_string_lossy().to_string());
+    
+    let daemon_options = DaemonOptions {
+        headed: flags.headed,
+        executable_path: flags.executable_path.as_deref(),
+        extensions: &flags.extensions,
+        codegen: flags.codegen,
+        codegen_output: flags.codegen_output.as_deref(),
+        codegen_code_only: flags.codegen_code_only,
+        cwd: cwd.as_deref(),
+    };
+
+    let daemon_result = match ensure_daemon(&flags.session, &daemon_options) {
         Ok(result) => result,
         Err(e) => {
             if flags.json {
@@ -213,6 +226,13 @@ fn main() {
             if !flags.extensions.is_empty() {
                 eprintln!("{} --extension ignored: daemon already running. Use 'agent-browser close' first to restart with extensions.", color::warning_indicator());
             }
+        }
+    }
+
+    // Warn if codegen was specified but daemon was already running
+    if daemon_result.already_running && flags.codegen {
+        if !flags.json {
+            eprintln!("{} --codegen ignored: daemon already running. Use 'agent-browser close' first to restart with codegen, or use 'agent-browser codegen start'.", color::warning_indicator());
         }
     }
 

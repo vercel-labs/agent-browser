@@ -204,6 +204,15 @@ export async function startDaemon(options?: { streamPort?: number }): Promise<vo
               executablePath: process.env.AGENT_BROWSER_EXECUTABLE_PATH,
               extensions: extensions,
             });
+
+            // Auto-start codegen if AGENT_BROWSER_CODEGEN is set
+            if (process.env.AGENT_BROWSER_CODEGEN === '1' && !browser.isCodegenActive()) {
+              browser.startCodegen({
+                path: process.env.AGENT_BROWSER_CODEGEN_OUTPUT,
+                codeOnly: process.env.AGENT_BROWSER_CODEGEN_CODE_ONLY === '1',
+                cwd: process.env.AGENT_BROWSER_CODEGEN_CWD,
+              });
+            }
           }
 
           // Handle close command specially

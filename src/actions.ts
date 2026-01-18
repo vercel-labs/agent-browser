@@ -104,6 +104,9 @@ import type {
   RecordingStartCommand,
   RecordingStopCommand,
   RecordingRestartCommand,
+  CodegenStartCommand,
+  CodegenStopCommand,
+  CodegenStatusCommand,
   NavigateData,
   ScreenshotData,
   EvaluateData,
@@ -119,6 +122,9 @@ import type {
   RecordingRestartData,
   InputEventData,
   StylesData,
+  CodegenStartData,
+  CodegenStopData,
+  CodegenStatusData,
 } from './types.js';
 import { successResponse, errorResponse } from './protocol.js';
 
@@ -194,8 +200,37 @@ export function toAIFriendlyError(error: unknown, selector: string): Error {
 
 /**
  * Execute a command and return a response
+ * @param command - The command to execute
+ * @param browser - The browser manager
+ * @param originalCliCommand - Optional original CLI command string for codegen
  */
-export async function executeCommand(command: Command, browser: BrowserManager): Promise<Response> {
+export async function executeCommand(
+  command: Command,
+  browser: BrowserManager,
+  originalCliCommand?: string
+): Promise<Response> {
+  try {
+    const response = await executeCommandInternal(command, browser);
+
+    // Record action for codegen if active and successful
+    if (response.success && browser.isCodegenActive()) {
+      browser.recordCodegenAction(command, response, originalCliCommand);
+    }
+
+    return response;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return errorResponse(command.id, message);
+  }
+}
+
+/**
+ * Internal command execution (called by executeCommand)
+ */
+async function executeCommandInternal(
+  command: Command,
+  browser: BrowserManager
+): Promise<Response> {
   try {
     switch (command.action) {
       case 'launch':
@@ -444,6 +479,12 @@ export async function executeCommand(command: Command, browser: BrowserManager):
         return await handleRecordingStop(command, browser);
       case 'recording_restart':
         return await handleRecordingRestart(command, browser);
+      case 'codegen_start':
+        return await handleCodegenStart(command, browser);
+      case 'codegen_stop':
+        return await handleCodegenStop(command, browser);
+      case 'codegen_status':
+        return await handleCodegenStatus(command, browser);
       default: {
         // TypeScript narrows to never here, but we handle it for safety
         const unknownCommand = command as { id: string; action: string };
@@ -709,7 +750,20 @@ async function handleClose(
   command: Command & { action: 'close' },
   browser: BrowserManager
 ): Promise<Response> {
-  await browser.close();
+  const { codegenResult } = await browser.close();
+
+  // Include codegen result if codegen was active
+  if (codegenResult) {
+    return successResponse(command.id, {
+      closed: true,
+      codegen: {
+        path: codegenResult.path,
+        actionCount: codegenResult.actionCount,
+        codeOnly: codegenResult.codeOnly,
+      },
+    });
+  }
+
   return successResponse(command.id, { closed: true });
 }
 
@@ -1999,4 +2053,46 @@ async function handleRecordingRestart(
     previousPath: result.previousPath,
     stopped: result.stopped,
   });
+}
+
+// Codegen handlers (Playwright code generation)
+
+async function handleCodegenStart(
+  command: CodegenStartCommand,
+  browser: BrowserManager
+): Promise<Response<CodegenStartData>> {
+  browser.startCodegen({
+    path: command.path,
+    codeOnly: command.codeOnly,
+    cwd: command.cwd,
+  });
+
+  const status = browser.getCodegenStatus();
+  return successResponse(command.id, {
+    started: true,
+    path: status.path ?? '',
+    codeOnly: command.codeOnly ?? false,
+  });
+}
+
+async function handleCodegenStop(
+  command: CodegenStopCommand,
+  browser: BrowserManager
+): Promise<Response<CodegenStopData>> {
+  const result = browser.stopCodegen(command.noSave);
+  return successResponse(command.id, {
+    path: result.path,
+    actionCount: result.actionCount,
+    codeOnly: result.codeOnly,
+    code: result.code,
+    noSave: result.noSave,
+  });
+}
+
+async function handleCodegenStatus(
+  command: CodegenStatusCommand,
+  browser: BrowserManager
+): Promise<Response<CodegenStatusData>> {
+  const status = browser.getCodegenStatus();
+  return successResponse(command.id, status);
 }

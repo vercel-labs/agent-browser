@@ -1,6 +1,6 @@
 ---
 name: agent-browser
-description: Automates browser interactions for web testing, form filling, screenshots, and data extraction. Use when the user needs to navigate websites, interact with web pages, fill forms, take screenshots, test web applications, or extract information from web pages.
+description: Automates browser interactions for web testing, form filling, screenshots, data extraction, and generating Playwright test code. Use when the user needs to navigate websites, interact with web pages, fill forms, take screenshots, test web applications, extract information from web pages, or generate Playwright code from browser actions.
 allowed-tools: Bash(agent-browser:*)
 ---
 
@@ -99,6 +99,17 @@ agent-browser record stop                 # Stop and save video
 agent-browser record restart ./take2.webm # Stop current + start new recording
 ```
 Recording creates a fresh context but preserves cookies/storage from your session. If no URL is provided, it automatically returns to your current page. For smooth demos, explore first, then start recording.
+
+### Codegen (Playwright code generation)
+```bash
+agent-browser codegen start              # Start recording actions as Playwright code
+agent-browser codegen start test.json    # Save to specific file (JSON with metadata)
+agent-browser codegen start test.ts --code-only  # Save as TypeScript only
+agent-browser codegen status             # Check if codegen is active
+agent-browser codegen stop               # Stop and save generated code
+agent-browser codegen stop --no-save     # Stop and return code without saving
+```
+Codegen records your browser actions and generates equivalent Playwright TypeScript code. Use JSON format for full metadata (original commands + generated code), or `--code-only` for clean TypeScript output.
 
 ### Wait
 ```bash

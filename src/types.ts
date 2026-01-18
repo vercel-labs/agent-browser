@@ -541,6 +541,24 @@ export interface RecordingRestartCommand extends BaseCommand {
   url?: string;
 }
 
+// Codegen (Playwright code generation)
+export interface CodegenStartCommand extends BaseCommand {
+  action: 'codegen_start';
+  path?: string;
+  codeOnly?: boolean;
+  cwd?: string;
+}
+
+export interface CodegenStopCommand extends BaseCommand {
+  action: 'codegen_stop';
+  /** If true, don't save to file - just return the generated code */
+  noSave?: boolean;
+}
+
+export interface CodegenStatusCommand extends BaseCommand {
+  action: 'codegen_status';
+}
+
 // Tracing
 export interface TraceStartCommand extends BaseCommand {
   action: 'trace_start';
@@ -924,7 +942,10 @@ export type Command =
   | ScreencastStopCommand
   | InputMouseCommand
   | InputKeyboardCommand
-  | InputTouchCommand;
+  | InputTouchCommand
+  | CodegenStartCommand
+  | CodegenStopCommand
+  | CodegenStatusCommand;
 
 // Response types
 export interface SuccessResponse<T = unknown> {
@@ -1022,6 +1043,30 @@ export interface RecordingRestartData {
 
 export interface InputEventData {
   injected: boolean;
+}
+
+export interface CodegenStartData {
+  started: boolean;
+  path: string;
+  codeOnly: boolean;
+}
+
+export interface CodegenStopData {
+  /** Path where the file was saved (empty if noSave was true) */
+  path: string;
+  actionCount: number;
+  codeOnly: boolean;
+  /** Generated Playwright code (for AI-readable output) */
+  code?: string;
+  /** True if the code was NOT saved to a file */
+  noSave?: boolean;
+}
+
+export interface CodegenStatusData {
+  recording: boolean;
+  actionCount?: number;
+  startedAt?: string;
+  path?: string;
 }
 
 // Element styles data

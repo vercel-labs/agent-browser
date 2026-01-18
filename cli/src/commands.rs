@@ -544,6 +544,65 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                 }),
             }
         }
+
+        // === Codegen (Playwright code generation) ===
+        "codegen" => {
+            const VALID: &[&str] = &["start", "stop", "status"];
+            
+            // Check for --code-only flag
+            let code_only = rest.iter().any(|&s| s == "--code-only");
+            // Check for --no-save flag
+            let no_save = rest.iter().any(|&s| s == "--no-save");
+            
+            // Get current working directory for relative path resolution
+            let cwd = std::env::current_dir().ok().map(|p| p.to_string_lossy().to_string());
+            
+            match rest.get(0).map(|s| *s) {
+                Some("start") => {
+                    // Optional path parameter (skip if it's a flag)
+                    let path = rest.get(1).filter(|s| !s.starts_with('-'));
+                    
+                    let mut cmd = json!({ "id": id, "action": "codegen_start" });
+                    if let Some(p) = path {
+                        cmd["path"] = json!(p);
+                    }
+                    if code_only {
+                        cmd["codeOnly"] = json!(true);
+                    }
+                    if let Some(ref c) = cwd {
+                        cmd["cwd"] = json!(c);
+                    }
+                    Ok(cmd)
+                }
+                Some("stop") => {
+                    let mut cmd = json!({ "id": id, "action": "codegen_stop" });
+                    if no_save {
+                        cmd["noSave"] = json!(true);
+                    }
+                    Ok(cmd)
+                }
+                Some("status") => Ok(json!({ "id": id, "action": "codegen_status" })),
+                Some(sub) if sub.starts_with('-') => {
+                    // If first arg is a flag, treat as "start" with no path
+                    let mut cmd = json!({ "id": id, "action": "codegen_start" });
+                    if code_only {
+                        cmd["codeOnly"] = json!(true);
+                    }
+                    if let Some(ref c) = cwd {
+                        cmd["cwd"] = json!(c);
+                    }
+                    Ok(cmd)
+                }
+                Some(sub) => Err(ParseError::UnknownSubcommand {
+                    subcommand: sub.to_string(),
+                    valid_options: VALID,
+                }),
+                None => Err(ParseError::MissingArguments {
+                    context: "codegen".to_string(),
+                    usage: "codegen <start|stop|status> [path] [--code-only] [--no-save]",
+                }),
+            }
+        }
         "console" => {
             let clear = rest.iter().any(|&s| s == "--clear");
             Ok(json!({ "id": id, "action": "console", "clear": clear }))
@@ -1052,6 +1111,9 @@ mod tests {
             extensions: Vec::new(),
             cdp: None,
             proxy: None,
+            codegen: false,
+            codegen_output: None,
+            codegen_code_only: false,
         }
     }
 
@@ -1632,5 +1694,78 @@ mod tests {
         assert_eq!(cmd["action"], "nth");
         assert_eq!(cmd["index"], 2);
         assert!(cmd.get("value").is_none());
+    }
+
+    // === Codegen Tests ===
+
+    #[test]
+    fn test_codegen_start() {
+        let cmd = parse_command(&args("codegen start"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "codegen_start");
+        assert!(cmd.get("path").is_none());
+        assert!(cmd.get("codeOnly").is_none());
+    }
+
+    #[test]
+    fn test_codegen_start_with_path() {
+        let cmd = parse_command(&args("codegen start output.json"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "codegen_start");
+        assert_eq!(cmd["path"], "output.json");
+    }
+
+    #[test]
+    fn test_codegen_start_with_code_only() {
+        let cmd = parse_command(&args("codegen start output.ts --code-only"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "codegen_start");
+        assert_eq!(cmd["path"], "output.ts");
+        assert_eq!(cmd["codeOnly"], true);
+    }
+
+    #[test]
+    fn test_codegen_start_code_only_no_path() {
+        let cmd = parse_command(&args("codegen start --code-only"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "codegen_start");
+        assert!(cmd.get("path").is_none());
+        assert_eq!(cmd["codeOnly"], true);
+    }
+
+    #[test]
+    fn test_codegen_stop() {
+        let cmd = parse_command(&args("codegen stop"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "codegen_stop");
+    }
+
+    #[test]
+    fn test_codegen_status() {
+        let cmd = parse_command(&args("codegen status"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "codegen_status");
+    }
+
+    #[test]
+    fn test_codegen_invalid_subcommand() {
+        let result = parse_command(&args("codegen foo"), &default_flags());
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ParseError::UnknownSubcommand { .. }));
+    }
+
+    #[test]
+    fn test_codegen_missing_subcommand() {
+        let result = parse_command(&args("codegen"), &default_flags());
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ParseError::MissingArguments { .. }));
+    }
+
+    #[test]
+    fn test_codegen_stop_with_no_save() {
+        let cmd = parse_command(&args("codegen stop --no-save"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "codegen_stop");
+        assert_eq!(cmd["noSave"], true);
+    }
+
+    #[test]
+    fn test_codegen_stop_without_no_save() {
+        let cmd = parse_command(&args("codegen stop"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "codegen_stop");
+        assert!(cmd.get("noSave").is_none());
     }
 }

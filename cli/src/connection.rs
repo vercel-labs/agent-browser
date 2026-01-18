@@ -162,11 +162,20 @@ pub struct DaemonResult {
     pub already_running: bool,
 }
 
+/// Options for starting the daemon
+pub struct DaemonOptions<'a> {
+    pub headed: bool,
+    pub executable_path: Option<&'a str>,
+    pub extensions: &'a [String],
+    pub codegen: bool,
+    pub codegen_output: Option<&'a str>,
+    pub codegen_code_only: bool,
+    pub cwd: Option<&'a str>,
+}
+
 pub fn ensure_daemon(
     session: &str,
-    headed: bool,
-    executable_path: Option<&str>,
-    extensions: &[String],
+    options: &DaemonOptions,
 ) -> Result<DaemonResult, String> {
     if is_daemon_running(session) && daemon_ready(session) {
         return Ok(DaemonResult {
@@ -195,27 +204,49 @@ pub fn ensure_daemon(
         .find(|p| p.exists())
         .ok_or("Daemon not found. Set AGENT_BROWSER_HOME environment variable or run from project directory.")?;
 
+    // Helper to set common environment variables
+    fn set_common_env(cmd: &mut Command, session: &str, options: &DaemonOptions) {
+        cmd.env("AGENT_BROWSER_DAEMON", "1")
+            .env("AGENT_BROWSER_SESSION", session);
+
+        if options.headed {
+            cmd.env("AGENT_BROWSER_HEADED", "1");
+        }
+
+        if let Some(path) = options.executable_path {
+            cmd.env("AGENT_BROWSER_EXECUTABLE_PATH", path);
+        }
+
+        if !options.extensions.is_empty() {
+            cmd.env("AGENT_BROWSER_EXTENSIONS", options.extensions.join(","));
+        }
+
+        // Codegen environment variables
+        if options.codegen {
+            cmd.env("AGENT_BROWSER_CODEGEN", "1");
+        }
+
+        if let Some(output) = options.codegen_output {
+            cmd.env("AGENT_BROWSER_CODEGEN_OUTPUT", output);
+        }
+
+        if options.codegen_code_only {
+            cmd.env("AGENT_BROWSER_CODEGEN_CODE_ONLY", "1");
+        }
+
+        if let Some(cwd) = options.cwd {
+            cmd.env("AGENT_BROWSER_CODEGEN_CWD", cwd);
+        }
+    }
+
     // Spawn daemon as a fully detached background process
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
         
         let mut cmd = Command::new("node");
-        cmd.arg(daemon_path)
-            .env("AGENT_BROWSER_DAEMON", "1")
-            .env("AGENT_BROWSER_SESSION", session);
-
-        if headed {
-            cmd.env("AGENT_BROWSER_HEADED", "1");
-        }
-
-        if let Some(path) = executable_path {
-            cmd.env("AGENT_BROWSER_EXECUTABLE_PATH", path);
-        }
-
-        if !extensions.is_empty() {
-            cmd.env("AGENT_BROWSER_EXTENSIONS", extensions.join(","));
-        }
+        cmd.arg(daemon_path);
+        set_common_env(&mut cmd, session, options);
 
         // Create new process group and session to fully detach
         unsafe {
@@ -237,24 +268,13 @@ pub fn ensure_daemon(
     {
         use std::os::windows::process::CommandExt;
         
-        // On Windows, call node directly. Command::new handles PATH resolution (node.exe or node.cmd)
-        // and automatically quotes arguments containing spaces.
-        let mut cmd = Command::new("node");
-        cmd.arg(daemon_path)
-            .env("AGENT_BROWSER_DAEMON", "1")
-            .env("AGENT_BROWSER_SESSION", session);
-
-        if headed {
-            cmd.env("AGENT_BROWSER_HEADED", "1");
-        }
-
-        if let Some(path) = executable_path {
-            cmd.env("AGENT_BROWSER_EXECUTABLE_PATH", path);
-        }
-
-        if !extensions.is_empty() {
-            cmd.env("AGENT_BROWSER_EXTENSIONS", extensions.join(","));
-        }
+        // On Windows, use cmd.exe to run node to ensure proper PATH resolution.
+        // This handles cases where node.exe isn't directly in PATH but node.cmd is.
+        // Pass the entire command as a single string to /c to handle paths with spaces.
+        let cmd_string = format!("node \"{}\"", daemon_path.display());
+        let mut cmd = Command::new("cmd");
+        cmd.arg("/c").arg(&cmd_string);
+        set_common_env(&mut cmd, session, options);
 
         // CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS
         const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
