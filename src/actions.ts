@@ -549,15 +549,22 @@ async function handleScreenshot(
 
   let target: Page | ReturnType<Page['locator']> = page;
   if (command.selector) {
-    target = page.locator(command.selector);
+    target = browser.getLocator(command.selector);
   }
 
-  if (command.path) {
-    await target.screenshot({ ...options, path: command.path });
-    return successResponse(command.id, { path: command.path });
-  } else {
-    const buffer = await target.screenshot(options);
-    return successResponse(command.id, { base64: buffer.toString('base64') });
+  try {
+    if (command.path) {
+      await target.screenshot({ ...options, path: command.path });
+      return successResponse(command.id, { path: command.path });
+    } else {
+      const buffer = await target.screenshot(options);
+      return successResponse(command.id, { base64: buffer.toString('base64') });
+    }
+  } catch (error) {
+    if (command.selector) {
+      throw toAIFriendlyError(error, command.selector);
+    }
+    throw error;
   }
 }
 
