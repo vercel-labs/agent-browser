@@ -197,12 +197,35 @@ export async function startDaemon(options?: { streamPort?: number }): Promise<vo
                   .map((p) => p.trim())
                   .filter(Boolean)
               : undefined;
+
+            // Parse args from env (comma or newline separated)
+            const argsEnv = process.env.AGENT_BROWSER_ARGS;
+            const args = argsEnv
+              ? argsEnv
+                  .split(/[,\n]/)
+                  .map((a) => a.trim())
+                  .filter((a) => a.length > 0)
+              : undefined;
+
+            // Parse proxy from env
+            const proxyServer = process.env.AGENT_BROWSER_PROXY;
+            const proxyBypass = process.env.AGENT_BROWSER_PROXY_BYPASS;
+            const proxy = proxyServer
+              ? {
+                  server: proxyServer,
+                  ...(proxyBypass && { bypass: proxyBypass }),
+                }
+              : undefined;
+
             await browser.launch({
               id: 'auto',
-              action: 'launch',
+              action: 'launch' as const,
               headless: process.env.AGENT_BROWSER_HEADED !== '1',
               executablePath: process.env.AGENT_BROWSER_EXECUTABLE_PATH,
               extensions: extensions,
+              args,
+              userAgent: process.env.AGENT_BROWSER_USER_AGENT,
+              proxy,
             });
           }
 

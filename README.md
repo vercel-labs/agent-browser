@@ -298,6 +298,10 @@ agent-browser snapshot -i -c -d 5         # Combine options
 | `--session <name>` | Use isolated session (or `AGENT_BROWSER_SESSION` env) |
 | `--headers <json>` | Set HTTP headers scoped to the URL's origin |
 | `--executable-path <path>` | Custom browser executable (or `AGENT_BROWSER_EXECUTABLE_PATH` env) |
+| `--args <args>` | Browser launch args, comma or newline separated (or `AGENT_BROWSER_ARGS` env) |
+| `--user-agent <ua>` | Custom User-Agent string (or `AGENT_BROWSER_USER_AGENT` env) |
+| `--proxy <url>` | Proxy server URL with optional auth (or `AGENT_BROWSER_PROXY` env) |
+| `--proxy-bypass <hosts>` | Hosts to bypass proxy (or `AGENT_BROWSER_PROXY_BYPASS` env) |
 | `--json` | JSON output (for agents) |
 | `--full, -f` | Full page screenshot |
 | `--name, -n` | Locator name filter |
