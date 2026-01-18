@@ -75,7 +75,12 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                 context: cmd.to_string(),
                 usage: "open <url>",
             })?;
-            let url = if url.starts_with("http") || url.starts_with("about:") || url.starts_with("data:") || url.starts_with("file:") {
+            let url_lower = url.to_lowercase();
+            let url = if url_lower.starts_with("http://") 
+                || url_lower.starts_with("https://")
+                || url_lower.starts_with("about:") 
+                || url_lower.starts_with("data:") 
+                || url_lower.starts_with("file:") {
                 url.to_string()
             } else {
                 format!("https://{}", url)
