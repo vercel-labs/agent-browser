@@ -22,6 +22,7 @@ export interface LaunchCommand extends BaseCommand {
     username?: string;
     password?: string;
   };
+  ignoreHTTPSErrors?: boolean;
 }
 
 export interface NavigateCommand extends BaseCommand {

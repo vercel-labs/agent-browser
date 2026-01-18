@@ -165,6 +165,7 @@ pub fn ensure_daemon(
     headed: bool,
     executable_path: Option<&str>,
     extensions: &[String],
+    ignore_https_errors: bool,
 ) -> Result<DaemonResult, String> {
     if is_daemon_running(session) && daemon_ready(session) {
         return Ok(DaemonResult {
@@ -197,7 +198,7 @@ pub fn ensure_daemon(
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        
+
         let mut cmd = Command::new("node");
         cmd.arg(daemon_path)
             .env("AGENT_BROWSER_DAEMON", "1")
@@ -213,6 +214,10 @@ pub fn ensure_daemon(
 
         if !extensions.is_empty() {
             cmd.env("AGENT_BROWSER_EXTENSIONS", extensions.join(","));
+        }
+
+        if ignore_https_errors {
+            cmd.env("AGENT_BROWSER_IGNORE_HTTPS_ERRORS", "1");
         }
 
         // Create new process group and session to fully detach
@@ -234,7 +239,7 @@ pub fn ensure_daemon(
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        
+
         // On Windows, use cmd.exe to run node to ensure proper PATH resolution.
         // This handles cases where node.exe isn't directly in PATH but node.cmd is.
         // Pass the entire command as a single string to /c to handle paths with spaces.
@@ -257,10 +262,14 @@ pub fn ensure_daemon(
             cmd.env("AGENT_BROWSER_EXTENSIONS", extensions.join(","));
         }
 
+        if ignore_https_errors {
+            cmd.env("AGENT_BROWSER_IGNORE_HTTPS_ERRORS", "1");
+        }
+
         // CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS
         const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
         const DETACHED_PROCESS: u32 = 0x00000008;
-        
+
         cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS)
             .stdin(Stdio::null())
             .stdout(Stdio::null())

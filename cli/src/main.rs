@@ -192,7 +192,7 @@ fn main() {
         }
     };
 
-    let daemon_result = match ensure_daemon(&flags.session, flags.headed, flags.executable_path.as_deref(), &flags.extensions) {
+    let daemon_result = match ensure_daemon(&flags.session, flags.headed, flags.executable_path.as_deref(), &flags.extensions, flags.ignore_https_errors) {
         Ok(result) => result,
         Err(e) => {
             if flags.json {
@@ -204,14 +204,17 @@ fn main() {
         }
     };
 
-    // Warn if executable_path was specified but daemon was already running
-    if daemon_result.already_running && (flags.executable_path.is_some() || !flags.extensions.is_empty()) {
+    // Warn if executable_path/extensions/ignore_https_errors was specified but daemon was already running
+    if daemon_result.already_running && (flags.executable_path.is_some() || !flags.extensions.is_empty() || flags.ignore_https_errors) {
         if !flags.json {
             if flags.executable_path.is_some() {
                 eprintln!("{} --executable-path ignored: daemon already running. Use 'agent-browser close' first to restart with new path.", color::warning_indicator());
             }
             if !flags.extensions.is_empty() {
                 eprintln!("{} --extension ignored: daemon already running. Use 'agent-browser close' first to restart with extensions.", color::warning_indicator());
+            }
+            if flags.ignore_https_errors {
+                eprintln!("{} --ignore-https-errors ignored: daemon already running. Use 'agent-browser close' first to restart with this option.", color::warning_indicator());
             }
         }
     }
@@ -249,11 +252,15 @@ fn main() {
             }
         };
 
-        let launch_cmd = json!({
+        let mut launch_cmd = json!({
             "id": gen_id(),
             "action": "launch",
             "cdpPort": cdp_port
         });
+
+        if flags.ignore_https_errors {
+            launch_cmd["ignoreHTTPSErrors"] = json!(true);
+        }
 
         let err = match send_command(launch_cmd, &flags.session) {
             Ok(resp) if resp.success => None,
@@ -284,6 +291,10 @@ fn main() {
             launch_cmd.as_object_mut()
                 .expect("json! macro guarantees object type")
                 .insert("proxy".to_string(), proxy_obj);
+        }
+
+        if flags.ignore_https_errors {
+            launch_cmd["ignoreHTTPSErrors"] = json!(true);
         }
 
         if let Err(e) = send_command(launch_cmd, &flags.session) {

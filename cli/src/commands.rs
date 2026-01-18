@@ -1034,6 +1034,7 @@ mod tests {
             extensions: Vec::new(),
             cdp: None,
             proxy: None,
+            ignore_https_errors: false,
         }
     }
 

@@ -1325,6 +1325,7 @@ Options:
   --executable-path <path>   Custom browser executable (or AGENT_BROWSER_EXECUTABLE_PATH)
   --extension <path>         Load browser extensions (repeatable).
   --proxy <url>              Proxy server (http://[user:pass@]host:port)
+  --ignore-https-errors      Ignore HTTPS certificate errors
   --json                     JSON output
   --full, -f                 Full page screenshot
   --headed                   Show browser window (not headless)

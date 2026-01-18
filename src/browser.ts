@@ -691,6 +691,7 @@ export class BrowserManager {
           viewport,
           extraHTTPHeaders: options.headers,
           ...(options.proxy && { proxy: options.proxy }),
+          ignoreHTTPSErrors: options.ignoreHTTPSErrors ?? false,
         }
       );
       this.isPersistentContext = true;
@@ -704,6 +705,7 @@ export class BrowserManager {
         viewport,
         extraHTTPHeaders: options.headers,
         ...(options.proxy && { proxy: options.proxy }),
+        ignoreHTTPSErrors: options.ignoreHTTPSErrors ?? false,
       });
     }
 
@@ -739,9 +741,7 @@ export class BrowserManager {
       }
 
       // Filter out pages with empty URLs, which can cause Playwright to hang
-      const allPages = contexts
-        .flatMap((context) => context.pages())
-        .filter((page) => page.url());
+      const allPages = contexts.flatMap((context) => context.pages()).filter((page) => page.url());
 
       if (allPages.length === 0) {
         throw new Error('No page found. Make sure the app has loaded content.');
