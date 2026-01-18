@@ -219,7 +219,7 @@ export async function startDaemon(options?: { streamPort?: number }): Promise<vo
 
             await browser.launch({
               id: 'auto',
-              action: 'launch',
+              action: 'launch' as const,
               headless: process.env.AGENT_BROWSER_HEADED !== '1',
               executablePath: process.env.AGENT_BROWSER_EXECUTABLE_PATH,
               extensions: extensions,
