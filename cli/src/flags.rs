@@ -36,7 +36,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
         proxy: env::var("AGENT_BROWSER_PROXY").ok(),
         proxy_bypass: env::var("AGENT_BROWSER_PROXY_BYPASS").ok(),
         args: env::var("AGENT_BROWSER_ARGS").ok(),
-        user_agent: None,
+        user_agent: env::var("AGENT_BROWSER_USER_AGENT").ok(),
         provider: env::var("AGENT_BROWSER_PROVIDER").ok(),
     };
 
