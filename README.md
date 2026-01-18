@@ -657,6 +657,23 @@ curl -o .claude/skills/agent-browser/SKILL.md \
   https://raw.githubusercontent.com/vercel-labs/agent-browser/main/skills/agent-browser/SKILL.md
 ```
 
+## Integrations
+
+### Browserbase
+
+[Browserbase](https://browserbase.com) provides remote browser infrastructure to make deployment of agentic browsing agents easy. Use it when running the agent-browser CLI in an environment where a local browser isn't feasible.
+
+To enable Browserbase, set these environment variables:
+
+```bash
+export BROWSERBASE_API_KEY="your-api-key"
+export BROWSERBASE_PROJECT_ID="your-project-id"
+```
+
+When both variables are set, agent-browser automatically connects to a Browserbase session instead of launching a local browser. All commands work identically.
+
+Get your API key and project ID from the [Browserbase Dashboard](https://browserbase.com/overview).
+
 ## License
 
 Apache-2.0
