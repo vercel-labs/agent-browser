@@ -339,18 +339,39 @@ fn main() {
     }
 
     // Launch headed browser or proxy if flags are set (without CDP or provider)
-    if (flags.headed || flags.proxy.is_some()) && flags.cdp.is_none() && flags.provider.is_none() {
+    if (flags.headed || flags.proxy.is_some() || flags.args.is_some() || flags.user_agent.is_some()) && flags.cdp.is_none() && flags.provider.is_none() {
         let mut launch_cmd = json!({
             "id": gen_id(),
             "action": "launch",
             "headless": !flags.headed
         });
 
+        let cmd_obj = launch_cmd.as_object_mut()
+            .expect("json! macro guarantees object type");
+
         if let Some(ref proxy_str) = flags.proxy {
-            let proxy_obj = parse_proxy(proxy_str);
-            launch_cmd.as_object_mut()
-                .expect("json! macro guarantees object type")
-                .insert("proxy".to_string(), proxy_obj);
+            let mut proxy_obj = parse_proxy(proxy_str);
+            // Add bypass if specified
+            if let Some(ref bypass) = flags.proxy_bypass {
+                if let Some(obj) = proxy_obj.as_object_mut() {
+                    obj.insert("bypass".to_string(), json!(bypass));
+                }
+            }
+            cmd_obj.insert("proxy".to_string(), proxy_obj);
+        }
+
+        if let Some(ref ua) = flags.user_agent {
+            cmd_obj.insert("userAgent".to_string(), json!(ua));
+        }
+
+        if let Some(ref a) = flags.args {
+            // Parse args (comma or newline separated)
+            let args_vec: Vec<String> = a
+                .split(&[',', '\n'][..])
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            cmd_obj.insert("args".to_string(), json!(args_vec));
         }
 
         if let Err(e) = send_command(launch_cmd, &flags.session) {
