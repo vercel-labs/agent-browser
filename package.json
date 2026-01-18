@@ -45,12 +45,12 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/browserbase/agent-browser.git"
+    "url": "git+https://github.com/vercel-labs/agent-browser.git"
   },
   "bugs": {
-    "url": "https://github.com/browserbase/agent-browser/issues"
+    "url": "https://github.com/vercel-labs/agent-browser/issues"
   },
-  "homepage": "https://github.com/browserbase/agent-browser#readme",
+  "homepage": "https://github.com/vercel-labs/agent-browser#readme",
   "dependencies": {
     "playwright-core": "^1.57.0",
     "ws": "^8.19.0",
