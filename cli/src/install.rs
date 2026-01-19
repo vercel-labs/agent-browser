@@ -1,3 +1,4 @@
+use crate::color;
 use std::process::{exit, Command, Stdio};
 
 pub fn run_install(with_deps: bool) {
@@ -5,9 +6,15 @@ pub fn run_install(with_deps: bool) {
 
     if is_linux {
         if with_deps {
-            println!("\x1b[36mInstalling system dependencies...\x1b[0m");
+            println!("{}", color::cyan("Installing system dependencies..."));
 
             let (pkg_mgr, deps) = if which_exists("apt-get") {
+                let libasound = if package_exists_apt("libasound2t64") {
+                    "libasound2t64"
+                } else {
+                    "libasound2"
+                };
+
                 (
                     "apt-get",
                     vec![
@@ -30,7 +37,7 @@ pub fn run_install(with_deps: bool) {
                         "libcairo2",
                         "libgdk-pixbuf-2.0-0",
                         "libxrender1",
-                        "libasound2",
+                        libasound,
                         "libfreetype6",
                         "libfontconfig1",
                         "libdbus-1-3",
@@ -93,7 +100,7 @@ pub fn run_install(with_deps: bool) {
                     ],
                 )
             } else {
-                eprintln!("\x1b[31m✗\x1b[0m No supported package manager found (apt-get, dnf, or yum)");
+                eprintln!("{} No supported package manager found (apt-get, dnf, or yum)", color::error_indicator());
                 exit(1);
             };
 
@@ -112,22 +119,23 @@ pub fn run_install(with_deps: bool) {
 
             match status {
                 Ok(s) if s.success() => {
-                    println!("\x1b[32m✓\x1b[0m System dependencies installed")
+                    println!("{} System dependencies installed", color::success_indicator())
                 }
                 Ok(_) => eprintln!(
-                    "\x1b[33m⚠\x1b[0m Failed to install some dependencies. You may need to run manually with sudo."
+                    "{} Failed to install some dependencies. You may need to run manually with sudo.",
+                    color::warning_indicator()
                 ),
-                Err(e) => eprintln!("\x1b[33m⚠\x1b[0m Could not run install command: {}", e),
+                Err(e) => eprintln!("{} Could not run install command: {}", color::warning_indicator(), e),
             }
         } else {
-            println!("\x1b[33m⚠\x1b[0m Linux detected. If browser fails to launch, run:");
+            println!("{} Linux detected. If browser fails to launch, run:", color::warning_indicator());
             println!("  agent-browser install --with-deps");
             println!("  or: npx playwright install-deps chromium");
             println!();
         }
     }
 
-    println!("\x1b[36mInstalling Chromium browser...\x1b[0m");
+    println!("{}", color::cyan("Installing Chromium browser..."));
     
     // On Windows, we need to use cmd.exe to run npx because npx is actually npx.cmd
     // and Command::new() doesn't resolve .cmd files the way the shell does.
@@ -144,23 +152,23 @@ pub fn run_install(with_deps: bool) {
 
     match status {
         Ok(s) if s.success() => {
-            println!("\x1b[32m✓\x1b[0m Chromium installed successfully");
+            println!("{} Chromium installed successfully", color::success_indicator());
             if is_linux && !with_deps {
                 println!();
-                println!("\x1b[33mNote:\x1b[0m If you see \"shared library\" errors when running, use:");
+                println!("{} If you see \"shared library\" errors when running, use:", color::yellow("Note:"));
                 println!("  agent-browser install --with-deps");
             }
         }
         Ok(_) => {
-            eprintln!("\x1b[31m✗\x1b[0m Failed to install browser");
+            eprintln!("{} Failed to install browser", color::error_indicator());
             if is_linux {
-                println!("\x1b[33mTip:\x1b[0m Try installing system dependencies first:");
+                println!("{} Try installing system dependencies first:", color::yellow("Tip:"));
                 println!("  agent-browser install --with-deps");
             }
             exit(1);
         }
         Err(e) => {
-            eprintln!("\x1b[31m✗\x1b[0m Failed to run npx: {}", e);
+            eprintln!("{} Failed to run npx: {}", color::error_indicator(), e);
             eprintln!("Make sure Node.js is installed and npx is in your PATH");
             exit(1);
         }
@@ -188,4 +196,15 @@ fn which_exists(cmd: &str) -> bool {
             .map(|s| s.success())
             .unwrap_or(false)
     }
+}
+
+fn package_exists_apt(pkg: &str) -> bool {
+    Command::new("apt-cache")
+        .arg("show")
+        .arg(pkg)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }

@@ -1,0 +1,19 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "agent-browser",
+  "description": "Headless browser automation for AI agents",
+  "owner": {
+    "name": "Vercel",
+    "email": "support@vercel.com"
+  },
+  "plugins": [
+    {
+      "name": "agent-browser",
+      "description": "Automates browser interactions for web testing, form filling, screenshots, and data extraction",
+      "source": "./",
+      "strict": false,
+      "skills": ["./skills/agent-browser"],
+      "category": "development"
+    }
+  ]
+}

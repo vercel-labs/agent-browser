@@ -6,12 +6,16 @@ export default function CDPMode() {
       <div className="prose">
         <h1>CDP Mode</h1>
         <p>Connect to an existing browser via Chrome DevTools Protocol:</p>
-        <CodeBlock code={`# Connect to Electron app
-agent-browser --cdp 9222 snapshot
+        <CodeBlock code={`# Start Chrome with: google-chrome --remote-debugging-port=9222
 
-# Connect to Chrome with remote debugging
-# (Start Chrome with: google-chrome --remote-debugging-port=9222)
-agent-browser --cdp 9222 open about:blank`} />
+# Connect once, then run commands without --cdp
+agent-browser connect 9222
+agent-browser snapshot
+agent-browser tab
+agent-browser close
+
+# Or pass --cdp on each command
+agent-browser --cdp 9222 snapshot`} />
 
         <h2>Use cases</h2>
         <p>This enables control of:</p>

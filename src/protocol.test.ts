@@ -15,6 +15,22 @@ describe('parseCommand', () => {
       }
     });
 
+    it('should parse navigate with headers', () => {
+      const result = parseCommand(
+        cmd({
+          id: '1',
+          action: 'navigate',
+          url: 'https://example.com',
+          headers: { Authorization: 'Bearer token' },
+        })
+      );
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.command.action).toBe('navigate');
+        expect(result.command.headers).toEqual({ Authorization: 'Bearer token' });
+      }
+    });
+
     it('should reject navigate without url', () => {
       const result = parseCommand(cmd({ id: '1', action: 'navigate' }));
       expect(result.success).toBe(false);
@@ -371,6 +387,14 @@ describe('parseCommand', () => {
     it('should parse tab_new', () => {
       const result = parseCommand(cmd({ id: '1', action: 'tab_new' }));
       expect(result.success).toBe(true);
+    });
+
+    it('should parse tab_new with url', () => {
+      const result = parseCommand(cmd({ id: '1', action: 'tab_new', url: 'https://example.com' }));
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect((result.command as { url?: string }).url).toBe('https://example.com');
+      }
     });
 
     it('should parse tab_list', () => {

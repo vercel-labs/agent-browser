@@ -16,6 +16,12 @@ export interface LaunchCommand extends BaseCommand {
   executablePath?: string;
   cdpPort?: number;
   extensions?: string[];
+  proxy?: {
+    server: string;
+    bypass?: string;
+    username?: string;
+    password?: string;
+  };
 }
 
 export interface NavigateCommand extends BaseCommand {
@@ -310,6 +316,12 @@ export interface BoundingBoxCommand extends BaseCommand {
   selector: string;
 }
 
+// Computed styles
+export interface StylesCommand extends BaseCommand {
+  action: 'styles';
+  selector: string;
+}
+
 // More semantic locators
 export interface GetByAltTextCommand extends BaseCommand {
   action: 'getbyalttext';
@@ -502,7 +514,7 @@ export interface InputTouchCommand extends BaseCommand {
   modifiers?: number;
 }
 
-// Video recording
+// Video recording (Playwright native - requires launch-time setup)
 export interface VideoStartCommand extends BaseCommand {
   action: 'video_start';
   path: string;
@@ -510,6 +522,23 @@ export interface VideoStartCommand extends BaseCommand {
 
 export interface VideoStopCommand extends BaseCommand {
   action: 'video_stop';
+}
+
+// Screen recording (Playwright native - creates fresh recording context)
+export interface RecordingStartCommand extends BaseCommand {
+  action: 'recording_start';
+  path: string;
+  url?: string;
+}
+
+export interface RecordingStopCommand extends BaseCommand {
+  action: 'recording_stop';
+}
+
+export interface RecordingRestartCommand extends BaseCommand {
+  action: 'recording_restart';
+  path: string;
+  url?: string;
 }
 
 // Tracing
@@ -749,6 +778,7 @@ export interface CloseCommand extends BaseCommand {
 // Tab/Window commands
 export interface TabNewCommand extends BaseCommand {
   action: 'tab_new';
+  url?: string;
 }
 
 export interface TabListCommand extends BaseCommand {
@@ -833,8 +863,12 @@ export type Command =
   | IsCheckedCommand
   | CountCommand
   | BoundingBoxCommand
+  | StylesCommand
   | VideoStartCommand
   | VideoStopCommand
+  | RecordingStartCommand
+  | RecordingStopCommand
+  | RecordingRestartCommand
   | TraceStartCommand
   | TraceStopCommand
   | HarStartCommand
@@ -968,8 +1002,48 @@ export interface ScreencastStopData {
   stopped: boolean;
 }
 
+export interface RecordingStartData {
+  started: boolean;
+  path: string;
+}
+
+export interface RecordingStopData {
+  path: string;
+  frames: number;
+  error?: string;
+}
+
+export interface RecordingRestartData {
+  started: boolean;
+  path: string;
+  previousPath?: string;
+  stopped: boolean;
+}
+
 export interface InputEventData {
   injected: boolean;
+}
+
+// Element styles data
+export interface ElementStyleInfo {
+  tag: string;
+  text: string | null;
+  box: { x: number; y: number; width: number; height: number };
+  styles: {
+    fontSize: string;
+    fontWeight: string;
+    fontFamily: string;
+    color: string;
+    backgroundColor: string;
+    borderRadius: string;
+    border: string | null;
+    boxShadow: string | null;
+    padding: string;
+  };
+}
+
+export interface StylesData {
+  elements: ElementStyleInfo[];
 }
 
 // Browser state

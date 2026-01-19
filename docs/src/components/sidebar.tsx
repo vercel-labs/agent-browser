@@ -15,6 +15,7 @@ const navigation = [
   { name: "Streaming", href: "/streaming" },
   { name: "Agent Mode", href: "/agent-mode" },
   { name: "CDP Mode", href: "/cdp-mode" },
+  { name: "Changelog", href: "/changelog" },
 ];
 
 export function Sidebar() {

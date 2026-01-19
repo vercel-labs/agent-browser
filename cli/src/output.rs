@@ -1,3 +1,4 @@
+use crate::color;
 use crate::connection::Response;
 
 pub fn print_response(resp: &Response, json_mode: bool, action: Option<&str>) {
@@ -8,7 +9,8 @@ pub fn print_response(resp: &Response, json_mode: bool, action: Option<&str>) {
 
     if !resp.success {
         eprintln!(
-            "\x1b[31m✗\x1b[0m {}",
+            "{} {}",
+            color::error_indicator(),
             resp.error.as_deref().unwrap_or("Unknown error")
         );
         return;
@@ -18,8 +20,8 @@ pub fn print_response(resp: &Response, json_mode: bool, action: Option<&str>) {
         // Navigation response
         if let Some(url) = data.get("url").and_then(|v| v.as_str()) {
             if let Some(title) = data.get("title").and_then(|v| v.as_str()) {
-                println!("\x1b[32m✓\x1b[0m \x1b[1m{}\x1b[0m", title);
-                println!("\x1b[2m  {}\x1b[0m", url);
+                println!("{} {}", color::success_indicator(), color::bold(title));
+                println!("  {}", color::dim(url));
                 return;
             }
             println!("{}", url);
@@ -85,23 +87,17 @@ pub fn print_response(resp: &Response, json_mode: bool, action: Option<&str>) {
                     .unwrap_or("Untitled");
                 let url = tab.get("url").and_then(|v| v.as_str()).unwrap_or("");
                 let active = tab.get("active").and_then(|v| v.as_bool()).unwrap_or(false);
-                let marker = if active { "→" } else { " " };
+                let marker = if active { color::cyan("→") } else { " ".to_string() };
                 println!("{} [{}] {} - {}", marker, i, title, url);
             }
             return;
         }
         // Console logs
-        if let Some(logs) = data.get("logs").and_then(|v| v.as_array()) {
+        if let Some(logs) = data.get("messages").and_then(|v| v.as_array()) {
             for log in logs {
                 let level = log.get("type").and_then(|v| v.as_str()).unwrap_or("log");
                 let text = log.get("text").and_then(|v| v.as_str()).unwrap_or("");
-                let color = match level {
-                    "error" => "\x1b[31m",
-                    "warning" => "\x1b[33m",
-                    "info" => "\x1b[36m",
-                    _ => "\x1b[0m",
-                };
-                println!("{}[{}]\x1b[0m {}", color, level, text);
+                println!("{} {}", color::console_level_prefix(level), text);
             }
             return;
         }
@@ -109,7 +105,7 @@ pub fn print_response(resp: &Response, json_mode: bool, action: Option<&str>) {
         if let Some(errors) = data.get("errors").and_then(|v| v.as_array()) {
             for err in errors {
                 let msg = err.get("message").and_then(|v| v.as_str()).unwrap_or("");
-                println!("\x1b[31m✗\x1b[0m {}", msg);
+                println!("{} {}", color::error_indicator(), msg);
             }
             return;
         }
@@ -122,6 +118,27 @@ pub fn print_response(resp: &Response, json_mode: bool, action: Option<&str>) {
             }
             return;
         }
+        // Network requests
+        if let Some(requests) = data.get("requests").and_then(|v| v.as_array()) {
+            if requests.is_empty() {
+                println!("No requests captured");
+            } else {
+                for req in requests {
+                    let method = req.get("method").and_then(|v| v.as_str()).unwrap_or("GET");
+                    let url = req.get("url").and_then(|v| v.as_str()).unwrap_or("");
+                    let resource_type = req.get("resourceType").and_then(|v| v.as_str()).unwrap_or("");
+                    println!("{} {} ({})", method, url, resource_type);
+                }
+            }
+            return;
+        }
+        // Cleared requests
+        if let Some(cleared) = data.get("cleared").and_then(|v| v.as_bool()) {
+            if cleared {
+                println!("\x1b[32m✓\x1b[0m Request log cleared");
+                return;
+            }
+        }
         // Bounding box
         if let Some(box_data) = data.get("box") {
             println!(
@@ -130,9 +147,77 @@ pub fn print_response(resp: &Response, json_mode: bool, action: Option<&str>) {
             );
             return;
         }
+        // Element styles
+        if let Some(elements) = data.get("elements").and_then(|v| v.as_array()) {
+            for (i, el) in elements.iter().enumerate() {
+                let tag = el.get("tag").and_then(|v| v.as_str()).unwrap_or("?");
+                let text = el.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                println!("[{}] {} \"{}\"", i, tag, text);
+                
+                if let Some(box_data) = el.get("box") {
+                    let w = box_data.get("width").and_then(|v| v.as_i64()).unwrap_or(0);
+                    let h = box_data.get("height").and_then(|v| v.as_i64()).unwrap_or(0);
+                    let x = box_data.get("x").and_then(|v| v.as_i64()).unwrap_or(0);
+                    let y = box_data.get("y").and_then(|v| v.as_i64()).unwrap_or(0);
+                    println!("    box: {}x{} at ({}, {})", w, h, x, y);
+                }
+                
+                if let Some(styles) = el.get("styles") {
+                    let font_size = styles.get("fontSize").and_then(|v| v.as_str()).unwrap_or("");
+                    let font_weight = styles.get("fontWeight").and_then(|v| v.as_str()).unwrap_or("");
+                    let font_family = styles.get("fontFamily").and_then(|v| v.as_str()).unwrap_or("");
+                    let color = styles.get("color").and_then(|v| v.as_str()).unwrap_or("");
+                    let bg = styles.get("backgroundColor").and_then(|v| v.as_str()).unwrap_or("");
+                    let radius = styles.get("borderRadius").and_then(|v| v.as_str()).unwrap_or("");
+                    
+                    println!("    font: {} {} {}", font_size, font_weight, font_family);
+                    println!("    color: {}", color);
+                    println!("    background: {}", bg);
+                    if radius != "0px" {
+                        println!("    border-radius: {}", radius);
+                    }
+                }
+                println!();
+            }
+            return;
+        }
         // Closed
         if data.get("closed").is_some() {
-            println!("\x1b[32m✓\x1b[0m Browser closed");
+            println!("{} Browser closed", color::success_indicator());
+            return;
+        }
+        // Recording start (has "started" field)
+        if let Some(started) = data.get("started").and_then(|v| v.as_bool()) {
+            if started {
+                if let Some(path) = data.get("path").and_then(|v| v.as_str()) {
+                    println!("{} Recording started: {}", color::success_indicator(), path);
+                } else {
+                    println!("{} Recording started", color::success_indicator());
+                }
+                return;
+            }
+        }
+        // Recording restart (has "stopped" field - from recording_restart action)
+        if data.get("stopped").is_some() {
+            let path = data.get("path").and_then(|v| v.as_str()).unwrap_or("unknown");
+            if let Some(prev_path) = data.get("previousPath").and_then(|v| v.as_str()) {
+                println!("{} Recording restarted: {} (previous saved to {})", color::success_indicator(), path, prev_path);
+            } else {
+                println!("{} Recording started: {}", color::success_indicator(), path);
+            }
+            return;
+        }
+        // Recording stop (has "frames" field - from recording_stop action)
+        if data.get("frames").is_some() {
+            if let Some(path) = data.get("path").and_then(|v| v.as_str()) {
+                if let Some(error) = data.get("error").and_then(|v| v.as_str()) {
+                    println!("{} Recording saved to {} - {}", color::warning_indicator(), path, error);
+                } else {
+                    println!("{} Recording saved to {}", color::success_indicator(), path);
+                }
+            } else {
+                println!("{} Recording stopped", color::success_indicator());
+            }
             return;
         }
         // Path-based operations (screenshot/pdf/trace/har/download/state/video)
@@ -169,7 +254,7 @@ pub fn print_response(resp: &Response, json_mode: bool, action: Option<&str>) {
             return;
         }
         // Default success
-        println!("\x1b[32m✓\x1b[0m Done");
+        println!("{} Done", color::success_indicator());
     }
 }
 
@@ -378,9 +463,9 @@ Examples:
         "select" => r##"
 agent-browser select - Select a dropdown option
 
-Usage: agent-browser select <selector> <value>
+Usage: agent-browser select <selector> <value...>
 
-Selects an option in a <select> dropdown by its value attribute.
+Selects one or more options in a <select> dropdown by value.
 
 Global Options:
   --json               Output as JSON
@@ -389,6 +474,7 @@ Global Options:
 Examples:
   agent-browser select "#country" "US"
   agent-browser select @e5 "option2"
+  agent-browser select "#menu" "opt1" "opt2" "opt3"
 "##,
         "drag" => r##"
 agent-browser drag - Drag and drop
@@ -670,6 +756,7 @@ Subcommands:
   url                        Get current URL
   count <selector>           Count matching elements
   box <selector>             Get bounding box (x, y, width, height)
+  styles <selector>          Get computed styles of elements
 
 Global Options:
   --json               Output as JSON
@@ -684,6 +771,8 @@ Examples:
   agent-browser get url
   agent-browser get count "li.item"
   agent-browser get box "#header"
+  agent-browser get styles "button"
+  agent-browser get styles @e1
 "##,
 
         // === Is ===
@@ -1007,6 +1096,42 @@ Examples:
   agent-browser trace stop ./debug-trace.zip
 "##,
 
+        // === Record (video) ===
+        "record" => r##"
+agent-browser record - Record browser session to video
+
+Usage: agent-browser record start <path.webm> [url]
+       agent-browser record stop
+       agent-browser record restart <path.webm> [url]
+
+Record the browser to a WebM video file using Playwright's native recording.
+Creates a fresh browser context but preserves cookies and localStorage.
+If no URL is provided, automatically navigates to your current page.
+
+Operations:
+  start <path> [url]     Start recording (defaults to current URL if omitted)
+  stop                   Stop recording and save video
+  restart <path> [url]   Stop current recording (if any) and start a new one
+
+Global Options:
+  --json               Output as JSON
+  --session <name>     Use specific session
+
+Examples:
+  # Record from current page (preserves login state)
+  agent-browser open https://app.example.com/dashboard
+  agent-browser snapshot -i            # Explore and plan
+  agent-browser record start ./demo.webm
+  agent-browser click @e3              # Execute planned actions
+  agent-browser record stop
+
+  # Or specify a different URL
+  agent-browser record start ./demo.webm https://example.com
+
+  # Restart recording with a new file (stops previous, starts new)
+  agent-browser record restart ./take2.webm
+"##,
+
         // === Console/Errors ===
         "console" => r##"
 agent-browser console - View console logs
@@ -1149,7 +1274,7 @@ Core Commands:
   focus <sel>                Focus element
   check <sel>                Check checkbox
   uncheck <sel>              Uncheck checkbox
-  select <sel> <val>         Select dropdown option
+  select <sel> <val...>      Select dropdown option
   drag <src> <dst>           Drag and drop
   upload <sel> <files...>    Upload files
   scroll <dir> [px]          Scroll (up/down/left/right)
@@ -1159,6 +1284,7 @@ Core Commands:
   pdf <path>                 Save as PDF
   snapshot                   Accessibility tree with refs (for AI)
   eval <js>                  Run JavaScript
+  connect <port>             Connect to browser via CDP (e.g., connect 9222)
   close                      Close browser
 
 Navigation:
@@ -1167,7 +1293,7 @@ Navigation:
   reload                     Reload page
 
 Get Info:  agent-browser get <what> [selector]
-  text, html, value, attr <name>, title, url, count, box
+  text, html, value, attr <name>, title, url, count, box, styles
 
 Check State:  agent-browser is <what> <selector>
   visible, enabled, checked
@@ -1197,6 +1323,8 @@ Tabs:
 
 Debug:
   trace start|stop [path]    Record trace
+  record start <path> [url]  Start video recording (WebM)
+  record stop                Stop and save video
   console [--clear]          View console logs
   errors [--clear]           View page errors
   highlight <sel>            Highlight element
@@ -1220,11 +1348,13 @@ Options:
   --headers <json>           HTTP headers scoped to URL's origin (for auth)
   --executable-path <path>   Custom browser executable (or AGENT_BROWSER_EXECUTABLE_PATH)
   --extension <path>         Load browser extensions (repeatable).
+  --proxy <url>              Proxy server (http://[user:pass@]host:port)
   --json                     JSON output
   --full, -f                 Full page screenshot
   --headed                   Show browser window (not headless)
   --cdp <port>               Connect via CDP (Chrome DevTools Protocol)
   --debug                    Debug output
+  --version, -V              Show version
 
 Environment:
   AGENT_BROWSER_SESSION          Session name (default: "default")
@@ -1242,4 +1372,8 @@ Examples:
   agent-browser --cdp 9222 snapshot      # Connect via CDP port
 "#
     );
+}
+
+pub fn print_version() {
+    println!("agent-browser {}", env!("CARGO_PKG_VERSION"));
 }

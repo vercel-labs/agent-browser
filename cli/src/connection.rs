@@ -104,7 +104,9 @@ fn get_port_for_session(session: &str) -> u16 {
     for c in session.chars() {
         hash = ((hash << 5).wrapping_sub(hash)).wrapping_add(c as i32);
     }
-    49152 + ((hash.abs() as u16) % 16383)
+    // Correct logic: first take absolute modulo, then cast to u16
+    // Using unsigned_abs() to safely handle i32::MIN
+    49152 + ((hash.unsigned_abs() as u32 % 16383) as u16)
 }
 
 #[cfg(unix)]
@@ -140,7 +142,8 @@ fn is_daemon_running(session: &str) -> bool {
 fn daemon_ready(session: &str) -> bool {
     #[cfg(unix)]
     {
-        get_socket_path(session).exists()
+        let socket_path = get_socket_path(session);
+        UnixStream::connect(&socket_path).is_ok()
     }
     #[cfg(windows)]
     {
@@ -174,16 +177,23 @@ pub fn ensure_daemon(
     let exe_path = env::current_exe().map_err(|e| e.to_string())?;
     let exe_dir = exe_path.parent().unwrap();
 
-    let daemon_paths = [
+    let mut daemon_paths = vec![
         exe_dir.join("daemon.js"),
         exe_dir.join("../dist/daemon.js"),
         PathBuf::from("dist/daemon.js"),
     ];
 
+    // Check AGENT_BROWSER_HOME environment variable
+    if let Ok(home) = env::var("AGENT_BROWSER_HOME") {
+        let home_path = PathBuf::from(&home);
+        daemon_paths.insert(0, home_path.join("dist/daemon.js"));
+        daemon_paths.insert(1, home_path.join("daemon.js"));
+    }
+
     let daemon_path = daemon_paths
         .iter()
         .find(|p| p.exists())
-        .ok_or("Daemon not found. Run from project directory or ensure daemon.js is alongside binary.")?;
+        .ok_or("Daemon not found. Set AGENT_BROWSER_HOME environment variable or run from project directory.")?;
 
     // Spawn daemon as a fully detached background process
     #[cfg(unix)]
@@ -227,13 +237,10 @@ pub fn ensure_daemon(
     {
         use std::os::windows::process::CommandExt;
         
-        // On Windows, use cmd.exe to run node to ensure proper PATH resolution.
-        // This handles cases where node.exe isn't directly in PATH but node.cmd is.
-        // Pass the entire command as a single string to /c to handle paths with spaces.
-        let cmd_string = format!("node \"{}\"", daemon_path.display());
-        let mut cmd = Command::new("cmd");
-        cmd.arg("/c")
-            .arg(&cmd_string)
+        // On Windows, call node directly. Command::new handles PATH resolution (node.exe or node.cmd)
+        // and automatically quotes arguments containing spaces.
+        let mut cmd = Command::new("node");
+        cmd.arg(daemon_path)
             .env("AGENT_BROWSER_DAEMON", "1")
             .env("AGENT_BROWSER_SESSION", session);
 
