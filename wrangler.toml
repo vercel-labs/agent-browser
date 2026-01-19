@@ -4,15 +4,26 @@ main = "dist/worker.js"
 compatibility_date = "2024-01-01"
 compatibility_flags = ["streams_enable_constructors", "nodejs_compat"]
 
+# Environment variables for all environments
+[env.default]
+vars = { AGENT_BROWSER_HEADLESS = "true", AGENT_BROWSER_ENABLE_PLUGINS = "true" }
+
 [env.production]
 name = "agent-browser-prod"
 routes = [
   { pattern = "api.agent-browser.com/*", zone_name = "agent-browser.com" }
 ]
+vars = { AGENT_BROWSER_HEADLESS = "true", AGENT_BROWSER_ENABLE_PLUGINS = "true", AGENT_BROWSER_LOG_LEVEL = "info" }
 
 [env.staging]
 name = "agent-browser-staging"
+vars = { AGENT_BROWSER_HEADLESS = "true", AGENT_BROWSER_ENABLE_PLUGINS = "true", AGENT_BROWSER_LOG_LEVEL = "debug" }
 
+[env.development]
+name = "agent-browser-dev"
+vars = { AGENT_BROWSER_HEADLESS = "false", AGENT_BROWSER_ENABLE_PLUGINS = "true", AGENT_BROWSER_LOG_LEVEL = "debug" }
+
+# Build configuration
 [build]
 command = "npm run build"
 cwd = "."
@@ -21,5 +32,13 @@ watch_paths = ["src/**/*.ts"]
 [build.upload]
 format = "service-worker"
 
+# Observability
 [observability]
 enabled = true
+
+# Limits
+limits = { cpu_seconds = 30 }
+
+# Triggers for scheduled jobs (optional - for background skill execution)
+[[triggers.crons]]
+cron = "0 */1 * * *"

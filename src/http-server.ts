@@ -1,6 +1,7 @@
 import { BrowserManager } from './browser.js';
 import { parseCommand, serializeResponse, errorResponse } from './protocol.js';
 import { executeCommand } from './actions.js';
+import { SkillsManager } from './skills-manager.js';
 
 /**
  * HTTP Server adapter for agent-browser daemon
@@ -10,10 +11,12 @@ export class HttpServer {
   private browser: BrowserManager;
   private sessionId: string;
   private shuttingDown: boolean = false;
+  private skillsManager: SkillsManager;
 
   constructor(sessionId: string = 'default') {
     this.browser = new BrowserManager();
     this.sessionId = sessionId;
+    this.skillsManager = new SkillsManager();
   }
 
   /**
@@ -33,6 +36,22 @@ export class HttpServer {
       return this.handleClose();
     } else if (request.method === 'GET' && path === '/health') {
       return this.handleHealth();
+    } else if (request.method === 'GET' && path === '/skills') {
+      return this.handleListSkills();
+    } else if (request.method === 'GET' && path.match(/^\/skills\/[\w-]+$/)) {
+      const skillId = path.split('/')[2];
+      return this.handleGetSkill(skillId);
+    } else if (request.method === 'POST' && path.match(/^\/skills\/[\w-]+\/execute$/)) {
+      const skillId = path.split('/')[2];
+      return this.handleExecuteSkill(skillId, request);
+    } else if (request.method === 'GET' && path === '/plugins') {
+      return this.handleListPlugins();
+    } else if (request.method === 'POST' && path.match(/^\/plugins\/[\w-]+\/enable$/)) {
+      const pluginId = path.split('/')[2];
+      return this.handleEnablePlugin(pluginId);
+    } else if (request.method === 'POST' && path.match(/^\/plugins\/[\w-]+\/disable$/)) {
+      const pluginId = path.split('/')[2];
+      return this.handleDisablePlugin(pluginId);
     } else {
       return new Response(
         JSON.stringify({ error: 'Not found' }),
@@ -170,5 +189,146 @@ export class HttpServer {
       this.shuttingDown = true;
       await this.browser.close();
     }
+  }
+
+  /**
+   * Get SkillsManager instance
+   */
+  getSkillsManager(): SkillsManager {
+    return this.skillsManager;
+  }
+
+  /**
+   * Handle list skills request
+   * GET /skills
+   */
+  private handleListSkills(): Response {
+    const summary = this.skillsManager.getSkillsSummary();
+    return new Response(JSON.stringify({ skills: summary }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  /**
+   * Handle get skill request
+   * GET /skills/:id
+   */
+  private handleGetSkill(skillId: string): Response {
+    const skill = this.skillsManager.getSkill(skillId);
+
+    if (!skill) {
+      return new Response(JSON.stringify({ error: `Skill ${skillId} not found` }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    return new Response(
+      JSON.stringify({
+        id: skill.id,
+        name: skill.name,
+        version: skill.version,
+        description: skill.description,
+        enabled: skill.enabled,
+      }),
+      {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }
+    );
+  }
+
+  /**
+   * Handle execute skill request
+   * POST /skills/:id/execute
+   */
+  private async handleExecuteSkill(skillId: string, request: Request): Promise<Response> {
+    try {
+      const body = await request.text();
+      let params: Record<string, unknown> = {};
+
+      if (body) {
+        try {
+          params = JSON.parse(body);
+        } catch {
+          return new Response(JSON.stringify({ error: 'Invalid JSON body' }), {
+            status: 400,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+      }
+
+      const result = await this.skillsManager.executeSkill(skillId, params);
+
+      return new Response(JSON.stringify({ success: true, result }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return new Response(JSON.stringify({ error: message }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+  }
+
+  /**
+   * Handle list plugins request
+   * GET /plugins
+   */
+  private handleListPlugins(): Response {
+    const summary = this.skillsManager.getPluginsSummary();
+    return new Response(JSON.stringify({ plugins: summary }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  /**
+   * Handle enable plugin request
+   * POST /plugins/:id/enable
+   */
+  private handleEnablePlugin(pluginId: string): Response {
+    const success = this.skillsManager.enablePlugin(pluginId);
+
+    if (!success) {
+      return new Response(JSON.stringify({ error: `Plugin ${pluginId} not found` }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    return new Response(
+      JSON.stringify({ success: true, message: `Plugin ${pluginId} enabled` }),
+      {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }
+    );
+  }
+
+  /**
+   * Handle disable plugin request
+   * POST /plugins/:id/disable
+   */
+  private handleDisablePlugin(pluginId: string): Response {
+    const success = this.skillsManager.disablePlugin(pluginId);
+
+    if (!success) {
+      return new Response(JSON.stringify({ error: `Plugin ${pluginId} not found` }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    return new Response(
+      JSON.stringify({ success: true, message: `Plugin ${pluginId} disabled` }),
+      {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }
+    );
   }
 }
