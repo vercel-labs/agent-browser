@@ -115,6 +115,7 @@ export class BrowserManager {
   private lastPopupPage: Page | null = null;
   private popupResolvers: Array<(page: Page) => void> = [];
   private explicitlyCreatedPages: WeakSet<Page> = new WeakSet();
+  private isCreatingExplicitPage: boolean = false;
 
   /**
    * Check if browser is launched
@@ -1152,8 +1153,11 @@ export class BrowserManager {
     this.setupContextTracking(context);
 
     // Create initial page (mark as explicit to prevent recording as popup)
+    // Flag provides synchronous protection during async operation
+    this.isCreatingExplicitPage = true;
     const page = context.pages()[0] ?? (await context.newPage());
-    this.explicitlyCreatedPages.add(page);
+    this.explicitlyCreatedPages.add(page);  // WeakSet for long-term tracking
+    this.isCreatingExplicitPage = false;
 
     // Only add if not already tracked (setupContextTracking may have already added it via 'page' event)
     if (!this.pages.includes(page)) {
@@ -1292,6 +1296,11 @@ export class BrowserManager {
       return;
     }
 
+    // Skip if this is an explicit page creation (flag provides synchronous protection during async)
+    if (this.isCreatingExplicitPage) {
+      return;
+    }
+
     // Get opener URL before adding to array
     const openerUrl = this.pages.length > 0 ? this.pages[this.activePageIndex].url() : '';
 
@@ -1302,7 +1311,7 @@ export class BrowserManager {
     // Set up tracking
     this.setupPageTracking(newPage);
 
-    // Only record as popup if this wasn't an explicit page creation (newTab/newWindow)
+    // Only record as popup if this wasn't an explicit page creation (WeakSet for long-term tracking)
     if (!this.explicitlyCreatedPages.has(newPage)) {
       // Record popup event
       const popupEvent: PopupEvent = {
@@ -1413,8 +1422,11 @@ export class BrowserManager {
     const context = this.contexts[0]; // Use first context for tabs
 
     // Mark as explicit page creation to prevent handlePopup from recording it as a popup
+    // Flag provides synchronous protection during async operation
+    this.isCreatingExplicitPage = true;
     const page = await context.newPage();
-    this.explicitlyCreatedPages.add(page);
+    this.explicitlyCreatedPages.add(page);  // WeakSet for long-term tracking
+    this.isCreatingExplicitPage = false;
 
     // Only add if not already tracked (setupContextTracking may have already added it via 'page' event)
     if (!this.pages.includes(page)) {
@@ -1451,8 +1463,11 @@ export class BrowserManager {
     this.setupContextTracking(context);
 
     // Mark as explicit page creation to prevent handlePopup from recording it as a popup
+    // Flag provides synchronous protection during async operation
+    this.isCreatingExplicitPage = true;
     const page = await context.newPage();
-    this.explicitlyCreatedPages.add(page);
+    this.explicitlyCreatedPages.add(page);  // WeakSet for long-term tracking
+    this.isCreatingExplicitPage = false;
 
     // Only add if not already tracked (setupContextTracking may have already added it via 'page' event)
     if (!this.pages.includes(page)) {
