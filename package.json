@@ -27,6 +27,8 @@
     "release": "npm run version:sync && npm run build && npm run build:all-platforms && npm publish",
     "start": "node dist/daemon.js",
     "dev": "tsx src/daemon.ts",
+    "worker:dev": "wrangler dev",
+    "worker:deploy": "npm run build && wrangler deploy",
     "typecheck": "tsc --noEmit",
     "format": "prettier --write 'src/**/*.ts'",
     "format:check": "prettier --check 'src/**/*.ts'",
@@ -65,7 +67,8 @@
     "prettier": "^3.7.4",
     "tsx": "^4.6.0",
     "typescript": "^5.3.0",
-    "vitest": "^4.0.16"
+    "vitest": "^4.0.16",
+    "wrangler": "^3.85.0"
   },
   "lint-staged": {
     "src/**/*.ts": "prettier --write"

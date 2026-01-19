@@ -1,0 +1,25 @@
+name = "agent-browser"
+type = "module"
+main = "dist/worker.js"
+compatibility_date = "2024-01-01"
+compatibility_flags = ["streams_enable_constructors", "nodejs_compat"]
+
+[env.production]
+name = "agent-browser-prod"
+routes = [
+  { pattern = "api.agent-browser.com/*", zone_name = "agent-browser.com" }
+]
+
+[env.staging]
+name = "agent-browser-staging"
+
+[build]
+command = "npm run build"
+cwd = "."
+watch_paths = ["src/**/*.ts"]
+
+[build.upload]
+format = "service-worker"
+
+[observability]
+enabled = true
