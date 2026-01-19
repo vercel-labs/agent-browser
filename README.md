@@ -657,6 +657,16 @@ curl -o .claude/skills/agent-browser/SKILL.md \
   https://raw.githubusercontent.com/vercel-labs/agent-browser/main/skills/agent-browser/SKILL.md
 ```
 
+### sk (Universal Skill Installer)
+
+Install via [sk](https://github.com/803/skills-supply), the universal package manager for AI agent skills (supports Claude Code, Amp, Codex, OpenCode, Factory, etc.).
+
+```bash
+# Add --global flag if you'd like to install in user-scope (defaults to project-scope)
+sk pkg add gh vercel-labs/agent-browser --path skills
+sk sync
+```
+
 ## License
 
 Apache-2.0
