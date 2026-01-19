@@ -679,20 +679,25 @@ export class BrowserManager {
     const viewport = options.viewport ?? { width: 1280, height: 720 };
 
     let context: BrowserContext;
-    if (hasExtensions) {
-      const extPaths = options.extensions!.join(',');
-      const session = process.env.AGENT_BROWSER_SESSION || 'default';
-      context = await launcher.launchPersistentContext(
-        path.join(os.tmpdir(), `agent-browser-ext-${session}`),
-        {
-          headless: false,
-          executablePath: options.executablePath,
+    const hasUserDataDir = !!options.userDataDir;
+
+    if (hasExtensions || hasUserDataDir) {
+      // Use persistent context for extensions or when userDataDir is specified
+      const extPaths = options.extensions?.join(',');
+      const userDataPath =
+        options.userDataDir ||
+        path.join(os.tmpdir(), `agent-browser-ext-${process.env.AGENT_BROWSER_SESSION || 'default'}`);
+
+      context = await launcher.launchPersistentContext(userDataPath, {
+        headless: hasExtensions ? false : (options.headless ?? true),
+        executablePath: options.executablePath,
+        ...(extPaths && {
           args: [`--disable-extensions-except=${extPaths}`, `--load-extension=${extPaths}`],
-          viewport,
-          extraHTTPHeaders: options.headers,
-          ...(options.proxy && { proxy: options.proxy }),
-        }
-      );
+        }),
+        viewport,
+        extraHTTPHeaders: options.headers,
+        ...(options.proxy && { proxy: options.proxy }),
+      });
       this.isPersistentContext = true;
     } else {
       this.browser = await launcher.launch({

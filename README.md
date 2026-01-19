@@ -297,6 +297,7 @@ agent-browser snapshot -i -c -d 5         # Combine options
 | `--session <name>` | Use isolated session (or `AGENT_BROWSER_SESSION` env) |
 | `--headers <json>` | Set HTTP headers scoped to the URL's origin |
 | `--executable-path <path>` | Custom browser executable (or `AGENT_BROWSER_EXECUTABLE_PATH` env) |
+| `--user-data-dir <path>` | Use persistent Chrome profile (or `AGENT_BROWSER_USER_DATA_DIR` env) |
 | `--json` | JSON output (for agents) |
 | `--full, -f` | Full page screenshot |
 | `--name, -n` | Locator name filter |
@@ -585,6 +586,56 @@ await browser.injectKeyboardEvent({
 // Stop when done
 await browser.stopScreencast();
 ```
+
+## Persistent Chrome Profiles
+
+Use `--user-data-dir` to launch agent-browser with a persistent Chrome profile, enabling access to saved cookies, passwords, and session data.
+
+### Use Cases
+
+- **Multi-account workflows**: Different agents handle different Google accounts or work contexts
+- **Session persistence**: Maintain login state across multiple agent interactions
+- **Cookie & localStorage access**: Preserve user data between launches
+- **Profile-specific extensions**: Each profile can have different Chrome extensions
+
+### CLI Usage
+
+```bash
+# Use default Chrome profile
+CHROME_PROFILE_DIR="$HOME/Library/Application Support/Google/Chrome"
+agent-browser --user-data-dir "$CHROME_PROFILE_DIR/Default" open example.com
+
+# Use alternate profile (e.g., work profile)
+agent-browser --user-data-dir "$CHROME_PROFILE_DIR/Profile 1" open work-app.com
+
+# Via environment variable
+AGENT_BROWSER_USER_DATA_DIR="$CHROME_PROFILE_DIR/Profile 2" agent-browser open personal-app.com
+```
+
+### Multi-Session Example
+
+Launch different agents with different profiles:
+
+```bash
+# Terminal 1 - Agent A uses work profile
+AGENT_BROWSER_SESSION=agent-work AGENT_BROWSER_USER_DATA_DIR="$CHROME_PROFILE_DIR/Profile 1" agent-browser open work.com
+
+# Terminal 2 - Agent B uses personal profile
+AGENT_BROWSER_SESSION=agent-personal AGENT_BROWSER_USER_DATA_DIR="$CHROME_PROFILE_DIR/Profile 2" agent-browser open personal.com
+```
+
+### Profile Locations
+
+- **macOS**: `~/Library/Application Support/Google/Chrome/{Default,Profile 1,Profile 2,...}`
+- **Linux**: `~/.config/google-chrome/{Default,Profile 1,Profile 2,...}`
+- **Windows**: `%APPDATA%\Google\Chrome\User Data\{Default,Profile 1,Profile 2,...}`
+
+### Important Notes
+
+- **Profile persistence**: Data saved in the profile directory persists across launches
+- **Isolation**: Each `--session` gets its own browser process, but shares the same `--user-data-dir`
+- **Extensions**: Profiles can have Chrome extensions, but extensions require `--headed` mode
+- **Browser ownership**: Close the browser cleanly to avoid locking issues: `agent-browser close`
 
 ## Architecture
 
