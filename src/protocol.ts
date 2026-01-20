@@ -212,7 +212,7 @@ const unrouteSchema = baseCommandSchema.extend({
 
 const requestsSchema = baseCommandSchema.extend({
   action: z.literal('requests'),
-  filter: z.string().optional(),
+  filter: z.string().nullable().optional(),
   clear: z.boolean().optional(),
 });
 
