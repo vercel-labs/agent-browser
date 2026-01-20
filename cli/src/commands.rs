@@ -189,6 +189,17 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
             })?;
             Ok(json!({ "id": id, "action": "upload", "selector": sel, "files": &rest[1..] }))
         }
+        "download" => {
+            let sel = rest.get(0).ok_or_else(|| ParseError::MissingArguments {
+                context: "download".to_string(),
+                usage: "download <selector> <path>",
+            })?;
+            let path = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
+                context: "download".to_string(),
+                usage: "download <selector> <path>",
+            })?;
+            Ok(json!({ "id": id, "action": "download", "selector": sel, "path": path }))
+        }
 
         // === Keyboard ===
         "press" | "key" => {
@@ -265,7 +276,28 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                 // Use getByText locator to wait for text to appear
                 return Ok(json!({ "id": id, "action": "wait", "selector": format!("text={}", text) }));
             }
-            
+
+            // Check for --download flag: wait --download [path] [--timeout ms]
+            if rest.iter().any(|&s| s == "--download" || s == "-d") {
+                let mut cmd = json!({ "id": id, "action": "waitfordownload" });
+                // Check for optional path (first non-flag argument after --download)
+                let download_idx = rest.iter().position(|&s| s == "--download" || s == "-d").unwrap();
+                if let Some(path) = rest.get(download_idx + 1) {
+                    if !path.starts_with("--") {
+                        cmd["path"] = json!(path);
+                    }
+                }
+                // Check for optional timeout
+                if let Some(idx) = rest.iter().position(|&s| s == "--timeout") {
+                    if let Some(timeout_str) = rest.get(idx + 1) {
+                        if let Ok(timeout) = timeout_str.parse::<u64>() {
+                            cmd["timeout"] = json!(timeout);
+                        }
+                    }
+                }
+                return Ok(cmd);
+            }
+
             // Default: selector or timeout
             if let Some(arg) = rest.get(0) {
                 if arg.parse::<u64>().is_ok() {
@@ -1632,5 +1664,75 @@ mod tests {
         assert_eq!(cmd["action"], "nth");
         assert_eq!(cmd["index"], 2);
         assert!(cmd.get("value").is_none());
+    }
+
+    // === Download Tests ===
+
+    #[test]
+    fn test_download() {
+        let cmd = parse_command(&args("download #btn ./file.pdf"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "download");
+        assert_eq!(cmd["selector"], "#btn");
+        assert_eq!(cmd["path"], "./file.pdf");
+    }
+
+    #[test]
+    fn test_download_with_ref() {
+        let cmd = parse_command(&args("download @e5 ./report.xlsx"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "download");
+        assert_eq!(cmd["selector"], "@e5");
+        assert_eq!(cmd["path"], "./report.xlsx");
+    }
+
+    #[test]
+    fn test_download_missing_path() {
+        let result = parse_command(&args("download #btn"), &default_flags());
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ParseError::MissingArguments { .. }));
+    }
+
+    #[test]
+    fn test_download_missing_selector() {
+        let result = parse_command(&args("download"), &default_flags());
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ParseError::MissingArguments { .. }));
+    }
+
+    // === Wait for Download Tests ===
+
+    #[test]
+    fn test_wait_download() {
+        let cmd = parse_command(&args("wait --download"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "waitfordownload");
+        assert!(cmd.get("path").is_none());
+    }
+
+    #[test]
+    fn test_wait_download_with_path() {
+        let cmd = parse_command(&args("wait --download ./file.pdf"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "waitfordownload");
+        assert_eq!(cmd["path"], "./file.pdf");
+    }
+
+    #[test]
+    fn test_wait_download_with_timeout() {
+        let cmd = parse_command(&args("wait --download --timeout 30000"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "waitfordownload");
+        assert_eq!(cmd["timeout"], 30000);
+    }
+
+    #[test]
+    fn test_wait_download_with_path_and_timeout() {
+        let cmd = parse_command(&args("wait --download ./file.pdf --timeout 30000"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "waitfordownload");
+        assert_eq!(cmd["path"], "./file.pdf");
+        assert_eq!(cmd["timeout"], 30000);
+    }
+
+    #[test]
+    fn test_wait_download_short_flag() {
+        let cmd = parse_command(&args("wait -d ./file.pdf"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "waitfordownload");
+        assert_eq!(cmd["path"], "./file.pdf");
     }
 }
