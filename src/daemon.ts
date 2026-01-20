@@ -48,6 +48,25 @@ function getPortForSession(session: string): number {
 }
 
 /**
+ * Get the base directory for socket/pid files.
+ * Priority: AGENT_BROWSER_SOCKET_DIR > XDG_RUNTIME_DIR > ~/.agent-browser
+ */
+function getSocketDir(): string {
+  // 1. Explicit override
+  if (process.env.AGENT_BROWSER_SOCKET_DIR) {
+    return process.env.AGENT_BROWSER_SOCKET_DIR;
+  }
+
+  // 2. XDG_RUNTIME_DIR (Linux standard)
+  if (process.env.XDG_RUNTIME_DIR) {
+    return path.join(process.env.XDG_RUNTIME_DIR, 'agent-browser');
+  }
+
+  // 3. Home directory fallback (like Docker Desktop's ~/.docker/run/)
+  return path.join(os.homedir(), '.agent-browser');
+}
+
+/**
  * Get the socket path for the current session (Unix) or port (Windows)
  */
 export function getSocketPath(session?: string): string {
@@ -55,7 +74,7 @@ export function getSocketPath(session?: string): string {
   if (isWindows) {
     return String(getPortForSession(sess));
   }
-  return path.join(os.tmpdir(), `agent-browser-${sess}.sock`);
+  return path.join(getSocketDir(), `${sess}.sock`);
 }
 
 /**
@@ -63,7 +82,7 @@ export function getSocketPath(session?: string): string {
  */
 export function getPortFile(session?: string): string {
   const sess = session ?? currentSession;
-  return path.join(os.tmpdir(), `agent-browser-${sess}.port`);
+  return path.join(getSocketDir(), `${sess}.port`);
 }
 
 /**
@@ -71,7 +90,7 @@ export function getPortFile(session?: string): string {
  */
 export function getPidFile(session?: string): string {
   const sess = session ?? currentSession;
-  return path.join(os.tmpdir(), `agent-browser-${sess}.pid`);
+  return path.join(getSocketDir(), `${sess}.pid`);
 }
 
 /**
@@ -104,7 +123,7 @@ export function getConnectionInfo(
   if (isWindows) {
     return { type: 'tcp', port: getPortForSession(sess) };
   }
-  return { type: 'unix', path: path.join(os.tmpdir(), `agent-browser-${sess}.sock`) };
+  return { type: 'unix', path: path.join(getSocketDir(), `${sess}.sock`) };
 }
 
 /**
@@ -133,7 +152,7 @@ export function cleanupSocket(session?: string): void {
  */
 export function getStreamPortFile(session?: string): string {
   const sess = session ?? currentSession;
-  return path.join(os.tmpdir(), `agent-browser-${sess}.stream`);
+  return path.join(getSocketDir(), `${sess}.stream`);
 }
 
 /**
@@ -141,6 +160,12 @@ export function getStreamPortFile(session?: string): string {
  * @param options.streamPort Port for WebSocket stream server (0 to disable)
  */
 export async function startDaemon(options?: { streamPort?: number }): Promise<void> {
+  // Ensure socket directory exists
+  const socketDir = getSocketDir();
+  if (!fs.existsSync(socketDir)) {
+    fs.mkdirSync(socketDir, { recursive: true });
+  }
+
   // Clean up any stale socket
   cleanupSocket();
 
