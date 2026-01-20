@@ -286,10 +286,19 @@ fn main() {
                 .insert("proxy".to_string(), proxy_obj);
         }
 
-        if let Err(e) = send_command(launch_cmd, &flags.session) {
-            if !flags.json {
-                eprintln!("{} Could not configure browser: {}", color::warning_indicator(), e);
+        let err = match send_command(launch_cmd, &flags.session) {
+            Ok(resp) if resp.success => None,
+            Ok(resp) => Some(resp.error.unwrap_or_else(|| "Browser launch failed".to_string())),
+            Err(e) => Some(e.to_string()),
+        };
+
+        if let Some(msg) = err {
+            if flags.json {
+                println!(r#"{{"success":false,"error":"{}"}}"#, msg);
+            } else {
+                eprintln!("{} {}", color::error_indicator(), msg);
             }
+            exit(1);
         }
     }
 

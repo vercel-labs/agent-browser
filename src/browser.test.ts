@@ -404,7 +404,8 @@ describe('BrowserManager', () => {
             on: vi.fn(),
           },
         ],
-        close: vi.fn(),
+        on: vi.fn(),
+        close: vi.fn().mockResolvedValue(undefined),
       };
       const spy = vi.spyOn(chromium, 'connectOverCDP').mockResolvedValue(mockBrowser as any);
 
