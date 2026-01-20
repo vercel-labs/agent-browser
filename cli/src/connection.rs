@@ -199,7 +199,7 @@ pub fn ensure_daemon(
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        
+
         let mut cmd = Command::new("node");
         cmd.arg(daemon_path)
             .env("AGENT_BROWSER_DAEMON", "1")
@@ -236,31 +236,39 @@ pub fn ensure_daemon(
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        
-        // On Windows, call node directly. Command::new handles PATH resolution (node.exe or node.cmd)
-        // and automatically quotes arguments containing spaces.
-        let mut cmd = Command::new("node");
-        cmd.arg(daemon_path)
-            .env("AGENT_BROWSER_DAEMON", "1")
-            .env("AGENT_BROWSER_SESSION", session);
+
+        // Build environment variables for the daemon
+        let mut env_vars = vec![
+            ("AGENT_BROWSER_DAEMON", "1".to_string()),
+            ("AGENT_BROWSER_SESSION", session.to_string()),
+        ];
 
         if headed {
-            cmd.env("AGENT_BROWSER_HEADED", "1");
+            env_vars.push(("AGENT_BROWSER_HEADED", "1".to_string()));
         }
 
         if let Some(path) = executable_path {
-            cmd.env("AGENT_BROWSER_EXECUTABLE_PATH", path);
+            env_vars.push(("AGENT_BROWSER_EXECUTABLE_PATH", path.to_string()));
         }
 
         if !extensions.is_empty() {
-            cmd.env("AGENT_BROWSER_EXTENSIONS", extensions.join(","));
+            env_vars.push(("AGENT_BROWSER_EXTENSIONS", extensions.join(",")));
         }
 
-        // CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS
-        const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
-        const DETACHED_PROCESS: u32 = 0x00000008;
-        
-        cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS)
+        // Use cmd /c start /b to launch daemon without visible window
+        // This is the most reliable way to hide console window on Windows
+        let daemon_path_str = daemon_path.to_string_lossy();
+        let mut cmd = Command::new("cmd");
+        cmd.args(["/c", "start", "/b", "node", &daemon_path_str]);
+
+        for (key, value) in env_vars {
+            cmd.env(key, value);
+        }
+
+        // CREATE_NO_WINDOW prevents cmd.exe from showing a window
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+        cmd.creation_flags(CREATE_NO_WINDOW)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -270,7 +278,9 @@ pub fn ensure_daemon(
 
     for _ in 0..50 {
         if daemon_ready(session) {
-            return Ok(DaemonResult { already_running: false });
+            return Ok(DaemonResult {
+                already_running: false,
+            });
         }
         thread::sleep(Duration::from_millis(100));
     }
