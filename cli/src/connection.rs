@@ -83,7 +83,7 @@ impl Connection {
 
 /// Get the base directory for socket/pid files.
 /// Priority: AGENT_BROWSER_SOCKET_DIR > XDG_RUNTIME_DIR > ~/.agent-browser
-fn get_socket_dir() -> PathBuf {
+pub fn get_socket_dir() -> PathBuf {
     // 1. Explicit override
     if let Ok(dir) = env::var("AGENT_BROWSER_SOCKET_DIR") {
         return PathBuf::from(dir);

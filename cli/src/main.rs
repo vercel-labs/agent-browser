@@ -19,7 +19,7 @@ use windows_sys::Win32::Foundation::CloseHandle;
 use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
 
 use commands::{gen_id, parse_command, ParseError};
-use connection::{ensure_daemon, send_command};
+use connection::{ensure_daemon, get_socket_dir, send_command};
 use flags::{clean_args, parse_flags};
 use install::run_install;
 use output::{print_command_help, print_help, print_response, print_version};
@@ -59,21 +59,18 @@ fn run_session(args: &[String], session: &str, json_mode: bool) {
 
     match subcommand {
         Some("list") => {
-            let tmp = env::temp_dir();
+            let socket_dir = get_socket_dir();
             let mut sessions: Vec<String> = Vec::new();
 
-            if let Ok(entries) = fs::read_dir(&tmp) {
+            if let Ok(entries) = fs::read_dir(&socket_dir) {
                 for entry in entries.flatten() {
                     let name = entry.file_name().to_string_lossy().to_string();
-                    // Look for socket files (Unix) or pid files
-                    if name.starts_with("agent-browser-") && name.ends_with(".pid") {
-                        let session_name = name
-                            .strip_prefix("agent-browser-")
-                            .and_then(|s| s.strip_suffix(".pid"))
-                            .unwrap_or("");
+                    // Look for pid files in socket directory
+                    if name.ends_with(".pid") {
+                        let session_name = name.strip_suffix(".pid").unwrap_or("");
                         if !session_name.is_empty() {
                             // Check if session is actually running
-                            let pid_path = tmp.join(&name);
+                            let pid_path = socket_dir.join(&name);
                             if let Ok(pid_str) = fs::read_to_string(&pid_path) {
                                 if let Ok(pid) = pid_str.trim().parse::<u32>() {
                                     #[cfg(unix)]
