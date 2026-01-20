@@ -211,7 +211,7 @@ export interface UnrouteCommand extends BaseCommand {
 // Request inspection
 export interface RequestsCommand extends BaseCommand {
   action: 'requests';
-  filter?: string; // URL pattern to filter
+  filter?: string | null; // URL pattern to filter
   clear?: boolean;
 }
 
