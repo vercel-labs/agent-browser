@@ -1,5 +1,5 @@
 @echo off
 setlocal
 set "SCRIPT_DIR=%~dp0"
-node "%SCRIPT_DIR%..\dist\index.js" %*
+node "%SCRIPT_DIR%agent-browser" %*
 exit /b %errorlevel%
