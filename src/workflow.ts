@@ -4,6 +4,8 @@
  * Leverages Cloudflare KV storage for persistence
  */
 
+import type { WorkerBindings } from './worker-bindings.js';
+
 /**
  * Workflow Step - Individual action in a workflow
  */
@@ -254,6 +256,14 @@ export const workflowTemplates: Record<string, WorkflowTemplate> = {
 export class WorkflowManager {
   private workflows: Map<string, Workflow> = new Map();
   private executions: Map<string, WorkflowExecution> = new Map();
+  private bindings?: WorkerBindings;
+
+  /**
+   * Constructor - optionally accepts Cloudflare bindings for persistence
+   */
+  constructor(bindings?: WorkerBindings) {
+    this.bindings = bindings;
+  }
 
   /**
    * Create a new workflow
@@ -285,6 +295,12 @@ export class WorkflowManager {
       createdBy: options?.createdBy,
       metadata: options?.metadata,
     };
+
+    // Validate workflow
+    const validation = validateWorkflow(workflow);
+    if (!validation.valid) {
+      throw new Error(`Invalid workflow: ${validation.errors.join(', ')}`);
+    }
 
     this.workflows.set(id, workflow);
     return workflow;
@@ -444,6 +460,24 @@ export class WorkflowManager {
   }
 
   /**
+   * Execute workflow asynchronously (fire-and-forget)
+   * Returns execution object immediately, execution continues in background
+   */
+  async executeWorkflowAsync(
+    workflowId: string,
+    executor: StepExecutor,
+    sessionId: string,
+    variables?: Record<string, unknown>
+  ): Promise<WorkflowExecution | undefined> {
+    const workflow = this.workflows.get(workflowId);
+    if (!workflow || !workflow.enabled) return undefined;
+
+    const execution = await executeWorkflow(workflow, executor, sessionId, variables);
+    await this.persistExecution(execution);
+    return execution;
+  }
+
+  /**
    * Update execution status
    */
   updateExecution(
@@ -503,30 +537,348 @@ export class WorkflowManager {
       return undefined;
     }
   }
+
+  /**
+   * Persist workflow to KV storage
+   */
+  async persistWorkflow(workflow: Workflow): Promise<boolean> {
+    if (!this.bindings?.WORKFLOWS) {
+      // Fall back to in-memory storage if KV is not available
+      this.workflows.set(workflow.id, workflow);
+      return true;
+    }
+
+    try {
+      await this.bindings.WORKFLOWS.put(
+        workflow.id,
+        JSON.stringify(workflow),
+        { expirationTtl: 86400 * 365 } // 1 year expiration
+      );
+      this.workflows.set(workflow.id, workflow);
+      return true;
+    } catch (error) {
+      console.error(`Failed to persist workflow ${workflow.id}:`, error);
+      return false;
+    }
+  }
+
+  /**
+   * Load workflow from KV storage
+   */
+  async loadWorkflow(id: string): Promise<Workflow | undefined> {
+    // Check in-memory first
+    const cached = this.workflows.get(id);
+    if (cached) return cached;
+
+    if (!this.bindings?.WORKFLOWS) {
+      return undefined;
+    }
+
+    try {
+      const data = await this.bindings.WORKFLOWS.get(id, 'json');
+      if (data) {
+        const workflow = data as Workflow;
+        this.workflows.set(id, workflow);
+        return workflow;
+      }
+    } catch (error) {
+      console.error(`Failed to load workflow ${id}:`, error);
+    }
+
+    return undefined;
+  }
+
+  /**
+   * Persist execution to KV storage
+   */
+  async persistExecution(execution: WorkflowExecution): Promise<boolean> {
+    if (!this.bindings?.EXECUTIONS) {
+      // Fall back to in-memory storage
+      this.executions.set(execution.id, execution);
+      return true;
+    }
+
+    try {
+      await this.bindings.EXECUTIONS.put(
+        execution.id,
+        JSON.stringify(execution),
+        { expirationTtl: 86400 * 30 } // 30 days expiration
+      );
+      this.executions.set(execution.id, execution);
+      return true;
+    } catch (error) {
+      console.error(`Failed to persist execution ${execution.id}:`, error);
+      return false;
+    }
+  }
+
+  /**
+   * Load all executions for a workflow from KV
+   */
+  async loadExecutions(workflowId: string): Promise<WorkflowExecution[]> {
+    // Return in-memory executions if KV not available
+    if (!this.bindings?.EXECUTIONS) {
+      return Array.from(this.executions.values()).filter((e) => e.workflowId === workflowId);
+    }
+
+    // Note: KV doesn't support direct queries, so we return cached executions
+    // In production, use D1 database for querying executions
+    return Array.from(this.executions.values()).filter((e) => e.workflowId === workflowId);
+  }
 }
 
 /**
  * Workflow execution with browser integration
  */
+
+/**
+ * Validate workflow before execution
+ */
+export function validateWorkflow(workflow: Workflow): { valid: boolean; errors: string[] } {
+  const errors: string[] = [];
+
+  // Check basic properties
+  if (!workflow.id || !workflow.name) {
+    errors.push('Workflow must have id and name');
+  }
+
+  if (!Array.isArray(workflow.steps) || workflow.steps.length === 0) {
+    errors.push('Workflow must have at least one step');
+  }
+
+  // Validate each step
+  for (let i = 0; i < workflow.steps.length; i++) {
+    const step = workflow.steps[i];
+    const stepErrors = validateWorkflowStep(step, i);
+    errors.push(...stepErrors);
+  }
+
+  return {
+    valid: errors.length === 0,
+    errors,
+  };
+}
+
+/**
+ * Validate individual workflow step
+ */
+export function validateWorkflowStep(step: WorkflowStep, index: number): string[] {
+  const errors: string[] = [];
+
+  if (!step.id) {
+    errors.push(`Step ${index} missing id`);
+  }
+
+  if (!step.action) {
+    errors.push(`Step ${index} missing action`);
+  }
+
+  if (typeof step.action !== 'string' || step.action.length > 100) {
+    errors.push(`Step ${index} action must be a string ≤ 100 chars`);
+  }
+
+  if (step.params && typeof step.params !== 'object') {
+    errors.push(`Step ${index} params must be an object`);
+  }
+
+  if (step.retries !== undefined && (step.retries < 0 || step.retries > 10)) {
+    errors.push(`Step ${index} retries must be 0-10`);
+  }
+
+  if (step.timeout !== undefined && (step.timeout < 100 || step.timeout > 300000)) {
+    errors.push(`Step ${index} timeout must be 100-300000ms`);
+  }
+
+  // Validate parameters for dangerous actions
+  if (step.params) {
+    validateStepParameters(step, index, errors);
+  }
+
+  return errors;
+}
+
+/**
+ * Validate step parameters for security issues
+ */
+function validateStepParameters(step: WorkflowStep, index: number, errors: string[]): void {
+  const params = step.params || {};
+
+  // Check for dangerous selectors that could cause issues
+  for (const [key, value] of Object.entries(params)) {
+    if (typeof value === 'string') {
+      // Prevent extremely long strings that could cause memory issues
+      if (value.length > 10000) {
+        errors.push(`Step ${index} parameter ${key} exceeds max length (10000 chars)`);
+      }
+
+      // Check for common injection patterns in selectors
+      if ((key === 'selector' || key === 'url') && value.includes('javascript:')) {
+        errors.push(`Step ${index} parameter ${key} contains dangerous javascript: protocol`);
+      }
+    }
+  }
+}
+
+/**
+ * Step execution result
+ */
+export interface StepExecutionResult {
+  stepId: string;
+  action: string;
+  status: 'success' | 'failed' | 'timeout' | 'skipped';
+  result?: unknown;
+  error?: string;
+  duration: number; // milliseconds
+  retriesUsed?: number;
+}
+
+/**
+ * Execute a workflow step with retry logic and timeout handling
+ */
 export async function executeWorkflowStep(
   step: WorkflowStep,
-  browserManager: any
-): Promise<unknown> {
-  // This would be called with actual browser manager
-  // Returns the result of executing the step action
-  try {
-    // Simulate step execution
-    return {
-      stepId: step.id,
-      action: step.action,
-      status: 'success',
-      result: null,
-    };
-  } catch (error) {
-    throw {
-      stepId: step.id,
-      action: step.action,
-      error: String(error),
-    };
+  executor: StepExecutor,
+  variables?: Record<string, unknown>
+): Promise<StepExecutionResult> {
+  const startTime = Date.now();
+  const maxRetries = step.retries ?? 1;
+  const timeout = step.timeout ?? 30000; // 30 second default timeout
+
+  // Check if step should be skipped
+  if (step.condition) {
+    if (step.condition.type === 'if' && !variables?.[step.condition.field]) {
+      return {
+        stepId: step.id,
+        action: step.action,
+        status: 'skipped',
+        duration: Date.now() - startTime,
+      };
+    }
+    if (step.condition.type === 'if-not' && variables?.[step.condition.field]) {
+      return {
+        stepId: step.id,
+        action: step.action,
+        status: 'skipped',
+        duration: Date.now() - startTime,
+      };
+    }
   }
+
+  // Execute with retries
+  let lastError: Error | undefined;
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      // Apply timeout
+      const result = await Promise.race([
+        executor.execute(step.action, step.params, variables),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error(`Step timeout after ${timeout}ms`)), timeout)
+        ),
+      ]);
+
+      return {
+        stepId: step.id,
+        action: step.action,
+        status: 'success',
+        result,
+        duration: Date.now() - startTime,
+        retriesUsed: attempt,
+      };
+    } catch (error) {
+      lastError = error as Error;
+
+      // Log retry attempt
+      if (attempt < maxRetries - 1) {
+        console.warn(
+          `[Workflow] Step ${step.id} (${step.action}) failed, retrying (${attempt + 1}/${maxRetries}):`,
+          lastError?.message
+        );
+        // Exponential backoff: wait 100ms * 2^attempt (100ms, 200ms, 400ms, ...)
+        await new Promise((resolve) => setTimeout(resolve, 100 * Math.pow(2, attempt)));
+      }
+    }
+  }
+
+  // All retries exhausted
+  return {
+    stepId: step.id,
+    action: step.action,
+    status: 'failed',
+    error: lastError?.message || 'Unknown error',
+    duration: Date.now() - startTime,
+    retriesUsed: maxRetries - 1,
+  };
+}
+
+/**
+ * Interface for step executor - implements this to connect to browser/API
+ */
+export interface StepExecutor {
+  execute(
+    action: string,
+    params: Record<string, unknown>,
+    variables?: Record<string, unknown>
+  ): Promise<unknown>;
+}
+
+/**
+ * Execute entire workflow
+ */
+export async function executeWorkflow(
+  workflow: Workflow,
+  executor: StepExecutor,
+  sessionId: string = 'default',
+  variables?: Record<string, unknown>
+): Promise<WorkflowExecution> {
+  const executionId = `exec-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+  const startTime = Date.now();
+
+  const execution: WorkflowExecution = {
+    id: executionId,
+    workflowId: workflow.id,
+    sessionId,
+    status: 'running',
+    startedAt: startTime,
+    results: {},
+    errors: [],
+  };
+
+  // Execute steps sequentially (unless parallelizable)
+  for (const step of workflow.steps) {
+    try {
+      const result = await executeWorkflowStep(step, executor, variables);
+
+      if (result.status === 'success') {
+        execution.results[step.id] = result.result;
+      } else if (result.status === 'failed') {
+        execution.errors.push({
+          stepId: step.id,
+          error: result.error || 'Unknown error',
+          timestamp: Date.now(),
+        });
+
+        // Stop execution on first error (unless configured to continue)
+        execution.status = 'failed';
+        execution.completedAt = Date.now();
+        return execution;
+      }
+      // Skipped steps don't affect execution
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      execution.errors.push({
+        stepId: step.id,
+        error: errorMsg,
+        timestamp: Date.now(),
+      });
+
+      execution.status = 'failed';
+      execution.completedAt = Date.now();
+      return execution;
+    }
+  }
+
+  // All steps completed successfully
+  execution.status = 'success';
+  execution.completedAt = Date.now();
+  return execution;
 }

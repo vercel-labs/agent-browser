@@ -8,11 +8,16 @@
 
 import { SkillsManager, createContentPlugin } from './skills-manager.js';
 import { WorkflowManager } from './workflow.js';
+import { WorkerStepExecutor } from './workflow-executor.js';
+import type { WorkerBindings } from './worker-bindings.js';
 
 // Store instances per session
 const skillsManagers = new Map<string, SkillsManager>();
 const workflowManagers = new Map<string, WorkflowManager>();
 const initializedSessions = new Set<string>();
+
+// Global reference to bindings for persistence operations
+let globalEnv: WorkerBindings | undefined;
 
 /**
  * Get or create SkillsManager instance for a session
@@ -29,7 +34,7 @@ function getSkillsManager(sessionId: string = 'default'): SkillsManager {
  */
 function getWorkflowManager(sessionId: string = 'default'): WorkflowManager {
   if (!workflowManagers.has(sessionId)) {
-    workflowManagers.set(sessionId, new WorkflowManager());
+    workflowManagers.set(sessionId, new WorkflowManager(globalEnv));
   }
   return workflowManagers.get(sessionId)!;
 }
@@ -57,8 +62,13 @@ async function initializePlugins(sessionId: string): Promise<void> {
  * Handle API requests
  */
 export default {
-  async fetch(request: Request): Promise<Response> {
+  async fetch(request: Request, env?: WorkerBindings): Promise<Response> {
     try {
+      // Store bindings for use in other functions
+      if (env) {
+        globalEnv = env;
+      }
+
       const url = new URL(request.url);
       const path = url.pathname;
       const sessionId =
@@ -415,7 +425,14 @@ export default {
             );
           }
 
-          const execution = workflowManager.startExecution(workflowId, payload.sessionId);
+          // Start execution asynchronously
+          const executor = new WorkerStepExecutor(payload.sessionId);
+          const execution = await workflowManager.executeWorkflowAsync(
+            workflowId,
+            executor,
+            payload.sessionId,
+            payload.variables
+          );
 
           if (!execution) {
             return new Response(
@@ -425,6 +442,12 @@ export default {
                 headers: { 'Content-Type': 'application/json' },
               }
             );
+          }
+
+          // Persist the workflow to KV
+          const workflow = workflowManager.getWorkflow(workflowId);
+          if (workflow) {
+            await workflowManager.persistWorkflow(workflow);
           }
 
           return new Response(JSON.stringify({ success: true, data: execution }), {
