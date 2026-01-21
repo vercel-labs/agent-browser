@@ -652,8 +652,8 @@ cp -r node_modules/agent-browser/skills/agent-browser .claude/skills/
 Or download:
 
 ```bash
-mkdir -p .claude/skills/agent-browser
-curl -o .claude/skills/agent-browser/SKILL.md \
+mkdir -p ~/.claude/skills/agent-browser
+curl -o ~/.claude/skills/agent-browser/SKILL.md \
   https://raw.githubusercontent.com/vercel-labs/agent-browser/main/skills/agent-browser/SKILL.md
 ```
 
