@@ -172,8 +172,8 @@ export class BrowserManager {
     if (locator) return locator;
 
     // Otherwise treat as regular selector
-    const page = this.getPage();
-    return page.locator(selectorOrRef);
+    const frame = this.getFrame();
+    return frame.locator(selectorOrRef);
   }
 
   /**
