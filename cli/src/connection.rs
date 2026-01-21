@@ -82,16 +82,20 @@ impl Connection {
 }
 
 /// Get the base directory for socket/pid files.
-/// Priority: AGENT_BROWSER_SOCKET_DIR > XDG_RUNTIME_DIR > ~/.agent-browser
+/// Priority: AGENT_BROWSER_SOCKET_DIR > XDG_RUNTIME_DIR > ~/.agent-browser > tmpdir
 pub fn get_socket_dir() -> PathBuf {
-    // 1. Explicit override
+    // 1. Explicit override (ignore empty string)
     if let Ok(dir) = env::var("AGENT_BROWSER_SOCKET_DIR") {
-        return PathBuf::from(dir);
+        if !dir.is_empty() {
+            return PathBuf::from(dir);
+        }
     }
 
-    // 2. XDG_RUNTIME_DIR (Linux standard)
+    // 2. XDG_RUNTIME_DIR (Linux standard, ignore empty string)
     if let Ok(runtime_dir) = env::var("XDG_RUNTIME_DIR") {
-        return PathBuf::from(runtime_dir).join("agent-browser");
+        if !runtime_dir.is_empty() {
+            return PathBuf::from(runtime_dir).join("agent-browser");
+        }
     }
 
     // 3. Home directory fallback (like Docker Desktop's ~/.docker/run/)
@@ -340,4 +344,93 @@ pub fn send_command(cmd: Value, session: &str) -> Result<Response, String> {
         .map_err(|e| format!("Failed to read: {}", e))?;
 
     serde_json::from_str(&response_line).map_err(|e| format!("Invalid response: {}", e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Mutex, MutexGuard};
+
+    // Mutex to prevent parallel tests from interfering with env vars
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    /// RAII guard that locks env mutex and restores env vars on drop
+    struct EnvGuard<'a> {
+        _lock: MutexGuard<'a, ()>,
+        vars: Vec<(String, Option<String>)>,
+    }
+
+    impl<'a> EnvGuard<'a> {
+        fn new(var_names: &[&str]) -> Self {
+            let lock = ENV_MUTEX.lock().unwrap();
+            let vars = var_names
+                .iter()
+                .map(|&name| (name.to_string(), env::var(name).ok()))
+                .collect();
+            Self { _lock: lock, vars }
+        }
+    }
+
+    impl Drop for EnvGuard<'_> {
+        fn drop(&mut self) {
+            for (name, value) in &self.vars {
+                match value {
+                    Some(v) => env::set_var(name, v),
+                    None => env::remove_var(name),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_get_socket_dir_explicit_override() {
+        let _guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
+
+        env::set_var("AGENT_BROWSER_SOCKET_DIR", "/custom/socket/path");
+        env::remove_var("XDG_RUNTIME_DIR");
+
+        assert_eq!(get_socket_dir(), PathBuf::from("/custom/socket/path"));
+    }
+
+    #[test]
+    fn test_get_socket_dir_ignores_empty_socket_dir() {
+        let _guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
+
+        env::set_var("AGENT_BROWSER_SOCKET_DIR", "");
+        env::remove_var("XDG_RUNTIME_DIR");
+
+        assert!(get_socket_dir().to_string_lossy().ends_with(".agent-browser"));
+    }
+
+    #[test]
+    fn test_get_socket_dir_xdg_runtime() {
+        let _guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
+
+        env::remove_var("AGENT_BROWSER_SOCKET_DIR");
+        env::set_var("XDG_RUNTIME_DIR", "/run/user/1000");
+
+        assert_eq!(get_socket_dir(), PathBuf::from("/run/user/1000/agent-browser"));
+    }
+
+    #[test]
+    fn test_get_socket_dir_ignores_empty_xdg_runtime() {
+        let _guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
+
+        env::set_var("AGENT_BROWSER_SOCKET_DIR", "");
+        env::set_var("XDG_RUNTIME_DIR", "");
+
+        assert!(get_socket_dir().to_string_lossy().ends_with(".agent-browser"));
+    }
+
+    #[test]
+    fn test_get_socket_dir_home_fallback() {
+        let _guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
+
+        env::remove_var("AGENT_BROWSER_SOCKET_DIR");
+        env::remove_var("XDG_RUNTIME_DIR");
+
+        let result = get_socket_dir();
+        assert!(result.to_string_lossy().ends_with(".agent-browser"));
+        assert!(result.to_string_lossy().contains("home") || result.to_string_lossy().contains("Users"));
+    }
 }

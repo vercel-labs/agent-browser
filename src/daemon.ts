@@ -51,7 +51,7 @@ function getPortForSession(session: string): number {
  * Get the base directory for socket/pid files.
  * Priority: AGENT_BROWSER_SOCKET_DIR > XDG_RUNTIME_DIR > ~/.agent-browser > tmpdir
  */
-function getSocketDir(): string {
+export function getSocketDir(): string {
   // 1. Explicit override
   if (process.env.AGENT_BROWSER_SOCKET_DIR) {
     return process.env.AGENT_BROWSER_SOCKET_DIR;
