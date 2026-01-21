@@ -392,13 +392,13 @@ describe('BrowserManager', () => {
       expect(cdp1).toBe(cdp2);
     });
 
-    it('should filter out pages with empty URLs during CDP connection', async () => {
+    it('should include pages with empty URLs during CDP connection for Electron support', async () => {
       const mockBrowser = {
         contexts: () => [
           {
             pages: () => [
               { url: () => 'http://example.com', on: vi.fn() },
-              { url: () => '', on: vi.fn() }, // This page should be filtered out
+              { url: () => '', on: vi.fn() }, // Empty URL pages are kept for Electron app support
               { url: () => 'http://anothersite.com', on: vi.fn() },
             ],
             on: vi.fn(),
@@ -411,13 +411,14 @@ describe('BrowserManager', () => {
       const cdpBrowser = new BrowserManager();
       await cdpBrowser.launch({ cdpPort: 9222 });
 
-      // Should have 2 pages, not 3
-      expect(cdpBrowser.getPages().length).toBe(2);
+      // Should have all 3 pages including the one with empty URL
+      expect(cdpBrowser.getPages().length).toBe(3);
 
-      // Verify that the empty URL page is not in the list
+      // All pages should be included
       const urls = cdpBrowser.getPages().map((p) => p.url());
-      expect(urls).not.toContain('');
       expect(urls).toContain('http://example.com');
+      expect(urls).toContain('');
+      expect(urls).toContain('http://anothersite.com');
       spy.mockRestore();
     });
   });
