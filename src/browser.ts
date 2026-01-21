@@ -17,6 +17,10 @@ import {
 import path from 'node:path';
 import os from 'node:os';
 import { existsSync, mkdirSync, rmSync } from 'node:fs';
+import { exec } from 'node:child_process';
+import { promisify } from 'node:util';
+
+const execAsync = promisify(exec);
 import type { LaunchCommand } from './types.js';
 import { type RefMap, type EnhancedSnapshot, getEnhancedSnapshot, parseRef } from './snapshot.js';
 
@@ -924,10 +928,41 @@ export class BrowserManager {
   }
 
   /**
+   * Check if Chrome/Chromium is currently running
+   */
+  private async isChromeRunning(): Promise<boolean> {
+    try {
+      if (process.platform === 'win32') {
+        const { stdout } = await execAsync('tasklist /FI "IMAGENAME eq chrome.exe"');
+        return stdout.toLowerCase().includes('chrome.exe');
+      } else {
+        // Check for chrome, chromium, or google-chrome processes
+        const { stdout } = await execAsync('pgrep -f "(chrome|chromium)" || true');
+        return stdout.trim().length > 0;
+      }
+    } catch {
+      return false; // Can't determine, assume not running
+    }
+  }
+
+  /**
+   * Sleep for a given number of milliseconds
+   */
+  private sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  /**
    * Connect to a running browser via CDP (Chrome DevTools Protocol)
    * @param cdpEndpoint Either a port number (as string) or a full WebSocket URL (ws:// or wss://)
+   * @param retries - Number of retry attempts (default: 3)
+   * @param retryDelayMs - Delay between retries in milliseconds (default: 1000)
    */
-  private async connectViaCDP(cdpEndpoint: string | undefined): Promise<void> {
+  private async connectViaCDP(
+    cdpEndpoint: string | undefined,
+    retries: number = 3,
+    retryDelayMs: number = 1000
+  ): Promise<void> {
     if (!cdpEndpoint) {
       throw new Error('CDP endpoint is required for CDP connection');
     }
@@ -952,15 +987,63 @@ export class BrowserManager {
       cdpUrl = `http://localhost:${cdpEndpoint}`;
     }
 
-    const browser = await chromium.connectOverCDP(cdpUrl).catch(() => {
-      throw new Error(
-        `Failed to connect via CDP to ${cdpUrl}. ` +
-          (cdpUrl.includes('localhost')
-            ? `Make sure the app is running with --remote-debugging-port=${cdpEndpoint}`
-            : 'Make sure the remote browser is accessible and the URL is correct.')
-      );
-    });
+    let lastError: Error | null = null;
 
+    for (let attempt = 1; attempt <= retries; attempt++) {
+      try {
+        const browser = await chromium.connectOverCDP(cdpUrl);
+
+        // Connection successful - validate and set up state
+        await this.setupCDPConnection(browser, cdpEndpoint);
+        return;
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error(String(error));
+
+        // Don't retry on validation errors (browser connected but no contexts/pages)
+        if (
+          lastError.message.includes('No browser context') ||
+          lastError.message.includes('No page found')
+        ) {
+          throw lastError;
+        }
+
+        if (attempt < retries) {
+          // Wait before retrying
+          await this.sleep(retryDelayMs);
+        }
+      }
+    }
+
+    // All retries failed - provide helpful error message
+    const chromeRunning = await this.isChromeRunning();
+    const isLocalhost = cdpUrl.includes('localhost');
+
+    let errorMessage = `Failed to connect via CDP to ${cdpUrl} after ${retries} attempts.\n\n`;
+
+    if (isLocalhost && chromeRunning) {
+      errorMessage +=
+        `Chrome is already running but likely not with remote debugging enabled.\n` +
+        `This happens when Chrome opens your request in an existing session.\n\n` +
+        `Solutions:\n` +
+        `  1. Start a separate Chrome instance with a temp profile:\n` +
+        `     google-chrome --remote-debugging-port=${cdpEndpoint} --user-data-dir=/tmp/chrome-cdp\n\n` +
+        `  2. Or close all Chrome windows first, then:\n` +
+        `     google-chrome --remote-debugging-port=${cdpEndpoint}`;
+    } else if (isLocalhost) {
+      errorMessage +=
+        `Make sure Chrome is running with remote debugging:\n` +
+        `  google-chrome --remote-debugging-port=${cdpEndpoint}`;
+    } else {
+      errorMessage += 'Make sure the remote browser is accessible and the URL is correct.';
+    }
+
+    throw new Error(errorMessage);
+  }
+
+  /**
+   * Set up the CDP connection after successful connect
+   */
+  private async setupCDPConnection(browser: Browser, cdpEndpoint: string): Promise<void> {
     // Validate and set up state, cleaning up browser connection if anything fails
     try {
       const contexts = browser.contexts();
