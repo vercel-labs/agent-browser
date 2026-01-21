@@ -218,9 +218,9 @@ agent-browser dialog dismiss          # Dismiss
 ```bash
 agent-browser trace start [path]      # Start recording trace
 agent-browser trace stop [path]       # Stop and save trace
-agent-browser console                 # View console messages
+agent-browser console                 # View console messages (log, error, warn, info)
 agent-browser console --clear         # Clear console
-agent-browser errors                  # View page errors
+agent-browser errors                  # View page errors (uncaught JavaScript exceptions)
 agent-browser errors --clear          # Clear errors
 agent-browser highlight <sel>         # Highlight element
 agent-browser state save <path>       # Save auth state
