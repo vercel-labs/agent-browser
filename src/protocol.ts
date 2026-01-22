@@ -19,6 +19,18 @@ const launchSchema = baseCommandSchema.extend({
     .optional(),
   browser: z.enum(['chromium', 'firefox', 'webkit']).optional(),
   cdpPort: z.number().positive().optional(),
+  cdpUrl: z
+    .string()
+    .url()
+    .refine(
+      (url) =>
+        url.startsWith('ws://') ||
+        url.startsWith('wss://') ||
+        url.startsWith('http://') ||
+        url.startsWith('https://'),
+      { message: 'CDP URL must start with ws://, wss://, http://, or https://' }
+    )
+    .optional(),
   executablePath: z.string().optional(),
   extensions: z.array(z.string()).optional(),
   headers: z.record(z.string()).optional(),

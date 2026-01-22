@@ -260,47 +260,70 @@ fn main() {
     }
 
     // Connect via CDP if --cdp flag is set
-    if let Some(ref port) = flags.cdp {
-        let cdp_port: u16 = match port.parse::<u32>() {
-            Ok(p) if p == 0 => {
-                let msg = "Invalid CDP port: port must be greater than 0".to_string();
-                if flags.json {
-                    println!(r#"{{"success":false,"error":"{}"}}"#, msg);
-                } else {
-                    eprintln!("{} {}", color::error_indicator(), msg);
+    // Accepts either a port number (e.g., "9222") or a full URL (e.g., "ws://..." or "wss://...")
+    if let Some(ref cdp_value) = flags.cdp {
+        let launch_cmd = if cdp_value.starts_with("ws://")
+            || cdp_value.starts_with("wss://")
+            || cdp_value.starts_with("http://")
+            || cdp_value.starts_with("https://")
+        {
+            // It's a URL - use cdpUrl field
+            json!({
+                "id": gen_id(),
+                "action": "launch",
+                "cdpUrl": cdp_value
+            })
+        } else {
+            // It's a port number - validate and use cdpPort field
+            let cdp_port: u16 = match cdp_value.parse::<u32>() {
+                Ok(p) if p == 0 => {
+                    let msg = "Invalid CDP port: port must be greater than 0".to_string();
+                    if flags.json {
+                        println!(r#"{{"success":false,"error":"{}"}}"#, msg);
+                    } else {
+                        eprintln!("{} {}", color::error_indicator(), msg);
+                    }
+                    exit(1);
                 }
-                exit(1);
-            }
-            Ok(p) if p > 65535 => {
-                let msg = format!("Invalid CDP port: {} is out of range (valid range: 1-65535)", p);
-                if flags.json {
-                    println!(r#"{{"success":false,"error":"{}"}}"#, msg);
-                } else {
-                    eprintln!("{} {}", color::error_indicator(), msg);
+                Ok(p) if p > 65535 => {
+                    let msg = format!(
+                        "Invalid CDP port: {} is out of range (valid range: 1-65535)",
+                        p
+                    );
+                    if flags.json {
+                        println!(r#"{{"success":false,"error":"{}"}}"#, msg);
+                    } else {
+                        eprintln!("{} {}", color::error_indicator(), msg);
+                    }
+                    exit(1);
                 }
-                exit(1);
-            }
-            Ok(p) => p as u16,
-            Err(_) => {
-                let msg = format!("Invalid CDP port: '{}' is not a valid number. Port must be a number between 1 and 65535", port);
-                if flags.json {
-                    println!(r#"{{"success":false,"error":"{}"}}"#, msg);
-                } else {
-                    eprintln!("{} {}", color::error_indicator(), msg);
+                Ok(p) => p as u16,
+                Err(_) => {
+                    let msg = format!(
+                        "Invalid CDP value: '{}' is not a valid port number or URL",
+                        cdp_value
+                    );
+                    if flags.json {
+                        println!(r#"{{"success":false,"error":"{}"}}"#, msg);
+                    } else {
+                        eprintln!("{} {}", color::error_indicator(), msg);
+                    }
+                    exit(1);
                 }
-                exit(1);
-            }
+            };
+            json!({
+                "id": gen_id(),
+                "action": "launch",
+                "cdpPort": cdp_port
+            })
         };
-
-        let launch_cmd = json!({
-            "id": gen_id(),
-            "action": "launch",
-            "cdpPort": cdp_port
-        });
 
         let err = match send_command(launch_cmd, &flags.session) {
             Ok(resp) if resp.success => None,
-            Ok(resp) => Some(resp.error.unwrap_or_else(|| "CDP connection failed".to_string())),
+            Ok(resp) => Some(
+                resp.error
+                    .unwrap_or_else(|| "CDP connection failed".to_string()),
+            ),
             Err(e) => Some(e.to_string()),
         };
 

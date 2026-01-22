@@ -15,6 +15,7 @@ export interface LaunchCommand extends BaseCommand {
   headers?: Record<string, string>;
   executablePath?: string;
   cdpPort?: number;
+  cdpUrl?: string;
   extensions?: string[];
   proxy?: {
     server: string;

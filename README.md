@@ -480,7 +480,14 @@ agent-browser close
 
 # Or pass --cdp on each command
 agent-browser --cdp 9222 snapshot
+
+# Connect to remote browser via WebSocket URL
+agent-browser --cdp "wss://your-browser-service.com/cdp?token=..." snapshot
 ```
+
+The `--cdp` flag accepts either:
+- A port number (e.g., `9222`) for local connections via `http://localhost:{port}`
+- A full WebSocket URL (e.g., `wss://...` or `ws://...`) for remote browser services
 
 This enables control of:
 - Electron apps
