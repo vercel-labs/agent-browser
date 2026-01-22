@@ -1526,7 +1526,8 @@ mod tests {
     fn test_screenshot() {
         let cmd = parse_command(&args("screenshot"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "screenshot");
-        assert!(cmd.get("path").is_none());
+        assert_eq!(cmd["path"], serde_json::Value::Null);
+        assert_eq!(cmd["selector"], serde_json::Value::Null);
     }
 
     #[test]
