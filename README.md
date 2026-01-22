@@ -449,7 +449,7 @@ AGENT_BROWSER_EXECUTABLE_PATH=/path/to/chromium agent-browser open example.com
 
 ```typescript
 import chromium from '@sparticuz/chromium';
-import { BrowserManager } from 'agent-browser';
+import { BrowserManager } from 'agent-browser/dist/browser';
 
 export async function handler() {
   const browser = new BrowserManager();
