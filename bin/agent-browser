@@ -1,26 +1,80 @@
-#!/bin/sh
-# agent-browser CLI wrapper
-# Detects OS/arch and runs the appropriate native binary
+#!/usr/bin/env node
 
-SCRIPT="$0"
-while [ -L "$SCRIPT" ]; do
-  SCRIPT_DIR="$(cd "$(dirname "$SCRIPT")" && pwd)"
-  SCRIPT="$(readlink "$SCRIPT")"
-  case "$SCRIPT" in /*) ;; *) SCRIPT="$SCRIPT_DIR/$SCRIPT" ;; esac
-done
-SCRIPT_DIR="$(cd "$(dirname "$SCRIPT")" && pwd)"
+async function main() {
+  const [{ accessSync, constants, existsSync, realpathSync }, { spawn }, { dirname, join }] =
+    await Promise.all([import('fs'), import('child_process'), import('path')]);
 
-OS=$(uname -s | tr '[:upper:]' '[:lower:]')
-ARCH=$(uname -m)
-case "$OS" in darwin) OS="darwin" ;; linux) OS="linux" ;; mingw*|msys*|cygwin*) OS="win32" ;; esac
-case "$ARCH" in x86_64|amd64) ARCH="x64" ;; aarch64|arm64) ARCH="arm64" ;; esac
+  const scriptArg = process.argv[1];
+  if (!scriptArg) {
+    console.error('Error: Missing script path for agent-browser wrapper');
+    process.exit(1);
+  }
 
-BINARY="$SCRIPT_DIR/agent-browser-${OS}-${ARCH}"
+  let scriptPath;
+  try {
+    scriptPath = realpathSync(scriptArg);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`Error: Failed to resolve script path: ${message}`);
+    process.exit(1);
+  }
 
-if [ -f "$BINARY" ] && [ -x "$BINARY" ]; then
-  exec "$BINARY" "$@"
-fi
+  const scriptDir = dirname(scriptPath);
+  const platform = process.platform;
+  const arch = process.arch;
 
-echo "Error: No binary found for ${OS}-${ARCH}" >&2
-echo "Run 'npm run build:native' to build for your platform" >&2
-exit 1
+  const os =
+    platform === 'win32' ? 'win32' : platform === 'darwin' ? 'darwin' : platform === 'linux' ? 'linux' : null;
+
+  if (!os) {
+    console.error(`Error: Unsupported platform ${platform}`);
+    process.exit(1);
+  }
+
+  const mappedArch = arch === 'x64' ? 'x64' : arch === 'arm64' ? 'arm64' : null;
+
+  if (!mappedArch) {
+    console.error(`Error: Unsupported architecture ${arch}`);
+    process.exit(1);
+  }
+
+  const ext = platform === 'win32' ? '.exe' : '';
+  const binaryName = `agent-browser-${os}-${mappedArch}${ext}`;
+  const binaryPath = join(scriptDir, binaryName);
+
+  try {
+    if (!existsSync(binaryPath)) {
+      throw new Error(`No binary found for ${os}-${mappedArch}`);
+    }
+    if (platform !== 'win32') {
+      accessSync(binaryPath, constants.X_OK);
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`Error: ${message}`);
+    console.error("Run 'npm run build:native' to build for your platform");
+    process.exit(1);
+  }
+
+  const child = spawn(binaryPath, process.argv.slice(2), { stdio: 'inherit' });
+
+  child.on('error', (err) => {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`Error: Failed to launch ${binaryName}: ${message}`);
+    process.exit(1);
+  });
+
+  child.on('close', (code, signal) => {
+    if (typeof code === 'number') {
+      process.exit(code);
+    }
+    console.error(`Error: ${binaryName} exited with signal ${signal ?? 'unknown'}`);
+    process.exit(1);
+  });
+}
+
+main().catch((err) => {
+  const message = err instanceof Error ? err.message : String(err);
+  console.error(`Error: Unexpected failure in CLI wrapper: ${message}`);
+  process.exit(1);
+});

@@ -256,16 +256,26 @@ pub fn ensure_daemon(
             cmd.env("AGENT_BROWSER_EXTENSIONS", extensions.join(","));
         }
 
-        // CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS
+        // CREATE_NEW_PROCESS_GROUP (keep console association for headed mode)
         const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
-        const DETACHED_PROCESS: u32 = 0x00000008;
-        
-        cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|e| format!("Failed to start daemon: {}", e))?;
+
+        if headed {
+            cmd.creation_flags(CREATE_NEW_PROCESS_GROUP)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .map_err(|e| format!("Failed to start daemon: {}", e))?;
+        } else {
+            // DETACHED_PROCESS avoids flashing a console window in headless mode
+            const DETACHED_PROCESS: u32 = 0x00000008;
+            cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .map_err(|e| format!("Failed to start daemon: {}", e))?;
+        }
     }
 
     for _ in 0..50 {
