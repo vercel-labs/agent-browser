@@ -218,9 +218,9 @@ agent-browser dialog dismiss          # Dismiss
 ```bash
 agent-browser trace start [path]      # Start recording trace
 agent-browser trace stop [path]       # Stop and save trace
-agent-browser console                 # View console messages
+agent-browser console                 # View console messages (log, error, warn, info)
 agent-browser console --clear         # Clear console
-agent-browser errors                  # View page errors
+agent-browser errors                  # View page errors (uncaught JavaScript exceptions)
 agent-browser errors --clear          # Clear errors
 agent-browser highlight <sel>         # Highlight element
 agent-browser state save <path>       # Save auth state
@@ -271,6 +271,30 @@ Each session has its own:
 - Navigation history
 - Authentication state
 
+## Persistent Profiles
+
+By default, browser state (cookies, localStorage, login sessions) is ephemeral and lost when the browser closes. Use `--profile` to persist state across browser restarts:
+
+```bash
+# Use a persistent profile directory
+agent-browser --profile ~/.myapp-profile open myapp.com
+
+# Login once, then reuse the authenticated session
+agent-browser --profile ~/.myapp-profile open myapp.com/dashboard
+
+# Or via environment variable
+AGENT_BROWSER_PROFILE=~/.myapp-profile agent-browser open myapp.com
+```
+
+The profile directory stores:
+- Cookies and localStorage
+- IndexedDB data
+- Service workers
+- Browser cache
+- Login sessions
+
+**Tip**: Use different profile paths for different projects to keep their browser state isolated.
+
 ## Snapshot Options
 
 The `snapshot` command supports filtering to reduce output size:
@@ -296,8 +320,13 @@ agent-browser snapshot -i -c -d 5         # Combine options
 | Option | Description |
 |--------|-------------|
 | `--session <name>` | Use isolated session (or `AGENT_BROWSER_SESSION` env) |
+| `--profile <path>` | Persistent browser profile directory (or `AGENT_BROWSER_PROFILE` env) |
 | `--headers <json>` | Set HTTP headers scoped to the URL's origin |
 | `--executable-path <path>` | Custom browser executable (or `AGENT_BROWSER_EXECUTABLE_PATH` env) |
+| `--args <args>` | Browser launch args, comma or newline separated (or `AGENT_BROWSER_ARGS` env) |
+| `--user-agent <ua>` | Custom User-Agent string (or `AGENT_BROWSER_USER_AGENT` env) |
+| `--proxy <url>` | Proxy server URL with optional auth (or `AGENT_BROWSER_PROXY` env) |
+| `--proxy-bypass <hosts>` | Hosts to bypass proxy (or `AGENT_BROWSER_PROXY_BYPASS` env) |
 | `--json` | JSON output (for agents) |
 | `--full, -f` | Full page screenshot |
 | `--name, -n` | Locator name filter |
@@ -476,7 +505,14 @@ agent-browser close
 
 # Or pass --cdp on each command
 agent-browser --cdp 9222 snapshot
+
+# Connect to remote browser via WebSocket URL
+agent-browser --cdp "wss://your-browser-service.com/cdp?token=..." snapshot
 ```
+
+The `--cdp` flag accepts either:
+- A port number (e.g., `9222`) for local connections via `http://localhost:{port}`
+- A full WebSocket URL (e.g., `wss://...` or `ws://...`) for remote browser services
 
 This enables control of:
 - Electron apps
@@ -643,19 +679,68 @@ Core workflow:
 
 ### Claude Code Skill
 
-For Claude Code, a [skill](https://platform.claude.com/docs/en/agents-and-tools/agent-skills/best-practices) provides richer context:
+For Claude Code, a [skill](https://platform.claude.com/docs/en/agents-and-tools/agent-skills/best-practices) provides richer context.
+
+**Plugin (recommended):**
+
+```bash
+/plugin marketplace add vercel-labs/agent-browser
+/plugin install agent-browser
+```
+
+**Manual install:**
 
 ```bash
 cp -r node_modules/agent-browser/skills/agent-browser .claude/skills/
 ```
 
-Or download:
+Or download directly:
 
 ```bash
 mkdir -p .claude/skills/agent-browser
 curl -o .claude/skills/agent-browser/SKILL.md \
   https://raw.githubusercontent.com/vercel-labs/agent-browser/main/skills/agent-browser/SKILL.md
 ```
+
+## Integrations
+
+### Browserbase
+
+[Browserbase](https://browserbase.com) provides remote browser infrastructure to make deployment of agentic browsing agents easy. Use it when running the agent-browser CLI in an environment where a local browser isn't feasible.
+
+To enable Browserbase, set these environment variables:
+
+```bash
+export BROWSERBASE_API_KEY="your-api-key"
+export BROWSERBASE_PROJECT_ID="your-project-id"
+```
+
+When both variables are set, agent-browser automatically connects to a Browserbase session instead of launching a local browser. All commands work identically.
+
+Get your API key and project ID from the [Browserbase Dashboard](https://browserbase.com/overview).
+
+### Browser Use
+
+[Browser Use](https://browser-use.com) provides cloud browser infrastructure for AI agents. Use it when running agent-browser in environments where a local browser isn't available (serverless, CI/CD, etc.).
+
+To enable Browser Use, use the `-p` flag:
+
+```bash
+export BROWSER_USE_API_KEY="your-api-key"
+agent-browser -p browseruse open https://example.com
+```
+
+Or use environment variables for CI/scripts:
+
+```bash
+export AGENT_BROWSER_PROVIDER=browseruse
+export BROWSER_USE_API_KEY="your-api-key"
+agent-browser open https://example.com
+```
+
+When enabled, agent-browser connects to a Browser Use cloud session instead of launching a local browser. All commands work identically.
+
+Get your API key from the [Browser Use Cloud Dashboard](https://cloud.browser-use.com/settings?tab=api-keys). Free credits are available to get started, with pay-as-you-go pricing after.
 
 ## License
 

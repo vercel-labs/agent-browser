@@ -81,21 +81,44 @@ impl Connection {
     }
 }
 
+/// Get the base directory for socket/pid files.
+/// Priority: AGENT_BROWSER_SOCKET_DIR > XDG_RUNTIME_DIR > ~/.agent-browser > tmpdir
+pub fn get_socket_dir() -> PathBuf {
+    // 1. Explicit override (ignore empty string)
+    if let Ok(dir) = env::var("AGENT_BROWSER_SOCKET_DIR") {
+        if !dir.is_empty() {
+            return PathBuf::from(dir);
+        }
+    }
+
+    // 2. XDG_RUNTIME_DIR (Linux standard, ignore empty string)
+    if let Ok(runtime_dir) = env::var("XDG_RUNTIME_DIR") {
+        if !runtime_dir.is_empty() {
+            return PathBuf::from(runtime_dir).join("agent-browser");
+        }
+    }
+
+    // 3. Home directory fallback (like Docker Desktop's ~/.docker/run/)
+    if let Some(home) = dirs::home_dir() {
+        return home.join(".agent-browser");
+    }
+
+    // 4. Last resort: temp dir
+    env::temp_dir().join("agent-browser")
+}
+
 #[cfg(unix)]
 fn get_socket_path(session: &str) -> PathBuf {
-    let tmp = env::temp_dir();
-    tmp.join(format!("agent-browser-{}.sock", session))
+    get_socket_dir().join(format!("{}.sock", session))
 }
 
 fn get_pid_path(session: &str) -> PathBuf {
-    let tmp = env::temp_dir();
-    tmp.join(format!("agent-browser-{}.pid", session))
+    get_socket_dir().join(format!("{}.pid", session))
 }
 
 #[cfg(windows)]
 fn get_port_path(session: &str) -> PathBuf {
-    let tmp = env::temp_dir();
-    tmp.join(format!("agent-browser-{}.port", session))
+    get_socket_dir().join(format!("{}.port", session))
 }
 
 #[cfg(windows)]
@@ -167,11 +190,21 @@ pub fn ensure_daemon(
     headed: bool,
     executable_path: Option<&str>,
     extensions: &[String],
+    args: Option<&str>,
+    user_agent: Option<&str>,
+    proxy: Option<&str>,
+    proxy_bypass: Option<&str>,
 ) -> Result<DaemonResult, String> {
     if is_daemon_running(session) && daemon_ready(session) {
         return Ok(DaemonResult {
             already_running: true,
         });
+    }
+
+    // Ensure socket directory exists
+    let socket_dir = get_socket_dir();
+    if !socket_dir.exists() {
+        fs::create_dir_all(&socket_dir).map_err(|e| format!("Failed to create socket directory: {}", e))?;
     }
 
     let exe_path = env::current_exe().map_err(|e| e.to_string())?;
@@ -199,7 +232,7 @@ pub fn ensure_daemon(
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        
+
         let mut cmd = Command::new("node");
         cmd.arg(daemon_path)
             .env("AGENT_BROWSER_DAEMON", "1")
@@ -215,6 +248,22 @@ pub fn ensure_daemon(
 
         if !extensions.is_empty() {
             cmd.env("AGENT_BROWSER_EXTENSIONS", extensions.join(","));
+        }
+
+        if let Some(a) = args {
+            cmd.env("AGENT_BROWSER_ARGS", a);
+        }
+
+        if let Some(ua) = user_agent {
+            cmd.env("AGENT_BROWSER_USER_AGENT", ua);
+        }
+
+        if let Some(p) = proxy {
+            cmd.env("AGENT_BROWSER_PROXY", p);
+        }
+
+        if let Some(pb) = proxy_bypass {
+            cmd.env("AGENT_BROWSER_PROXY_BYPASS", pb);
         }
 
         // Create new process group and session to fully detach
@@ -256,10 +305,26 @@ pub fn ensure_daemon(
             cmd.env("AGENT_BROWSER_EXTENSIONS", extensions.join(","));
         }
 
+        if let Some(a) = args {
+            cmd.env("AGENT_BROWSER_ARGS", a);
+        }
+
+        if let Some(ua) = user_agent {
+            cmd.env("AGENT_BROWSER_USER_AGENT", ua);
+        }
+
+        if let Some(p) = proxy {
+            cmd.env("AGENT_BROWSER_PROXY", p);
+        }
+
+        if let Some(pb) = proxy_bypass {
+            cmd.env("AGENT_BROWSER_PROXY_BYPASS", pb);
+        }
+
         // CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS
         const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
         const DETACHED_PROCESS: u32 = 0x00000008;
-        
+
         cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -270,7 +335,9 @@ pub fn ensure_daemon(
 
     for _ in 0..50 {
         if daemon_ready(session) {
-            return Ok(DaemonResult { already_running: false });
+            return Ok(DaemonResult {
+                already_running: false,
+            });
         }
         thread::sleep(Duration::from_millis(100));
     }
@@ -315,4 +382,93 @@ pub fn send_command(cmd: Value, session: &str) -> Result<Response, String> {
         .map_err(|e| format!("Failed to read: {}", e))?;
 
     serde_json::from_str(&response_line).map_err(|e| format!("Invalid response: {}", e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Mutex, MutexGuard};
+
+    // Mutex to prevent parallel tests from interfering with env vars
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    /// RAII guard that locks env mutex and restores env vars on drop
+    struct EnvGuard<'a> {
+        _lock: MutexGuard<'a, ()>,
+        vars: Vec<(String, Option<String>)>,
+    }
+
+    impl<'a> EnvGuard<'a> {
+        fn new(var_names: &[&str]) -> Self {
+            let lock = ENV_MUTEX.lock().unwrap();
+            let vars = var_names
+                .iter()
+                .map(|&name| (name.to_string(), env::var(name).ok()))
+                .collect();
+            Self { _lock: lock, vars }
+        }
+    }
+
+    impl Drop for EnvGuard<'_> {
+        fn drop(&mut self) {
+            for (name, value) in &self.vars {
+                match value {
+                    Some(v) => env::set_var(name, v),
+                    None => env::remove_var(name),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_get_socket_dir_explicit_override() {
+        let _guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
+
+        env::set_var("AGENT_BROWSER_SOCKET_DIR", "/custom/socket/path");
+        env::remove_var("XDG_RUNTIME_DIR");
+
+        assert_eq!(get_socket_dir(), PathBuf::from("/custom/socket/path"));
+    }
+
+    #[test]
+    fn test_get_socket_dir_ignores_empty_socket_dir() {
+        let _guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
+
+        env::set_var("AGENT_BROWSER_SOCKET_DIR", "");
+        env::remove_var("XDG_RUNTIME_DIR");
+
+        assert!(get_socket_dir().to_string_lossy().ends_with(".agent-browser"));
+    }
+
+    #[test]
+    fn test_get_socket_dir_xdg_runtime() {
+        let _guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
+
+        env::remove_var("AGENT_BROWSER_SOCKET_DIR");
+        env::set_var("XDG_RUNTIME_DIR", "/run/user/1000");
+
+        assert_eq!(get_socket_dir(), PathBuf::from("/run/user/1000/agent-browser"));
+    }
+
+    #[test]
+    fn test_get_socket_dir_ignores_empty_xdg_runtime() {
+        let _guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
+
+        env::set_var("AGENT_BROWSER_SOCKET_DIR", "");
+        env::set_var("XDG_RUNTIME_DIR", "");
+
+        assert!(get_socket_dir().to_string_lossy().ends_with(".agent-browser"));
+    }
+
+    #[test]
+    fn test_get_socket_dir_home_fallback() {
+        let _guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
+
+        env::remove_var("AGENT_BROWSER_SOCKET_DIR");
+        env::remove_var("XDG_RUNTIME_DIR");
+
+        let result = get_socket_dir();
+        assert!(result.to_string_lossy().ends_with(".agent-browser"));
+        assert!(result.to_string_lossy().contains("home") || result.to_string_lossy().contains("Users"));
+    }
 }

@@ -15,13 +15,18 @@ export interface LaunchCommand extends BaseCommand {
   headers?: Record<string, string>;
   executablePath?: string;
   cdpPort?: number;
+  cdpUrl?: string;
   extensions?: string[];
+  profile?: string; // Path to persistent browser profile directory
   proxy?: {
     server: string;
     bypass?: string;
     username?: string;
     password?: string;
   };
+  args?: string[];
+  userAgent?: string;
+  provider?: string;
 }
 
 export interface NavigateCommand extends BaseCommand {
