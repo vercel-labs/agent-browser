@@ -102,10 +102,44 @@ export class BrowserManager {
   private recordingTempDir: string = '';
 
   /**
-   * Check if browser is launched
+   * Check if browser is launched and usable
+   * Returns false if browser was launched but has since disconnected or has no pages
    */
   isLaunched(): boolean {
-    return this.browser !== null || this.isPersistentContext;
+    // For persistent context (extensions), check if we have usable pages
+    if (this.isPersistentContext) {
+      // Filter out any closed pages (handles crash before 'close' event fires)
+      this.pages = this.pages.filter((page) => !page.isClosed());
+      if (this.pages.length === 0) {
+        // All pages closed - clean up stale state
+        this.contexts = [];
+        this.isPersistentContext = false;
+        return false;
+      }
+      return true;
+    }
+
+    // For regular browser, check connection status and pages
+    if (this.browser === null) {
+      return false;
+    }
+
+    // Check if browser is still connected (handles crash/close scenarios)
+    if (!this.browser.isConnected()) {
+      // Browser disconnected - clean up stale state
+      this.browser = null;
+      this.pages = [];
+      this.contexts = [];
+      this.cdpPort = null;
+      return false;
+    }
+
+    // Browser is connected but has no pages - not usable
+    if (this.pages.length === 0) {
+      return false;
+    }
+
+    return true;
   }
 
   /**
@@ -875,12 +909,32 @@ export class BrowserManager {
         }
       );
       this.isPersistentContext = true;
+
+      // Handle context close (crash, manual close, etc.) for persistent contexts
+      // Note: BrowserContext uses 'close' event, not 'disconnected' like Browser
+      context.on('close', () => {
+        this.browser = null;
+        this.pages = [];
+        this.contexts = [];
+        this.cdpPort = null;
+        this.isPersistentContext = false;
+      });
     } else {
       this.browser = await launcher.launch({
         headless: options.headless ?? true,
         executablePath: options.executablePath,
       });
       this.cdpPort = null;
+
+      // Handle browser disconnect (crash, manual close, etc.)
+      this.browser.on('disconnected', () => {
+        this.browser = null;
+        this.pages = [];
+        this.contexts = [];
+        this.cdpPort = null;
+        this.isPersistentContext = false;
+      });
+
       context = await this.browser.newContext({
         viewport,
         extraHTTPHeaders: options.headers,
@@ -930,6 +984,15 @@ export class BrowserManager {
       this.browser = browser;
       this.cdpPort = cdpPort;
 
+      // Handle browser disconnect (crash, manual close, etc.)
+      this.browser.on('disconnected', () => {
+        this.browser = null;
+        this.pages = [];
+        this.contexts = [];
+        this.cdpPort = null;
+        this.isPersistentContext = false;
+      });
+
       for (const context of contexts) {
         this.contexts.push(context);
         this.setupContextTracking(context);
@@ -943,7 +1006,9 @@ export class BrowserManager {
       this.activePageIndex = 0;
     } catch (error) {
       // Clean up browser connection if validation or setup failed
-      await browser.close().catch(() => {});
+      if (browser) {
+        await browser.close().catch(() => {});
+      }
       throw error;
     }
   }
