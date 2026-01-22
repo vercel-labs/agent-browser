@@ -5,6 +5,7 @@ Instructions for AI coding agents working with this codebase.
 ## Code Style
 
 - Do not use emojis in code, output, or documentation. Unicode symbols (✓, ✗, →, ⚠) are acceptable.
+- CLI colored output uses `cli/src/color.rs`. This module respects the `NO_COLOR` environment variable. Never use hardcoded ANSI color codes.
 
 <!-- opensrc:start -->
 

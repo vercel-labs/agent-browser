@@ -81,21 +81,44 @@ impl Connection {
     }
 }
 
+/// Get the base directory for socket/pid files.
+/// Priority: AGENT_BROWSER_SOCKET_DIR > XDG_RUNTIME_DIR > ~/.agent-browser > tmpdir
+pub fn get_socket_dir() -> PathBuf {
+    // 1. Explicit override (ignore empty string)
+    if let Ok(dir) = env::var("AGENT_BROWSER_SOCKET_DIR") {
+        if !dir.is_empty() {
+            return PathBuf::from(dir);
+        }
+    }
+
+    // 2. XDG_RUNTIME_DIR (Linux standard, ignore empty string)
+    if let Ok(runtime_dir) = env::var("XDG_RUNTIME_DIR") {
+        if !runtime_dir.is_empty() {
+            return PathBuf::from(runtime_dir).join("agent-browser");
+        }
+    }
+
+    // 3. Home directory fallback (like Docker Desktop's ~/.docker/run/)
+    if let Some(home) = dirs::home_dir() {
+        return home.join(".agent-browser");
+    }
+
+    // 4. Last resort: temp dir
+    env::temp_dir().join("agent-browser")
+}
+
 #[cfg(unix)]
 fn get_socket_path(session: &str) -> PathBuf {
-    let tmp = env::temp_dir();
-    tmp.join(format!("agent-browser-{}.sock", session))
+    get_socket_dir().join(format!("{}.sock", session))
 }
 
 fn get_pid_path(session: &str) -> PathBuf {
-    let tmp = env::temp_dir();
-    tmp.join(format!("agent-browser-{}.pid", session))
+    get_socket_dir().join(format!("{}.pid", session))
 }
 
 #[cfg(windows)]
 fn get_port_path(session: &str) -> PathBuf {
-    let tmp = env::temp_dir();
-    tmp.join(format!("agent-browser-{}.port", session))
+    get_socket_dir().join(format!("{}.port", session))
 }
 
 #[cfg(windows)]
@@ -104,7 +127,9 @@ fn get_port_for_session(session: &str) -> u16 {
     for c in session.chars() {
         hash = ((hash << 5).wrapping_sub(hash)).wrapping_add(c as i32);
     }
-    49152 + ((hash.abs() as u16) % 16383)
+    // Correct logic: first take absolute modulo, then cast to u16
+    // Using unsigned_abs() to safely handle i32::MIN
+    49152 + ((hash.unsigned_abs() as u32 % 16383) as u16)
 }
 
 #[cfg(unix)]
@@ -140,7 +165,8 @@ fn is_daemon_running(session: &str) -> bool {
 fn daemon_ready(session: &str) -> bool {
     #[cfg(unix)]
     {
-        get_socket_path(session).exists()
+        let socket_path = get_socket_path(session);
+        UnixStream::connect(&socket_path).is_ok()
     }
     #[cfg(windows)]
     {
@@ -164,6 +190,10 @@ pub fn ensure_daemon(
     headed: bool,
     executable_path: Option<&str>,
     extensions: &[String],
+    args: Option<&str>,
+    user_agent: Option<&str>,
+    proxy: Option<&str>,
+    proxy_bypass: Option<&str>,
 ) -> Result<DaemonResult, String> {
     if is_daemon_running(session) && daemon_ready(session) {
         return Ok(DaemonResult {
@@ -171,25 +201,38 @@ pub fn ensure_daemon(
         });
     }
 
+    // Ensure socket directory exists
+    let socket_dir = get_socket_dir();
+    if !socket_dir.exists() {
+        fs::create_dir_all(&socket_dir).map_err(|e| format!("Failed to create socket directory: {}", e))?;
+    }
+
     let exe_path = env::current_exe().map_err(|e| e.to_string())?;
     let exe_dir = exe_path.parent().unwrap();
 
-    let daemon_paths = [
+    let mut daemon_paths = vec![
         exe_dir.join("daemon.js"),
         exe_dir.join("../dist/daemon.js"),
         PathBuf::from("dist/daemon.js"),
     ];
 
+    // Check AGENT_BROWSER_HOME environment variable
+    if let Ok(home) = env::var("AGENT_BROWSER_HOME") {
+        let home_path = PathBuf::from(&home);
+        daemon_paths.insert(0, home_path.join("dist/daemon.js"));
+        daemon_paths.insert(1, home_path.join("daemon.js"));
+    }
+
     let daemon_path = daemon_paths
         .iter()
         .find(|p| p.exists())
-        .ok_or("Daemon not found. Run from project directory or ensure daemon.js is alongside binary.")?;
+        .ok_or("Daemon not found. Set AGENT_BROWSER_HOME environment variable or run from project directory.")?;
 
     // Spawn daemon as a fully detached background process
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        
+
         let mut cmd = Command::new("node");
         cmd.arg(daemon_path)
             .env("AGENT_BROWSER_DAEMON", "1")
@@ -205,6 +248,22 @@ pub fn ensure_daemon(
 
         if !extensions.is_empty() {
             cmd.env("AGENT_BROWSER_EXTENSIONS", extensions.join(","));
+        }
+
+        if let Some(a) = args {
+            cmd.env("AGENT_BROWSER_ARGS", a);
+        }
+
+        if let Some(ua) = user_agent {
+            cmd.env("AGENT_BROWSER_USER_AGENT", ua);
+        }
+
+        if let Some(p) = proxy {
+            cmd.env("AGENT_BROWSER_PROXY", p);
+        }
+
+        if let Some(pb) = proxy_bypass {
+            cmd.env("AGENT_BROWSER_PROXY_BYPASS", pb);
         }
 
         // Create new process group and session to fully detach
@@ -227,13 +286,10 @@ pub fn ensure_daemon(
     {
         use std::os::windows::process::CommandExt;
         
-        // On Windows, use cmd.exe to run node to ensure proper PATH resolution.
-        // This handles cases where node.exe isn't directly in PATH but node.cmd is.
-        // Pass the entire command as a single string to /c to handle paths with spaces.
-        let cmd_string = format!("node \"{}\"", daemon_path.display());
-        let mut cmd = Command::new("cmd");
-        cmd.arg("/c")
-            .arg(&cmd_string)
+        // On Windows, call node directly. Command::new handles PATH resolution (node.exe or node.cmd)
+        // and automatically quotes arguments containing spaces.
+        let mut cmd = Command::new("node");
+        cmd.arg(daemon_path)
             .env("AGENT_BROWSER_DAEMON", "1")
             .env("AGENT_BROWSER_SESSION", session);
 
@@ -249,10 +305,26 @@ pub fn ensure_daemon(
             cmd.env("AGENT_BROWSER_EXTENSIONS", extensions.join(","));
         }
 
+        if let Some(a) = args {
+            cmd.env("AGENT_BROWSER_ARGS", a);
+        }
+
+        if let Some(ua) = user_agent {
+            cmd.env("AGENT_BROWSER_USER_AGENT", ua);
+        }
+
+        if let Some(p) = proxy {
+            cmd.env("AGENT_BROWSER_PROXY", p);
+        }
+
+        if let Some(pb) = proxy_bypass {
+            cmd.env("AGENT_BROWSER_PROXY_BYPASS", pb);
+        }
+
         // CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS
         const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
         const DETACHED_PROCESS: u32 = 0x00000008;
-        
+
         cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -263,7 +335,9 @@ pub fn ensure_daemon(
 
     for _ in 0..50 {
         if daemon_ready(session) {
-            return Ok(DaemonResult { already_running: false });
+            return Ok(DaemonResult {
+                already_running: false,
+            });
         }
         thread::sleep(Duration::from_millis(100));
     }
@@ -308,4 +382,93 @@ pub fn send_command(cmd: Value, session: &str) -> Result<Response, String> {
         .map_err(|e| format!("Failed to read: {}", e))?;
 
     serde_json::from_str(&response_line).map_err(|e| format!("Invalid response: {}", e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Mutex, MutexGuard};
+
+    // Mutex to prevent parallel tests from interfering with env vars
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    /// RAII guard that locks env mutex and restores env vars on drop
+    struct EnvGuard<'a> {
+        _lock: MutexGuard<'a, ()>,
+        vars: Vec<(String, Option<String>)>,
+    }
+
+    impl<'a> EnvGuard<'a> {
+        fn new(var_names: &[&str]) -> Self {
+            let lock = ENV_MUTEX.lock().unwrap();
+            let vars = var_names
+                .iter()
+                .map(|&name| (name.to_string(), env::var(name).ok()))
+                .collect();
+            Self { _lock: lock, vars }
+        }
+    }
+
+    impl Drop for EnvGuard<'_> {
+        fn drop(&mut self) {
+            for (name, value) in &self.vars {
+                match value {
+                    Some(v) => env::set_var(name, v),
+                    None => env::remove_var(name),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_get_socket_dir_explicit_override() {
+        let _guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
+
+        env::set_var("AGENT_BROWSER_SOCKET_DIR", "/custom/socket/path");
+        env::remove_var("XDG_RUNTIME_DIR");
+
+        assert_eq!(get_socket_dir(), PathBuf::from("/custom/socket/path"));
+    }
+
+    #[test]
+    fn test_get_socket_dir_ignores_empty_socket_dir() {
+        let _guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
+
+        env::set_var("AGENT_BROWSER_SOCKET_DIR", "");
+        env::remove_var("XDG_RUNTIME_DIR");
+
+        assert!(get_socket_dir().to_string_lossy().ends_with(".agent-browser"));
+    }
+
+    #[test]
+    fn test_get_socket_dir_xdg_runtime() {
+        let _guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
+
+        env::remove_var("AGENT_BROWSER_SOCKET_DIR");
+        env::set_var("XDG_RUNTIME_DIR", "/run/user/1000");
+
+        assert_eq!(get_socket_dir(), PathBuf::from("/run/user/1000/agent-browser"));
+    }
+
+    #[test]
+    fn test_get_socket_dir_ignores_empty_xdg_runtime() {
+        let _guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
+
+        env::set_var("AGENT_BROWSER_SOCKET_DIR", "");
+        env::set_var("XDG_RUNTIME_DIR", "");
+
+        assert!(get_socket_dir().to_string_lossy().ends_with(".agent-browser"));
+    }
+
+    #[test]
+    fn test_get_socket_dir_home_fallback() {
+        let _guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
+
+        env::remove_var("AGENT_BROWSER_SOCKET_DIR");
+        env::remove_var("XDG_RUNTIME_DIR");
+
+        let result = get_socket_dir();
+        assert!(result.to_string_lossy().ends_with(".agent-browser"));
+        assert!(result.to_string_lossy().contains("home") || result.to_string_lossy().contains("Users"));
+    }
 }

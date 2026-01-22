@@ -74,10 +74,11 @@ agent-browser scroll <dir> [px]       # Scroll (up/down/left/right)
 agent-browser scrollintoview <sel>    # Scroll element into view (alias: scrollinto)
 agent-browser drag <src> <tgt>        # Drag and drop
 agent-browser upload <sel> <files>    # Upload files
-agent-browser screenshot [path]       # Take screenshot (--full for full page)
+agent-browser screenshot [path]       # Take screenshot (--full for full page, base64 png to stdout if no path)
 agent-browser pdf <path>              # Save as PDF
 agent-browser snapshot                # Accessibility tree with refs (best for AI)
 agent-browser eval <js>               # Run JavaScript
+agent-browser connect <port>          # Connect to browser via CDP
 agent-browser close                   # Close browser (aliases: quit, exit)
 ```
 
@@ -217,9 +218,9 @@ agent-browser dialog dismiss          # Dismiss
 ```bash
 agent-browser trace start [path]      # Start recording trace
 agent-browser trace stop [path]       # Stop and save trace
-agent-browser console                 # View console messages
+agent-browser console                 # View console messages (log, error, warn, info)
 agent-browser console --clear         # Clear console
-agent-browser errors                  # View page errors
+agent-browser errors                  # View page errors (uncaught JavaScript exceptions)
 agent-browser errors --clear          # Clear errors
 agent-browser highlight <sel>         # Highlight element
 agent-browser state save <path>       # Save auth state
@@ -322,6 +323,10 @@ agent-browser snapshot -i -c -d 5         # Combine options
 | `--profile <path>` | Persistent browser profile directory (or `AGENT_BROWSER_PROFILE` env) |
 | `--headers <json>` | Set HTTP headers scoped to the URL's origin |
 | `--executable-path <path>` | Custom browser executable (or `AGENT_BROWSER_EXECUTABLE_PATH` env) |
+| `--args <args>` | Browser launch args, comma or newline separated (or `AGENT_BROWSER_ARGS` env) |
+| `--user-agent <ua>` | Custom User-Agent string (or `AGENT_BROWSER_USER_AGENT` env) |
+| `--proxy <url>` | Proxy server URL with optional auth (or `AGENT_BROWSER_PROXY` env) |
+| `--proxy-bypass <hosts>` | Hosts to bypass proxy (or `AGENT_BROWSER_PROXY_BYPASS` env) |
 | `--json` | JSON output (for agents) |
 | `--full, -f` | Full page screenshot |
 | `--name, -n` | Locator name filter |
@@ -490,19 +495,137 @@ export async function handler() {
 Connect to an existing browser via Chrome DevTools Protocol:
 
 ```bash
-# Connect to Electron app
+# Start Chrome with: google-chrome --remote-debugging-port=9222
+
+# Connect once, then run commands without --cdp
+agent-browser connect 9222
+agent-browser snapshot
+agent-browser tab
+agent-browser close
+
+# Or pass --cdp on each command
 agent-browser --cdp 9222 snapshot
 
-# Connect to Chrome with remote debugging
-# (Start Chrome with: google-chrome --remote-debugging-port=9222)
-agent-browser --cdp 9222 open about:blank
+# Connect to remote browser via WebSocket URL
+agent-browser --cdp "wss://your-browser-service.com/cdp?token=..." snapshot
 ```
+
+The `--cdp` flag accepts either:
+- A port number (e.g., `9222`) for local connections via `http://localhost:{port}`
+- A full WebSocket URL (e.g., `wss://...` or `ws://...`) for remote browser services
 
 This enables control of:
 - Electron apps
 - Chrome/Chromium instances with remote debugging
 - WebView2 applications
 - Any browser exposing a CDP endpoint
+
+## Streaming (Browser Preview)
+
+Stream the browser viewport via WebSocket for live preview or "pair browsing" where a human can watch and interact alongside an AI agent.
+
+### Enable Streaming
+
+Set the `AGENT_BROWSER_STREAM_PORT` environment variable:
+
+```bash
+AGENT_BROWSER_STREAM_PORT=9223 agent-browser open example.com
+```
+
+This starts a WebSocket server on the specified port that streams the browser viewport and accepts input events.
+
+### WebSocket Protocol
+
+Connect to `ws://localhost:9223` to receive frames and send input:
+
+**Receive frames:**
+```json
+{
+  "type": "frame",
+  "data": "<base64-encoded-jpeg>",
+  "metadata": {
+    "deviceWidth": 1280,
+    "deviceHeight": 720,
+    "pageScaleFactor": 1,
+    "offsetTop": 0,
+    "scrollOffsetX": 0,
+    "scrollOffsetY": 0
+  }
+}
+```
+
+**Send mouse events:**
+```json
+{
+  "type": "input_mouse",
+  "eventType": "mousePressed",
+  "x": 100,
+  "y": 200,
+  "button": "left",
+  "clickCount": 1
+}
+```
+
+**Send keyboard events:**
+```json
+{
+  "type": "input_keyboard",
+  "eventType": "keyDown",
+  "key": "Enter",
+  "code": "Enter"
+}
+```
+
+**Send touch events:**
+```json
+{
+  "type": "input_touch",
+  "eventType": "touchStart",
+  "touchPoints": [{ "x": 100, "y": 200 }]
+}
+```
+
+### Programmatic API
+
+For advanced use, control streaming directly via the protocol:
+
+```typescript
+import { BrowserManager } from 'agent-browser';
+
+const browser = new BrowserManager();
+await browser.launch({ headless: true });
+await browser.navigate('https://example.com');
+
+// Start screencast
+await browser.startScreencast((frame) => {
+  // frame.data is base64-encoded image
+  // frame.metadata contains viewport info
+  console.log('Frame received:', frame.metadata.deviceWidth, 'x', frame.metadata.deviceHeight);
+}, {
+  format: 'jpeg',
+  quality: 80,
+  maxWidth: 1280,
+  maxHeight: 720,
+});
+
+// Inject mouse events
+await browser.injectMouseEvent({
+  type: 'mousePressed',
+  x: 100,
+  y: 200,
+  button: 'left',
+});
+
+// Inject keyboard events
+await browser.injectKeyboardEvent({
+  type: 'keyDown',
+  key: 'Enter',
+  code: 'Enter',
+});
+
+// Stop when done
+await browser.stopScreencast();
+```
 
 ## Architecture
 
@@ -556,19 +679,68 @@ Core workflow:
 
 ### Claude Code Skill
 
-For Claude Code, a [skill](https://platform.claude.com/docs/en/agents-and-tools/agent-skills/best-practices) provides richer context:
+For Claude Code, a [skill](https://platform.claude.com/docs/en/agents-and-tools/agent-skills/best-practices) provides richer context.
+
+**Plugin (recommended):**
+
+```bash
+/plugin marketplace add vercel-labs/agent-browser
+/plugin install agent-browser
+```
+
+**Manual install:**
 
 ```bash
 cp -r node_modules/agent-browser/skills/agent-browser .claude/skills/
 ```
 
-Or download:
+Or download directly:
 
 ```bash
 mkdir -p .claude/skills/agent-browser
 curl -o .claude/skills/agent-browser/SKILL.md \
   https://raw.githubusercontent.com/vercel-labs/agent-browser/main/skills/agent-browser/SKILL.md
 ```
+
+## Integrations
+
+### Browserbase
+
+[Browserbase](https://browserbase.com) provides remote browser infrastructure to make deployment of agentic browsing agents easy. Use it when running the agent-browser CLI in an environment where a local browser isn't feasible.
+
+To enable Browserbase, set these environment variables:
+
+```bash
+export BROWSERBASE_API_KEY="your-api-key"
+export BROWSERBASE_PROJECT_ID="your-project-id"
+```
+
+When both variables are set, agent-browser automatically connects to a Browserbase session instead of launching a local browser. All commands work identically.
+
+Get your API key and project ID from the [Browserbase Dashboard](https://browserbase.com/overview).
+
+### Browser Use
+
+[Browser Use](https://browser-use.com) provides cloud browser infrastructure for AI agents. Use it when running agent-browser in environments where a local browser isn't available (serverless, CI/CD, etc.).
+
+To enable Browser Use, use the `-p` flag:
+
+```bash
+export BROWSER_USE_API_KEY="your-api-key"
+agent-browser -p browseruse open https://example.com
+```
+
+Or use environment variables for CI/scripts:
+
+```bash
+export AGENT_BROWSER_PROVIDER=browseruse
+export BROWSER_USE_API_KEY="your-api-key"
+agent-browser open https://example.com
+```
+
+When enabled, agent-browser connects to a Browser Use cloud session instead of launching a local browser. All commands work identically.
+
+Get your API key from the [Browser Use Cloud Dashboard](https://cloud.browser-use.com/settings?tab=api-keys). Free credits are available to get started, with pay-as-you-go pricing after.
 
 ## License
 

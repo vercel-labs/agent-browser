@@ -1,3 +1,4 @@
+use crate::color;
 use crate::connection::Response;
 
 pub fn print_response(resp: &Response, json_mode: bool) {
@@ -8,7 +9,8 @@ pub fn print_response(resp: &Response, json_mode: bool) {
 
     if !resp.success {
         eprintln!(
-            "\x1b[31m✗\x1b[0m {}",
+            "{} {}",
+            color::error_indicator(),
             resp.error.as_deref().unwrap_or("Unknown error")
         );
         return;
@@ -18,8 +20,8 @@ pub fn print_response(resp: &Response, json_mode: bool) {
         // Navigation response
         if let Some(url) = data.get("url").and_then(|v| v.as_str()) {
             if let Some(title) = data.get("title").and_then(|v| v.as_str()) {
-                println!("\x1b[32m✓\x1b[0m \x1b[1m{}\x1b[0m", title);
-                println!("\x1b[2m  {}\x1b[0m", url);
+                println!("{} {}", color::success_indicator(), color::bold(title));
+                println!("  {}", color::dim(url));
                 return;
             }
             println!("{}", url);
@@ -85,23 +87,17 @@ pub fn print_response(resp: &Response, json_mode: bool) {
                     .unwrap_or("Untitled");
                 let url = tab.get("url").and_then(|v| v.as_str()).unwrap_or("");
                 let active = tab.get("active").and_then(|v| v.as_bool()).unwrap_or(false);
-                let marker = if active { "→" } else { " " };
+                let marker = if active { color::cyan("→") } else { " ".to_string() };
                 println!("{} [{}] {} - {}", marker, i, title, url);
             }
             return;
         }
         // Console logs
-        if let Some(logs) = data.get("logs").and_then(|v| v.as_array()) {
+        if let Some(logs) = data.get("messages").and_then(|v| v.as_array()) {
             for log in logs {
                 let level = log.get("type").and_then(|v| v.as_str()).unwrap_or("log");
                 let text = log.get("text").and_then(|v| v.as_str()).unwrap_or("");
-                let color = match level {
-                    "error" => "\x1b[31m",
-                    "warning" => "\x1b[33m",
-                    "info" => "\x1b[36m",
-                    _ => "\x1b[0m",
-                };
-                println!("{}[{}]\x1b[0m {}", color, level, text);
+                println!("{} {}", color::console_level_prefix(level), text);
             }
             return;
         }
@@ -109,7 +105,7 @@ pub fn print_response(resp: &Response, json_mode: bool) {
         if let Some(errors) = data.get("errors").and_then(|v| v.as_array()) {
             for err in errors {
                 let msg = err.get("message").and_then(|v| v.as_str()).unwrap_or("");
-                println!("\x1b[31m✗\x1b[0m {}", msg);
+                println!("{} {}", color::error_indicator(), msg);
             }
             return;
         }
@@ -122,6 +118,27 @@ pub fn print_response(resp: &Response, json_mode: bool) {
             }
             return;
         }
+        // Network requests
+        if let Some(requests) = data.get("requests").and_then(|v| v.as_array()) {
+            if requests.is_empty() {
+                println!("No requests captured");
+            } else {
+                for req in requests {
+                    let method = req.get("method").and_then(|v| v.as_str()).unwrap_or("GET");
+                    let url = req.get("url").and_then(|v| v.as_str()).unwrap_or("");
+                    let resource_type = req.get("resourceType").and_then(|v| v.as_str()).unwrap_or("");
+                    println!("{} {} ({})", method, url, resource_type);
+                }
+            }
+            return;
+        }
+        // Cleared requests
+        if let Some(cleared) = data.get("cleared").and_then(|v| v.as_bool()) {
+            if cleared {
+                println!("\x1b[32m✓\x1b[0m Request log cleared");
+                return;
+            }
+        }
         // Bounding box
         if let Some(box_data) = data.get("box") {
             println!(
@@ -130,18 +147,91 @@ pub fn print_response(resp: &Response, json_mode: bool) {
             );
             return;
         }
-        // Closed
-        if data.get("closed").is_some() {
-            println!("\x1b[32m✓\x1b[0m Browser closed");
+        // Element styles
+        if let Some(elements) = data.get("elements").and_then(|v| v.as_array()) {
+            for (i, el) in elements.iter().enumerate() {
+                let tag = el.get("tag").and_then(|v| v.as_str()).unwrap_or("?");
+                let text = el.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                println!("[{}] {} \"{}\"", i, tag, text);
+                
+                if let Some(box_data) = el.get("box") {
+                    let w = box_data.get("width").and_then(|v| v.as_i64()).unwrap_or(0);
+                    let h = box_data.get("height").and_then(|v| v.as_i64()).unwrap_or(0);
+                    let x = box_data.get("x").and_then(|v| v.as_i64()).unwrap_or(0);
+                    let y = box_data.get("y").and_then(|v| v.as_i64()).unwrap_or(0);
+                    println!("    box: {}x{} at ({}, {})", w, h, x, y);
+                }
+                
+                if let Some(styles) = el.get("styles") {
+                    let font_size = styles.get("fontSize").and_then(|v| v.as_str()).unwrap_or("");
+                    let font_weight = styles.get("fontWeight").and_then(|v| v.as_str()).unwrap_or("");
+                    let font_family = styles.get("fontFamily").and_then(|v| v.as_str()).unwrap_or("");
+                    let color = styles.get("color").and_then(|v| v.as_str()).unwrap_or("");
+                    let bg = styles.get("backgroundColor").and_then(|v| v.as_str()).unwrap_or("");
+                    let radius = styles.get("borderRadius").and_then(|v| v.as_str()).unwrap_or("");
+                    
+                    println!("    font: {} {} {}", font_size, font_weight, font_family);
+                    println!("    color: {}", color);
+                    println!("    background: {}", bg);
+                    if radius != "0px" {
+                        println!("    border-radius: {}", radius);
+                    }
+                }
+                println!();
+            }
             return;
         }
-        // Screenshot path
+        // Closed
+        if data.get("closed").is_some() {
+            println!("{} Browser closed", color::success_indicator());
+            return;
+        }
+        // Recording start (has "started" field)
+        if let Some(started) = data.get("started").and_then(|v| v.as_bool()) {
+            if started {
+                if let Some(path) = data.get("path").and_then(|v| v.as_str()) {
+                    println!("{} Recording started: {}", color::success_indicator(), path);
+                } else {
+                    println!("{} Recording started", color::success_indicator());
+                }
+                return;
+            }
+        }
+        // Recording restart (has "stopped" field - from recording_restart action)
+        if data.get("stopped").is_some() {
+            let path = data.get("path").and_then(|v| v.as_str()).unwrap_or("unknown");
+            if let Some(prev_path) = data.get("previousPath").and_then(|v| v.as_str()) {
+                println!("{} Recording restarted: {} (previous saved to {})", color::success_indicator(), path, prev_path);
+            } else {
+                println!("{} Recording started: {}", color::success_indicator(), path);
+            }
+            return;
+        }
+        // Recording stop (has "frames" field - from recording_stop action)
+        if data.get("frames").is_some() {
+            if let Some(path) = data.get("path").and_then(|v| v.as_str()) {
+                if let Some(error) = data.get("error").and_then(|v| v.as_str()) {
+                    println!("{} Recording saved to {} - {}", color::warning_indicator(), path, error);
+                } else {
+                    println!("{} Recording saved to {}", color::success_indicator(), path);
+                }
+            } else {
+                println!("{} Recording stopped", color::success_indicator());
+            }
+            return;
+        }
+        // Screenshot path (no "started" or "frames" field)
         if let Some(path) = data.get("path").and_then(|v| v.as_str()) {
-            println!("\x1b[32m✓\x1b[0m Screenshot saved to {}", path);
+            println!("{} Screenshot saved to {}", color::success_indicator(), color::green(path));
+            return;
+        }
+        // Screenshot base64
+        if let Some(base64) = data.get("base64").and_then(|v| v.as_str()) {
+            println!("{}", base64);
             return;
         }
         // Default success
-        println!("\x1b[32m✓\x1b[0m Done");
+        println!("{} Done", color::success_indicator());
     }
 }
 
@@ -149,7 +239,8 @@ pub fn print_response(resp: &Response, json_mode: bool) {
 pub fn print_command_help(command: &str) -> bool {
     let help = match command {
         // === Navigation ===
-        "open" | "goto" | "navigate" => r##"
+        "open" | "goto" | "navigate" => {
+            r##"
 agent-browser open - Navigate to a URL
 
 Usage: agent-browser open <url>
@@ -171,8 +262,10 @@ Examples:
   agent-browser open localhost:3000
   agent-browser open api.example.com --headers '{"Authorization": "Bearer token"}'
     # ^ Headers only sent to api.example.com, not other domains
-"##,
-        "back" => r##"
+"##
+        }
+        "back" => {
+            r##"
 agent-browser back - Navigate back in history
 
 Usage: agent-browser back
@@ -186,8 +279,10 @@ Global Options:
 
 Examples:
   agent-browser back
-"##,
-        "forward" => r##"
+"##
+        }
+        "forward" => {
+            r##"
 agent-browser forward - Navigate forward in history
 
 Usage: agent-browser forward
@@ -201,8 +296,10 @@ Global Options:
 
 Examples:
   agent-browser forward
-"##,
-        "reload" => r##"
+"##
+        }
+        "reload" => {
+            r##"
 agent-browser reload - Reload the current page
 
 Usage: agent-browser reload
@@ -216,10 +313,12 @@ Global Options:
 
 Examples:
   agent-browser reload
-"##,
+"##
+        }
 
         // === Core Actions ===
-        "click" => r##"
+        "click" => {
+            r##"
 agent-browser click - Click an element
 
 Usage: agent-browser click <selector>
@@ -236,8 +335,10 @@ Examples:
   agent-browser click @e1
   agent-browser click "button.primary"
   agent-browser click "//button[@type='submit']"
-"##,
-        "dblclick" => r##"
+"##
+        }
+        "dblclick" => {
+            r##"
 agent-browser dblclick - Double-click an element
 
 Usage: agent-browser dblclick <selector>
@@ -252,8 +353,10 @@ Global Options:
 Examples:
   agent-browser dblclick "#editable-text"
   agent-browser dblclick @e5
-"##,
-        "fill" => r##"
+"##
+        }
+        "fill" => {
+            r##"
 agent-browser fill - Clear and fill an input field
 
 Usage: agent-browser fill <selector> <text>
@@ -269,8 +372,10 @@ Examples:
   agent-browser fill "#email" "user@example.com"
   agent-browser fill @e3 "Hello World"
   agent-browser fill "input[name='search']" "query"
-"##,
-        "type" => r##"
+"##
+        }
+        "type" => {
+            r##"
 agent-browser type - Type text into an element
 
 Usage: agent-browser type <selector> <text>
@@ -285,8 +390,10 @@ Global Options:
 Examples:
   agent-browser type "#search" "hello"
   agent-browser type @e2 "additional text"
-"##,
-        "hover" => r##"
+"##
+        }
+        "hover" => {
+            r##"
 agent-browser hover - Hover over an element
 
 Usage: agent-browser hover <selector>
@@ -301,8 +408,10 @@ Global Options:
 Examples:
   agent-browser hover "#dropdown-trigger"
   agent-browser hover @e4
-"##,
-        "focus" => r##"
+"##
+        }
+        "focus" => {
+            r##"
 agent-browser focus - Focus an element
 
 Usage: agent-browser focus <selector>
@@ -316,8 +425,10 @@ Global Options:
 Examples:
   agent-browser focus "#input-field"
   agent-browser focus @e2
-"##,
-        "check" => r##"
+"##
+        }
+        "check" => {
+            r##"
 agent-browser check - Check a checkbox
 
 Usage: agent-browser check <selector>
@@ -331,8 +442,10 @@ Global Options:
 Examples:
   agent-browser check "#terms-checkbox"
   agent-browser check @e7
-"##,
-        "uncheck" => r##"
+"##
+        }
+        "uncheck" => {
+            r##"
 agent-browser uncheck - Uncheck a checkbox
 
 Usage: agent-browser uncheck <selector>
@@ -346,13 +459,15 @@ Global Options:
 Examples:
   agent-browser uncheck "#newsletter-opt-in"
   agent-browser uncheck @e8
-"##,
-        "select" => r##"
+"##
+        }
+        "select" => {
+            r##"
 agent-browser select - Select a dropdown option
 
-Usage: agent-browser select <selector> <value>
+Usage: agent-browser select <selector> <value...>
 
-Selects an option in a <select> dropdown by its value attribute.
+Selects one or more options in a <select> dropdown by value.
 
 Global Options:
   --json               Output as JSON
@@ -361,8 +476,11 @@ Global Options:
 Examples:
   agent-browser select "#country" "US"
   agent-browser select @e5 "option2"
-"##,
-        "drag" => r##"
+  agent-browser select "#menu" "opt1" "opt2" "opt3"
+"##
+        }
+        "drag" => {
+            r##"
 agent-browser drag - Drag and drop
 
 Usage: agent-browser drag <source> <target>
@@ -376,8 +494,10 @@ Global Options:
 Examples:
   agent-browser drag "#draggable" "#drop-zone"
   agent-browser drag @e1 @e2
-"##,
-        "upload" => r##"
+"##
+        }
+        "upload" => {
+            r##"
 agent-browser upload - Upload files
 
 Usage: agent-browser upload <selector> <files...>
@@ -391,10 +511,12 @@ Global Options:
 Examples:
   agent-browser upload "#file-input" ./document.pdf
   agent-browser upload @e3 ./image1.png ./image2.png
-"##,
+"##
+        }
 
         // === Keyboard ===
-        "press" | "key" => r##"
+        "press" | "key" => {
+            r##"
 agent-browser press - Press a key or key combination
 
 Usage: agent-browser press <key>
@@ -422,8 +544,10 @@ Examples:
   agent-browser press Control+a
   agent-browser press Control+Shift+s
   agent-browser press Escape
-"##,
-        "keydown" => r##"
+"##
+        }
+        "keydown" => {
+            r##"
 agent-browser keydown - Press a key down (without release)
 
 Usage: agent-browser keydown <key>
@@ -438,8 +562,10 @@ Global Options:
 Examples:
   agent-browser keydown Shift
   agent-browser keydown Control
-"##,
-        "keyup" => r##"
+"##
+        }
+        "keyup" => {
+            r##"
 agent-browser keyup - Release a key
 
 Usage: agent-browser keyup <key>
@@ -453,10 +579,12 @@ Global Options:
 Examples:
   agent-browser keyup Shift
   agent-browser keyup Control
-"##,
+"##
+        }
 
         // === Scroll ===
-        "scroll" => r##"
+        "scroll" => {
+            r##"
 agent-browser scroll - Scroll the page
 
 Usage: agent-browser scroll [direction] [amount]
@@ -476,8 +604,10 @@ Examples:
   agent-browser scroll down 500
   agent-browser scroll up 200
   agent-browser scroll left 100
-"##,
-        "scrollintoview" | "scrollinto" => r##"
+"##
+        }
+        "scrollintoview" | "scrollinto" => {
+            r##"
 agent-browser scrollintoview - Scroll element into view
 
 Usage: agent-browser scrollintoview <selector>
@@ -493,10 +623,12 @@ Global Options:
 Examples:
   agent-browser scrollintoview "#footer"
   agent-browser scrollintoview @e15
-"##,
+"##
+        }
 
         // === Wait ===
-        "wait" => r##"
+        "wait" => {
+            r##"
 agent-browser wait - Wait for condition
 
 Usage: agent-browser wait <selector|ms|option>
@@ -522,10 +654,12 @@ Examples:
   agent-browser wait --load networkidle
   agent-browser wait --fn "window.appReady === true"
   agent-browser wait --text "Welcome back"
-"##,
+"##
+        }
 
         // === Screenshot/PDF ===
-        "screenshot" => r##"
+        "screenshot" => {
+            r##"
 agent-browser screenshot - Take a screenshot
 
 Usage: agent-browser screenshot [path]
@@ -544,8 +678,10 @@ Examples:
   agent-browser screenshot
   agent-browser screenshot ./screenshot.png
   agent-browser screenshot --full ./full-page.png
-"##,
-        "pdf" => r##"
+"##
+        }
+        "pdf" => {
+            r##"
 agent-browser pdf - Save page as PDF
 
 Usage: agent-browser pdf <path>
@@ -559,10 +695,12 @@ Global Options:
 Examples:
   agent-browser pdf ./page.pdf
   agent-browser pdf ~/Documents/report.pdf
-"##,
+"##
+        }
 
         // === Snapshot ===
-        "snapshot" => r##"
+        "snapshot" => {
+            r##"
 agent-browser snapshot - Get accessibility tree snapshot
 
 Usage: agent-browser snapshot [options]
@@ -586,10 +724,12 @@ Examples:
   agent-browser snapshot -i
   agent-browser snapshot --compact --depth 5
   agent-browser snapshot -s "#main-content"
-"##,
+"##
+        }
 
         // === Eval ===
-        "eval" => r##"
+        "eval" => {
+            r##"
 agent-browser eval - Execute JavaScript
 
 Usage: agent-browser eval <script>
@@ -604,10 +744,12 @@ Examples:
   agent-browser eval "document.title"
   agent-browser eval "window.location.href"
   agent-browser eval "document.querySelectorAll('a').length"
-"##,
+"##
+        }
 
         // === Close ===
-        "close" | "quit" | "exit" => r##"
+        "close" | "quit" | "exit" => {
+            r##"
 agent-browser close - Close the browser
 
 Usage: agent-browser close
@@ -623,10 +765,12 @@ Global Options:
 Examples:
   agent-browser close
   agent-browser close --session mysession
-"##,
+"##
+        }
 
         // === Get ===
-        "get" => r##"
+        "get" => {
+            r##"
 agent-browser get - Retrieve information from elements or page
 
 Usage: agent-browser get <subcommand> [args]
@@ -642,6 +786,7 @@ Subcommands:
   url                        Get current URL
   count <selector>           Count matching elements
   box <selector>             Get bounding box (x, y, width, height)
+  styles <selector>          Get computed styles of elements
 
 Global Options:
   --json               Output as JSON
@@ -656,10 +801,14 @@ Examples:
   agent-browser get url
   agent-browser get count "li.item"
   agent-browser get box "#header"
-"##,
+  agent-browser get styles "button"
+  agent-browser get styles @e1
+"##
+        }
 
         // === Is ===
-        "is" => r##"
+        "is" => {
+            r##"
 agent-browser is - Check element state
 
 Usage: agent-browser is <subcommand> <selector>
@@ -679,10 +828,12 @@ Examples:
   agent-browser is visible "#modal"
   agent-browser is enabled "#submit-btn"
   agent-browser is checked "#agree-checkbox"
-"##,
+"##
+        }
 
         // === Find ===
-        "find" => r##"
+        "find" => {
+            r##"
 agent-browser find - Find and interact with elements by locator
 
 Usage: agent-browser find <locator> <value> [action] [text]
@@ -720,10 +871,12 @@ Examples:
   agent-browser find testid "login-form" click
   agent-browser find first "li.item" click
   agent-browser find nth 2 ".card" hover
-"##,
+"##
+        }
 
         // === Mouse ===
-        "mouse" => r##"
+        "mouse" => {
+            r##"
 agent-browser mouse - Low-level mouse operations
 
 Usage: agent-browser mouse <subcommand> [args]
@@ -747,10 +900,12 @@ Examples:
   agent-browser mouse down right
   agent-browser mouse wheel 100
   agent-browser mouse wheel -50 0
-"##,
+"##
+        }
 
         // === Set ===
-        "set" => r##"
+        "set" => {
+            r##"
 agent-browser set - Configure browser settings
 
 Usage: agent-browser set <setting> [args]
@@ -780,10 +935,12 @@ Examples:
   agent-browser set credentials admin secret123
   agent-browser set media dark
   agent-browser set media light reduced-motion
-"##,
+"##
+        }
 
         // === Network ===
-        "network" => r##"
+        "network" => {
+            r##"
 agent-browser network - Network interception and monitoring
 
 Usage: agent-browser network <subcommand> [args]
@@ -810,10 +967,12 @@ Examples:
   agent-browser network requests
   agent-browser network requests --filter "api"
   agent-browser network requests --clear
-"##,
+"##
+        }
 
         // === Storage ===
-        "storage" => r##"
+        "storage" => {
+            r##"
 agent-browser storage - Manage web storage
 
 Usage: agent-browser storage <type> [operation] [key] [value]
@@ -839,10 +998,12 @@ Examples:
   agent-browser storage local set theme "dark"
   agent-browser storage local clear
   agent-browser storage session get userId
-"##,
+"##
+        }
 
         // === Cookies ===
-        "cookies" => r##"
+        "cookies" => {
+            r##"
 agent-browser cookies - Manage browser cookies
 
 Usage: agent-browser cookies [operation] [args]
@@ -863,10 +1024,12 @@ Examples:
   agent-browser cookies get
   agent-browser cookies set session_id "abc123"
   agent-browser cookies clear
-"##,
+"##
+        }
 
         // === Tabs ===
-        "tab" => r##"
+        "tab" => {
+            r##"
 agent-browser tab - Manage browser tabs
 
 Usage: agent-browser tab [operation] [args]
@@ -891,10 +1054,12 @@ Examples:
   agent-browser tab 2
   agent-browser tab close
   agent-browser tab close 1
-"##,
+"##
+        }
 
         // === Window ===
-        "window" => r##"
+        "window" => {
+            r##"
 agent-browser window - Manage browser windows
 
 Usage: agent-browser window <operation>
@@ -910,10 +1075,12 @@ Global Options:
 
 Examples:
   agent-browser window new
-"##,
+"##
+        }
 
         // === Frame ===
-        "frame" => r##"
+        "frame" => {
+            r##"
 agent-browser frame - Switch frame context
 
 Usage: agent-browser frame <selector|main>
@@ -932,10 +1099,12 @@ Examples:
   agent-browser frame "#embed-iframe"
   agent-browser frame "iframe[name='content']"
   agent-browser frame main
-"##,
+"##
+        }
 
         // === Dialog ===
-        "dialog" => r##"
+        "dialog" => {
+            r##"
 agent-browser dialog - Handle browser dialogs
 
 Usage: agent-browser dialog <response> [text]
@@ -954,10 +1123,12 @@ Examples:
   agent-browser dialog accept
   agent-browser dialog accept "my input"
   agent-browser dialog dismiss
-"##,
+"##
+        }
 
         // === Trace ===
-        "trace" => r##"
+        "trace" => {
+            r##"
 agent-browser trace - Record execution trace
 
 Usage: agent-browser trace <operation> [path]
@@ -977,10 +1148,48 @@ Examples:
   agent-browser trace start ./my-trace
   agent-browser trace stop
   agent-browser trace stop ./debug-trace.zip
+"##
+        }
+
+        // === Record (video) ===
+        "record" => r##"
+agent-browser record - Record browser session to video
+
+Usage: agent-browser record start <path.webm> [url]
+       agent-browser record stop
+       agent-browser record restart <path.webm> [url]
+
+Record the browser to a WebM video file using Playwright's native recording.
+Creates a fresh browser context but preserves cookies and localStorage.
+If no URL is provided, automatically navigates to your current page.
+
+Operations:
+  start <path> [url]     Start recording (defaults to current URL if omitted)
+  stop                   Stop recording and save video
+  restart <path> [url]   Stop current recording (if any) and start a new one
+
+Global Options:
+  --json               Output as JSON
+  --session <name>     Use specific session
+
+Examples:
+  # Record from current page (preserves login state)
+  agent-browser open https://app.example.com/dashboard
+  agent-browser snapshot -i            # Explore and plan
+  agent-browser record start ./demo.webm
+  agent-browser click @e3              # Execute planned actions
+  agent-browser record stop
+
+  # Or specify a different URL
+  agent-browser record start ./demo.webm https://example.com
+
+  # Restart recording with a new file (stops previous, starts new)
+  agent-browser record restart ./take2.webm
 "##,
 
         // === Console/Errors ===
-        "console" => r##"
+        "console" => {
+            r##"
 agent-browser console - View console logs
 
 Usage: agent-browser console [--clear]
@@ -997,8 +1206,10 @@ Global Options:
 Examples:
   agent-browser console
   agent-browser console --clear
-"##,
-        "errors" => r##"
+"##
+        }
+        "errors" => {
+            r##"
 agent-browser errors - View page errors
 
 Usage: agent-browser errors [--clear]
@@ -1015,10 +1226,12 @@ Global Options:
 Examples:
   agent-browser errors
   agent-browser errors --clear
-"##,
+"##
+        }
 
         // === Highlight ===
-        "highlight" => r##"
+        "highlight" => {
+            r##"
 agent-browser highlight - Highlight an element
 
 Usage: agent-browser highlight <selector>
@@ -1032,10 +1245,12 @@ Global Options:
 Examples:
   agent-browser highlight "#target-element"
   agent-browser highlight @e5
-"##,
+"##
+        }
 
         // === State ===
-        "state" => r##"
+        "state" => {
+            r##"
 agent-browser state - Save/load browser state
 
 Usage: agent-browser state <operation> <path>
@@ -1053,10 +1268,12 @@ Global Options:
 Examples:
   agent-browser state save ./auth-state.json
   agent-browser state load ./auth-state.json
-"##,
+"##
+        }
 
         // === Session ===
-        "session" => r##"
+        "session" => {
+            r##"
 agent-browser session - Manage sessions
 
 Usage: agent-browser session [operation]
@@ -1079,10 +1296,12 @@ Examples:
   agent-browser session
   agent-browser session list
   agent-browser --session test open example.com
-"##,
+"##
+        }
 
         // === Install ===
-        "install" => r##"
+        "install" => {
+            r##"
 agent-browser install - Install browser binaries
 
 Usage: agent-browser install [--with-deps]
@@ -1095,7 +1314,8 @@ Options:
 Examples:
   agent-browser install
   agent-browser install --with-deps
-"##,
+"##
+        }
 
         _ => return false,
     };
@@ -1121,7 +1341,7 @@ Core Commands:
   focus <sel>                Focus element
   check <sel>                Check checkbox
   uncheck <sel>              Uncheck checkbox
-  select <sel> <val>         Select dropdown option
+  select <sel> <val...>      Select dropdown option
   drag <src> <dst>           Drag and drop
   upload <sel> <files...>    Upload files
   scroll <dir> [px]          Scroll (up/down/left/right)
@@ -1131,6 +1351,7 @@ Core Commands:
   pdf <path>                 Save as PDF
   snapshot                   Accessibility tree with refs (for AI)
   eval <js>                  Run JavaScript
+  connect <port>             Connect to browser via CDP (e.g., connect 9222)
   close                      Close browser
 
 Navigation:
@@ -1139,7 +1360,7 @@ Navigation:
   reload                     Reload page
 
 Get Info:  agent-browser get <what> [selector]
-  text, html, value, attr <name>, title, url, count, box
+  text, html, value, attr <name>, title, url, count, box, styles
 
 Check State:  agent-browser is <what> <selector>
   visible, enabled, checked
@@ -1169,6 +1390,8 @@ Tabs:
 
 Debug:
   trace start|stop [path]    Record trace
+  record start <path> [url]  Start video recording (WebM)
+  record stop                Stop and save video
   console [--clear]          View console logs
   errors [--clear]           View page errors
   highlight <sel>            Highlight element
@@ -1192,12 +1415,25 @@ Options:
   --profile <path>           Persistent browser profile (or AGENT_BROWSER_PROFILE env)
   --headers <json>           HTTP headers scoped to URL's origin (for auth)
   --executable-path <path>   Custom browser executable (or AGENT_BROWSER_EXECUTABLE_PATH)
-  --extension <path>         Load browser extensions (repeatable).
+  --extension <path>         Load browser extensions (repeatable)
+  --args <args>              Browser launch args, comma or newline separated (or AGENT_BROWSER_ARGS)
+                             e.g., --args "--no-sandbox,--disable-blink-features=AutomationControlled"
+  --user-agent <ua>          Custom User-Agent (or AGENT_BROWSER_USER_AGENT)
+  --proxy <server>           Proxy server URL (or AGENT_BROWSER_PROXY)
+                             e.g., --proxy "http://user:pass@127.0.0.1:7890"
+  --proxy-bypass <hosts>     Bypass proxy for these hosts (or AGENT_BROWSER_PROXY_BYPASS)
+                             e.g., --proxy-bypass "localhost,*.internal.com"
   --json                     JSON output
   --full, -f                 Full page screenshot
   --headed                   Show browser window (not headless)
   --cdp <port>               Connect via CDP (Chrome DevTools Protocol)
   --debug                    Debug output
+  --version, -V              Show version
+
+Environment:
+  AGENT_BROWSER_SESSION          Session name (default: "default")
+  AGENT_BROWSER_EXECUTABLE_PATH  Custom browser executable path
+  AGENT_BROWSER_STREAM_PORT      Enable WebSocket streaming on port (e.g., 9223)
 
 Examples:
   agent-browser open example.com
@@ -1211,4 +1447,8 @@ Examples:
   agent-browser --profile ~/.myapp open example.com  # Persistent profile
 "#
     );
+}
+
+pub fn print_version() {
+    println!("agent-browser {}", env!("CARGO_PKG_VERSION"));
 }

@@ -5,12 +5,19 @@ import * as os from 'os';
 import { BrowserManager } from './browser.js';
 import { parseCommand, serializeResponse, errorResponse } from './protocol.js';
 import { executeCommand } from './actions.js';
+import { StreamServer } from './stream-server.js';
 
 // Platform detection
 const isWindows = process.platform === 'win32';
 
 // Session support - each session gets its own socket/pid
 let currentSession = process.env.AGENT_BROWSER_SESSION || 'default';
+
+// Stream server for browser preview
+let streamServer: StreamServer | null = null;
+
+// Default stream port (can be overridden with AGENT_BROWSER_STREAM_PORT)
+const DEFAULT_STREAM_PORT = 9223;
 
 /**
  * Set the current session
@@ -41,6 +48,31 @@ function getPortForSession(session: string): number {
 }
 
 /**
+ * Get the base directory for socket/pid files.
+ * Priority: AGENT_BROWSER_SOCKET_DIR > XDG_RUNTIME_DIR > ~/.agent-browser > tmpdir
+ */
+export function getSocketDir(): string {
+  // 1. Explicit override
+  if (process.env.AGENT_BROWSER_SOCKET_DIR) {
+    return process.env.AGENT_BROWSER_SOCKET_DIR;
+  }
+
+  // 2. XDG_RUNTIME_DIR (Linux standard)
+  if (process.env.XDG_RUNTIME_DIR) {
+    return path.join(process.env.XDG_RUNTIME_DIR, 'agent-browser');
+  }
+
+  // 3. Home directory fallback (like Docker Desktop's ~/.docker/run/)
+  const homeDir = os.homedir();
+  if (homeDir) {
+    return path.join(homeDir, '.agent-browser');
+  }
+
+  // 4. Last resort: temp dir
+  return path.join(os.tmpdir(), 'agent-browser');
+}
+
+/**
  * Get the socket path for the current session (Unix) or port (Windows)
  */
 export function getSocketPath(session?: string): string {
@@ -48,7 +80,7 @@ export function getSocketPath(session?: string): string {
   if (isWindows) {
     return String(getPortForSession(sess));
   }
-  return path.join(os.tmpdir(), `agent-browser-${sess}.sock`);
+  return path.join(getSocketDir(), `${sess}.sock`);
 }
 
 /**
@@ -56,7 +88,7 @@ export function getSocketPath(session?: string): string {
  */
 export function getPortFile(session?: string): string {
   const sess = session ?? currentSession;
-  return path.join(os.tmpdir(), `agent-browser-${sess}.port`);
+  return path.join(getSocketDir(), `${sess}.port`);
 }
 
 /**
@@ -64,7 +96,7 @@ export function getPortFile(session?: string): string {
  */
 export function getPidFile(session?: string): string {
   const sess = session ?? currentSession;
-  return path.join(os.tmpdir(), `agent-browser-${sess}.pid`);
+  return path.join(getSocketDir(), `${sess}.pid`);
 }
 
 /**
@@ -97,7 +129,7 @@ export function getConnectionInfo(
   if (isWindows) {
     return { type: 'tcp', port: getPortForSession(sess) };
   }
-  return { type: 'unix', path: path.join(os.tmpdir(), `agent-browser-${sess}.sock`) };
+  return { type: 'unix', path: path.join(getSocketDir(), `${sess}.sock`) };
 }
 
 /**
@@ -105,8 +137,10 @@ export function getConnectionInfo(
  */
 export function cleanupSocket(session?: string): void {
   const pidFile = getPidFile(session);
+  const streamPortFile = getStreamPortFile(session);
   try {
     if (fs.existsSync(pidFile)) fs.unlinkSync(pidFile);
+    if (fs.existsSync(streamPortFile)) fs.unlinkSync(streamPortFile);
     if (isWindows) {
       const portFile = getPortFile(session);
       if (fs.existsSync(portFile)) fs.unlinkSync(portFile);
@@ -120,14 +154,45 @@ export function cleanupSocket(session?: string): void {
 }
 
 /**
- * Start the daemon server
+ * Get the stream port file path
  */
-export async function startDaemon(): Promise<void> {
+export function getStreamPortFile(session?: string): string {
+  const sess = session ?? currentSession;
+  return path.join(getSocketDir(), `${sess}.stream`);
+}
+
+/**
+ * Start the daemon server
+ * @param options.streamPort Port for WebSocket stream server (0 to disable)
+ */
+export async function startDaemon(options?: { streamPort?: number }): Promise<void> {
+  // Ensure socket directory exists
+  const socketDir = getSocketDir();
+  if (!fs.existsSync(socketDir)) {
+    fs.mkdirSync(socketDir, { recursive: true });
+  }
+
   // Clean up any stale socket
   cleanupSocket();
 
   const browser = new BrowserManager();
   let shuttingDown = false;
+
+  // Start stream server if port is specified (or use default if env var is set)
+  const streamPort =
+    options?.streamPort ??
+    (process.env.AGENT_BROWSER_STREAM_PORT
+      ? parseInt(process.env.AGENT_BROWSER_STREAM_PORT, 10)
+      : 0);
+
+  if (streamPort > 0) {
+    streamServer = new StreamServer(browser, streamPort);
+    await streamServer.start();
+
+    // Write stream port to file for clients to discover
+    const streamPortFile = getStreamPortFile();
+    fs.writeFileSync(streamPortFile, streamPort.toString());
+  }
 
   const server = net.createServer((socket) => {
     let buffer = '';
@@ -163,12 +228,35 @@ export async function startDaemon(): Promise<void> {
                   .map((p) => p.trim())
                   .filter(Boolean)
               : undefined;
+
+            // Parse args from env (comma or newline separated)
+            const argsEnv = process.env.AGENT_BROWSER_ARGS;
+            const args = argsEnv
+              ? argsEnv
+                  .split(/[,\n]/)
+                  .map((a) => a.trim())
+                  .filter((a) => a.length > 0)
+              : undefined;
+
+            // Parse proxy from env
+            const proxyServer = process.env.AGENT_BROWSER_PROXY;
+            const proxyBypass = process.env.AGENT_BROWSER_PROXY_BYPASS;
+            const proxy = proxyServer
+              ? {
+                  server: proxyServer,
+                  ...(proxyBypass && { bypass: proxyBypass }),
+                }
+              : undefined;
+
             await browser.launch({
               id: 'auto',
-              action: 'launch',
-              headless: true,
+              action: 'launch' as const,
+              headless: process.env.AGENT_BROWSER_HEADED !== '1',
               executablePath: process.env.AGENT_BROWSER_EXECUTABLE_PATH,
               extensions: extensions,
+              args,
+              userAgent: process.env.AGENT_BROWSER_USER_AGENT,
+              proxy,
             });
           }
 
@@ -233,6 +321,20 @@ export async function startDaemon(): Promise<void> {
   const shutdown = async () => {
     if (shuttingDown) return;
     shuttingDown = true;
+
+    // Stop stream server if running
+    if (streamServer) {
+      await streamServer.stop();
+      streamServer = null;
+      // Clean up stream port file
+      const streamPortFile = getStreamPortFile();
+      try {
+        if (fs.existsSync(streamPortFile)) fs.unlinkSync(streamPortFile);
+      } catch {
+        // Ignore cleanup errors
+      }
+    }
+
     await browser.close();
     server.close();
     cleanupSocket();

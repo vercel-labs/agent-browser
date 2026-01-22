@@ -11,11 +11,38 @@ import {
   type Request,
   type Route,
   type Locator,
+  type CDPSession,
+  type Video,
 } from 'playwright-core';
 import path from 'node:path';
 import os from 'node:os';
+import { existsSync, mkdirSync, rmSync } from 'node:fs';
 import type { LaunchCommand } from './types.js';
 import { type RefMap, type EnhancedSnapshot, getEnhancedSnapshot, parseRef } from './snapshot.js';
+
+// Screencast frame data from CDP
+export interface ScreencastFrame {
+  data: string; // base64 encoded image
+  metadata: {
+    offsetTop: number;
+    pageScaleFactor: number;
+    deviceWidth: number;
+    deviceHeight: number;
+    scrollOffsetX: number;
+    scrollOffsetY: number;
+    timestamp?: number;
+  };
+  sessionId: number;
+}
+
+// Screencast options
+export interface ScreencastOptions {
+  format?: 'jpeg' | 'png';
+  quality?: number; // 0-100, only for jpeg
+  maxWidth?: number;
+  maxHeight?: number;
+  everyNthFrame?: number;
+}
 
 interface TrackedRequest {
   url: string;
@@ -41,8 +68,12 @@ interface PageError {
  */
 export class BrowserManager {
   private browser: Browser | null = null;
-  private cdpPort: number | null = null;
+  private cdpEndpoint: string | null = null; // stores port number or full URL
   private isPersistentContext: boolean = false;
+  private browserbaseSessionId: string | null = null;
+  private browserbaseApiKey: string | null = null;
+  private browserUseSessionId: string | null = null;
+  private browserUseApiKey: string | null = null;
   private contexts: BrowserContext[] = [];
   private pages: Page[] = [];
   private activePageIndex: number = 0;
@@ -56,6 +87,19 @@ export class BrowserManager {
   private refMap: RefMap = {};
   private lastSnapshot: string = '';
   private scopedHeaderRoutes: Map<string, (route: Route) => Promise<void>> = new Map();
+
+  // CDP session for screencast and input injection
+  private cdpSession: CDPSession | null = null;
+  private screencastActive: boolean = false;
+  private screencastSessionId: number = 0;
+  private frameCallback: ((frame: ScreencastFrame) => void) | null = null;
+  private screencastFrameHandler: ((params: any) => void) | null = null;
+
+  // Video recording (Playwright native)
+  private recordingContext: BrowserContext | null = null;
+  private recordingPage: Page | null = null;
+  private recordingOutputPath: string = '';
+  private recordingTempDir: string = '';
 
   /**
    * Check if browser is launched
@@ -595,11 +639,175 @@ export class BrowserManager {
   /**
    * Check if CDP connection needs to be re-established
    */
-  private needsCdpReconnect(cdpPort: number): boolean {
+  private needsCdpReconnect(cdpEndpoint: string): boolean {
     if (!this.browser?.isConnected()) return true;
-    if (this.cdpPort !== cdpPort) return true;
+    if (this.cdpEndpoint !== cdpEndpoint) return true;
     if (!this.isCdpConnectionAlive()) return true;
     return false;
+  }
+
+  /**
+   * Close a Browserbase session via API
+   */
+  private async closeBrowserbaseSession(sessionId: string, apiKey: string): Promise<void> {
+    await fetch(`https://api.browserbase.com/v1/sessions/${sessionId}`, {
+      method: 'DELETE',
+      headers: {
+        'X-BB-API-Key': apiKey,
+      },
+    });
+  }
+
+  /**
+   * Close a Browser Use session via API
+   */
+  private async closeBrowserUseSession(sessionId: string, apiKey: string): Promise<void> {
+    const response = await fetch(`https://api.browser-use.com/api/v2/browsers/${sessionId}`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Browser-Use-API-Key': apiKey,
+      },
+      body: JSON.stringify({ action: 'stop' }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Failed to close Browser Use session: ${response.statusText}`);
+    }
+  }
+
+  /**
+   * Connect to Browserbase remote browser via CDP.
+   * Returns true if connected, false if credentials not available.
+   */
+  private async connectToBrowserbase(): Promise<boolean> {
+    const browserbaseApiKey = process.env.BROWSERBASE_API_KEY;
+    const browserbaseProjectId = process.env.BROWSERBASE_PROJECT_ID;
+
+    if (!browserbaseApiKey || !browserbaseProjectId) {
+      return false;
+    }
+
+    const response = await fetch('https://api.browserbase.com/v1/sessions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-BB-API-Key': browserbaseApiKey,
+      },
+      body: JSON.stringify({
+        projectId: browserbaseProjectId,
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Failed to create Browserbase session: ${response.statusText}`);
+    }
+
+    const session = (await response.json()) as { id: string; connectUrl: string };
+
+    const browser = await chromium.connectOverCDP(session.connectUrl).catch(() => {
+      throw new Error('Failed to connect to Browserbase session via CDP');
+    });
+
+    try {
+      const contexts = browser.contexts();
+      if (contexts.length === 0) {
+        throw new Error('No browser context found in Browserbase session');
+      }
+
+      const context = contexts[0];
+      const pages = context.pages();
+      const page = pages[0] ?? (await context.newPage());
+
+      this.browserbaseSessionId = session.id;
+      this.browserbaseApiKey = browserbaseApiKey;
+      this.browser = browser;
+      context.setDefaultTimeout(10000);
+      this.contexts.push(context);
+      this.pages.push(page);
+      this.activePageIndex = 0;
+      this.setupPageTracking(page);
+
+      return true;
+    } catch (error) {
+      await this.closeBrowserbaseSession(session.id, browserbaseApiKey).catch((sessionError) => {
+        console.error('Failed to close Browserbase session during cleanup:', sessionError);
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Connect to Browser Use remote browser via CDP.
+   * Requires BROWSER_USE_API_KEY environment variable.
+   */
+  private async connectToBrowserUse(): Promise<void> {
+    const browserUseApiKey = process.env.BROWSER_USE_API_KEY;
+    if (!browserUseApiKey) {
+      throw new Error('BROWSER_USE_API_KEY is required when using browseruse as a provider');
+    }
+
+    const response = await fetch('https://api.browser-use.com/api/v2/browsers', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Browser-Use-API-Key': browserUseApiKey,
+      },
+      body: JSON.stringify({}),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Failed to create Browser Use session: ${response.statusText}`);
+    }
+
+    let session: { id: string; cdpUrl: string };
+    try {
+      session = (await response.json()) as { id: string; cdpUrl: string };
+    } catch (error) {
+      throw new Error(
+        `Failed to parse Browser Use session response: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+
+    if (!session.id || !session.cdpUrl) {
+      throw new Error(
+        `Invalid Browser Use session response: missing ${!session.id ? 'id' : 'cdpUrl'}`
+      );
+    }
+
+    const browser = await chromium.connectOverCDP(session.cdpUrl).catch(() => {
+      throw new Error('Failed to connect to Browser Use session via CDP');
+    });
+
+    try {
+      const contexts = browser.contexts();
+      let context: BrowserContext;
+      let page: Page;
+
+      if (contexts.length === 0) {
+        context = await browser.newContext();
+        page = await context.newPage();
+      } else {
+        context = contexts[0];
+        const pages = context.pages();
+        page = pages[0] ?? (await context.newPage());
+      }
+
+      this.browserUseSessionId = session.id;
+      this.browserUseApiKey = browserUseApiKey;
+      this.browser = browser;
+      context.setDefaultTimeout(60000);
+      this.contexts.push(context);
+      this.pages.push(page);
+      this.activePageIndex = 0;
+      this.setupPageTracking(page);
+      this.setupContextTracking(context);
+    } catch (error) {
+      await this.closeBrowserUseSession(session.id, browserUseApiKey).catch((sessionError) => {
+        console.error('Failed to close Browser Use session during cleanup:', sessionError);
+      });
+      throw error;
+    }
   }
 
   /**
@@ -607,21 +815,23 @@ export class BrowserManager {
    * If already launched, this is a no-op (browser stays open)
    */
   async launch(options: LaunchCommand): Promise<void> {
-    const cdpPort = options.cdpPort;
+    // Determine CDP endpoint: prefer cdpUrl over cdpPort for flexibility
+    const cdpEndpoint = options.cdpUrl ?? (options.cdpPort ? String(options.cdpPort) : undefined);
     const hasExtensions = !!options.extensions?.length;
     const hasProfile = !!options.profile;
 
-    if (hasExtensions && cdpPort) {
+    if (hasExtensions && cdpEndpoint) {
       throw new Error('Extensions cannot be used with CDP connection');
     }
 
-    if (hasProfile && cdpPort) {
+    if (hasProfile && cdpEndpoint) {
       throw new Error('Profile cannot be used with CDP connection');
     }
 
     if (this.isLaunched()) {
       const needsRelaunch =
-        (!cdpPort && this.cdpPort !== null) || (!!cdpPort && this.needsCdpReconnect(cdpPort));
+        (!cdpEndpoint && this.cdpEndpoint !== null) ||
+        (!!cdpEndpoint && this.needsCdpReconnect(cdpEndpoint));
       if (needsRelaunch) {
         await this.close();
       } else {
@@ -629,8 +839,21 @@ export class BrowserManager {
       }
     }
 
-    if (cdpPort) {
-      await this.connectViaCDP(cdpPort);
+    if (cdpEndpoint) {
+      await this.connectViaCDP(cdpEndpoint);
+      return;
+    }
+
+    // Try connecting to cloud browser providers if configured
+    // Browserbase: auto-connects when BROWSERBASE_API_KEY and BROWSERBASE_PROJECT_ID are set
+    if (await this.connectToBrowserbase()) {
+      return;
+    }
+
+    // Browser Use: requires explicit opt-in via -p browseruse flag or AGENT_BROWSER_PROVIDER=browseruse
+    const provider = options.provider ?? process.env.AGENT_BROWSER_PROVIDER;
+    if (provider === 'browseruse') {
+      await this.connectToBrowserUse();
       return;
     }
 
@@ -648,14 +871,19 @@ export class BrowserManager {
       // Extensions require persistent context in a temp directory
       const extPaths = options.extensions!.join(',');
       const session = process.env.AGENT_BROWSER_SESSION || 'default';
+      // Combine extension args with custom args
+      const extArgs = [`--disable-extensions-except=${extPaths}`, `--load-extension=${extPaths}`];
+      const allArgs = options.args ? [...extArgs, ...options.args] : extArgs;
       context = await launcher.launchPersistentContext(
         path.join(os.tmpdir(), `agent-browser-ext-${session}`),
         {
           headless: false,
           executablePath: options.executablePath,
-          args: [`--disable-extensions-except=${extPaths}`, `--load-extension=${extPaths}`],
+          args: allArgs,
           viewport,
           extraHTTPHeaders: options.headers,
+          userAgent: options.userAgent,
+          ...(options.proxy && { proxy: options.proxy }),
         }
       );
       this.isPersistentContext = true;
@@ -675,12 +903,18 @@ export class BrowserManager {
       this.browser = await launcher.launch({
         headless: options.headless ?? true,
         executablePath: options.executablePath,
+        args: options.args,
       });
-      this.cdpPort = null;
-      context = await this.browser.newContext({ viewport, extraHTTPHeaders: options.headers });
+      this.cdpEndpoint = null;
+      context = await this.browser.newContext({
+        viewport,
+        extraHTTPHeaders: options.headers,
+        userAgent: options.userAgent,
+        ...(options.proxy && { proxy: options.proxy }),
+      });
     }
 
-    context.setDefaultTimeout(10000);
+    context.setDefaultTimeout(60000);
     this.contexts.push(context);
 
     const page = context.pages()[0] ?? (await context.newPage());
@@ -691,16 +925,39 @@ export class BrowserManager {
 
   /**
    * Connect to a running browser via CDP (Chrome DevTools Protocol)
+   * @param cdpEndpoint Either a port number (as string) or a full WebSocket URL (ws:// or wss://)
    */
-  private async connectViaCDP(cdpPort: number | undefined): Promise<void> {
-    if (!cdpPort) {
-      throw new Error('cdpPort is required for CDP connection');
+  private async connectViaCDP(cdpEndpoint: string | undefined): Promise<void> {
+    if (!cdpEndpoint) {
+      throw new Error('CDP endpoint is required for CDP connection');
     }
 
-    const browser = await chromium.connectOverCDP(`http://localhost:${cdpPort}`).catch(() => {
+    // Determine the connection URL:
+    // - If it starts with ws://, wss://, http://, or https://, use it directly
+    // - If it's a numeric string (e.g., "9222"), treat as port for localhost
+    // - Otherwise, treat it as a port number for localhost
+    let cdpUrl: string;
+    if (
+      cdpEndpoint.startsWith('ws://') ||
+      cdpEndpoint.startsWith('wss://') ||
+      cdpEndpoint.startsWith('http://') ||
+      cdpEndpoint.startsWith('https://')
+    ) {
+      cdpUrl = cdpEndpoint;
+    } else if (/^\d+$/.test(cdpEndpoint)) {
+      // Numeric string - treat as port number (handles JSON serialization quirks)
+      cdpUrl = `http://localhost:${cdpEndpoint}`;
+    } else {
+      // Unknown format - still try as port for backward compatibility
+      cdpUrl = `http://localhost:${cdpEndpoint}`;
+    }
+
+    const browser = await chromium.connectOverCDP(cdpUrl).catch(() => {
       throw new Error(
-        `Failed to connect via CDP on port ${cdpPort}. ` +
-          `Make sure the app is running with --remote-debugging-port=${cdpPort}`
+        `Failed to connect via CDP to ${cdpUrl}. ` +
+          (cdpUrl.includes('localhost')
+            ? `Make sure the app is running with --remote-debugging-port=${cdpEndpoint}`
+            : 'Make sure the remote browser is accessible and the URL is correct.')
       );
     });
 
@@ -711,14 +968,16 @@ export class BrowserManager {
         throw new Error('No browser context found. Make sure the app has an open window.');
       }
 
-      const allPages = contexts.flatMap((context) => context.pages());
+      // Filter out pages with empty URLs, which can cause Playwright to hang
+      const allPages = contexts.flatMap((context) => context.pages()).filter((page) => page.url());
+
       if (allPages.length === 0) {
         throw new Error('No page found. Make sure the app has loaded content.');
       }
 
       // All validation passed - commit state
       this.browser = browser;
-      this.cdpPort = cdpPort;
+      this.cdpEndpoint = cdpEndpoint;
 
       for (const context of contexts) {
         this.contexts.push(context);
@@ -786,6 +1045,9 @@ export class BrowserManager {
       throw new Error('Browser not launched');
     }
 
+    // Invalidate CDP session since we're switching to a new page
+    await this.invalidateCDPSession();
+
     const context = this.contexts[0]; // Use first context for tabs
     const page = await context.newPage();
     this.pages.push(page);
@@ -811,7 +1073,7 @@ export class BrowserManager {
     const context = await this.browser.newContext({
       viewport: viewport ?? { width: 1280, height: 720 },
     });
-    context.setDefaultTimeout(10000);
+    context.setDefaultTimeout(60000);
     this.contexts.push(context);
 
     const page = await context.newPage();
@@ -825,11 +1087,33 @@ export class BrowserManager {
   }
 
   /**
+   * Invalidate the current CDP session (must be called before switching pages)
+   * This ensures screencast and input injection work correctly after tab switch
+   */
+  private async invalidateCDPSession(): Promise<void> {
+    // Stop screencast if active (it's tied to the current page's CDP session)
+    if (this.screencastActive) {
+      await this.stopScreencast();
+    }
+
+    // Detach and clear the CDP session
+    if (this.cdpSession) {
+      await this.cdpSession.detach().catch(() => {});
+      this.cdpSession = null;
+    }
+  }
+
+  /**
    * Switch to a specific tab/page by index
    */
-  switchTo(index: number): { index: number; url: string; title: string } {
+  async switchTo(index: number): Promise<{ index: number; url: string; title: string }> {
     if (index < 0 || index >= this.pages.length) {
       throw new Error(`Invalid tab index: ${index}. Available: 0-${this.pages.length - 1}`);
+    }
+
+    // Invalidate CDP session before switching (it's page-specific)
+    if (index !== this.activePageIndex) {
+      await this.invalidateCDPSession();
     }
 
     this.activePageIndex = index;
@@ -854,6 +1138,11 @@ export class BrowserManager {
 
     if (this.pages.length === 1) {
       throw new Error('Cannot close the last tab. Use "close" to close the browser.');
+    }
+
+    // If closing the active tab, invalidate CDP session first
+    if (targetIndex === this.activePageIndex) {
+      await this.invalidateCDPSession();
     }
 
     const page = this.pages[targetIndex];
@@ -886,11 +1175,436 @@ export class BrowserManager {
   }
 
   /**
+   * Get or create a CDP session for the current page
+   * Only works with Chromium-based browsers
+   */
+  async getCDPSession(): Promise<CDPSession> {
+    if (this.cdpSession) {
+      return this.cdpSession;
+    }
+
+    const page = this.getPage();
+    const context = page.context();
+
+    // Create a new CDP session attached to the page
+    this.cdpSession = await context.newCDPSession(page);
+    return this.cdpSession;
+  }
+
+  /**
+   * Check if screencast is currently active
+   */
+  isScreencasting(): boolean {
+    return this.screencastActive;
+  }
+
+  /**
+   * Start screencast - streams viewport frames via CDP
+   * @param callback Function called for each frame
+   * @param options Screencast options
+   */
+  async startScreencast(
+    callback: (frame: ScreencastFrame) => void,
+    options?: ScreencastOptions
+  ): Promise<void> {
+    if (this.screencastActive) {
+      throw new Error('Screencast already active');
+    }
+
+    const cdp = await this.getCDPSession();
+    this.frameCallback = callback;
+    this.screencastActive = true;
+
+    // Create and store the frame handler so we can remove it later
+    this.screencastFrameHandler = async (params: any) => {
+      const frame: ScreencastFrame = {
+        data: params.data,
+        metadata: params.metadata,
+        sessionId: params.sessionId,
+      };
+
+      // Acknowledge the frame to receive the next one
+      await cdp.send('Page.screencastFrameAck', { sessionId: params.sessionId });
+
+      // Call the callback with the frame
+      if (this.frameCallback) {
+        this.frameCallback(frame);
+      }
+    };
+
+    // Listen for screencast frames
+    cdp.on('Page.screencastFrame', this.screencastFrameHandler);
+
+    // Start the screencast
+    await cdp.send('Page.startScreencast', {
+      format: options?.format ?? 'jpeg',
+      quality: options?.quality ?? 80,
+      maxWidth: options?.maxWidth ?? 1280,
+      maxHeight: options?.maxHeight ?? 720,
+      everyNthFrame: options?.everyNthFrame ?? 1,
+    });
+  }
+
+  /**
+   * Stop screencast
+   */
+  async stopScreencast(): Promise<void> {
+    if (!this.screencastActive) {
+      return;
+    }
+
+    try {
+      const cdp = await this.getCDPSession();
+      await cdp.send('Page.stopScreencast');
+
+      // Remove the event listener to prevent accumulation
+      if (this.screencastFrameHandler) {
+        cdp.off('Page.screencastFrame', this.screencastFrameHandler);
+      }
+    } catch {
+      // Ignore errors when stopping
+    }
+
+    this.screencastActive = false;
+    this.frameCallback = null;
+    this.screencastFrameHandler = null;
+  }
+
+  /**
+   * Inject a mouse event via CDP
+   */
+  async injectMouseEvent(params: {
+    type: 'mousePressed' | 'mouseReleased' | 'mouseMoved' | 'mouseWheel';
+    x: number;
+    y: number;
+    button?: 'left' | 'right' | 'middle' | 'none';
+    clickCount?: number;
+    deltaX?: number;
+    deltaY?: number;
+    modifiers?: number; // 1=Alt, 2=Ctrl, 4=Meta, 8=Shift
+  }): Promise<void> {
+    const cdp = await this.getCDPSession();
+
+    const cdpButton =
+      params.button === 'left'
+        ? 'left'
+        : params.button === 'right'
+          ? 'right'
+          : params.button === 'middle'
+            ? 'middle'
+            : 'none';
+
+    await cdp.send('Input.dispatchMouseEvent', {
+      type: params.type,
+      x: params.x,
+      y: params.y,
+      button: cdpButton,
+      clickCount: params.clickCount ?? 1,
+      deltaX: params.deltaX ?? 0,
+      deltaY: params.deltaY ?? 0,
+      modifiers: params.modifiers ?? 0,
+    });
+  }
+
+  /**
+   * Inject a keyboard event via CDP
+   */
+  async injectKeyboardEvent(params: {
+    type: 'keyDown' | 'keyUp' | 'char';
+    key?: string;
+    code?: string;
+    text?: string;
+    modifiers?: number; // 1=Alt, 2=Ctrl, 4=Meta, 8=Shift
+  }): Promise<void> {
+    const cdp = await this.getCDPSession();
+
+    await cdp.send('Input.dispatchKeyEvent', {
+      type: params.type,
+      key: params.key,
+      code: params.code,
+      text: params.text,
+      modifiers: params.modifiers ?? 0,
+    });
+  }
+
+  /**
+   * Inject touch event via CDP (for mobile emulation)
+   */
+  async injectTouchEvent(params: {
+    type: 'touchStart' | 'touchEnd' | 'touchMove' | 'touchCancel';
+    touchPoints: Array<{ x: number; y: number; id?: number }>;
+    modifiers?: number;
+  }): Promise<void> {
+    const cdp = await this.getCDPSession();
+
+    await cdp.send('Input.dispatchTouchEvent', {
+      type: params.type,
+      touchPoints: params.touchPoints.map((tp, i) => ({
+        x: tp.x,
+        y: tp.y,
+        id: tp.id ?? i,
+      })),
+      modifiers: params.modifiers ?? 0,
+    });
+  }
+
+  /**
+   * Check if video recording is currently active
+   */
+  isRecording(): boolean {
+    return this.recordingContext !== null;
+  }
+
+  /**
+   * Start recording to a video file using Playwright's native video recording.
+   * Creates a fresh browser context with video recording enabled.
+   * Automatically captures current URL and transfers cookies/storage if no URL provided.
+   *
+   * @param outputPath - Path to the output video file (will be .webm)
+   * @param url - Optional URL to navigate to (defaults to current page URL)
+   */
+  async startRecording(outputPath: string, url?: string): Promise<void> {
+    if (this.recordingContext) {
+      throw new Error(
+        "Recording already in progress. Run 'record stop' first, or use 'record restart' to stop and start a new recording."
+      );
+    }
+
+    if (!this.browser) {
+      throw new Error('Browser not launched. Call launch first.');
+    }
+
+    // Check if output file already exists
+    if (existsSync(outputPath)) {
+      throw new Error(`Output file already exists: ${outputPath}`);
+    }
+
+    // Validate output path is .webm (Playwright native format)
+    if (!outputPath.endsWith('.webm')) {
+      throw new Error(
+        'Playwright native recording only supports WebM format. Please use a .webm extension.'
+      );
+    }
+
+    // Auto-capture current URL if none provided
+    const currentPage = this.pages.length > 0 ? this.pages[this.activePageIndex] : null;
+    const currentContext = this.contexts.length > 0 ? this.contexts[0] : null;
+    if (!url && currentPage) {
+      const currentUrl = currentPage.url();
+      if (currentUrl && currentUrl !== 'about:blank') {
+        url = currentUrl;
+      }
+    }
+
+    // Capture state from current context (cookies + storage)
+    let storageState:
+      | {
+          cookies: Array<{
+            name: string;
+            value: string;
+            domain: string;
+            path: string;
+            expires: number;
+            httpOnly: boolean;
+            secure: boolean;
+            sameSite: 'Strict' | 'Lax' | 'None';
+          }>;
+          origins: Array<{
+            origin: string;
+            localStorage: Array<{ name: string; value: string }>;
+          }>;
+        }
+      | undefined;
+
+    if (currentContext) {
+      try {
+        storageState = await currentContext.storageState();
+      } catch {
+        // Ignore errors - context might be closed or invalid
+      }
+    }
+
+    // Create a temp directory for video recording
+    const session = process.env.AGENT_BROWSER_SESSION || 'default';
+    this.recordingTempDir = path.join(
+      os.tmpdir(),
+      `agent-browser-recording-${session}-${Date.now()}`
+    );
+    mkdirSync(this.recordingTempDir, { recursive: true });
+
+    this.recordingOutputPath = outputPath;
+
+    // Create a new context with video recording enabled and restored state
+    const viewport = { width: 1280, height: 720 };
+    this.recordingContext = await this.browser.newContext({
+      viewport,
+      recordVideo: {
+        dir: this.recordingTempDir,
+        size: viewport,
+      },
+      storageState,
+    });
+    this.recordingContext.setDefaultTimeout(10000);
+
+    // Create a page in the recording context
+    this.recordingPage = await this.recordingContext.newPage();
+
+    // Add the recording context and page to our managed lists
+    this.contexts.push(this.recordingContext);
+    this.pages.push(this.recordingPage);
+    this.activePageIndex = this.pages.length - 1;
+
+    // Set up page tracking
+    this.setupPageTracking(this.recordingPage);
+
+    // Invalidate CDP session since we switched pages
+    await this.invalidateCDPSession();
+
+    // Navigate to URL if provided or captured
+    if (url) {
+      await this.recordingPage.goto(url, { waitUntil: 'load' });
+    }
+  }
+
+  /**
+   * Stop recording and save the video file
+   * @returns Recording result with path
+   */
+  async stopRecording(): Promise<{ path: string; frames: number; error?: string }> {
+    if (!this.recordingContext || !this.recordingPage) {
+      return { path: '', frames: 0, error: 'No recording in progress' };
+    }
+
+    const outputPath = this.recordingOutputPath;
+
+    try {
+      // Get the video object before closing the page
+      const video = this.recordingPage.video();
+
+      // Remove recording page/context from our managed lists before closing
+      const pageIndex = this.pages.indexOf(this.recordingPage);
+      if (pageIndex !== -1) {
+        this.pages.splice(pageIndex, 1);
+      }
+      const contextIndex = this.contexts.indexOf(this.recordingContext);
+      if (contextIndex !== -1) {
+        this.contexts.splice(contextIndex, 1);
+      }
+
+      // Close the page to finalize the video
+      await this.recordingPage.close();
+
+      // Save the video to the desired output path
+      if (video) {
+        await video.saveAs(outputPath);
+      }
+
+      // Clean up temp directory
+      if (this.recordingTempDir) {
+        rmSync(this.recordingTempDir, { recursive: true, force: true });
+      }
+
+      // Close the recording context
+      await this.recordingContext.close();
+
+      // Reset recording state
+      this.recordingContext = null;
+      this.recordingPage = null;
+      this.recordingOutputPath = '';
+      this.recordingTempDir = '';
+
+      // Adjust active page index
+      if (this.pages.length > 0) {
+        this.activePageIndex = Math.min(this.activePageIndex, this.pages.length - 1);
+      } else {
+        this.activePageIndex = 0;
+      }
+
+      // Invalidate CDP session since we may have switched pages
+      await this.invalidateCDPSession();
+
+      return { path: outputPath, frames: 0 }; // Playwright doesn't expose frame count
+    } catch (error) {
+      // Clean up temp directory on error
+      if (this.recordingTempDir) {
+        rmSync(this.recordingTempDir, { recursive: true, force: true });
+      }
+
+      // Reset state on error
+      this.recordingContext = null;
+      this.recordingPage = null;
+      this.recordingOutputPath = '';
+      this.recordingTempDir = '';
+
+      const message = error instanceof Error ? error.message : String(error);
+      return { path: outputPath, frames: 0, error: message };
+    }
+  }
+
+  /**
+   * Restart recording - stops current recording (if any) and starts a new one.
+   * Convenience method that combines stopRecording and startRecording.
+   *
+   * @param outputPath - Path to the output video file (must be .webm)
+   * @param url - Optional URL to navigate to (defaults to current page URL)
+   * @returns Result from stopping the previous recording (if any)
+   */
+  async restartRecording(
+    outputPath: string,
+    url?: string
+  ): Promise<{ previousPath?: string; stopped: boolean }> {
+    let previousPath: string | undefined;
+    let stopped = false;
+
+    // Stop current recording if active
+    if (this.recordingContext) {
+      const result = await this.stopRecording();
+      previousPath = result.path;
+      stopped = true;
+    }
+
+    // Start new recording
+    await this.startRecording(outputPath, url);
+
+    return { previousPath, stopped };
+  }
+
+  /**
    * Close the browser and clean up
    */
   async close(): Promise<void> {
-    // CDP: only disconnect, don't close external app's pages
-    if (this.cdpPort !== null) {
+    // Stop recording if active (saves video)
+    if (this.recordingContext) {
+      await this.stopRecording();
+    }
+
+    // Stop screencast if active
+    if (this.screencastActive) {
+      await this.stopScreencast();
+    }
+
+    // Clean up CDP session
+    if (this.cdpSession) {
+      await this.cdpSession.detach().catch(() => {});
+      this.cdpSession = null;
+    }
+
+    if (this.browserbaseSessionId && this.browserbaseApiKey) {
+      await this.closeBrowserbaseSession(this.browserbaseSessionId, this.browserbaseApiKey).catch(
+        (error) => {
+          console.error('Failed to close Browserbase session:', error);
+        }
+      );
+      this.browser = null;
+    } else if (this.browserUseSessionId && this.browserUseApiKey) {
+      await this.closeBrowserUseSession(this.browserUseSessionId, this.browserUseApiKey).catch(
+        (error) => {
+          console.error('Failed to close Browser Use session:', error);
+        }
+      );
+      this.browser = null;
+    } else if (this.cdpEndpoint !== null) {
+      // CDP: only disconnect, don't close external app's pages
       if (this.browser) {
         await this.browser.close().catch(() => {});
         this.browser = null;
@@ -911,10 +1625,15 @@ export class BrowserManager {
 
     this.pages = [];
     this.contexts = [];
-    this.cdpPort = null;
+    this.cdpEndpoint = null;
+    this.browserbaseSessionId = null;
+    this.browserbaseApiKey = null;
+    this.browserUseSessionId = null;
+    this.browserUseApiKey = null;
     this.isPersistentContext = false;
     this.activePageIndex = 0;
     this.refMap = {};
     this.lastSnapshot = '';
+    this.frameCallback = null;
   }
 }

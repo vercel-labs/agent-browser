@@ -19,12 +19,39 @@ const launchSchema = baseCommandSchema.extend({
     .optional(),
   browser: z.enum(['chromium', 'firefox', 'webkit']).optional(),
   cdpPort: z.number().positive().optional(),
+  cdpUrl: z
+    .string()
+    .url()
+    .refine(
+      (url) =>
+        url.startsWith('ws://') ||
+        url.startsWith('wss://') ||
+        url.startsWith('http://') ||
+        url.startsWith('https://'),
+      { message: 'CDP URL must start with ws://, wss://, http://, or https://' }
+    )
+    .optional(),
+  executablePath: z.string().optional(),
+  extensions: z.array(z.string()).optional(),
+  headers: z.record(z.string()).optional(),
+  proxy: z
+    .object({
+      server: z.string().min(1),
+      bypass: z.string().optional(),
+      username: z.string().optional(),
+      password: z.string().optional(),
+    })
+    .optional(),
+  args: z.array(z.string()).optional(),
+  userAgent: z.string().optional(),
+  provider: z.string().optional(),
 });
 
 const navigateSchema = baseCommandSchema.extend({
   action: z.literal('navigate'),
   url: z.string().min(1),
   waitUntil: z.enum(['load', 'domcontentloaded', 'networkidle']).optional(),
+  headers: z.record(z.string()).optional(),
 });
 
 const clickSchema = baseCommandSchema.extend({
@@ -295,6 +322,11 @@ const boundingBoxSchema = baseCommandSchema.extend({
   selector: z.string().min(1),
 });
 
+const stylesSchema = baseCommandSchema.extend({
+  action: z.literal('styles'),
+  selector: z.string().min(1),
+});
+
 const videoStartSchema = baseCommandSchema.extend({
   action: z.literal('video_start'),
   path: z.string().min(1),
@@ -302,6 +334,23 @@ const videoStartSchema = baseCommandSchema.extend({
 
 const videoStopSchema = baseCommandSchema.extend({
   action: z.literal('video_stop'),
+});
+
+// Recording schemas (Playwright native video recording)
+const recordingStartSchema = baseCommandSchema.extend({
+  action: z.literal('recording_start'),
+  path: z.string().min(1),
+  url: z.string().min(1).optional(),
+});
+
+const recordingStopSchema = baseCommandSchema.extend({
+  action: z.literal('recording_stop'),
+});
+
+const recordingRestartSchema = baseCommandSchema.extend({
+  action: z.literal('recording_restart'),
+  path: z.string().min(1),
+  url: z.string().min(1).optional(),
 });
 
 const traceStartSchema = baseCommandSchema.extend({
@@ -585,6 +634,55 @@ const responseBodySchema = baseCommandSchema.extend({
   timeout: z.number().positive().optional(),
 });
 
+// Screencast schemas for streaming browser viewport
+const screencastStartSchema = baseCommandSchema.extend({
+  action: z.literal('screencast_start'),
+  format: z.enum(['jpeg', 'png']).optional(),
+  quality: z.number().min(0).max(100).optional(),
+  maxWidth: z.number().positive().optional(),
+  maxHeight: z.number().positive().optional(),
+  everyNthFrame: z.number().positive().optional(),
+});
+
+const screencastStopSchema = baseCommandSchema.extend({
+  action: z.literal('screencast_stop'),
+});
+
+// Input injection schemas for pair browsing
+const inputMouseSchema = baseCommandSchema.extend({
+  action: z.literal('input_mouse'),
+  type: z.enum(['mousePressed', 'mouseReleased', 'mouseMoved', 'mouseWheel']),
+  x: z.number(),
+  y: z.number(),
+  button: z.enum(['left', 'right', 'middle', 'none']).optional(),
+  clickCount: z.number().positive().optional(),
+  deltaX: z.number().optional(),
+  deltaY: z.number().optional(),
+  modifiers: z.number().optional(),
+});
+
+const inputKeyboardSchema = baseCommandSchema.extend({
+  action: z.literal('input_keyboard'),
+  type: z.enum(['keyDown', 'keyUp', 'char']),
+  key: z.string().optional(),
+  code: z.string().optional(),
+  text: z.string().optional(),
+  modifiers: z.number().optional(),
+});
+
+const inputTouchSchema = baseCommandSchema.extend({
+  action: z.literal('input_touch'),
+  type: z.enum(['touchStart', 'touchEnd', 'touchMove', 'touchCancel']),
+  touchPoints: z.array(
+    z.object({
+      x: z.number(),
+      y: z.number(),
+      id: z.number().optional(),
+    })
+  ),
+  modifiers: z.number().optional(),
+});
+
 const pressSchema = baseCommandSchema.extend({
   action: z.literal('press'),
   key: z.string().min(1),
@@ -593,7 +691,7 @@ const pressSchema = baseCommandSchema.extend({
 
 const screenshotSchema = baseCommandSchema.extend({
   action: z.literal('screenshot'),
-  path: z.string().optional(),
+  path: z.string().nullable().optional(),
   fullPage: z.boolean().optional(),
   selector: z.string().min(1).optional(),
   format: z.enum(['png', 'jpeg']).optional(),
@@ -653,6 +751,7 @@ const closeSchema = baseCommandSchema.extend({
 // Tab/Window schemas
 const tabNewSchema = baseCommandSchema.extend({
   action: z.literal('tab_new'),
+  url: z.string().min(1).optional(),
 });
 
 const tabListSchema = baseCommandSchema.extend({
@@ -742,8 +841,12 @@ const commandSchema = z.discriminatedUnion('action', [
   isCheckedSchema,
   countSchema,
   boundingBoxSchema,
+  stylesSchema,
   videoStartSchema,
   videoStopSchema,
+  recordingStartSchema,
+  recordingStopSchema,
+  recordingRestartSchema,
   traceStartSchema,
   traceStopSchema,
   harStartSchema,
@@ -795,6 +898,11 @@ const commandSchema = z.discriminatedUnion('action', [
   multiSelectSchema,
   waitForDownloadSchema,
   responseBodySchema,
+  screencastStartSchema,
+  screencastStopSchema,
+  inputMouseSchema,
+  inputKeyboardSchema,
+  inputTouchSchema,
 ]);
 
 // Parse result type
