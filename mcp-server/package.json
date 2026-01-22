@@ -1,12 +1,19 @@
 {
-  "name": "agent-browser-mcp-server",
-  "version": "2.0.0",
+  "name": "@agent-browser/mcp-server",
+  "version": "1.0.0",
   "description": "MCP server for agent-browser - Full browser automation for LLMs",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
     "agent-browser-mcp": "./dist/index.js"
   },
+  "files": [
+    "dist",
+    "README.md",
+    "SETUP.md",
+    "CHANGELOG.md",
+    "example-config-*.json"
+  ],
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
@@ -17,9 +24,29 @@
     "test": "vitest run",
     "test:watch": "vitest"
   },
-  "keywords": ["mcp", "agent-browser", "browser-automation", "llm", "ai", "playwright"],
-  "author": "",
+  "keywords": [
+    "mcp",
+    "agent-browser",
+    "browser-automation",
+    "llm",
+    "ai",
+    "playwright",
+    "model-context-protocol",
+    "anthropic",
+    "claude",
+    "cursor"
+  ],
+  "author": "Vercel Labs",
   "license": "Apache-2.0",
+  "homepage": "https://github.com/vercel-labs/agent-browser/tree/main/mcp-server",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/vercel-labs/agent-browser.git",
+    "directory": "mcp-server"
+  },
+  "bugs": {
+    "url": "https://github.com/vercel-labs/agent-browser/issues"
+  },
   "peerDependencies": {
     "agent-browser": ">=0.0.1"
   },

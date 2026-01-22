@@ -1,13 +1,18 @@
 {
   "mcpServers": {
     "agent-browser": {
-      "comment": "Option 1: Using absolute path (replace with your actual path)",
-      "command": "node",
-      "args": ["/absolute/path/to/agent-browser/mcp-server/dist/index.js"]
+      "comment": "Recommended: Use npx (no installation needed)",
+      "command": "npx",
+      "args": ["-y", "@agent-browser/mcp-server"]
     },
     "agent-browser-global": {
-      "comment": "Option 2: If installed globally with 'npm install -g agent-browser-mcp-server'",
+      "comment": "Alternative: If installed globally with 'npm install -g @agent-browser/mcp-server'",
       "command": "agent-browser-mcp"
+    },
+    "agent-browser-local": {
+      "comment": "Development: Using local path",
+      "command": "node",
+      "args": ["/absolute/path/to/agent-browser/mcp-server/dist/index.js"]
     }
   }
 }

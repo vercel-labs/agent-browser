@@ -1,11 +1,11 @@
 {
   "mcpServers": {
     "agent-browser": {
-      "comment": "macOS: Edit ~/Library/Application Support/Claude/claude_desktop_config.json",
-      "comment2": "Windows: Edit %APPDATA%\\Claude\\claude_desktop_config.json",
-      "comment3": "Replace path below with your actual installation path",
-      "command": "node",
-      "args": ["/absolute/path/to/agent-browser/mcp-server/dist/index.js"]
+      "comment": "macOS: ~/Library/Application Support/Claude/claude_desktop_config.json",
+      "comment2": "Windows: %APPDATA%\\Claude\\claude_desktop_config.json",
+      "comment3": "Recommended: Use npx (no installation needed)",
+      "command": "npx",
+      "args": ["-y", "@agent-browser/mcp-server"]
     }
   }
 }

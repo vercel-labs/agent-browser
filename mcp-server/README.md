@@ -2,7 +2,7 @@
 
 [Model Context Protocol](https://modelcontextprotocol.io) server for [agent-browser](https://github.com/vercel-labs/agent-browser). Enables LLMs to control browsers through 50+ automation tools.
 
-## Installation
+## Quick Start
 
 ### Prerequisites
 
@@ -11,7 +11,55 @@ npm install -g agent-browser
 agent-browser install
 ```
 
-### Install MCP Server
+### Option 1: NPX (Recommended)
+
+No installation needed! Just configure and use:
+
+**Cursor** (`~/.cursor/mcp.json`):
+```json
+{
+  "mcpServers": {
+    "agent-browser": {
+      "command": "npx",
+      "args": ["-y", "@agent-browser/mcp-server"]
+    }
+  }
+}
+```
+
+**Claude Desktop**:
+- macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- Windows: `%APPDATA%\Claude\claude_desktop_config.json`
+
+```json
+{
+  "mcpServers": {
+    "agent-browser": {
+      "command": "npx",
+      "args": ["-y", "@agent-browser/mcp-server"]
+    }
+  }
+}
+```
+
+### Option 2: Global Install
+
+```bash
+npm install -g @agent-browser/mcp-server
+```
+
+**Configuration**:
+```json
+{
+  "mcpServers": {
+    "agent-browser": {
+      "command": "agent-browser-mcp"
+    }
+  }
+}
+```
+
+### Option 3: Local Development
 
 ```bash
 cd mcp-server
@@ -19,35 +67,13 @@ npm install
 npm run build
 ```
 
-## Configuration
-
-### Cursor
-
-Add to `~/.cursor/mcp.json`:
-
+**Configuration**:
 ```json
 {
   "mcpServers": {
     "agent-browser": {
       "command": "node",
-      "args": ["/path/to/agent-browser/mcp-server/dist/index.js"]
-    }
-  }
-}
-```
-
-### Claude Desktop
-
-**macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
-
-**Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
-
-```json
-{
-  "mcpServers": {
-    "agent-browser": {
-      "command": "node",
-      "args": ["/path/to/agent-browser/mcp-server/dist/index.js"]
+      "args": ["/absolute/path/to/mcp-server/dist/index.js"]
     }
   }
 }

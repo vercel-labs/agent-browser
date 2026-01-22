@@ -21,12 +21,29 @@ agent-browser --version
 
 ## Step 2: Install MCP Server
 
-### Option A: From Source (Development)
+### Option A: NPX (Recommended - No Installation)
 
-1. Clone the repository:
+No installation needed! NPX will download and run automatically.
+
+Skip to Step 3 for configuration.
+
+### Option B: Global Install
+
 ```bash
-git clone https://github.com/YOUR_USERNAME/agent-browser-mcp-server.git
-cd agent-browser-mcp-server
+npm install -g @agent-browser/mcp-server
+```
+
+Verify:
+```bash
+agent-browser-mcp --help
+```
+
+### Option C: From Source (Development)
+
+1. Clone the agent-browser repository:
+```bash
+git clone https://github.com/vercel-labs/agent-browser.git
+cd agent-browser/mcp-server
 ```
 
 2. Install dependencies:
@@ -35,18 +52,6 @@ npm install
 ```
 
 3. Build:
-```bash
-npm run build
-```
-
-4. Note the absolute path to `dist/index.js`:
-```bash
-pwd  # On Unix/Mac
-cd    # On Windows
-```
-
-### Option B: Install Globally (Recommended)
-
 ```bash
 npm install -g agent-browser-mcp-server
 ```
