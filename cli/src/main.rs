@@ -216,6 +216,27 @@ fn main() {
         }
     }
 
+    // Validate mutually exclusive options
+    if flags.cdp.is_some() && flags.provider.is_some() {
+        let msg = "Cannot use --cdp and -p/--provider together";
+        if flags.json {
+            println!(r#"{{"success":false,"error":"{}"}}"#, msg);
+        } else {
+            eprintln!("\x1b[31m✗\x1b[0m {}", msg);
+        }
+        exit(1);
+    }
+
+    if flags.provider.is_some() && !flags.extensions.is_empty() {
+        let msg = "Cannot use --extension with -p/--provider (extensions require local browser)";
+        if flags.json {
+            println!(r#"{{"success":false,"error":"{}"}}"#, msg);
+        } else {
+            eprintln!("\x1b[31m✗\x1b[0m {}", msg);
+        }
+        exit(1);
+    }
+
     // Connect via CDP if --cdp flag is set
     if let Some(ref port) = flags.cdp {
         let cdp_port: u16 = match port.parse::<u32>() {
@@ -271,8 +292,32 @@ fn main() {
         }
     }
 
-    // Launch headed browser or proxy if flags are set (without CDP)
-    if (flags.headed || flags.proxy.is_some()) && flags.cdp.is_none() {
+    // Launch with cloud provider if -p flag is set
+    if let Some(ref provider) = flags.provider {
+        let launch_cmd = json!({
+            "id": gen_id(),
+            "action": "launch",
+            "provider": provider
+        });
+
+        let err = match send_command(launch_cmd, &flags.session) {
+            Ok(resp) if resp.success => None,
+            Ok(resp) => Some(resp.error.unwrap_or_else(|| "Provider connection failed".to_string())),
+            Err(e) => Some(e.to_string()),
+        };
+
+        if let Some(msg) = err {
+            if flags.json {
+                println!(r#"{{"success":false,"error":"{}"}}"#, msg);
+            } else {
+                eprintln!("\x1b[31m✗\x1b[0m {}", msg);
+            }
+            exit(1);
+        }
+    }
+
+    // Launch headed browser or proxy if flags are set (without CDP or provider)
+    if (flags.headed || flags.proxy.is_some()) && flags.cdp.is_none() && flags.provider.is_none() {
         let mut launch_cmd = json!({
             "id": gen_id(),
             "action": "launch",
