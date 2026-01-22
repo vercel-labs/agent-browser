@@ -1118,6 +1118,7 @@ mod tests {
             proxy_bypass: None,
             args: None,
             user_agent: None,
+            provider: None,
         }
     }
 
