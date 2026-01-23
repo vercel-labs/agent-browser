@@ -1,0 +1,72 @@
+name = "agent-browser"
+type = "module"
+main = "dist/worker-simple.js"
+compatibility_date = "2024-09-23"
+compatibility_flags = ["nodejs_compat"]
+
+# Environment variables for all environments
+[env.default]
+vars = { AGENT_BROWSER_HEADLESS = "true", AGENT_BROWSER_ENABLE_PLUGINS = "true" }
+
+[env.production]
+name = "agent-browser-prod"
+routes = [
+  { pattern = "api.agent-browser.com/*", zone_name = "agent-browser.com" }
+]
+vars = { AGENT_BROWSER_HEADLESS = "true", AGENT_BROWSER_ENABLE_PLUGINS = "true", AGENT_BROWSER_LOG_LEVEL = "info" }
+
+[env.staging]
+name = "agent-browser-staging"
+vars = { AGENT_BROWSER_HEADLESS = "true", AGENT_BROWSER_ENABLE_PLUGINS = "true", AGENT_BROWSER_LOG_LEVEL = "debug" }
+
+[env.development]
+name = "agent-browser-dev"
+vars = { AGENT_BROWSER_HEADLESS = "false", AGENT_BROWSER_ENABLE_PLUGINS = "true", AGENT_BROWSER_LOG_LEVEL = "debug" }
+
+# KV Namespaces for data persistence
+[[kv_namespaces]]
+binding = "WORKFLOWS"
+id = "default-workflows"
+preview_id = "dev-workflows"
+
+[[kv_namespaces]]
+binding = "EXECUTIONS"
+id = "default-executions"
+preview_id = "dev-executions"
+
+[[kv_namespaces]]
+binding = "CACHE"
+id = "default-cache"
+preview_id = "dev-cache"
+
+[[kv_namespaces]]
+binding = "SESSIONS"
+id = "default-sessions"
+preview_id = "dev-sessions"
+
+# R2 Bucket for file storage (screenshots, exports, reports)
+[[r2_buckets]]
+binding = "STORAGE"
+bucket_name = "agent-browser-storage"
+preview_bucket_name = "agent-browser-dev"
+
+# D1 Database for structured data
+[[d1_databases]]
+binding = "DB"
+database_name = "agent-browser-db"
+database_id = "default-db"
+preview_database_id = "dev-db"
+
+# Durable Objects for workflow queuing
+[[durable_objects.bindings]]
+name = "WORKFLOW_QUEUE"
+class_name = "WorkflowQueue"
+
+# Build configuration
+[build]
+command = "npm run build"
+cwd = "."
+
+# Observability
+[observability]
+enabled = true
