@@ -1,5 +1,11 @@
 # agent-browser
 
+## 0.7.4
+
+### Patch Changes
+
+- 957b5e5: Fix binary permissions on install. npm doesn't preserve execute bits, so postinstall now ensures the native binary is executable.
+
 ## 0.7.3
 
 ### Patch Changes
