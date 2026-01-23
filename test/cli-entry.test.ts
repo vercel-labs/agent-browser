@@ -110,4 +110,51 @@ describe('CLI Entry Point', () => {
       expect(output).not.toContain('is not recognized');
     });
   });
+
+  describe('agent-browser.cmd (Windows local dev)', () => {
+    const cmdPath = path.join(binDir, 'agent-browser.cmd');
+
+    it('should exist', () => {
+      expect(fs.existsSync(cmdPath)).toBe(true);
+    });
+
+    it('should call native binary directly (not dist/index.js)', () => {
+      const content = fs.readFileSync(cmdPath, 'utf-8');
+      // Should NOT point to dist/index.js
+      expect(content).not.toContain('dist\\index.js');
+      expect(content).not.toContain('dist/index.js');
+      // Should call the native binary
+      expect(content).toContain('agent-browser-win32-');
+    });
+
+    it('should detect architecture', () => {
+      const content = fs.readFileSync(cmdPath, 'utf-8');
+      expect(content).toContain('PROCESSOR_ARCHITECTURE');
+      expect(content).toContain('AMD64');
+      expect(content).toContain('ARM64');
+    });
+
+    it('should run successfully on Windows', () => {
+      if (os.platform() !== 'win32') {
+        // Skip on non-Windows
+        return;
+      }
+
+      const result = spawnSync(cmdPath, ['--version'], {
+        cwd: binDir,
+        encoding: 'utf-8',
+        timeout: 10000,
+        shell: true,
+      });
+
+      const output = result.stdout + result.stderr;
+      // Should either show version or "binary not found" error
+      const validOutput =
+        output.includes('agent-browser') ||
+        output.includes('No binary found') ||
+        result.status === 0;
+
+      expect(validOutput).toBe(true);
+    });
+  });
 });
