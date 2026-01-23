@@ -122,6 +122,13 @@ describe('parseCommand', () => {
       const result = parseCommand(cmd({ id: '1', action: 'screenshot', fullPage: true }));
       expect(result.success).toBe(true);
     });
+
+    it('should parse screenshot with null selector', () => {
+      const result = parseCommand(
+        cmd({ id: '1', action: 'screenshot', path: 'test.png', selector: null })
+      );
+      expect(result.success).toBe(true);
+    });
   });
 
   describe('cookies', () => {

@@ -693,7 +693,7 @@ const screenshotSchema = baseCommandSchema.extend({
   action: z.literal('screenshot'),
   path: z.string().nullable().optional(),
   fullPage: z.boolean().optional(),
-  selector: z.string().min(1).optional(),
+  selector: z.string().min(1).nullish(),
   format: z.enum(['png', 'jpeg']).optional(),
   quality: z.number().min(0).max(100).optional(),
 });
