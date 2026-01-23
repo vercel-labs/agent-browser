@@ -690,12 +690,26 @@ For Claude Code, a [skill](https://platform.claude.com/docs/en/agents-and-tools/
 
 **Manual install:**
 
+Global:
 ```bash
-cp -r node_modules/agent-browser/skills/agent-browser .claude/skills/
+cp -r "$(npm root -g)/agent-browser/skills/agent-browser" ~/.claude/skills/
+```
+
+Current project:
+```bash
+cp -r "$(npm root -g)/agent-browser/skills/agent-browser" .claude/skills/
 ```
 
 Or download directly:
 
+Global:
+```bash
+mkdir -p ~/.claude/skills/agent-browser
+curl -o  ~/.claude/skills/agent-browser/SKILL.md \
+  https://raw.githubusercontent.com/vercel-labs/agent-browser/main/skills/agent-browser/SKILL.md
+```
+
+Project:
 ```bash
 mkdir -p .claude/skills/agent-browser
 curl -o .claude/skills/agent-browser/SKILL.md \
