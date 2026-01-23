@@ -11,7 +11,7 @@
     "skills"
   ],
   "bin": {
-    "agent-browser": "./bin/agent-browser"
+    "agent-browser": "./bin/agent-browser.cjs"
   },
   "scripts": {
     "prepare": "husky",
