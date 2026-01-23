@@ -1,5 +1,11 @@
 # agent-browser
 
+## 0.7.5
+
+### Patch Changes
+
+- 8c2a6ec: Fix GitHub release workflow to handle existing releases. If a release already exists, binaries are uploaded to it instead of failing.
+
 ## 0.7.4
 
 ### Patch Changes
