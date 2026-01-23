@@ -39,8 +39,14 @@ function getBinaryName() {
     case 'aarch64':
       archName = 'arm64';
       break;
+    case 'ia32':
+    case 'x86':
+      console.error(`Error: 32-bit systems are not supported.`);
+      console.error(`agent-browser requires a 64-bit operating system (x64 or arm64).`);
+      process.exit(1);
     default:
       console.error(`Unsupported architecture: ${arch}`);
+      console.error(`Supported architectures: x64, arm64`);
       process.exit(1);
   }
 
