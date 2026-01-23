@@ -13,50 +13,9 @@ permissions:
   pull-requests: write
 
 jobs:
-  release:
-    name: Release
-    runs-on: ubuntu-latest
-    outputs:
-      published: ${{ steps.changesets.outputs.published }}
-      publishedPackages: ${{ steps.changesets.outputs.publishedPackages }}
-    steps:
-      - name: Checkout Repo
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 9
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          cache: pnpm
-          registry-url: 'https://registry.npmjs.org'
-
-      - name: Install Dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Create Release Pull Request or Publish to npm
-        id: changesets
-        uses: changesets/action@v1
-        with:
-          version: pnpm ci:version
-          publish: pnpm ci:publish
-          title: 'chore: version packages'
-          commit: 'chore: version packages'
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_VERCEL_TOKEN_ELEVATED }}
-
-  # Build native binaries for all platforms (only after changesets publishes)
+  # Build native binaries for all platforms first
   build-binaries:
     name: Build ${{ matrix.name }}
-    needs: release
-    if: needs.release.outputs.published == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -91,8 +50,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          ref: main
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
@@ -178,10 +135,89 @@ jobs:
           path: artifacts/${{ matrix.binary }}
           retention-days: 7
 
+  # Create release PR or publish to npm (with binaries)
+  release:
+    name: Release
+    needs: build-binaries
+    runs-on: ubuntu-latest
+    outputs:
+      published: ${{ steps.changesets.outputs.published }}
+      publishedPackages: ${{ steps.changesets.outputs.publishedPackages }}
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install Dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Download all binary artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Move binaries to bin directory
+        run: |
+          mkdir -p bin
+          find artifacts -type f -name 'agent-browser-*' -exec mv {} bin/ \;
+          rm -rf artifacts
+          chmod +x bin/agent-browser-* 2>/dev/null || true
+          echo "Binaries in bin/:"
+          ls -la bin/
+
+      - name: Verify all binaries exist
+        run: |
+          EXPECTED_BINARIES=(
+            "agent-browser-linux-x64"
+            "agent-browser-linux-arm64"
+            "agent-browser-win32-x64.exe"
+            "agent-browser-darwin-x64"
+            "agent-browser-darwin-arm64"
+          )
+          MISSING=0
+          for binary in "${EXPECTED_BINARIES[@]}"; do
+            if [ ! -f "bin/$binary" ]; then
+              echo "Missing: bin/$binary"
+              MISSING=$((MISSING + 1))
+            else
+              echo "Found: bin/$binary ($(stat -c%s "bin/$binary" 2>/dev/null || stat -f%z "bin/$binary") bytes)"
+            fi
+          done
+          if [ "$MISSING" -gt 0 ]; then
+            echo "Error: $MISSING binaries are missing"
+            exit 1
+          fi
+          echo "All 5 platform binaries present"
+
+      - name: Create Release Pull Request or Publish to npm
+        id: changesets
+        uses: changesets/action@v1
+        with:
+          version: pnpm ci:version
+          publish: pnpm ci:publish
+          title: 'chore: version packages'
+          commit: 'chore: version packages'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_VERCEL_TOKEN_ELEVATED }}
+
   # Create GitHub release with binaries after npm publish
   github-release:
     name: Create GitHub Release
-    needs: [release, build-binaries]
+    needs: release
     if: needs.release.outputs.published == 'true'
     runs-on: ubuntu-latest
     steps:
