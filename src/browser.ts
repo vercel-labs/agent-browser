@@ -722,7 +722,7 @@ export class BrowserManager {
       this.browserbaseSessionId = session.id;
       this.browserbaseApiKey = browserbaseApiKey;
       this.browser = browser;
-      context.setDefaultTimeout(10000);
+      context.setDefaultTimeout(60000);
       this.contexts.push(context);
       this.pages.push(page);
       this.activePageIndex = 0;
@@ -844,14 +844,26 @@ export class BrowserManager {
       return;
     }
 
-    // Try connecting to cloud browser providers if configured
-    // Browserbase: auto-connects when BROWSERBASE_API_KEY and BROWSERBASE_PROJECT_ID are set
-    if (await this.connectToBrowserbase()) {
+    // Check for explicit provider flag
+    const provider = options.provider ?? process.env.AGENT_BROWSER_PROVIDER;
+
+    // Browserbase: explicit opt-in via -p browserbase or auto-connect when env vars are set
+    if (provider === 'browserbase') {
+      const connected = await this.connectToBrowserbase();
+      if (!connected) {
+        throw new Error(
+          'BROWSERBASE_API_KEY and BROWSERBASE_PROJECT_ID are required when using browserbase as a provider'
+        );
+      }
       return;
     }
 
-    // Browser Use: requires explicit opt-in via -p browseruse flag or AGENT_BROWSER_PROVIDER=browseruse
-    const provider = options.provider ?? process.env.AGENT_BROWSER_PROVIDER;
+    // Try auto-connecting to Browserbase when env vars are set (no explicit provider)
+    if (!provider && (await this.connectToBrowserbase())) {
+      return;
+    }
+
+    // Browser Use: requires explicit opt-in via -p browseruse flag
     if (provider === 'browseruse') {
       await this.connectToBrowserUse();
       return;
