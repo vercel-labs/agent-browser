@@ -1314,6 +1314,7 @@ export class BrowserManager {
     key?: string;
     code?: string;
     text?: string;
+    keyCode?: number;
     modifiers?: number; // 1=Alt, 2=Ctrl, 4=Meta, 8=Shift
   }): Promise<void> {
     const cdp = await this.getCDPSession();
@@ -1323,6 +1324,8 @@ export class BrowserManager {
       key: params.key,
       code: params.code,
       text: params.text,
+      windowsVirtualKeyCode: params.keyCode,
+      nativeVirtualKeyCode: params.keyCode,
       modifiers: params.modifiers ?? 0,
     });
   }

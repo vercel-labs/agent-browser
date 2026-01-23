@@ -35,6 +35,7 @@ export interface InputKeyboardMessage {
   key?: string;
   code?: string;
   text?: string;
+  keyCode?: number;
   modifiers?: number;
 }
 
@@ -215,6 +216,7 @@ export class StreamServer {
             key: message.key,
             code: message.code,
             text: message.text,
+            keyCode: message.keyCode,
             modifiers: message.modifiers,
           });
           break;
