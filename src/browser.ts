@@ -928,7 +928,8 @@ export class BrowserManager {
   }
 
   /**
-   * Check if Chrome/Chromium is currently running
+   * Check if Chrome/Chromium browser is currently running
+   * (not just Chrome-related helper processes like crashpad handlers)
    */
   private async isChromeRunning(): Promise<boolean> {
     try {
@@ -936,8 +937,11 @@ export class BrowserManager {
         const { stdout } = await execAsync('tasklist /FI "IMAGENAME eq chrome.exe"');
         return stdout.toLowerCase().includes('chrome.exe');
       } else {
-        // Check for chrome, chromium, or google-chrome processes
-        const { stdout } = await execAsync('pgrep -f "(chrome|chromium)" || true');
+        // Look for actual Chrome/Chromium browser processes, excluding helpers
+        // -x matches exact process name (not substrings in command line)
+        const { stdout } = await execAsync(
+          'pgrep -x "chrome|chromium|chromium-browser|google-chrome" || true'
+        );
         return stdout.trim().length > 0;
       }
     } catch {
