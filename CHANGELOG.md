@@ -1,5 +1,11 @@
 # agent-browser
 
+## 0.7.3
+
+### Patch Changes
+
+- 161d8f5: Fix native binary distribution in npm package. Native binaries for all platforms (Linux x64/arm64, macOS x64/arm64, Windows x64) are now correctly included when publishing.
+
 ## 0.7.2
 
 ### Patch Changes
