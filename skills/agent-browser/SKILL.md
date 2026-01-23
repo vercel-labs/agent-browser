@@ -23,6 +23,38 @@ agent-browser close             # Close browser
 3. Interact using refs from the snapshot
 4. Re-snapshot after navigation or significant DOM changes
 
+## Session management
+
+**Always use a unique descriptive session name** for every browser task:
+
+```bash
+agent-browser --session login-test open https://example.com/login
+agent-browser --session checkout-flow open https://shop.example.com/cart
+```
+
+This ensures browser tasks never interfere with each other, even when running in parallel.
+
+**Session naming:** Use short, descriptive names based on what the task does (e.g., `auth-flow`, `form-submit`, `data-extraction`). Avoid generic names like `test` or `browser`.
+
+**Always include the session flag:** Once you start a session, include `--session <name>` in every subsequent command to that browser. This ensures commands go to the correct browser instance.
+
+```bash
+# Correct - session name on every command
+agent-browser --session login-test open https://example.com
+agent-browser --session login-test snapshot -i
+agent-browser --session login-test fill @e1 "user@test.com"
+agent-browser --session login-test click @e2
+agent-browser --session login-test close
+
+# Wrong - forgetting session sends to wrong browser
+agent-browser --session login-test open https://example.com
+agent-browser snapshot -i  # Goes to "default" session, not login-test!
+```
+
+**Cleanup rules:**
+- If you initiated the browser task autonomously and completed it → close the session with `agent-browser --session <name> close`
+- If the user is actively guiding you through browser interactions → ask before closing, they may want to inspect the result
+
 ## Commands
 
 ### Navigation
