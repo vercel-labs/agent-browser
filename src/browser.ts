@@ -776,7 +776,7 @@ export class BrowserManager {
       this.browserbaseSessionId = session.id;
       this.browserbaseApiKey = browserbaseApiKey;
       this.browser = browser;
-      context.setDefaultTimeout(10000);
+      context.setDefaultTimeout(60000);
       this.contexts.push(context);
       this.setupContextTracking(context);
       this.pages.push(page);
