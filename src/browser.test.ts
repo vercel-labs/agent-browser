@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import { BrowserManager } from './browser.js';
 import { chromium } from 'playwright-core';
 
@@ -419,6 +419,158 @@ describe('BrowserManager', () => {
       expect(urls).not.toContain('');
       expect(urls).toContain('http://example.com');
       spy.mockRestore();
+    });
+  });
+
+  describe('CDP connection resilience', () => {
+    let connectSpy: ReturnType<typeof vi.spyOn>;
+
+    const createMockBrowser = (
+      options: {
+        contexts?: Array<{
+          pages: () => Array<{ url: () => string; on: ReturnType<typeof vi.fn> }>;
+          on: ReturnType<typeof vi.fn>;
+        }>;
+      } = {}
+    ) => ({
+      contexts: () =>
+        options.contexts ?? [
+          {
+            pages: () => [{ url: () => 'http://example.com', on: vi.fn() }],
+            on: vi.fn(),
+          },
+        ],
+      close: vi.fn().mockResolvedValue(undefined),
+      isConnected: vi.fn().mockReturnValue(true),
+    });
+
+    afterEach(() => {
+      if (connectSpy) {
+        connectSpy.mockRestore();
+      }
+    });
+
+    it('should accept cdpUrl as full WebSocket URL', async () => {
+      const mockBrowser = createMockBrowser();
+      connectSpy = vi.spyOn(chromium, 'connectOverCDP').mockResolvedValue(mockBrowser as any);
+
+      const cdpBrowser = new BrowserManager();
+      await cdpBrowser.launch({
+        id: 'test',
+        action: 'launch',
+        cdpUrl: 'ws://localhost:9222/devtools/browser/abc123',
+      });
+
+      expect(connectSpy).toHaveBeenCalledWith('ws://localhost:9222/devtools/browser/abc123');
+      await cdpBrowser.close();
+    });
+
+    it('should accept cdpUrl as HTTP URL', async () => {
+      const mockBrowser = createMockBrowser();
+      connectSpy = vi.spyOn(chromium, 'connectOverCDP').mockResolvedValue(mockBrowser as any);
+
+      const cdpBrowser = new BrowserManager();
+      await cdpBrowser.launch({ id: 'test', action: 'launch', cdpUrl: 'http://remote-host:9222' });
+
+      expect(connectSpy).toHaveBeenCalledWith('http://remote-host:9222');
+      await cdpBrowser.close();
+    });
+
+    it('should convert numeric cdpPort to localhost URL', async () => {
+      const mockBrowser = createMockBrowser();
+      connectSpy = vi.spyOn(chromium, 'connectOverCDP').mockResolvedValue(mockBrowser as any);
+
+      const cdpBrowser = new BrowserManager();
+      await cdpBrowser.launch({ id: 'test', action: 'launch', cdpPort: 9222 });
+
+      expect(connectSpy).toHaveBeenCalledWith('http://localhost:9222');
+      await cdpBrowser.close();
+    });
+
+    it('should retry on transient connection failures', async () => {
+      const mockBrowser = createMockBrowser();
+
+      let callCount = 0;
+      connectSpy = vi.spyOn(chromium, 'connectOverCDP').mockImplementation(async () => {
+        callCount++;
+        if (callCount < 3) {
+          throw new Error('Connection refused');
+        }
+        return mockBrowser as any;
+      });
+
+      const cdpBrowser = new BrowserManager();
+      await cdpBrowser.launch({ id: 'test', action: 'launch', cdpPort: 9222 });
+
+      // Should have retried and succeeded on 3rd attempt
+      expect(callCount).toBe(3);
+      expect(cdpBrowser.isLaunched()).toBe(true);
+
+      await cdpBrowser.close();
+    });
+
+    it('should not retry on validation errors (no browser context)', async () => {
+      const mockBrowser = createMockBrowser({ contexts: [] });
+
+      connectSpy = vi.spyOn(chromium, 'connectOverCDP').mockResolvedValue(mockBrowser as any);
+
+      const cdpBrowser = new BrowserManager();
+      await expect(
+        cdpBrowser.launch({ id: 'test', action: 'launch', cdpPort: 9222 })
+      ).rejects.toThrow('No browser context');
+
+      // Should only have tried once (no retries for validation errors)
+      expect(connectSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('should not retry on validation errors (no page found)', async () => {
+      const mockBrowser = createMockBrowser({
+        contexts: [
+          {
+            pages: () => [], // No pages - validation error
+            on: vi.fn(),
+          },
+        ],
+      });
+
+      connectSpy = vi.spyOn(chromium, 'connectOverCDP').mockResolvedValue(mockBrowser as any);
+
+      const cdpBrowser = new BrowserManager();
+      await expect(
+        cdpBrowser.launch({ id: 'test', action: 'launch', cdpPort: 9222 })
+      ).rejects.toThrow('No page found');
+
+      // Should only have tried once
+      expect(connectSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('should provide helpful error message after all retries fail', async () => {
+      connectSpy = vi
+        .spyOn(chromium, 'connectOverCDP')
+        .mockRejectedValue(new Error('Connection refused'));
+
+      const cdpBrowser = new BrowserManager();
+      await expect(
+        cdpBrowser.launch({ id: 'test', action: 'launch', cdpPort: 9222 })
+      ).rejects.toThrow(/Failed to connect via CDP.*after 3 attempts/);
+
+      // Should have tried 3 times (default retries)
+      expect(connectSpy).toHaveBeenCalledTimes(3);
+    });
+
+    it('should mention remote URL in error message for non-localhost connections', async () => {
+      connectSpy = vi
+        .spyOn(chromium, 'connectOverCDP')
+        .mockRejectedValue(new Error('Connection refused'));
+
+      const cdpBrowser = new BrowserManager();
+      await expect(
+        cdpBrowser.launch({
+          id: 'test',
+          action: 'launch',
+          cdpUrl: 'ws://remote-server:9222/devtools',
+        })
+      ).rejects.toThrow(/remote browser is accessible/);
     });
   });
 
