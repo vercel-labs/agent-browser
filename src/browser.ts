@@ -856,7 +856,34 @@ export class BrowserManager {
       return;
     }
 
-    const browserType = options.browser ?? 'chromium';
+    // Detect system architecture for smart browser selection
+    const arch = os.arch();
+    const isArm64 = arch === 'arm64';
+
+    // Smart browser selection: use Firefox on ARM64, Chromium on x86_64
+    let browserType = options.browser;
+
+    if (!browserType) {
+      // No browser specified - use smart default
+      if (isArm64) {
+        // ARM64 systems: Firefox is recommended (native support)
+        browserType = 'firefox';
+        console.info(
+          `[agent-browser] ARM64 detected. Using Firefox for better compatibility. ` +
+          `To force Chromium, pass { browser: 'chromium' }.`
+        );
+      } else {
+        // x86_64: Traditional default is Chromium
+        browserType = 'chromium';
+      }
+    } else if (browserType === 'chromium' && isArm64) {
+      // User explicitly requested Chromium on ARM64 - warn them
+      console.warn(
+        `[agent-browser] WARNING: Chromium may not be available on ARM64. ` +
+        `Firefox is recommended: { browser: 'firefox', ... }`
+      );
+    }
+
     if (hasExtensions && browserType !== 'chromium') {
       throw new Error('Extensions are only supported in Chromium');
     }
