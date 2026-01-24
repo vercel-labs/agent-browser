@@ -1,5 +1,11 @@
 # agent-browser
 
+## 0.7.6
+
+### Patch Changes
+
+- a4d0c26: Allow null values for the screenshot selector field. Previously, passing a null selector would fail validation, but now it is properly handled as an optional value.
+
 ## 0.7.5
 
 ### Patch Changes
