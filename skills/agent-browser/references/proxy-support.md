@@ -2,12 +2,43 @@
 
 Configure proxy servers for browser automation, useful for geo-testing, rate limiting avoidance, and corporate environments.
 
+## Quick Start
+
+```bash
+# Via command line flag
+agent-browser --proxy http://proxy.example.com:8080 open https://example.com
+
+# With authentication
+agent-browser --proxy http://user:pass@proxy.example.com:8080 open https://example.com
+
+# SOCKS5 proxy
+agent-browser --proxy socks5://proxy.example.com:1080 open https://example.com
+```
+
+## Command Line Flags
+
+```bash
+--proxy <url>           # Proxy server URL
+--proxy-bypass <hosts>  # Bypass proxy for these hosts (comma-separated)
+```
+
+## Environment Variables
+
+```bash
+AGENT_BROWSER_PROXY="http://proxy:8080"        # Proxy server URL
+AGENT_BROWSER_PROXY_BYPASS="localhost,*.local" # Bypass hosts
+```
+
 ## Basic Proxy Configuration
 
 Set proxy via environment variable before starting:
 
 ```bash
 # HTTP proxy
+export AGENT_BROWSER_PROXY="http://proxy.example.com:8080"
+agent-browser open https://example.com
+
+# Or use standard env vars
 export HTTP_PROXY="http://proxy.example.com:8080"
 agent-browser open https://example.com
 
@@ -166,6 +197,45 @@ agent-browser open https://example.com --ignore-https-errors
 export NO_PROXY="*.cdn.com,*.static.com"  # Direct CDN access
 ```
 
+## Additional Browser Configuration
+
+These flags are often used alongside proxy configuration for stealth automation.
+
+### Custom User-Agent
+
+```bash
+# Override default User-Agent
+agent-browser --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0" open https://example.com
+
+# Via environment variable
+export AGENT_BROWSER_USER_AGENT="CustomBot/1.0"
+agent-browser open https://example.com
+```
+
+### Browser Launch Arguments
+
+```bash
+# Pass custom Chromium flags (comma or newline separated)
+agent-browser --args "--no-sandbox,--disable-blink-features=AutomationControlled" open https://example.com
+
+# Via environment variable
+export AGENT_BROWSER_ARGS="--no-sandbox,--disable-gpu"
+agent-browser open https://example.com
+```
+
+### Combined Stealth Configuration
+
+```bash
+#!/bin/bash
+# Full stealth setup with proxy
+agent-browser \
+    --proxy "http://proxy.example.com:8080" \
+    --proxy-bypass "localhost,*.local" \
+    --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+    --args "--disable-blink-features=AutomationControlled" \
+    open https://example.com
+```
+
 ## Best Practices
 
 1. **Use environment variables** - Don't hardcode proxy credentials
@@ -173,3 +243,4 @@ export NO_PROXY="*.cdn.com,*.static.com"  # Direct CDN access
 3. **Test proxy before automation** - Verify connectivity with simple requests
 4. **Handle proxy failures gracefully** - Implement retry logic for unstable proxies
 5. **Rotate proxies for large scraping jobs** - Distribute load and avoid bans
+6. **Match User-Agent to proxy location** - Use appropriate User-Agent for the proxy's region

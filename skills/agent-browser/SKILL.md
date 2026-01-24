@@ -69,6 +69,7 @@ agent-browser scroll down 500     # Scroll page (default: down 300px)
 agent-browser scrollintoview @e1  # Scroll element into view (alias: scrollinto)
 agent-browser drag @e1 @e2        # Drag and drop
 agent-browser upload @e1 file.pdf # Upload files
+agent-browser download @e1 ./file.pdf # Download file (click element, save to path)
 ```
 
 ### Get information
@@ -96,8 +97,8 @@ agent-browser is checked @e1      # Check if checked
 ### Screenshots & PDF
 
 ```bash
-agent-browser screenshot          # Save to a temporary directory
-agent-browser screenshot path.png # Save to a specific path
+agent-browser screenshot          # Screenshot to stdout
+agent-browser screenshot path.png # Save to file
 agent-browser screenshot --full   # Full page
 agent-browser pdf output.pdf      # Save as PDF
 ```
@@ -123,6 +124,8 @@ agent-browser wait --text "Success"        # Wait for text (or -t)
 agent-browser wait --url "**/dashboard"    # Wait for URL pattern (or -u)
 agent-browser wait --load networkidle      # Wait for network idle (or -l)
 agent-browser wait --fn "window.ready"     # Wait for JS condition (or -f)
+agent-browser wait --download              # Wait for download to complete (or -d)
+agent-browser wait --download ./file.pdf   # Wait and save to specific path
 ```
 
 ### Mouse control
@@ -221,12 +224,16 @@ agent-browser eval "document.title"   # Run JavaScript
 
 ```bash
 agent-browser --session <name> ...    # Isolated browser session
+agent-browser --profile <path> ...    # Persistent browser profile (cookies, localStorage)
 agent-browser --json ...              # JSON output for parsing
 agent-browser --headed ...            # Show browser window (not headless)
 agent-browser --full ...              # Full page screenshot (-f)
 agent-browser --cdp <port> ...        # Connect via Chrome DevTools Protocol
 agent-browser -p <provider> ...       # Cloud browser provider (--provider)
 agent-browser --proxy <url> ...       # Use proxy server
+agent-browser --proxy-bypass <hosts>  # Bypass proxy for hosts (comma-separated)
+agent-browser --args <args> ...       # Browser launch args (comma-separated)
+agent-browser --user-agent <ua> ...   # Custom User-Agent string
 agent-browser --headers <json> ...    # HTTP headers scoped to URL's origin
 agent-browser --executable-path <p>   # Custom browser executable
 agent-browser --extension <path> ...  # Load browser extension (repeatable)
@@ -247,9 +254,14 @@ agent-browser --proxy socks5://proxy.com:1080 open example.com
 
 ```bash
 AGENT_BROWSER_SESSION="mysession"            # Default session name
+AGENT_BROWSER_PROFILE="~/.myapp"             # Persistent browser profile path
 AGENT_BROWSER_EXECUTABLE_PATH="/path/chrome" # Custom browser path
 AGENT_BROWSER_EXTENSIONS="/ext1,/ext2"       # Comma-separated extension paths
-AGENT_BROWSER_PROVIDER="your-cloud-browser-provider"  # Cloud browser provider (select browseruse or browserbase)
+AGENT_BROWSER_PROVIDER="browserbase"         # Cloud browser provider
+AGENT_BROWSER_ARGS="--no-sandbox,--disable-gpu" # Browser launch args
+AGENT_BROWSER_USER_AGENT="CustomAgent/1.0"   # Custom User-Agent string
+AGENT_BROWSER_PROXY="http://proxy:8080"      # Proxy server URL
+AGENT_BROWSER_PROXY_BYPASS="localhost,*.local" # Bypass proxy for these hosts
 AGENT_BROWSER_STREAM_PORT="9223"             # WebSocket streaming port
 AGENT_BROWSER_HOME="/path/to/agent-browser"  # Custom install location (for daemon.js)
 ```
@@ -330,6 +342,8 @@ For detailed patterns and best practices, see:
 | [references/authentication.md](references/authentication.md) | Login flows, OAuth, 2FA handling, state reuse |
 | [references/video-recording.md](references/video-recording.md) | Recording workflows for debugging and documentation |
 | [references/proxy-support.md](references/proxy-support.md) | Proxy configuration, geo-testing, rotating proxies |
+| [references/persistent-profiles.md](references/persistent-profiles.md) | Browser profile persistence, login state reuse |
+| [references/cloud-providers.md](references/cloud-providers.md) | Browserbase and Browser Use cloud integration |
 
 ## Ready-to-use templates
 
