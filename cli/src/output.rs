@@ -235,11 +235,6 @@ pub fn print_response(resp: &Response, json_mode: bool, action: Option<&str>) {
                 return;
             }
         }
-        // Screenshot base64
-        if let Some(base64) = data.get("base64").and_then(|v| v.as_str()) {
-            println!("{}", base64);
-            return;
-        }
         // Path-based operations (screenshot/pdf/trace/har/download/state/video)
         if let Some(path) = data.get("path").and_then(|v| v.as_str()) {
             match action.unwrap_or("") {
@@ -736,7 +731,7 @@ agent-browser screenshot - Take a screenshot
 Usage: agent-browser screenshot [path]
 
 Captures a screenshot of the current page. If no path is provided,
-outputs base64-encoded image data.
+saves to ~/.agent-browser/tmp/screenshots/ with a generated filename.
 
 Options:
   --full, -f           Capture full page (not just viewport)
