@@ -19,6 +19,67 @@ pnpm build:native
 ./bin/agent-browser install
 pnpm link --global`} />
 
+        <h2>Browser selection</h2>
+        <p>
+          agent-browser supports multiple browsers. By default, Chromium is used,
+          but you can select Firefox or webkit for specific use cases or platforms:
+        </p>
+
+        <h3>Platform compatibility</h3>
+        <table>
+          <thead>
+            <tr>
+              <th>Platform</th>
+              <th>Chromium</th>
+              <th>Firefox</th>
+              <th>webkit</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>x86_64 (Linux/Mac/Windows)</td>
+              <td>✅</td>
+              <td>✅</td>
+              <td>✅</td>
+            </tr>
+            <tr>
+              <td>ARM64 (Graviton, Cobalt, etc.)</td>
+              <td>❓*</td>
+              <td>✅</td>
+              <td>✅</td>
+            </tr>
+          </tbody>
+        </table>
+        <p>
+          <small>
+            *Chromium may not be available on all ARM64 systems. Firefox is recommended
+            for ARM64 deployments (AWS Graviton, Azure Cobalt, on-premises servers, etc.).
+          </small>
+        </p>
+
+        <h3>Using Firefox (recommended for ARM64)</h3>
+        <CodeBlock code={`# Via command line
+agent-browser --browser firefox
+
+# Via environment variable
+AGENT_BROWSER_BROWSER=firefox agent-browser`} />
+
+        <h3>Using webkit</h3>
+        <CodeBlock code={`# Via command line
+agent-browser --browser webkit
+
+# Via environment variable
+AGENT_BROWSER_BROWSER=webkit agent-browser`} />
+
+        <h3>Programmatic browser selection</h3>
+        <CodeBlock lang="typescript" code={`import { BrowserManager } from 'agent-browser';
+
+const browser = new BrowserManager();
+await browser.launch({
+  browser: 'firefox',  // or 'chromium', 'webkit'
+  headless: true,
+});`} />
+
         <h2>Linux dependencies</h2>
         <p>On Linux, install system dependencies:</p>
         <CodeBlock code={`agent-browser install --with-deps
@@ -52,6 +113,18 @@ export async function handler() {
   });
   // ... use browser
 }`} />
+
+        <h2>ARM64 troubleshooting</h2>
+        <h3>Chromium not found</h3>
+        <p>If you see "Chromium not found", use Firefox instead:</p>
+        <CodeBlock code={`agent-browser --browser firefox`} />
+
+        <h3>Verifying browser installation</h3>
+        <CodeBlock code={`# Check which browsers are available
+agent-browser --help
+
+# Or test directly
+agent-browser --browser firefox navigate https://example.com`} />
       </div>
     </div>
   );
