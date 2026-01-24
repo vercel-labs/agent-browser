@@ -361,7 +361,10 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                 }
                 _ => (None, None),
             };
-            Ok(json!({ "id": id, "action": "screenshot", "path": path, "selector": selector, "fullPage": flags.full }))
+            let mut cmd = json!({ "id": id, "action": "screenshot", "fullPage": flags.full });
+            if let Some(p) = path { cmd["path"] = json!(p); }
+            if let Some(s) = selector { cmd["selector"] = json!(s); }
+            Ok(cmd)
         }
         "pdf" => {
             let path = rest.get(0).ok_or_else(|| ParseError::MissingArguments {
