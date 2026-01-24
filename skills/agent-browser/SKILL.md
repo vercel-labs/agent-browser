@@ -338,12 +338,15 @@ For detailed patterns and best practices, see:
 | Reference | Description |
 |-----------|-------------|
 | [references/snapshot-refs.md](references/snapshot-refs.md) | Ref lifecycle, invalidation rules, troubleshooting |
+| [references/semantic-locators.md](references/semantic-locators.md) | Role, text, label locators for stable automation |
 | [references/session-management.md](references/session-management.md) | Parallel sessions, state persistence, concurrent scraping |
 | [references/authentication.md](references/authentication.md) | Login flows, OAuth, 2FA handling, state reuse |
+| [references/network-mocking.md](references/network-mocking.md) | API mocking, request blocking, error simulation |
 | [references/video-recording.md](references/video-recording.md) | Recording workflows for debugging and documentation |
 | [references/proxy-support.md](references/proxy-support.md) | Proxy configuration, geo-testing, rotating proxies |
 | [references/persistent-profiles.md](references/persistent-profiles.md) | Browser profile persistence, login state reuse |
 | [references/cloud-providers.md](references/cloud-providers.md) | Browserbase and Browser Use cloud integration |
+| [references/debugging.md](references/debugging.md) | Troubleshooting, traces, common issues |
 
 ## Ready-to-use templates
 
@@ -354,12 +357,18 @@ Executable workflow scripts for common patterns:
 | [templates/form-automation.sh](templates/form-automation.sh) | Form filling with validation |
 | [templates/authenticated-session.sh](templates/authenticated-session.sh) | Login once, reuse state |
 | [templates/capture-workflow.sh](templates/capture-workflow.sh) | Content extraction with screenshots |
+| [templates/download-workflow.sh](templates/download-workflow.sh) | File downloads, exports, PDFs |
+| [templates/network-mocking.sh](templates/network-mocking.sh) | API mocking for testing UI states |
+| [templates/multi-tab-workflow.sh](templates/multi-tab-workflow.sh) | Multi-tab comparison and parallel ops |
 
 Usage:
 ```bash
 ./templates/form-automation.sh https://example.com/form
 ./templates/authenticated-session.sh https://app.example.com/login
 ./templates/capture-workflow.sh https://example.com ./output
+./templates/download-workflow.sh https://example.com/exports ./downloads
+./templates/network-mocking.sh https://app.example.com ./screenshots
+./templates/multi-tab-workflow.sh https://a.com https://b.com ./output
 ```
 
 ## HTTPS Certificate Errors
