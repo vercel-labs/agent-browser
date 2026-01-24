@@ -308,7 +308,7 @@ export async function startDaemon(options?: { streamPort?: number }): Promise<vo
       if (arch === 'arm64') {
         console.info(
           `[agent-browser] ARM64 platform detected. Firefox is recommended for better compatibility. ` +
-          `Pass { browser: 'firefox', headless: true, ... } to launch().`
+            `Pass { browser: 'firefox', headless: true, ... } to launch().`
         );
       }
     });
@@ -323,7 +323,7 @@ export async function startDaemon(options?: { streamPort?: number }): Promise<vo
       if (arch === 'arm64') {
         console.info(
           `[agent-browser] ARM64 platform detected. Firefox is recommended for better compatibility. ` +
-          `Pass { browser: 'firefox', headless: true, ... } to launch().`
+            `Pass { browser: 'firefox', headless: true, ... } to launch().`
         );
       }
     });
