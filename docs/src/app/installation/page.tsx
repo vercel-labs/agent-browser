@@ -57,21 +57,10 @@ pnpm link --global`} />
           </small>
         </p>
 
-        <h3>Using Firefox (recommended for ARM64)</h3>
-        <CodeBlock code={`# Via command line
-agent-browser --browser firefox
-
-# Via environment variable
-AGENT_BROWSER_BROWSER=firefox agent-browser`} />
-
-        <h3>Using webkit</h3>
-        <CodeBlock code={`# Via command line
-agent-browser --browser webkit
-
-# Via environment variable
-AGENT_BROWSER_BROWSER=webkit agent-browser`} />
-
-        <h3>Programmatic browser selection</h3>
+        <h3>Browser selection</h3>
+        <p>
+          Use the <code>browser</code> parameter when launching to select Firefox or webkit:
+        </p>
         <CodeBlock lang="typescript" code={`import { BrowserManager } from 'agent-browser';
 
 const browser = new BrowserManager();
@@ -115,16 +104,20 @@ export async function handler() {
 }`} />
 
         <h2>ARM64 troubleshooting</h2>
-        <h3>Chromium not found</h3>
-        <p>If you see "Chromium not found", use Firefox instead:</p>
-        <CodeBlock code={`agent-browser --browser firefox`} />
+        <h3>Chromium not found on ARM64</h3>
+        <p>
+          On ARM64 systems (AWS Graviton, Azure Cobalt, etc.), agent-browser automatically selects Firefox as the default browser. If you encounter "Chromium not found" errors, ensure you're using a recent version where Firefox is the ARM64 default.
+        </p>
+        <p>
+          Alternatively, explicitly specify Firefox when launching:
+        </p>
+        <CodeBlock lang="typescript" code={`import { BrowserManager } from 'agent-browser';
 
-        <h3>Verifying browser installation</h3>
-        <CodeBlock code={`# Check which browsers are available
-agent-browser --help
-
-# Or test directly
-agent-browser --browser firefox navigate https://example.com`} />
+const browser = new BrowserManager();
+await browser.launch({
+  browser: 'firefox',
+  headless: true,
+});`} />
       </div>
     </div>
   );
