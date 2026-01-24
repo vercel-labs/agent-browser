@@ -156,7 +156,8 @@ Some proxies perform SSL inspection. If you encounter certificate errors:
 
 ```bash
 # For testing only - not recommended for production
-agent-browser open https://example.com --ignore-https-errors
+# Pass Chrome's --ignore-certificate-errors flag via --args
+agent-browser open https://example.com --args "--ignore-certificate-errors"
 ```
 
 ### Slow Performance

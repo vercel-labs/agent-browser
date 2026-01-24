@@ -19,6 +19,7 @@ import os from 'node:os';
 import { existsSync, mkdirSync, rmSync } from 'node:fs';
 import type { LaunchCommand } from './types.js';
 import { type RefMap, type EnhancedSnapshot, getEnhancedSnapshot, parseRef } from './snapshot.js';
+import { safeHeaderMerge } from './state-utils.js';
 
 // Screencast frame data from CDP
 export interface ScreencastFrame {
@@ -43,6 +44,12 @@ export interface ScreencastOptions {
   maxHeight?: number;
   everyNthFrame?: number;
 }
+import {
+  getEncryptionKey,
+  isEncryptedPayload,
+  decryptData,
+  ENCRYPTION_KEY_ENV,
+} from './state-utils.js';
 
 interface TrackedRequest {
   url: string;
@@ -100,6 +107,16 @@ export class BrowserManager {
   private recordingPage: Page | null = null;
   private recordingOutputPath: string = '';
   private recordingTempDir: string = '';
+  private launchWarnings: string[] = [];
+
+  /**
+   * Get and clear launch warnings (e.g., decryption failures)
+   */
+  getAndClearWarnings(): string[] {
+    const warnings = this.launchWarnings;
+    this.launchWarnings = [];
+    return warnings;
+  }
 
   /**
    * Check if browser is launched
@@ -526,10 +543,7 @@ export class BrowserManager {
     const handler = async (route: Route) => {
       const requestHeaders = route.request().headers();
       await route.continue({
-        headers: {
-          ...requestHeaders,
-          ...headers,
-        },
+        headers: safeHeaderMerge(requestHeaders, headers),
       });
     };
 
@@ -622,6 +636,13 @@ export class BrowserManager {
   }
 
   /**
+   * Get the current browser context (first context)
+   */
+  getContext(): BrowserContext | null {
+    return this.contexts[0] ?? null;
+  }
+
+  /**
    * Check if an existing CDP connection is still alive
    * by verifying we can access browser contexts and that at least one has pages
    */
@@ -650,12 +671,15 @@ export class BrowserManager {
    * Close a Browserbase session via API
    */
   private async closeBrowserbaseSession(sessionId: string, apiKey: string): Promise<void> {
-    await fetch(`https://api.browserbase.com/v1/sessions/${sessionId}`, {
+    const response = await fetch(`https://api.browserbase.com/v1/sessions/${sessionId}`, {
       method: 'DELETE',
       headers: {
         'X-BB-API-Key': apiKey,
       },
     });
+    if (!response.ok) {
+      throw new Error(`Failed to close Browserbase session: ${response.statusText}`);
+    }
   }
 
   /**
@@ -724,7 +748,7 @@ export class BrowserManager {
       this.browserbaseSessionId = session.id;
       this.browserbaseApiKey = browserbaseApiKey;
       this.browser = browser;
-      context.setDefaultTimeout(10000);
+      context.setDefaultTimeout(60000);
       this.contexts.push(context);
       this.pages.push(page);
       this.activePageIndex = 0;
@@ -905,10 +929,86 @@ export class BrowserManager {
         args: options.args,
       });
       this.cdpEndpoint = null;
+
+      // Check for auto-load state file (supports encrypted files)
+      // Type matches Playwright's expected storageState parameter
+      let storageState:
+        | string
+        | {
+            cookies: Array<{
+              name: string;
+              value: string;
+              domain: string;
+              path: string;
+              expires: number;
+              httpOnly: boolean;
+              secure: boolean;
+              sameSite: 'Strict' | 'Lax' | 'None';
+            }>;
+            origins: Array<{
+              origin: string;
+              localStorage: Array<{ name: string; value: string }>;
+            }>;
+          }
+        | undefined = undefined;
+      if (options.autoStateFilePath) {
+        try {
+          const fs = await import('fs');
+          if (fs.existsSync(options.autoStateFilePath)) {
+            const content = fs.readFileSync(options.autoStateFilePath, 'utf8');
+            const parsed = JSON.parse(content);
+
+            // Check if file is encrypted
+            if (isEncryptedPayload(parsed)) {
+              const key = getEncryptionKey();
+              if (key) {
+                try {
+                  const decrypted = decryptData(parsed, key);
+                  storageState = JSON.parse(decrypted);
+                  if (process.env.AGENT_BROWSER_DEBUG === '1') {
+                    console.error(
+                      `[DEBUG] Auto-loading session state (decrypted): ${options.autoStateFilePath}`
+                    );
+                  }
+                } catch (decryptErr) {
+                  // Decryption failed - likely wrong key
+                  const warning =
+                    'Failed to decrypt state file - wrong encryption key? Starting fresh.';
+                  this.launchWarnings.push(warning);
+                  console.error(`[WARN] ${warning}`);
+                  if (process.env.AGENT_BROWSER_DEBUG === '1') {
+                    console.error(`[DEBUG] Decryption error:`, decryptErr);
+                  }
+                }
+              } else {
+                const warning = `State file is encrypted but ${ENCRYPTION_KEY_ENV} not set - starting fresh`;
+                this.launchWarnings.push(warning);
+                console.error(`[WARN] ${warning}`);
+              }
+            } else {
+              // Plain text file - use file path directly
+              storageState = options.autoStateFilePath;
+              if (process.env.AGENT_BROWSER_DEBUG === '1') {
+                console.error(`[DEBUG] Auto-loading session state: ${options.autoStateFilePath}`);
+              }
+            }
+          }
+        } catch (err) {
+          // Invalid or corrupted state file - fall back to fresh browser
+          if (process.env.AGENT_BROWSER_DEBUG === '1') {
+            console.error(`[DEBUG] Failed to load state file, starting fresh:`, err);
+          }
+        }
+      }
+
+      this.cdpEndpoint = null;
+
+      // Create context with viewport, optional headers, and optional storage state
       context = await this.browser.newContext({
         viewport,
         extraHTTPHeaders: options.headers,
         userAgent: options.userAgent,
+        storageState: storageState,
         ...(options.proxy && { proxy: options.proxy }),
       });
     }

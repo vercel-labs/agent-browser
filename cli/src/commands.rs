@@ -1,6 +1,7 @@
 use serde_json::{json, Value};
 
 use crate::flags::Flags;
+use crate::validation::{is_valid_session_name, session_name_error};
 
 /// Error type for command parsing with contextual information
 #[derive(Debug)]
@@ -19,6 +20,8 @@ pub enum ParseError {
     },
     /// Argument exists but has an invalid value
     InvalidValue { message: String, usage: &'static str },
+    /// Invalid session name (path traversal or invalid characters)
+    InvalidSessionName { name: String },
 }
 
 impl ParseError {
@@ -45,6 +48,9 @@ impl ParseError {
             }
             ParseError::InvalidValue { message, usage } => {
                 format!("{}\nUsage: agent-browser {}", message, usage)
+            }
+            ParseError::InvalidSessionName { name } => {
+                session_name_error(name)
             }
         }
     }
@@ -105,11 +111,18 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
 
         // === Core Actions ===
         "click" => {
-            let sel = rest.get(0).ok_or_else(|| ParseError::MissingArguments {
-                context: "click".to_string(),
-                usage: "click <selector>",
-            })?;
-            Ok(json!({ "id": id, "action": "click", "selector": sel }))
+            let new_tab = rest.iter().any(|arg| *arg == "--new-tab");
+            let sel = rest.iter()
+                .find(|arg| **arg != "--new-tab")
+                .ok_or_else(|| ParseError::MissingArguments {
+                    context: "click".to_string(),
+                    usage: "click <selector> [--new-tab]",
+                })?;
+            if new_tab {
+                Ok(json!({ "id": id, "action": "click", "selector": sel, "newTab": true }))
+            } else {
+                Ok(json!({ "id": id, "action": "click", "selector": sel }))
+            }
         }
         "dblclick" => {
             let sel = rest.get(0).ok_or_else(|| ParseError::MissingArguments {
@@ -670,7 +683,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
 
         // === State ===
         "state" => {
-            const VALID: &[&str] = &["save", "load"];
+            const VALID: &[&str] = &["save", "load", "list", "clear", "show", "clean", "rename"];
             match rest.get(0).map(|s| *s) {
                 Some("save") => {
                     let path = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
@@ -686,13 +699,106 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                     })?;
                     Ok(json!({ "id": id, "action": "state_load", "path": path }))
                 }
+                Some("list") => {
+                    Ok(json!({ "id": id, "action": "state_list" }))
+                }
+                Some("clear") => {
+                    // state clear [name] or state clear --all
+                    let mut session_name: Option<&str> = None;
+                    let mut all = false;
+                    
+                    let mut i = 1;
+                    while i < rest.len() {
+                        match rest[i] {
+                            "--all" | "-a" => {
+                                all = true;
+                            }
+                            arg if !arg.starts_with('-') => {
+                                session_name = Some(arg);
+                            }
+                            _ => {}
+                        }
+                        i += 1;
+                    }
+                    
+                    // Validate session name if provided
+                    if let Some(name) = session_name {
+                        if !is_valid_session_name(name) {
+                            return Err(ParseError::InvalidSessionName { name: name.to_string() });
+                        }
+                    }
+                    
+                    let mut cmd = json!({ "id": id, "action": "state_clear" });
+                    if all {
+                        cmd["all"] = json!(true);
+                    }
+                    if let Some(name) = session_name {
+                        cmd["sessionName"] = json!(name);
+                    }
+                    Ok(cmd)
+                }
+                Some("show") => {
+                    let filename = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
+                        context: "state show".to_string(),
+                        usage: "state show <filename>",
+                    })?;
+                    Ok(json!({ "id": id, "action": "state_show", "filename": filename }))
+                }
+                Some("clean") => {
+                    // state clean --older-than <days>
+                    let mut days: Option<i64> = None;
+                    
+                    let mut i = 1;
+                    while i < rest.len() {
+                        match rest[i] {
+                            "--older-than" => {
+                                if let Some(d) = rest.get(i + 1) {
+                                    days = d.parse().ok();
+                                    i += 1;
+                                }
+                            }
+                            _ => {}
+                        }
+                        i += 1;
+                    }
+                    
+                    let days = days.ok_or_else(|| ParseError::MissingArguments {
+                        context: "state clean".to_string(),
+                        usage: "state clean --older-than <days>",
+                    })?;
+                    
+                    Ok(json!({ "id": id, "action": "state_clean", "days": days }))
+                }
+                Some("rename") => {
+                    let old_name = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
+                        context: "state rename".to_string(),
+                        usage: "state rename <old-name> <new-name>",
+                    })?;
+                    let new_name = rest.get(2).ok_or_else(|| ParseError::MissingArguments {
+                        context: "state rename".to_string(),
+                        usage: "state rename <old-name> <new-name>",
+                    })?;
+                    // Strip .json extension if provided
+                    let old_name = old_name.trim_end_matches(".json");
+                    let new_name = new_name.trim_end_matches(".json");
+                    
+                    // Validate both session names
+                    if !is_valid_session_name(old_name) {
+                        return Err(ParseError::InvalidSessionName { name: old_name.to_string() });
+                    }
+                    if !is_valid_session_name(new_name) {
+                        return Err(ParseError::InvalidSessionName { name: new_name.to_string() });
+                    }
+                    
+                    Ok(json!({ "id": id, "action": "state_rename", "oldName": old_name, "newName": new_name }))
+                }
                 Some(sub) => Err(ParseError::UnknownSubcommand {
                     subcommand: sub.to_string(),
                     valid_options: VALID,
                 }),
                 None => Err(ParseError::MissingArguments {
                     context: "state".to_string(),
-                    usage: "state <save|load> <path>",
+                    usage: "state <save|load|list|clear|show|clean|rename> ...",
                 }),
             }
         }
@@ -1212,6 +1318,7 @@ mod tests {
             args: None,
             user_agent: None,
             provider: None,
+            session_name: None,
         }
     }
 
@@ -1441,6 +1548,40 @@ mod tests {
         let cmd = parse_command(&args("click #button"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "click");
         assert_eq!(cmd["selector"], "#button");
+        assert!(cmd.get("newTab").is_none());
+    }
+
+    #[test]
+    fn test_click_new_tab() {
+        let cmd = parse_command(&args("click @e1 --new-tab"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "click");
+        assert_eq!(cmd["selector"], "@e1");
+        assert_eq!(cmd["newTab"], true);
+    }
+
+    #[test]
+    fn test_click_new_tab_flag_before_selector() {
+        let cmd = parse_command(&args("click --new-tab #button"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "click");
+        assert_eq!(cmd["selector"], "#button");
+        assert_eq!(cmd["newTab"], true);
+    }
+
+    #[test]
+    fn test_click_new_tab_only_should_error() {
+        let result = parse_command(&args("click --new-tab"), &default_flags());
+        assert!(result.is_err());
+        if let Err(e) = result {
+            let error_msg = e.format();
+            assert!(error_msg.contains("Missing arguments"));
+            assert!(error_msg.contains("click <selector> [--new-tab]"));
+        }
+    }
+
+    #[test]
+    fn test_click_missing_selector_should_error() {
+        let result = parse_command(&args("click"), &default_flags());
+        assert!(result.is_err());
     }
 
     #[test]

@@ -4,6 +4,7 @@ mod connection;
 mod flags;
 mod install;
 mod output;
+mod validation;
 
 use serde_json::json;
 use std::env;
@@ -178,6 +179,7 @@ fn main() {
                     ParseError::UnknownSubcommand { .. } => "unknown_subcommand",
                     ParseError::MissingArguments { .. } => "missing_arguments",
                     ParseError::InvalidValue { .. } => "invalid_value",
+                    ParseError::InvalidSessionName { .. } => "invalid_session_name",
                 };
                 println!(
                     r#"{{"success":false,"error":"{}","type":"{}"}}"#,
@@ -200,6 +202,7 @@ fn main() {
         flags.user_agent.as_deref(),
         flags.proxy.as_deref(),
         flags.proxy_bypass.as_deref(),
+        flags.session_name.as_deref(),
     ) {
         Ok(result) => result,
         Err(e) => {

@@ -16,6 +16,7 @@ pub struct Flags {
     pub args: Option<String>,
     pub user_agent: Option<String>,
     pub provider: Option<String>,
+    pub session_name: Option<String>,
 }
 
 pub fn parse_flags(args: &[String]) -> Flags {
@@ -40,6 +41,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
         args: env::var("AGENT_BROWSER_ARGS").ok(),
         user_agent: env::var("AGENT_BROWSER_USER_AGENT").ok(),
         provider: env::var("AGENT_BROWSER_PROVIDER").ok(),
+        session_name: env::var("AGENT_BROWSER_SESSION_NAME").ok(),
     };
 
     let mut i = 0;
@@ -115,6 +117,12 @@ pub fn parse_flags(args: &[String]) -> Flags {
                     i += 1;
                 }
             }
+            "--session-name" => {
+                if let Some(s) = args.get(i + 1) {
+                    flags.session_name = Some(s.clone());
+                    i += 1;
+                }
+            }
             _ => {}
         }
         i += 1;
@@ -142,6 +150,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--user-agent",
         "-p",
         "--provider",
+        "--session-name",
     ];
 
     for arg in args.iter() {

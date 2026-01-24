@@ -426,18 +426,42 @@ function compactTree(tree: string): string {
 
 /**
  * Parse a ref from command argument (e.g., "@e1" -> "e1")
+ * Uses charCodeAt for fast single-char prefix checks.
  */
 export function parseRef(arg: string): string | null {
-  if (arg.startsWith('@')) {
+  if (arg.length === 0) return null;
+
+  // Fast path: check first char with charCodeAt (64 = '@')
+  if (arg.charCodeAt(0) === 64) {
     return arg.slice(1);
   }
-  if (arg.startsWith('ref=')) {
+  // Check for 'ref=' prefix (only if long enough)
+  if (arg.length > 4 && arg.charCodeAt(0) === 114 && arg.slice(0, 4) === 'ref=') {
     return arg.slice(4);
   }
-  if (/^e\d+$/.test(arg)) {
+  // Check for bare ref like 'e1', 'e12' etc.
+  // Fast path: starts with 'e' (101) and has digits
+  if (arg.charCodeAt(0) === 101 && arg.length >= 2) {
+    // Verify remaining chars are digits (48-57)
+    for (let i = 1; i < arg.length; i++) {
+      const c = arg.charCodeAt(i);
+      if (c < 48 || c > 57) return null;
+    }
     return arg;
   }
   return null;
+}
+
+/**
+ * Count newlines in a string without allocating an array.
+ * More efficient than split('\n').length for large strings.
+ */
+function countLines(str: string): number {
+  let count = 1; // At least one line even if no newlines
+  for (let i = 0; i < str.length; i++) {
+    if (str.charCodeAt(i) === 10) count++; // 10 = '\n'
+  }
+  return count;
 }
 
 /**
@@ -456,7 +480,7 @@ export function getSnapshotStats(
   const interactive = Object.values(refs).filter((r) => INTERACTIVE_ROLES.has(r.role)).length;
 
   return {
-    lines: tree.split('\n').length,
+    lines: countLines(tree),
     chars: tree.length,
     tokens: Math.ceil(tree.length / 4),
     refs: Object.keys(refs).length,

@@ -87,7 +87,10 @@ export class StreamServer {
   start(): Promise<void> {
     return new Promise((resolve, reject) => {
       try {
-        this.wss = new WebSocketServer({ port: this.port });
+        // SECURITY: Bind to localhost only to prevent network exposure.
+        // The stream server allows direct input injection (mouse, keyboard, touch)
+        // which would be a critical security risk if exposed to the network.
+        this.wss = new WebSocketServer({ port: this.port, host: '127.0.0.1' });
 
         this.wss.on('connection', (ws) => {
           this.handleConnection(ws);

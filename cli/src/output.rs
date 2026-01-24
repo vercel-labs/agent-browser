@@ -268,6 +268,67 @@ pub fn print_response(resp: &Response, json_mode: bool, action: Option<&str>) {
             return;
         }
 
+        // State list
+        if let Some(files) = data.get("files").and_then(|v| v.as_array()) {
+            if let Some(dir) = data.get("directory").and_then(|v| v.as_str()) {
+                println!("\x1b[1mSaved states in {}\x1b[0m", dir);
+            }
+            if files.is_empty() {
+                println!("\x1b[2m  No state files found\x1b[0m");
+            } else {
+                for file in files {
+                    let filename = file.get("filename").and_then(|v| v.as_str()).unwrap_or("");
+                    let size = file.get("size").and_then(|v| v.as_i64()).unwrap_or(0);
+                    let modified = file.get("modified").and_then(|v| v.as_str()).unwrap_or("");
+                    let encrypted = file.get("encrypted").and_then(|v| v.as_bool()).unwrap_or(false);
+                    // Format size
+                    let size_str = if size > 1024 {
+                        format!("{:.1}KB", size as f64 / 1024.0)
+                    } else {
+                        format!("{}B", size)
+                    };
+                    // Format date (just show date part)
+                    let date_str = modified.split('T').next().unwrap_or(modified);
+                    // Show lock icon if encrypted
+                    let enc_str = if encrypted { " [encrypted]" } else { "" };
+                    println!("  {} \x1b[2m({}, {}){}\x1b[0m", filename, size_str, date_str, enc_str);
+                }
+            }
+            return;
+        }
+
+        // State rename
+        if let Some(true) = data.get("renamed").and_then(|v| v.as_bool()) {
+            let old_name = data.get("oldName").and_then(|v| v.as_str()).unwrap_or("");
+            let new_name = data.get("newName").and_then(|v| v.as_str()).unwrap_or("");
+            println!("{} Renamed {} -> {}", color::success_indicator(), old_name, new_name);
+            return;
+        }
+
+        // State clear
+        if let Some(cleared) = data.get("cleared").and_then(|v| v.as_i64()) {
+            println!("{} Cleared {} state file(s)", color::success_indicator(), cleared);
+            return;
+        }
+
+        // State show summary
+        if let Some(summary) = data.get("summary") {
+            let cookies = summary.get("cookies").and_then(|v| v.as_i64()).unwrap_or(0);
+            let origins = summary.get("origins").and_then(|v| v.as_i64()).unwrap_or(0);
+            let encrypted = data.get("encrypted").and_then(|v| v.as_bool()).unwrap_or(false);
+            let enc_str = if encrypted { " (encrypted)" } else { "" };
+            println!("State file summary{}:", enc_str);
+            println!("  Cookies: {}", cookies);
+            println!("  Origins with localStorage: {}", origins);
+            return;
+        }
+
+        // State clean
+        if let Some(cleaned) = data.get("cleaned").and_then(|v| v.as_i64()) {
+            println!("{} Cleaned {} old state file(s)", color::success_indicator(), cleaned);
+            return;
+        }
+
         // Informational note
         if let Some(note) = data.get("note").and_then(|v| v.as_str()) {
             println!("{}", note);
@@ -364,10 +425,14 @@ Examples:
             r##"
 agent-browser click - Click an element
 
-Usage: agent-browser click <selector>
+Usage: agent-browser click <selector> [--new-tab]
 
 Clicks on the specified element. The selector can be a CSS selector,
 XPath, or an element reference from snapshot (e.g., @e1).
+
+Options:
+  --new-tab            Open link in a new tab instead of navigating current tab
+                       (only works on elements with href attribute)
 
 Global Options:
   --json               Output as JSON
@@ -378,6 +443,7 @@ Examples:
   agent-browser click @e1
   agent-browser click "button.primary"
   agent-browser click "//button[@type='submit']"
+  agent-browser click @e3 --new-tab
 "##
         }
         "dblclick" => {
