@@ -12,8 +12,8 @@ agent-browser snapshot                    # Get accessibility tree with refs
 agent-browser click @e2                   # Click by ref from snapshot
 agent-browser fill @e3 "test@example.com" # Fill by ref
 agent-browser get text @e1                # Get text by ref
-agent-browser screenshot                  # Save to tmp dir
-agent-browser screenshot page.png         # Save to specific file
+agent-browser screenshot                  # Save to a temporary directory
+agent-browser screenshot page.png         # Save to a specific path
 agent-browser close`} />
 
         <h2>Traditional selectors</h2>

@@ -731,7 +731,7 @@ agent-browser screenshot - Take a screenshot
 Usage: agent-browser screenshot [path]
 
 Captures a screenshot of the current page. If no path is provided,
-saves to ~/.agent-browser/tmp/screenshots/ with a generated filename.
+saves to a temporary directory with a generated filename.
 
 Options:
   --full, -f           Capture full page (not just viewport)
