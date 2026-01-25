@@ -69,7 +69,7 @@ agent-browser scroll down 500     # Scroll page (default: down 300px)
 agent-browser scrollintoview @e1  # Scroll element into view (alias: scrollinto)
 agent-browser drag @e1 @e2        # Drag and drop
 agent-browser upload @e1 file.pdf # Upload files
-agent-browser download @e1 ./file.pdf # Download file (click element, save to path)
+agent-browser click @e1 && agent-browser wait --download ./file.pdf  # Download (click + wait)
 ```
 
 ### Get information

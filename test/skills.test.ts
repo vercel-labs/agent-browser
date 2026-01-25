@@ -265,7 +265,6 @@ describe('Skills Documentation', () => {
         'scroll',
         'drag',
         'upload',
-        'download',
       ];
       for (const cmd of interactionCommands) {
         expect(skillContent, `Missing interaction: ${cmd}`).toContain(`agent-browser ${cmd}`);
