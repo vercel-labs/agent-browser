@@ -12,6 +12,188 @@ use std::time::Duration;
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
 
+/// Find node executable, checking fnm directories on Windows.
+/// This is necessary because fnm creates temporary shell directories that aren't
+/// inherited when spawning new processes via Command.
+///
+/// Search order:
+/// 1. `where node` - works for direct install, nvm-windows, volta, etc.
+/// 2. FNM_MULTISHELL_PATH env var - if set by fnm
+/// 3. fnm_multishells directory scan - fallback for fnm users
+/// 4. Common installation paths - last resort
+///
+/// Note: Tested on Windows 10/11 with default fnm installation.
+/// Custom fnm configurations may require adjustments.
+/// Ref: https://github.com/Schniz/fnm/issues/1228
+#[cfg(windows)]
+fn find_node_executable() -> Option<PathBuf> {
+    // First, check if node is directly in PATH (works for non-fnm setups)
+    if let Ok(output) = Command::new("where")
+        .arg("node")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+    {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if let Some(first_line) = stdout.lines().next() {
+                let path = PathBuf::from(first_line.trim());
+                if path.exists() {
+                    return Some(path);
+                }
+            }
+        }
+    }
+
+    // Check FNM_MULTISHELL_PATH env var (set by `fnm env`)
+    // This is the official fnm environment variable for the current shell's node path
+    if let Some(fnm_path) = env::var_os("FNM_MULTISHELL_PATH") {
+        let node_path = PathBuf::from(&fnm_path).join("node.exe");
+        if node_path.exists() {
+            return Some(node_path);
+        }
+    }
+
+    // Fallback: scan fnm multishells directory
+    // This handles cases where FNM_MULTISHELL_PATH isn't inherited
+    // Default location: %LOCALAPPDATA%\fnm_multishells\
+    // Note: Use LOCALAPPDATA directly, avoid HOME which may have Unix-style path in Git Bash
+    let fnm_dir = if let Some(local_app_data) = env::var_os("LOCALAPPDATA") {
+        PathBuf::from(&local_app_data).join("fnm_multishells")
+    } else if let Some(user_profile) = env::var_os("USERPROFILE") {
+        PathBuf::from(&user_profile)
+            .join("AppData")
+            .join("Local")
+            .join("fnm_multishells")
+    } else {
+        PathBuf::new()
+    };
+
+    if fnm_dir.exists() {
+        // Get all fnm shell directories, sorted by modification time (newest first)
+        if let Ok(entries) = fs::read_dir(&fnm_dir) {
+            let mut dirs: Vec<_> = entries
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().is_dir())
+                .collect();
+
+            // Sort by modification time, newest first
+            dirs.sort_by(|a, b| {
+                let time_a = a.metadata().and_then(|m| m.modified()).ok();
+                let time_b = b.metadata().and_then(|m| m.modified()).ok();
+                time_b.cmp(&time_a)
+            });
+
+            for entry in dirs {
+                let node_path = entry.path().join("node.exe");
+                if node_path.exists() {
+                    return Some(node_path);
+                }
+            }
+        }
+    }
+
+    // Check common installation paths
+    let common_paths = [
+        "C:\\Program Files\\nodejs\\node.exe",
+        "C:\\Program Files (x86)\\nodejs\\node.exe",
+    ];
+
+    for path_str in &common_paths {
+        let p = PathBuf::from(path_str);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+
+    None
+}
+
+/// Find npx executable, checking fnm directories on Windows.
+/// Same search strategy as find_node_executable().
+///
+/// Note: Tested on Windows 10/11 with default fnm installation.
+/// Custom fnm configurations may require adjustments.
+#[cfg(windows)]
+pub fn find_npx_executable() -> Option<PathBuf> {
+    // First, check if npx is directly in PATH
+    if let Ok(output) = Command::new("where")
+        .arg("npx")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+    {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if let Some(first_line) = stdout.lines().next() {
+                let path = PathBuf::from(first_line.trim());
+                if path.exists() {
+                    return Some(path);
+                }
+            }
+        }
+    }
+
+    // Check FNM_MULTISHELL_PATH env var (set by `fnm env`)
+    if let Some(fnm_path) = env::var_os("FNM_MULTISHELL_PATH") {
+        let npx_path = PathBuf::from(&fnm_path).join("npx.cmd");
+        if npx_path.exists() {
+            return Some(npx_path);
+        }
+    }
+
+    // Fallback: scan fnm multishells directory
+    // Note: Use LOCALAPPDATA directly, avoid HOME which may have Unix-style path in Git Bash
+    let fnm_dir = if let Some(local_app_data) = env::var_os("LOCALAPPDATA") {
+        PathBuf::from(&local_app_data).join("fnm_multishells")
+    } else if let Some(user_profile) = env::var_os("USERPROFILE") {
+        PathBuf::from(&user_profile)
+            .join("AppData")
+            .join("Local")
+            .join("fnm_multishells")
+    } else {
+        PathBuf::new()
+    };
+
+    if fnm_dir.exists() {
+        if let Ok(entries) = fs::read_dir(&fnm_dir) {
+            let mut dirs: Vec<_> = entries
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().is_dir())
+                .collect();
+
+            dirs.sort_by(|a, b| {
+                let time_a = a.metadata().and_then(|m| m.modified()).ok();
+                let time_b = b.metadata().and_then(|m| m.modified()).ok();
+                time_b.cmp(&time_a)
+            });
+
+            for entry in dirs {
+                // Check for npx.cmd (Windows uses .cmd wrapper)
+                let npx_cmd = entry.path().join("npx.cmd");
+                if npx_cmd.exists() {
+                    return Some(npx_cmd);
+                }
+            }
+        }
+    }
+
+    // Check common installation paths
+    let common_paths = [
+        "C:\\Program Files\\nodejs\\npx.cmd",
+        "C:\\Program Files (x86)\\nodejs\\npx.cmd",
+    ];
+
+    for path_str in &common_paths {
+        let p = PathBuf::from(path_str);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+
+    None
+}
+
 #[derive(Serialize)]
 #[allow(dead_code)]
 pub struct Request {
@@ -121,6 +303,8 @@ fn get_port_path(session: &str) -> PathBuf {
     get_socket_dir().join(format!("{}.port", session))
 }
 
+/// Calculate port number for a session (must match daemon.js implementation).
+/// Port range: 49152-65534 (dynamic/private ports)
 #[cfg(windows)]
 fn get_port_for_session(session: &str) -> u16 {
     let mut hash: i32 = 0;
@@ -290,10 +474,15 @@ pub fn ensure_daemon(
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        
-        // On Windows, call node directly. Command::new handles PATH resolution (node.exe or node.cmd)
-        // and automatically quotes arguments containing spaces.
-        let mut cmd = Command::new("node");
+
+        // Find node executable, checking fnm directories
+        // This fixes the issue where fnm's temporary shell directories aren't inherited
+        let node_path = find_node_executable()
+            .ok_or("Node.js not found. Please ensure Node.js is installed. If using fnm, make sure a Node.js version is installed.")?;
+
+        // Use the full path to node.exe directly instead of cmd.exe /c
+        // This avoids PATH resolution issues with fnm
+        let mut cmd = Command::new(&node_path);
         cmd.arg(daemon_path)
             .env("AGENT_BROWSER_DAEMON", "1")
             .env("AGENT_BROWSER_SESSION", session);

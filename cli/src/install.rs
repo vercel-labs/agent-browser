@@ -1,6 +1,9 @@
 use crate::color;
 use std::process::{exit, Command, Stdio};
 
+#[cfg(windows)]
+use crate::connection::find_npx_executable;
+
 pub fn run_install(with_deps: bool) {
     let is_linux = cfg!(target_os = "linux");
 
@@ -136,15 +139,25 @@ pub fn run_install(with_deps: bool) {
     }
 
     println!("{}", color::cyan("Installing Chromium browser..."));
-    
-    // On Windows, we need to use cmd.exe to run npx because npx is actually npx.cmd
-    // and Command::new() doesn't resolve .cmd files the way the shell does.
-    // Pass the entire command as a single string to /c to handle paths with spaces.
+
+    // On Windows, find npx executable checking fnm directories
+    // This fixes the issue where fnm's temporary shell directories aren't inherited
     #[cfg(windows)]
-    let status = Command::new("cmd")
-        .args(["/c", "npx playwright install chromium"])
-        .status();
-    
+    let status = {
+        match find_npx_executable() {
+            Some(npx_path) => {
+                Command::new(&npx_path)
+                    .args(["playwright", "install", "chromium"])
+                    .status()
+            }
+            None => {
+                eprintln!("{} npx not found. Please ensure Node.js is installed.", color::error_indicator());
+                eprintln!("If using fnm, make sure a Node.js version is installed.");
+                exit(1);
+            }
+        }
+    };
+
     #[cfg(not(windows))]
     let status = Command::new("npx")
         .args(["playwright", "install", "chromium"])
