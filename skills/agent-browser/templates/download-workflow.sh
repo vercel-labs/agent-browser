@@ -22,18 +22,15 @@ agent-browser snapshot -i
 # Example: Download by clicking element
 # Uncomment and modify refs based on snapshot output
 
-# Method 1: Download command (click element and save file)
-# agent-browser download @e1 "$OUTPUT_DIR/report.pdf"
-
-# Method 2: Wait for download after click
+# Method 1: Wait for download after click
 # agent-browser click @e1
 # agent-browser wait --download "$OUTPUT_DIR/export.xlsx"
 
-# Method 3: Download with timeout
+# Method 2: Download with timeout
 # agent-browser click @e1
 # agent-browser wait --download "$OUTPUT_DIR/large-file.zip" --timeout 60000
 
-# Method 4: Multiple downloads
+# Method 3: Multiple downloads
 # for i in 1 2 3; do
 #     agent-browser click "@e$i"
 #     agent-browser wait --download "$OUTPUT_DIR/file-$i.pdf"
