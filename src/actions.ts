@@ -2,7 +2,7 @@ import type { Page, Frame } from 'playwright-core';
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import type { BrowserManager, ScreencastFrame } from './browser.js';
-import { getSocketDir } from './daemon.js';
+import { getAppDir } from './daemon.js';
 import type {
   Command,
   Response,
@@ -562,7 +562,7 @@ async function handleScreenshot(
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
       const random = Math.random().toString(36).substring(2, 8);
       const filename = `screenshot-${timestamp}-${random}.${ext}`;
-      const screenshotDir = path.join(getSocketDir(), 'tmp', 'screenshots');
+      const screenshotDir = path.join(getAppDir(), 'tmp', 'screenshots');
       mkdirSync(screenshotDir, { recursive: true });
       savePath = path.join(screenshotDir, filename);
     }
