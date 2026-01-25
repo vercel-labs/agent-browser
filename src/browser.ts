@@ -74,6 +74,8 @@ export class BrowserManager {
   private browserbaseApiKey: string | null = null;
   private browserUseSessionId: string | null = null;
   private browserUseApiKey: string | null = null;
+  private anchorbrowserSessionId: string | null = null;
+  private anchorbrowserApiKey: string | null = null;
   private contexts: BrowserContext[] = [];
   private pages: Page[] = [];
   private activePageIndex: number = 0;
@@ -810,6 +812,88 @@ export class BrowserManager {
     }
   }
 
+  private async connectToAnchorbrowser(): Promise<void> {
+    const anchorbrowserApiKey = process.env.ANCHORBROWSER_API_KEY;
+    if (!anchorbrowserApiKey) {
+      throw new Error('ANCHORBROWSER_API_KEY is required when using anchorbrowser as a provider');
+    }
+
+    const response = await fetch('https://api.anchorbrowser.io/v1/sessions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'anchor-api-key': anchorbrowserApiKey,
+        'X-Client-Source': 'vercel-agent-browser',
+      },
+    });
+    if (!response.ok) {
+      throw new Error(`Failed to create Anchorbrowser session: ${response.statusText}`);
+    }
+
+    let session: { data: { id: string; cdp_url: string; live_view_url: string } };
+    try {
+      session = (await response.json()) as {
+        data: { id: string; cdp_url: string; live_view_url: string };
+      };
+    } catch (error) {
+      throw new Error(
+        `Failed to parse Anchorbrowser session response: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+
+    if (!session.data.id || !session.data.cdp_url || !session.data.live_view_url) {
+      throw new Error(
+        `Invalid Anchorbrowser session response: missing ${!session.data.id ? 'id' : !session.data.cdp_url ? 'cdp_url' : !session.data.live_view_url ? 'live_view_url' : ''}`
+      );
+    }
+
+    const browser = await chromium.connectOverCDP(session.data.cdp_url).catch(() => {
+      throw new Error('Failed to connect to Anchorbrowser session via CDP');
+    });
+
+    try {
+      const contexts = browser.contexts();
+      let context: BrowserContext;
+      let page: Page;
+
+      if (contexts.length === 0) {
+        context = await browser.newContext();
+        page = await context.newPage();
+      } else {
+        context = contexts[0];
+        const pages = context.pages();
+        page = pages[0] ?? (await context.newPage());
+      }
+
+      this.anchorbrowserSessionId = session.data.id;
+      this.anchorbrowserApiKey = anchorbrowserApiKey;
+      this.browser = browser;
+      context.setDefaultTimeout(60000);
+      this.contexts.push(context);
+      this.pages.push(page);
+      this.activePageIndex = 0;
+      this.setupPageTracking(page);
+      this.setupContextTracking(context);
+    } catch (error) {
+      await this.closeAnchorbrowserSession(session.data.id, anchorbrowserApiKey).catch(
+        (sessionError) => {
+          console.error('Failed to close Anchorbrowser session during cleanup:', sessionError);
+        }
+      );
+      throw error;
+    }
+  }
+
+  private async closeAnchorbrowserSession(sessionId: string, apiKey: string): Promise<void> {
+    await fetch(`https://api.anchorbrowser.io/v1/sessions/${sessionId}`, {
+      method: 'DELETE',
+      headers: {
+        'anchor-api-key': apiKey,
+        'X-Client-Source': 'vercel-agent-browser',
+      },
+    });
+  }
+
   /**
    * Launch the browser with the specified options
    * If already launched, this is a no-op (browser stays open)
@@ -853,6 +937,10 @@ export class BrowserManager {
     }
     if (provider === 'browseruse') {
       await this.connectToBrowserUse();
+      return;
+    }
+    if (provider === 'anchorbrowser') {
+      await this.connectToAnchorbrowser();
       return;
     }
 
@@ -1604,6 +1692,14 @@ export class BrowserManager {
         }
       );
       this.browser = null;
+    } else if (this.anchorbrowserSessionId && this.anchorbrowserApiKey) {
+      await this.closeAnchorbrowserSession(
+        this.anchorbrowserSessionId,
+        this.anchorbrowserApiKey
+      ).catch((error) => {
+        console.error('Failed to close Anchorbrowser session:', error);
+      });
+      this.browser = null;
     } else if (this.cdpEndpoint !== null) {
       // CDP: only disconnect, don't close external app's pages
       if (this.browser) {
@@ -1631,6 +1727,8 @@ export class BrowserManager {
     this.browserbaseApiKey = null;
     this.browserUseSessionId = null;
     this.browserUseApiKey = null;
+    this.anchorbrowserSessionId = null;
+    this.anchorbrowserApiKey = null;
     this.isPersistentContext = false;
     this.activePageIndex = 0;
     this.refMap = {};

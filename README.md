@@ -739,6 +739,30 @@ When enabled, agent-browser connects to a Browser Use cloud session instead of l
 
 Get your API key from the [Browser Use Cloud Dashboard](https://cloud.browser-use.com/settings?tab=api-keys). Free credits are available to get started, with pay-as-you-go pricing after.
 
+
+### Anchorbrowser
+
+[Anchorbrowser](https://anchorbrowser.io) provides cloud browser infrastructure for AI agents. Use it when running agent-browser in environments where a local browser isn't available (serverless, CI/CD, etc.).
+
+To enable Anchorbrowser, use the `-p` flag:
+
+```bash
+export ANCHORBROWSER_API_KEY="your-api-key"
+agent-browser -p anchorbrowser open https://example.com
+```
+
+Or use environment variables for CI/scripts:
+
+```bash
+export AGENT_BROWSER_PROVIDER=anchorbrowser
+export ANCHORBROWSER_API_KEY="your-api-key"
+agent-browser open https://example.com
+```
+
+When enabled, agent-browser connects to a Anchorbrowser cloud session instead of launching a local browser. All commands work identically.
+
+Get your API key from the [Anchorbrowser Dashboard](https://app.anchorbrowser.io?api-keys). Free monthly credits are available to get started, with various pricing tiers for heavier usage. For more details, see [Anchorbrowser Pricing Page](https://anchorbrowser.io/#pricing).
+
 ## License
 
 Apache-2.0
