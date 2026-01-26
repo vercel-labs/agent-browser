@@ -1135,6 +1135,7 @@ export class BrowserManager {
     this.pages.push(page);
     this.activePageIndex = 0;
     this.setupPageTracking(page);
+    this.setupContextTracking(context);
   }
 
   /**
