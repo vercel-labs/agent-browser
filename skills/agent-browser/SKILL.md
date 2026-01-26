@@ -242,6 +242,7 @@ agent-browser --user-agent <ua> ...   # Custom User-Agent string
 agent-browser --headers <json> ...    # HTTP headers scoped to URL's origin
 agent-browser --executable-path <p>   # Custom browser executable
 agent-browser --extension <path> ...  # Load browser extension (repeatable)
+agent-browser --debug ...             # Debug output for troubleshooting
 agent-browser --help                  # Show help (-h)
 agent-browser --version               # Show version (-V)
 agent-browser <command> --help        # Show detailed help for a command
