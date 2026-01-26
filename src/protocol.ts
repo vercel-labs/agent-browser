@@ -46,6 +46,8 @@ const launchSchema = baseCommandSchema.extend({
   userAgent: z.string().optional(),
   provider: z.string().optional(),
   ignoreHTTPSErrors: z.boolean().optional(),
+  profile: z.string().optional(),
+  storageState: z.string().optional(),
 });
 
 const navigateSchema = baseCommandSchema.extend({

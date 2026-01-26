@@ -196,9 +196,22 @@ export async function startDaemon(options?: { streamPort?: number }): Promise<vo
 
   const server = net.createServer((socket) => {
     let buffer = '';
+    let httpChecked = false;
 
     socket.on('data', async (data) => {
       buffer += data.toString();
+
+      // Security: Detect and reject HTTP requests to prevent cross-origin attacks.
+      // Browsers using fetch() must send HTTP headers (e.g., "POST / HTTP/1.1"),
+      // while legitimate clients send raw JSON starting with "{".
+      if (!httpChecked) {
+        httpChecked = true;
+        const trimmed = buffer.trimStart();
+        if (/^(GET|POST|PUT|DELETE|HEAD|OPTIONS|PATCH|CONNECT|TRACE)\s/i.test(trimmed)) {
+          socket.destroy();
+          return;
+        }
+      }
 
       // Process complete lines
       while (buffer.includes('\n')) {
@@ -255,6 +268,8 @@ export async function startDaemon(options?: { streamPort?: number }): Promise<vo
               headless: process.env.AGENT_BROWSER_HEADED !== '1',
               executablePath: process.env.AGENT_BROWSER_EXECUTABLE_PATH,
               extensions: extensions,
+              profile: process.env.AGENT_BROWSER_PROFILE,
+              storageState: process.env.AGENT_BROWSER_STATE,
               args,
               userAgent: process.env.AGENT_BROWSER_USER_AGENT,
               proxy,

@@ -195,6 +195,8 @@ pub fn ensure_daemon(
     proxy: Option<&str>,
     proxy_bypass: Option<&str>,
     ignore_https_errors: bool,
+    profile: Option<&str>,
+    state: Option<&str>,
 ) -> Result<DaemonResult, String> {
     if is_daemon_running(session) && daemon_ready(session) {
         return Ok(DaemonResult {
@@ -205,7 +207,8 @@ pub fn ensure_daemon(
     // Ensure socket directory exists
     let socket_dir = get_socket_dir();
     if !socket_dir.exists() {
-        fs::create_dir_all(&socket_dir).map_err(|e| format!("Failed to create socket directory: {}", e))?;
+        fs::create_dir_all(&socket_dir)
+            .map_err(|e| format!("Failed to create socket directory: {}", e))?;
     }
 
     let exe_path = env::current_exe().map_err(|e| e.to_string())?;
@@ -271,6 +274,14 @@ pub fn ensure_daemon(
             cmd.env("AGENT_BROWSER_IGNORE_HTTPS_ERRORS", "1");
         }
 
+        if let Some(prof) = profile {
+            cmd.env("AGENT_BROWSER_PROFILE", prof);
+        }
+
+        if let Some(st) = state {
+            cmd.env("AGENT_BROWSER_STATE", st);
+        }
+
         // Create new process group and session to fully detach
         unsafe {
             cmd.pre_exec(|| {
@@ -290,7 +301,7 @@ pub fn ensure_daemon(
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        
+
         // On Windows, call node directly. Command::new handles PATH resolution (node.exe or node.cmd)
         // and automatically quotes arguments containing spaces.
         let mut cmd = Command::new("node");
@@ -326,8 +337,16 @@ pub fn ensure_daemon(
             cmd.env("AGENT_BROWSER_PROXY_BYPASS", pb);
         }
 
-         if ignore_https_errors {
+        if ignore_https_errors {
             cmd.env("AGENT_BROWSER_IGNORE_HTTPS_ERRORS", "1");
+        }
+
+        if let Some(prof) = profile {
+            cmd.env("AGENT_BROWSER_PROFILE", prof);
+        }
+
+        if let Some(st) = state {
+            cmd.env("AGENT_BROWSER_STATE", st);
         }
 
         // CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS
@@ -446,7 +465,9 @@ mod tests {
         env::set_var("AGENT_BROWSER_SOCKET_DIR", "");
         env::remove_var("XDG_RUNTIME_DIR");
 
-        assert!(get_socket_dir().to_string_lossy().ends_with(".agent-browser"));
+        assert!(get_socket_dir()
+            .to_string_lossy()
+            .ends_with(".agent-browser"));
     }
 
     #[test]
@@ -456,7 +477,10 @@ mod tests {
         env::remove_var("AGENT_BROWSER_SOCKET_DIR");
         env::set_var("XDG_RUNTIME_DIR", "/run/user/1000");
 
-        assert_eq!(get_socket_dir(), PathBuf::from("/run/user/1000/agent-browser"));
+        assert_eq!(
+            get_socket_dir(),
+            PathBuf::from("/run/user/1000/agent-browser")
+        );
     }
 
     #[test]
@@ -466,7 +490,9 @@ mod tests {
         env::set_var("AGENT_BROWSER_SOCKET_DIR", "");
         env::set_var("XDG_RUNTIME_DIR", "");
 
-        assert!(get_socket_dir().to_string_lossy().ends_with(".agent-browser"));
+        assert!(get_socket_dir()
+            .to_string_lossy()
+            .ends_with(".agent-browser"));
     }
 
     #[test]
@@ -478,6 +504,8 @@ mod tests {
 
         let result = get_socket_dir();
         assert!(result.to_string_lossy().ends_with(".agent-browser"));
-        assert!(result.to_string_lossy().contains("home") || result.to_string_lossy().contains("Users"));
+        assert!(
+            result.to_string_lossy().contains("home") || result.to_string_lossy().contains("Users")
+        );
     }
 }

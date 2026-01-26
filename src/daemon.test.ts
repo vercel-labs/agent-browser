@@ -3,6 +3,42 @@ import * as os from 'os';
 import * as path from 'path';
 import { getSocketDir } from './daemon.js';
 
+/**
+ * HTTP request detection pattern used in daemon.ts to prevent cross-origin attacks.
+ * This pattern detects HTTP method prefixes that browsers must send when using fetch().
+ */
+const HTTP_REQUEST_PATTERN = /^(GET|POST|PUT|DELETE|HEAD|OPTIONS|PATCH|CONNECT|TRACE)\s/i;
+
+describe('HTTP request detection (security)', () => {
+  it('should detect POST requests from fetch()', () => {
+    const httpRequest = 'POST / HTTP/1.1\r\nHost: 127.0.0.1:51234\r\n';
+    expect(HTTP_REQUEST_PATTERN.test(httpRequest.trimStart())).toBe(true);
+  });
+
+  it('should detect GET requests', () => {
+    expect(HTTP_REQUEST_PATTERN.test('GET / HTTP/1.1')).toBe(true);
+  });
+
+  it('should detect OPTIONS preflight requests', () => {
+    expect(HTTP_REQUEST_PATTERN.test('OPTIONS / HTTP/1.1')).toBe(true);
+  });
+
+  it('should NOT detect valid JSON commands', () => {
+    const jsonCommand = '{"id":"1","action":"navigate","url":"https://example.com"}';
+    expect(HTTP_REQUEST_PATTERN.test(jsonCommand.trimStart())).toBe(false);
+  });
+
+  it('should NOT detect JSON with leading whitespace', () => {
+    const jsonCommand = '  {"id":"1","action":"click","selector":"button"}';
+    expect(HTTP_REQUEST_PATTERN.test(jsonCommand.trimStart())).toBe(false);
+  });
+
+  it('should be case insensitive for HTTP methods', () => {
+    expect(HTTP_REQUEST_PATTERN.test('post / HTTP/1.1')).toBe(true);
+    expect(HTTP_REQUEST_PATTERN.test('Post / HTTP/1.1')).toBe(true);
+  });
+});
+
 describe('getSocketDir', () => {
   const originalEnv = { ...process.env };
 
