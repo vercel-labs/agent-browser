@@ -1,5 +1,11 @@
 # agent-browser
 
+## 0.8.0
+
+### Minor Changes
+
+- e059730: Added Kernel cloud browser provider integration with support for stealth mode and persistent profiles. Added --ignore-https-errors flag for working with self-signed certificates. Enhanced cookies set command with additional options for domain, path, httpOnly, secure, sameSite, and expires parameters.
+
 ## 0.7.6
 
 ### Patch Changes
