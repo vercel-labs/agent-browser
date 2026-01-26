@@ -6,8 +6,9 @@ Connect to cloud browser infrastructure for scalable automation without managing
 
 | Provider | Description |
 |----------|-------------|
+| `kernel` | [Kernel](https://www.kernel.sh) - Cloud browsers with stealth mode and profiles |
 | `browserbase` | [Browserbase](https://browserbase.com) - Headless browser infrastructure |
-| `browser-use` | [Browser Use](https://browser-use.com) - AI-native browser automation |
+| `browseruse` | [Browser Use](https://browser-use.com) - AI-native browser automation |
 
 ## Basic Usage
 
@@ -20,6 +21,59 @@ agent-browser --provider browserbase open https://example.com
 export AGENT_BROWSER_PROVIDER="browserbase"
 agent-browser open https://example.com
 ```
+
+## Kernel Setup
+
+[Kernel](https://www.kernel.sh) provides cloud browser infrastructure for AI agents with stealth mode and persistent profiles.
+
+### 1. Get API Key
+
+Sign up at [dashboard.onkernel.com](https://dashboard.onkernel.com) and get your API key.
+
+### 2. Configure Environment
+
+```bash
+export KERNEL_API_KEY="your-api-key"
+```
+
+### 3. Use with agent-browser
+
+```bash
+agent-browser -p kernel open https://example.com
+agent-browser -p kernel snapshot -i
+agent-browser -p kernel click @e1
+agent-browser -p kernel close
+```
+
+### Kernel-Specific Options
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `KERNEL_API_KEY` | Required API key | (none) |
+| `KERNEL_HEADLESS` | Headless mode (`true`/`false`) | `false` |
+| `KERNEL_STEALTH` | Stealth mode to avoid bot detection | `true` |
+| `KERNEL_TIMEOUT_SECONDS` | Session timeout in seconds | `300` |
+| `KERNEL_PROFILE_NAME` | Profile name for persistent cookies/logins | (none) |
+
+### Profile Persistence with Kernel
+
+Kernel uniquely supports persistent profiles in the cloud:
+
+```bash
+# First session - login and save to profile
+export KERNEL_PROFILE_NAME="my-app-profile"
+agent-browser -p kernel open https://app.example.com/login
+agent-browser -p kernel fill @e1 "username"
+agent-browser -p kernel fill @e2 "password"
+agent-browser -p kernel click @e3
+agent-browser -p kernel close  # Cookies saved to profile
+
+# Later sessions - profile auto-loads
+export KERNEL_PROFILE_NAME="my-app-profile"
+agent-browser -p kernel open https://app.example.com/dashboard  # Already logged in!
+```
+
+---
 
 ## Browserbase Setup
 
@@ -59,10 +113,10 @@ export BROWSER_USE_API_KEY="your-api-key"
 ### 3. Use with agent-browser
 
 ```bash
-agent-browser -p browser-use open https://example.com
-agent-browser -p browser-use snapshot -i
-agent-browser -p browser-use click @e1
-agent-browser -p browser-use close
+agent-browser -p browseruse open https://example.com
+agent-browser -p browseruse snapshot -i
+agent-browser -p browseruse click @e1
+agent-browser -p browseruse close
 ```
 
 ## Remote CDP WebSocket
@@ -88,13 +142,16 @@ agent-browser --cdp "wss://browser.example.com/ws" snapshot -i
 When using cloud providers:
 
 - **No extensions** - Browser extensions require local browser
-- **No --headed** - Browsers run headless in the cloud
-- **No --profile** - Persistent profiles are local-only
+- **No --headed** - Browsers run headless in the cloud (except Kernel: headful by default)
+- **No --profile** - Persistent profiles are local-only (except Kernel: use `KERNEL_PROFILE_NAME`)
 
 ```bash
-# These will error with -p flag
+# These will error with most providers
 agent-browser -p browserbase --extension ./ext  # Error
 agent-browser -p browserbase --headed           # Error
+
+# Kernel supports profiles via its own env var
+KERNEL_PROFILE_NAME="myprofile" agent-browser -p kernel open https://example.com  # Works!
 ```
 
 ## Common Patterns
