@@ -40,9 +40,6 @@ yarn.lock
 .env
 .env.local
 
-# Claude Code plugin
-.claude/
-
 # opensrc - source code for packages
 opensrc/
 
