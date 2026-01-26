@@ -1106,7 +1106,7 @@ export class BrowserManager {
       return;
     }
 
-    const browserType = options.browser ?? 'chromium';
+
     if (hasExtensions && browserType !== 'chromium') {
       throw new Error('Extensions are only supported in Chromium');
     }
