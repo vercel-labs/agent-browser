@@ -170,7 +170,12 @@ agent-browser set media light reduced-motion  # Light mode + reduced motion
 
 ```bash
 agent-browser cookies                     # Get all cookies
-agent-browser cookies set name value      # Set cookie
+agent-browser cookies set name value      # Set cookie (basic)
+agent-browser cookies set name value --url https://app.example.com  # Set for specific URL
+agent-browser cookies set name value --domain example.com --path /api  # With domain/path
+agent-browser cookies set name value --httpOnly --secure  # Security flags
+agent-browser cookies set name value --sameSite Strict    # SameSite policy (Strict|Lax|None)
+agent-browser cookies set name value --expires 1735689600 # Unix timestamp expiry
 agent-browser cookies clear               # Clear cookies
 agent-browser storage local               # Get all localStorage
 agent-browser storage local key           # Get specific key
