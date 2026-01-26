@@ -778,6 +778,7 @@ export class BrowserManager {
       this.browser = browser;
       context.setDefaultTimeout(10000);
       this.contexts.push(context);
+      this.setupContextTracking(context);
       this.pages.push(page);
       this.activePageIndex = 0;
       this.setupPageTracking(page);
@@ -1130,11 +1131,15 @@ export class BrowserManager {
 
     context.setDefaultTimeout(60000);
     this.contexts.push(context);
+    this.setupContextTracking(context);
 
     const page = context.pages()[0] ?? (await context.newPage());
-    this.pages.push(page);
-    this.activePageIndex = 0;
-    this.setupPageTracking(page);
+    // Only add if not already tracked (setupContextTracking may have already added it via 'page' event)
+    if (!this.pages.includes(page)) {
+      this.pages.push(page);
+      this.setupPageTracking(page);
+    }
+    this.activePageIndex = this.pages.length > 0 ? this.pages.length - 1 : 0;
   }
 
   /**
@@ -1243,12 +1248,16 @@ export class BrowserManager {
   }
 
   /**
-   * Set up tracking for new pages in a context (for CDP connections)
+   * Set up tracking for new pages in a context (for CDP connections and popups/new tabs)
+   * This handles pages created externally (e.g., via target="_blank" links)
    */
   private setupContextTracking(context: BrowserContext): void {
     context.on('page', (page) => {
-      this.pages.push(page);
-      this.setupPageTracking(page);
+      // Only add if not already tracked (avoids duplicates when newTab() creates pages)
+      if (!this.pages.includes(page)) {
+        this.pages.push(page);
+        this.setupPageTracking(page);
+      }
     });
   }
 
@@ -1265,11 +1274,12 @@ export class BrowserManager {
 
     const context = this.contexts[0]; // Use first context for tabs
     const page = await context.newPage();
-    this.pages.push(page);
+    // Only add if not already tracked (setupContextTracking may have already added it via 'page' event)
+    if (!this.pages.includes(page)) {
+      this.pages.push(page);
+      this.setupPageTracking(page);
+    }
     this.activePageIndex = this.pages.length - 1;
-
-    // Set up tracking for the new page
-    this.setupPageTracking(page);
 
     return { index: this.activePageIndex, total: this.pages.length };
   }
@@ -1290,13 +1300,15 @@ export class BrowserManager {
     });
     context.setDefaultTimeout(60000);
     this.contexts.push(context);
+    this.setupContextTracking(context);
 
     const page = await context.newPage();
-    this.pages.push(page);
+    // Only add if not already tracked (setupContextTracking may have already added it via 'page' event)
+    if (!this.pages.includes(page)) {
+      this.pages.push(page);
+      this.setupPageTracking(page);
+    }
     this.activePageIndex = this.pages.length - 1;
-
-    // Set up tracking for the new page
-    this.setupPageTracking(page);
 
     return { index: this.activePageIndex, total: this.pages.length };
   }
