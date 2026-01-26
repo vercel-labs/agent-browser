@@ -106,7 +106,11 @@ fn run_session(args: &[String], session: &str, json_mode: bool) {
             } else {
                 println!("Active sessions:");
                 for s in &sessions {
-                    let marker = if s == session { color::cyan("→") } else { " ".to_string() };
+                    let marker = if s == session {
+                        color::cyan("→")
+                    } else {
+                        " ".to_string()
+                    };
                     println!("{} {}", marker, s);
                 }
             }
@@ -200,6 +204,9 @@ fn main() {
         flags.user_agent.as_deref(),
         flags.proxy.as_deref(),
         flags.proxy_bypass.as_deref(),
+        flags.ignore_https_errors,
+        flags.profile.as_deref(),
+        flags.state.as_deref(),
     ) {
         Ok(result) => result,
         Err(e) => {
@@ -217,12 +224,18 @@ fn main() {
         let has_extensions = !flags.extensions.is_empty();
         let ignored_flags: Vec<&str> = [
             flags.executable_path.as_ref().map(|_| "--executable-path"),
-            if has_extensions { Some("--extension") } else { None },
+            if has_extensions {
+                Some("--extension")
+            } else {
+                None
+            },
             flags.profile.as_ref().map(|_| "--profile"),
+            flags.state.as_ref().map(|_| "--state"),
             flags.args.as_ref().map(|_| "--args"),
             flags.user_agent.as_ref().map(|_| "--user-agent"),
             flags.proxy.as_ref().map(|_| "--proxy"),
             flags.proxy_bypass.as_ref().map(|_| "--proxy-bypass"),
+            flags.ignore_https_errors.then(|| "--ignore-https-errors"),
         ]
         .into_iter()
         .flatten()
@@ -234,6 +247,10 @@ fn main() {
                 color::warning_indicator(),
                 ignored_flags.join(", ")
             );
+        }
+
+        if flags.ignore_https_errors {
+            eprintln!("{} --ignore-https-errors ignored: daemon already running. Use 'agent-browser close' first to restart with this option.", color::warning_indicator());
         }
     }
 
@@ -261,7 +278,7 @@ fn main() {
     // Connect via CDP if --cdp flag is set
     // Accepts either a port number (e.g., "9222") or a full URL (e.g., "ws://..." or "wss://...")
     if let Some(ref cdp_value) = flags.cdp {
-        let launch_cmd = if cdp_value.starts_with("ws://")
+        let mut launch_cmd = if cdp_value.starts_with("ws://")
             || cdp_value.starts_with("wss://")
             || cdp_value.starts_with("http://")
             || cdp_value.starts_with("https://")
@@ -317,6 +334,10 @@ fn main() {
             })
         };
 
+        if flags.ignore_https_errors {
+            launch_cmd["ignoreHTTPSErrors"] = json!(true);
+        }
+
         let err = match send_command(launch_cmd, &flags.session) {
             Ok(resp) if resp.success => None,
             Ok(resp) => Some(
@@ -346,7 +367,10 @@ fn main() {
 
         let err = match send_command(launch_cmd, &flags.session) {
             Ok(resp) if resp.success => None,
-            Ok(resp) => Some(resp.error.unwrap_or_else(|| "Provider connection failed".to_string())),
+            Ok(resp) => Some(
+                resp.error
+                    .unwrap_or_else(|| "Provider connection failed".to_string()),
+            ),
             Err(e) => Some(e.to_string()),
         };
 
@@ -361,19 +385,33 @@ fn main() {
     }
 
     // Launch headed browser or configure browser options (without CDP or provider)
-    if (flags.headed || flags.profile.is_some() || flags.proxy.is_some() || flags.args.is_some() || flags.user_agent.is_some()) && flags.cdp.is_none() && flags.provider.is_none() {
+    if (flags.headed
+        || flags.profile.is_some()
+        || flags.state.is_some()
+        || flags.proxy.is_some()
+        || flags.args.is_some()
+        || flags.user_agent.is_some())
+        && flags.cdp.is_none()
+        && flags.provider.is_none()
+    {
         let mut launch_cmd = json!({
             "id": gen_id(),
             "action": "launch",
             "headless": !flags.headed
         });
 
-        let cmd_obj = launch_cmd.as_object_mut()
+        let cmd_obj = launch_cmd
+            .as_object_mut()
             .expect("json! macro guarantees object type");
 
         // Add profile path if specified
         if let Some(ref profile_path) = flags.profile {
             cmd_obj.insert("profile".to_string(), json!(profile_path));
+        }
+
+        // Add state path if specified
+        if let Some(ref state_path) = flags.state {
+            cmd_obj.insert("storageState".to_string(), json!(state_path));
         }
 
         if let Some(ref proxy_str) = flags.proxy {
@@ -401,9 +439,17 @@ fn main() {
             cmd_obj.insert("args".to_string(), json!(args_vec));
         }
 
+        if flags.ignore_https_errors {
+            launch_cmd["ignoreHTTPSErrors"] = json!(true);
+        }
+
         if let Err(e) = send_command(launch_cmd, &flags.session) {
             if !flags.json {
-                eprintln!("{} Could not configure browser: {}", color::warning_indicator(), e);
+                eprintln!(
+                    "{} Could not configure browser: {}",
+                    color::warning_indicator(),
+                    e
+                );
             }
         }
     }
@@ -412,9 +458,7 @@ fn main() {
         Ok(resp) => {
             let success = resp.success;
             // Extract action for context-specific output handling
-            let action = cmd
-                .get("action")
-                .and_then(|v| v.as_str());
+            let action = cmd.get("action").and_then(|v| v.as_str());
             print_response(&resp, flags.json, action);
             if !success {
                 exit(1);

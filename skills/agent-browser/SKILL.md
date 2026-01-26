@@ -249,7 +249,7 @@ agent-browser --proxy socks5://proxy.com:1080 open example.com
 AGENT_BROWSER_SESSION="mysession"            # Default session name
 AGENT_BROWSER_EXECUTABLE_PATH="/path/chrome" # Custom browser path
 AGENT_BROWSER_EXTENSIONS="/ext1,/ext2"       # Comma-separated extension paths
-AGENT_BROWSER_PROVIDER="browserbase"         # Cloud browser provider
+AGENT_BROWSER_PROVIDER="your-cloud-browser-provider"  # Cloud browser provider (select browseruse or browserbase)
 AGENT_BROWSER_STREAM_PORT="9223"             # WebSocket streaming port
 AGENT_BROWSER_HOME="/path/to/agent-browser"  # Custom install location (for daemon.js)
 ```
@@ -346,4 +346,11 @@ Usage:
 ./templates/form-automation.sh https://example.com/form
 ./templates/authenticated-session.sh https://app.example.com/login
 ./templates/capture-workflow.sh https://example.com ./output
+```
+
+## HTTPS Certificate Errors
+
+For sites with self-signed or invalid certificates:
+```bash
+agent-browser open https://localhost:8443 --ignore-https-errors
 ```

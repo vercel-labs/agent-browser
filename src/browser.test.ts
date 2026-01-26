@@ -402,6 +402,7 @@ describe('BrowserManager', () => {
               { url: () => 'http://anothersite.com', on: vi.fn() },
             ],
             on: vi.fn(),
+            setDefaultTimeout: vi.fn(),
           },
         ],
         close: vi.fn(),

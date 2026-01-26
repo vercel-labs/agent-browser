@@ -11,17 +11,24 @@ pub struct Flags {
     pub cdp: Option<String>,
     pub extensions: Vec<String>,
     pub profile: Option<String>,
+    pub state: Option<String>,
     pub proxy: Option<String>,
     pub proxy_bypass: Option<String>,
     pub args: Option<String>,
     pub user_agent: Option<String>,
     pub provider: Option<String>,
+    pub ignore_https_errors: bool,
 }
 
 pub fn parse_flags(args: &[String]) -> Flags {
     let extensions_env = env::var("AGENT_BROWSER_EXTENSIONS")
         .ok()
-        .map(|s| s.split(',').map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect::<Vec<_>>())
+        .map(|s| {
+            s.split(',')
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty())
+                .collect::<Vec<_>>()
+        })
         .unwrap_or_default();
 
     let mut flags = Flags {
@@ -35,11 +42,13 @@ pub fn parse_flags(args: &[String]) -> Flags {
         cdp: None,
         extensions: extensions_env,
         profile: env::var("AGENT_BROWSER_PROFILE").ok(),
+        state: env::var("AGENT_BROWSER_STATE").ok(),
         proxy: env::var("AGENT_BROWSER_PROXY").ok(),
         proxy_bypass: env::var("AGENT_BROWSER_PROXY_BYPASS").ok(),
         args: env::var("AGENT_BROWSER_ARGS").ok(),
         user_agent: env::var("AGENT_BROWSER_USER_AGENT").ok(),
         provider: env::var("AGENT_BROWSER_PROVIDER").ok(),
+        ignore_https_errors: false,
     };
 
     let mut i = 0;
@@ -66,13 +75,13 @@ pub fn parse_flags(args: &[String]) -> Flags {
                     flags.executable_path = Some(s.clone());
                     i += 1;
                 }
-            },
+            }
             "--extension" => {
                 if let Some(s) = args.get(i + 1) {
                     flags.extensions.push(s.clone());
                     i += 1;
                 }
-            },
+            }
             "--cdp" => {
                 if let Some(s) = args.get(i + 1) {
                     flags.cdp = Some(s.clone());
@@ -82,6 +91,12 @@ pub fn parse_flags(args: &[String]) -> Flags {
             "--profile" => {
                 if let Some(s) = args.get(i + 1) {
                     flags.profile = Some(s.clone());
+                    i += 1;
+                }
+            }
+            "--state" => {
+                if let Some(s) = args.get(i + 1) {
+                    flags.state = Some(s.clone());
                     i += 1;
                 }
             }
@@ -115,6 +130,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
                     i += 1;
                 }
             }
+            "--ignore-https-errors" => flags.ignore_https_errors = true,
             _ => {}
         }
         i += 1;
@@ -127,7 +143,13 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
     let mut skip_next = false;
 
     // Global flags that should be stripped from command args
-    const GLOBAL_FLAGS: &[&str] = &["--json", "--full", "--headed", "--debug"];
+    const GLOBAL_FLAGS: &[&str] = &[
+        "--json",
+        "--full",
+        "--headed",
+        "--debug",
+        "--ignore-https-errors",
+    ];
     // Global flags that take a value (need to skip the next arg too)
     const GLOBAL_FLAGS_WITH_VALUE: &[&str] = &[
         "--session",
@@ -136,6 +158,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--cdp",
         "--extension",
         "--profile",
+        "--state",
         "--proxy",
         "--proxy-bypass",
         "--args",

@@ -87,7 +87,11 @@ pub fn print_response(resp: &Response, json_mode: bool, action: Option<&str>) {
                     .unwrap_or("Untitled");
                 let url = tab.get("url").and_then(|v| v.as_str()).unwrap_or("");
                 let active = tab.get("active").and_then(|v| v.as_bool()).unwrap_or(false);
-                let marker = if active { color::cyan("→") } else { " ".to_string() };
+                let marker = if active {
+                    color::cyan("→")
+                } else {
+                    " ".to_string()
+                };
                 println!("{} [{}] {} - {}", marker, i, title, url);
             }
             return;
@@ -126,7 +130,10 @@ pub fn print_response(resp: &Response, json_mode: bool, action: Option<&str>) {
                 for req in requests {
                     let method = req.get("method").and_then(|v| v.as_str()).unwrap_or("GET");
                     let url = req.get("url").and_then(|v| v.as_str()).unwrap_or("");
-                    let resource_type = req.get("resourceType").and_then(|v| v.as_str()).unwrap_or("");
+                    let resource_type = req
+                        .get("resourceType")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
                     println!("{} {} ({})", method, url, resource_type);
                 }
             }
@@ -153,7 +160,7 @@ pub fn print_response(resp: &Response, json_mode: bool, action: Option<&str>) {
                 let tag = el.get("tag").and_then(|v| v.as_str()).unwrap_or("?");
                 let text = el.get("text").and_then(|v| v.as_str()).unwrap_or("");
                 println!("[{}] {} \"{}\"", i, tag, text);
-                
+
                 if let Some(box_data) = el.get("box") {
                     let w = box_data.get("width").and_then(|v| v.as_i64()).unwrap_or(0);
                     let h = box_data.get("height").and_then(|v| v.as_i64()).unwrap_or(0);
@@ -161,15 +168,30 @@ pub fn print_response(resp: &Response, json_mode: bool, action: Option<&str>) {
                     let y = box_data.get("y").and_then(|v| v.as_i64()).unwrap_or(0);
                     println!("    box: {}x{} at ({}, {})", w, h, x, y);
                 }
-                
+
                 if let Some(styles) = el.get("styles") {
-                    let font_size = styles.get("fontSize").and_then(|v| v.as_str()).unwrap_or("");
-                    let font_weight = styles.get("fontWeight").and_then(|v| v.as_str()).unwrap_or("");
-                    let font_family = styles.get("fontFamily").and_then(|v| v.as_str()).unwrap_or("");
+                    let font_size = styles
+                        .get("fontSize")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let font_weight = styles
+                        .get("fontWeight")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let font_family = styles
+                        .get("fontFamily")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
                     let color = styles.get("color").and_then(|v| v.as_str()).unwrap_or("");
-                    let bg = styles.get("backgroundColor").and_then(|v| v.as_str()).unwrap_or("");
-                    let radius = styles.get("borderRadius").and_then(|v| v.as_str()).unwrap_or("");
-                    
+                    let bg = styles
+                        .get("backgroundColor")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let radius = styles
+                        .get("borderRadius")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+
                     println!("    font: {} {} {}", font_size, font_weight, font_family);
                     println!("    color: {}", color);
                     println!("    background: {}", bg);
@@ -199,9 +221,17 @@ pub fn print_response(resp: &Response, json_mode: bool, action: Option<&str>) {
         }
         // Recording restart (has "stopped" field - from recording_restart action)
         if data.get("stopped").is_some() {
-            let path = data.get("path").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let path = data
+                .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
             if let Some(prev_path) = data.get("previousPath").and_then(|v| v.as_str()) {
-                println!("{} Recording restarted: {} (previous saved to {})", color::success_indicator(), path, prev_path);
+                println!(
+                    "{} Recording restarted: {} (previous saved to {})",
+                    color::success_indicator(),
+                    path,
+                    prev_path
+                );
             } else {
                 println!("{} Recording started: {}", color::success_indicator(), path);
             }
@@ -211,7 +241,12 @@ pub fn print_response(resp: &Response, json_mode: bool, action: Option<&str>) {
         if data.get("frames").is_some() {
             if let Some(path) = data.get("path").and_then(|v| v.as_str()) {
                 if let Some(error) = data.get("error").and_then(|v| v.as_str()) {
-                    println!("{} Recording saved to {} - {}", color::warning_indicator(), path, error);
+                    println!(
+                        "{} Recording saved to {} - {}",
+                        color::warning_indicator(),
+                        path,
+                        error
+                    );
                 } else {
                     println!("{} Recording saved to {}", color::success_indicator(), path);
                 }
@@ -223,14 +258,24 @@ pub fn print_response(resp: &Response, json_mode: bool, action: Option<&str>) {
         // Download response (has "suggestedFilename" or "filename" field)
         if data.get("suggestedFilename").is_some() || data.get("filename").is_some() {
             if let Some(path) = data.get("path").and_then(|v| v.as_str()) {
-                let filename = data.get("suggestedFilename")
+                let filename = data
+                    .get("suggestedFilename")
                     .or_else(|| data.get("filename"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
                 if filename.is_empty() {
-                    println!("{} Downloaded to {}", color::success_indicator(), color::green(path));
+                    println!(
+                        "{} Downloaded to {}",
+                        color::success_indicator(),
+                        color::green(path)
+                    );
                 } else {
-                    println!("{} Downloaded to {} ({})", color::success_indicator(), color::green(path), filename);
+                    println!(
+                        "{} Downloaded to {} ({})",
+                        color::success_indicator(),
+                        color::green(path),
+                        filename
+                    );
                 }
                 return;
             }
@@ -243,18 +288,50 @@ pub fn print_response(resp: &Response, json_mode: bool, action: Option<&str>) {
         // Path-based operations (screenshot/pdf/trace/har/download/state/video)
         if let Some(path) = data.get("path").and_then(|v| v.as_str()) {
             match action.unwrap_or("") {
-                "screenshot" => println!("{} Screenshot saved to {}", color::success_indicator(), color::green(path)),
-                "pdf" => println!("{} PDF saved to {}", color::success_indicator(), color::green(path)),
-                "trace_stop" => println!("{} Trace saved to {}", color::success_indicator(), color::green(path)),
-                "har_stop" => println!("{} HAR saved to {}", color::success_indicator(), color::green(path)),
-                "download" | "waitfordownload" => println!("{} Download saved to {}", color::success_indicator(), color::green(path)),
-                "video_stop" => println!("{} Video saved to {}", color::success_indicator(), color::green(path)),
-                "state_save" => println!("{} State saved to {}", color::success_indicator(), color::green(path)),
+                "screenshot" => println!(
+                    "{} Screenshot saved to {}",
+                    color::success_indicator(),
+                    color::green(path)
+                ),
+                "pdf" => println!(
+                    "{} PDF saved to {}",
+                    color::success_indicator(),
+                    color::green(path)
+                ),
+                "trace_stop" => println!(
+                    "{} Trace saved to {}",
+                    color::success_indicator(),
+                    color::green(path)
+                ),
+                "har_stop" => println!(
+                    "{} HAR saved to {}",
+                    color::success_indicator(),
+                    color::green(path)
+                ),
+                "download" | "waitfordownload" => println!(
+                    "{} Download saved to {}",
+                    color::success_indicator(),
+                    color::green(path)
+                ),
+                "video_stop" => println!(
+                    "{} Video saved to {}",
+                    color::success_indicator(),
+                    color::green(path)
+                ),
+                "state_save" => println!(
+                    "{} State saved to {}",
+                    color::success_indicator(),
+                    color::green(path)
+                ),
                 "state_load" => {
                     if let Some(note) = data.get("note").and_then(|v| v.as_str()) {
                         println!("{}", note);
                     }
-                    println!("{} State path set to {}", color::success_indicator(), color::green(path));
+                    println!(
+                        "{} State path set to {}",
+                        color::success_indicator(),
+                        color::green(path)
+                    );
                 }
                 // video_start and other commands that provide a path with a note
                 "video_start" => {
@@ -263,7 +340,11 @@ pub fn print_response(resp: &Response, json_mode: bool, action: Option<&str>) {
                     }
                     println!("Path: {}", path);
                 }
-                _ => println!("{} Saved to {}", color::success_indicator(), color::green(path)),
+                _ => println!(
+                    "{} Saved to {}",
+                    color::success_indicator(),
+                    color::green(path)
+                ),
             }
             return;
         }
@@ -1082,18 +1163,46 @@ Usage: agent-browser cookies [operation] [args]
 Manage browser cookies for the current context.
 
 Operations:
-  get                  Get all cookies (default)
-  set <name> <value>   Set a cookie
-  clear                Clear all cookies
+  get                                Get all cookies (default)
+  set <name> <value> [options]       Set a cookie with optional properties
+  clear                              Clear all cookies
+
+Cookie Set Options:
+  --url <url>                        URL for the cookie (allows setting before page load)
+  --domain <domain>                  Cookie domain (e.g., ".example.com")
+  --path <path>                      Cookie path (e.g., "/api")
+  --httpOnly                         Set HttpOnly flag (prevents JavaScript access)
+  --secure                           Set Secure flag (HTTPS only)
+  --sameSite <Strict|Lax|None>       SameSite policy
+  --expires <timestamp>              Expiration time (Unix timestamp in seconds)
+
+Note: If --url, --domain, and --path are all omitted, the cookie will be set
+for the current page URL.
 
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
 
 Examples:
-  agent-browser cookies
-  agent-browser cookies get
+  # Simple cookie for current page
   agent-browser cookies set session_id "abc123"
+
+  # Set cookie for a URL before loading it (useful for authentication)
+  agent-browser cookies set session_id "abc123" --url https://app.example.com
+
+  # Set secure, httpOnly cookie with domain and path
+  agent-browser cookies set auth_token "xyz789" --domain example.com --path /api --httpOnly --secure
+
+  # Set cookie with SameSite policy
+  agent-browser cookies set tracking_consent "yes" --sameSite Strict
+
+  # Set cookie with expiration (Unix timestamp)
+  agent-browser cookies set temp_token "temp123" --expires 1735689600
+
+  # Get all cookies
+  agent-browser cookies
+
+  # Clear all cookies
   agent-browser cookies clear
 "##
         }
@@ -1223,7 +1332,8 @@ Examples:
         }
 
         // === Record (video) ===
-        "record" => r##"
+        "record" => {
+            r##"
 agent-browser record - Record browser session to video
 
 Usage: agent-browser record start <path.webm> [url]
@@ -1256,7 +1366,8 @@ Examples:
 
   # Restart recording with a new file (stops previous, starts new)
   agent-browser record restart ./take2.webm
-"##,
+"##
+        }
 
         // === Console/Errors ===
         "console" => {
@@ -1330,7 +1441,13 @@ Save or restore browser state (cookies, localStorage, sessionStorage).
 
 Operations:
   save <path>          Save current state to file
-  load <path>          Load state from file
+  load <path>          Note: State must be loaded at browser launch via --state flag
+
+Applying State:
+  Use --state flag when launching browser to load saved state:
+  agent-browser --state ./auth-state.json open https://example.com
+
+  Or set AGENT_BROWSER_STATE environment variable.
 
 Global Options:
   --json               Output as JSON
@@ -1338,7 +1455,7 @@ Global Options:
 
 Examples:
   agent-browser state save ./auth-state.json
-  agent-browser state load ./auth-state.json
+  agent-browser --state ./auth-state.json open https://example.com
 "##
         }
 
@@ -1494,7 +1611,7 @@ Network:  agent-browser network <action>
   requests [--clear] [--filter <pattern>]
 
 Storage:
-  cookies [get|set|clear]    Manage cookies
+  cookies [get|set|clear]    Manage cookies (set supports --url, --domain, --path, --httpOnly, --secure, --sameSite, --expires)
   storage <local|session>    Manage web storage
 
 Tabs:
@@ -1525,6 +1642,7 @@ Snapshot Options:
 Options:
   --session <name>           Isolated session (or AGENT_BROWSER_SESSION env)
   --profile <path>           Persistent browser profile (or AGENT_BROWSER_PROFILE env)
+  --state <path>             Load storage state from JSON file (or AGENT_BROWSER_STATE env)
   --headers <json>           HTTP headers scoped to URL's origin (for auth)
   --executable-path <path>   Custom browser executable (or AGENT_BROWSER_EXECUTABLE_PATH)
   --extension <path>         Load browser extensions (repeatable)
@@ -1535,6 +1653,7 @@ Options:
                              e.g., --proxy "http://user:pass@127.0.0.1:7890"
   --proxy-bypass <hosts>     Bypass proxy for these hosts (or AGENT_BROWSER_PROXY_BYPASS)
                              e.g., --proxy-bypass "localhost,*.internal.com"
+  --ignore-https-errors      Ignore HTTPS certificate errors
   -p, --provider <name>      Cloud browser provider (or AGENT_BROWSER_PROVIDER env)
   --json                     JSON output
   --full, -f                 Full page screenshot

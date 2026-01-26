@@ -74,6 +74,8 @@ export class BrowserManager {
   private browserbaseApiKey: string | null = null;
   private browserUseSessionId: string | null = null;
   private browserUseApiKey: string | null = null;
+  private kernelSessionId: string | null = null;
+  private kernelApiKey: string | null = null;
   private contexts: BrowserContext[] = [];
   private pages: Page[] = [];
   private activePageIndex: number = 0;
@@ -394,6 +396,40 @@ export class BrowserManager {
   }
 
   /**
+   * Set device scale factor (devicePixelRatio) via CDP
+   * This sets window.devicePixelRatio which affects how the page renders and responds to media queries
+   *
+   * Note: When using CDP to set deviceScaleFactor, screenshots will be at logical pixel dimensions
+   * (viewport size), not physical pixel dimensions (viewport × scale). This is a Playwright limitation
+   * when using CDP emulation on existing contexts. For true HiDPI screenshots with physical pixels,
+   * deviceScaleFactor must be set at context creation time.
+   *
+   * Must be called after setViewport to work correctly
+   */
+  async setDeviceScaleFactor(
+    deviceScaleFactor: number,
+    width: number,
+    height: number,
+    mobile: boolean = false
+  ): Promise<void> {
+    const cdp = await this.getCDPSession();
+    await cdp.send('Emulation.setDeviceMetricsOverride', {
+      width,
+      height,
+      deviceScaleFactor,
+      mobile,
+    });
+  }
+
+  /**
+   * Clear device metrics override to restore default devicePixelRatio
+   */
+  async clearDeviceMetricsOverride(): Promise<void> {
+    const cdp = await this.getCDPSession();
+    await cdp.send('Emulation.clearDeviceMetricsOverride');
+  }
+
+  /**
    * Get device descriptor
    */
   getDevice(deviceName: string): (typeof devices)[keyof typeof devices] | undefined {
@@ -677,6 +713,22 @@ export class BrowserManager {
   }
 
   /**
+   * Close a Kernel session via API
+   */
+  private async closeKernelSession(sessionId: string, apiKey: string): Promise<void> {
+    const response = await fetch(`https://api.onkernel.com/browsers/${sessionId}`, {
+      method: 'DELETE',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+      },
+    });
+
+    if (!response.ok) {
+      throw new Error(`Failed to close Kernel session: ${response.statusText}`);
+    }
+  }
+
+  /**
    * Connect to Browserbase remote browser via CDP.
    * Requires BROWSERBASE_API_KEY and BROWSERBASE_PROJECT_ID environment variables.
    */
@@ -726,12 +778,154 @@ export class BrowserManager {
       this.browser = browser;
       context.setDefaultTimeout(10000);
       this.contexts.push(context);
+      this.setupContextTracking(context);
       this.pages.push(page);
       this.activePageIndex = 0;
       this.setupPageTracking(page);
     } catch (error) {
       await this.closeBrowserbaseSession(session.id, browserbaseApiKey).catch((sessionError) => {
         console.error('Failed to close Browserbase session during cleanup:', sessionError);
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Find or create a Kernel profile by name.
+   * Returns the profile object if successful.
+   */
+  private async findOrCreateKernelProfile(
+    profileName: string,
+    apiKey: string
+  ): Promise<{ name: string }> {
+    // First, try to get the existing profile
+    const getResponse = await fetch(
+      `https://api.onkernel.com/profiles/${encodeURIComponent(profileName)}`,
+      {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+        },
+      }
+    );
+
+    if (getResponse.ok) {
+      // Profile exists, return it
+      return { name: profileName };
+    }
+
+    if (getResponse.status !== 404) {
+      throw new Error(`Failed to check Kernel profile: ${getResponse.statusText}`);
+    }
+
+    // Profile doesn't exist, create it
+    const createResponse = await fetch('https://api.onkernel.com/profiles', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({ name: profileName }),
+    });
+
+    if (!createResponse.ok) {
+      throw new Error(`Failed to create Kernel profile: ${createResponse.statusText}`);
+    }
+
+    return { name: profileName };
+  }
+
+  /**
+   * Connect to Kernel remote browser via CDP.
+   * Requires KERNEL_API_KEY environment variable.
+   */
+  private async connectToKernel(): Promise<void> {
+    const kernelApiKey = process.env.KERNEL_API_KEY;
+    if (!kernelApiKey) {
+      throw new Error('KERNEL_API_KEY is required when using kernel as a provider');
+    }
+
+    // Find or create profile if KERNEL_PROFILE_NAME is set
+    const profileName = process.env.KERNEL_PROFILE_NAME;
+    let profileConfig: { profile: { name: string; save_changes: boolean } } | undefined;
+
+    if (profileName) {
+      await this.findOrCreateKernelProfile(profileName, kernelApiKey);
+      profileConfig = {
+        profile: {
+          name: profileName,
+          save_changes: true, // Save cookies/state back to the profile when session ends
+        },
+      };
+    }
+
+    const response = await fetch('https://api.onkernel.com/browsers', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${kernelApiKey}`,
+      },
+      body: JSON.stringify({
+        // Kernel browsers are headful by default with stealth mode available
+        // The user can configure these via environment variables if needed
+        headless: process.env.KERNEL_HEADLESS?.toLowerCase() === 'true',
+        stealth: process.env.KERNEL_STEALTH?.toLowerCase() !== 'false', // Default to stealth mode
+        timeout_seconds: parseInt(process.env.KERNEL_TIMEOUT_SECONDS || '300', 10),
+        // Load and save to a profile if specified
+        ...profileConfig,
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Failed to create Kernel session: ${response.statusText}`);
+    }
+
+    let session: { session_id: string; cdp_ws_url: string };
+    try {
+      session = (await response.json()) as { session_id: string; cdp_ws_url: string };
+    } catch (error) {
+      throw new Error(
+        `Failed to parse Kernel session response: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+
+    if (!session.session_id || !session.cdp_ws_url) {
+      throw new Error(
+        `Invalid Kernel session response: missing ${!session.session_id ? 'session_id' : 'cdp_ws_url'}`
+      );
+    }
+
+    const browser = await chromium.connectOverCDP(session.cdp_ws_url).catch(() => {
+      throw new Error('Failed to connect to Kernel session via CDP');
+    });
+
+    try {
+      const contexts = browser.contexts();
+      let context: BrowserContext;
+      let page: Page;
+
+      // Kernel browsers launch with a default context and page
+      if (contexts.length === 0) {
+        context = await browser.newContext();
+        page = await context.newPage();
+      } else {
+        context = contexts[0];
+        const pages = context.pages();
+        page = pages[0] ?? (await context.newPage());
+      }
+
+      this.kernelSessionId = session.session_id;
+      this.kernelApiKey = kernelApiKey;
+      this.browser = browser;
+      context.setDefaultTimeout(60000);
+      this.contexts.push(context);
+      this.pages.push(page);
+      this.activePageIndex = 0;
+      this.setupPageTracking(page);
+      this.setupContextTracking(context);
+    } catch (error) {
+      await this.closeKernelSession(session.session_id, kernelApiKey).catch((sessionError) => {
+        console.error('Failed to close Kernel session during cleanup:', sessionError);
       });
       throw error;
     }
@@ -819,6 +1013,7 @@ export class BrowserManager {
     const cdpEndpoint = options.cdpUrl ?? (options.cdpPort ? String(options.cdpPort) : undefined);
     const hasExtensions = !!options.extensions?.length;
     const hasProfile = !!options.profile;
+    const hasStorageState = !!options.storageState;
 
     if (hasExtensions && cdpEndpoint) {
       throw new Error('Extensions cannot be used with CDP connection');
@@ -826,6 +1021,18 @@ export class BrowserManager {
 
     if (hasProfile && cdpEndpoint) {
       throw new Error('Profile cannot be used with CDP connection');
+    }
+
+    if (hasStorageState && hasProfile) {
+      throw new Error(
+        'Storage state cannot be used with profile (profile is already persistent storage)'
+      );
+    }
+
+    if (hasStorageState && hasExtensions) {
+      throw new Error(
+        'Storage state cannot be used with extensions (extensions require persistent context)'
+      );
     }
 
     if (this.isLaunched()) {
@@ -893,6 +1100,13 @@ export class BrowserManager {
       );
     }
 
+    // Kernel: requires explicit opt-in via -p kernel flag or AGENT_BROWSER_PROVIDER=kernel
+    if (provider === 'kernel') {
+      await this.connectToKernel();
+      return;
+    }
+
+    const browserType = options.browser ?? 'chromium';
     if (hasExtensions && browserType !== 'chromium') {
       throw new Error('Extensions are only supported in Chromium');
     }
@@ -919,6 +1133,7 @@ export class BrowserManager {
           extraHTTPHeaders: options.headers,
           userAgent: options.userAgent,
           ...(options.proxy && { proxy: options.proxy }),
+          ignoreHTTPSErrors: options.ignoreHTTPSErrors ?? false,
         }
       );
       this.isPersistentContext = true;
@@ -946,16 +1161,22 @@ export class BrowserManager {
         extraHTTPHeaders: options.headers,
         userAgent: options.userAgent,
         ...(options.proxy && { proxy: options.proxy }),
+        ignoreHTTPSErrors: options.ignoreHTTPSErrors ?? false,
+        ...(options.storageState && { storageState: options.storageState }),
       });
     }
 
     context.setDefaultTimeout(60000);
     this.contexts.push(context);
+    this.setupContextTracking(context);
 
     const page = context.pages()[0] ?? (await context.newPage());
-    this.pages.push(page);
-    this.activePageIndex = 0;
-    this.setupPageTracking(page);
+    // Only add if not already tracked (setupContextTracking may have already added it via 'page' event)
+    if (!this.pages.includes(page)) {
+      this.pages.push(page);
+      this.setupPageTracking(page);
+    }
+    this.activePageIndex = this.pages.length > 0 ? this.pages.length - 1 : 0;
   }
 
   /**
@@ -1015,6 +1236,7 @@ export class BrowserManager {
       this.cdpEndpoint = cdpEndpoint;
 
       for (const context of contexts) {
+        context.setDefaultTimeout(10000);
         this.contexts.push(context);
         this.setupContextTracking(context);
       }
@@ -1063,12 +1285,16 @@ export class BrowserManager {
   }
 
   /**
-   * Set up tracking for new pages in a context (for CDP connections)
+   * Set up tracking for new pages in a context (for CDP connections and popups/new tabs)
+   * This handles pages created externally (e.g., via target="_blank" links)
    */
   private setupContextTracking(context: BrowserContext): void {
     context.on('page', (page) => {
-      this.pages.push(page);
-      this.setupPageTracking(page);
+      // Only add if not already tracked (avoids duplicates when newTab() creates pages)
+      if (!this.pages.includes(page)) {
+        this.pages.push(page);
+        this.setupPageTracking(page);
+      }
     });
   }
 
@@ -1085,11 +1311,12 @@ export class BrowserManager {
 
     const context = this.contexts[0]; // Use first context for tabs
     const page = await context.newPage();
-    this.pages.push(page);
+    // Only add if not already tracked (setupContextTracking may have already added it via 'page' event)
+    if (!this.pages.includes(page)) {
+      this.pages.push(page);
+      this.setupPageTracking(page);
+    }
     this.activePageIndex = this.pages.length - 1;
-
-    // Set up tracking for the new page
-    this.setupPageTracking(page);
 
     return { index: this.activePageIndex, total: this.pages.length };
   }
@@ -1110,13 +1337,15 @@ export class BrowserManager {
     });
     context.setDefaultTimeout(60000);
     this.contexts.push(context);
+    this.setupContextTracking(context);
 
     const page = await context.newPage();
-    this.pages.push(page);
+    // Only add if not already tracked (setupContextTracking may have already added it via 'page' event)
+    if (!this.pages.includes(page)) {
+      this.pages.push(page);
+      this.setupPageTracking(page);
+    }
     this.activePageIndex = this.pages.length - 1;
-
-    // Set up tracking for the new page
-    this.setupPageTracking(page);
 
     return { index: this.activePageIndex, total: this.pages.length };
   }
@@ -1638,6 +1867,11 @@ export class BrowserManager {
         }
       );
       this.browser = null;
+    } else if (this.kernelSessionId && this.kernelApiKey) {
+      await this.closeKernelSession(this.kernelSessionId, this.kernelApiKey).catch((error) => {
+        console.error('Failed to close Kernel session:', error);
+      });
+      this.browser = null;
     } else if (this.cdpEndpoint !== null) {
       // CDP: only disconnect, don't close external app's pages
       if (this.browser) {
@@ -1665,6 +1899,8 @@ export class BrowserManager {
     this.browserbaseApiKey = null;
     this.browserUseSessionId = null;
     this.browserUseApiKey = null;
+    this.kernelSessionId = null;
+    this.kernelApiKey = null;
     this.isPersistentContext = false;
     this.activePageIndex = 0;
     this.refMap = {};
