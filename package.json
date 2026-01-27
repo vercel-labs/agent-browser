@@ -34,7 +34,7 @@
     "test:watch": "vitest",
     "postinstall": "node scripts/postinstall.js",
     "changeset": "changeset",
-    "ci:version": "changeset version && pnpm install --no-frozen-lockfile",
+    "ci:version": "changeset version && pnpm run version:sync && pnpm install --no-frozen-lockfile",
     "ci:publish": "pnpm run version:sync && pnpm run build && changeset publish"
   },
   "keywords": [
