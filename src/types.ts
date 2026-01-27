@@ -560,6 +560,17 @@ export interface TraceStopCommand extends BaseCommand {
   path: string;
 }
 
+// CDP Profiling (Chrome DevTools trace format)
+export interface ProfilerStartCommand extends BaseCommand {
+  action: 'profiler_start';
+  categories?: string[]; // Optional trace categories (e.g., "devtools.timeline")
+}
+
+export interface ProfilerStopCommand extends BaseCommand {
+  action: 'profiler_stop';
+  path: string; // Output file path (.json)
+}
+
 // HAR recording
 export interface HarStartCommand extends BaseCommand {
   action: 'har_start';
@@ -878,6 +889,8 @@ export type Command =
   | RecordingRestartCommand
   | TraceStartCommand
   | TraceStopCommand
+  | ProfilerStartCommand
+  | ProfilerStopCommand
   | HarStartCommand
   | HarStopCommand
   | StorageStateSaveCommand
