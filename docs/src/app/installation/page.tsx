@@ -19,6 +19,56 @@ pnpm build:native
 ./bin/agent-browser install
 pnpm link --global`} />
 
+        <h2>Browser selection</h2>
+        <p>
+          agent-browser supports multiple browsers. By default, Chromium is used,
+          but you can select Firefox or webkit for specific use cases or platforms:
+        </p>
+
+        <h3>Platform compatibility</h3>
+        <table>
+          <thead>
+            <tr>
+              <th>Platform</th>
+              <th>Chromium</th>
+              <th>Firefox</th>
+              <th>webkit</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>x86_64 (Linux/Mac/Windows)</td>
+              <td>✅</td>
+              <td>✅</td>
+              <td>✅</td>
+            </tr>
+            <tr>
+              <td>ARM64 (Graviton, Cobalt, etc.)</td>
+              <td>❓*</td>
+              <td>✅</td>
+              <td>✅</td>
+            </tr>
+          </tbody>
+        </table>
+        <p>
+          <small>
+            *Chromium may not be available on all ARM64 systems. Firefox is recommended
+            for ARM64 deployments (AWS Graviton, Azure Cobalt, on-premises servers, etc.).
+          </small>
+        </p>
+
+        <h3>Browser selection</h3>
+        <p>
+          Use the <code>browser</code> parameter when launching to select Firefox or webkit:
+        </p>
+        <CodeBlock lang="typescript" code={`import { BrowserManager } from 'agent-browser';
+
+const browser = new BrowserManager();
+await browser.launch({
+  browser: 'firefox',  // or 'chromium', 'webkit'
+  headless: true,
+});`} />
+
         <h2>Linux dependencies</h2>
         <p>On Linux, install system dependencies:</p>
         <CodeBlock code={`agent-browser install --with-deps
@@ -52,6 +102,22 @@ export async function handler() {
   });
   // ... use browser
 }`} />
+
+        <h2>ARM64 troubleshooting</h2>
+        <h3>Chromium not found on ARM64</h3>
+        <p>
+          On ARM64 systems (AWS Graviton, Azure Cobalt, etc.), agent-browser automatically selects Firefox as the default browser. If you encounter "Chromium not found" errors, ensure you're using a recent version where Firefox is the ARM64 default.
+        </p>
+        <p>
+          Alternatively, explicitly specify Firefox when launching:
+        </p>
+        <CodeBlock lang="typescript" code={`import { BrowserManager } from 'agent-browser';
+
+const browser = new BrowserManager();
+await browser.launch({
+  browser: 'firefox',
+  headless: true,
+});`} />
       </div>
     </div>
   );
