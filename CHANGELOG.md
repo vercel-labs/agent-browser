@@ -1,5 +1,11 @@
 # agent-browser
 
+## 0.8.2
+
+### Patch Changes
+
+- 7e6336f: Fixed the Windows CMD wrapper to use the native binary directly instead of routing through Node.js, improving startup performance and reliability. Added retry logic to the CI install command to handle transient failures during browser installation.
+
 ## 0.8.1
 
 ### Patch Changes
