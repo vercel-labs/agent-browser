@@ -796,8 +796,8 @@ Optional configuration via environment variables:
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `NOTTE_HEADLESS` | Run browser in headless mode (`true`/`false`) | `true` |
-| `NOTTE_TIMEOUT_MINUTES` | Session idle timeout in minutes | `10` |
+| `NOTTE_BROWSER_TYPE` | Browser type (`chromium`/`chrome`) | `chromium` |
+| `NOTTE_TIMEOUT_MINUTES` | Session max duration in minutes (1-15) | `15` |
 | `NOTTE_PROXIES` | Enable proxy rotation (`true`/`false`) | `true` |
 
 When enabled, agent-browser connects to a Notte cloud session instead of launching a local browser. All commands work identically.
