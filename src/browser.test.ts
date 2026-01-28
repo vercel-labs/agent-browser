@@ -221,6 +221,21 @@ describe('BrowserManager', () => {
       await browser.closeTab(newTabResult.index);
     });
 
+    it('should clear targetIdCache on close', async () => {
+      const freshBrowser = new BrowserManager();
+      await freshBrowser.launch({ headless: true });
+      const page = freshBrowser.getPage();
+      const targetId = await freshBrowser.getTargetId(page);
+      expect(targetId.length).toBeGreaterThan(0);
+
+      await freshBrowser.close();
+
+      // After close, the old targetId should not resolve
+      await freshBrowser.launch({ headless: true });
+      await expect(freshBrowser.resolveTarget(targetId)).rejects.toThrow('not found');
+      await freshBrowser.close();
+    });
+
     it('should assign unique targetIds to different tabs', async () => {
       const newTabResult = await browser.newTab();
       const tabs = await browser.listTabs();

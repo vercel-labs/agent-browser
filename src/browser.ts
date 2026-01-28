@@ -1943,6 +1943,7 @@ export class BrowserManager {
     this.isPersistentContext = false;
     this.activePageIndex = 0;
     this.refMap = {};
+    this.targetIdCache.clear();
     this.lastSnapshot = '';
     this.frameCallback = null;
   }
