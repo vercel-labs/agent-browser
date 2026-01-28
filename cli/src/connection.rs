@@ -212,6 +212,8 @@ pub fn ensure_daemon(
     }
 
     let exe_path = env::current_exe().map_err(|e| e.to_string())?;
+    // Canonicalize to resolve symlinks (e.g., npm global bin symlink -> actual binary)
+    let exe_path = exe_path.canonicalize().unwrap_or(exe_path);
     let exe_dir = exe_path.parent().unwrap();
 
     let mut daemon_paths = vec![
