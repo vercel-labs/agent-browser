@@ -425,6 +425,14 @@ describe('parseCommand', () => {
       }
     });
 
+    it('should reject tab_switch with neither index nor targetId', () => {
+      const result = parseCommand(cmd({ id: '1', action: 'tab_switch' }));
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(result.error).toContain('tab_switch requires either index or targetId');
+      }
+    });
+
     it('should parse tab_switch with both index and targetId', () => {
       const result = parseCommand(
         cmd({ id: '1', action: 'tab_switch', index: 0, targetId: 'A8C7634B' })

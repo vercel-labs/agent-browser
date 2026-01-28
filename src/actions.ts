@@ -781,6 +781,13 @@ async function handleTabSwitch(
   command: TabSwitchCommand,
   browser: BrowserManager
 ): Promise<Response<TabSwitchData>> {
+  if (command.index === undefined && command.targetId === undefined) {
+    return errorResponse(
+      command.id,
+      'tab_switch requires either index or targetId'
+    ) as Response<TabSwitchData>;
+  }
+  // index takes precedence over targetId when both are provided
   const result =
     command.index !== undefined
       ? await browser.switchTo(command.index)

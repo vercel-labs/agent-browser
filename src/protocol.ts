@@ -762,6 +762,10 @@ const tabListSchema = baseCommandSchema.extend({
   action: z.literal('tab_list'),
 });
 
+// At least one of index or targetId must be provided. index takes precedence
+// when both are present. We cannot use .refine() here because tabSwitchSchema
+// is a member of z.discriminatedUnion(), which requires ZodObject members
+// (refine returns ZodEffects). The constraint is enforced in parseCommand().
 const tabSwitchSchema = baseCommandSchema.extend({
   action: z.literal('tab_switch'),
   index: z.number().nonnegative().optional(),
@@ -941,7 +945,18 @@ export function parseCommand(input: string): ParseResult {
     return { success: false, error: `Validation error: ${errors}`, id };
   }
 
-  return { success: true, command: result.data as Command };
+  // Post-parse validation for constraints that cannot be expressed in the schema
+  // (discriminatedUnion requires ZodObject members, so .refine() is not viable).
+  const data = result.data;
+  if (data.action === 'tab_switch' && data.index === undefined && data.targetId === undefined) {
+    return {
+      success: false,
+      error: 'Validation error: tab_switch requires either index or targetId',
+      id,
+    };
+  }
+
+  return { success: true, command: data as Command };
 }
 
 /**
