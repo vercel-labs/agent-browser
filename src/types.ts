@@ -4,6 +4,7 @@ import type { Page, Browser, BrowserContext } from 'playwright-core';
 export interface BaseCommand {
   id: string;
   action: string;
+  targetId?: string;
 }
 
 // Action-specific command types
@@ -794,7 +795,8 @@ export interface TabListCommand extends BaseCommand {
 
 export interface TabSwitchCommand extends BaseCommand {
   action: 'tab_switch';
-  index: number;
+  index?: number;
+  targetId?: string;
 }
 
 export interface TabCloseCommand extends BaseCommand {
@@ -976,6 +978,7 @@ export interface TabInfo {
   url: string;
   title: string;
   active: boolean;
+  targetId: string;
 }
 
 export interface TabListData {
@@ -986,12 +989,14 @@ export interface TabListData {
 export interface TabNewData {
   index: number;
   total: number;
+  targetId: string;
 }
 
 export interface TabSwitchData {
   index: number;
   url: string;
   title: string;
+  targetId: string;
 }
 
 export interface TabCloseData {

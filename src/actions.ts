@@ -207,6 +207,20 @@ export function toAIFriendlyError(error: unknown, selector: string): Error {
  * Execute a command and return a response
  */
 export async function executeCommand(command: Command, browser: BrowserManager): Promise<Response> {
+  if (command.targetId && command.action !== 'tab_switch') {
+    try {
+      return await browser.withTarget(command.targetId, () =>
+        executeCommandInner(command, browser)
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return errorResponse(command.id, message);
+    }
+  }
+  return executeCommandInner(command, browser);
+}
+
+async function executeCommandInner(command: Command, browser: BrowserManager): Promise<Response> {
   try {
     switch (command.action) {
       case 'launch':
@@ -767,7 +781,10 @@ async function handleTabSwitch(
   command: TabSwitchCommand,
   browser: BrowserManager
 ): Promise<Response<TabSwitchData>> {
-  const result = await browser.switchTo(command.index);
+  const result =
+    command.index !== undefined
+      ? await browser.switchTo(command.index)
+      : await browser.switchToTarget(command.targetId!);
   const page = browser.getPage();
   return successResponse(command.id, {
     ...result,

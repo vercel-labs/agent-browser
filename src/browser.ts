@@ -14,11 +14,14 @@ import {
   type CDPSession,
   type Video,
 } from 'playwright-core';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import path from 'node:path';
 import os from 'node:os';
 import { existsSync, mkdirSync, rmSync } from 'node:fs';
 import type { LaunchCommand } from './types.js';
 import { type RefMap, type EnhancedSnapshot, getEnhancedSnapshot, parseRef } from './snapshot.js';
+
+const targetPageStorage = new AsyncLocalStorage<Page>();
 
 // Screencast frame data from CDP
 export interface ScreencastFrame {
@@ -89,6 +92,7 @@ export class BrowserManager {
   private refMap: RefMap = {};
   private lastSnapshot: string = '';
   private scopedHeaderRoutes: Map<string, (route: Route) => Promise<void>> = new Map();
+  private targetIdCache: Map<Page, string> = new Map();
 
   // CDP session for screencast and input injection
   private cdpSession: CDPSession | null = null;
@@ -186,6 +190,8 @@ export class BrowserManager {
    * Get the current active page, throws if not launched
    */
   getPage(): Page {
+    const override = targetPageStorage.getStore();
+    if (override) return override;
     if (this.pages.length === 0) {
       throw new Error('Browser not launched. Call launch first.');
     }
@@ -1237,6 +1243,7 @@ export class BrowserManager {
     });
 
     page.on('close', () => {
+      this.targetIdCache.delete(page);
       const index = this.pages.indexOf(page);
       if (index !== -1) {
         this.pages.splice(index, 1);
@@ -1264,7 +1271,7 @@ export class BrowserManager {
   /**
    * Create a new tab in the current context
    */
-  async newTab(): Promise<{ index: number; total: number }> {
+  async newTab(): Promise<{ index: number; total: number; targetId: string }> {
     if (!this.browser || this.contexts.length === 0) {
       throw new Error('Browser not launched');
     }
@@ -1280,8 +1287,9 @@ export class BrowserManager {
       this.setupPageTracking(page);
     }
     this.activePageIndex = this.pages.length - 1;
+    const targetId = await this.getTargetId(page).catch(() => '');
 
-    return { index: this.activePageIndex, total: this.pages.length };
+    return { index: this.activePageIndex, total: this.pages.length, targetId };
   }
 
   /**
@@ -1290,7 +1298,7 @@ export class BrowserManager {
   async newWindow(viewport?: {
     width: number;
     height: number;
-  }): Promise<{ index: number; total: number }> {
+  }): Promise<{ index: number; total: number; targetId: string }> {
     if (!this.browser) {
       throw new Error('Browser not launched');
     }
@@ -1309,8 +1317,9 @@ export class BrowserManager {
       this.setupPageTracking(page);
     }
     this.activePageIndex = this.pages.length - 1;
+    const targetId = await this.getTargetId(page).catch(() => '');
 
-    return { index: this.activePageIndex, total: this.pages.length };
+    return { index: this.activePageIndex, total: this.pages.length, targetId };
   }
 
   /**
@@ -1333,7 +1342,9 @@ export class BrowserManager {
   /**
    * Switch to a specific tab/page by index
    */
-  async switchTo(index: number): Promise<{ index: number; url: string; title: string }> {
+  async switchTo(
+    index: number
+  ): Promise<{ index: number; url: string; title: string; targetId: string }> {
     if (index < 0 || index >= this.pages.length) {
       throw new Error(`Invalid tab index: ${index}. Available: 0-${this.pages.length - 1}`);
     }
@@ -1345,12 +1356,74 @@ export class BrowserManager {
 
     this.activePageIndex = index;
     const page = this.pages[index];
+    const targetId = await this.getTargetId(page).catch(() => '');
 
     return {
       index: this.activePageIndex,
       url: page.url(),
       title: '', // Title requires async, will be fetched separately
+      targetId,
     };
+  }
+
+  /**
+   * Get the CDP targetId for a page. Creates a temporary CDP session to call
+   * Target.getTargetInfo, then detaches it immediately. Results are cached.
+   */
+  async getTargetId(page: Page): Promise<string> {
+    const cached = this.targetIdCache.get(page);
+    if (cached) return cached;
+    const session = await page.context().newCDPSession(page);
+    try {
+      const { targetInfo } = (await session.send('Target.getTargetInfo')) as any;
+      this.targetIdCache.set(page, targetInfo.targetId);
+      return targetInfo.targetId;
+    } finally {
+      await session.detach().catch(() => {});
+    }
+  }
+
+  /**
+   * Resolve a targetId to its corresponding Page object
+   */
+  async resolveTarget(targetId: string): Promise<Page> {
+    // Check cache first
+    for (const [page, id] of this.targetIdCache.entries()) {
+      if (id === targetId && this.pages.includes(page)) return page;
+      if (id === targetId) {
+        this.targetIdCache.delete(page);
+        break;
+      }
+    }
+    // Cache miss: scan all pages
+    for (const page of this.pages) {
+      if (this.targetIdCache.has(page)) continue;
+      const id = await this.getTargetId(page);
+      if (id === targetId) return page;
+    }
+    throw new Error(
+      `Target "${targetId}" not found. It may have been closed. Use "tab list" to see available targets.`
+    );
+  }
+
+  /**
+   * Execute a function with a specific target page bound to the async context.
+   * Within the callback, getPage() returns the targeted page.
+   */
+  async withTarget<T>(targetId: string, fn: () => Promise<T>): Promise<T> {
+    const page = await this.resolveTarget(targetId);
+    return targetPageStorage.run(page, fn);
+  }
+
+  /**
+   * Switch the active tab by CDP targetId
+   */
+  async switchToTarget(
+    targetId: string
+  ): Promise<{ index: number; url: string; title: string; targetId: string }> {
+    const page = await this.resolveTarget(targetId);
+    const index = this.pages.indexOf(page);
+    return this.switchTo(index);
   }
 
   /**
@@ -1389,13 +1462,16 @@ export class BrowserManager {
   /**
    * List all tabs with their info
    */
-  async listTabs(): Promise<Array<{ index: number; url: string; title: string; active: boolean }>> {
+  async listTabs(): Promise<
+    Array<{ index: number; url: string; title: string; active: boolean; targetId: string }>
+  > {
     const tabs = await Promise.all(
       this.pages.map(async (page, index) => ({
         index,
         url: page.url(),
         title: await page.title().catch(() => ''),
         active: index === this.activePageIndex,
+        targetId: await this.getTargetId(page).catch(() => ''),
       }))
     );
     return tabs;
