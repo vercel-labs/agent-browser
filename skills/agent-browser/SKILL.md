@@ -69,6 +69,7 @@ agent-browser scroll down 500     # Scroll page (default: down 300px)
 agent-browser scrollintoview @e1  # Scroll element into view (alias: scrollinto)
 agent-browser drag @e1 @e2        # Drag and drop
 agent-browser upload @e1 file.pdf # Upload files
+agent-browser download @e1 ./file.pdf # Download file (click + wait combined)
 ```
 
 ### Get information
@@ -96,8 +97,8 @@ agent-browser is checked @e1      # Check if checked
 ### Screenshots & PDF
 
 ```bash
-agent-browser screenshot          # Save to a temporary directory
-agent-browser screenshot path.png # Save to a specific path
+agent-browser screenshot          # Screenshot to stdout
+agent-browser screenshot path.png # Save to file
 agent-browser screenshot --full   # Full page
 agent-browser pdf output.pdf      # Save as PDF
 ```
@@ -123,6 +124,8 @@ agent-browser wait --text "Success"        # Wait for text (or -t)
 agent-browser wait --url "**/dashboard"    # Wait for URL pattern (or -u)
 agent-browser wait --load networkidle      # Wait for network idle (or -l)
 agent-browser wait --fn "window.ready"     # Wait for JS condition (or -f)
+agent-browser wait --download              # Wait for download to complete (or -d)
+agent-browser wait --download ./file.pdf   # Wait and save to specific path
 ```
 
 ### Mouse control
@@ -167,7 +170,12 @@ agent-browser set media light reduced-motion  # Light mode + reduced motion
 
 ```bash
 agent-browser cookies                     # Get all cookies
-agent-browser cookies set name value      # Set cookie
+agent-browser cookies set name value      # Set cookie (basic)
+agent-browser cookies set name value --url https://app.example.com  # Set for specific URL
+agent-browser cookies set name value --domain example.com --path /api  # With domain/path
+agent-browser cookies set name value --httpOnly --secure  # Security flags
+agent-browser cookies set name value --sameSite Strict    # SameSite policy (Strict|Lax|None)
+agent-browser cookies set name value --expires 1735689600 # Unix timestamp expiry
 agent-browser cookies clear               # Clear cookies
 agent-browser storage local               # Get all localStorage
 agent-browser storage local key           # Get specific key
@@ -221,15 +229,21 @@ agent-browser eval "document.title"   # Run JavaScript
 
 ```bash
 agent-browser --session <name> ...    # Isolated browser session
+agent-browser --profile <path> ...    # Persistent browser profile (cookies, localStorage)
 agent-browser --json ...              # JSON output for parsing
 agent-browser --headed ...            # Show browser window (not headless)
 agent-browser --full ...              # Full page screenshot (-f)
 agent-browser --cdp <port> ...        # Connect via Chrome DevTools Protocol
 agent-browser -p <provider> ...       # Cloud browser provider (--provider)
 agent-browser --proxy <url> ...       # Use proxy server
+agent-browser --proxy-bypass <hosts>  # Bypass proxy for hosts (comma-separated)
+agent-browser --args <args> ...       # Browser launch args (comma-separated)
+agent-browser --user-agent <ua> ...   # Custom User-Agent string
 agent-browser --headers <json> ...    # HTTP headers scoped to URL's origin
 agent-browser --executable-path <p>   # Custom browser executable
 agent-browser --extension <path> ...  # Load browser extension (repeatable)
+agent-browser --state <path> ...      # Load saved browser state (cookies, storage)
+agent-browser --debug ...             # Debug output for troubleshooting
 agent-browser --help                  # Show help (-h)
 agent-browser --version               # Show version (-V)
 agent-browser <command> --help        # Show detailed help for a command
@@ -247,9 +261,15 @@ agent-browser --proxy socks5://proxy.com:1080 open example.com
 
 ```bash
 AGENT_BROWSER_SESSION="mysession"            # Default session name
+AGENT_BROWSER_PROFILE="~/.myapp"             # Persistent browser profile path
 AGENT_BROWSER_EXECUTABLE_PATH="/path/chrome" # Custom browser path
 AGENT_BROWSER_EXTENSIONS="/ext1,/ext2"       # Comma-separated extension paths
-AGENT_BROWSER_PROVIDER="your-cloud-browser-provider"  # Cloud browser provider (select browseruse or browserbase)
+AGENT_BROWSER_PROVIDER="kernel"              # Cloud browser provider (kernel, browserbase, browseruse)
+AGENT_BROWSER_STATE="./auth.json"            # Load storage state from JSON file
+AGENT_BROWSER_ARGS="--no-sandbox,--disable-gpu" # Browser launch args
+AGENT_BROWSER_USER_AGENT="CustomAgent/1.0"   # Custom User-Agent string
+AGENT_BROWSER_PROXY="http://proxy:8080"      # Proxy server URL
+AGENT_BROWSER_PROXY_BYPASS="localhost,*.local" # Bypass proxy for these hosts
 AGENT_BROWSER_STREAM_PORT="9223"             # WebSocket streaming port
 AGENT_BROWSER_HOME="/path/to/agent-browser"  # Custom install location (for daemon.js)
 ```
@@ -271,7 +291,7 @@ agent-browser snapshot -i  # Check result
 ## Example: Authentication with saved state
 
 ```bash
-# Login once
+# Login once and save state
 agent-browser open https://app.example.com/login
 agent-browser snapshot -i
 agent-browser fill @e1 "username"
@@ -279,10 +299,12 @@ agent-browser fill @e2 "password"
 agent-browser click @e3
 agent-browser wait --url "**/dashboard"
 agent-browser state save auth.json
+agent-browser close
 
-# Later sessions: load saved state
-agent-browser state load auth.json
-agent-browser open https://app.example.com/dashboard
+# Later sessions: load state at launch
+agent-browser --state auth.json open https://app.example.com/dashboard
+# Or via environment variable:
+# AGENT_BROWSER_STATE="auth.json" agent-browser open https://app.example.com/dashboard
 ```
 
 ## Sessions (parallel browsers)
@@ -326,10 +348,15 @@ For detailed patterns and best practices, see:
 | Reference | Description |
 |-----------|-------------|
 | [references/snapshot-refs.md](references/snapshot-refs.md) | Ref lifecycle, invalidation rules, troubleshooting |
+| [references/semantic-locators.md](references/semantic-locators.md) | Role, text, label locators for stable automation |
 | [references/session-management.md](references/session-management.md) | Parallel sessions, state persistence, concurrent scraping |
 | [references/authentication.md](references/authentication.md) | Login flows, OAuth, 2FA handling, state reuse |
+| [references/network-mocking.md](references/network-mocking.md) | API mocking, request blocking, error simulation |
 | [references/video-recording.md](references/video-recording.md) | Recording workflows for debugging and documentation |
 | [references/proxy-support.md](references/proxy-support.md) | Proxy configuration, geo-testing, rotating proxies |
+| [references/persistent-profiles.md](references/persistent-profiles.md) | Browser profile persistence, login state reuse |
+| [references/cloud-providers.md](references/cloud-providers.md) | Browserbase and Browser Use cloud integration |
+| [references/debugging.md](references/debugging.md) | Troubleshooting, traces, common issues |
 
 ## Ready-to-use templates
 
@@ -340,12 +367,18 @@ Executable workflow scripts for common patterns:
 | [templates/form-automation.sh](templates/form-automation.sh) | Form filling with validation |
 | [templates/authenticated-session.sh](templates/authenticated-session.sh) | Login once, reuse state |
 | [templates/capture-workflow.sh](templates/capture-workflow.sh) | Content extraction with screenshots |
+| [templates/download-workflow.sh](templates/download-workflow.sh) | File downloads, exports, PDFs |
+| [templates/network-mocking.sh](templates/network-mocking.sh) | API mocking for testing UI states |
+| [templates/multi-tab-workflow.sh](templates/multi-tab-workflow.sh) | Multi-tab comparison and parallel ops |
 
 Usage:
 ```bash
 ./templates/form-automation.sh https://example.com/form
 ./templates/authenticated-session.sh https://app.example.com/login
 ./templates/capture-workflow.sh https://example.com ./output
+./templates/download-workflow.sh https://example.com/exports ./downloads
+./templates/network-mocking.sh https://app.example.com ./screenshots
+./templates/multi-tab-workflow.sh https://a.com https://b.com ./output
 ```
 
 ## HTTPS Certificate Errors
