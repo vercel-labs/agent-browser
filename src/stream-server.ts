@@ -97,9 +97,28 @@ export class StreamServer {
             req: import('http').IncomingMessage;
           }) => {
             const origin = info.origin;
+
             // Allow connections with no origin (non-browser clients like CLI tools)
+            if (!origin) return true;
+
+            // Check for allowed origin pattern from environment variable
+            if (process.env.AGENT_BROWSER_ALLOWED_ORIGIN) {
+              try {
+                const allowedOriginRegex = new RegExp(process.env.AGENT_BROWSER_ALLOWED_ORIGIN);
+                if (allowedOriginRegex.test(origin)) {
+                  return true;
+                }
+              } catch (error) {
+                console.error(
+                  `[StreamServer] Invalid regex in AGENT_BROWSER_ALLOWED_ORIGIN: ${process.env.AGENT_BROWSER_ALLOWED_ORIGIN}`,
+                  error
+                );
+              }
+            }
+
             // Reject connections from web pages (which always have an origin)
-            if (origin && !origin.startsWith('file://')) {
+            // unless they are from local file system
+            if (!origin.startsWith('file://')) {
               console.log(`[StreamServer] Rejected connection from origin: ${origin}`);
               return false;
             }
