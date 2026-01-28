@@ -624,6 +624,10 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
             Some(n) if n.parse::<i32>().is_ok() => {
                 Ok(json!({ "id": id, "action": "tab_switch", "index": n.parse::<i32>().unwrap() }))
             }
+            Some(tid) if !tid.starts_with('-') => {
+                // Non-numeric, non-flag argument: treat as targetId
+                Ok(json!({ "id": id, "action": "tab_switch", "targetId": tid }))
+            }
             _ => Ok(json!({ "id": id, "action": "tab_list" })),
         },
 
@@ -1340,6 +1344,7 @@ mod tests {
             user_agent: None,
             provider: None,
             ignore_https_errors: false,
+            target: None,
         }
     }
 

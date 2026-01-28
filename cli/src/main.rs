@@ -24,6 +24,30 @@ use flags::{clean_args, parse_flags};
 use install::run_install;
 use output::{print_command_help, print_help, print_response, print_version};
 
+/// Extract targetId from page-specific CDP URL.
+/// ws://localhost:9222/devtools/page/ABC -> ("http://localhost:9222", Some("ABC"))
+/// wss://host:9222/devtools/page/ABC    -> ("https://host:9222", Some("ABC"))
+/// http://host:9222/devtools/page/ABC   -> ("http://host:9222", Some("ABC"))
+/// 9222                                  -> ("9222", None)
+fn extract_page_target(cdp_value: &str) -> (String, Option<String>) {
+    if let Some(idx) = cdp_value.find("/devtools/page/") {
+        let target_id = &cdp_value[idx + "/devtools/page/".len()..];
+        let target_id = target_id.split(&['?', '#'][..]).next().unwrap_or(target_id);
+        if !target_id.is_empty() {
+            let base = &cdp_value[..idx];
+            let base = if base.starts_with("wss://") {
+                base.replace("wss://", "https://")
+            } else if base.starts_with("ws://") {
+                base.replace("ws://", "http://")
+            } else {
+                base.to_string()
+            };
+            return (base, Some(target_id.to_string()));
+        }
+    }
+    (cdp_value.to_string(), None)
+}
+
 fn parse_proxy(proxy_str: &str) -> serde_json::Value {
     let Some(protocol_end) = proxy_str.find("://") else {
         return json!({ "server": proxy_str });
@@ -173,7 +197,7 @@ fn main() {
         return;
     }
 
-    let cmd = match parse_command(&clean, &flags) {
+    let mut cmd = match parse_command(&clean, &flags) {
         Ok(c) => c,
         Err(e) => {
             if flags.json {
@@ -194,6 +218,11 @@ fn main() {
             exit(1);
         }
     };
+
+    // Inject targetId from --target flag
+    if let Some(ref target_id) = flags.target {
+        cmd["targetId"] = json!(target_id);
+    }
 
     let daemon_result = match ensure_daemon(
         &flags.session,
@@ -254,6 +283,17 @@ fn main() {
         }
     }
 
+    // Validate --target requires --cdp
+    if flags.target.is_some() && flags.cdp.is_none() {
+        let msg = "--target requires --cdp (target IDs are CDP-specific)";
+        if flags.json {
+            println!(r#"{{"success":false,"error":"{}"}}"#, msg);
+        } else {
+            eprintln!("{} {}", color::error_indicator(), msg);
+        }
+        exit(1);
+    }
+
     // Validate mutually exclusive options
     if flags.cdp.is_some() && flags.provider.is_some() {
         let msg = "Cannot use --cdp and -p/--provider together";
@@ -277,21 +317,24 @@ fn main() {
 
     // Connect via CDP if --cdp flag is set
     // Accepts either a port number (e.g., "9222") or a full URL (e.g., "ws://..." or "wss://...")
+    // Also supports page-specific URLs like "ws://host:port/devtools/page/<targetId>"
     if let Some(ref cdp_value) = flags.cdp {
-        let mut launch_cmd = if cdp_value.starts_with("ws://")
-            || cdp_value.starts_with("wss://")
-            || cdp_value.starts_with("http://")
-            || cdp_value.starts_with("https://")
+        let (effective_cdp, page_target) = extract_page_target(cdp_value);
+
+        let mut launch_cmd = if effective_cdp.starts_with("ws://")
+            || effective_cdp.starts_with("wss://")
+            || effective_cdp.starts_with("http://")
+            || effective_cdp.starts_with("https://")
         {
             // It's a URL - use cdpUrl field
             json!({
                 "id": gen_id(),
                 "action": "launch",
-                "cdpUrl": cdp_value
+                "cdpUrl": effective_cdp
             })
         } else {
             // It's a port number - validate and use cdpPort field
-            let cdp_port: u16 = match cdp_value.parse::<u32>() {
+            let cdp_port: u16 = match effective_cdp.parse::<u32>() {
                 Ok(p) if p == 0 => {
                     let msg = "Invalid CDP port: port must be greater than 0".to_string();
                     if flags.json {
@@ -354,6 +397,13 @@ fn main() {
                 eprintln!("{} {}", color::error_indicator(), msg);
             }
             exit(1);
+        }
+
+        // Inject page-derived targetId if --target was not explicitly set
+        if flags.target.is_none() {
+            if let Some(ref tid) = page_target {
+                cmd["targetId"] = json!(tid);
+            }
         }
     }
 

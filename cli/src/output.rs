@@ -87,12 +87,20 @@ pub fn print_response(resp: &Response, json_mode: bool, action: Option<&str>) {
                     .unwrap_or("Untitled");
                 let url = tab.get("url").and_then(|v| v.as_str()).unwrap_or("");
                 let active = tab.get("active").and_then(|v| v.as_bool()).unwrap_or(false);
+                let target_id = tab.get("targetId").and_then(|v| v.as_str()).unwrap_or("");
                 let marker = if active {
                     color::cyan("→")
                 } else {
                     " ".to_string()
                 };
-                println!("{} [{}] {} - {}", marker, i, title, url);
+                if target_id.is_empty() {
+                    println!("{} [{}] {} - {}", marker, i, title, url);
+                } else {
+                    println!(
+                        "{} [{}] {} - {} {}",
+                        marker, i, title, url, color::dim(target_id)
+                    );
+                }
             }
             return;
         }
@@ -1212,10 +1220,11 @@ Usage: agent-browser tab [operation] [args]
 Manage browser tabs in the current window.
 
 Operations:
-  list                 List all tabs (default)
-  new [url]            Open new tab
+  list                 List all tabs (default, includes targetId)
+  new [url]            Open new tab (returns targetId)
   close [index]        Close tab (current if no index)
   <index>              Switch to tab by index
+  <targetId>           Switch to tab by CDP targetId
 
 Global Options:
   --json               Output as JSON
@@ -1227,6 +1236,7 @@ Examples:
   agent-browser tab new
   agent-browser tab new https://example.com
   agent-browser tab 2
+  agent-browser tab A8C7634B...              # Switch by targetId
   agent-browser tab close
   agent-browser tab close 1
 "##
@@ -1610,7 +1620,7 @@ Storage:
   storage <local|session>    Manage web storage
 
 Tabs:
-  tab [new|list|close|<n>]   Manage tabs
+  tab [new|list|close|<n>|<targetId>]  Manage tabs
 
 Debug:
   trace start|stop [path]    Record trace
@@ -1654,6 +1664,7 @@ Options:
   --full, -f                 Full page screenshot
   --headed                   Show browser window (not headless)
   --cdp <port>               Connect via CDP (Chrome DevTools Protocol)
+  --target <id>              Target a specific tab by CDP targetId
   --debug                    Debug output
   --version, -V              Show version
 
@@ -1661,6 +1672,7 @@ Environment:
   AGENT_BROWSER_SESSION          Session name (default: "default")
   AGENT_BROWSER_EXECUTABLE_PATH  Custom browser executable path
   AGENT_BROWSER_PROVIDER         Cloud browser provider
+  AGENT_BROWSER_TARGET           CDP target ID for tab targeting
   AGENT_BROWSER_STREAM_PORT      Enable WebSocket streaming on port (e.g., 9223)
 
 Examples:
@@ -1672,6 +1684,7 @@ Examples:
   agent-browser get text @e1
   agent-browser screenshot --full
   agent-browser --cdp 9222 snapshot      # Connect via CDP port
+  agent-browser --cdp 9222 --target <id> open url  # Target specific tab
   agent-browser --profile ~/.myapp open example.com  # Persistent profile
 "#
     );
