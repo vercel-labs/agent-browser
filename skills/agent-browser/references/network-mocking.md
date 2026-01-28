@@ -62,9 +62,9 @@ agent-browser network route "https://api.example.com/users" \
 agent-browser network route "https://api.example.com/notifications" \
     --body '{"notifications": [], "count": 0}'
 
-# Mock error response
+# Mock error response (body only - status codes not configurable)
 agent-browser network route "https://api.example.com/profile" \
-    --body '{"error": "Not found"}' --status 404
+    --body '{"error": "Not found"}'
 ```
 
 ### Block Unwanted Requests
@@ -107,9 +107,9 @@ agent-browser get text ".error-message"
 #!/bin/bash
 # Simulate various API errors
 
-# 500 Internal Server Error
+# Simulate server error response
 agent-browser network route "https://api.example.com/submit" \
-    --body '{"error": "Internal server error"}' --status 500
+    --body '{"error": "Internal server error"}'
 
 agent-browser open https://app.example.com/form
 agent-browser snapshot -i
@@ -130,7 +130,7 @@ agent-browser network route "https://api.example.com/auth/login" \
 
 # Mock auth failure
 agent-browser network route "https://api.example.com/auth/login" \
-    --body '{"error": "Invalid credentials"}' --status 401
+    --body '{"error": "Invalid credentials"}'
 ```
 
 ## Viewing Requests
@@ -182,16 +182,18 @@ agent-browser screenshot ./v2-response.png
 ### Rate Limit Simulation
 
 ```bash
-# After N requests, return rate limit error
+# Return rate limit error response
 agent-browser network route "https://api.example.com/search" \
-    --body '{"error": "Rate limit exceeded", "retry_after": 60}' --status 429
+    --body '{"error": "Rate limit exceeded", "retry_after": 60}'
 ```
 
 ### Slow Network Simulation
 
 ```bash
-# Add artificial delay (if supported)
-agent-browser network route "https://api.example.com/**" --delay 3000
+# Use set offline to simulate disconnection
+agent-browser set offline on
+# ... test offline behavior ...
+agent-browser set offline off
 ```
 
 ## Best Practices
