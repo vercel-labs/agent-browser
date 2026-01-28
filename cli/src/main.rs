@@ -219,6 +219,17 @@ fn main() {
         }
     };
 
+    // Validate --target requires --cdp
+    if flags.target.is_some() && flags.cdp.is_none() {
+        let msg = "--target requires --cdp (target IDs are CDP-specific)";
+        if flags.json {
+            println!(r#"{{"success":false,"error":"{}"}}"#, msg);
+        } else {
+            eprintln!("{} {}", color::error_indicator(), msg);
+        }
+        exit(1);
+    }
+
     // Inject targetId from --target flag
     if let Some(ref target_id) = flags.target {
         cmd["targetId"] = json!(target_id);
@@ -281,17 +292,6 @@ fn main() {
         if flags.ignore_https_errors {
             eprintln!("{} --ignore-https-errors ignored: daemon already running. Use 'agent-browser close' first to restart with this option.", color::warning_indicator());
         }
-    }
-
-    // Validate --target requires --cdp
-    if flags.target.is_some() && flags.cdp.is_none() {
-        let msg = "--target requires --cdp (target IDs are CDP-specific)";
-        if flags.json {
-            println!(r#"{{"success":false,"error":"{}"}}"#, msg);
-        } else {
-            eprintln!("{} {}", color::error_indicator(), msg);
-        }
-        exit(1);
     }
 
     // Validate mutually exclusive options
