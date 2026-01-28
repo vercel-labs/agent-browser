@@ -966,15 +966,24 @@ export class BrowserManager {
         Authorization: `Bearer ${notteApiKey}`,
       },
       body: JSON.stringify({
-        headless: process.env.NOTTE_HEADLESS?.toLowerCase() !== 'false',
-        idle_timeout_minutes: parseInt(process.env.NOTTE_TIMEOUT_MINUTES || '10', 10),
-        browser_type: 'chromium',
+        headless: true,
+        max_duration_minutes: parseInt(process.env.NOTTE_TIMEOUT_MINUTES || '15', 10),
+        idle_timeout_minutes: parseInt(process.env.NOTTE_TIMEOUT_MINUTES || '15', 10),
+        browser_type: process.env.NOTTE_BROWSER_TYPE === 'chrome' ? 'chrome' : 'chromium',
         proxies: process.env.NOTTE_PROXIES?.toLowerCase() !== 'false',
       }),
     });
 
     if (!response.ok) {
-      throw new Error(`Failed to create Notte session: ${response.statusText}`);
+      let errorBody = '';
+      try {
+        errorBody = await response.text();
+      } catch {
+        // ignore
+      }
+      throw new Error(
+        `Failed to create Notte session: ${response.status} ${response.statusText}${errorBody ? ` - ${errorBody}` : ''}`
+      );
     }
 
     let session: { session_id: string; cdp_url: string };
