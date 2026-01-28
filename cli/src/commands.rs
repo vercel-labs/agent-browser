@@ -1774,6 +1774,28 @@ mod tests {
     }
 
     #[test]
+    fn test_tab_switch_by_target_id() {
+        let cmd = parse_command(&args("tab A8C7634B"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "tab_switch");
+        assert_eq!(cmd["targetId"], "A8C7634B");
+        assert!(cmd.get("index").is_none());
+    }
+
+    #[test]
+    fn test_tab_switch_by_hex_target_id() {
+        let cmd =
+            parse_command(&args("tab DEADBEEF-1234-5678"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "tab_switch");
+        assert_eq!(cmd["targetId"], "DEADBEEF-1234-5678");
+    }
+
+    #[test]
+    fn test_tab_no_args_defaults_to_list() {
+        let cmd = parse_command(&args("tab"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "tab_list");
+    }
+
+    #[test]
     fn test_tab_close() {
         let cmd = parse_command(&args("tab close"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "tab_close");

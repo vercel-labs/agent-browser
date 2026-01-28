@@ -409,14 +409,50 @@ describe('parseCommand', () => {
       expect(result.success).toBe(true);
     });
 
-    it('should parse tab_switch', () => {
+    it('should parse tab_switch with index', () => {
       const result = parseCommand(cmd({ id: '1', action: 'tab_switch', index: 0 }));
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.command.index).toBe(0);
+      }
+    });
+
+    it('should parse tab_switch with targetId', () => {
+      const result = parseCommand(cmd({ id: '1', action: 'tab_switch', targetId: 'A8C7634B' }));
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.command.targetId).toBe('A8C7634B');
+      }
+    });
+
+    it('should parse tab_switch with both index and targetId', () => {
+      const result = parseCommand(
+        cmd({ id: '1', action: 'tab_switch', index: 0, targetId: 'A8C7634B' })
+      );
       expect(result.success).toBe(true);
     });
 
     it('should parse tab_close', () => {
       const result = parseCommand(cmd({ id: '1', action: 'tab_close' }));
       expect(result.success).toBe(true);
+    });
+  });
+
+  describe('targetId on base command', () => {
+    it('should accept targetId on any command', () => {
+      const result = parseCommand(cmd({ id: '1', action: 'snapshot', targetId: 'ABCD1234' }));
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.command.targetId).toBe('ABCD1234');
+      }
+    });
+
+    it('should accept command without targetId', () => {
+      const result = parseCommand(cmd({ id: '1', action: 'snapshot' }));
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.command.targetId).toBeUndefined();
+      }
     });
   });
 

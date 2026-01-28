@@ -134,6 +134,105 @@ describe('BrowserManager', () => {
     });
   });
 
+  describe('target ID', () => {
+    it('should return targetId from newTab', async () => {
+      const result = await browser.newTab();
+      expect(result.targetId).toBeDefined();
+      expect(typeof result.targetId).toBe('string');
+      expect(result.targetId.length).toBeGreaterThan(0);
+      // Cleanup
+      await browser.closeTab(result.index);
+    });
+
+    it('should return targetId from listTabs', async () => {
+      const tabs = await browser.listTabs();
+      expect(tabs.length).toBeGreaterThan(0);
+      for (const tab of tabs) {
+        expect(tab.targetId).toBeDefined();
+        expect(typeof tab.targetId).toBe('string');
+        expect(tab.targetId.length).toBeGreaterThan(0);
+      }
+    });
+
+    it('should return targetId from switchTo', async () => {
+      const result = await browser.switchTo(0);
+      expect(result.targetId).toBeDefined();
+      expect(typeof result.targetId).toBe('string');
+      expect(result.targetId.length).toBeGreaterThan(0);
+    });
+
+    it('should get targetId for current page', async () => {
+      const page = browser.getPage();
+      const targetId = await browser.getTargetId(page);
+      expect(typeof targetId).toBe('string');
+      expect(targetId.length).toBeGreaterThan(0);
+    });
+
+    it('should cache targetId across calls', async () => {
+      const page = browser.getPage();
+      const id1 = await browser.getTargetId(page);
+      const id2 = await browser.getTargetId(page);
+      expect(id1).toBe(id2);
+    });
+
+    it('should resolve target by targetId', async () => {
+      const page = browser.getPage();
+      const targetId = await browser.getTargetId(page);
+      const resolved = await browser.resolveTarget(targetId);
+      expect(resolved).toBe(page);
+    });
+
+    it('should throw for unknown targetId', async () => {
+      await expect(browser.resolveTarget('nonexistent-target-id')).rejects.toThrow(
+        'Target "nonexistent-target-id" not found'
+      );
+    });
+
+    it('should switch to tab by targetId', async () => {
+      const newTabResult = await browser.newTab();
+      const targetId = newTabResult.targetId;
+
+      // Switch back to first tab
+      await browser.switchTo(0);
+
+      // Switch to new tab by targetId
+      const result = await browser.switchToTarget(targetId);
+      expect(result.targetId).toBe(targetId);
+      expect(result.index).toBe(newTabResult.index);
+
+      // Cleanup
+      await browser.closeTab(newTabResult.index);
+    });
+
+    it('should scope getPage to target within withTarget', async () => {
+      const page0 = browser.getPage();
+      const newTabResult = await browser.newTab();
+      const page1 = browser.getPage();
+      const targetId0 = await browser.getTargetId(page0);
+
+      // We're on tab 1, but withTarget should scope getPage to tab 0
+      const scopedPage = await browser.withTarget(targetId0, async () => {
+        return browser.getPage();
+      });
+      expect(scopedPage).toBe(page0);
+      expect(scopedPage).not.toBe(page1);
+
+      // Cleanup
+      await browser.closeTab(newTabResult.index);
+    });
+
+    it('should assign unique targetIds to different tabs', async () => {
+      const newTabResult = await browser.newTab();
+      const tabs = await browser.listTabs();
+      const ids = tabs.map((t) => t.targetId);
+      const uniqueIds = new Set(ids);
+      expect(uniqueIds.size).toBe(ids.length);
+
+      // Cleanup
+      await browser.closeTab(newTabResult.index);
+    });
+  });
+
   describe('context operations', () => {
     it('should get cookies from context', async () => {
       const page = browser.getPage();

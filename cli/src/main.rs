@@ -582,4 +582,63 @@ mod tests {
         assert_eq!(result["username"], "user");
         assert_eq!(result["password"], "p@ss:w0rd");
     }
+
+    #[test]
+    fn test_extract_page_target_ws_url() {
+        let (base, target) = extract_page_target("ws://localhost:9222/devtools/page/ABC123");
+        assert_eq!(base, "http://localhost:9222");
+        assert_eq!(target, Some("ABC123".to_string()));
+    }
+
+    #[test]
+    fn test_extract_page_target_wss_url() {
+        let (base, target) = extract_page_target("wss://host:9222/devtools/page/DEF456");
+        assert_eq!(base, "https://host:9222");
+        assert_eq!(target, Some("DEF456".to_string()));
+    }
+
+    #[test]
+    fn test_extract_page_target_http_url() {
+        let (base, target) =
+            extract_page_target("http://localhost:9222/devtools/page/TARGET-ID");
+        assert_eq!(base, "http://localhost:9222");
+        assert_eq!(target, Some("TARGET-ID".to_string()));
+    }
+
+    #[test]
+    fn test_extract_page_target_plain_port() {
+        let (base, target) = extract_page_target("9222");
+        assert_eq!(base, "9222");
+        assert_eq!(target, None);
+    }
+
+    #[test]
+    fn test_extract_page_target_ws_without_page_path() {
+        let (base, target) = extract_page_target("ws://localhost:9222");
+        assert_eq!(base, "ws://localhost:9222");
+        assert_eq!(target, None);
+    }
+
+    #[test]
+    fn test_extract_page_target_strips_query_params() {
+        let (base, target) =
+            extract_page_target("ws://localhost:9222/devtools/page/ABC?foo=bar");
+        assert_eq!(base, "http://localhost:9222");
+        assert_eq!(target, Some("ABC".to_string()));
+    }
+
+    #[test]
+    fn test_extract_page_target_strips_fragment() {
+        let (base, target) =
+            extract_page_target("ws://localhost:9222/devtools/page/ABC#section");
+        assert_eq!(base, "http://localhost:9222");
+        assert_eq!(target, Some("ABC".to_string()));
+    }
+
+    #[test]
+    fn test_extract_page_target_empty_target_id() {
+        let (base, target) = extract_page_target("ws://localhost:9222/devtools/page/");
+        assert_eq!(base, "ws://localhost:9222/devtools/page/");
+        assert_eq!(target, None);
+    }
 }

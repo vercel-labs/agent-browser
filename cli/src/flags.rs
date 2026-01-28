@@ -311,4 +311,29 @@ mod tests {
         assert_eq!(flags.session, "test");
         assert_eq!(flags.executable_path, Some("/custom/chrome".to_string()));
     }
+
+    #[test]
+    fn test_parse_target_flag() {
+        let flags = parse_flags(&args("--target ABC123 snapshot"));
+        assert_eq!(flags.target, Some("ABC123".to_string()));
+    }
+
+    #[test]
+    fn test_parse_target_flag_no_value() {
+        let flags = parse_flags(&args("--target"));
+        assert_eq!(flags.target, None);
+    }
+
+    #[test]
+    fn test_clean_args_removes_target() {
+        let cleaned = clean_args(&args("--target ABC123 snapshot"));
+        assert_eq!(cleaned, vec!["snapshot"]);
+    }
+
+    #[test]
+    fn test_target_with_cdp_and_command() {
+        let flags = parse_flags(&args("--cdp 9222 --target DEADBEEF open example.com"));
+        assert_eq!(flags.cdp, Some("9222".to_string()));
+        assert_eq!(flags.target, Some("DEADBEEF".to_string()));
+    }
 }
