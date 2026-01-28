@@ -69,7 +69,7 @@ agent-browser scroll down 500     # Scroll page (default: down 300px)
 agent-browser scrollintoview @e1  # Scroll element into view (alias: scrollinto)
 agent-browser drag @e1 @e2        # Drag and drop
 agent-browser upload @e1 file.pdf # Upload files
-agent-browser click @e1 && agent-browser wait --download ./file.pdf  # Download (click + wait)
+agent-browser download @e1 ./file.pdf # Download file (click + wait combined)
 ```
 
 ### Get information
@@ -242,6 +242,7 @@ agent-browser --user-agent <ua> ...   # Custom User-Agent string
 agent-browser --headers <json> ...    # HTTP headers scoped to URL's origin
 agent-browser --executable-path <p>   # Custom browser executable
 agent-browser --extension <path> ...  # Load browser extension (repeatable)
+agent-browser --state <path> ...      # Load saved browser state (cookies, storage)
 agent-browser --debug ...             # Debug output for troubleshooting
 agent-browser --help                  # Show help (-h)
 agent-browser --version               # Show version (-V)
@@ -290,7 +291,7 @@ agent-browser snapshot -i  # Check result
 ## Example: Authentication with saved state
 
 ```bash
-# Login once
+# Login once and save state
 agent-browser open https://app.example.com/login
 agent-browser snapshot -i
 agent-browser fill @e1 "username"
@@ -298,10 +299,12 @@ agent-browser fill @e2 "password"
 agent-browser click @e3
 agent-browser wait --url "**/dashboard"
 agent-browser state save auth.json
+agent-browser close
 
-# Later sessions: load saved state
-agent-browser state load auth.json
-agent-browser open https://app.example.com/dashboard
+# Later sessions: load state at launch
+agent-browser --state auth.json open https://app.example.com/dashboard
+# Or via environment variable:
+# AGENT_BROWSER_STATE="auth.json" agent-browser open https://app.example.com/dashboard
 ```
 
 ## Sessions (parallel browsers)
