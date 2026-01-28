@@ -1672,7 +1672,6 @@ Environment:
   AGENT_BROWSER_SESSION          Session name (default: "default")
   AGENT_BROWSER_EXECUTABLE_PATH  Custom browser executable path
   AGENT_BROWSER_PROVIDER         Cloud browser provider
-  AGENT_BROWSER_TARGET           CDP target ID for tab targeting
   AGENT_BROWSER_STREAM_PORT      Enable WebSocket streaming on port (e.g., 9223)
 
 Examples:

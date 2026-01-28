@@ -50,7 +50,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
         user_agent: env::var("AGENT_BROWSER_USER_AGENT").ok(),
         provider: env::var("AGENT_BROWSER_PROVIDER").ok(),
         ignore_https_errors: false,
-        target: env::var("AGENT_BROWSER_TARGET").ok(),
+        target: None,
     };
 
     let mut i = 0;
