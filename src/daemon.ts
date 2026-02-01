@@ -322,12 +322,30 @@ export async function startDaemon(options?: { streamPort?: number }): Promise<vo
     fs.writeFileSync(portFile, port.toString());
     server.listen(port, '127.0.0.1', () => {
       // Daemon is ready on TCP port
+      const arch = os.arch();
+      console.log(`[agent-browser] daemon started (Windows/${arch})`);
+
+      if (arch === 'arm64') {
+        console.info(
+          `[agent-browser] ARM64 platform detected. Firefox is recommended for better compatibility. ` +
+            `Pass { browser: 'firefox', headless: true, ... } to launch().`
+        );
+      }
     });
   } else {
     // Unix: use Unix domain socket
     const socketPath = getSocketPath();
     server.listen(socketPath, () => {
       // Daemon is ready
+      const arch = os.arch();
+      console.log(`[agent-browser] daemon started (${process.platform}/${arch})`);
+
+      if (arch === 'arm64') {
+        console.info(
+          `[agent-browser] ARM64 platform detected. Firefox is recommended for better compatibility. ` +
+            `Pass { browser: 'firefox', headless: true, ... } to launch().`
+        );
+      }
     });
   }
 
