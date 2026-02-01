@@ -51,25 +51,28 @@ function getPortForSession(session: string): number {
  * Get the base directory for socket/pid files.
  * Priority: AGENT_BROWSER_SOCKET_DIR > XDG_RUNTIME_DIR > ~/.agent-browser > tmpdir
  */
-export function getSocketDir(): string {
-  // 1. Explicit override
-  if (process.env.AGENT_BROWSER_SOCKET_DIR) {
-    return process.env.AGENT_BROWSER_SOCKET_DIR;
-  }
-
-  // 2. XDG_RUNTIME_DIR (Linux standard)
+export function getAppDir(): string {
+  // 1. XDG_RUNTIME_DIR (Linux standard)
   if (process.env.XDG_RUNTIME_DIR) {
     return path.join(process.env.XDG_RUNTIME_DIR, 'agent-browser');
   }
 
-  // 3. Home directory fallback (like Docker Desktop's ~/.docker/run/)
+  // 2. Home directory fallback (like Docker Desktop's ~/.docker/run/)
   const homeDir = os.homedir();
   if (homeDir) {
     return path.join(homeDir, '.agent-browser');
   }
 
-  // 4. Last resort: temp dir
+  // 3. Last resort: temp dir
   return path.join(os.tmpdir(), 'agent-browser');
+}
+
+export function getSocketDir(): string {
+  // Allow explicit override for socket directory
+  if (process.env.AGENT_BROWSER_SOCKET_DIR) {
+    return process.env.AGENT_BROWSER_SOCKET_DIR;
+  }
+  return getAppDir();
 }
 
 /**

@@ -6,6 +6,52 @@ export default function Changelog() {
       <div className="prose">
         <h1>Changelog</h1>
 
+        <h2 id="v0.8.0">v0.8.0</h2>
+        <p className="text-[#888] text-sm">January 2026</p>
+
+        <h3>New Features</h3>
+        <ul>
+          <li>
+            <strong>Kernel cloud browser provider</strong> - Connect to Kernel (kernel.sh) for remote browser infrastructure with stealth mode and persistent profiles
+            <CodeBlock code={`# Via -p flag
+agent-browser -p kernel open https://example.com
+
+# Via environment variable
+export AGENT_BROWSER_PROVIDER=kernel
+export KERNEL_API_KEY=your-api-key
+agent-browser open https://example.com
+
+# With persistent profile
+export KERNEL_PROFILE_NAME=my-profile
+agent-browser open https://example.com`} />
+          </li>
+          <li>
+            <strong>Ignore HTTPS certificate errors</strong> - New flag for working with self-signed certificates and development environments
+            <CodeBlock code={`agent-browser --ignore-https-errors open https://localhost:3000`} />
+          </li>
+          <li>
+            <strong>Enhanced cookie management</strong> - Extended <code>cookies set</code> command with additional flags for setting cookies before page load
+            <CodeBlock code={`agent-browser cookies set session_id "abc123" --url https://app.example.com --httpOnly --secure
+agent-browser cookies set token "xyz" --domain .example.com --path /api --expires 1735689600`} />
+          </li>
+        </ul>
+
+        <h3>Bug Fixes</h3>
+        <ul>
+          <li>Fixed tab list command not recognizing new pages opened via clicks or <code>target=&quot;_blank&quot;</code> links</li>
+          <li>Fixed <code>check</code> command hanging indefinitely</li>
+          <li>Fixed <code>set device</code> not applying deviceScaleFactor - HiDPI screenshots now work correctly</li>
+          <li>Fixed state load and profile persistence not working in v0.7.6</li>
+          <li>Screenshots now save to temp directory when no path is provided</li>
+        </ul>
+
+        <h3>Security</h3>
+        <ul>
+          <li>Daemon and stream server now reject cross-origin connections</li>
+        </ul>
+
+        <hr className="my-8 border-[#333]" />
+
         <h2 id="v0.7.1">v0.7.1</h2>
         <p className="text-[#888] text-sm">January 2026</p>
 

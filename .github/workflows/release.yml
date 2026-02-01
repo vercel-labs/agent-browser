@@ -187,20 +187,27 @@ jobs:
             "agent-browser-darwin-x64"
             "agent-browser-darwin-arm64"
           )
-          MISSING=0
+          MIN_SIZE=100000  # Binaries should be at least 100KB
+          ERRORS=0
           for binary in "${EXPECTED_BINARIES[@]}"; do
             if [ ! -f "bin/$binary" ]; then
-              echo "Missing: bin/$binary"
-              MISSING=$((MISSING + 1))
+              echo "ERROR: Missing bin/$binary"
+              ERRORS=$((ERRORS + 1))
             else
-              echo "Found: bin/$binary ($(stat -c%s "bin/$binary" 2>/dev/null || stat -f%z "bin/$binary") bytes)"
+              SIZE=$(stat -c%s "bin/$binary" 2>/dev/null || stat -f%z "bin/$binary")
+              if [ "$SIZE" -lt "$MIN_SIZE" ]; then
+                echo "ERROR: bin/$binary is too small ($SIZE bytes, expected >= $MIN_SIZE)"
+                ERRORS=$((ERRORS + 1))
+              else
+                echo "OK: bin/$binary ($SIZE bytes)"
+              fi
             fi
           done
-          if [ "$MISSING" -gt 0 ]; then
-            echo "Error: $MISSING binaries are missing"
+          if [ "$ERRORS" -gt 0 ]; then
+            echo "Error: $ERRORS binary issues found"
             exit 1
           fi
-          echo "All 5 platform binaries present"
+          echo "All 5 platform binaries present and valid"
 
       - name: Create Release Pull Request or Publish to npm
         id: changesets

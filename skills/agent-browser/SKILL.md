@@ -96,8 +96,8 @@ agent-browser is checked @e1      # Check if checked
 ### Screenshots & PDF
 
 ```bash
-agent-browser screenshot          # Screenshot to stdout
-agent-browser screenshot path.png # Save to file
+agent-browser screenshot          # Save to a temporary directory
+agent-browser screenshot path.png # Save to a specific path
 agent-browser screenshot --full   # Full page
 agent-browser pdf output.pdf      # Save as PDF
 ```

@@ -1,5 +1,8 @@
 import type { Page, Frame } from 'playwright-core';
+import { mkdirSync } from 'node:fs';
+import path from 'node:path';
 import type { BrowserManager, ScreencastFrame } from './browser.js';
+import { getAppDir } from './daemon.js';
 import type {
   Command,
   Response,
@@ -561,13 +564,19 @@ async function handleScreenshot(
   }
 
   try {
-    if (command.path) {
-      await target.screenshot({ ...options, path: command.path });
-      return successResponse(command.id, { path: command.path });
-    } else {
-      const buffer = await target.screenshot(options);
-      return successResponse(command.id, { base64: buffer.toString('base64') });
+    let savePath = command.path;
+    if (!savePath) {
+      const ext = command.format === 'jpeg' ? 'jpg' : 'png';
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const random = Math.random().toString(36).substring(2, 8);
+      const filename = `screenshot-${timestamp}-${random}.${ext}`;
+      const screenshotDir = path.join(getAppDir(), 'tmp', 'screenshots');
+      mkdirSync(screenshotDir, { recursive: true });
+      savePath = path.join(screenshotDir, filename);
     }
+
+    await target.screenshot({ ...options, path: savePath });
+    return successResponse(command.id, { path: savePath });
   } catch (error) {
     if (command.selector) {
       throw toAIFriendlyError(error, command.selector);

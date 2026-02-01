@@ -7,6 +7,16 @@ on:
     branches: [main]
 
 jobs:
+  version-sync:
+    name: Version Sync Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check version sync
+        run: node scripts/check-version-sync.js
+
   typescript:
     name: TypeScript (Node ${{ matrix.node-version }})
     runs-on: ubuntu-latest
@@ -141,8 +151,15 @@ jobs:
       - name: Test agent-browser install command
         run: |
           $env:PATH = "$pwd\bin;$env:PATH"
-          bin/agent-browser-win32-x64.exe install
+          for ($i = 1; $i -le 3; $i++) {
+            bin/agent-browser-win32-x64.exe install
+            if ($LASTEXITCODE -eq 0) { exit 0 }
+            Write-Host "Attempt $i failed, retrying in 10 seconds..."
+            Start-Sleep -Seconds 10
+          }
+          exit 1
         shell: pwsh
+        timeout-minutes: 10
 
       - name: Verify Chromium was installed
         run: |
@@ -186,3 +203,106 @@ jobs:
 
       - name: Run serverless integration test
         run: pnpm exec vitest run test/serverless.test.ts
+
+  global-install:
+    name: Global Install (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    needs: rust
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            binary: agent-browser-linux-x64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            binary: agent-browser-darwin-arm64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            binary: agent-browser-win32-x64.exe
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            cli/target/
+          key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ hashFiles('cli/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ matrix.target }}-
+
+      - name: Build Rust CLI
+        run: cargo build --release --manifest-path cli/Cargo.toml --target ${{ matrix.target }}
+
+      - name: Install npm dependencies
+        run: pnpm install
+
+      - name: Build TypeScript
+        run: pnpm build
+
+      - name: Copy CLI binary to bin directory (Unix)
+        if: runner.os != 'Windows'
+        run: cp cli/target/${{ matrix.target }}/release/agent-browser bin/${{ matrix.binary }}
+
+      - name: Copy CLI binary to bin directory (Windows)
+        if: runner.os == 'Windows'
+        run: Copy-Item cli/target/${{ matrix.target }}/release/agent-browser.exe bin/${{ matrix.binary }}
+
+      - name: Test npm global install
+        run: |
+          npm pack
+          npm install -g agent-browser-*.tgz
+          agent-browser --version
+        shell: bash
+
+      - name: Verify symlink points to native binary (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          SYMLINK=$(npm prefix -g)/bin/agent-browser
+          TARGET=$(readlink "$SYMLINK")
+          echo "Symlink: $SYMLINK"
+          echo "Target: $TARGET"
+          if [[ "$TARGET" != *"${{ matrix.binary }}"* ]]; then
+            echo "ERROR: Symlink should point to native binary, not JS wrapper"
+            exit 1
+          fi
+          echo "✓ Symlink correctly points to native binary"
+        shell: bash
+
+      - name: Verify shim points to native binary (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          $shimPath = "$(npm prefix -g)\agent-browser.cmd"
+          $content = Get-Content $shimPath -Raw
+          echo "Shim path: $shimPath"
+          echo "Shim content:"
+          echo $content
+          if ($content -notmatch "agent-browser-win32-x64\.exe") {
+            echo "ERROR: Shim should point to native .exe, not JS wrapper"
+            exit 1
+          }
+          echo "✓ Shim correctly points to native binary"
+        shell: pwsh

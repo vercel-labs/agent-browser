@@ -1,6 +1,6 @@
 {
   "name": "agent-browser",
-  "version": "0.7.6",
+  "version": "0.8.6",
   "description": "Headless browser automation CLI for AI agents",
   "type": "module",
   "main": "dist/daemon.js",
@@ -11,7 +11,7 @@
     "skills"
   ],
   "bin": {
-    "agent-browser": "./bin/agent-browser"
+    "agent-browser": "./bin/agent-browser.js"
   },
   "scripts": {
     "prepare": "husky",
@@ -34,7 +34,7 @@
     "test:watch": "vitest",
     "postinstall": "node scripts/postinstall.js",
     "changeset": "changeset",
-    "ci:version": "changeset version && pnpm install --no-frozen-lockfile",
+    "ci:version": "changeset version && pnpm run version:sync && pnpm install --no-frozen-lockfile",
     "ci:publish": "pnpm run version:sync && pnpm run build && changeset publish"
   },
   "keywords": [
