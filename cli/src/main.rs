@@ -439,6 +439,10 @@ fn main() {
             cmd_obj.insert("args".to_string(), json!(args_vec));
         }
 
+        if let Some(ref exec_path) = flags.executable_path {
+            cmd_obj.insert("executablePath".to_string(), json!(exec_path));
+        }
+
         if flags.ignore_https_errors {
             launch_cmd["ignoreHTTPSErrors"] = json!(true);
         }
