@@ -588,6 +588,20 @@ const bringToFrontSchema = baseCommandSchema.extend({
   action: z.literal('bringtofront'),
 });
 
+// Popup schemas
+const popupWaitSchema = baseCommandSchema.extend({
+  action: z.literal('popup_wait'),
+  timeout: z.number().positive().optional(),
+});
+
+const popupListSchema = baseCommandSchema.extend({
+  action: z.literal('popup_list'),
+});
+
+const popupClearSchema = baseCommandSchema.extend({
+  action: z.literal('popup_clear'),
+});
+
 const waitForFunctionSchema = baseCommandSchema.extend({
   action: z.literal('waitforfunction'),
   expression: z.string().min(1),
@@ -906,6 +920,9 @@ const commandSchema = z.discriminatedUnion('action', [
   inputMouseSchema,
   inputKeyboardSchema,
   inputTouchSchema,
+  popupWaitSchema,
+  popupListSchema,
+  popupClearSchema,
 ]);
 
 // Parse result type
