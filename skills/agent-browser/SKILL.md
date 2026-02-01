@@ -230,6 +230,7 @@ agent-browser --proxy <url> ...       # Use proxy server
 agent-browser --headers <json> ...    # HTTP headers scoped to URL's origin
 agent-browser --executable-path <p>   # Custom browser executable
 agent-browser --extension <path> ...  # Load browser extension (repeatable)
+agent-browser -p <provider> ...       # Cloud browser provider (--provider)
 agent-browser --help                  # Show help (-h)
 agent-browser --version               # Show version (-V)
 agent-browser <command> --help        # Show detailed help for a command
@@ -249,9 +250,24 @@ agent-browser --proxy socks5://proxy.com:1080 open example.com
 AGENT_BROWSER_SESSION="mysession"            # Default session name
 AGENT_BROWSER_EXECUTABLE_PATH="/path/chrome" # Custom browser path
 AGENT_BROWSER_EXTENSIONS="/ext1,/ext2"       # Comma-separated extension paths
-AGENT_BROWSER_PROVIDER="your-cloud-browser-provider"  # Cloud browser provider (select browseruse or browserbase)
+AGENT_BROWSER_PROVIDER="browserbase"         # Cloud browser provider (browserbase, browseruse, or kernel)
 AGENT_BROWSER_STREAM_PORT="9223"             # WebSocket streaming port
 AGENT_BROWSER_HOME="/path/to/agent-browser"  # Custom install location (for daemon.js)
+```
+
+## Cloud browser providers
+
+Use `-p` to connect to cloud browser infrastructure instead of launching a local browser:
+
+```bash
+# Browserbase (requires BROWSERBASE_API_KEY + BROWSERBASE_PROJECT_ID)
+agent-browser -p browserbase open https://example.com
+```
+
+Or set via environment variable:
+```bash
+export AGENT_BROWSER_PROVIDER=browserbase
+agent-browser open https://example.com
 ```
 
 ## Example: Form submission
