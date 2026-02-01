@@ -103,6 +103,13 @@ export class BrowserManager {
   private recordingOutputPath: string = '';
   private recordingTempDir: string = '';
 
+  // CDP profiling state
+  private profilingActive: boolean = false;
+  private profileChunks: any[] = [];
+  private profileCompleteResolver: (() => void) | null = null;
+  private profileDataHandler: ((params: any) => void) | null = null;
+  private profileCompleteHandler: (() => void) | null = null;
+
   /**
    * Check if browser is launched
    */
@@ -1498,6 +1505,127 @@ export class BrowserManager {
   }
 
   /**
+   * Check if profiling is currently active
+   */
+  isProfilingActive(): boolean {
+    return this.profilingActive;
+  }
+
+  /**
+   * Start CDP profiling (Tracing)
+   */
+  async startProfiling(options?: { categories?: string[] }): Promise<void> {
+    if (this.profilingActive) {
+      throw new Error('Profiling already active');
+    }
+
+    const cdp = await this.getCDPSession();
+    this.profilingActive = true;
+    this.profileChunks = [];
+
+    // Set up event handlers
+    this.profileDataHandler = (params: any) => {
+      if (params.value) {
+        this.profileChunks.push(...params.value);
+      }
+    };
+
+    this.profileCompleteHandler = () => {
+      if (this.profileCompleteResolver) {
+        this.profileCompleteResolver();
+      }
+    };
+
+    cdp.on('Tracing.dataCollected', this.profileDataHandler);
+    cdp.on('Tracing.tracingComplete', this.profileCompleteHandler);
+
+    // Default categories for useful profiling data
+    const categories = options?.categories ?? [
+      'devtools.timeline', // "normal" devtools performance traces
+      'disabled-by-default-devtools.timeline', // more detailed timeline instrumentation
+      'disabled-by-default-devtools.timeline.frame', // useful for per-frame analysis
+      'disabled-by-default-devtools.timeline.stack', // necessary for understanding call stack
+      'v8.execute', // captures time spent running JS
+      'disabled-by-default-v8.cpu_profiler', // sampling-based profiling for hotspot detection
+      'disabled-by-default-v8.cpu_profiler.hires', // higher-resolution samples on above
+      'v8', // captures v8 internals
+      'disabled-by-default-v8.runtime_stats', // JS runtime call stats
+      'blink', // get all renderer events
+      'blink.user_timing', // user-recorded performance measurements (performance.mark, performance.measure)
+      'latencyInfo', // input-to-latency tracking
+      'renderer.scheduler', // show how tasks are scheduled/executed
+      'sequence_manager', // attribute latency to task queues
+      'toplevel', // broad-spectrum basic events
+    ];
+
+    await cdp.send('Tracing.start', {
+      traceConfig: {
+        includedCategories: categories,
+        enableSampling: true,
+      },
+      transferMode: 'ReportEvents', // Data arrives via Tracing.dataCollected events
+    });
+  }
+
+  /**
+   * Stop CDP profiling and save to file
+   */
+  async stopProfiling(outputPath: string): Promise<{ path: string; eventCount: number }> {
+    if (!this.profilingActive) {
+      throw new Error('No profiling session active');
+    }
+
+    const cdp = await this.getCDPSession();
+
+    // Create promise to wait for tracingComplete
+    const completePromise = new Promise<void>((resolve) => {
+      this.profileCompleteResolver = resolve;
+    });
+
+    // Signal end of tracing
+    await cdp.send('Tracing.end');
+
+    // Wait for all data to be collected
+    await completePromise;
+
+    // Clean up event handlers
+    if (this.profileDataHandler) {
+      cdp.off('Tracing.dataCollected', this.profileDataHandler);
+    }
+    if (this.profileCompleteHandler) {
+      cdp.off('Tracing.tracingComplete', this.profileCompleteHandler);
+    }
+
+    // Write trace data to file
+    const traceData = {
+      traceEvents: this.profileChunks,
+      metadata: {
+        'clock-domain': 'LINUX_CLOCK_MONOTONIC',
+      },
+    };
+
+    const fs = await import('node:fs/promises');
+    const pathModule = await import('node:path');
+
+    // Ensure directory exists
+    const dir = pathModule.dirname(outputPath);
+    await fs.mkdir(dir, { recursive: true }).catch(() => {});
+
+    await fs.writeFile(outputPath, JSON.stringify(traceData));
+
+    const eventCount = this.profileChunks.length;
+
+    // Reset state
+    this.profilingActive = false;
+    this.profileChunks = [];
+    this.profileCompleteResolver = null;
+    this.profileDataHandler = null;
+    this.profileCompleteHandler = null;
+
+    return { path: outputPath, eventCount };
+  }
+
+  /**
    * Inject a mouse event via CDP
    */
   async injectMouseEvent(params: {
@@ -1808,6 +1936,25 @@ export class BrowserManager {
     // Stop screencast if active
     if (this.screencastActive) {
       await this.stopScreencast();
+    }
+
+    // Clean up profiling state if active (without saving)
+    if (this.profilingActive) {
+      const cdp = this.cdpSession;
+      if (cdp) {
+        if (this.profileDataHandler) {
+          cdp.off('Tracing.dataCollected', this.profileDataHandler);
+        }
+        if (this.profileCompleteHandler) {
+          cdp.off('Tracing.tracingComplete', this.profileCompleteHandler);
+        }
+        await cdp.send('Tracing.end').catch(() => {});
+      }
+      this.profilingActive = false;
+      this.profileChunks = [];
+      this.profileCompleteResolver = null;
+      this.profileDataHandler = null;
+      this.profileCompleteHandler = null;
     }
 
     // Clean up CDP session

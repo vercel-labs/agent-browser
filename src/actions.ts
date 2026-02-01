@@ -56,6 +56,8 @@ import type {
   StylesCommand,
   TraceStartCommand,
   TraceStopCommand,
+  ProfilerStartCommand,
+  ProfilerStopCommand,
   HarStopCommand,
   StorageStateSaveCommand,
   ConsoleCommand,
@@ -341,6 +343,10 @@ export async function executeCommand(command: Command, browser: BrowserManager):
         return await handleTraceStart(command, browser);
       case 'trace_stop':
         return await handleTraceStop(command, browser);
+      case 'profiler_start':
+        return await handleProfilerStart(command, browser);
+      case 'profiler_stop':
+        return await handleProfilerStop(command, browser);
       case 'har_start':
         return await handleHarStart(command, browser);
       case 'har_stop':
@@ -1391,6 +1397,22 @@ async function handleTraceStop(
 ): Promise<Response> {
   await browser.stopTracing(command.path);
   return successResponse(command.id, { path: command.path });
+}
+
+async function handleProfilerStart(
+  command: ProfilerStartCommand,
+  browser: BrowserManager
+): Promise<Response> {
+  await browser.startProfiling({ categories: command.categories });
+  return successResponse(command.id, { started: true });
+}
+
+async function handleProfilerStop(
+  command: ProfilerStopCommand,
+  browser: BrowserManager
+): Promise<Response> {
+  const result = await browser.stopProfiling(command.path);
+  return successResponse(command.id, result);
 }
 
 async function handleHarStart(

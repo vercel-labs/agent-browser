@@ -536,6 +536,89 @@ describe('BrowserManager', () => {
     });
   });
 
+  describe('profiling (CDP tracing)', () => {
+    const fs = require('node:fs/promises');
+    const path = require('node:path');
+    const testOutputDir = '/tmp/agent-browser-test';
+
+    beforeAll(async () => {
+      // Ensure test output directory exists
+      await fs.mkdir(testOutputDir, { recursive: true }).catch(() => {});
+    });
+
+    afterEach(async () => {
+      // Stop profiling if still active
+      if (browser.isProfilingActive()) {
+        const tempPath = path.join(testOutputDir, 'cleanup.json');
+        await browser.stopProfiling(tempPath).catch(() => {});
+      }
+    });
+
+    it('should report profiling state correctly', () => {
+      expect(browser.isProfilingActive()).toBe(false);
+    });
+
+    it('should start profiling', async () => {
+      await browser.startProfiling();
+      expect(browser.isProfilingActive()).toBe(true);
+    });
+
+    it('should throw when starting profiling twice', async () => {
+      // Profiling might still be active from previous test
+      if (!browser.isProfilingActive()) {
+        await browser.startProfiling();
+      }
+      await expect(browser.startProfiling()).rejects.toThrow('Profiling already active');
+    });
+
+    it('should stop profiling and write file', async () => {
+      // Ensure profiling is active (might still be active from previous test)
+      if (!browser.isProfilingActive()) {
+        await browser.startProfiling();
+      }
+
+      const outputPath = path.join(testOutputDir, 'test-profile.json');
+      const result = await browser.stopProfiling(outputPath);
+
+      expect(result.path).toBe(outputPath);
+      expect(typeof result.eventCount).toBe('number');
+      expect(browser.isProfilingActive()).toBe(false);
+
+      // Verify file was written
+      const fileExists = await fs
+        .access(outputPath)
+        .then(() => true)
+        .catch(() => false);
+      expect(fileExists).toBe(true);
+
+      // Verify file content is valid JSON with traceEvents
+      const content = await fs.readFile(outputPath, 'utf-8');
+      const data = JSON.parse(content);
+      expect(data).toHaveProperty('traceEvents');
+      expect(Array.isArray(data.traceEvents)).toBe(true);
+
+      // Cleanup
+      await fs.unlink(outputPath).catch(() => {});
+    });
+
+    it('should throw when stopping without start', async () => {
+      expect(browser.isProfilingActive()).toBe(false);
+      await expect(browser.stopProfiling('/tmp/should-not-exist.json')).rejects.toThrow(
+        'No profiling session active'
+      );
+    });
+
+    it('should start profiling with custom categories', async () => {
+      await browser.startProfiling({ categories: ['devtools.timeline', 'v8.execute'] });
+      expect(browser.isProfilingActive()).toBe(true);
+
+      // Stop and cleanup
+      const outputPath = path.join(testOutputDir, 'custom-categories.json');
+      await browser.stopProfiling(outputPath);
+      await fs.unlink(outputPath).catch(() => {});
+    });
+  });
+
   describe('input injection', () => {
     it('should inject mouse move event', async () => {
       await expect(
