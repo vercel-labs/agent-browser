@@ -17,7 +17,7 @@
  *   agent-browser click @e2             # Click element by ref
  */
 
-import type { Page, Locator } from 'playwright-core';
+import type { Page, Frame, Locator } from 'playwright-core';
 
 export interface RefMap {
   [ref: string]: {
@@ -137,17 +137,20 @@ function buildSelector(role: string, name?: string): string {
 }
 
 /**
- * Get enhanced snapshot with refs and optional filtering
+ * Get enhanced snapshot with refs and optional filtering.
+ * Accepts Page or Frame so snapshots can be scoped to the active frame (e.g. iframe).
  */
 export async function getEnhancedSnapshot(
-  page: Page,
+  pageOrFrame: Page | Frame,
   options: SnapshotOptions = {}
 ): Promise<EnhancedSnapshot> {
   resetRefs();
   const refs: RefMap = {};
 
-  // Get ARIA snapshot from Playwright
-  const locator = options.selector ? page.locator(options.selector) : page.locator(':root');
+  // Get ARIA snapshot from Playwright (works for both Page and Frame)
+  const locator = options.selector
+    ? pageOrFrame.locator(options.selector)
+    : pageOrFrame.locator(':root');
   const ariaTree = await locator.ariaSnapshot();
 
   if (!ariaTree) {

@@ -119,8 +119,8 @@ export class BrowserManager {
     compact?: boolean;
     selector?: string;
   }): Promise<EnhancedSnapshot> {
-    const page = this.getPage();
-    const snapshot = await getEnhancedSnapshot(page, options);
+    const frame = this.getFrame();
+    const snapshot = await getEnhancedSnapshot(frame, options);
     this.refMap = snapshot.refs;
     this.lastSnapshot = snapshot.tree;
     return snapshot;
@@ -144,14 +144,14 @@ export class BrowserManager {
     const refData = this.refMap[ref];
     if (!refData) return null;
 
-    const page = this.getPage();
+    const frame = this.getFrame();
 
     // Build locator with exact: true to avoid substring matches
     let locator: Locator;
     if (refData.name) {
-      locator = page.getByRole(refData.role as any, { name: refData.name, exact: true });
+      locator = frame.getByRole(refData.role as any, { name: refData.name, exact: true });
     } else {
-      locator = page.getByRole(refData.role as any);
+      locator = frame.getByRole(refData.role as any);
     }
 
     // If an nth index is stored (for disambiguation), use it
@@ -178,8 +178,8 @@ export class BrowserManager {
     if (locator) return locator;
 
     // Otherwise treat as regular selector
-    const page = this.getPage();
-    return page.locator(selectorOrRef);
+    const frame = this.getFrame();
+    return frame.locator(selectorOrRef);
   }
 
   /**
@@ -203,13 +203,16 @@ export class BrowserManager {
   }
 
   /**
-   * Switch to a frame by selector, name, or URL
+   * Switch to a frame by selector, name, or URL.
+   * Selector is resolved within the current frame (supports nested iframes).
+   * Name and URL search the entire frame tree.
    */
   async switchToFrame(options: { selector?: string; name?: string; url?: string }): Promise<void> {
     const page = this.getPage();
+    const currentFrame = this.getFrame();
 
     if (options.selector) {
-      const frameElement = await page.$(options.selector);
+      const frameElement = await currentFrame.$(options.selector);
       if (!frameElement) {
         throw new Error(`Frame not found: ${options.selector}`);
       }

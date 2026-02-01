@@ -619,10 +619,9 @@ async function handleEvaluate(
   command: EvaluateCommand,
   browser: BrowserManager
 ): Promise<Response<EvaluateData>> {
-  const page = browser.getPage();
+  const frame = browser.getFrame();
 
-  // Evaluate the script directly as a string expression
-  const result = await page.evaluate(command.script);
+  const result = await frame.evaluate(command.script);
 
   return successResponse(command.id, { result });
 }
