@@ -148,6 +148,13 @@ async function fixGlobalInstallBin() {
  * Replace the symlink to the JS wrapper with a symlink to the native binary.
  */
 async function fixUnixSymlink() {
+  // Skip optimization in Volta environment - Volta uses a staging directory
+  // that gets renamed after postinstall, breaking absolute symlinks
+  if (process.env.VOLTA_HOME) {
+    console.log('ℹ Volta detected: skipping bin optimization (Volta manages shims)');
+    return;
+  }
+
   // Get npm's global bin directory (npm prefix -g + /bin)
   let npmBinDir;
   try {
@@ -187,6 +194,13 @@ async function fixUnixSymlink() {
  * We overwrite them to invoke the native .exe directly.
  */
 async function fixWindowsShims() {
+  // Skip optimization in Volta environment - Volta uses a staging directory
+  // that gets renamed after postinstall, breaking absolute symlinks
+  if (process.env.VOLTA_HOME) {
+    console.log('ℹ Volta detected: skipping bin optimization (Volta manages shims)');
+    return;
+  }
+
   // Check if this is a global install by looking for npm's global prefix
   let npmBinDir;
   try {
