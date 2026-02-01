@@ -120,11 +120,11 @@ agent-browser click @e7            # Select item
 
 ### 4. Snapshot Specific Regions
 
-For complex pages, snapshot specific areas:
+For complex pages, snapshot specific areas using CSS selectors:
 
 ```bash
 # Snapshot just the form
-agent-browser snapshot @e9
+agent-browser snapshot -s "#contact-form"
 ```
 
 ## Ref Notation Details
@@ -166,8 +166,8 @@ agent-browser snapshot -i
 ### Element Not Visible in Snapshot
 
 ```bash
-# Scroll to reveal element
-agent-browser scroll --bottom
+# Scroll down to reveal element
+agent-browser scroll down 500
 agent-browser snapshot -i
 
 # Or wait for dynamic content
@@ -178,8 +178,8 @@ agent-browser snapshot -i
 ### Too Many Elements
 
 ```bash
-# Snapshot specific container
-agent-browser snapshot @e5
+# Snapshot specific container using CSS selector
+agent-browser snapshot -s ".main-content"
 
 # Or use get text for content-only extraction
 agent-browser get text @e5
