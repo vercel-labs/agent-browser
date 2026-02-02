@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { BrowserManager } from './browser.js';
-import { chromium } from 'playwright-core';
+import { chromium } from 'patchright';
 
 describe('BrowserManager', () => {
   let browser: BrowserManager;
