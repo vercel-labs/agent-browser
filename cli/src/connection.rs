@@ -239,6 +239,37 @@ pub fn ensure_daemon(
             .map_err(|e| format!("Failed to create socket directory: {}", e))?;
     }
 
+    // Pre-flight check: Validate socket path length (Unix limit is 104 bytes including null terminator)
+    #[cfg(unix)]
+    {
+        let socket_path = get_socket_path(session);
+        let path_len = socket_path.as_os_str().len();
+        if path_len > 103 {
+            return Err(format!(
+                "Session name '{}' is too long. Socket path would be {} bytes (max 103).\n\
+                 Use a shorter session name or set AGENT_BROWSER_SOCKET_DIR to a shorter path.",
+                session, path_len
+            ));
+        }
+    }
+
+    // Pre-flight check: Verify socket directory is writable
+    {
+        let test_file = socket_dir.join(".write_test");
+        match fs::write(&test_file, b"") {
+            Ok(_) => {
+                let _ = fs::remove_file(&test_file);
+            }
+            Err(e) => {
+                return Err(format!(
+                    "Socket directory '{}' is not writable: {}",
+                    socket_dir.display(),
+                    e
+                ));
+            }
+        }
+    }
+
     let exe_path = env::current_exe().map_err(|e| e.to_string())?;
     // Canonicalize to resolve symlinks (e.g., npm global bin symlink -> actual binary)
     let exe_path = exe_path.canonicalize().unwrap_or(exe_path);
@@ -400,7 +431,10 @@ pub fn ensure_daemon(
         thread::sleep(Duration::from_millis(100));
     }
 
-    Err("Daemon failed to start".to_string())
+    Err(format!(
+        "Daemon failed to start (socket: {})",
+        get_socket_dir().join(format!("{}.sock", session)).display()
+    ))
 }
 
 fn connect(session: &str) -> Result<Connection, String> {
