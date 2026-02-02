@@ -817,6 +817,7 @@ export class BrowserManager {
   async launch(options: LaunchCommand): Promise<void> {
     // Determine CDP endpoint: prefer cdpUrl over cdpPort for flexibility
     const cdpEndpoint = options.cdpUrl ?? (options.cdpPort ? String(options.cdpPort) : undefined);
+    const wsEndpoint = options.wsEndpoint;
     const hasExtensions = !!options.extensions?.length;
     const hasProfile = !!options.profile;
 
@@ -828,15 +829,30 @@ export class BrowserManager {
       throw new Error('Profile cannot be used with CDP connection');
     }
 
+    if (hasExtensions && wsEndpoint) {
+      throw new Error('Extensions cannot be used with WebSocket connection');
+    }
+
+    if (hasProfile && wsEndpoint) {
+      throw new Error('Profile cannot be used with WebSocket connection');
+    }
+
     if (this.isLaunched()) {
       const needsRelaunch =
-        (!cdpEndpoint && this.cdpEndpoint !== null) ||
-        (!!cdpEndpoint && this.needsCdpReconnect(cdpEndpoint));
+        (!cdpEndpoint && !wsEndpoint && this.cdpEndpoint !== null) ||
+        (!!cdpEndpoint && this.needsCdpReconnect(cdpEndpoint)) ||
+        (!!wsEndpoint && this.cdpEndpoint !== wsEndpoint);
       if (needsRelaunch) {
         await this.close();
       } else {
         return;
       }
+    }
+
+    // Connect via WebSocket endpoint (for Firefox-based browsers like Camoufox)
+    if (wsEndpoint) {
+      await this.connectViaWebSocket(wsEndpoint, options.browser ?? 'firefox');
+      return;
     }
 
     if (cdpEndpoint) {
@@ -990,6 +1006,67 @@ export class BrowserManager {
       }
 
       this.activePageIndex = 0;
+    } catch (error) {
+      // Clean up browser connection if validation or setup failed
+      await browser.close().catch(() => {});
+      throw error;
+    }
+  }
+
+  /**
+   * Connect to a running browser via Playwright WebSocket endpoint
+   * Used for Firefox-based browsers like Camoufox that don't support CDP
+   * @param wsEndpoint The WebSocket endpoint URL (ws:// or wss://)
+   * @param browserType The browser type to use for connection
+   */
+  private async connectViaWebSocket(
+    wsEndpoint: string,
+    browserType: 'chromium' | 'firefox' | 'webkit' = 'firefox'
+  ): Promise<void> {
+    if (!wsEndpoint) {
+      throw new Error('WebSocket endpoint is required for WebSocket connection');
+    }
+
+    if (!wsEndpoint.startsWith('ws://') && !wsEndpoint.startsWith('wss://')) {
+      throw new Error('WebSocket endpoint must start with ws:// or wss://');
+    }
+
+    const launcher =
+      browserType === 'firefox' ? firefox : browserType === 'webkit' ? webkit : chromium;
+
+    const browser = await launcher.connect(wsEndpoint).catch(() => {
+      throw new Error(
+        `Failed to connect via WebSocket to ${wsEndpoint}. ` +
+          'Make sure the browser server is running and accessible.'
+      );
+    });
+
+    // Validate and set up state, cleaning up browser connection if anything fails
+    try {
+      const contexts = browser.contexts();
+      let context: BrowserContext;
+      let page: Page;
+
+      if (contexts.length === 0) {
+        // Create a new context if none exists
+        context = await browser.newContext();
+        page = await context.newPage();
+      } else {
+        context = contexts[0];
+        const pages = context.pages();
+        page = pages[0] ?? (await context.newPage());
+      }
+
+      // All validation passed - commit state
+      this.browser = browser;
+      this.cdpEndpoint = wsEndpoint; // Store WebSocket endpoint in cdpEndpoint for reconnect detection
+
+      context.setDefaultTimeout(60000);
+      this.contexts.push(context);
+      this.pages.push(page);
+      this.activePageIndex = 0;
+      this.setupPageTracking(page);
+      this.setupContextTracking(context);
     } catch (error) {
       // Clean up browser connection if validation or setup failed
       await browser.close().catch(() => {});

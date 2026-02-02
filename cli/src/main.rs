@@ -248,6 +248,26 @@ fn main() {
         exit(1);
     }
 
+    if flags.ws.is_some() && flags.cdp.is_some() {
+        let msg = "Cannot use --ws and --cdp together";
+        if flags.json {
+            println!(r#"{{"success":false,"error":"{}"}}"#, msg);
+        } else {
+            eprintln!("\x1b[31m✗\x1b[0m {}", msg);
+        }
+        exit(1);
+    }
+
+    if flags.ws.is_some() && flags.provider.is_some() {
+        let msg = "Cannot use --ws and -p/--provider together";
+        if flags.json {
+            println!(r#"{{"success":false,"error":"{}"}}"#, msg);
+        } else {
+            eprintln!("\x1b[31m✗\x1b[0m {}", msg);
+        }
+        exit(1);
+    }
+
     if flags.provider.is_some() && !flags.extensions.is_empty() {
         let msg = "Cannot use --extension with -p/--provider (extensions require local browser)";
         if flags.json {
@@ -336,6 +356,56 @@ fn main() {
         }
     }
 
+    // Connect via Playwright WebSocket if --ws flag is set
+    // Used to connect to browsers like Camoufox (Firefox) that don't support CDP
+    if let Some(ref ws_value) = flags.ws {
+        if !ws_value.starts_with("ws://") && !ws_value.starts_with("wss://") {
+            let msg = "Invalid WebSocket URL: must start with ws:// or wss://";
+            if flags.json {
+                println!(r#"{{"success":false,"error":"{}"}}"#, msg);
+            } else {
+                eprintln!("{} {}", color::error_indicator(), msg);
+            }
+            exit(1);
+        }
+
+        let browser_type = flags.browser.as_deref().unwrap_or("chromium");
+        if browser_type != "chromium" && browser_type != "firefox" && browser_type != "webkit" {
+            let msg = format!("Invalid browser type: '{}'. Must be chromium, firefox, or webkit", browser_type);
+            if flags.json {
+                println!(r#"{{"success":false,"error":"{}"}}"#, msg);
+            } else {
+                eprintln!("{} {}", color::error_indicator(), msg);
+            }
+            exit(1);
+        }
+
+        let launch_cmd = json!({
+            "id": gen_id(),
+            "action": "launch",
+            "wsEndpoint": ws_value,
+            "browser": browser_type
+        });
+
+        let err = match send_command(launch_cmd, &flags.session) {
+            Ok(resp) if resp.success => None,
+            Ok(resp) => Some(
+                resp.error
+                    .unwrap_or_else(|| "WebSocket connection failed".to_string()),
+            ),
+            Err(e) => Some(e.to_string()),
+        };
+
+        if let Some(msg) = err {
+            if flags.json {
+                println!(r#"{{"success":false,"error":"{}"}}"#, msg);
+            } else {
+                eprintln!("{} {}", color::error_indicator(), msg);
+            }
+            exit(1);
+        }
+    }
+
     // Launch with cloud provider if -p flag is set
     if let Some(ref provider) = flags.provider {
         let launch_cmd = json!({
@@ -360,8 +430,8 @@ fn main() {
         }
     }
 
-    // Launch headed browser or configure browser options (without CDP or provider)
-    if (flags.headed || flags.profile.is_some() || flags.proxy.is_some() || flags.args.is_some() || flags.user_agent.is_some()) && flags.cdp.is_none() && flags.provider.is_none() {
+    // Launch headed browser or configure browser options (without CDP, WS, or provider)
+    if (flags.headed || flags.profile.is_some() || flags.proxy.is_some() || flags.args.is_some() || flags.user_agent.is_some()) && flags.cdp.is_none() && flags.ws.is_none() && flags.provider.is_none() {
         let mut launch_cmd = json!({
             "id": gen_id(),
             "action": "launch",

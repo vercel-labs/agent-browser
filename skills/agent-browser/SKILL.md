@@ -69,6 +69,7 @@ agent-browser scroll down 500     # Scroll page (default: down 300px)
 agent-browser scrollintoview @e1  # Scroll element into view (alias: scrollinto)
 agent-browser drag @e1 @e2        # Drag and drop
 agent-browser upload @e1 file.pdf # Upload files
+agent-browser download @e1 ./out  # Download file by clicking element
 ```
 
 ### Get information
@@ -221,12 +222,18 @@ agent-browser eval "document.title"   # Run JavaScript
 
 ```bash
 agent-browser --session <name> ...    # Isolated browser session
+agent-browser --profile <path> ...    # Persistent browser profile directory
 agent-browser --json ...              # JSON output for parsing
 agent-browser --headed ...            # Show browser window (not headless)
 agent-browser --full ...              # Full page screenshot (-f)
 agent-browser --cdp <port> ...        # Connect via Chrome DevTools Protocol
+agent-browser --ws <url> ...          # Connect via Playwright WebSocket (for Firefox/Camoufox)
+agent-browser -b <type> ...           # Browser type: chromium, firefox, webkit (default: chromium)
 agent-browser --proxy <url> ...       # Use proxy server
+agent-browser --proxy-bypass <hosts>  # Bypass proxy for these hosts
 agent-browser --headers <json> ...    # HTTP headers scoped to URL's origin
+agent-browser --user-agent <ua> ...   # Custom User-Agent string
+agent-browser --args <args> ...       # Browser launch args (comma separated)
 agent-browser --executable-path <p>   # Custom browser executable
 agent-browser --extension <path> ...  # Load browser extension (repeatable)
 agent-browser --help                  # Show help (-h)
@@ -246,10 +253,16 @@ agent-browser --proxy socks5://proxy.com:1080 open example.com
 
 ```bash
 AGENT_BROWSER_SESSION="mysession"            # Default session name
+AGENT_BROWSER_PROFILE="/path/to/profile"     # Persistent browser profile
 AGENT_BROWSER_EXECUTABLE_PATH="/path/chrome" # Custom browser path
 AGENT_BROWSER_EXTENSIONS="/ext1,/ext2"       # Comma-separated extension paths
 AGENT_BROWSER_STREAM_PORT="9223"             # WebSocket streaming port
-AGENT_BROWSER_HOME="/path/to/agent-browser"  # Custom install location (for daemon.js)
+AGENT_BROWSER_WS="ws://localhost:9222"       # Default WebSocket endpoint
+AGENT_BROWSER_BROWSER="chromium"             # Default browser type (chromium, firefox, webkit)
+AGENT_BROWSER_USER_AGENT="..."               # Custom User-Agent string
+AGENT_BROWSER_ARGS="--no-sandbox,..."        # Browser launch arguments
+AGENT_BROWSER_PROXY="http://proxy:8080"      # Proxy server URL
+AGENT_BROWSER_PROXY_BYPASS="localhost,*.local" # Bypass proxy for hosts
 ```
 
 ## Example: Form submission
@@ -315,6 +328,19 @@ agent-browser trace start                 # Start recording trace
 agent-browser trace stop trace.zip        # Stop and save trace
 agent-browser record start ./debug.webm   # Record video from current page
 agent-browser record stop                 # Save recording
+```
+
+## Connect to Camoufox (Firefox)
+
+```bash
+# Connect via WebSocket to a running Camoufox instance
+agent-browser --ws ws://localhost:9222/browser -b firefox open example.com
+agent-browser --ws ws://localhost:9222/browser -b firefox snapshot -i
+
+# Or set environment variables
+export AGENT_BROWSER_WS="ws://localhost:9222/browser"
+export AGENT_BROWSER_BROWSER="firefox"
+agent-browser open example.com
 ```
 
 ## Deep-dive documentation

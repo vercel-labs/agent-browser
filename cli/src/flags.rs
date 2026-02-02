@@ -9,6 +9,8 @@ pub struct Flags {
     pub headers: Option<String>,
     pub executable_path: Option<String>,
     pub cdp: Option<String>,
+    pub ws: Option<String>,
+    pub browser: Option<String>,
     pub extensions: Vec<String>,
     pub profile: Option<String>,
     pub proxy: Option<String>,
@@ -33,6 +35,8 @@ pub fn parse_flags(args: &[String]) -> Flags {
         headers: None,
         executable_path: env::var("AGENT_BROWSER_EXECUTABLE_PATH").ok(),
         cdp: None,
+        ws: env::var("AGENT_BROWSER_WS").ok(),
+        browser: env::var("AGENT_BROWSER_BROWSER").ok(),
         extensions: extensions_env,
         profile: env::var("AGENT_BROWSER_PROFILE").ok(),
         proxy: env::var("AGENT_BROWSER_PROXY").ok(),
@@ -76,6 +80,18 @@ pub fn parse_flags(args: &[String]) -> Flags {
             "--cdp" => {
                 if let Some(s) = args.get(i + 1) {
                     flags.cdp = Some(s.clone());
+                    i += 1;
+                }
+            }
+            "--ws" => {
+                if let Some(s) = args.get(i + 1) {
+                    flags.ws = Some(s.clone());
+                    i += 1;
+                }
+            }
+            "-b" | "--browser" => {
+                if let Some(s) = args.get(i + 1) {
+                    flags.browser = Some(s.clone());
                     i += 1;
                 }
             }
@@ -134,6 +150,9 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--headers",
         "--executable-path",
         "--cdp",
+        "--ws",
+        "-b",
+        "--browser",
         "--extension",
         "--profile",
         "--proxy",

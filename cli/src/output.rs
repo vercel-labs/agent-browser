@@ -1539,6 +1539,10 @@ Options:
   --full, -f                 Full page screenshot
   --headed                   Show browser window (not headless)
   --cdp <port>               Connect via CDP (Chrome DevTools Protocol)
+  --ws <url>                 Connect via Playwright WebSocket (for Firefox/Camoufox)
+                             e.g., --ws "ws://localhost:9222/browser" -b firefox
+  -b, --browser <type>       Browser type: chromium, firefox, webkit (default: chromium)
+                             Used with --ws to specify browser type for WebSocket connection
   --debug                    Debug output
   --version, -V              Show version
 
@@ -1546,6 +1550,8 @@ Environment:
   AGENT_BROWSER_SESSION          Session name (default: "default")
   AGENT_BROWSER_EXECUTABLE_PATH  Custom browser executable path
   AGENT_BROWSER_STREAM_PORT      Enable WebSocket streaming on port (e.g., 9223)
+  AGENT_BROWSER_WS               Default WebSocket endpoint for connection
+  AGENT_BROWSER_BROWSER          Default browser type (chromium, firefox, webkit)
 
 Examples:
   agent-browser open example.com
@@ -1556,6 +1562,7 @@ Examples:
   agent-browser get text @e1
   agent-browser screenshot --full
   agent-browser --cdp 9222 snapshot      # Connect via CDP port
+  agent-browser --ws ws://localhost:9222/browser -b firefox snapshot  # Connect to Camoufox
   agent-browser --profile ~/.myapp open example.com  # Persistent profile
 "#
     );

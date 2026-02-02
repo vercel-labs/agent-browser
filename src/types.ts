@@ -16,6 +16,7 @@ export interface LaunchCommand extends BaseCommand {
   executablePath?: string;
   cdpPort?: number;
   cdpUrl?: string;
+  wsEndpoint?: string; // WebSocket endpoint for connecting to browsers like Camoufox (Firefox)
   extensions?: string[];
   profile?: string; // Path to persistent browser profile directory
   proxy?: {

@@ -31,6 +31,13 @@ const launchSchema = baseCommandSchema.extend({
       { message: 'CDP URL must start with ws://, wss://, http://, or https://' }
     )
     .optional(),
+  wsEndpoint: z
+    .string()
+    .url()
+    .refine((url) => url.startsWith('ws://') || url.startsWith('wss://'), {
+      message: 'WebSocket endpoint must start with ws:// or wss://',
+    })
+    .optional(),
   executablePath: z.string().optional(),
   extensions: z.array(z.string()).optional(),
   headers: z.record(z.string()).optional(),
