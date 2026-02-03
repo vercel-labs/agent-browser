@@ -679,6 +679,20 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
             }
         }
 
+        // === Popup (JavaScript-opened windows) ===
+        "popup" => match rest.get(0).map(|s| *s) {
+            Some("wait") => {
+                let mut cmd = json!({ "id": id, "action": "popup_wait" });
+                if let Some(timeout) = rest.get(1).and_then(|s| s.parse::<i32>().ok()) {
+                    cmd.as_object_mut().unwrap().insert("timeout".to_string(), json!(timeout));
+                }
+                Ok(cmd)
+            }
+            Some("list") => Ok(json!({ "id": id, "action": "popup_list" })),
+            Some("clear") => Ok(json!({ "id": id, "action": "popup_clear" })),
+            _ => Ok(json!({ "id": id, "action": "popup_list" })),
+        }
+
         // === Frame ===
         "frame" => {
             if rest.get(0).map(|s| *s) == Some("main") {
@@ -2385,5 +2399,40 @@ mod tests {
         let cmd = parse_command(&args("connect 1"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "launch");
         assert_eq!(cmd["cdpPort"], 1);
+    }
+
+    // === Popup Tests ===
+
+    #[test]
+    fn test_popup_list_default() {
+        let cmd = parse_command(&args("popup"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "popup_list");
+    }
+
+    #[test]
+    fn test_popup_list_explicit() {
+        let cmd = parse_command(&args("popup list"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "popup_list");
+    }
+
+    #[test]
+    fn test_popup_wait_no_timeout() {
+        let cmd = parse_command(&args("popup wait"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "popup_wait");
+        // timeout should NOT be present (not null)
+        assert!(cmd.get("timeout").is_none());
+    }
+
+    #[test]
+    fn test_popup_wait_with_timeout() {
+        let cmd = parse_command(&args("popup wait 10000"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "popup_wait");
+        assert_eq!(cmd["timeout"], 10000);
+    }
+
+    #[test]
+    fn test_popup_clear() {
+        let cmd = parse_command(&args("popup clear"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "popup_clear");
     }
 }
