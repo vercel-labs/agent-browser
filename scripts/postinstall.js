@@ -122,11 +122,11 @@ function showPlaywrightReminder() {
   console.log('╔═══════════════════════════════════════════════════════════════════════════╗');
   console.log('║ To download browser binaries, run:                                        ║');
   console.log('║                                                                           ║');
-  console.log('║     npx playwright install chromium                                       ║');
+  console.log('║     npx patchright install chromium                                       ║');
   console.log('║                                                                           ║');
   console.log('║ On Linux, include system dependencies with:                               ║');
   console.log('║                                                                           ║');
-  console.log('║     npx playwright install --with-deps chromium                           ║');
+  console.log('║     npx patchright install --with-deps chromium                           ║');
   console.log('║                                                                           ║');
   console.log('╚═══════════════════════════════════════════════════════════════════════════╝');
 }

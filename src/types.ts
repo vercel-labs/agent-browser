@@ -1,4 +1,4 @@
-import type { Page, Browser, BrowserContext } from 'playwright-core';
+import type { Page, Browser, BrowserContext } from 'patchright';
 
 // Base command structure
 export interface BaseCommand {

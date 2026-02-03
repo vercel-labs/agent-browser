@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "patchright-browser": {
+      "command": "node",
+      "args": ["${workspaceFolder}/bin/patchright-mcp.js"],
+      "env": {}
+    }
+  }
+}
