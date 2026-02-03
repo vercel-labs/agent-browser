@@ -1,5 +1,11 @@
 # agent-browser
 
+## 0.8.10
+
+### Patch Changes
+
+- 17dba8f: Add --stdin flag for eval command to read JavaScript from stdin, enabling heredoc usage for multiline scripts
+
 ## 0.8.9
 
 ### Patch Changes
