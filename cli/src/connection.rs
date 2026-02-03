@@ -140,14 +140,13 @@ fn get_port_path(session: &str) -> PathBuf {
 }
 
 #[cfg(windows)]
-fn get_port_for_session(session: &str) -> u16 {
-    let mut hash: i32 = 0;
-    for c in session.chars() {
-        hash = ((hash << 5).wrapping_sub(hash)).wrapping_add(c as i32);
+fn get_port_for_session(session: &str) -> Option<u16> {
+    let port_path = get_port_path(session);
+    if let Ok(content) = fs::read_to_string(&port_path) {
+        content.trim().parse::<u16>().ok()
+    } else {
+        None
     }
-    // Correct logic: first take absolute modulo, then cast to u16
-    // Using unsigned_abs() to safely handle i32::MIN
-    49152 + ((hash.unsigned_abs() as u32 % 16383) as u16)
 }
 
 #[cfg(unix)]
@@ -172,12 +171,15 @@ fn is_daemon_running(session: &str) -> bool {
     if !pid_path.exists() {
         return false;
     }
-    let port = get_port_for_session(session);
-    TcpStream::connect_timeout(
-        &format!("127.0.0.1:{}", port).parse().unwrap(),
-        Duration::from_millis(100),
-    )
-    .is_ok()
+    if let Some(port) = get_port_for_session(session) {
+        TcpStream::connect_timeout(
+            &format!("127.0.0.1:{}", port).parse().unwrap(),
+            Duration::from_millis(100),
+        )
+        .is_ok()
+    } else {
+        false
+    }
 }
 
 fn daemon_ready(session: &str) -> bool {
@@ -188,12 +190,15 @@ fn daemon_ready(session: &str) -> bool {
     }
     #[cfg(windows)]
     {
-        let port = get_port_for_session(session);
-        TcpStream::connect_timeout(
-            &format!("127.0.0.1:{}", port).parse().unwrap(),
-            Duration::from_millis(50),
-        )
-        .is_ok()
+        if let Some(port) = get_port_for_session(session) {
+            TcpStream::connect_timeout(
+                &format!("127.0.0.1:{}", port).parse().unwrap(),
+                Duration::from_millis(50),
+            )
+            .is_ok()
+        } else {
+            false
+        }
     }
 }
 
@@ -465,10 +470,13 @@ fn connect(session: &str) -> Result<Connection, String> {
     }
     #[cfg(windows)]
     {
-        let port = get_port_for_session(session);
-        TcpStream::connect(format!("127.0.0.1:{}", port))
-            .map(Connection::Tcp)
-            .map_err(|e| format!("Failed to connect: {}", e))
+        if let Some(port) = get_port_for_session(session) {
+            TcpStream::connect(format!("127.0.0.1:{}", port))
+                .map(Connection::Tcp)
+                .map_err(|e| format!("Failed to connect: {}", e))
+        } else {
+            Err("Port file not found (daemon not running?)".to_string())
+        }
     }
 }
 
