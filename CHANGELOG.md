@@ -1,5 +1,11 @@
 # agent-browser
 
+## 0.9.0
+
+### Minor Changes
+
+- 9d021bd: Add iOS Simulator and real device support for mobile Safari testing via Appium. New CLI commands include `device list` to show available simulators, `tap` and `swipe` for touch interactions, and the `--device` flag to specify which iOS device to use. Configure with `-p ios` provider flag or `AGENT_BROWSER_PROVIDER=ios` environment variable.
+
 ## 0.8.10
 
 ### Patch Changes
