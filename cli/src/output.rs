@@ -1673,7 +1673,7 @@ Environment:
   AGENT_BROWSER_EXECUTABLE_PATH  Custom browser executable path
   AGENT_BROWSER_PROVIDER         Cloud browser provider
   AGENT_BROWSER_STREAM_PORT      Enable WebSocket streaming on port (e.g., 9223)
-
+  AGENT_BROWSER_ALLOWED_ORIGIN   Allowed origin regex for WebSocket connection
 Examples:
   agent-browser open example.com
   agent-browser snapshot -i              # Interactive elements only

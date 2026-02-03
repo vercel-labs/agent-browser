@@ -536,6 +536,22 @@ AGENT_BROWSER_STREAM_PORT=9223 agent-browser open example.com
 
 This starts a WebSocket server on the specified port that streams the browser viewport and accepts input events.
 
+### Security
+
+By default, the stream server rejects connections from web pages (browsers) to prevent malicious sites from connecting to your local browser stream. It allows connections from:
+- Non-browser clients (like CLI tools)
+- Local files (`file://` origin)
+
+To allow connections from specific web origins (e.g., a web-based viewer hosted on a specific domain), set `AGENT_BROWSER_ALLOWED_ORIGIN` to a regex pattern:
+
+```bash
+# Allow connections from localhost:3000
+AGENT_BROWSER_ALLOWED_ORIGIN="http://localhost:3000" agent-browser open example.com
+
+# Allow connections from any subdomain of example.com
+AGENT_BROWSER_ALLOWED_ORIGIN="https://.*\\.example\\.com" agent-browser open example.com
+```
+
 ### WebSocket Protocol
 
 Connect to `ws://localhost:9223` to receive frames and send input:
