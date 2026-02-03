@@ -1,6 +1,6 @@
 {
   "name": "agent-browser",
-  "version": "0.8.8",
+  "version": "0.8.9",
   "description": "Headless browser automation CLI for AI agents",
   "type": "module",
   "main": "dist/daemon.js",
