@@ -13,7 +13,7 @@ import {
   type Locator,
   type CDPSession,
   type Video,
-} from 'playwright-core';
+} from 'patchright';
 import path from 'node:path';
 import os from 'node:os';
 import { existsSync, mkdirSync, rmSync } from 'node:fs';

@@ -1,4 +1,4 @@
-import type { Page, Frame } from 'playwright-core';
+import type { Page, Frame } from 'patchright';
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import type { BrowserManager, ScreencastFrame } from './browser.js';

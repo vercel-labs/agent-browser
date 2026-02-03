@@ -17,7 +17,7 @@
  *   agent-browser click @e2             # Click element by ref
  */
 
-import type { Page, Locator } from 'playwright-core';
+import type { Page, Locator } from 'patchright';
 
 export interface RefMap {
   [ref: string]: {
