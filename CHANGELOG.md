@@ -1,5 +1,11 @@
 # agent-browser
 
+## 0.8.8
+
+### Patch Changes
+
+- 2771588: Added base64 encoding support for the eval command with -b/--base64 flag to avoid shell escaping issues when executing JavaScript. Updated documentation with AI agent setup instructions and reorganized the docs structure by consolidating agent mode content into the installation page.
+
 ## 0.8.7
 
 ### Patch Changes
