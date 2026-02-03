@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi, beforeEach } from 'vitest';
 import { BrowserManager } from './browser.js';
 import { chromium } from 'playwright-core';
 
@@ -659,6 +659,79 @@ describe('BrowserManager', () => {
           touchPoints: [],
         })
       ).resolves.not.toThrow();
+    });
+  });
+
+  describe('frame switch', () => {
+    const IFRAME_HTML = `
+      <div id="main-content">Main document</div>
+      <iframe id="test-iframe" srcdoc="<h1>Iframe heading</h1><button id='frame-btn'>Frame button</button>"></iframe>
+    `;
+
+    beforeEach(async () => {
+      const page = browser.getPage();
+      await page.setContent(IFRAME_HTML, { waitUntil: 'load' });
+      browser.switchToMainFrame();
+    });
+
+    it('should return main frame when no frame selected', () => {
+      browser.switchToMainFrame();
+      const frame = browser.getFrame();
+      const page = browser.getPage();
+      expect(frame).toBe(page.mainFrame());
+    });
+
+    it('should switch to iframe by selector and snapshot shows iframe content', async () => {
+      await browser.switchToFrame({ selector: '#test-iframe' });
+      const { tree } = await browser.getSnapshot();
+      expect(tree).toContain('Iframe heading');
+      expect(tree).toContain('Frame button');
+      expect(tree).not.toContain('Main document');
+    });
+
+    it('should run eval in active frame context', async () => {
+      await browser.switchToFrame({ selector: '#test-iframe' });
+      const frame = browser.getFrame();
+      const result = await frame.evaluate(() => document.querySelector('h1')?.textContent);
+      expect(result).toBe('Iframe heading');
+    });
+
+    it('should resolve locators within active frame', async () => {
+      await browser.switchToFrame({ selector: '#test-iframe' });
+      const locator = browser.getLocator('#frame-btn');
+      const text = await locator.textContent();
+      expect(text).toBe('Frame button');
+    });
+
+    it('should support nested iframe switch (selector within current frame)', async () => {
+      const nestedHtml = `
+        <div>Outer iframe</div>
+        <iframe id="inner" srcdoc="<p>Inner content</p>"></iframe>
+      `;
+      const page = browser.getPage();
+      await page.setContent(
+        `<iframe id="outer" srcdoc="${nestedHtml.replace(/"/g, '&quot;')}"></iframe>`,
+        { waitUntil: 'load' }
+      );
+
+      await browser.switchToFrame({ selector: '#outer' });
+      const { tree } = await browser.getSnapshot();
+      expect(tree).toContain('Outer iframe');
+
+      await browser.switchToFrame({ selector: '#inner' });
+      const { tree: innerTree } = await browser.getSnapshot();
+      expect(innerTree).toContain('Inner content');
+    });
+
+    it('should return to main document after switchToMainFrame', async () => {
+      await browser.switchToFrame({ selector: '#test-iframe' });
+      const { tree: iframeTree } = await browser.getSnapshot();
+      expect(iframeTree).toContain('Iframe heading');
+
+      browser.switchToMainFrame();
+      const { tree: mainTree } = await browser.getSnapshot();
+      expect(mainTree).toContain('Main document');
+      expect(mainTree).not.toContain('Iframe heading');
     });
   });
 });
