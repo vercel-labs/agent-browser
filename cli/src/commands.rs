@@ -1425,6 +1425,14 @@ mod tests {
             provider: None,
             ignore_https_errors: false,
             device: None,
+            cli_executable_path: false,
+            cli_extensions: false,
+            cli_profile: false,
+            cli_state: false,
+            cli_args: false,
+            cli_user_agent: false,
+            cli_proxy: false,
+            cli_proxy_bypass: false,
         }
     }
 

@@ -221,22 +221,51 @@ fn main() {
         }
     };
 
-    // Warn if launch-time options were specified but daemon was already running
+    // Warn if launch-time options were explicitly passed via CLI but daemon was already running
+    // Only warn about flags that were passed on the command line, not those set via environment
+    // variables (since the daemon already uses the env vars when it starts).
     if daemon_result.already_running {
-        let has_extensions = !flags.extensions.is_empty();
         let ignored_flags: Vec<&str> = [
-            flags.executable_path.as_ref().map(|_| "--executable-path"),
-            if has_extensions {
+            if flags.cli_executable_path {
+                Some("--executable-path")
+            } else {
+                None
+            },
+            if flags.cli_extensions {
                 Some("--extension")
             } else {
                 None
             },
-            flags.profile.as_ref().map(|_| "--profile"),
-            flags.state.as_ref().map(|_| "--state"),
-            flags.args.as_ref().map(|_| "--args"),
-            flags.user_agent.as_ref().map(|_| "--user-agent"),
-            flags.proxy.as_ref().map(|_| "--proxy"),
-            flags.proxy_bypass.as_ref().map(|_| "--proxy-bypass"),
+            if flags.cli_profile {
+                Some("--profile")
+            } else {
+                None
+            },
+            if flags.cli_state {
+                Some("--state")
+            } else {
+                None
+            },
+            if flags.cli_args {
+                Some("--args")
+            } else {
+                None
+            },
+            if flags.cli_user_agent {
+                Some("--user-agent")
+            } else {
+                None
+            },
+            if flags.cli_proxy {
+                Some("--proxy")
+            } else {
+                None
+            },
+            if flags.cli_proxy_bypass {
+                Some("--proxy-bypass")
+            } else {
+                None
+            },
             flags.ignore_https_errors.then(|| "--ignore-https-errors"),
         ]
         .into_iter()
@@ -249,10 +278,6 @@ fn main() {
                 color::warning_indicator(),
                 ignored_flags.join(", ")
             );
-        }
-
-        if flags.ignore_https_errors {
-            eprintln!("{} --ignore-https-errors ignored: daemon already running. Use 'agent-browser close' first to restart with this option.", color::warning_indicator());
         }
     }
 

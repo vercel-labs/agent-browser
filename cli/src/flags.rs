@@ -19,6 +19,17 @@ pub struct Flags {
     pub provider: Option<String>,
     pub ignore_https_errors: bool,
     pub device: Option<String>,
+
+    // Track which launch-time options were explicitly passed via CLI
+    // (as opposed to being set only via environment variables)
+    pub cli_executable_path: bool,
+    pub cli_extensions: bool,
+    pub cli_profile: bool,
+    pub cli_state: bool,
+    pub cli_args: bool,
+    pub cli_user_agent: bool,
+    pub cli_proxy: bool,
+    pub cli_proxy_bypass: bool,
 }
 
 pub fn parse_flags(args: &[String]) -> Flags {
@@ -51,6 +62,15 @@ pub fn parse_flags(args: &[String]) -> Flags {
         provider: env::var("AGENT_BROWSER_PROVIDER").ok(),
         ignore_https_errors: false,
         device: env::var("AGENT_BROWSER_IOS_DEVICE").ok(),
+        // Track CLI-passed flags (default false, set to true when flag is passed)
+        cli_executable_path: false,
+        cli_extensions: false,
+        cli_profile: false,
+        cli_state: false,
+        cli_args: false,
+        cli_user_agent: false,
+        cli_proxy: false,
+        cli_proxy_bypass: false,
     };
 
     let mut i = 0;
@@ -75,12 +95,14 @@ pub fn parse_flags(args: &[String]) -> Flags {
             "--executable-path" => {
                 if let Some(s) = args.get(i + 1) {
                     flags.executable_path = Some(s.clone());
+                    flags.cli_executable_path = true;
                     i += 1;
                 }
             }
             "--extension" => {
                 if let Some(s) = args.get(i + 1) {
                     flags.extensions.push(s.clone());
+                    flags.cli_extensions = true;
                     i += 1;
                 }
             }
@@ -93,36 +115,42 @@ pub fn parse_flags(args: &[String]) -> Flags {
             "--profile" => {
                 if let Some(s) = args.get(i + 1) {
                     flags.profile = Some(s.clone());
+                    flags.cli_profile = true;
                     i += 1;
                 }
             }
             "--state" => {
                 if let Some(s) = args.get(i + 1) {
                     flags.state = Some(s.clone());
+                    flags.cli_state = true;
                     i += 1;
                 }
             }
             "--proxy" => {
                 if let Some(p) = args.get(i + 1) {
                     flags.proxy = Some(p.clone());
+                    flags.cli_proxy = true;
                     i += 1;
                 }
             }
             "--proxy-bypass" => {
                 if let Some(s) = args.get(i + 1) {
                     flags.proxy_bypass = Some(s.clone());
+                    flags.cli_proxy_bypass = true;
                     i += 1;
                 }
             }
             "--args" => {
                 if let Some(s) = args.get(i + 1) {
                     flags.args = Some(s.clone());
+                    flags.cli_args = true;
                     i += 1;
                 }
             }
             "--user-agent" => {
                 if let Some(s) = args.get(i + 1) {
                     flags.user_agent = Some(s.clone());
+                    flags.cli_user_agent = true;
                     i += 1;
                 }
             }
@@ -310,5 +338,45 @@ mod tests {
         ));
         assert_eq!(flags.session, "test");
         assert_eq!(flags.executable_path, Some("/custom/chrome".to_string()));
+    }
+
+    #[test]
+    fn test_cli_executable_path_tracking() {
+        // When --executable-path is passed via CLI, cli_executable_path should be true
+        let flags = parse_flags(&args("--executable-path /path/to/chrome snapshot"));
+        assert!(flags.cli_executable_path);
+        assert_eq!(flags.executable_path, Some("/path/to/chrome".to_string()));
+    }
+
+    #[test]
+    fn test_cli_executable_path_not_set_without_flag() {
+        // When no --executable-path is passed, cli_executable_path should be false
+        // (even if env var sets executable_path to Some value, which we can't test here)
+        let flags = parse_flags(&args("snapshot"));
+        assert!(!flags.cli_executable_path);
+    }
+
+    #[test]
+    fn test_cli_extension_tracking() {
+        let flags = parse_flags(&args("--extension /path/to/ext snapshot"));
+        assert!(flags.cli_extensions);
+    }
+
+    #[test]
+    fn test_cli_profile_tracking() {
+        let flags = parse_flags(&args("--profile /path/to/profile snapshot"));
+        assert!(flags.cli_profile);
+    }
+
+    #[test]
+    fn test_cli_multiple_flags_tracking() {
+        let flags = parse_flags(&args(
+            "--executable-path /chrome --profile /profile --proxy http://proxy snapshot",
+        ));
+        assert!(flags.cli_executable_path);
+        assert!(flags.cli_profile);
+        assert!(flags.cli_proxy);
+        assert!(!flags.cli_extensions);
+        assert!(!flags.cli_state);
     }
 }
