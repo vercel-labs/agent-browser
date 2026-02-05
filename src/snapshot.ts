@@ -37,6 +37,8 @@ export interface EnhancedSnapshot {
 export interface SnapshotOptions {
   /** Only include interactive elements (buttons, links, inputs, etc.) */
   interactive?: boolean;
+  /** Include cursor-interactive elements (cursor:pointer, onclick, tabindex) */
+  cursor?: boolean;
   /** Maximum depth of tree to include (0 = root only) */
   maxDepth?: number;
   /** Remove structural elements without meaningful content */
@@ -137,6 +139,115 @@ function buildSelector(role: string, name?: string): string {
 }
 
 /**
+ * Query the page for clickable elements that might not have proper ARIA roles.
+ * This finds elements with cursor: pointer or onclick handlers.
+ */
+async function findCursorInteractiveElements(
+  page: Page,
+  selector?: string
+): Promise<
+  Array<{
+    selector: string;
+    text: string;
+    tagName: string;
+    hasOnClick: boolean;
+    hasCursorPointer: boolean;
+    hasTabIndex: boolean;
+  }>
+> {
+  const rootSelector = selector || 'body';
+
+  // Use a string function body to avoid TypeScript transpilation issues
+  const scriptBody = `(rootSel) => {
+    const results = [];
+
+    // Elements that already have interactive ARIA roles - skip these
+    const interactiveRoles = new Set([
+      'button', 'link', 'textbox', 'checkbox', 'radio', 'combobox', 'listbox',
+      'menuitem', 'menuitemcheckbox', 'menuitemradio', 'option', 'searchbox',
+      'slider', 'spinbutton', 'switch', 'tab', 'treeitem'
+    ]);
+
+    // Tags that are already interactive by default
+    const interactiveTags = new Set([
+      'a', 'button', 'input', 'select', 'textarea', 'details', 'summary'
+    ]);
+
+    const root = document.querySelector(rootSel) || document.body;
+    const allElements = root.querySelectorAll('*');
+
+    // Build a unique selector for an element
+    const buildSelector = (el) => {
+      const testId = el.getAttribute('data-testid');
+      if (testId) return '[data-testid="' + testId + '"]';
+      if (el.id) return '#' + CSS.escape(el.id);
+
+      const path = [];
+      let current = el;
+      while (current && current !== document.body) {
+        let sel = current.tagName.toLowerCase();
+        const classes = Array.from(current.classList).filter(c => c.trim());
+        if (classes.length > 0) sel += '.' + CSS.escape(classes[0]);
+
+        const parent = current.parentElement;
+        if (parent) {
+          const siblings = Array.from(parent.children);
+          const matching = siblings.filter(s => {
+            if (s.tagName !== current.tagName) return false;
+            if (classes.length > 0 && !s.classList.contains(classes[0])) return false;
+            return true;
+          });
+          if (matching.length > 1) {
+            const idx = matching.indexOf(current) + 1;
+            sel += ':nth-of-type(' + idx + ')';
+          }
+        }
+        path.unshift(sel);
+        current = current.parentElement;
+        if (path.length >= 3) break;
+      }
+      return path.join(' > ');
+    };
+
+    for (const el of allElements) {
+      const tagName = el.tagName.toLowerCase();
+      if (interactiveTags.has(tagName)) continue;
+
+      const role = el.getAttribute('role');
+      if (role && interactiveRoles.has(role.toLowerCase())) continue;
+
+      const computedStyle = getComputedStyle(el);
+      const hasCursorPointer = computedStyle.cursor === 'pointer';
+      const hasOnClick = el.hasAttribute('onclick') || el.onclick !== null;
+      const tabIndex = el.getAttribute('tabindex');
+      const hasTabIndex = tabIndex !== null && tabIndex !== '-1';
+
+      if (!hasCursorPointer && !hasOnClick && !hasTabIndex) continue;
+
+      const text = (el.textContent || '').trim().slice(0, 100);
+      if (!text) continue;
+
+      const rect = el.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) continue;
+
+      results.push({
+        selector: buildSelector(el),
+        text,
+        tagName,
+        hasOnClick,
+        hasCursorPointer,
+        hasTabIndex
+      });
+    }
+    return results;
+  }`;
+
+  // eslint-disable-next-line @typescript-eslint/no-implied-eval
+  const fn = new Function('return ' + scriptBody)();
+  return page.evaluate(fn, rootSelector);
+}
+
+/**
  * Get enhanced snapshot with refs and optional filtering
  */
 export async function getEnhancedSnapshot(
@@ -159,6 +270,48 @@ export async function getEnhancedSnapshot(
 
   // Parse and enhance the ARIA tree
   const enhancedTree = processAriaTree(ariaTree, refs, options);
+
+  // When cursor flag is set, also find cursor-interactive elements
+  // that may not have proper ARIA roles
+  if (options.cursor) {
+    const cursorElements = await findCursorInteractiveElements(page, options.selector);
+
+    // Filter out elements whose text is already captured in the snapshot
+    const existingTexts = new Set(Object.values(refs).map((r) => r.name?.toLowerCase()));
+
+    const additionalLines: string[] = [];
+    for (const el of cursorElements) {
+      // Skip if text already captured (likely already in ARIA tree)
+      if (existingTexts.has(el.text.toLowerCase())) continue;
+
+      const ref = nextRef();
+      const role = el.hasCursorPointer ? 'clickable' : el.hasOnClick ? 'clickable' : 'focusable';
+
+      refs[ref] = {
+        selector: el.selector,
+        role: role,
+        name: el.text,
+      };
+
+      // Build description of why it's interactive
+      const hints: string[] = [];
+      if (el.hasCursorPointer) hints.push('cursor:pointer');
+      if (el.hasOnClick) hints.push('onclick');
+      if (el.hasTabIndex) hints.push('tabindex');
+
+      additionalLines.push(`- ${role} "${el.text}" [ref=${ref}] [${hints.join(', ')}]`);
+    }
+
+    if (additionalLines.length > 0) {
+      const separator =
+        enhancedTree === '(no interactive elements)' ? '' : '\n# Cursor-interactive elements:\n';
+      const base = enhancedTree === '(no interactive elements)' ? '' : enhancedTree;
+      return {
+        tree: base + separator + additionalLines.join('\n'),
+        refs,
+      };
+    }
+  }
 
   return { tree: enhancedTree, refs };
 }

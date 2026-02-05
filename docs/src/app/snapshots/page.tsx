@@ -13,6 +13,7 @@ export default function Snapshots() {
         <p>Filter output to reduce size:</p>
         <CodeBlock code={`agent-browser snapshot                    # Full accessibility tree
 agent-browser snapshot -i                 # Interactive elements only (recommended)
+agent-browser snapshot -i -C              # Include cursor-interactive elements
 agent-browser snapshot -c                 # Compact (remove empty elements)
 agent-browser snapshot -d 3               # Limit depth to 3 levels
 agent-browser snapshot -s "#main"         # Scope to CSS selector
@@ -31,6 +32,10 @@ agent-browser snapshot -i -c -d 5         # Combine options`} />
               <td>Only interactive elements (buttons, links, inputs)</td>
             </tr>
             <tr>
+              <td><code>-C, --cursor</code></td>
+              <td>Include cursor-interactive elements (cursor:pointer, onclick, tabindex)</td>
+            </tr>
+            <tr>
               <td><code>-c, --compact</code></td>
               <td>Remove empty structural elements</td>
             </tr>
@@ -44,6 +49,24 @@ agent-browser snapshot -i -c -d 5         # Combine options`} />
             </tr>
           </tbody>
         </table>
+
+        <h2>Cursor-interactive elements</h2>
+        <p>
+          Many modern web apps use custom clickable elements (divs, spans) instead of standard buttons or links.
+          The <code>-C</code> flag detects these by looking for:
+        </p>
+        <ul>
+          <li><code>cursor: pointer</code> CSS style</li>
+          <li><code>onclick</code> attribute or handler</li>
+          <li><code>tabindex</code> attribute (keyboard focusable)</li>
+        </ul>
+        <CodeBlock code={`agent-browser snapshot -i -C
+# Output includes:
+# @e1 [button] "Submit"
+# @e2 [link] "Learn more"
+# Cursor-interactive elements:
+# @e3 [clickable] "Menu Item" [cursor:pointer, onclick]
+# @e4 [clickable] "Card" [cursor:pointer]`} />
 
         <h2>Output format</h2>
         <p>The default text output is compact and AI-friendly:</p>

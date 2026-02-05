@@ -146,6 +146,13 @@ export class BrowserManager {
 
     const page = this.getPage();
 
+    // Check if this is a cursor-interactive element (uses CSS selector, not ARIA role)
+    // These have pseudo-roles 'clickable' or 'focusable' and a CSS selector
+    if (refData.role === 'clickable' || refData.role === 'focusable') {
+      // The selector is a CSS selector, use it directly
+      return page.locator(refData.selector);
+    }
+
     // Build locator with exact: true to avoid substring matches
     let locator: Locator;
     if (refData.name) {

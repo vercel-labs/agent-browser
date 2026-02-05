@@ -403,6 +403,9 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                     "-c" | "--compact" => {
                         obj.insert("compact".to_string(), json!(true));
                     }
+                    "-C" | "--cursor" => {
+                        obj.insert("cursor".to_string(), json!(true));
+                    }
                     "-d" | "--depth" => {
                         if let Some(d) = rest.get(i + 1) {
                             if let Ok(n) = d.parse::<i32>() {
@@ -1946,6 +1949,21 @@ mod tests {
         let cmd = parse_command(&args("snapshot -i"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "snapshot");
         assert_eq!(cmd["interactive"], true);
+    }
+
+    #[test]
+    fn test_snapshot_cursor() {
+        let cmd = parse_command(&args("snapshot -C"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "snapshot");
+        assert_eq!(cmd["cursor"], true);
+    }
+
+    #[test]
+    fn test_snapshot_interactive_cursor() {
+        let cmd = parse_command(&args("snapshot -i -C"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "snapshot");
+        assert_eq!(cmd["interactive"], true);
+        assert_eq!(cmd["cursor"], true);
     }
 
     #[test]
