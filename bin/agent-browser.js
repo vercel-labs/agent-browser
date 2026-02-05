@@ -9,7 +9,7 @@
  */
 
 import { spawn } from 'child_process';
-import { existsSync } from 'fs';
+import { existsSync, accessSync, chmodSync, constants } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { platform, arch } from 'os';
@@ -71,6 +71,23 @@ function main() {
     console.error('Run "npm run build:native" to build for your platform,');
     console.error('or reinstall the package to trigger the postinstall download.');
     process.exit(1);
+  }
+
+  // Ensure binary is executable (fixes EACCES on macOS/Linux when postinstall didn't run,
+  // e.g., when using bun which blocks lifecycle scripts by default)
+  if (platform() !== 'win32') {
+    try {
+      accessSync(binaryPath, constants.X_OK);
+    } catch {
+      // Binary exists but isn't executable - fix it
+      try {
+        chmodSync(binaryPath, 0o755);
+      } catch (chmodErr) {
+        console.error(`Error: Cannot make binary executable: ${chmodErr.message}`);
+        console.error('Try running: chmod +x ' + binaryPath);
+        process.exit(1);
+      }
+    }
   }
 
   // Spawn the native binary with inherited stdio

@@ -4,14 +4,21 @@ version = 4
 
 [[package]]
 name = "agent-browser"
-version = "0.8.4"
+version = "0.9.1"
 dependencies = [
+ "base64",
  "dirs",
  "libc",
  "serde",
  "serde_json",
  "windows-sys 0.52.0",
 ]
+
+[[package]]
+name = "base64"
+version = "0.22.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "bitflags"

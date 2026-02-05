@@ -1,4 +1,6 @@
+use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::{json, Value};
+use std::io::{self, BufRead};
 
 use crate::flags::Flags;
 
@@ -99,6 +101,12 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
             if let Some(ref headers_json) = flags.headers {
                 if let Ok(headers) = serde_json::from_str::<serde_json::Value>(headers_json) {
                     nav_cmd["headers"] = headers;
+                }
+            }
+            // Include iOS device info if specified (needed for auto-launch with existing daemon)
+            if flags.provider.as_deref() == Some("ios") {
+                if let Some(ref device) = flags.device {
+                    nav_cmd["iosDevice"] = json!(device);
                 }
             }
             Ok(nav_cmd)
@@ -395,6 +403,9 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                     "-c" | "--compact" => {
                         obj.insert("compact".to_string(), json!(true));
                     }
+                    "-C" | "--cursor" => {
+                        obj.insert("cursor".to_string(), json!(true));
+                    }
                     "-d" | "--depth" => {
                         if let Some(d) = rest.get(i + 1) {
                             if let Ok(n) = d.parse::<i32>() {
@@ -417,7 +428,41 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
         }
 
         // === Eval ===
-        "eval" => Ok(json!({ "id": id, "action": "evaluate", "script": rest.join(" ") })),
+        "eval" => {
+            // Check for flags: -b/--base64 or --stdin
+            let (is_base64, is_stdin, script_parts): (bool, bool, &[&str]) =
+                if rest.first() == Some(&"-b") || rest.first() == Some(&"--base64") {
+                    (true, false, &rest[1..])
+                } else if rest.first() == Some(&"--stdin") {
+                    (false, true, &rest[1..])
+                } else {
+                    (false, false, rest.as_slice())
+                };
+
+            let script = if is_stdin {
+                // Read script from stdin
+                let stdin = io::stdin();
+                let lines: Vec<String> = stdin.lock().lines()
+                    .map(|l| l.unwrap_or_default())
+                    .collect();
+                lines.join("\n")
+            } else {
+                let raw_script = script_parts.join(" ");
+                if is_base64 {
+                    let decoded = STANDARD.decode(&raw_script).map_err(|_| ParseError::InvalidValue {
+                        message: "Invalid base64 encoding".to_string(),
+                        usage: "eval -b <base64-encoded-script>",
+                    })?;
+                    String::from_utf8(decoded).map_err(|_| ParseError::InvalidValue {
+                        message: "Base64 decoded to invalid UTF-8".to_string(),
+                        usage: "eval -b <base64-encoded-script>",
+                    })?
+                } else {
+                    raw_script
+                }
+            };
+            Ok(json!({ "id": id, "action": "evaluate", "script": script }))
+        }
 
         // === Close ===
         "close" | "quit" | "exit" => Ok(json!({ "id": id, "action": "close" })),
@@ -795,6 +840,48 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                 None => Err(ParseError::MissingArguments {
                     context: "state".to_string(),
                     usage: "state <save|load> <path>",
+                }),
+            }
+        }
+
+        // === iOS-specific commands ===
+        "tap" => {
+            // Alias for click (semantic clarity for touch interfaces)
+            let sel = rest.get(0).ok_or_else(|| ParseError::MissingArguments {
+                context: "tap".to_string(),
+                usage: "tap <selector>",
+            })?;
+            Ok(json!({ "id": id, "action": "tap", "selector": sel }))
+        }
+        "swipe" => {
+            let direction = rest.get(0).ok_or_else(|| ParseError::MissingArguments {
+                context: "swipe".to_string(),
+                usage: "swipe <up|down|left|right> [distance]",
+            })?;
+            let valid_directions = ["up", "down", "left", "right"];
+            if !valid_directions.contains(direction) {
+                return Err(ParseError::InvalidValue {
+                    message: format!("Invalid swipe direction: {}", direction),
+                    usage: "swipe <up|down|left|right> [distance]",
+                });
+            }
+            let mut cmd = json!({ "id": id, "action": "swipe", "direction": direction });
+            if let Some(distance) = rest.get(1) {
+                if let Ok(d) = distance.parse::<u32>() {
+                    cmd.as_object_mut().unwrap().insert("distance".to_string(), json!(d));
+                }
+            }
+            Ok(cmd)
+        }
+        "device" => {
+            match rest.get(0).map(|s| *s) {
+                Some("list") | None => {
+                    // List available iOS simulators
+                    Ok(json!({ "id": id, "action": "device_list" }))
+                }
+                Some(sub) => Err(ParseError::UnknownSubcommand {
+                    subcommand: sub.to_string(),
+                    valid_options: &["list"],
                 }),
             }
         }
@@ -1340,6 +1427,17 @@ mod tests {
             user_agent: None,
             provider: None,
             ignore_https_errors: false,
+            allow_file_access: false,
+            device: None,
+            cli_executable_path: false,
+            cli_extensions: false,
+            cli_profile: false,
+            cli_state: false,
+            cli_args: false,
+            cli_user_agent: false,
+            cli_proxy: false,
+            cli_proxy_bypass: false,
+            cli_allow_file_access: false,
         }
     }
 
@@ -1856,6 +1954,21 @@ mod tests {
     }
 
     #[test]
+    fn test_snapshot_cursor() {
+        let cmd = parse_command(&args("snapshot -C"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "snapshot");
+        assert_eq!(cmd["cursor"], true);
+    }
+
+    #[test]
+    fn test_snapshot_interactive_cursor() {
+        let cmd = parse_command(&args("snapshot -i -C"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "snapshot");
+        assert_eq!(cmd["interactive"], true);
+        assert_eq!(cmd["cursor"], true);
+    }
+
+    #[test]
     fn test_snapshot_compact() {
         let cmd = parse_command(&args("snapshot --compact"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "snapshot");
@@ -2023,6 +2136,53 @@ mod tests {
             result.unwrap_err(),
             ParseError::MissingArguments { .. }
         ));
+    }
+
+    // === Eval Tests ===
+
+    #[test]
+    fn test_eval_basic() {
+        let cmd = parse_command(&args("eval document.title"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "evaluate");
+        assert_eq!(cmd["script"], "document.title");
+    }
+
+    #[test]
+    fn test_eval_base64_short_flag() {
+        // "document.title" in base64
+        let cmd = parse_command(&args("eval -b ZG9jdW1lbnQudGl0bGU="), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "evaluate");
+        assert_eq!(cmd["script"], "document.title");
+    }
+
+    #[test]
+    fn test_eval_base64_long_flag() {
+        // "document.title" in base64
+        let cmd =
+            parse_command(&args("eval --base64 ZG9jdW1lbnQudGl0bGU="), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "evaluate");
+        assert_eq!(cmd["script"], "document.title");
+    }
+
+    #[test]
+    fn test_eval_base64_with_special_chars() {
+        // "document.querySelector('[src*=\"_next\"]')" in base64
+        let cmd = parse_command(
+            &args("eval -b ZG9jdW1lbnQucXVlcnlTZWxlY3RvcignW3NyYyo9Il9uZXh0Il0nKQ=="),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "evaluate");
+        assert_eq!(cmd["script"], "document.querySelector('[src*=\"_next\"]')");
+    }
+
+    #[test]
+    fn test_eval_base64_invalid() {
+        let result = parse_command(&args("eval -b !!!invalid!!!"), &default_flags());
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, ParseError::InvalidValue { .. }));
+        assert!(err.format().contains("Invalid base64"));
     }
 
     #[test]

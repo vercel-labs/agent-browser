@@ -1,64 +1,62 @@
 #!/bin/bash
 # Template: Form Automation Workflow
-# Fills and submits web forms with validation
+# Purpose: Fill and submit web forms with validation
+# Usage: ./form-automation.sh <form-url>
+#
+# This template demonstrates the snapshot-interact-verify pattern:
+# 1. Navigate to form
+# 2. Snapshot to get element refs
+# 3. Fill fields using refs
+# 4. Submit and verify result
+#
+# Customize: Update the refs (@e1, @e2, etc.) based on your form's snapshot output
 
 set -euo pipefail
 
 FORM_URL="${1:?Usage: $0 <form-url>}"
 
-echo "Automating form at: $FORM_URL"
+echo "Form automation: $FORM_URL"
 
-# Navigate to form page
+# Step 1: Navigate to form
 agent-browser open "$FORM_URL"
 agent-browser wait --load networkidle
 
-# Get interactive snapshot to identify form fields
-echo "Analyzing form structure..."
+# Step 2: Snapshot to discover form elements
+echo ""
+echo "Form structure:"
 agent-browser snapshot -i
 
-# Example: Fill common form fields
-# Uncomment and modify refs based on snapshot output
+# Step 3: Fill form fields (customize these refs based on snapshot output)
+#
+# Common field types:
+#   agent-browser fill @e1 "John Doe"           # Text input
+#   agent-browser fill @e2 "user@example.com"   # Email input
+#   agent-browser fill @e3 "SecureP@ss123"      # Password input
+#   agent-browser select @e4 "Option Value"     # Dropdown
+#   agent-browser check @e5                     # Checkbox
+#   agent-browser click @e6                     # Radio button
+#   agent-browser fill @e7 "Multi-line text"   # Textarea
+#   agent-browser upload @e8 /path/to/file.pdf # File upload
+#
+# Uncomment and modify:
+# agent-browser fill @e1 "Test User"
+# agent-browser fill @e2 "test@example.com"
+# agent-browser click @e3  # Submit button
 
-# Text inputs
-# agent-browser fill @e1 "John Doe"           # Name field
-# agent-browser fill @e2 "user@example.com"   # Email field
-# agent-browser fill @e3 "+1-555-123-4567"    # Phone field
-
-# Password fields
-# agent-browser fill @e4 "SecureP@ssw0rd!"
-
-# Dropdowns
-# agent-browser select @e5 "Option Value"
-
-# Checkboxes
-# agent-browser check @e6                      # Check
-# agent-browser uncheck @e7                    # Uncheck
-
-# Radio buttons
-# agent-browser click @e8                      # Select radio option
-
-# Text areas
-# agent-browser fill @e9 "Multi-line text content here"
-
-# File uploads
-# agent-browser upload @e10 /path/to/file.pdf
-
-# Submit form
-# agent-browser click @e11                     # Submit button
-
-# Wait for response
+# Step 4: Wait for submission
 # agent-browser wait --load networkidle
-# agent-browser wait --url "**/success"        # Or wait for redirect
+# agent-browser wait --url "**/success"  # Or wait for redirect
 
-# Verify submission
-echo "Form submission result:"
+# Step 5: Verify result
+echo ""
+echo "Result:"
 agent-browser get url
 agent-browser snapshot -i
 
-# Take screenshot of result
+# Optional: Capture evidence
 agent-browser screenshot /tmp/form-result.png
+echo "Screenshot saved: /tmp/form-result.png"
 
 # Cleanup
 agent-browser close
-
-echo "Form automation complete"
+echo "Done"

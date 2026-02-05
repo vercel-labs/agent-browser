@@ -52,6 +52,28 @@ export async function handler() {
   });
   // ... use browser
 }`} />
+
+        <h2>AI agent setup</h2>
+        <p>agent-browser works with any AI agent out of the box. For richer context:</p>
+
+        <h3>AGENTS.md / CLAUDE.md</h3>
+        <p>Add to your instructions file:</p>
+        <CodeBlock lang="markdown" code={`## Browser Automation
+
+Use \`agent-browser\` for web automation. Run \`agent-browser --help\` for all commands.
+
+Core workflow:
+1. \`agent-browser open <url>\` - Navigate to page
+2. \`agent-browser snapshot -i\` - Get interactive elements with refs (@e1, @e2)
+3. \`agent-browser click @e1\` / \`fill @e2 "text"\` - Interact using refs
+4. Re-snapshot after page changes`} />
+
+        <h3>Claude Code skill</h3>
+        <CodeBlock code="cp -r node_modules/agent-browser/skills/agent-browser .claude/skills/" />
+        <p>Or download:</p>
+        <CodeBlock code={`mkdir -p .claude/skills/agent-browser
+curl -o .claude/skills/agent-browser/SKILL.md \\
+  https://raw.githubusercontent.com/vercel-labs/agent-browser/main/skills/agent-browser/SKILL.md`} />
       </div>
     </div>
   );

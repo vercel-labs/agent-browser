@@ -1,6 +1,19 @@
 # Proxy Support
 
-Configure proxy servers for browser automation, useful for geo-testing, rate limiting avoidance, and corporate environments.
+Proxy configuration for geo-testing, rate limiting avoidance, and corporate environments.
+
+**Related**: [commands.md](commands.md) for global options, [SKILL.md](../SKILL.md) for quick start.
+
+## Contents
+
+- [Basic Proxy Configuration](#basic-proxy-configuration)
+- [Authenticated Proxy](#authenticated-proxy)
+- [SOCKS Proxy](#socks-proxy)
+- [Proxy Bypass](#proxy-bypass)
+- [Common Use Cases](#common-use-cases)
+- [Verifying Proxy Connection](#verifying-proxy-connection)
+- [Troubleshooting](#troubleshooting)
+- [Best Practices](#best-practices)
 
 ## Basic Proxy Configuration
 

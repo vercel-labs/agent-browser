@@ -1,6 +1,6 @@
 {
   "name": "agent-browser",
-  "version": "0.8.4",
+  "version": "0.9.1",
   "description": "Headless browser automation CLI for AI agents",
   "type": "module",
   "main": "dist/daemon.js",
@@ -55,7 +55,9 @@
   },
   "homepage": "https://github.com/vercel-labs/agent-browser#readme",
   "dependencies": {
+    "node-simctl": "^7.4.0",
     "playwright-core": "^1.57.0",
+    "webdriverio": "^9.15.0",
     "ws": "^8.19.0",
     "zod": "^3.22.4"
   },

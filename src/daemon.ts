@@ -3,9 +3,14 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { BrowserManager } from './browser.js';
+import { IOSManager } from './ios-manager.js';
 import { parseCommand, serializeResponse, errorResponse } from './protocol.js';
 import { executeCommand } from './actions.js';
+import { executeIOSCommand } from './ios-actions.js';
 import { StreamServer } from './stream-server.js';
+
+// Manager type - either desktop browser or iOS
+type Manager = BrowserManager | IOSManager;
 
 // Platform detection
 const isWindows = process.platform === 'win32';
@@ -167,8 +172,12 @@ export function getStreamPortFile(session?: string): string {
 /**
  * Start the daemon server
  * @param options.streamPort Port for WebSocket stream server (0 to disable)
+ * @param options.provider Provider type ('ios' for iOS Simulator, undefined for desktop)
  */
-export async function startDaemon(options?: { streamPort?: number }): Promise<void> {
+export async function startDaemon(options?: {
+  streamPort?: number;
+  provider?: string;
+}): Promise<void> {
   // Ensure socket directory exists
   const socketDir = getSocketDir();
   if (!fs.existsSync(socketDir)) {
@@ -178,18 +187,24 @@ export async function startDaemon(options?: { streamPort?: number }): Promise<vo
   // Clean up any stale socket
   cleanupSocket();
 
-  const browser = new BrowserManager();
+  // Determine provider from options or environment
+  const provider = options?.provider ?? process.env.AGENT_BROWSER_PROVIDER;
+  const isIOS = provider === 'ios';
+
+  // Create appropriate manager
+  const manager: Manager = isIOS ? new IOSManager() : new BrowserManager();
   let shuttingDown = false;
 
   // Start stream server if port is specified (or use default if env var is set)
+  // Note: Stream server only works with BrowserManager (desktop), not iOS
   const streamPort =
     options?.streamPort ??
     (process.env.AGENT_BROWSER_STREAM_PORT
       ? parseInt(process.env.AGENT_BROWSER_STREAM_PORT, 10)
       : 0);
 
-  if (streamPort > 0) {
-    streamServer = new StreamServer(browser, streamPort);
+  if (streamPort > 0 && !isIOS && manager instanceof BrowserManager) {
+    streamServer = new StreamServer(manager, streamPort);
     await streamServer.start();
 
     // Write stream port to file for clients to discover
@@ -233,56 +248,93 @@ export async function startDaemon(options?: { streamPort?: number }): Promise<vo
             continue;
           }
 
-          // Auto-launch browser if not already launched and this isn't a launch command
+          // Handle device_list specially - it works without a session and always uses IOSManager
+          if (parseResult.command.action === 'device_list') {
+            const iosManager = new IOSManager();
+            try {
+              const devices = await iosManager.listAllDevices();
+              const response = {
+                id: parseResult.command.id,
+                success: true as const,
+                data: { devices },
+              };
+              socket.write(serializeResponse(response) + '\n');
+            } catch (err) {
+              const message = err instanceof Error ? err.message : String(err);
+              socket.write(
+                serializeResponse(errorResponse(parseResult.command.id, message)) + '\n'
+              );
+            }
+            continue;
+          }
+
+          // Auto-launch if not already launched and this isn't a launch/close command
           if (
-            !browser.isLaunched() &&
+            !manager.isLaunched() &&
             parseResult.command.action !== 'launch' &&
             parseResult.command.action !== 'close'
           ) {
-            const extensions = process.env.AGENT_BROWSER_EXTENSIONS
-              ? process.env.AGENT_BROWSER_EXTENSIONS.split(',')
-                  .map((p) => p.trim())
-                  .filter(Boolean)
-              : undefined;
+            if (isIOS && manager instanceof IOSManager) {
+              // Auto-launch iOS Safari
+              // Check for device in command first (for reused daemons), then fall back to env vars
+              const cmd = parseResult.command as { iosDevice?: string };
+              const iosDevice = cmd.iosDevice || process.env.AGENT_BROWSER_IOS_DEVICE;
+              await manager.launch({
+                device: iosDevice,
+                udid: process.env.AGENT_BROWSER_IOS_UDID,
+              });
+            } else if (manager instanceof BrowserManager) {
+              // Auto-launch desktop browser
+              const extensions = process.env.AGENT_BROWSER_EXTENSIONS
+                ? process.env.AGENT_BROWSER_EXTENSIONS.split(',')
+                    .map((p) => p.trim())
+                    .filter(Boolean)
+                : undefined;
 
-            // Parse args from env (comma or newline separated)
-            const argsEnv = process.env.AGENT_BROWSER_ARGS;
-            const args = argsEnv
-              ? argsEnv
-                  .split(/[,\n]/)
-                  .map((a) => a.trim())
-                  .filter((a) => a.length > 0)
-              : undefined;
+              // Parse args from env (comma or newline separated)
+              const argsEnv = process.env.AGENT_BROWSER_ARGS;
+              const args = argsEnv
+                ? argsEnv
+                    .split(/[,\n]/)
+                    .map((a) => a.trim())
+                    .filter((a) => a.length > 0)
+                : undefined;
 
-            // Parse proxy from env
-            const proxyServer = process.env.AGENT_BROWSER_PROXY;
-            const proxyBypass = process.env.AGENT_BROWSER_PROXY_BYPASS;
-            const proxy = proxyServer
-              ? {
-                  server: proxyServer,
-                  ...(proxyBypass && { bypass: proxyBypass }),
-                }
-              : undefined;
+              // Parse proxy from env
+              const proxyServer = process.env.AGENT_BROWSER_PROXY;
+              const proxyBypass = process.env.AGENT_BROWSER_PROXY_BYPASS;
+              const proxy = proxyServer
+                ? {
+                    server: proxyServer,
+                    ...(proxyBypass && { bypass: proxyBypass }),
+                  }
+                : undefined;
 
-            const ignoreHTTPSErrors = process.env.AGENT_BROWSER_IGNORE_HTTPS_ERRORS === '1';
-            await browser.launch({
-              id: 'auto',
-              action: 'launch' as const,
-              headless: process.env.AGENT_BROWSER_HEADED !== '1',
-              executablePath: process.env.AGENT_BROWSER_EXECUTABLE_PATH,
-              extensions: extensions,
-              profile: process.env.AGENT_BROWSER_PROFILE,
-              storageState: process.env.AGENT_BROWSER_STATE,
-              args,
-              userAgent: process.env.AGENT_BROWSER_USER_AGENT,
-              proxy,
-              ignoreHTTPSErrors: ignoreHTTPSErrors,
-            });
+              const ignoreHTTPSErrors = process.env.AGENT_BROWSER_IGNORE_HTTPS_ERRORS === '1';
+              const allowFileAccess = process.env.AGENT_BROWSER_ALLOW_FILE_ACCESS === '1';
+              await manager.launch({
+                id: 'auto',
+                action: 'launch' as const,
+                headless: process.env.AGENT_BROWSER_HEADED !== '1',
+                executablePath: process.env.AGENT_BROWSER_EXECUTABLE_PATH,
+                extensions: extensions,
+                profile: process.env.AGENT_BROWSER_PROFILE,
+                storageState: process.env.AGENT_BROWSER_STATE,
+                args,
+                userAgent: process.env.AGENT_BROWSER_USER_AGENT,
+                proxy,
+                ignoreHTTPSErrors: ignoreHTTPSErrors,
+                allowFileAccess: allowFileAccess,
+              });
+            }
           }
 
-          // Handle close command specially
+          // Handle close command specially - shuts down daemon
           if (parseResult.command.action === 'close') {
-            const response = await executeCommand(parseResult.command, browser);
+            const response =
+              isIOS && manager instanceof IOSManager
+                ? await executeIOSCommand(parseResult.command, manager)
+                : await executeCommand(parseResult.command, manager as BrowserManager);
             socket.write(serializeResponse(response) + '\n');
 
             if (!shuttingDown) {
@@ -296,7 +348,11 @@ export async function startDaemon(options?: { streamPort?: number }): Promise<vo
             return;
           }
 
-          const response = await executeCommand(parseResult.command, browser);
+          // Execute command with appropriate handler
+          const response =
+            isIOS && manager instanceof IOSManager
+              ? await executeIOSCommand(parseResult.command, manager)
+              : await executeCommand(parseResult.command, manager as BrowserManager);
           socket.write(serializeResponse(response) + '\n');
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
@@ -376,7 +432,7 @@ export async function startDaemon(options?: { streamPort?: number }): Promise<vo
       }
     }
 
-    await browser.close();
+    await manager.close();
     server.close();
     cleanupSocket();
     process.exit(0);

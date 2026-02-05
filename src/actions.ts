@@ -589,6 +589,7 @@ async function handleSnapshot(
   command: Command & {
     action: 'snapshot';
     interactive?: boolean;
+    cursor?: boolean;
     maxDepth?: number;
     compact?: boolean;
     selector?: string;
@@ -598,6 +599,7 @@ async function handleSnapshot(
   // Use enhanced snapshot with refs and optional filtering
   const { tree, refs } = await browser.getSnapshot({
     interactive: command.interactive,
+    cursor: command.cursor,
     maxDepth: command.maxDepth,
     compact: command.compact,
     selector: command.selector,

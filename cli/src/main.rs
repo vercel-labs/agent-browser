@@ -205,8 +205,11 @@ fn main() {
         flags.proxy.as_deref(),
         flags.proxy_bypass.as_deref(),
         flags.ignore_https_errors,
+        flags.allow_file_access,
         flags.profile.as_deref(),
         flags.state.as_deref(),
+        flags.provider.as_deref(),
+        flags.device.as_deref(),
     ) {
         Ok(result) => result,
         Err(e) => {
@@ -219,23 +222,53 @@ fn main() {
         }
     };
 
-    // Warn if launch-time options were specified but daemon was already running
+    // Warn if launch-time options were explicitly passed via CLI but daemon was already running
+    // Only warn about flags that were passed on the command line, not those set via environment
+    // variables (since the daemon already uses the env vars when it starts).
     if daemon_result.already_running {
-        let has_extensions = !flags.extensions.is_empty();
         let ignored_flags: Vec<&str> = [
-            flags.executable_path.as_ref().map(|_| "--executable-path"),
-            if has_extensions {
+            if flags.cli_executable_path {
+                Some("--executable-path")
+            } else {
+                None
+            },
+            if flags.cli_extensions {
                 Some("--extension")
             } else {
                 None
             },
-            flags.profile.as_ref().map(|_| "--profile"),
-            flags.state.as_ref().map(|_| "--state"),
-            flags.args.as_ref().map(|_| "--args"),
-            flags.user_agent.as_ref().map(|_| "--user-agent"),
-            flags.proxy.as_ref().map(|_| "--proxy"),
-            flags.proxy_bypass.as_ref().map(|_| "--proxy-bypass"),
+            if flags.cli_profile {
+                Some("--profile")
+            } else {
+                None
+            },
+            if flags.cli_state {
+                Some("--state")
+            } else {
+                None
+            },
+            if flags.cli_args {
+                Some("--args")
+            } else {
+                None
+            },
+            if flags.cli_user_agent {
+                Some("--user-agent")
+            } else {
+                None
+            },
+            if flags.cli_proxy {
+                Some("--proxy")
+            } else {
+                None
+            },
+            if flags.cli_proxy_bypass {
+                Some("--proxy-bypass")
+            } else {
+                None
+            },
             flags.ignore_https_errors.then(|| "--ignore-https-errors"),
+            flags.cli_allow_file_access.then(|| "--allow-file-access"),
         ]
         .into_iter()
         .flatten()
@@ -247,10 +280,6 @@ fn main() {
                 color::warning_indicator(),
                 ignored_flags.join(", ")
             );
-        }
-
-        if flags.ignore_https_errors {
-            eprintln!("{} --ignore-https-errors ignored: daemon already running. Use 'agent-browser close' first to restart with this option.", color::warning_indicator());
         }
     }
 
@@ -390,7 +419,8 @@ fn main() {
         || flags.state.is_some()
         || flags.proxy.is_some()
         || flags.args.is_some()
-        || flags.user_agent.is_some())
+        || flags.user_agent.is_some()
+        || flags.allow_file_access)
         && flags.cdp.is_none()
         && flags.provider.is_none()
     {
@@ -443,13 +473,37 @@ fn main() {
             launch_cmd["ignoreHTTPSErrors"] = json!(true);
         }
 
-        if let Err(e) = send_command(launch_cmd, &flags.session) {
-            if !flags.json {
-                eprintln!(
-                    "{} Could not configure browser: {}",
-                    color::warning_indicator(),
-                    e
-                );
+        if flags.allow_file_access {
+            launch_cmd["allowFileAccess"] = json!(true);
+        }
+
+        match send_command(launch_cmd, &flags.session) {
+            Ok(resp) if !resp.success => {
+                // Launch command failed (e.g., invalid state file, profile error)
+                let error_msg = resp
+                    .error
+                    .unwrap_or_else(|| "Browser launch failed".to_string());
+                if flags.json {
+                    println!(r#"{{"success":false,"error":"{}"}}"#, error_msg);
+                } else {
+                    eprintln!("{} {}", color::error_indicator(), error_msg);
+                }
+                exit(1);
+            }
+            Err(e) => {
+                if flags.json {
+                    println!(r#"{{"success":false,"error":"{}"}}"#, e);
+                } else {
+                    eprintln!(
+                        "{} Could not configure browser: {}",
+                        color::error_indicator(),
+                        e
+                    );
+                }
+                exit(1);
+            }
+            Ok(_) => {
+                // Launch succeeded
             }
         }
     }

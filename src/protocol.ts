@@ -686,6 +686,17 @@ const inputTouchSchema = baseCommandSchema.extend({
   modifiers: z.number().optional(),
 });
 
+// iOS-specific schemas
+const swipeSchema = baseCommandSchema.extend({
+  action: z.literal('swipe'),
+  direction: z.enum(['up', 'down', 'left', 'right']),
+  distance: z.number().positive().optional(),
+});
+
+const deviceListSchema = baseCommandSchema.extend({
+  action: z.literal('device_list'),
+});
+
 const pressSchema = baseCommandSchema.extend({
   action: z.literal('press'),
   key: z.string().min(1),
@@ -906,6 +917,8 @@ const commandSchema = z.discriminatedUnion('action', [
   inputMouseSchema,
   inputKeyboardSchema,
   inputTouchSchema,
+  swipeSchema,
+  deviceListSchema,
 ]);
 
 // Parse result type

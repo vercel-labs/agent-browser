@@ -87,7 +87,7 @@ agent-browser --cdp "ws://localhost:9222/devtools/browser/abc123" open example.c
             </tr>
             <tr>
               <td><code>--json</code></td>
-              <td>JSON output for agents</td>
+              <td>JSON output for scripts</td>
             </tr>
             <tr>
               <td><code>--full, -f</code></td>

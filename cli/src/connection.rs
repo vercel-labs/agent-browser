@@ -116,6 +116,24 @@ fn get_pid_path(session: &str) -> PathBuf {
     get_socket_dir().join(format!("{}.pid", session))
 }
 
+/// Clean up stale socket and PID files for a session
+fn cleanup_stale_files(session: &str) {
+    let pid_path = get_pid_path(session);
+    let _ = fs::remove_file(&pid_path);
+
+    #[cfg(unix)]
+    {
+        let socket_path = get_socket_path(session);
+        let _ = fs::remove_file(&socket_path);
+    }
+
+    #[cfg(windows)]
+    {
+        let port_path = get_port_path(session);
+        let _ = fs::remove_file(&port_path);
+    }
+}
+
 #[cfg(windows)]
 fn get_port_path(session: &str) -> PathBuf {
     get_socket_dir().join(format!("{}.port", session))
@@ -225,20 +243,64 @@ pub fn ensure_daemon(
     proxy: Option<&str>,
     proxy_bypass: Option<&str>,
     ignore_https_errors: bool,
+    allow_file_access: bool,
     profile: Option<&str>,
     state: Option<&str>,
+    provider: Option<&str>,
+    device: Option<&str>,
 ) -> Result<DaemonResult, String> {
+    // Check if daemon is running AND responsive
     if is_daemon_running(session) && daemon_ready(session) {
-        return Ok(DaemonResult {
-            already_running: true,
-        });
+        // Double-check it's actually responsive by waiting and checking again
+        // This handles the race condition where daemon is shutting down
+        // (daemon has a 100ms shutdown delay, so we wait longer)
+        thread::sleep(Duration::from_millis(150));
+        if daemon_ready(session) {
+            return Ok(DaemonResult {
+                already_running: true,
+            });
+        }
     }
+
+    // Clean up any stale socket/pid files before starting fresh
+    cleanup_stale_files(session);
 
     // Ensure socket directory exists
     let socket_dir = get_socket_dir();
     if !socket_dir.exists() {
         fs::create_dir_all(&socket_dir)
             .map_err(|e| format!("Failed to create socket directory: {}", e))?;
+    }
+
+    // Pre-flight check: Validate socket path length (Unix limit is 104 bytes including null terminator)
+    #[cfg(unix)]
+    {
+        let socket_path = get_socket_path(session);
+        let path_len = socket_path.as_os_str().len();
+        if path_len > 103 {
+            return Err(format!(
+                "Session name '{}' is too long. Socket path would be {} bytes (max 103).\n\
+                 Use a shorter session name or set AGENT_BROWSER_SOCKET_DIR to a shorter path.",
+                session, path_len
+            ));
+        }
+    }
+
+    // Pre-flight check: Verify socket directory is writable
+    {
+        let test_file = socket_dir.join(".write_test");
+        match fs::write(&test_file, b"") {
+            Ok(_) => {
+                let _ = fs::remove_file(&test_file);
+            }
+            Err(e) => {
+                return Err(format!(
+                    "Socket directory '{}' is not writable: {}",
+                    socket_dir.display(),
+                    e
+                ));
+            }
+        }
     }
 
     let exe_path = env::current_exe().map_err(|e| e.to_string())?;
@@ -306,12 +368,24 @@ pub fn ensure_daemon(
             cmd.env("AGENT_BROWSER_IGNORE_HTTPS_ERRORS", "1");
         }
 
+        if allow_file_access {
+            cmd.env("AGENT_BROWSER_ALLOW_FILE_ACCESS", "1");
+        }
+
         if let Some(prof) = profile {
             cmd.env("AGENT_BROWSER_PROFILE", prof);
         }
 
         if let Some(st) = state {
             cmd.env("AGENT_BROWSER_STATE", st);
+        }
+
+        if let Some(p) = provider {
+            cmd.env("AGENT_BROWSER_PROVIDER", p);
+        }
+
+        if let Some(d) = device {
+            cmd.env("AGENT_BROWSER_IOS_DEVICE", d);
         }
 
         // Create new process group and session to fully detach
@@ -379,6 +453,10 @@ pub fn ensure_daemon(
             cmd.env("AGENT_BROWSER_IGNORE_HTTPS_ERRORS", "1");
         }
 
+        if allow_file_access {
+            cmd.env("AGENT_BROWSER_ALLOW_FILE_ACCESS", "1");
+        }
+
         if let Some(prof) = profile {
             cmd.env("AGENT_BROWSER_PROFILE", prof);
         }
@@ -387,6 +465,13 @@ pub fn ensure_daemon(
             cmd.env("AGENT_BROWSER_STATE", st);
         }
 
+        if let Some(p) = provider {
+            cmd.env("AGENT_BROWSER_PROVIDER", p);
+        }
+
+        if let Some(d) = device {
+            cmd.env("AGENT_BROWSER_IOS_DEVICE", d);
+        }
         let output = cmd
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -416,7 +501,10 @@ pub fn ensure_daemon(
         thread::sleep(Duration::from_millis(100));
     }
 
-    Err("Daemon failed to start".to_string())
+    Err(format!(
+        "Daemon failed to start (socket: {})",
+        get_socket_dir().join(format!("{}.sock", session)).display()
+    ))
 }
 
 fn connect(session: &str) -> Result<Connection, String> {
@@ -437,12 +525,65 @@ fn connect(session: &str) -> Result<Connection, String> {
 }
 
 pub fn send_command(cmd: Value, session: &str) -> Result<Response, String> {
+    // Retry logic for transient errors (EAGAIN/EWOULDBLOCK/connection issues)
+    const MAX_RETRIES: u32 = 5;
+    const RETRY_DELAY_MS: u64 = 200;
+
+    let mut last_error = String::new();
+
+    for attempt in 0..MAX_RETRIES {
+        if attempt > 0 {
+            thread::sleep(Duration::from_millis(RETRY_DELAY_MS * (attempt as u64)));
+        }
+
+        match send_command_once(&cmd, session) {
+            Ok(response) => return Ok(response),
+            Err(e) => {
+                if is_transient_error(&e) {
+                    last_error = e;
+                    continue;
+                }
+                // Non-transient error, fail immediately
+                return Err(e);
+            }
+        }
+    }
+
+    Err(format!(
+        "{} (after {} retries - daemon may be busy or unresponsive)",
+        last_error, MAX_RETRIES
+    ))
+}
+
+/// Check if an error is transient and worth retrying.
+/// Transient errors include:
+/// - EAGAIN/EWOULDBLOCK (os error 35 on macOS, 11 on Linux)
+/// - EOF errors (daemon closed connection before responding)
+/// - Connection reset/broken pipe (daemon crashed or restarting)
+/// - Connection refused/socket not found (daemon still starting)
+fn is_transient_error(error: &str) -> bool {
+    error.contains("os error 35") // EAGAIN on macOS
+        || error.contains("os error 11") // EAGAIN on Linux
+        || error.contains("WouldBlock")
+        || error.contains("Resource temporarily unavailable")
+        || error.contains("EOF")
+        || error.contains("line 1 column 0") // Empty JSON response
+        || error.contains("Connection reset")
+        || error.contains("Broken pipe")
+        || error.contains("os error 54") // Connection reset by peer (macOS)
+        || error.contains("os error 104") // Connection reset by peer (Linux)
+        || error.contains("os error 2") // No such file or directory (socket gone)
+        || error.contains("os error 61") // Connection refused (macOS)
+        || error.contains("os error 111") // Connection refused (Linux)
+}
+
+fn send_command_once(cmd: &Value, session: &str) -> Result<Response, String> {
     let mut stream = connect(session)?;
 
     stream.set_read_timeout(Some(Duration::from_secs(30))).ok();
     stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
 
-    let mut json_str = serde_json::to_string(&cmd).map_err(|e| e.to_string())?;
+    let mut json_str = serde_json::to_string(cmd).map_err(|e| e.to_string())?;
     json_str.push('\n');
 
     stream
@@ -553,5 +694,99 @@ mod tests {
         assert!(
             result.to_string_lossy().contains("home") || result.to_string_lossy().contains("Users")
         );
+    }
+
+    // === Transient Error Detection Tests ===
+
+    #[test]
+    fn test_is_transient_error_eagain_macos() {
+        assert!(is_transient_error(
+            "Failed to read: Resource temporarily unavailable (os error 35)"
+        ));
+    }
+
+    #[test]
+    fn test_is_transient_error_eagain_linux() {
+        assert!(is_transient_error(
+            "Failed to read: Resource temporarily unavailable (os error 11)"
+        ));
+    }
+
+    #[test]
+    fn test_is_transient_error_would_block() {
+        assert!(is_transient_error("operation WouldBlock"));
+    }
+
+    #[test]
+    fn test_is_transient_error_resource_unavailable() {
+        assert!(is_transient_error("Resource temporarily unavailable"));
+    }
+
+    #[test]
+    fn test_is_transient_error_eof() {
+        assert!(is_transient_error(
+            "Invalid response: EOF while parsing a value at line 1 column 0"
+        ));
+    }
+
+    #[test]
+    fn test_is_transient_error_empty_json() {
+        assert!(is_transient_error(
+            "Invalid response: expected value at line 1 column 0"
+        ));
+    }
+
+    #[test]
+    fn test_is_transient_error_connection_reset() {
+        assert!(is_transient_error("Connection reset by peer"));
+    }
+
+    #[test]
+    fn test_is_transient_error_broken_pipe() {
+        assert!(is_transient_error("Broken pipe"));
+    }
+
+    #[test]
+    fn test_is_transient_error_connection_reset_macos() {
+        assert!(is_transient_error(
+            "Failed to send: Connection reset by peer (os error 54)"
+        ));
+    }
+
+    #[test]
+    fn test_is_transient_error_connection_reset_linux() {
+        assert!(is_transient_error(
+            "Failed to send: Connection reset by peer (os error 104)"
+        ));
+    }
+
+    #[test]
+    fn test_is_transient_error_socket_not_found() {
+        assert!(is_transient_error(
+            "Failed to connect: No such file or directory (os error 2)"
+        ));
+    }
+
+    #[test]
+    fn test_is_transient_error_connection_refused_macos() {
+        assert!(is_transient_error(
+            "Failed to connect: Connection refused (os error 61)"
+        ));
+    }
+
+    #[test]
+    fn test_is_transient_error_connection_refused_linux() {
+        assert!(is_transient_error(
+            "Failed to connect: Connection refused (os error 111)"
+        ));
+    }
+
+    #[test]
+    fn test_is_transient_error_non_transient() {
+        // These should NOT be considered transient
+        assert!(!is_transient_error("Unknown command: foo"));
+        assert!(!is_transient_error("Invalid JSON syntax"));
+        assert!(!is_transient_error("Permission denied"));
+        assert!(!is_transient_error("Daemon not found"));
     }
 }

@@ -6,21 +6,25 @@ export default function Home() {
       <div className="prose">
         <h1>agent-browser</h1>
         <p>
-          Headless browser automation CLI for AI agents. Fast Rust CLI with Node.js fallback.
+          Browser automation CLI designed for AI agents. Compact text output minimizes context usage. Fast Rust CLI with Node.js fallback.
         </p>
 
         <CodeBlock code="npm install -g agent-browser" />
 
         <h2>Features</h2>
         <ul>
-          <li><strong>Universal</strong> - Works with any AI agent: Claude Code, Cursor, Codex, Copilot, Gemini, opencode, and more</li>
-          <li><strong>AI-first</strong> - Snapshot returns accessibility tree with refs for deterministic element selection</li>
+          <li><strong>Agent-first</strong> - Compact text output uses fewer tokens than JSON, designed for AI context efficiency</li>
+          <li><strong>Ref-based</strong> - Snapshot returns accessibility tree with refs for deterministic element selection</li>
           <li><strong>Fast</strong> - Native Rust CLI for instant command parsing</li>
           <li><strong>Complete</strong> - 50+ commands for navigation, forms, screenshots, network, storage</li>
           <li><strong>Sessions</strong> - Multiple isolated browser instances with separate auth</li>
           <li><strong>Cross-platform</strong> - macOS, Linux, Windows with native binaries</li>
-          <li><strong>Serverless</strong> - Custom executable path for lightweight Chromium builds</li>
         </ul>
+
+        <h2>Works with</h2>
+        <p>
+          Claude Code, Cursor, GitHub Copilot, OpenAI Codex, Google Gemini, opencode, and any agent that can run shell commands.
+        </p>
 
         <h2>Example</h2>
         <CodeBlock code={`# Navigate and get snapshot
@@ -38,13 +42,14 @@ agent-browser close`} />
 
         <h2>Why refs?</h2>
         <p>
-          The <code>snapshot</code> command returns an accessibility tree where each element 
+          The <code>snapshot</code> command returns a compact accessibility tree where each element 
           has a unique ref like <code>@e1</code>, <code>@e2</code>. This provides:
         </p>
         <ul>
+          <li><strong>Context-efficient</strong> - Text output uses ~200-400 tokens vs ~3000-5000 for full DOM</li>
           <li><strong>Deterministic</strong> - Ref points to exact element from snapshot</li>
           <li><strong>Fast</strong> - No DOM re-query needed</li>
-          <li><strong>AI-friendly</strong> - LLMs can reliably parse and use refs</li>
+          <li><strong>AI-friendly</strong> - LLMs parse text output naturally</li>
         </ul>
 
         <h2>Architecture</h2>

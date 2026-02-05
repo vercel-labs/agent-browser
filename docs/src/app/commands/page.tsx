@@ -120,6 +120,30 @@ agent-browser state load <path>       # Load auth state`} />
         <CodeBlock code={`agent-browser back                    # Go back
 agent-browser forward                 # Go forward
 agent-browser reload                  # Reload page`} />
+
+        <h2>Global options</h2>
+        <CodeBlock code={`--session <name>         # Isolated browser session
+--profile <path>         # Persistent browser profile directory
+--headed                 # Show browser window (not headless)
+--cdp <port>             # Connect via Chrome DevTools Protocol
+--executable-path <path> # Custom browser executable
+--args <args>            # Browser launch args (comma separated)
+--user-agent <ua>        # Custom User-Agent string
+--proxy <url>            # Proxy server URL
+--headers <json>         # HTTP headers scoped to URL's origin
+--ignore-https-errors    # Ignore HTTPS certificate errors
+--allow-file-access      # Allow file:// URLs to access local files (Chromium only)
+--json                   # JSON output (for scripts)
+--debug                  # Debug output`} />
+
+        <h2>Local files</h2>
+        <p>Open local files (PDFs, HTML) using <code>file://</code> URLs:</p>
+        <CodeBlock code={`agent-browser --allow-file-access open file:///path/to/document.pdf
+agent-browser --allow-file-access open file:///path/to/page.html
+agent-browser screenshot output.png`} />
+        <p>
+          The <code>--allow-file-access</code> flag enables JavaScript to access other local files. Chromium only.
+        </p>
       </div>
     </div>
   );

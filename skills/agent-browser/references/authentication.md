@@ -1,6 +1,20 @@
 # Authentication Patterns
 
-Patterns for handling login flows, session persistence, and authenticated browsing.
+Login flows, session persistence, OAuth, 2FA, and authenticated browsing.
+
+**Related**: [session-management.md](session-management.md) for state persistence details, [SKILL.md](../SKILL.md) for quick start.
+
+## Contents
+
+- [Basic Login Flow](#basic-login-flow)
+- [Saving Authentication State](#saving-authentication-state)
+- [Restoring Authentication](#restoring-authentication)
+- [OAuth / SSO Flows](#oauth--sso-flows)
+- [Two-Factor Authentication](#two-factor-authentication)
+- [HTTP Basic Auth](#http-basic-auth)
+- [Cookie-Based Auth](#cookie-based-auth)
+- [Token Refresh Handling](#token-refresh-handling)
+- [Security Best Practices](#security-best-practices)
 
 ## Basic Login Flow
 
