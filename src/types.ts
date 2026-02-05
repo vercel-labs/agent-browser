@@ -45,6 +45,7 @@ export interface ClickCommand extends BaseCommand {
   button?: 'left' | 'right' | 'middle';
   clickCount?: number;
   delay?: number;
+  timeout?: number;
 }
 
 export interface TypeCommand extends BaseCommand {

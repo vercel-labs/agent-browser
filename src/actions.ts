@@ -505,6 +505,7 @@ async function handleClick(command: ClickCommand, browser: BrowserManager): Prom
       button: command.button,
       clickCount: command.clickCount,
       delay: command.delay,
+      timeout: command.timeout,
     });
   } catch (error) {
     throw toAIFriendlyError(error, command.selector);
