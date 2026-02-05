@@ -10,6 +10,23 @@ import { StreamServer } from './stream-server.js';
 // Platform detection
 const isWindows = process.platform === 'win32';
 
+/**
+ * Parse AGENT_BROWSER_VIEWPORT env var into viewport dimensions.
+ * Accepts "WIDTHxHEIGHT" or "WIDTH,HEIGHT" format (e.g., "1920x1080").
+ * Returns undefined if the value is missing, empty, or invalid.
+ */
+export function parseViewportEnv(
+  value: string | undefined
+): { width: number; height: number } | undefined {
+  if (!value) return undefined;
+  const match = value.match(/^(\d+)[x,](\d+)$/);
+  if (!match) return undefined;
+  const width = parseInt(match[1], 10);
+  const height = parseInt(match[2], 10);
+  if (width <= 0 || height <= 0) return undefined;
+  return { width, height };
+}
+
 // Session support - each session gets its own socket/pid
 let currentSession = process.env.AGENT_BROWSER_SESSION || 'default';
 
@@ -197,12 +214,14 @@ export async function startDaemon(options?: { streamPort?: number }): Promise<vo
                   .map((p) => p.trim())
                   .filter(Boolean)
               : undefined;
+            const viewport = parseViewportEnv(process.env.AGENT_BROWSER_VIEWPORT);
             await browser.launch({
               id: 'auto',
               action: 'launch',
               headless: true,
               executablePath: process.env.AGENT_BROWSER_EXECUTABLE_PATH,
               extensions: extensions,
+              viewport,
             });
           }
 

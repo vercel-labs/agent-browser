@@ -305,6 +305,17 @@ agent-browser snapshot -i -c -d 5         # Combine options
 | `--cdp <port>` | Connect via Chrome DevTools Protocol |
 | `--debug` | Debug output |
 
+## Environment Variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `AGENT_BROWSER_SESSION` | Session name for isolated instances | `default` |
+| `AGENT_BROWSER_EXECUTABLE_PATH` | Custom browser executable path | Bundled Chromium |
+| `AGENT_BROWSER_VIEWPORT` | Default viewport size (e.g., `1920x1080` or `1920,1080`) | `1280x720` |
+| `AGENT_BROWSER_STREAM_PORT` | Port for WebSocket stream server (0 to disable) | `0` (disabled) |
+| `AGENT_BROWSER_EXTENSIONS` | Comma-separated list of extension paths | — |
+| `AGENT_BROWSER_DAEMON` | Set to `1` to run as daemon | — |
+
 ## Selectors
 
 ### Refs (Recommended for AI)
