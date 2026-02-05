@@ -115,6 +115,7 @@ export class BrowserManager {
    */
   async getSnapshot(options?: {
     interactive?: boolean;
+    cursor?: boolean;
     maxDepth?: number;
     compact?: boolean;
     selector?: string;
