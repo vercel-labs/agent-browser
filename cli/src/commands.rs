@@ -1327,7 +1327,11 @@ fn parse_network(rest: &[&str], id: &str) -> Result<Value, ParseError> {
             let abort = rest.iter().any(|&s| s == "--abort");
             let body_idx = rest.iter().position(|&s| s == "--body");
             let body = body_idx.and_then(|i| rest.get(i + 1).map(|s| *s));
-            Ok(json!({ "id": id, "action": "route", "url": url, "abort": abort, "body": body }))
+            let mut cmd = json!({ "id": id, "action": "route", "url": url, "abort": abort });
+            if let Some(b) = body {
+                cmd["response"] = json!({ "body": b, "contentType": "application/json" });
+            }
+            Ok(cmd)
         }
         Some("unroute") => {
             let mut cmd = json!({ "id": id, "action": "unroute" });
