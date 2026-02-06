@@ -1124,6 +1124,7 @@ export class BrowserManager {
           ignoreHTTPSErrors: options.ignoreHTTPSErrors ?? false,
         }
       );
+      this.browser = context.browser();
       this.isPersistentContext = true;
     } else if (hasProfile) {
       // Profile uses persistent context for durable cookies/storage
@@ -1139,6 +1140,7 @@ export class BrowserManager {
         ...(options.proxy && { proxy: options.proxy }),
         ignoreHTTPSErrors: options.ignoreHTTPSErrors ?? false,
       });
+      this.browser = context.browser();
       this.isPersistentContext = true;
     } else {
       // Regular ephemeral browser
