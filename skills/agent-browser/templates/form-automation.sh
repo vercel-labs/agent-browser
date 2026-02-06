@@ -9,56 +9,56 @@ FORM_URL="${1:?Usage: $0 <form-url>}"
 echo "Automating form at: $FORM_URL"
 
 # Navigate to form page
-agent-browser open "$FORM_URL"
-agent-browser wait --load networkidle
+npx agent-browser open "$FORM_URL"
+npx agent-browser wait --load networkidle
 
 # Get interactive snapshot to identify form fields
 echo "Analyzing form structure..."
-agent-browser snapshot -i
+npx agent-browser snapshot -i
 
 # Example: Fill common form fields
 # Uncomment and modify refs based on snapshot output
 
 # Text inputs
-# agent-browser fill @e1 "John Doe"           # Name field
-# agent-browser fill @e2 "user@example.com"   # Email field
-# agent-browser fill @e3 "+1-555-123-4567"    # Phone field
+# npx agent-browser fill @e1 "John Doe"           # Name field
+# npx agent-browser fill @e2 "user@example.com"   # Email field
+# npx agent-browser fill @e3 "+1-555-123-4567"    # Phone field
 
 # Password fields
-# agent-browser fill @e4 "SecureP@ssw0rd!"
+# npx agent-browser fill @e4 "SecureP@ssw0rd!"
 
 # Dropdowns
-# agent-browser select @e5 "Option Value"
+# npx agent-browser select @e5 "Option Value"
 
 # Checkboxes
-# agent-browser check @e6                      # Check
-# agent-browser uncheck @e7                    # Uncheck
+# npx agent-browser check @e6                      # Check
+# npx agent-browser uncheck @e7                    # Uncheck
 
 # Radio buttons
-# agent-browser click @e8                      # Select radio option
+# npx agent-browser click @e8                      # Select radio option
 
 # Text areas
-# agent-browser fill @e9 "Multi-line text content here"
+# npx agent-browser fill @e9 "Multi-line text content here"
 
 # File uploads
-# agent-browser upload @e10 /path/to/file.pdf
+# npx agent-browser upload @e10 /path/to/file.pdf
 
 # Submit form
-# agent-browser click @e11                     # Submit button
+# npx agent-browser click @e11                     # Submit button
 
 # Wait for response
-# agent-browser wait --load networkidle
-# agent-browser wait --url "**/success"        # Or wait for redirect
+# npx agent-browser wait --load networkidle
+# npx agent-browser wait --url "**/success"        # Or wait for redirect
 
 # Verify submission
 echo "Form submission result:"
-agent-browser get url
-agent-browser snapshot -i
+npx agent-browser get url
+npx agent-browser snapshot -i
 
 # Take screenshot of result
-agent-browser screenshot /tmp/form-result.png
+npx agent-browser screenshot /tmp/form-result.png
 
 # Cleanup
-agent-browser close
+npx agent-browser close
 
 echo "Form automation complete"
