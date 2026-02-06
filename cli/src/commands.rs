@@ -4,6 +4,32 @@ use std::io::{self, BufRead};
 
 use crate::flags::Flags;
 
+/// Parse and extract timeout flag from arguments
+/// Returns (timeout_value, filtered_args_without_timeout)
+fn extract_timeout<'a>(args: &'a [&'a str]) -> (Option<u64>, Vec<&'a str>) {
+    let mut timeout = None;
+    let mut filtered = Vec::new();
+    let mut skip_next = false;
+
+    for (i, &arg) in args.iter().enumerate() {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+
+        if arg == "--timeout" {
+            if let Some(&next) = args.get(i + 1) {
+                timeout = next.parse::<u64>().ok();
+                skip_next = true;
+            }
+        } else {
+            filtered.push(arg);
+        }
+    }
+
+    (timeout, filtered)
+}
+
 /// Error type for command parsing with contextual information
 #[derive(Debug)]
 pub enum ParseError {
@@ -117,11 +143,17 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
 
         // === Core Actions ===
         "click" => {
-            let sel = rest.get(0).ok_or_else(|| ParseError::MissingArguments {
+            let (timeout, filtered) = extract_timeout(&rest);
+            let sel = filtered.get(0).ok_or_else(|| ParseError::MissingArguments {
                 context: "click".to_string(),
-                usage: "click <selector>",
+                usage: "click <selector> [--timeout <ms>]",
             })?;
-            Ok(json!({ "id": id, "action": "click", "selector": sel }))
+
+            let mut cmd = json!({ "id": id, "action": "click", "selector": sel });
+            if let Some(t) = timeout {
+                cmd["timeout"] = json!(t);
+            }
+            Ok(cmd)
         }
         "dblclick" => {
             let sel = rest.get(0).ok_or_else(|| ParseError::MissingArguments {

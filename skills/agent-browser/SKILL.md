@@ -41,6 +41,7 @@ agent-browser snapshot -s "#selector" # Scope to CSS selector
 
 # Interaction (use @refs from snapshot)
 agent-browser click @e1               # Click element
+agent-browser click @e1 --timeout 500 # Use if page hangs (optional)
 agent-browser fill @e2 "text"         # Clear and type text
 agent-browser type @e2 "text"         # Type without clearing
 agent-browser select @e1 "option"     # Select dropdown option

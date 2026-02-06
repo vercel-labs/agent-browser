@@ -63,6 +63,7 @@ const clickSchema = baseCommandSchema.extend({
   button: z.enum(['left', 'right', 'middle']).optional(),
   clickCount: z.number().positive().optional(),
   delay: z.number().nonnegative().optional(),
+  timeout: z.number().positive().optional(),
 });
 
 const typeSchema = baseCommandSchema.extend({
