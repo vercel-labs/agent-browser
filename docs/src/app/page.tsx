@@ -9,7 +9,11 @@ export default function Home() {
           Browser automation CLI designed for AI agents. Compact text output minimizes context usage. Fast Rust CLI with Node.js fallback.
         </p>
 
-        <CodeBlock code="npm install -g agent-browser" />
+        <CodeBlock
+          code={`
+npm install -g agent-browser      # all platforms
+brew install agent-browser        # macOS`}
+        />
 
         <h2>Features</h2>
         <ul>

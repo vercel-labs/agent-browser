@@ -11,6 +11,13 @@ npm install -g agent-browser
 agent-browser install  # Download Chromium
 ```
 
+### Homebrew (macOS)
+
+```bash
+brew install agent-browser
+agent-browser install  # Download Chromium
+```
+
 ### From Source
 
 ```bash

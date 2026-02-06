@@ -10,6 +10,12 @@ export default function Installation() {
         <CodeBlock code={`npm install -g agent-browser
 agent-browser install  # Download Chromium`} />
 
+        <h2>Homebrew (macOS)</h2>
+        <CodeBlock
+          code={`brew install agent-browser
+agent-browser install  # Download Chromium`}
+        />
+
         <h2>From source</h2>
         <CodeBlock code={`git clone https://github.com/vercel-labs/agent-browser
 cd agent-browser
