@@ -1,4 +1,4 @@
-import type { Page, Frame } from 'playwright-core';
+import type { Page, Frame, Locator } from 'playwright-core';
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import type { BrowserManager, ScreencastFrame } from './browser.js';
@@ -142,6 +142,43 @@ export function setScreencastFrameCallback(
 interface SnapshotData {
   snapshot: string;
   refs?: Record<string, { role: string; name?: string }>;
+}
+
+/**
+ * Safely perform check/uncheck on a locator.
+ * If the element is hidden (common with UI frameworks like Element UI, Ant Design, Vuetify
+ * which hide native checkbox inputs), falls back to using { force: true }.
+ * This prevents Playwright from hanging indefinitely waiting for the element to become visible.
+ * @see https://github.com/vercel-labs/agent-browser/issues/335
+ */
+export async function safeCheckAction(locator: Locator, action: 'check' | 'uncheck'): Promise<void> {
+  try {
+    // First, try with a short timeout to detect hidden elements quickly
+    if (action === 'check') {
+      await locator.check({ timeout: 5000 });
+    } else {
+      await locator.uncheck({ timeout: 5000 });
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    // If the element is not visible or the action timed out, retry with force: true
+    // This handles hidden native checkboxes in UI component libraries
+    if (
+      message.includes('not visible') ||
+      message.includes('hidden') ||
+      message.includes('Timeout') ||
+      message.includes('waiting for') ||
+      message.includes('Element is not visible')
+    ) {
+      if (action === 'check') {
+        await locator.check({ force: true });
+      } else {
+        await locator.uncheck({ force: true });
+      }
+    } else {
+      throw error;
+    }
+  }
 }
 
 /**
@@ -808,7 +845,7 @@ async function handleFill(command: FillCommand, browser: BrowserManager): Promis
 async function handleCheck(command: CheckCommand, browser: BrowserManager): Promise<Response> {
   const locator = browser.getLocator(command.selector);
   try {
-    await locator.check();
+    await safeCheckAction(locator, 'check');
   } catch (error) {
     throw toAIFriendlyError(error, command.selector);
   }
@@ -818,7 +855,7 @@ async function handleCheck(command: CheckCommand, browser: BrowserManager): Prom
 async function handleUncheck(command: UncheckCommand, browser: BrowserManager): Promise<Response> {
   const locator = browser.getLocator(command.selector);
   try {
-    await locator.uncheck();
+    await safeCheckAction(locator, 'uncheck');
   } catch (error) {
     throw toAIFriendlyError(error, command.selector);
   }
@@ -897,7 +934,7 @@ async function handleGetByRole(
       await locator.fill(command.value ?? '');
       return successResponse(command.id, { filled: true });
     case 'check':
-      await locator.check();
+      await safeCheckAction(locator, 'check');
       return successResponse(command.id, { checked: true });
     case 'hover':
       await locator.hover();
@@ -937,7 +974,7 @@ async function handleGetByLabel(
       await locator.fill(command.value ?? '');
       return successResponse(command.id, { filled: true });
     case 'check':
-      await locator.check();
+      await safeCheckAction(locator, 'check');
       return successResponse(command.id, { checked: true });
   }
 }
@@ -1704,7 +1741,7 @@ async function handleGetByTestId(
       await locator.fill(command.value ?? '');
       return successResponse(command.id, { filled: true });
     case 'check':
-      await locator.check();
+      await safeCheckAction(locator, 'check');
       return successResponse(command.id, { checked: true });
     case 'hover':
       await locator.hover();
@@ -1725,7 +1762,7 @@ async function handleNth(command: NthCommand, browser: BrowserManager): Promise<
       await locator.fill(command.value ?? '');
       return successResponse(command.id, { filled: true });
     case 'check':
-      await locator.check();
+      await safeCheckAction(locator, 'check');
       return successResponse(command.id, { checked: true });
     case 'hover':
       await locator.hover();
