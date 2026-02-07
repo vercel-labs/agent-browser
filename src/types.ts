@@ -108,6 +108,7 @@ export interface GetByRoleCommand extends BaseCommand {
   action: 'getbyrole';
   role: string;
   name?: string;
+  index?: number; // 0 = first, -1 = last, or nth index
   subaction: 'click' | 'fill' | 'check' | 'hover';
   value?: string;
 }
@@ -116,12 +117,15 @@ export interface GetByTextCommand extends BaseCommand {
   action: 'getbytext';
   text: string;
   exact?: boolean;
-  subaction: 'click' | 'hover';
+  index?: number; // 0 = first, -1 = last, or nth index
+  subaction: 'click' | 'hover' | 'fill';
+  value?: string;
 }
 
 export interface GetByLabelCommand extends BaseCommand {
   action: 'getbylabel';
   label: string;
+  index?: number; // 0 = first, -1 = last, or nth index
   subaction: 'click' | 'fill' | 'check';
   value?: string;
 }
@@ -129,6 +133,7 @@ export interface GetByLabelCommand extends BaseCommand {
 export interface GetByPlaceholderCommand extends BaseCommand {
   action: 'getbyplaceholder';
   placeholder: string;
+  index?: number; // 0 = first, -1 = last, or nth index
   subaction: 'click' | 'fill';
   value?: string;
 }
@@ -335,6 +340,7 @@ export interface GetByAltTextCommand extends BaseCommand {
   action: 'getbyalttext';
   text: string;
   exact?: boolean;
+  index?: number; // 0 = first, -1 = last, or nth index
   subaction: 'click' | 'hover';
 }
 
@@ -342,12 +348,14 @@ export interface GetByTitleCommand extends BaseCommand {
   action: 'getbytitle';
   text: string;
   exact?: boolean;
+  index?: number; // 0 = first, -1 = last, or nth index
   subaction: 'click' | 'hover';
 }
 
 export interface GetByTestIdCommand extends BaseCommand {
   action: 'getbytestid';
   testId: string;
+  index?: number; // 0 = first, -1 = last, or nth index
   subaction: 'click' | 'fill' | 'check' | 'hover';
   value?: string;
 }

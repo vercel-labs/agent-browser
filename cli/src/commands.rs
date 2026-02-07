@@ -1029,21 +1029,48 @@ fn parse_find(rest: &[&str], id: &str) -> Result<Value, ParseError> {
             let value = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
                 context: format!("find {}", locator),
                 usage: match *locator {
-                    "role" => "find role <role> [action] [--name <name>] [--exact]",
-                    "text" => "find text <text> [action] [--exact]",
-                    "label" => "find label <label> [action] [text] [--exact]",
-                    "placeholder" => "find placeholder <text> [action] [text] [--exact]",
-                    "alt" => "find alt <text> [action] [--exact]",
-                    "title" => "find title <text> [action] [--exact]",
-                    "testid" => "find testid <id> [action] [text]",
+                    "role" => "find role <role> [first|last|nth <n>] [action] [--name <name>] [--exact]",
+                    "text" => "find text <text> [first|last|nth <n>] [action] [--exact]",
+                    "label" => "find label <label> [first|last|nth <n>] [action] [text] [--exact]",
+                    "placeholder" => "find placeholder <text> [first|last|nth <n>] [action] [text] [--exact]",
+                    "alt" => "find alt <text> [first|last|nth <n>] [action] [--exact]",
+                    "title" => "find title <text> [first|last|nth <n>] [action] [--exact]",
+                    "testid" => "find testid <id> [first|last|nth <n>] [action] [text]",
                     "first" => "find first <selector> [action] [text]",
                     "last" => "find last <selector> [action] [text]",
                     _ => "find <locator> <value> [action] [text]",
                 },
             })?;
-            let subaction = rest.get(2).unwrap_or(&"click");
-            let fill_value = if rest.len() > 3 {
-                Some(rest[3..].join(" "))
+
+            // Check if next token after value is a modifier (first/last/nth)
+            // For semantic locators (role, text, label, etc.), first/last/nth can be
+            // used as modifiers: e.g. `find role spinbutton first fill '20'`
+            let modifier_token = rest.get(2).map(|s| *s);
+            let (index, args_offset) = match (*locator, modifier_token) {
+                // When locator is already first/last, don't look for modifier
+                ("first", _) | ("last", _) => (None, 0),
+                // first/last/nth as modifier after a semantic locator
+                (_, Some("first")) => (Some(0i32), 1),
+                (_, Some("last")) => (Some(-1i32), 1),
+                (_, Some("nth")) => {
+                    let nth_val = rest.get(3).ok_or_else(|| ParseError::MissingArguments {
+                        context: format!("find {} {} nth", locator, value),
+                        usage: "find <locator> <value> nth <index> [action] [text]",
+                    })?;
+                    let idx = nth_val.parse::<i32>().map_err(|_| ParseError::MissingArguments {
+                        context: format!("find {} {} nth", locator, value),
+                        usage: "find <locator> <value> nth <index> [action] [text]",
+                    })?;
+                    (Some(idx), 2)
+                }
+                _ => (None, 0),
+            };
+
+            let subaction_pos = 2 + args_offset;
+            let subaction = rest.get(subaction_pos).unwrap_or(&"click");
+            let fill_start = subaction_pos + 1;
+            let fill_value = if rest.len() > fill_start {
+                Some(rest[fill_start..].join(" "))
             } else {
                 None
             };
@@ -1054,15 +1081,28 @@ fn parse_find(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                     if let Some(v) = fill_value {
                         cmd["value"] = json!(v);
                     }
+                    if let Some(idx) = index {
+                        cmd["index"] = json!(idx);
+                    }
                     Ok(cmd)
                 }
-                "text" => Ok(
-                    json!({ "id": id, "action": "getbytext", "text": value, "subaction": subaction, "exact": exact }),
-                ),
+                "text" => {
+                    let mut cmd = json!({ "id": id, "action": "getbytext", "text": value, "subaction": subaction, "exact": exact });
+                    if let Some(v) = fill_value {
+                        cmd["value"] = json!(v);
+                    }
+                    if let Some(idx) = index {
+                        cmd["index"] = json!(idx);
+                    }
+                    Ok(cmd)
+                }
                 "label" => {
                     let mut cmd = json!({ "id": id, "action": "getbylabel", "label": value, "subaction": subaction, "exact": exact });
                     if let Some(v) = fill_value {
                         cmd["value"] = json!(v);
+                    }
+                    if let Some(idx) = index {
+                        cmd["index"] = json!(idx);
                     }
                     Ok(cmd)
                 }
@@ -1071,18 +1111,38 @@ fn parse_find(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                     if let Some(v) = fill_value {
                         cmd["value"] = json!(v);
                     }
+                    if let Some(idx) = index {
+                        cmd["index"] = json!(idx);
+                    }
                     Ok(cmd)
                 }
-                "alt" => Ok(
-                    json!({ "id": id, "action": "getbyalttext", "text": value, "subaction": subaction, "exact": exact }),
-                ),
-                "title" => Ok(
-                    json!({ "id": id, "action": "getbytitle", "text": value, "subaction": subaction, "exact": exact }),
-                ),
+                "alt" => {
+                    let mut cmd = json!({ "id": id, "action": "getbyalttext", "text": value, "subaction": subaction, "exact": exact });
+                    if let Some(v) = fill_value {
+                        cmd["value"] = json!(v);
+                    }
+                    if let Some(idx) = index {
+                        cmd["index"] = json!(idx);
+                    }
+                    Ok(cmd)
+                }
+                "title" => {
+                    let mut cmd = json!({ "id": id, "action": "getbytitle", "text": value, "subaction": subaction, "exact": exact });
+                    if let Some(v) = fill_value {
+                        cmd["value"] = json!(v);
+                    }
+                    if let Some(idx) = index {
+                        cmd["index"] = json!(idx);
+                    }
+                    Ok(cmd)
+                }
                 "testid" => {
                     let mut cmd = json!({ "id": id, "action": "getbytestid", "testId": value, "subaction": subaction });
                     if let Some(v) = fill_value {
                         cmd["value"] = json!(v);
+                    }
+                    if let Some(idx) = index {
+                        cmd["index"] = json!(idx);
                     }
                     Ok(cmd)
                 }
@@ -2283,6 +2343,130 @@ mod tests {
         assert_eq!(cmd["action"], "nth");
         assert_eq!(cmd["index"], 2);
         assert!(cmd.get("value").is_none());
+    }
+
+    // === find first/last as modifier tests (issue #364) ===
+
+    #[test]
+    fn test_find_role_first_modifier_click() {
+        let cmd =
+            parse_command(&args("find role spinbutton first click"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "getbyrole");
+        assert_eq!(cmd["role"], "spinbutton");
+        assert_eq!(cmd["index"], 0);
+        assert_eq!(cmd["subaction"], "click");
+        assert!(cmd.get("value").is_none());
+    }
+
+    #[test]
+    fn test_find_role_first_modifier_fill() {
+        let cmd =
+            parse_command(&args("find role spinbutton first fill 20"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "getbyrole");
+        assert_eq!(cmd["role"], "spinbutton");
+        assert_eq!(cmd["index"], 0);
+        assert_eq!(cmd["subaction"], "fill");
+        assert_eq!(cmd["value"], "20");
+    }
+
+    #[test]
+    fn test_find_role_last_modifier() {
+        let cmd =
+            parse_command(&args("find role textbox last fill hello"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "getbyrole");
+        assert_eq!(cmd["role"], "textbox");
+        assert_eq!(cmd["index"], -1);
+        assert_eq!(cmd["subaction"], "fill");
+        assert_eq!(cmd["value"], "hello");
+    }
+
+    #[test]
+    fn test_find_text_first_modifier() {
+        let cmd =
+            parse_command(&args("find text Submit first click"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "getbytext");
+        assert_eq!(cmd["text"], "Submit");
+        assert_eq!(cmd["index"], 0);
+        assert_eq!(cmd["subaction"], "click");
+    }
+
+    #[test]
+    fn test_find_label_last_modifier() {
+        let cmd =
+            parse_command(&args("find label Email last fill test@test.com"), &default_flags())
+                .unwrap();
+        assert_eq!(cmd["action"], "getbylabel");
+        assert_eq!(cmd["label"], "Email");
+        assert_eq!(cmd["index"], -1);
+        assert_eq!(cmd["subaction"], "fill");
+        assert_eq!(cmd["value"], "test@test.com");
+    }
+
+    #[test]
+    fn test_find_role_nth_modifier() {
+        let cmd =
+            parse_command(&args("find role listitem nth 3 click"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "getbyrole");
+        assert_eq!(cmd["role"], "listitem");
+        assert_eq!(cmd["index"], 3);
+        assert_eq!(cmd["subaction"], "click");
+    }
+
+    #[test]
+    fn test_find_role_without_modifier_no_index() {
+        // Backward compat: find role spinbutton click (no modifier) should NOT have index
+        let cmd =
+            parse_command(&args("find role spinbutton click"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "getbyrole");
+        assert_eq!(cmd["role"], "spinbutton");
+        assert_eq!(cmd["subaction"], "click");
+        assert!(cmd.get("index").is_none());
+    }
+
+    #[test]
+    fn test_find_first_standalone_still_works() {
+        // Backward compat: find first <selector> still works as before
+        let cmd = parse_command(&args("find first .item click"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "nth");
+        assert_eq!(cmd["selector"], ".item");
+        assert_eq!(cmd["index"], 0);
+        assert_eq!(cmd["subaction"], "click");
+    }
+
+    #[test]
+    fn test_find_last_standalone_still_works() {
+        let cmd = parse_command(&args("find last .item click"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "nth");
+        assert_eq!(cmd["selector"], ".item");
+        assert_eq!(cmd["index"], -1);
+        assert_eq!(cmd["subaction"], "click");
+    }
+
+    #[test]
+    fn test_find_placeholder_first_modifier() {
+        let cmd = parse_command(
+            &args("find placeholder Search first fill query"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "getbyplaceholder");
+        assert_eq!(cmd["placeholder"], "Search");
+        assert_eq!(cmd["index"], 0);
+        assert_eq!(cmd["subaction"], "fill");
+        assert_eq!(cmd["value"], "query");
+    }
+
+    #[test]
+    fn test_find_testid_last_modifier() {
+        let cmd = parse_command(
+            &args("find testid submit-btn last click"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "getbytestid");
+        assert_eq!(cmd["testId"], "submit-btn");
+        assert_eq!(cmd["index"], -1);
+        assert_eq!(cmd["subaction"], "click");
     }
 
     // === Download Tests ===

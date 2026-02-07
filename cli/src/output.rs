@@ -1043,7 +1043,7 @@ Examples:
             r##"
 agent-browser find - Find and interact with elements by locator
 
-Usage: agent-browser find <locator> <value> [action] [text]
+Usage: agent-browser find <locator> <value> [first|last|nth <n>] [action] [text]
 
 Finds elements using semantic locators and optionally performs an action.
 
@@ -1058,6 +1058,11 @@ Locators:
   first <selector>         First matching element
   last <selector>          Last matching element
   nth <index> <selector>   Nth matching element (0-based)
+
+Modifiers (chain after any locator to narrow results):
+  first                    Select the first match
+  last                     Select the last match
+  nth <index>              Select the nth match (0-based)
 
 Actions (default: click):
   click, fill, type, hover, focus, check, uncheck
@@ -1078,6 +1083,9 @@ Examples:
   agent-browser find testid "login-form" click
   agent-browser find first "li.item" click
   agent-browser find nth 2 ".card" hover
+  agent-browser find role spinbutton first fill "20"
+  agent-browser find text "Submit" last click
+  agent-browser find label "Email" nth 2 fill "user@example.com"
 "##
         }
 
