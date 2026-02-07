@@ -887,7 +887,10 @@ async function handleGetByRole(
   browser: BrowserManager
 ): Promise<Response> {
   const page = browser.getPage();
-  const locator = page.getByRole(command.role as any, { name: command.name });
+  let locator = page.getByRole(command.role as any, { name: command.name });
+  if (command.index !== undefined) {
+    locator = command.index === -1 ? locator.last() : locator.nth(command.index);
+  }
 
   switch (command.subaction) {
     case 'click':
@@ -910,12 +913,18 @@ async function handleGetByText(
   browser: BrowserManager
 ): Promise<Response> {
   const page = browser.getPage();
-  const locator = page.getByText(command.text, { exact: command.exact });
+  let locator = page.getByText(command.text, { exact: command.exact });
+  if (command.index !== undefined) {
+    locator = command.index === -1 ? locator.last() : locator.nth(command.index);
+  }
 
   switch (command.subaction) {
     case 'click':
       await locator.click();
       return successResponse(command.id, { clicked: true });
+    case 'fill':
+      await locator.fill(command.value ?? '');
+      return successResponse(command.id, { filled: true });
     case 'hover':
       await locator.hover();
       return successResponse(command.id, { hovered: true });
@@ -927,7 +936,10 @@ async function handleGetByLabel(
   browser: BrowserManager
 ): Promise<Response> {
   const page = browser.getPage();
-  const locator = page.getByLabel(command.label);
+  let locator = page.getByLabel(command.label);
+  if (command.index !== undefined) {
+    locator = command.index === -1 ? locator.last() : locator.nth(command.index);
+  }
 
   switch (command.subaction) {
     case 'click':
@@ -947,7 +959,10 @@ async function handleGetByPlaceholder(
   browser: BrowserManager
 ): Promise<Response> {
   const page = browser.getPage();
-  const locator = page.getByPlaceholder(command.placeholder);
+  let locator = page.getByPlaceholder(command.placeholder);
+  if (command.index !== undefined) {
+    locator = command.index === -1 ? locator.last() : locator.nth(command.index);
+  }
 
   switch (command.subaction) {
     case 'click':
@@ -1660,7 +1675,10 @@ async function handleGetByAltText(
   browser: BrowserManager
 ): Promise<Response> {
   const page = browser.getPage();
-  const locator = page.getByAltText(command.text, { exact: command.exact });
+  let locator = page.getByAltText(command.text, { exact: command.exact });
+  if (command.index !== undefined) {
+    locator = command.index === -1 ? locator.last() : locator.nth(command.index);
+  }
 
   switch (command.subaction) {
     case 'click':
@@ -1677,7 +1695,10 @@ async function handleGetByTitle(
   browser: BrowserManager
 ): Promise<Response> {
   const page = browser.getPage();
-  const locator = page.getByTitle(command.text, { exact: command.exact });
+  let locator = page.getByTitle(command.text, { exact: command.exact });
+  if (command.index !== undefined) {
+    locator = command.index === -1 ? locator.last() : locator.nth(command.index);
+  }
 
   switch (command.subaction) {
     case 'click':
@@ -1694,7 +1715,10 @@ async function handleGetByTestId(
   browser: BrowserManager
 ): Promise<Response> {
   const page = browser.getPage();
-  const locator = page.getByTestId(command.testId);
+  let locator = page.getByTestId(command.testId);
+  if (command.index !== undefined) {
+    locator = command.index === -1 ? locator.last() : locator.nth(command.index);
+  }
 
   switch (command.subaction) {
     case 'click':
