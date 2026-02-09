@@ -1117,7 +1117,7 @@ export class BrowserManager {
     }
 
     if (cdpEndpoint) {
-      await this.connectViaCDP(cdpEndpoint);
+      await this.connectViaCDP(cdpEndpoint, options.headers);
       return;
     }
 
@@ -1309,8 +1309,9 @@ export class BrowserManager {
   /**
    * Connect to a running browser via CDP (Chrome DevTools Protocol)
    * @param cdpEndpoint Either a port number (as string) or a full WebSocket URL (ws:// or wss://)
+   * @param headers Optional headers for WebSocket connection (e.g., for AWS SigV4 authentication)
    */
-  private async connectViaCDP(cdpEndpoint: string | undefined): Promise<void> {
+  private async connectViaCDP(cdpEndpoint: string | undefined, headers?: Record<string, string>): Promise<void> {
     if (!cdpEndpoint) {
       throw new Error('CDP endpoint is required for CDP connection');
     }
@@ -1335,7 +1336,7 @@ export class BrowserManager {
       cdpUrl = `http://localhost:${cdpEndpoint}`;
     }
 
-    const browser = await chromium.connectOverCDP(cdpUrl).catch(() => {
+    const browser = await chromium.connectOverCDP(cdpUrl, { headers }).catch(() => {
       throw new Error(
         `Failed to connect via CDP to ${cdpUrl}. ` +
           (cdpUrl.includes('localhost')
