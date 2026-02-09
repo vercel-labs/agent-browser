@@ -489,15 +489,15 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
         "connect" => {
             let endpoint = rest.first().ok_or_else(|| ParseError::MissingArguments {
                 context: "connect".to_string(),
-                usage: "connect <port|url>",
+                usage: "connect <port|url> [--headers <json>]",
             })?;
             // Check if it's a URL (ws://, wss://, http://, https://)
-            if endpoint.starts_with("ws://")
+            let mut cmd = if endpoint.starts_with("ws://")
                 || endpoint.starts_with("wss://")
                 || endpoint.starts_with("http://")
                 || endpoint.starts_with("https://")
             {
-                Ok(json!({ "id": id, "action": "launch", "cdpUrl": endpoint }))
+                json!({ "id": id, "action": "launch", "cdpUrl": endpoint })
             } else {
                 // It's a port number - validate and use cdpPort field
                 let port: u16 = match endpoint.parse::<u32>() {
@@ -527,8 +527,15 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                         });
                     }
                 };
-                Ok(json!({ "id": id, "action": "launch", "cdpPort": port }))
+                json!({ "id": id, "action": "launch", "cdpPort": port })
+            };
+            // Add headers for CDP connection (e.g., AWS SigV4 authentication)
+            if let Some(ref headers_json) = flags.headers {
+                if let Ok(headers) = serde_json::from_str::<serde_json::Value>(headers_json) {
+                    cmd["headers"] = headers;
+                }
             }
+            Ok(cmd)
         }
 
         // === Get ===

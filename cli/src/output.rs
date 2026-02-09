@@ -1720,7 +1720,7 @@ Examples:
             r##"
 agent-browser connect - Connect to browser via CDP
 
-Usage: agent-browser connect <port|url>
+Usage: agent-browser connect <port|url> [--headers <json>]
 
 Connects to a running browser instance via Chrome DevTools Protocol (CDP).
 This allows controlling browsers, Electron apps, or remote browser services.
@@ -1728,6 +1728,10 @@ This allows controlling browsers, Electron apps, or remote browser services.
 Arguments:
   <port>               Local port number (e.g., 9222)
   <url>                Full WebSocket URL (ws://, wss://, http://, https://)
+
+Options:
+  --headers <json>     Custom headers for WebSocket connection (JSON format)
+                       Useful for authenticated services like AWS AgentCore Browser
 
 Supported URL formats:
   - Port number: 9222 (connects to http://localhost:9222)
@@ -1748,6 +1752,9 @@ Examples:
 
   # Connect to remote browser service
   agent-browser connect "wss://browser-service.example.com/cdp?token=xyz"
+
+  # Connect with custom headers (e.g., AWS SigV4 authentication)
+  agent-browser connect "wss://..." --headers '{"Authorization":"AWS4-HMAC-SHA256..."}'
 
   # After connecting, run commands normally
   agent-browser snapshot

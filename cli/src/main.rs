@@ -440,6 +440,13 @@ fn main() {
             launch_cmd["ignoreHTTPSErrors"] = json!(true);
         }
 
+        // Add headers for CDP connection (e.g., AWS SigV4 authentication)
+        if let Some(ref headers_json) = flags.headers {
+            if let Ok(headers) = serde_json::from_str::<serde_json::Value>(headers_json) {
+                launch_cmd["headers"] = headers;
+            }
+        }
+
         let err = match send_command(launch_cmd, &flags.session) {
             Ok(resp) if resp.success => None,
             Ok(resp) => Some(
