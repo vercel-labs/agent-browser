@@ -1115,4 +1115,90 @@ describe('BrowserManager', () => {
       ).resolves.not.toThrow();
     });
   });
+
+  describe('AgentCore provider', () => {
+    it('should require AWS credentials', async () => {
+      const testBrowser = new BrowserManager();
+      // With invalid credentials, it should fail during signing
+      const origEnv = process.env.AWS_ACCESS_KEY_ID;
+      process.env.AWS_ACCESS_KEY_ID = '';
+      process.env.AWS_SECRET_ACCESS_KEY = '';
+      process.env.AWS_PROFILE = 'nonexistent-profile-xyz';
+
+      await expect(
+        testBrowser.launch({ provider: 'agentcore', headless: true })
+      ).rejects.toThrow();
+
+      // Restore
+      if (origEnv !== undefined) process.env.AWS_ACCESS_KEY_ID = origEnv;
+      else delete process.env.AWS_ACCESS_KEY_ID;
+      delete process.env.AWS_SECRET_ACCESS_KEY;
+      delete process.env.AWS_PROFILE;
+      await testBrowser.close().catch(() => {});
+    });
+
+    it('should use AGENTCORE_REGION env var', async () => {
+      const testBrowser = new BrowserManager();
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+        new Response(JSON.stringify({ browserIdentifier: 'aws.browser.v1', sessionId: 'test-123' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+      );
+
+      process.env.AGENTCORE_REGION = 'eu-west-1';
+
+      // Will fail at CDP connect, but we can verify the fetch URL
+      await testBrowser.launch({ provider: 'agentcore', headless: true }).catch(() => {});
+
+      expect(fetchSpy).toHaveBeenCalled();
+      const fetchUrl = fetchSpy.mock.calls[0][0] as string;
+      expect(fetchUrl).toContain('bedrock-agentcore.eu-west-1.amazonaws.com');
+
+      fetchSpy.mockRestore();
+      delete process.env.AGENTCORE_REGION;
+      await testBrowser.close().catch(() => {});
+    });
+
+    it('should call correct start session API path', async () => {
+      const testBrowser = new BrowserManager();
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+        new Response(JSON.stringify({ browserIdentifier: 'aws.browser.v1', sessionId: 'test-456' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+      );
+
+      process.env.AGENTCORE_REGION = 'us-east-1';
+
+      await testBrowser.launch({ provider: 'agentcore', headless: true }).catch(() => {});
+
+      expect(fetchSpy).toHaveBeenCalled();
+      const fetchUrl = fetchSpy.mock.calls[0][0] as string;
+      expect(fetchUrl).toContain('/browsers/aws.browser.v1/sessions/start');
+
+      const fetchOptions = fetchSpy.mock.calls[0][1] as RequestInit;
+      expect(fetchOptions.method).toBe('PUT');
+
+      fetchSpy.mockRestore();
+      delete process.env.AGENTCORE_REGION;
+      await testBrowser.close().catch(() => {});
+    });
+
+    it('should throw on failed session start', async () => {
+      const testBrowser = new BrowserManager();
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+        new Response('Forbidden', { status: 403, statusText: 'Forbidden' })
+      );
+
+      process.env.AGENTCORE_REGION = 'us-east-1';
+
+      await expect(
+        testBrowser.launch({ provider: 'agentcore', headless: true })
+      ).rejects.toThrow('Failed to start AgentCore browser session');
+
+      fetchSpy.mockRestore();
+      delete process.env.AGENTCORE_REGION;
+    });
+  });
 });
