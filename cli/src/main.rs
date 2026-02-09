@@ -314,7 +314,7 @@ fn main() {
         } else {
             // It's a port number - validate and use cdpPort field
             let cdp_port: u16 = match cdp_value.parse::<u32>() {
-                Ok(p) if p == 0 => {
+                Ok(0) => {
                     let msg = "Invalid CDP port: port must be greater than 0".to_string();
                     if flags.json {
                         println!(r#"{{"success":false,"error":"{}"}}"#, msg);
