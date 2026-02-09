@@ -655,7 +655,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
         }
 
         // === Tabs ===
-        "tab" => match rest.first().map(|s| *s) {
+        "tab" => match rest.first().copied() {
             Some("new") => {
                 let mut cmd = json!({ "id": id, "action": "tab_new" });
                 if let Some(url) = rest.get(1) {
@@ -680,7 +680,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
         // === Window ===
         "window" => {
             const VALID: &[&str] = &["new"];
-            match rest.first().map(|s| *s) {
+            match rest.first().copied() {
                 Some("new") => Ok(json!({ "id": id, "action": "window_new" })),
                 Some(sub) => Err(ParseError::UnknownSubcommand {
                     subcommand: sub.to_string(),
@@ -695,7 +695,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
 
         // === Frame ===
         "frame" => {
-            if rest.first().map(|s| *s) == Some("main") {
+            if rest.first().copied() == Some("main") {
                 Ok(json!({ "id": id, "action": "mainframe" }))
             } else {
                 let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
@@ -709,7 +709,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
         // === Dialog ===
         "dialog" => {
             const VALID: &[&str] = &["accept", "dismiss"];
-            match rest.first().map(|s| *s) {
+            match rest.first().copied() {
                 Some("accept") => {
                     let mut cmd = json!({ "id": id, "action": "dialog", "response": "accept" });
                     if let Some(prompt_text) = rest.get(1) {
@@ -731,7 +731,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
         // === Debug ===
         "trace" => {
             const VALID: &[&str] = &["start", "stop"];
-            match rest.first().map(|s| *s) {
+            match rest.first().copied() {
                 Some("start") => Ok(json!({ "id": id, "action": "trace_start" })),
                 Some("stop") => {
                     let path = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
@@ -754,7 +754,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
         // === Recording (Playwright native video recording) ===
         "record" => {
             const VALID: &[&str] = &["start", "stop", "restart"];
-            match rest.first().map(|s| *s) {
+            match rest.first().copied() {
                 Some("start") => {
                     let path = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
                         context: "record start".to_string(),
@@ -823,7 +823,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
         // === State ===
         "state" => {
             const VALID: &[&str] = &["save", "load"];
-            match rest.first().map(|s| *s) {
+            match rest.first().copied() {
                 Some("save") => {
                     let path = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
                         context: "state save".to_string(),
@@ -881,7 +881,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
             Ok(cmd)
         }
         "device" => {
-            match rest.first().map(|s| *s) {
+            match rest.first().copied() {
                 Some("list") | None => {
                     // List available iOS simulators
                     Ok(json!({ "id": id, "action": "device_list" }))
@@ -904,7 +904,7 @@ fn parse_get(rest: &[&str], id: &str) -> Result<Value, ParseError> {
         "text", "html", "value", "attr", "url", "title", "count", "box", "styles",
     ];
 
-    match rest.first().map(|s| *s) {
+    match rest.first().copied() {
         Some("text") => {
             let sel = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
                 context: "get text".to_string(),
@@ -974,7 +974,7 @@ fn parse_get(rest: &[&str], id: &str) -> Result<Value, ParseError> {
 fn parse_is(rest: &[&str], id: &str) -> Result<Value, ParseError> {
     const VALID: &[&str] = &["visible", "enabled", "checked"];
 
-    match rest.first().map(|s| *s) {
+    match rest.first().copied() {
         Some("visible") => {
             let sel = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
                 context: "is visible".to_string(),
@@ -1027,7 +1027,7 @@ fn parse_find(rest: &[&str], id: &str) -> Result<Value, ParseError> {
     })?;
 
     let name_idx = rest.iter().position(|&s| s == "--name");
-    let name = name_idx.and_then(|i| rest.get(i + 1).map(|s| *s));
+    let name = name_idx.and_then(|i| rest.get(i + 1).copied());
     let exact = rest.iter().any(|&s| s == "--exact");
 
     match *locator {
@@ -1147,7 +1147,7 @@ fn parse_find(rest: &[&str], id: &str) -> Result<Value, ParseError> {
 fn parse_mouse(rest: &[&str], id: &str) -> Result<Value, ParseError> {
     const VALID: &[&str] = &["move", "down", "up", "wheel"];
 
-    match rest.first().map(|s| *s) {
+    match rest.first().copied() {
         Some("move") => {
             let x_str = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
                 context: "mouse move".to_string(),
@@ -1209,7 +1209,7 @@ fn parse_set(rest: &[&str], id: &str) -> Result<Value, ParseError> {
         "media",
     ];
 
-    match rest.first().map(|s| *s) {
+    match rest.first().copied() {
         Some("viewport") => {
             let w_str = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
                 context: "set viewport".to_string(),
@@ -1325,7 +1325,7 @@ fn parse_set(rest: &[&str], id: &str) -> Result<Value, ParseError> {
 fn parse_network(rest: &[&str], id: &str) -> Result<Value, ParseError> {
     const VALID: &[&str] = &["route", "unroute", "requests"];
 
-    match rest.first().map(|s| *s) {
+    match rest.first().copied() {
         Some("route") => {
             let url = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
                 context: "network route".to_string(),
@@ -1333,7 +1333,7 @@ fn parse_network(rest: &[&str], id: &str) -> Result<Value, ParseError> {
             })?;
             let abort = rest.iter().any(|&s| s == "--abort");
             let body_idx = rest.iter().position(|&s| s == "--body");
-            let body = body_idx.and_then(|i| rest.get(i + 1).map(|s| *s));
+            let body = body_idx.and_then(|i| rest.get(i + 1).copied());
             Ok(json!({ "id": id, "action": "route", "url": url, "abort": abort, "body": body }))
         }
         Some("unroute") => {
@@ -1346,7 +1346,7 @@ fn parse_network(rest: &[&str], id: &str) -> Result<Value, ParseError> {
         Some("requests") => {
             let clear = rest.iter().any(|&s| s == "--clear");
             let filter_idx = rest.iter().position(|&s| s == "--filter");
-            let filter = filter_idx.and_then(|i| rest.get(i + 1).map(|s| *s));
+            let filter = filter_idx.and_then(|i| rest.get(i + 1).copied());
             let mut cmd = json!({ "id": id, "action": "requests", "clear": clear });
             if let Some(f) = filter {
                 cmd["filter"] = json!(f);
@@ -1367,7 +1367,7 @@ fn parse_network(rest: &[&str], id: &str) -> Result<Value, ParseError> {
 fn parse_storage(rest: &[&str], id: &str) -> Result<Value, ParseError> {
     const VALID: &[&str] = &["local", "session"];
 
-    match rest.first().map(|s| *s) {
+    match rest.first().copied() {
         Some("local") | Some("session") => {
             let storage_type = rest.first().unwrap();
             let op = rest.get(1).unwrap_or(&"get");
