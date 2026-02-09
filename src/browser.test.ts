@@ -751,6 +751,53 @@ describe('BrowserManager', () => {
       expect(urls).toContain('http://example.com');
       spy.mockRestore();
     });
+
+    it('should pass headers to connectOverCDP when provided', async () => {
+      const mockBrowser = {
+        contexts: () => [
+          {
+            pages: () => [{ url: () => 'http://example.com', on: vi.fn() }],
+            on: vi.fn(),
+            setDefaultTimeout: vi.fn(),
+          },
+        ],
+        close: vi.fn(),
+      };
+      const spy = vi.spyOn(chromium, 'connectOverCDP').mockResolvedValue(mockBrowser as any);
+
+      const cdpBrowser = new BrowserManager();
+      const testHeaders = {
+        Authorization: 'AWS4-HMAC-SHA256 Credential=...',
+        'X-Amz-Date': '20260209T000000Z',
+      };
+      await cdpBrowser.launch({
+        cdpUrl: 'wss://example.com/cdp',
+        headers: testHeaders,
+      });
+
+      expect(spy).toHaveBeenCalledWith('wss://example.com/cdp', { headers: testHeaders });
+      spy.mockRestore();
+    });
+
+    it('should pass undefined headers when not provided', async () => {
+      const mockBrowser = {
+        contexts: () => [
+          {
+            pages: () => [{ url: () => 'http://example.com', on: vi.fn() }],
+            on: vi.fn(),
+            setDefaultTimeout: vi.fn(),
+          },
+        ],
+        close: vi.fn(),
+      };
+      const spy = vi.spyOn(chromium, 'connectOverCDP').mockResolvedValue(mockBrowser as any);
+
+      const cdpBrowser = new BrowserManager();
+      await cdpBrowser.launch({ cdpPort: 9222 });
+
+      expect(spy).toHaveBeenCalledWith('http://localhost:9222', { headers: undefined });
+      spy.mockRestore();
+    });
   });
 
   describe('screencast', () => {
