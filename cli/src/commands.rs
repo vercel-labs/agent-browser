@@ -805,11 +805,11 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
             }
         }
         "console" => {
-            let clear = rest.iter().any(|&s| s == "--clear");
+            let clear = rest.contains(&"--clear");
             Ok(json!({ "id": id, "action": "console", "clear": clear }))
         }
         "errors" => {
-            let clear = rest.iter().any(|&s| s == "--clear");
+            let clear = rest.contains(&"--clear");
             Ok(json!({ "id": id, "action": "errors", "clear": clear }))
         }
         "highlight" => {
@@ -1028,7 +1028,7 @@ fn parse_find(rest: &[&str], id: &str) -> Result<Value, ParseError> {
 
     let name_idx = rest.iter().position(|&s| s == "--name");
     let name = name_idx.and_then(|i| rest.get(i + 1).copied());
-    let exact = rest.iter().any(|&s| s == "--exact");
+    let exact = rest.contains(&"--exact");
 
     match *locator {
         "role" | "text" | "label" | "placeholder" | "alt" | "title" | "testid" | "first"
@@ -1295,14 +1295,14 @@ fn parse_set(rest: &[&str], id: &str) -> Result<Value, ParseError> {
             Ok(json!({ "id": id, "action": "credentials", "username": user, "password": pass }))
         }
         Some("media") => {
-            let color = if rest.iter().any(|&s| s == "dark") {
+            let color = if rest.contains(&"dark") {
                 "dark"
-            } else if rest.iter().any(|&s| s == "light") {
+            } else if rest.contains(&"light") {
                 "light"
             } else {
                 "no-preference"
             };
-            let reduced = if rest.iter().any(|&s| s == "reduced-motion") {
+            let reduced = if rest.contains(&"reduced-motion") {
                 "reduce"
             } else {
                 "no-preference"
@@ -1331,7 +1331,7 @@ fn parse_network(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                 context: "network route".to_string(),
                 usage: "network route <url> [--abort|--body <json>]",
             })?;
-            let abort = rest.iter().any(|&s| s == "--abort");
+            let abort = rest.contains(&"--abort");
             let body_idx = rest.iter().position(|&s| s == "--body");
             let body = body_idx.and_then(|i| rest.get(i + 1).copied());
             Ok(json!({ "id": id, "action": "route", "url": url, "abort": abort, "body": body }))
@@ -1344,7 +1344,7 @@ fn parse_network(rest: &[&str], id: &str) -> Result<Value, ParseError> {
             Ok(cmd)
         }
         Some("requests") => {
-            let clear = rest.iter().any(|&s| s == "--clear");
+            let clear = rest.contains(&"--clear");
             let filter_idx = rest.iter().position(|&s| s == "--filter");
             let filter = filter_idx.and_then(|i| rest.get(i + 1).copied());
             let mut cmd = json!({ "id": id, "action": "requests", "clear": clear });
