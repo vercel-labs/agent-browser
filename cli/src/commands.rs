@@ -488,7 +488,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
             } else {
                 // It's a port number - validate and use cdpPort field
                 let port: u16 = match endpoint.parse::<u32>() {
-                    Ok(p) if p == 0 => {
+                    Ok(0) => {
                         return Err(ParseError::InvalidValue {
                             message: "Invalid port: port must be greater than 0".to_string(),
                             usage: "connect <port|url>",
