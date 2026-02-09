@@ -10,9 +10,6 @@ use std::env;
 use std::fs;
 use std::process::exit;
 
-#[cfg(unix)]
-use libc;
-
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::CloseHandle;
 #[cfg(windows)]
