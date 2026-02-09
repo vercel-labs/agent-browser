@@ -442,17 +442,22 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
             let script = if is_stdin {
                 // Read script from stdin
                 let stdin = io::stdin();
-                let lines: Vec<String> = stdin.lock().lines()
+                let lines: Vec<String> = stdin
+                    .lock()
+                    .lines()
                     .map(|l| l.unwrap_or_default())
                     .collect();
                 lines.join("\n")
             } else {
                 let raw_script = script_parts.join(" ");
                 if is_base64 {
-                    let decoded = STANDARD.decode(&raw_script).map_err(|_| ParseError::InvalidValue {
-                        message: "Invalid base64 encoding".to_string(),
-                        usage: "eval -b <base64-encoded-script>",
-                    })?;
+                    let decoded =
+                        STANDARD
+                            .decode(&raw_script)
+                            .map_err(|_| ParseError::InvalidValue {
+                                message: "Invalid base64 encoding".to_string(),
+                                usage: "eval -b <base64-encoded-script>",
+                            })?;
                     String::from_utf8(decoded).map_err(|_| ParseError::InvalidValue {
                         message: "Base64 decoded to invalid UTF-8".to_string(),
                         usage: "eval -b <base64-encoded-script>",
@@ -868,7 +873,9 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
             let mut cmd = json!({ "id": id, "action": "swipe", "direction": direction });
             if let Some(distance) = rest.get(1) {
                 if let Ok(d) = distance.parse::<u32>() {
-                    cmd.as_object_mut().unwrap().insert("distance".to_string(), json!(d));
+                    cmd.as_object_mut()
+                        .unwrap()
+                        .insert("distance".to_string(), json!(d));
                 }
             }
             Ok(cmd)
@@ -2158,8 +2165,11 @@ mod tests {
     #[test]
     fn test_eval_base64_long_flag() {
         // "document.title" in base64
-        let cmd =
-            parse_command(&args("eval --base64 ZG9jdW1lbnQudGl0bGU="), &default_flags()).unwrap();
+        let cmd = parse_command(
+            &args("eval --base64 ZG9jdW1lbnQudGl0bGU="),
+            &default_flags(),
+        )
+        .unwrap();
         assert_eq!(cmd["action"], "evaluate");
         assert_eq!(cmd["script"], "document.title");
     }

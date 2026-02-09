@@ -247,11 +247,7 @@ fn main() {
             } else {
                 None
             },
-            if flags.cli_args {
-                Some("--args")
-            } else {
-                None
-            },
+            if flags.cli_args { Some("--args") } else { None },
             if flags.cli_user_agent {
                 Some("--user-agent")
             } else {

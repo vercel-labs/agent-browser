@@ -88,17 +88,28 @@ pub fn print_response(resp: &Response, json_mode: bool, action: Option<&str>) {
             // Separate real devices from simulators
             let real_devices: Vec<_> = devices
                 .iter()
-                .filter(|d| d.get("isRealDevice").and_then(|v| v.as_bool()).unwrap_or(false))
+                .filter(|d| {
+                    d.get("isRealDevice")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false)
+                })
                 .collect();
             let simulators: Vec<_> = devices
                 .iter()
-                .filter(|d| !d.get("isRealDevice").and_then(|v| v.as_bool()).unwrap_or(false))
+                .filter(|d| {
+                    !d.get("isRealDevice")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false)
+                })
                 .collect();
 
             if !real_devices.is_empty() {
                 println!("Connected Devices:\n");
                 for device in real_devices.iter() {
-                    let name = device.get("name").and_then(|v| v.as_str()).unwrap_or("Unknown");
+                    let name = device
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("Unknown");
                     let runtime = device.get("runtime").and_then(|v| v.as_str()).unwrap_or("");
                     let udid = device.get("udid").and_then(|v| v.as_str()).unwrap_or("");
                     println!("  {} {} ({})", color::green("●"), name, runtime);
@@ -110,9 +121,15 @@ pub fn print_response(resp: &Response, json_mode: bool, action: Option<&str>) {
             if !simulators.is_empty() {
                 println!("Simulators:\n");
                 for device in simulators.iter() {
-                    let name = device.get("name").and_then(|v| v.as_str()).unwrap_or("Unknown");
+                    let name = device
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("Unknown");
                     let runtime = device.get("runtime").and_then(|v| v.as_str()).unwrap_or("");
-                    let state = device.get("state").and_then(|v| v.as_str()).unwrap_or("Unknown");
+                    let state = device
+                        .get("state")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("Unknown");
                     let udid = device.get("udid").and_then(|v| v.as_str()).unwrap_or("");
                     let state_indicator = if state == "Booted" {
                         color::green("●")
