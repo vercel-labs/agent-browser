@@ -81,7 +81,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
     match cmd {
         // === Navigation ===
         "open" | "goto" | "navigate" => {
-            let url = rest.get(0).ok_or_else(|| ParseError::MissingArguments {
+            let url = rest.first().ok_or_else(|| ParseError::MissingArguments {
                 context: cmd.to_string(),
                 usage: "open <url>",
             })?;
@@ -117,63 +117,63 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
 
         // === Core Actions ===
         "click" => {
-            let sel = rest.get(0).ok_or_else(|| ParseError::MissingArguments {
+            let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
                 context: "click".to_string(),
                 usage: "click <selector>",
             })?;
             Ok(json!({ "id": id, "action": "click", "selector": sel }))
         }
         "dblclick" => {
-            let sel = rest.get(0).ok_or_else(|| ParseError::MissingArguments {
+            let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
                 context: "dblclick".to_string(),
                 usage: "dblclick <selector>",
             })?;
             Ok(json!({ "id": id, "action": "dblclick", "selector": sel }))
         }
         "fill" => {
-            let sel = rest.get(0).ok_or_else(|| ParseError::MissingArguments {
+            let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
                 context: "fill".to_string(),
                 usage: "fill <selector> <text>",
             })?;
             Ok(json!({ "id": id, "action": "fill", "selector": sel, "value": rest[1..].join(" ") }))
         }
         "type" => {
-            let sel = rest.get(0).ok_or_else(|| ParseError::MissingArguments {
+            let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
                 context: "type".to_string(),
                 usage: "type <selector> <text>",
             })?;
             Ok(json!({ "id": id, "action": "type", "selector": sel, "text": rest[1..].join(" ") }))
         }
         "hover" => {
-            let sel = rest.get(0).ok_or_else(|| ParseError::MissingArguments {
+            let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
                 context: "hover".to_string(),
                 usage: "hover <selector>",
             })?;
             Ok(json!({ "id": id, "action": "hover", "selector": sel }))
         }
         "focus" => {
-            let sel = rest.get(0).ok_or_else(|| ParseError::MissingArguments {
+            let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
                 context: "focus".to_string(),
                 usage: "focus <selector>",
             })?;
             Ok(json!({ "id": id, "action": "focus", "selector": sel }))
         }
         "check" => {
-            let sel = rest.get(0).ok_or_else(|| ParseError::MissingArguments {
+            let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
                 context: "check".to_string(),
                 usage: "check <selector>",
             })?;
             Ok(json!({ "id": id, "action": "check", "selector": sel }))
         }
         "uncheck" => {
-            let sel = rest.get(0).ok_or_else(|| ParseError::MissingArguments {
+            let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
                 context: "uncheck".to_string(),
                 usage: "uncheck <selector>",
             })?;
             Ok(json!({ "id": id, "action": "uncheck", "selector": sel }))
         }
         "select" => {
-            let sel = rest.get(0).ok_or_else(|| ParseError::MissingArguments {
+            let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
                 context: "select".to_string(),
                 usage: "select <selector> <value...>",
             })?;
@@ -189,7 +189,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
             }
         }
         "drag" => {
-            let src = rest.get(0).ok_or_else(|| ParseError::MissingArguments {
+            let src = rest.first().ok_or_else(|| ParseError::MissingArguments {
                 context: "drag".to_string(),
                 usage: "drag <source> <target>",
             })?;
@@ -200,14 +200,14 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
             Ok(json!({ "id": id, "action": "drag", "source": src, "target": tgt }))
         }
         "upload" => {
-            let sel = rest.get(0).ok_or_else(|| ParseError::MissingArguments {
+            let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
                 context: "upload".to_string(),
                 usage: "upload <selector> <files...>",
             })?;
             Ok(json!({ "id": id, "action": "upload", "selector": sel, "files": &rest[1..] }))
         }
         "download" => {
-            let sel = rest.get(0).ok_or_else(|| ParseError::MissingArguments {
+            let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
                 context: "download".to_string(),
                 usage: "download <selector> <path>",
             })?;
@@ -220,21 +220,21 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
 
         // === Keyboard ===
         "press" | "key" => {
-            let key = rest.get(0).ok_or_else(|| ParseError::MissingArguments {
+            let key = rest.first().ok_or_else(|| ParseError::MissingArguments {
                 context: "press".to_string(),
                 usage: "press <key>",
             })?;
             Ok(json!({ "id": id, "action": "press", "key": key }))
         }
         "keydown" => {
-            let key = rest.get(0).ok_or_else(|| ParseError::MissingArguments {
+            let key = rest.first().ok_or_else(|| ParseError::MissingArguments {
                 context: "keydown".to_string(),
                 usage: "keydown <key>",
             })?;
             Ok(json!({ "id": id, "action": "keydown", "key": key }))
         }
         "keyup" => {
-            let key = rest.get(0).ok_or_else(|| ParseError::MissingArguments {
+            let key = rest.first().ok_or_else(|| ParseError::MissingArguments {
                 context: "keyup".to_string(),
                 usage: "keyup <key>",
             })?;
@@ -243,7 +243,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
 
         // === Scroll ===
         "scroll" => {
-            let dir = rest.get(0).unwrap_or(&"down");
+            let dir = rest.first().unwrap_or(&"down");
             let amount = rest
                 .get(1)
                 .and_then(|s| s.parse::<i32>().ok())
@@ -251,7 +251,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
             Ok(json!({ "id": id, "action": "scroll", "direction": dir, "amount": amount }))
         }
         "scrollintoview" | "scrollinto" => {
-            let sel = rest.get(0).ok_or_else(|| ParseError::MissingArguments {
+            let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
                 context: "scrollintoview".to_string(),
                 usage: "scrollintoview <selector>",
             })?;
@@ -332,7 +332,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
             }
 
             // Default: selector or timeout
-            if let Some(arg) = rest.get(0) {
+            if let Some(arg) = rest.first() {
                 if arg.parse::<u64>().is_ok() {
                     Ok(
                         json!({ "id": id, "action": "wait", "timeout": arg.parse::<u64>().unwrap() }),
@@ -353,7 +353,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
             // screenshot [selector] [path]
             // selector: @ref or CSS selector
             // path: file path (contains / or . or ends with known extension)
-            let (selector, path) = match (rest.get(0), rest.get(1)) {
+            let (selector, path) = match (rest.first(), rest.get(1)) {
                 (Some(first), Some(second)) => {
                     // Two args: first is selector, second is path
                     (Some(*first), Some(*second))
@@ -383,7 +383,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
             )
         }
         "pdf" => {
-            let path = rest.get(0).ok_or_else(|| ParseError::MissingArguments {
+            let path = rest.first().ok_or_else(|| ParseError::MissingArguments {
                 context: "pdf".to_string(),
                 usage: "pdf <path>",
             })?;
@@ -541,7 +541,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
 
         // === Cookies ===
         "cookies" => {
-            let op = rest.get(0).unwrap_or(&"get");
+            let op = rest.first().unwrap_or(&"get");
             match *op {
                 "set" => {
                     let name = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
@@ -655,7 +655,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
         }
 
         // === Tabs ===
-        "tab" => match rest.get(0).map(|s| *s) {
+        "tab" => match rest.first().map(|s| *s) {
             Some("new") => {
                 let mut cmd = json!({ "id": id, "action": "tab_new" });
                 if let Some(url) = rest.get(1) {
@@ -680,7 +680,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
         // === Window ===
         "window" => {
             const VALID: &[&str] = &["new"];
-            match rest.get(0).map(|s| *s) {
+            match rest.first().map(|s| *s) {
                 Some("new") => Ok(json!({ "id": id, "action": "window_new" })),
                 Some(sub) => Err(ParseError::UnknownSubcommand {
                     subcommand: sub.to_string(),
@@ -695,10 +695,10 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
 
         // === Frame ===
         "frame" => {
-            if rest.get(0).map(|s| *s) == Some("main") {
+            if rest.first().map(|s| *s) == Some("main") {
                 Ok(json!({ "id": id, "action": "mainframe" }))
             } else {
-                let sel = rest.get(0).ok_or_else(|| ParseError::MissingArguments {
+                let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
                     context: "frame".to_string(),
                     usage: "frame <selector|main>",
                 })?;
@@ -709,7 +709,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
         // === Dialog ===
         "dialog" => {
             const VALID: &[&str] = &["accept", "dismiss"];
-            match rest.get(0).map(|s| *s) {
+            match rest.first().map(|s| *s) {
                 Some("accept") => {
                     let mut cmd = json!({ "id": id, "action": "dialog", "response": "accept" });
                     if let Some(prompt_text) = rest.get(1) {
@@ -731,7 +731,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
         // === Debug ===
         "trace" => {
             const VALID: &[&str] = &["start", "stop"];
-            match rest.get(0).map(|s| *s) {
+            match rest.first().map(|s| *s) {
                 Some("start") => Ok(json!({ "id": id, "action": "trace_start" })),
                 Some("stop") => {
                     let path = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
@@ -754,7 +754,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
         // === Recording (Playwright native video recording) ===
         "record" => {
             const VALID: &[&str] = &["start", "stop", "restart"];
-            match rest.get(0).map(|s| *s) {
+            match rest.first().map(|s| *s) {
                 Some("start") => {
                     let path = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
                         context: "record start".to_string(),
@@ -813,7 +813,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
             Ok(json!({ "id": id, "action": "errors", "clear": clear }))
         }
         "highlight" => {
-            let sel = rest.get(0).ok_or_else(|| ParseError::MissingArguments {
+            let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
                 context: "highlight".to_string(),
                 usage: "highlight <selector>",
             })?;
@@ -823,7 +823,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
         // === State ===
         "state" => {
             const VALID: &[&str] = &["save", "load"];
-            match rest.get(0).map(|s| *s) {
+            match rest.first().map(|s| *s) {
                 Some("save") => {
                     let path = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
                         context: "state save".to_string(),
@@ -852,14 +852,14 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
         // === iOS-specific commands ===
         "tap" => {
             // Alias for click (semantic clarity for touch interfaces)
-            let sel = rest.get(0).ok_or_else(|| ParseError::MissingArguments {
+            let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
                 context: "tap".to_string(),
                 usage: "tap <selector>",
             })?;
             Ok(json!({ "id": id, "action": "tap", "selector": sel }))
         }
         "swipe" => {
-            let direction = rest.get(0).ok_or_else(|| ParseError::MissingArguments {
+            let direction = rest.first().ok_or_else(|| ParseError::MissingArguments {
                 context: "swipe".to_string(),
                 usage: "swipe <up|down|left|right> [distance]",
             })?;
@@ -881,7 +881,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
             Ok(cmd)
         }
         "device" => {
-            match rest.get(0).map(|s| *s) {
+            match rest.first().map(|s| *s) {
                 Some("list") | None => {
                     // List available iOS simulators
                     Ok(json!({ "id": id, "action": "device_list" }))
@@ -904,7 +904,7 @@ fn parse_get(rest: &[&str], id: &str) -> Result<Value, ParseError> {
         "text", "html", "value", "attr", "url", "title", "count", "box", "styles",
     ];
 
-    match rest.get(0).map(|s| *s) {
+    match rest.first().map(|s| *s) {
         Some("text") => {
             let sel = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
                 context: "get text".to_string(),
@@ -974,7 +974,7 @@ fn parse_get(rest: &[&str], id: &str) -> Result<Value, ParseError> {
 fn parse_is(rest: &[&str], id: &str) -> Result<Value, ParseError> {
     const VALID: &[&str] = &["visible", "enabled", "checked"];
 
-    match rest.get(0).map(|s| *s) {
+    match rest.first().map(|s| *s) {
         Some("visible") => {
             let sel = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
                 context: "is visible".to_string(),
@@ -1021,7 +1021,7 @@ fn parse_find(rest: &[&str], id: &str) -> Result<Value, ParseError> {
         "nth",
     ];
 
-    let locator = rest.get(0).ok_or_else(|| ParseError::MissingArguments {
+    let locator = rest.first().ok_or_else(|| ParseError::MissingArguments {
         context: "find".to_string(),
         usage: "find <locator> <value> [action] [text]",
     })?;
@@ -1147,7 +1147,7 @@ fn parse_find(rest: &[&str], id: &str) -> Result<Value, ParseError> {
 fn parse_mouse(rest: &[&str], id: &str) -> Result<Value, ParseError> {
     const VALID: &[&str] = &["move", "down", "up", "wheel"];
 
-    match rest.get(0).map(|s| *s) {
+    match rest.first().map(|s| *s) {
         Some("move") => {
             let x_str = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
                 context: "mouse move".to_string(),
@@ -1209,7 +1209,7 @@ fn parse_set(rest: &[&str], id: &str) -> Result<Value, ParseError> {
         "media",
     ];
 
-    match rest.get(0).map(|s| *s) {
+    match rest.first().map(|s| *s) {
         Some("viewport") => {
             let w_str = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
                 context: "set viewport".to_string(),
@@ -1325,7 +1325,7 @@ fn parse_set(rest: &[&str], id: &str) -> Result<Value, ParseError> {
 fn parse_network(rest: &[&str], id: &str) -> Result<Value, ParseError> {
     const VALID: &[&str] = &["route", "unroute", "requests"];
 
-    match rest.get(0).map(|s| *s) {
+    match rest.first().map(|s| *s) {
         Some("route") => {
             let url = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
                 context: "network route".to_string(),
@@ -1367,9 +1367,9 @@ fn parse_network(rest: &[&str], id: &str) -> Result<Value, ParseError> {
 fn parse_storage(rest: &[&str], id: &str) -> Result<Value, ParseError> {
     const VALID: &[&str] = &["local", "session"];
 
-    match rest.get(0).map(|s| *s) {
+    match rest.first().map(|s| *s) {
         Some("local") | Some("session") => {
-            let storage_type = rest.get(0).unwrap();
+            let storage_type = rest.first().unwrap();
             let op = rest.get(1).unwrap_or(&"get");
             let key = rest.get(2);
             let value = rest.get(3);
