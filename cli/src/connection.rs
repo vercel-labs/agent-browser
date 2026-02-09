@@ -203,6 +203,7 @@ pub struct DaemonResult {
     pub already_running: bool,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn ensure_daemon(
     session: &str,
     headed: bool,
