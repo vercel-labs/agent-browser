@@ -2,6 +2,33 @@ import { WebSocketServer, WebSocket } from 'ws';
 import type { BrowserManager, ScreencastFrame } from './browser.js';
 import { setScreencastFrameCallback } from './actions.js';
 
+/**
+ * Check whether a WebSocket connection origin should be allowed.
+ * Allows: no origin (CLI tools), file:// origins, and localhost/loopback origins.
+ * Rejects: all other origins (prevents malicious web pages from connecting).
+ */
+export function isAllowedOrigin(origin: string | undefined): boolean {
+  // Allow connections with no origin (non-browser clients like CLI tools)
+  if (!origin) {
+    return true;
+  }
+  // Allow file:// origins (local HTML files)
+  if (origin.startsWith('file://')) {
+    return true;
+  }
+  // Allow localhost/loopback origins (browser-based stream viewers)
+  try {
+    const url = new URL(origin);
+    const host = url.hostname;
+    if (host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '[::1]') {
+      return true;
+    }
+  } catch {
+    // Invalid origin URL - reject
+  }
+  return false;
+}
+
 // Message types for WebSocket communication
 export interface FrameMessage {
   type: 'frame';
@@ -89,21 +116,19 @@ export class StreamServer {
       try {
         this.wss = new WebSocketServer({
           port: this.port,
-          // Security: Reject cross-origin WebSocket connections from browsers.
+          // Security: Reject cross-origin WebSocket connections from untrusted origins.
           // This prevents malicious web pages from connecting and injecting input events.
+          // Localhost origins are allowed so browser-based stream viewers can connect.
           verifyClient: (info: {
             origin: string;
             secure: boolean;
             req: import('http').IncomingMessage;
           }) => {
-            const origin = info.origin;
-            // Allow connections with no origin (non-browser clients like CLI tools)
-            // Reject connections from web pages (which always have an origin)
-            if (origin && !origin.startsWith('file://')) {
-              console.log(`[StreamServer] Rejected connection from origin: ${origin}`);
-              return false;
+            if (isAllowedOrigin(info.origin)) {
+              return true;
             }
-            return true;
+            console.log(`[StreamServer] Rejected connection from origin: ${info.origin}`);
+            return false;
           },
         });
 
