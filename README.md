@@ -555,6 +555,43 @@ This enables control of:
 - WebView2 applications
 - Any browser exposing a CDP endpoint
 
+## Playwriter Mode (Browser Extension)
+
+Use [playwriter](https://playwriter.dev) to control your existing Chrome browser via extension instead of launching a new browser instance.
+
+### Setup
+
+1. Install the [playwriter extension](https://chromewebstore.google.com/detail/playwriter-mcp/jfeammnjpkecdekppnclgkkffahnhfhe) from Chrome Web Store
+2. Click the extension icon on tabs you want to control (icon turns green when connected)
+3. Start the playwriter CDP relay server:
+
+```bash
+npx playwriter serve --host 127.0.0.1
+```
+
+4. Use agent-browser with `--cdp 19988`:
+
+```bash
+agent-browser --cdp 19988 snapshot
+agent-browser --cdp 19988 click @e1
+agent-browser --cdp 19988 fill @e2 "hello"
+```
+
+### Why use playwriter?
+
+- **Automate pages you're already on** - Quickly automate a page you're already working on without restarting or re-navigating
+- **No browser window jumping** - Browser stays in background during automation
+- **Reuse your browser** - Use your existing Chrome with all extensions (ad blockers, password managers, etc.)
+- **Bypass bot detection** - Temporarily disconnect the extension to pass Google login or captchas, then reconnect
+- **Less resource usage** - No separate Chromium instance needed
+- **Collaborate with AI** - Work alongside the agent in the same browser
+
+### How it works
+
+The playwriter extension uses Chrome's debugger API to relay CDP commands from port 19988 to your browser tabs. Only tabs where you've clicked the extension icon are controllable.
+
+For more details, see [playwriter.dev](https://playwriter.dev).
+
 ## Streaming (Browser Preview)
 
 Stream the browser viewport via WebSocket for live preview or "pair browsing" where a human can watch and interact alongside an AI agent.
