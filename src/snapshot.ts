@@ -26,6 +26,8 @@ export interface RefMap {
     name?: string;
     /** Index for disambiguation when multiple elements have same role+name */
     nth?: number;
+    /** All ARIA attributes from the element (expanded, pressed, level=1, etc.) */
+    attributes?: Record<string, string | boolean>;
   };
 }
 
@@ -136,6 +138,21 @@ function buildSelector(role: string, name?: string): string {
     return `getByRole('${role}', { name: "${escapedName}", exact: true })`;
   }
   return `getByRole('${role}')`;
+}
+
+/**
+ * Parse ARIA attributes from a line suffix.
+ * Matches patterns like [expanded], [pressed], [level=1], [valuenow=50]
+ */
+function parseAttributes(suffix: string): Record<string, string | boolean> {
+  const attrs: Record<string, string | boolean> = {};
+  // Match patterns like [expanded], [pressed], [level=1], [valuenow=50]
+  const matches = suffix.matchAll(/\[(\w+)(?:=([^\]]*))?\]/g);
+  for (const match of matches) {
+    const [, key, value] = match;
+    attrs[key] = value ?? true; // true for boolean flags like [expanded]
+  }
+  return attrs;
 }
 
 /**
@@ -383,12 +400,14 @@ function processAriaTree(ariaTree: string, refs: RefMap, options: SnapshotOption
       if (INTERACTIVE_ROLES.has(roleLower)) {
         const ref = nextRef();
         const nth = tracker.getNextIndex(roleLower, name);
+        const attributes = parseAttributes(suffix);
         tracker.trackRef(roleLower, name, ref);
         refs[ref] = {
           selector: buildSelector(roleLower, name),
           role: roleLower,
           name,
           nth, // Always store nth, we'll use it for duplicates
+          attributes: Object.keys(attributes).length > 0 ? attributes : undefined,
         };
 
         let enhanced = `- ${role}`;
@@ -510,6 +529,7 @@ function processLine(
   if (shouldHaveRef) {
     const ref = nextRef();
     const nth = tracker.getNextIndex(roleLower, name);
+    const attributes = parseAttributes(suffix);
     tracker.trackRef(roleLower, name, ref);
 
     refs[ref] = {
@@ -517,6 +537,7 @@ function processLine(
       role: roleLower,
       name,
       nth, // Always store nth, we'll clean up non-duplicates later
+      attributes: Object.keys(attributes).length > 0 ? attributes : undefined,
     };
 
     // Build enhanced line with ref
