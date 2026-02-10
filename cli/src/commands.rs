@@ -91,6 +91,8 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                 || url_lower.starts_with("about:")
                 || url_lower.starts_with("data:")
                 || url_lower.starts_with("file:")
+                || url_lower.starts_with("chrome-extension://")
+                || url_lower.starts_with("chrome://")
             {
                 url.to_string()
             } else {
@@ -759,8 +761,8 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                     let url = rest.get(2);
                     let mut cmd = json!({ "id": id, "action": "recording_start", "path": path });
                     if let Some(u) = url {
-                        // Add https:// prefix if needed
-                        let url_str = if u.starts_with("http") {
+                        // Add https:// prefix if needed (preserve special schemes)
+                        let url_str = if u.starts_with("http") || u.contains("://") {
                             u.to_string()
                         } else {
                             format!("https://{}", u)
@@ -779,8 +781,8 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                     let url = rest.get(2);
                     let mut cmd = json!({ "id": id, "action": "recording_restart", "path": path });
                     if let Some(u) = url {
-                        // Add https:// prefix if needed
-                        let url_str = if u.starts_with("http") {
+                        // Add https:// prefix if needed (preserve special schemes)
+                        let url_str = if u.starts_with("http") || u.contains("://") {
                             u.to_string()
                         } else {
                             format!("https://{}", u)
@@ -1730,6 +1732,28 @@ mod tests {
         assert!(cmd.get("headers").is_none());
     }
 
+    #[test]
+    fn test_navigate_chrome_extension_url() {
+        let cmd = parse_command(
+            &args("open chrome-extension://abcdefghijklmnop/popup.html"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "navigate");
+        assert_eq!(
+            cmd["url"],
+            "chrome-extension://abcdefghijklmnop/popup.html"
+        );
+    }
+
+    #[test]
+    fn test_navigate_chrome_url() {
+        let cmd =
+            parse_command(&args("open chrome://extensions"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "navigate");
+        assert_eq!(cmd["url"], "chrome://extensions");
+    }
+
     // === Set Headers Tests ===
 
     #[test]
@@ -2070,6 +2094,18 @@ mod tests {
         assert_eq!(cmd["action"], "recording_start");
         assert_eq!(cmd["path"], "demo.webm");
         assert_eq!(cmd["url"], "https://example.com");
+    }
+
+    #[test]
+    fn test_record_start_with_chrome_extension_url() {
+        let cmd = parse_command(
+            &args("record start demo.webm chrome-extension://abcdef/popup.html"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "recording_start");
+        assert_eq!(cmd["path"], "demo.webm");
+        assert_eq!(cmd["url"], "chrome-extension://abcdef/popup.html");
     }
 
     #[test]
