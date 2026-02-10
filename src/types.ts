@@ -108,6 +108,7 @@ export interface GetByRoleCommand extends BaseCommand {
   action: 'getbyrole';
   role: string;
   name?: string;
+  exact?: boolean;
   subaction: 'click' | 'fill' | 'check' | 'hover';
   value?: string;
 }
@@ -122,6 +123,7 @@ export interface GetByTextCommand extends BaseCommand {
 export interface GetByLabelCommand extends BaseCommand {
   action: 'getbylabel';
   label: string;
+  exact?: boolean;
   subaction: 'click' | 'fill' | 'check';
   value?: string;
 }
@@ -129,6 +131,7 @@ export interface GetByLabelCommand extends BaseCommand {
 export interface GetByPlaceholderCommand extends BaseCommand {
   action: 'getbyplaceholder';
   placeholder: string;
+  exact?: boolean;
   subaction: 'click' | 'fill';
   value?: string;
 }

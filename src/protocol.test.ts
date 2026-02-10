@@ -364,6 +364,23 @@ describe('parseCommand', () => {
       expect(result.success).toBe(true);
     });
 
+    it('should parse getbyrole with exact', () => {
+      const result = parseCommand(
+        cmd({
+          id: '1',
+          action: 'getbyrole',
+          role: 'button',
+          name: 'Continue',
+          subaction: 'click',
+          exact: true,
+        })
+      );
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.command.exact).toBe(true);
+      }
+    });
+
     it('should parse getbytext', () => {
       const result = parseCommand(
         cmd({
@@ -387,6 +404,40 @@ describe('parseCommand', () => {
         })
       );
       expect(result.success).toBe(true);
+    });
+
+    it('should parse getbylabel with exact', () => {
+      const result = parseCommand(
+        cmd({
+          id: '1',
+          action: 'getbylabel',
+          label: 'Email',
+          subaction: 'fill',
+          value: 'test@test.com',
+          exact: true,
+        })
+      );
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.command.exact).toBe(true);
+      }
+    });
+
+    it('should parse getbyplaceholder with exact', () => {
+      const result = parseCommand(
+        cmd({
+          id: '1',
+          action: 'getbyplaceholder',
+          placeholder: 'Search',
+          subaction: 'fill',
+          value: 'test',
+          exact: true,
+        })
+      );
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.command.exact).toBe(true);
+      }
     });
   });
 

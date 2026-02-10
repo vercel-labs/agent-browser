@@ -126,6 +126,7 @@ const getByRoleSchema = baseCommandSchema.extend({
   action: z.literal('getbyrole'),
   role: z.string().min(1),
   name: z.string().optional(),
+  exact: z.boolean().optional(),
   subaction: z.enum(['click', 'fill', 'check', 'hover']),
   value: z.string().optional(),
 });
@@ -140,6 +141,7 @@ const getByTextSchema = baseCommandSchema.extend({
 const getByLabelSchema = baseCommandSchema.extend({
   action: z.literal('getbylabel'),
   label: z.string().min(1),
+  exact: z.boolean().optional(),
   subaction: z.enum(['click', 'fill', 'check']),
   value: z.string().optional(),
 });
@@ -147,6 +149,7 @@ const getByLabelSchema = baseCommandSchema.extend({
 const getByPlaceholderSchema = baseCommandSchema.extend({
   action: z.literal('getbyplaceholder'),
   placeholder: z.string().min(1),
+  exact: z.boolean().optional(),
   subaction: z.enum(['click', 'fill']),
   value: z.string().optional(),
 });
