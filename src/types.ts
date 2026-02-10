@@ -4,6 +4,7 @@ import type { Page, Browser, BrowserContext } from 'playwright-core';
 export interface BaseCommand {
   id: string;
   action: string;
+  timeout?: number; // Action timeout in milliseconds (overrides AGENT_BROWSER_ACTION_TIMEOUT)
 }
 
 // Action-specific command types

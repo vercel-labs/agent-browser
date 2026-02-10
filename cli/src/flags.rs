@@ -20,6 +20,8 @@ pub struct Flags {
     pub ignore_https_errors: bool,
     pub allow_file_access: bool,
     pub device: Option<String>,
+    pub timeout: Option<u64>, // Global Playwright timeout (setDefaultTimeout) in milliseconds
+    pub action_timeout: Option<u64>, // Per-action timeout in milliseconds
 
     // Track which launch-time options were explicitly passed via CLI
     // (as opposed to being set only via environment variables)
@@ -65,6 +67,8 @@ pub fn parse_flags(args: &[String]) -> Flags {
         ignore_https_errors: false,
         allow_file_access: env::var("AGENT_BROWSER_ALLOW_FILE_ACCESS").is_ok(),
         device: env::var("AGENT_BROWSER_IOS_DEVICE").ok(),
+        timeout: None,
+        action_timeout: None,
         // Track CLI-passed flags (default false, set to true when flag is passed)
         cli_executable_path: false,
         cli_extensions: false,
@@ -175,6 +179,23 @@ pub fn parse_flags(args: &[String]) -> Flags {
                     i += 1;
                 }
             }
+            "--default-timeout" => {
+                if let Some(t) = args.get(i + 1) {
+                    if let Ok(timeout) = t.parse::<u64>() {
+                        flags.timeout = Some(timeout);
+                    }
+                    i += 1;
+                }
+            }
+            "--timeout" | "--default-action-timeout" => {
+                if let Some(t) = args.get(i + 1) {
+                    if let Ok(timeout) = t.parse::<u64>() {
+                        flags.action_timeout = Some(timeout);
+                    }
+                    i += 1;
+                }
+            }
+            // Note: --timeout is per-command, handled in commands.rs, not stripped here
             _ => {}
         }
         i += 1;
@@ -211,6 +232,9 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "-p",
         "--provider",
         "--device",
+        "--default-timeout",
+        "--timeout",
+        "--default-action-timeout",
     ];
 
     for arg in args.iter() {
@@ -387,5 +411,55 @@ mod tests {
         assert!(flags.cli_proxy);
         assert!(!flags.cli_extensions);
         assert!(!flags.cli_state);
+    }
+
+    // === Timeout Flag Tests ===
+
+    #[test]
+    fn test_parse_timeout_flag() {
+        let flags = parse_flags(&args("--timeout 30000 click @e1"));
+        assert_eq!(flags.action_timeout, Some(30000));
+    }
+
+    #[test]
+    fn test_parse_timeout_with_session() {
+        let flags = parse_flags(&args("--session mysession --timeout 45000 fill @e2 hello"));
+        assert_eq!(flags.session, "mysession");
+        assert_eq!(flags.action_timeout, Some(45000));
+    }
+
+    #[test]
+    fn test_parse_timeout_backward_compat() {
+        // --default-action-timeout should still work
+        let flags = parse_flags(&args("--default-action-timeout 60000 click @e1"));
+        assert_eq!(flags.action_timeout, Some(60000));
+    }
+
+    #[test]
+    fn test_clean_args_removes_timeout() {
+        let cleaned = clean_args(&args("--timeout 30000 click @e1"));
+        assert_eq!(cleaned, vec!["click", "@e1"]);
+    }
+
+    #[test]
+    fn test_clean_args_removes_default_action_timeout() {
+        let cleaned = clean_args(&args("--default-action-timeout 30000 click @e1"));
+        assert_eq!(cleaned, vec!["click", "@e1"]);
+    }
+
+    #[test]
+    fn test_parse_timeout_no_value() {
+        let flags = parse_flags(&args("--timeout"));
+        assert_eq!(flags.action_timeout, None);
+    }
+
+    #[test]
+    fn test_parse_timeout_invalid_value() {
+        let flags = parse_flags(&args("--timeout notanumber click @e1"));
+        // Invalid value should result in None (parse fails silently)
+        assert_eq!(flags.action_timeout, None);
+        // But command should still be parsed correctly
+        let cleaned = clean_args(&args("--timeout notanumber click @e1"));
+        assert_eq!(cleaned, vec!["click", "@e1"]);
     }
 }

@@ -508,7 +508,15 @@ fn main() {
         }
     }
 
-    match send_command(cmd.clone(), &flags.session) {
+    // Inject default action timeout if command doesn't have one
+    let mut cmd_to_send = cmd.clone();
+    if cmd_to_send.get("timeout").is_none() {
+        if let Some(default_action_timeout) = flags.action_timeout {
+            cmd_to_send["timeout"] = json!(default_action_timeout);
+        }
+    }
+
+    match send_command(cmd_to_send, &flags.session) {
         Ok(resp) => {
             let success = resp.success;
             // Extract action for context-specific output handling
@@ -585,5 +593,55 @@ mod tests {
         assert_eq!(result["server"], "http://proxy.com:8080");
         assert_eq!(result["username"], "user");
         assert_eq!(result["password"], "p@ss:w0rd");
+    }
+
+    // === Timeout Injection Tests ===
+
+    #[test]
+    fn test_timeout_injection_into_command() {
+        // Simulates: agent-browser --timeout 30000 click @e1
+        // When timeout flag is set, main.rs should inject it into command JSON
+        let cmd = json!({"id": "r1", "action": "click", "selector": "@e1"});
+        let timeout = Some(30000u64);
+
+        let mut cmd_to_send = cmd.clone();
+        if cmd_to_send.get("timeout").is_none() {
+            if let Some(t) = timeout {
+                cmd_to_send["timeout"] = json!(t);
+            }
+        }
+
+        assert_eq!(cmd_to_send["timeout"], 30000);
+    }
+
+    #[test]
+    fn test_timeout_not_overwritten_if_already_set() {
+        // Command already has timeout - should not be overwritten
+        let cmd = json!({"id": "r1", "action": "wait", "selector": "@e1", "timeout": 5000});
+        let timeout = Some(30000u64);
+
+        let mut cmd_to_send = cmd.clone();
+        if cmd_to_send.get("timeout").is_none() {
+            if let Some(t) = timeout {
+                cmd_to_send["timeout"] = json!(t);
+            }
+        }
+
+        assert_eq!(cmd_to_send["timeout"], 5000); // Original preserved
+    }
+
+    #[test]
+    fn test_no_timeout_injection_when_flag_not_set() {
+        let cmd = json!({"id": "r1", "action": "click", "selector": "@e1"});
+        let timeout: Option<u64> = None;
+
+        let mut cmd_to_send = cmd.clone();
+        if cmd_to_send.get("timeout").is_none() {
+            if let Some(t) = timeout {
+                cmd_to_send["timeout"] = json!(t);
+            }
+        }
+
+        assert!(cmd_to_send.get("timeout").is_none());
     }
 }

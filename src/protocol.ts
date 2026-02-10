@@ -5,6 +5,7 @@ import type { Command, Response } from './types.js';
 const baseCommandSchema = z.object({
   id: z.string(),
   action: z.string(),
+  timeout: z.number().positive().optional(), // Action timeout in milliseconds
 });
 
 // Individual action schemas

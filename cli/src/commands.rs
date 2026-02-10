@@ -1429,6 +1429,8 @@ mod tests {
             ignore_https_errors: false,
             allow_file_access: false,
             device: None,
+            timeout: None,
+            action_timeout: None,
             cli_executable_path: false,
             cli_extensions: false,
             cli_profile: false,
@@ -1797,6 +1799,14 @@ mod tests {
     }
 
     #[test]
+    fn test_click_without_timeout() {
+        let cmd = parse_command(&args("click @e1"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "click");
+        assert_eq!(cmd["selector"], "@e1");
+        assert!(cmd.get("timeout").is_none());
+    }
+
+    #[test]
     fn test_fill() {
         let cmd = parse_command(&args("fill #input hello world"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "fill");
@@ -1805,11 +1815,25 @@ mod tests {
     }
 
     #[test]
+    fn test_fill_without_timeout() {
+        let cmd = parse_command(&args("fill @e2 hello"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "fill");
+        assert!(cmd.get("timeout").is_none());
+    }
+
+    #[test]
     fn test_type_command() {
         let cmd = parse_command(&args("type #input some text"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "type");
         assert_eq!(cmd["selector"], "#input");
         assert_eq!(cmd["text"], "some text");
+    }
+
+    #[test]
+    fn test_type_without_timeout() {
+        let cmd = parse_command(&args("type @e3 text"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "type");
+        assert!(cmd.get("timeout").is_none());
     }
 
     #[test]
@@ -1826,6 +1850,69 @@ mod tests {
         assert_eq!(cmd["action"], "select");
         assert_eq!(cmd["selector"], "#menu");
         assert_eq!(cmd["values"], json!(["opt1", "opt2", "opt3"]));
+    }
+
+    #[test]
+    fn test_select_without_timeout() {
+        let cmd = parse_command(&args("select #menu option1"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "select");
+        assert!(cmd.get("timeout").is_none());
+    }
+
+    #[test]
+    fn test_hover_without_timeout() {
+        let cmd = parse_command(&args("hover @e4"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "hover");
+        assert!(cmd.get("timeout").is_none());
+    }
+
+    #[test]
+    fn test_upload_without_timeout() {
+        let cmd = parse_command(&args("upload @e5 file.pdf"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "upload");
+        assert!(cmd.get("timeout").is_none());
+    }
+
+    #[test]
+    fn test_check_without_timeout() {
+        let cmd = parse_command(&args("check @e6"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "check");
+        assert!(cmd.get("timeout").is_none());
+    }
+
+    #[test]
+    fn test_uncheck_without_timeout() {
+        let cmd = parse_command(&args("uncheck @e7"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "uncheck");
+        assert!(cmd.get("timeout").is_none());
+    }
+
+    #[test]
+    fn test_dblclick_without_timeout() {
+        let cmd = parse_command(&args("dblclick @e8"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "dblclick");
+        assert!(cmd.get("timeout").is_none());
+    }
+
+    #[test]
+    fn test_focus_without_timeout() {
+        let cmd = parse_command(&args("focus @e9"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "focus");
+        assert!(cmd.get("timeout").is_none());
+    }
+
+    #[test]
+    fn test_drag_without_timeout() {
+        let cmd = parse_command(&args("drag @e1 @e2"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "drag");
+        assert!(cmd.get("timeout").is_none());
+    }
+
+    #[test]
+    fn test_find_text_click_without_timeout() {
+        let cmd = parse_command(&args("find text Submit click"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "getbytext");
+        assert!(cmd.get("timeout").is_none());
     }
 
     #[test]

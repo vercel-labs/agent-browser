@@ -18,6 +18,21 @@ import path from 'node:path';
 import os from 'node:os';
 import { existsSync, mkdirSync, rmSync } from 'node:fs';
 import type { LaunchCommand } from './types.js';
+
+// Default Playwright global timeout (setDefaultTimeout) - 60 seconds
+const DEFAULT_TIMEOUT = 60000;
+
+// Get global timeout from env var or use default
+function getGlobalTimeout(): number {
+  const envTimeout = process.env.AGENT_BROWSER_TIMEOUT;
+  if (envTimeout) {
+    const parsed = parseInt(envTimeout, 10);
+    if (!isNaN(parsed) && parsed > 0) {
+      return parsed;
+    }
+  }
+  return DEFAULT_TIMEOUT;
+}
 import { type RefMap, type EnhancedSnapshot, getEnhancedSnapshot, parseRef } from './snapshot.js';
 
 // Screencast frame data from CDP
@@ -925,7 +940,7 @@ export class BrowserManager {
       this.kernelSessionId = session.session_id;
       this.kernelApiKey = kernelApiKey;
       this.browser = browser;
-      context.setDefaultTimeout(60000);
+      context.setDefaultTimeout(getGlobalTimeout());
       this.contexts.push(context);
       this.pages.push(page);
       this.activePageIndex = 0;
@@ -998,7 +1013,7 @@ export class BrowserManager {
       this.browserUseSessionId = session.id;
       this.browserUseApiKey = browserUseApiKey;
       this.browser = browser;
-      context.setDefaultTimeout(60000);
+      context.setDefaultTimeout(getGlobalTimeout());
       this.contexts.push(context);
       this.pages.push(page);
       this.activePageIndex = 0;
@@ -1158,7 +1173,7 @@ export class BrowserManager {
       });
     }
 
-    context.setDefaultTimeout(60000);
+    context.setDefaultTimeout(getGlobalTimeout());
     this.contexts.push(context);
     this.setupContextTracking(context);
 
@@ -1327,7 +1342,7 @@ export class BrowserManager {
     const context = await this.browser.newContext({
       viewport: viewport ?? { width: 1280, height: 720 },
     });
-    context.setDefaultTimeout(60000);
+    context.setDefaultTimeout(getGlobalTimeout());
     this.contexts.push(context);
     this.setupContextTracking(context);
 

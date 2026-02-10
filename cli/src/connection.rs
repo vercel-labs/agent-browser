@@ -358,6 +358,14 @@ pub fn ensure_daemon(
             cmd.env("AGENT_BROWSER_IOS_DEVICE", d);
         }
 
+        // Forward timeout settings to daemon
+        if let Ok(timeout) = env::var("AGENT_BROWSER_TIMEOUT") {
+            cmd.env("AGENT_BROWSER_TIMEOUT", timeout);
+        }
+        if let Ok(action_timeout) = env::var("AGENT_BROWSER_ACTION_TIMEOUT") {
+            cmd.env("AGENT_BROWSER_ACTION_TIMEOUT", action_timeout);
+        }
+
         // Create new process group and session to fully detach
         unsafe {
             cmd.pre_exec(|| {

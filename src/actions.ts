@@ -3,6 +3,13 @@ import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import type { BrowserManager, ScreencastFrame } from './browser.js';
 import { getAppDir } from './daemon.js';
+import { getActionTimeout } from './timeout.js';
+
+// Get timeout for a command (uses command.timeout if set, otherwise default from env)
+function getTimeout(command: { timeout?: number }): number {
+  return command.timeout ?? getActionTimeout();
+}
+
 import type {
   Command,
   Response,
@@ -505,6 +512,7 @@ async function handleClick(command: ClickCommand, browser: BrowserManager): Prom
       button: command.button,
       clickCount: command.clickCount,
       delay: command.delay,
+      timeout: getTimeout(command),
     });
   } catch (error) {
     throw toAIFriendlyError(error, command.selector);
@@ -518,11 +526,12 @@ async function handleType(command: TypeCommand, browser: BrowserManager): Promis
 
   try {
     if (command.clear) {
-      await locator.fill('');
+      await locator.fill('', { timeout: getTimeout(command) });
     }
 
     await locator.pressSequentially(command.text, {
       delay: command.delay,
+      timeout: getTimeout(command),
     });
   } catch (error) {
     throw toAIFriendlyError(error, command.selector);
@@ -696,7 +705,7 @@ async function handleSelect(command: SelectCommand, browser: BrowserManager): Pr
   const values = Array.isArray(command.values) ? command.values : [command.values];
 
   try {
-    await locator.selectOption(values);
+    await locator.selectOption(values, { timeout: getTimeout(command) });
   } catch (error) {
     throw toAIFriendlyError(error, command.selector);
   }
@@ -707,7 +716,7 @@ async function handleSelect(command: SelectCommand, browser: BrowserManager): Pr
 async function handleHover(command: HoverCommand, browser: BrowserManager): Promise<Response> {
   const locator = browser.getLocator(command.selector);
   try {
-    await locator.hover();
+    await locator.hover({ timeout: getTimeout(command) });
   } catch (error) {
     throw toAIFriendlyError(error, command.selector);
   }
@@ -798,7 +807,7 @@ async function handleWindowNew(
 async function handleFill(command: FillCommand, browser: BrowserManager): Promise<Response> {
   const locator = browser.getLocator(command.selector);
   try {
-    await locator.fill(command.value);
+    await locator.fill(command.value, { timeout: getTimeout(command) });
   } catch (error) {
     throw toAIFriendlyError(error, command.selector);
   }
@@ -808,7 +817,7 @@ async function handleFill(command: FillCommand, browser: BrowserManager): Promis
 async function handleCheck(command: CheckCommand, browser: BrowserManager): Promise<Response> {
   const locator = browser.getLocator(command.selector);
   try {
-    await locator.check();
+    await locator.check({ timeout: getTimeout(command) });
   } catch (error) {
     throw toAIFriendlyError(error, command.selector);
   }
@@ -818,7 +827,7 @@ async function handleCheck(command: CheckCommand, browser: BrowserManager): Prom
 async function handleUncheck(command: UncheckCommand, browser: BrowserManager): Promise<Response> {
   const locator = browser.getLocator(command.selector);
   try {
-    await locator.uncheck();
+    await locator.uncheck({ timeout: getTimeout(command) });
   } catch (error) {
     throw toAIFriendlyError(error, command.selector);
   }
@@ -829,7 +838,7 @@ async function handleUpload(command: UploadCommand, browser: BrowserManager): Pr
   const locator = browser.getLocator(command.selector);
   const files = Array.isArray(command.files) ? command.files : [command.files];
   try {
-    await locator.setInputFiles(files);
+    await locator.setInputFiles(files, { timeout: getTimeout(command) });
   } catch (error) {
     throw toAIFriendlyError(error, command.selector);
   }
@@ -914,10 +923,10 @@ async function handleGetByText(
 
   switch (command.subaction) {
     case 'click':
-      await locator.click();
+      await locator.click({ timeout: getTimeout(command) });
       return successResponse(command.id, { clicked: true });
     case 'hover':
-      await locator.hover();
+      await locator.hover({ timeout: getTimeout(command) });
       return successResponse(command.id, { hovered: true });
   }
 }

@@ -62,8 +62,26 @@ describe('parseCommand', () => {
       }
     });
 
+    it('should parse click with timeout', () => {
+      const result = parseCommand(
+        cmd({ id: '1', action: 'click', selector: '#btn', timeout: 5000 })
+      );
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.command.action).toBe('click');
+        expect(result.command.timeout).toBe(5000);
+      }
+    });
+
     it('should reject click without selector', () => {
       const result = parseCommand(cmd({ id: '1', action: 'click' }));
+      expect(result.success).toBe(false);
+    });
+
+    it('should reject click with invalid timeout', () => {
+      const result = parseCommand(
+        cmd({ id: '1', action: 'click', selector: '#btn', timeout: -100 })
+      );
       expect(result.success).toBe(false);
     });
   });
