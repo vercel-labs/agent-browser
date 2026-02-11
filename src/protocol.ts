@@ -48,6 +48,7 @@ const launchSchema = baseCommandSchema.extend({
   ignoreHTTPSErrors: z.boolean().optional(),
   profile: z.string().optional(),
   storageState: z.string().optional(),
+  kiosk: z.boolean().optional(),
 });
 
 const navigateSchema = baseCommandSchema.extend({
