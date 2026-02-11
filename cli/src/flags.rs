@@ -21,6 +21,8 @@ pub struct Flags {
     pub allow_file_access: bool,
     pub kiosk: bool,
     pub device: Option<String>,
+    pub screenshot_format: Option<String>,
+    pub screenshot_quality: Option<u32>,
 
     // Track which launch-time options were explicitly passed via CLI
     // (as opposed to being set only via environment variables)
@@ -68,6 +70,8 @@ pub fn parse_flags(args: &[String]) -> Flags {
         allow_file_access: env::var("AGENT_BROWSER_ALLOW_FILE_ACCESS").is_ok(),
         kiosk: false,
         device: env::var("AGENT_BROWSER_IOS_DEVICE").ok(),
+        screenshot_format: env::var("AGENT_BROWSER_SCREENSHOT_FORMAT").ok(),
+        screenshot_quality: env::var("AGENT_BROWSER_SCREENSHOT_QUALITY").ok().and_then(|s| s.parse().ok()),
         // Track CLI-passed flags (default false, set to true when flag is passed)
         cli_executable_path: false,
         cli_extensions: false,

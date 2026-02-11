@@ -748,7 +748,7 @@ export interface ScreenshotCommand extends BaseCommand {
   path?: string;
   fullPage?: boolean;
   selector?: string;
-  format?: 'png' | 'jpeg';
+  format?: 'png' | 'jpeg' | 'webp';
   quality?: number;
   scale?: 'css' | 'device' | number;
 }
