@@ -132,8 +132,13 @@ fn main() {
     }
 
     let args: Vec<String> = env::args().skip(1).collect();
-    let flags = parse_flags(&args);
+    let mut flags = parse_flags(&args);
     let clean = clean_args(&args);
+
+    // Kiosk mode automatically enables headed mode
+    if flags.kiosk {
+        flags.headed = true;
+    }
 
     let has_help = args.iter().any(|a| a == "--help" || a == "-h");
     let has_version = args.iter().any(|a| a == "--version" || a == "-V");
@@ -281,6 +286,7 @@ fn main() {
             },
             flags.ignore_https_errors.then_some("--ignore-https-errors"),
             flags.cli_allow_file_access.then_some("--allow-file-access"),
+            flags.cli_kiosk.then_some("--kiosk"),
         ]
         .into_iter()
         .flatten()
@@ -488,6 +494,7 @@ fn main() {
 
     // Launch headed browser or configure browser options (without CDP or provider)
     if (flags.headed
+        || flags.kiosk
         || flags.executable_path.is_some()
         || flags.profile.is_some()
         || flags.state.is_some()
@@ -554,6 +561,10 @@ fn main() {
 
         if flags.allow_file_access {
             launch_cmd["allowFileAccess"] = json!(true);
+        }
+
+        if flags.kiosk {
+            launch_cmd["kiosk"] = json!(true);
         }
 
         match send_command(launch_cmd, &flags.session) {

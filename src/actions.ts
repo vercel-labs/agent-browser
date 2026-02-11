@@ -521,6 +521,8 @@ async function handleNavigate(
     waitUntil: command.waitUntil ?? 'load',
   });
 
+  await browser.applyKioskFullscreen();
+
   return successResponse(command.id, {
     url: page.url(),
     title: await page.title(),

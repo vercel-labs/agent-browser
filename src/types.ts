@@ -33,6 +33,7 @@ export interface LaunchCommand extends BaseCommand {
   allowFileAccess?: boolean; // Enable file:// URL access and cross-origin file requests
   // Auto-load state file for session persistence
   autoStateFilePath?: string;
+  kiosk?: boolean; // Launch in kiosk mode (fullscreen, headed Chromium only)
 }
 
 export interface NavigateCommand extends BaseCommand {

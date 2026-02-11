@@ -1579,6 +1579,7 @@ mod tests {
             provider: None,
             ignore_https_errors: false,
             allow_file_access: false,
+            kiosk: false,
             device: None,
             auto_connect: false,
             session_name: None,
@@ -1591,6 +1592,7 @@ mod tests {
             cli_proxy: false,
             cli_proxy_bypass: false,
             cli_allow_file_access: false,
+            cli_kiosk: false,
             annotate: false,
         }
     }

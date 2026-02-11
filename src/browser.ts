@@ -100,6 +100,7 @@ export class BrowserManager {
 
   // CDP session for screencast and input injection
   private cdpSession: CDPSession | null = null;
+  private kioskPending: boolean = false;
   private screencastActive: boolean = false;
   private screencastSessionId: number = 0;
   private frameCallback: ((frame: ScreencastFrame) => void) | null = null;
@@ -499,6 +500,23 @@ export class BrowserManager {
   async clearDeviceMetricsOverride(): Promise<void> {
     const cdp = await this.getCDPSession();
     await cdp.send('Emulation.clearDeviceMetricsOverride');
+  }
+
+  /**
+   * Apply kiosk fullscreen if pending. Must be called after first navigation
+   * because CDP Browser.setWindowBounds requires a fresh session post-navigation
+   * to properly resize the window on macOS.
+   */
+  async applyKioskFullscreen(): Promise<void> {
+    if (!this.kioskPending) return;
+    this.kioskPending = false;
+    const page = this.getPage();
+    const cdp = await page.context().newCDPSession(page);
+    const { windowId } = await cdp.send('Browser.getWindowForTarget');
+    await cdp.send('Browser.setWindowBounds', {
+      windowId,
+      bounds: { windowState: 'fullscreen' },
+    });
   }
 
   /**
@@ -1164,6 +1182,14 @@ export class BrowserManager {
       throw new Error('allowFileAccess is only supported in Chromium');
     }
 
+    // Kiosk mode: only supported in Chromium, requires headed mode
+    if (options.kiosk && browserType !== 'chromium') {
+      throw new Error('Kiosk mode is only supported in Chromium');
+    }
+    if (options.kiosk && (options.headless ?? true)) {
+      throw new Error('Kiosk mode requires headed mode (--headed)');
+    }
+
     const launcher =
       browserType === 'firefox' ? firefox : browserType === 'webkit' ? webkit : chromium;
 
@@ -1173,11 +1199,9 @@ export class BrowserManager {
     const fileAccessArgs = options.allowFileAccess
       ? ['--allow-file-access-from-files', '--allow-file-access']
       : [];
-    const baseArgs = options.args
-      ? [...fileAccessArgs, ...options.args]
-      : fileAccessArgs.length > 0
-        ? fileAccessArgs
-        : undefined;
+    const kioskArgs = options.kiosk ? ['--kiosk'] : [];
+    const combinedArgs = [...fileAccessArgs, ...kioskArgs, ...(options.args ?? [])];
+    const baseArgs = combinedArgs.length > 0 ? combinedArgs : undefined;
 
     // Auto-detect args that control window size and disable viewport emulation
     // so Playwright doesn't override the browser's own sizing behavior
@@ -1187,7 +1211,7 @@ export class BrowserManager {
     const viewport =
       options.viewport !== undefined
         ? options.viewport
-        : hasWindowSizeArgs
+        : options.kiosk || hasWindowSizeArgs
           ? null
           : { width: 1280, height: 720 };
 
@@ -1325,6 +1349,14 @@ export class BrowserManager {
       this.setupPageTracking(page);
     }
     this.activePageIndex = this.pages.length > 0 ? this.pages.length - 1 : 0;
+
+    // Kiosk mode: defer CDP fullscreen to after the first navigation.
+    // The --kiosk arg hides browser chrome, but on macOS the window doesn't
+    // actually go fullscreen until CDP Browser.setWindowBounds is called with
+    // a fresh CDP session after a page has loaded.
+    if (options.kiosk) {
+      this.kioskPending = true;
+    }
   }
 
   /**
