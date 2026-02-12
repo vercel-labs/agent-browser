@@ -249,6 +249,8 @@ agent-browser trace start                 # Start recording trace
 agent-browser trace stop trace.zip        # Stop and save trace
 agent-browser profiler start              # Start Chrome DevTools profiling
 agent-browser profiler stop trace.json    # Stop and save profile
+agent-browser har start                   # Start HAR capture
+agent-browser har stop network.har        # Stop and save HAR file
 ```
 
 ## Environment Variables

@@ -2,6 +2,9 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } 
 import { BrowserManager, getDefaultTimeout } from './browser.js';
 import { executeCommand } from './actions.js';
 import { chromium } from 'playwright-core';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 describe('BrowserManager', () => {
   let browser: BrowserManager;
@@ -408,6 +411,38 @@ describe('BrowserManager', () => {
       const bottom = data.annotations!.find((a) => a.name === 'Bottom');
       expect(bottom).toBeDefined();
       expect(bottom!.box.y).toBeGreaterThanOrEqual(2000);
+    });
+  });
+
+  describe('har recording', () => {
+    it('should record network traffic and save a HAR file', async () => {
+      const tmpDir = mkdtempSync(path.join(os.tmpdir(), 'agent-browser-har-test-'));
+      const harPath = path.join(tmpDir, 'session.har');
+
+      try {
+        await browser.startHarRecording();
+
+        const page = browser.getPage();
+        await page.goto('https://example.com', { waitUntil: 'load' });
+
+        const result = await browser.stopHarRecording(harPath);
+
+        expect(result.error).toBeUndefined();
+        expect(result.path).toBe(harPath);
+        expect(existsSync(harPath)).toBe(true);
+        expect(result.entries).toBeGreaterThan(0);
+
+        const har = JSON.parse(readFileSync(harPath, 'utf8')) as {
+          log?: {
+            entries?: unknown[];
+          };
+        };
+
+        expect(Array.isArray(har.log?.entries)).toBe(true);
+        expect(har.log?.entries?.length ?? 0).toBeGreaterThan(0);
+      } finally {
+        rmSync(tmpDir, { recursive: true, force: true });
+      }
     });
   });
 

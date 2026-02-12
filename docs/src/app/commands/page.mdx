@@ -1,6 +1,6 @@
-import { pageMetadata } from "@/lib/page-metadata"
+import { pageMetadata } from '@/lib/page-metadata';
 
-export const metadata = pageMetadata("commands")
+export const metadata = pageMetadata('commands');
 
 # Commands
 
@@ -189,6 +189,8 @@ agent-browser dialog dismiss          # Dismiss dialog
 ```bash
 agent-browser trace start [path]      # Start trace
 agent-browser trace stop [path]       # Stop and save trace
+agent-browser har start               # Start HAR capture
+agent-browser har stop <path.har>     # Stop and save HAR file
 agent-browser profiler start          # Start Chrome DevTools profiling
 agent-browser profiler stop [path]    # Stop and save profile (.json)
 agent-browser record start <path>     # Start video recording (WebM)

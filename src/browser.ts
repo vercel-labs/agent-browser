@@ -16,7 +16,16 @@ import {
 } from 'playwright-core';
 import path from 'node:path';
 import os from 'node:os';
-import { existsSync, mkdirSync, rmSync, readFileSync, statSync } from 'node:fs';
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  unlinkSync,
+} from 'node:fs';
 import { writeFile, mkdir } from 'node:fs/promises';
 import type { LaunchCommand, TraceEvent } from './types.js';
 import { type RefMap, type EnhancedSnapshot, getEnhancedSnapshot, parseRef } from './snapshot.js';
@@ -112,7 +121,6 @@ export class BrowserManager {
   private routes: Map<string, (route: Route) => Promise<void>> = new Map();
   private consoleMessages: ConsoleMessage[] = [];
   private pageErrors: PageError[] = [];
-  private isRecordingHar: boolean = false;
   private refMap: RefMap = {};
   private lastSnapshot: string = '';
   private scopedHeaderRoutes: Map<string, (route: Route) => Promise<void>> = new Map();
@@ -159,6 +167,12 @@ export class BrowserManager {
   private profileCompleteResolver: (() => void) | null = null;
   private profileDataHandler: ((params: { value?: TraceEvent[] }) => void) | null = null;
   private profileCompleteHandler: (() => void) | null = null;
+
+  // HAR recording (Playwright native)
+  private harContext: BrowserContext | null = null;
+  private harPage: Page | null = null;
+  private harTempPath: string = '';
+  private harTempDir: string = '';
 
   /**
    * Check if browser is launched
@@ -676,15 +690,179 @@ export class BrowserManager {
    * Start HAR recording
    */
   async startHarRecording(): Promise<void> {
-    // HAR is started at context level, flag for tracking
-    this.isRecordingHar = true;
+    if (this.harContext) {
+      throw new Error(
+        "HAR recording already in progress. Run 'har stop <path.har>' first before starting a new HAR capture."
+      );
+    }
+
+    const currentPage = this.pages.length > 0 ? this.pages[this.activePageIndex] : null;
+    const currentContext = currentPage?.context() ?? this.contexts[0] ?? null;
+    const browser = this.browser ?? currentContext?.browser() ?? null;
+
+    if (!browser) {
+      throw new Error('Browser not launched. Call launch first.');
+    }
+
+    let url: string | undefined;
+    if (currentPage) {
+      const currentUrl = currentPage.url();
+      if (currentUrl && currentUrl !== 'about:blank') {
+        url = currentUrl;
+      }
+    }
+
+    let storageState: Awaited<ReturnType<BrowserContext['storageState']>> | undefined;
+    if (currentContext) {
+      try {
+        storageState = await currentContext.storageState();
+      } catch {
+        // Ignore errors - context might be closed or invalid
+      }
+    }
+
+    const session = process.env.AGENT_BROWSER_SESSION || 'default';
+    this.harTempDir = path.join(os.tmpdir(), `agent-browser-har-${session}-${Date.now()}`);
+    mkdirSync(this.harTempDir, { recursive: true });
+    this.harTempPath = path.join(this.harTempDir, 'recording.har');
+
+    const viewport = currentPage?.viewportSize() ?? { width: 1280, height: 720 };
+    this.harContext = await browser.newContext({
+      viewport,
+      recordHar: { path: this.harTempPath },
+      storageState,
+    });
+    this.harContext.setDefaultTimeout(10000);
+
+    this.harPage = await this.harContext.newPage();
+
+    this.contexts.push(this.harContext);
+    this.pages.push(this.harPage);
+    this.activePageIndex = this.pages.length - 1;
+
+    this.setupPageTracking(this.harPage);
+
+    await this.invalidateCDPSession();
+
+    if (url) {
+      await this.harPage.goto(url, { waitUntil: 'load' });
+    }
+  }
+
+  /**
+   * Stop HAR recording and save the file
+   */
+  async stopHarRecording(
+    outputPath: string
+  ): Promise<{ path: string; entries: number; error?: string }> {
+    if (!this.harContext || !this.harPage || !this.harTempPath) {
+      return { path: outputPath, entries: 0, error: 'No HAR recording in progress' };
+    }
+
+    if (existsSync(outputPath)) {
+      return { path: outputPath, entries: 0, error: `Output file already exists: ${outputPath}` };
+    }
+
+    const harContext = this.harContext;
+    const harPage = this.harPage;
+    const tempHarPath = this.harTempPath;
+    const tempHarDir = this.harTempDir;
+
+    try {
+      const pageIndex = this.pages.indexOf(harPage);
+      if (pageIndex !== -1) {
+        this.pages.splice(pageIndex, 1);
+      }
+      const contextIndex = this.contexts.indexOf(harContext);
+      if (contextIndex !== -1) {
+        this.contexts.splice(contextIndex, 1);
+      }
+
+      await harPage.close();
+      await harContext.close();
+
+      mkdirSync(path.dirname(outputPath), { recursive: true });
+
+      try {
+        renameSync(tempHarPath, outputPath);
+      } catch (error) {
+        const err = error as NodeJS.ErrnoException;
+        if (err.code === 'EXDEV') {
+          copyFileSync(tempHarPath, outputPath);
+          unlinkSync(tempHarPath);
+        } else {
+          throw error;
+        }
+      }
+
+      const entries = this.countHarEntries(outputPath);
+
+      if (tempHarDir) {
+        rmSync(tempHarDir, { recursive: true, force: true });
+      }
+
+      this.harContext = null;
+      this.harPage = null;
+      this.harTempPath = '';
+      this.harTempDir = '';
+
+      if (this.pages.length > 0) {
+        this.activePageIndex = Math.min(this.activePageIndex, this.pages.length - 1);
+      } else {
+        this.activePageIndex = 0;
+      }
+
+      await this.invalidateCDPSession();
+
+      return { path: outputPath, entries };
+    } catch (error) {
+      await harPage.close().catch(() => {});
+      await harContext.close().catch(() => {});
+
+      if (tempHarDir) {
+        rmSync(tempHarDir, { recursive: true, force: true });
+      }
+
+      this.harContext = null;
+      this.harPage = null;
+      this.harTempPath = '';
+      this.harTempDir = '';
+
+      if (this.pages.length > 0) {
+        this.activePageIndex = Math.min(this.activePageIndex, this.pages.length - 1);
+      } else {
+        this.activePageIndex = 0;
+      }
+
+      await this.invalidateCDPSession();
+
+      const message = error instanceof Error ? error.message : String(error);
+      return { path: outputPath, entries: 0, error: message };
+    }
   }
 
   /**
    * Check if HAR recording
    */
   isHarRecording(): boolean {
-    return this.isRecordingHar;
+    return this.harContext !== null;
+  }
+
+  private countHarEntries(harPath: string): number {
+    try {
+      const content = readFileSync(harPath, 'utf8');
+      const parsed = JSON.parse(content) as {
+        log?: {
+          entries?: unknown[];
+        };
+      };
+      if (Array.isArray(parsed.log?.entries)) {
+        return parsed.log.entries.length;
+      }
+      return 0;
+    } catch {
+      return 0;
+    }
   }
 
   /**
@@ -2468,6 +2646,29 @@ export class BrowserManager {
     // Stop recording if active (saves video)
     if (this.recordingContext) {
       await this.stopRecording();
+    }
+
+    // Stop HAR recording if active (discards temporary HAR)
+    if (this.harContext) {
+      if (this.harPage) {
+        const pageIndex = this.pages.indexOf(this.harPage);
+        if (pageIndex !== -1) {
+          this.pages.splice(pageIndex, 1);
+        }
+        await this.harPage.close().catch(() => {});
+      }
+      const contextIndex = this.contexts.indexOf(this.harContext);
+      if (contextIndex !== -1) {
+        this.contexts.splice(contextIndex, 1);
+      }
+      await this.harContext.close().catch(() => {});
+      if (this.harTempDir) {
+        rmSync(this.harTempDir, { recursive: true, force: true });
+      }
+      this.harContext = null;
+      this.harPage = null;
+      this.harTempPath = '';
+      this.harTempDir = '';
     }
 
     // Stop screencast if active
