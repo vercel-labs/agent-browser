@@ -350,10 +350,81 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
 
         // === Screenshot/PDF ===
         "screenshot" => {
+            // Extract --scale, --format, --quality flags before positional parsing
+            let mut filtered_rest: Vec<&str> = Vec::new();
+            let mut scale_value: Option<serde_json::Value> = None;
+            let mut format_value: Option<String> = None;
+            let mut quality_value: Option<u32> = None;
+            let mut i = 0;
+            while i < rest.len() {
+                if rest[i] == "--scale" {
+                    if let Some(val) = rest.get(i + 1) {
+                        match *val {
+                            "css" | "device" => {
+                                scale_value = Some(json!(val));
+                            }
+                            _ => {
+                                if let Ok(n) = val.parse::<f64>() {
+                                    if n > 0.0 {
+                                        scale_value = Some(json!(n));
+                                    } else {
+                                        return Err(ParseError::InvalidValue {
+                                            message: "Scale must be a positive number".to_string(),
+                                            usage: "screenshot [selector] [path] [--scale css|device|<number>] [--format png|jpeg|webp] [--quality 0-100]",
+                                        });
+                                    }
+                                } else {
+                                    return Err(ParseError::InvalidValue {
+                                        message: format!("Invalid scale value: '{}'. Use 'css', 'device', or a positive number", val),
+                                        usage: "screenshot [selector] [path] [--scale css|device|<number>] [--format png|jpeg|webp] [--quality 0-100]",
+                                    });
+                                }
+                            }
+                        }
+                        i += 2;
+                        continue;
+                    }
+                } else if rest[i] == "--format" {
+                    if let Some(val) = rest.get(i + 1) {
+                        match *val {
+                            "png" | "jpeg" | "webp" => {
+                                format_value = Some(val.to_string());
+                            }
+                            _ => {
+                                return Err(ParseError::InvalidValue {
+                                    message: format!("Invalid format: '{}'. Use 'png', 'jpeg', or 'webp'", val),
+                                    usage: "screenshot [selector] [path] [--format png|jpeg|webp]",
+                                });
+                            }
+                        }
+                        i += 2;
+                        continue;
+                    }
+                } else if rest[i] == "--quality" {
+                    if let Some(val) = rest.get(i + 1) {
+                        match val.parse::<u32>() {
+                            Ok(q) if q <= 100 => {
+                                quality_value = Some(q);
+                            }
+                            _ => {
+                                return Err(ParseError::InvalidValue {
+                                    message: format!("Invalid quality: '{}'. Use a number between 0 and 100", val),
+                                    usage: "screenshot [selector] [path] [--quality 0-100]",
+                                });
+                            }
+                        }
+                        i += 2;
+                        continue;
+                    }
+                }
+                filtered_rest.push(rest[i]);
+                i += 1;
+            }
+
             // screenshot [selector] [path]
             // selector: @ref or CSS selector
             // path: file path (contains / or . or ends with known extension)
-            let (selector, path) = match (rest.get(0), rest.get(1)) {
+            let (selector, path) = match (filtered_rest.get(0), filtered_rest.get(1)) {
                 (Some(first), Some(second)) => {
                     // Two args: first is selector, second is path
                     (Some(*first), Some(*second))
@@ -378,9 +449,28 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                 }
                 _ => (None, None),
             };
-            Ok(
-                json!({ "id": id, "action": "screenshot", "path": path, "selector": selector, "fullPage": flags.full }),
-            )
+            let mut cmd = json!({ "id": id, "action": "screenshot", "path": path, "selector": selector, "fullPage": flags.full });
+            if let Some(scale) = scale_value {
+                cmd["scale"] = scale;
+            }
+            // Format resolution: --format flag > file extension > env var > default (omit for server default)
+            let resolved_format = format_value.or_else(|| {
+                path.and_then(|p| {
+                    if p.ends_with(".webp") { Some("webp".to_string()) }
+                    else if p.ends_with(".jpg") || p.ends_with(".jpeg") { Some("jpeg".to_string()) }
+                    else if p.ends_with(".png") { Some("png".to_string()) }
+                    else { None }
+                })
+            }).or_else(|| flags.screenshot_format.clone());
+            if let Some(fmt) = resolved_format {
+                cmd["format"] = json!(fmt);
+            }
+            // Quality: --quality flag > env var > omit
+            let resolved_quality = quality_value.or(flags.screenshot_quality);
+            if let Some(q) = resolved_quality {
+                cmd["quality"] = json!(q);
+            }
+            Ok(cmd)
         }
         "pdf" => {
             let path = rest.get(0).ok_or_else(|| ParseError::MissingArguments {
@@ -1428,7 +1518,10 @@ mod tests {
             provider: None,
             ignore_https_errors: false,
             allow_file_access: false,
+            kiosk: false,
             device: None,
+            screenshot_format: None,
+            screenshot_quality: None,
             cli_executable_path: false,
             cli_extensions: false,
             cli_profile: false,
@@ -1438,6 +1531,7 @@ mod tests {
             cli_proxy: false,
             cli_proxy_bypass: false,
             cli_allow_file_access: false,
+            cli_kiosk: false,
         }
     }
 

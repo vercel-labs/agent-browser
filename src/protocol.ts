@@ -48,6 +48,7 @@ const launchSchema = baseCommandSchema.extend({
   ignoreHTTPSErrors: z.boolean().optional(),
   profile: z.string().optional(),
   storageState: z.string().optional(),
+  kiosk: z.boolean().optional(),
 });
 
 const navigateSchema = baseCommandSchema.extend({
@@ -711,8 +712,9 @@ const screenshotSchema = baseCommandSchema.extend({
   path: z.string().nullable().optional(),
   fullPage: z.boolean().optional(),
   selector: z.string().min(1).nullish(),
-  format: z.enum(['png', 'jpeg']).optional(),
+  format: z.enum(['png', 'jpeg', 'webp']).optional(),
   quality: z.number().min(0).max(100).optional(),
+  scale: z.union([z.enum(['css', 'device']), z.number().positive()]).optional(),
 });
 
 const snapshotSchema = baseCommandSchema.extend({

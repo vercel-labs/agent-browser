@@ -30,6 +30,7 @@ export interface LaunchCommand extends BaseCommand {
   provider?: string;
   ignoreHTTPSErrors?: boolean;
   allowFileAccess?: boolean; // Enable file:// URL access and cross-origin file requests
+  kiosk?: boolean; // Launch in kiosk mode (fullscreen, headed Chromium only)
 }
 
 export interface NavigateCommand extends BaseCommand {
@@ -747,8 +748,9 @@ export interface ScreenshotCommand extends BaseCommand {
   path?: string;
   fullPage?: boolean;
   selector?: string;
-  format?: 'png' | 'jpeg';
+  format?: 'png' | 'jpeg' | 'webp';
   quality?: number;
+  scale?: 'css' | 'device' | number;
 }
 
 export interface SnapshotCommand extends BaseCommand {

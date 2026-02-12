@@ -856,13 +856,22 @@ Examples:
             r##"
 agent-browser screenshot - Take a screenshot
 
-Usage: agent-browser screenshot [path]
+Usage: agent-browser screenshot [selector] [path] [options]
 
 Captures a screenshot of the current page. If no path is provided,
 saves to a temporary directory with a generated filename.
 
 Options:
-  --full, -f           Capture full page (not just viewport)
+  --full, -f                 Capture full page (not just viewport)
+  --format <png|jpeg|webp>   Image format (default: png, or inferred from path)
+  --quality <0-100>          Compression quality (jpeg and webp only)
+  --scale <css|device|N>     Screenshot scale factor (default: css)
+                             css: 1x logical pixels
+                             device: native device pixel ratio
+                             N: custom scale (e.g., 0.5, 1.5, 2)
+
+Format is auto-detected from file extension when not specified.
+Set defaults via AGENT_BROWSER_SCREENSHOT_FORMAT and AGENT_BROWSER_SCREENSHOT_QUALITY.
 
 Global Options:
   --json               Output as JSON
@@ -871,7 +880,10 @@ Global Options:
 Examples:
   agent-browser screenshot
   agent-browser screenshot ./screenshot.png
+  agent-browser screenshot ./shot.webp
+  agent-browser screenshot --format webp --quality 80
   agent-browser screenshot --full ./full-page.png
+  agent-browser screenshot --scale 0.5 ./half-res.png
 "##
         }
         "pdf" => {
@@ -1693,7 +1705,7 @@ Core Commands:
   scroll <dir> [px]          Scroll (up/down/left/right)
   scrollintoview <sel>       Scroll element into view
   wait <sel|ms>              Wait for element or time
-  screenshot [path]          Take screenshot
+  screenshot [path]          Take screenshot (--format png|jpeg|webp, --quality, --scale)
   pdf <path>                 Save as PDF
   snapshot                   Accessibility tree with refs (for AI)
   eval <js>                  Run JavaScript
@@ -1777,6 +1789,7 @@ Options:
   --json                     JSON output
   --full, -f                 Full page screenshot
   --headed                   Show browser window (not headless)
+  --kiosk                    Fullscreen kiosk mode (Chromium, implies --headed)
   --cdp <port>               Connect via CDP (Chrome DevTools Protocol)
   --debug                    Debug output
   --version, -V              Show version
@@ -1788,6 +1801,8 @@ Environment:
   AGENT_BROWSER_STREAM_PORT      Enable WebSocket streaming on port (e.g., 9223)
   AGENT_BROWSER_IOS_DEVICE       Default iOS device name
   AGENT_BROWSER_IOS_UDID         Default iOS device UDID
+  AGENT_BROWSER_SCREENSHOT_FORMAT     Default screenshot format (png, jpeg, webp)
+  AGENT_BROWSER_SCREENSHOT_QUALITY    Default screenshot quality (0-100, jpeg/webp)
 
 Examples:
   agent-browser open example.com

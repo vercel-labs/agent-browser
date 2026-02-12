@@ -19,7 +19,10 @@ pub struct Flags {
     pub provider: Option<String>,
     pub ignore_https_errors: bool,
     pub allow_file_access: bool,
+    pub kiosk: bool,
     pub device: Option<String>,
+    pub screenshot_format: Option<String>,
+    pub screenshot_quality: Option<u32>,
 
     // Track which launch-time options were explicitly passed via CLI
     // (as opposed to being set only via environment variables)
@@ -32,6 +35,7 @@ pub struct Flags {
     pub cli_proxy: bool,
     pub cli_proxy_bypass: bool,
     pub cli_allow_file_access: bool,
+    pub cli_kiosk: bool,
 }
 
 pub fn parse_flags(args: &[String]) -> Flags {
@@ -64,7 +68,10 @@ pub fn parse_flags(args: &[String]) -> Flags {
         provider: env::var("AGENT_BROWSER_PROVIDER").ok(),
         ignore_https_errors: false,
         allow_file_access: env::var("AGENT_BROWSER_ALLOW_FILE_ACCESS").is_ok(),
+        kiosk: false,
         device: env::var("AGENT_BROWSER_IOS_DEVICE").ok(),
+        screenshot_format: env::var("AGENT_BROWSER_SCREENSHOT_FORMAT").ok(),
+        screenshot_quality: env::var("AGENT_BROWSER_SCREENSHOT_QUALITY").ok().and_then(|s| s.parse().ok()),
         // Track CLI-passed flags (default false, set to true when flag is passed)
         cli_executable_path: false,
         cli_extensions: false,
@@ -75,6 +82,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
         cli_proxy: false,
         cli_proxy_bypass: false,
         cli_allow_file_access: false,
+        cli_kiosk: false,
     };
 
     let mut i = 0;
@@ -169,6 +177,10 @@ pub fn parse_flags(args: &[String]) -> Flags {
                 flags.allow_file_access = true;
                 flags.cli_allow_file_access = true;
             }
+            "--kiosk" => {
+                flags.kiosk = true;
+                flags.cli_kiosk = true;
+            }
             "--device" => {
                 if let Some(d) = args.get(i + 1) {
                     flags.device = Some(d.clone());
@@ -194,6 +206,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--debug",
         "--ignore-https-errors",
         "--allow-file-access",
+        "--kiosk",
     ];
     // Global flags that take a value (need to skip the next arg too)
     const GLOBAL_FLAGS_WITH_VALUE: &[&str] = &[

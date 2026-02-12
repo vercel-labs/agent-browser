@@ -1,5 +1,5 @@
 import type { Page, Frame } from 'playwright-core';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import type { BrowserManager, ScreencastFrame } from './browser.js';
 import { getAppDir } from './daemon.js';
@@ -490,6 +490,8 @@ async function handleNavigate(
     waitUntil: command.waitUntil ?? 'load',
   });
 
+  await browser.applyKioskFullscreen();
+
   return successResponse(command.id, {
     url: page.url(),
     title: await page.title(),
@@ -549,13 +551,33 @@ async function handleScreenshot(
 ): Promise<Response<ScreenshotData>> {
   const page = browser.getPage();
 
+  // Resolve format: explicit > file extension > default png
+  let format = command.format;
+  if (!format && command.path) {
+    const ext = command.path.split('.').pop()?.toLowerCase();
+    if (ext === 'webp') format = 'webp';
+    else if (ext === 'jpg' || ext === 'jpeg') format = 'jpeg';
+    else if (ext === 'png') format = 'png';
+  }
+  format = format ?? 'png';
+
   const options: Parameters<Page['screenshot']>[0] = {
     fullPage: command.fullPage,
-    type: command.format ?? 'png',
+    type: format === 'webp' ? 'png' : format, // Playwright doesn't support webp, use png as placeholder
   };
 
-  if (command.format === 'jpeg' && command.quality !== undefined) {
+  if ((format === 'jpeg' || format === 'webp') && command.quality !== undefined) {
     options.quality = command.quality;
+  }
+
+  // Default scale to 'css' (1x) when not specified
+  const scale = command.scale ?? 'css';
+  const isNumericScale = typeof scale === 'number';
+  const needsCDP = format === 'webp'; // Playwright doesn't support webp, must use CDP
+
+  // For string values ('css'/'device'), pass directly to Playwright
+  if (!isNumericScale) {
+    options.scale = scale;
   }
 
   let target: Page | ReturnType<Page['locator']> = page;
@@ -566,7 +588,7 @@ async function handleScreenshot(
   try {
     let savePath = command.path;
     if (!savePath) {
-      const ext = command.format === 'jpeg' ? 'jpg' : 'png';
+      const ext = format === 'jpeg' ? 'jpg' : format;
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
       const random = Math.random().toString(36).substring(2, 8);
       const filename = `screenshot-${timestamp}-${random}.${ext}`;
@@ -575,7 +597,39 @@ async function handleScreenshot(
       savePath = path.join(screenshotDir, filename);
     }
 
-    await target.screenshot({ ...options, path: savePath });
+    // For numeric scale, use CDP Page.captureScreenshot directly since
+    // Playwright's page.screenshot() ignores CDP device metrics overrides.
+    // Falls back to Playwright for selector-scoped screenshots (CDP can't clip to elements).
+    if ((isNumericScale || needsCDP) && !command.selector) {
+      const viewport = page.viewportSize() ?? { width: 1280, height: 720 };
+      if (isNumericScale) {
+        await browser.setDeviceScaleFactor(scale as number, viewport.width, viewport.height);
+      }
+      try {
+        const cdp = await browser.getCDPSession();
+        const cdpFormat = format === 'jpeg' ? 'jpeg' : format === 'webp' ? 'webp' : 'png';
+        const cdpParams: Record<string, unknown> = {
+          format: cdpFormat,
+          captureBeyondViewport: !!command.fullPage,
+        };
+        if ((cdpFormat === 'jpeg' || cdpFormat === 'webp') && command.quality !== undefined) {
+          cdpParams.quality = command.quality;
+        }
+        const result = await cdp.send('Page.captureScreenshot', cdpParams);
+        writeFileSync(savePath, Buffer.from((result as { data: string }).data, 'base64'));
+      } finally {
+        if (isNumericScale) {
+          await browser.clearDeviceMetricsOverride();
+        }
+      }
+    } else if (isNumericScale && command.selector) {
+      // Selector + numeric scale: CDP can't clip to elements, fall back to Playwright.
+      // The numeric scale won't apply since Playwright ignores CDP device metrics.
+      await target.screenshot({ ...options, scale: 'device', path: savePath });
+    } else {
+      await target.screenshot({ ...options, path: savePath });
+    }
+
     return successResponse(command.id, { path: savePath });
   } catch (error) {
     if (command.selector) {
