@@ -67,7 +67,7 @@
   "dependencies": {
     "node-simctl": "^7.4.0",
     "playwright-core": "^1.57.0",
-    "webdriverio": "^9.15.0",
+    "webdriverio": "^9.24.0",
     "ws": "^8.19.0",
     "zod": "^3.22.4"
   },
@@ -85,5 +85,11 @@
   },
   "lint-staged": {
     "src/**/*.ts": "prettier --write"
+  },
+  "pnpm": {
+    "overrides": {
+      "glob": "^11.0.3",
+      "lodash": "^4.17.23"
+    }
   }
 }
