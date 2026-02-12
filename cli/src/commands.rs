@@ -814,6 +814,14 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
             })?;
             Ok(json!({ "id": id, "action": "highlight", "selector": sel }))
         }
+        "selector" => {
+            let ref_arg = rest.get(0).ok_or_else(|| ParseError::MissingArguments {
+                context: "selector".to_string(),
+                usage: "selector <@ref> [--all]",
+            })?;
+            let all = rest.iter().any(|&s| s == "--all" || s == "-a");
+            Ok(json!({ "id": id, "action": "selector", "selector": ref_arg, "all": all }))
+        }
 
         // === State ===
         "state" => {
@@ -2462,5 +2470,37 @@ mod tests {
         let cmd = parse_command(&args("connect 1"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "launch");
         assert_eq!(cmd["cdpPort"], 1);
+    }
+
+    #[test]
+    fn test_selector_basic() {
+        let cmd = parse_command(&args("selector @e1"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "selector");
+        assert_eq!(cmd["selector"], "@e1");
+        assert_eq!(cmd["all"], false);
+    }
+
+    #[test]
+    fn test_selector_with_all_flag() {
+        let cmd = parse_command(&args("selector @e5 --all"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "selector");
+        assert_eq!(cmd["selector"], "@e5");
+        assert_eq!(cmd["all"], true);
+    }
+
+    #[test]
+    fn test_selector_with_short_all_flag() {
+        let cmd = parse_command(&args("selector @e10 -a"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "selector");
+        assert_eq!(cmd["selector"], "@e10");
+        assert_eq!(cmd["all"], true);
+    }
+
+    #[test]
+    fn test_selector_missing_ref() {
+        let result = parse_command(&args("selector"), &default_flags());
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, ParseError::MissingArguments { .. }));
     }
 }

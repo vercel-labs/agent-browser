@@ -1485,6 +1485,42 @@ Examples:
 "##
         }
 
+        // === Selector ===
+        "selector" => {
+            r##"
+agent-browser selector - Extract stable CSS selectors from element refs
+
+Usage: agent-browser selector <@ref> [--all]
+
+Extracts stable CSS selectors from element refs (@e1, @e2, etc.) for use
+in deterministic scripts across sessions. This is useful when you want to
+convert a snapshot ref into a reusable selector for automation scripts.
+
+Arguments:
+  <@ref>               Element reference from snapshot (e.g., @e1, @e2)
+
+Options:
+  -a, --all            Return all candidate selectors (not just the best one)
+
+Selector Priority (by stability):
+  1. data-testid
+  2. id (if not auto-generated)
+  3. aria-label
+  4. Test attributes (data-cy, data-qa, data-test, data-e2e)
+  5. Unique class combinations (filters utility classes)
+  6. Structural path with nth-of-type (last resort)
+
+Global Options:
+  --json               Output as JSON
+  --session <name>     Use specific session
+
+Examples:
+  agent-browser selector @e1              # Get best stable selector
+  agent-browser selector @e5 --all        # Get all candidate selectors
+  agent-browser selector @e3 -a           # Short form of --all
+"##
+        }
+
         // === State ===
         "state" => {
             r##"
@@ -1696,6 +1732,7 @@ Core Commands:
   screenshot [path]          Take screenshot
   pdf <path>                 Save as PDF
   snapshot                   Accessibility tree with refs (for AI)
+  selector <@ref>            Get stable CSS selector from ref
   eval <js>                  Run JavaScript
   connect <port|url>         Connect to browser via CDP
   close                      Close browser
@@ -1794,6 +1831,7 @@ Examples:
   agent-browser snapshot -i              # Interactive elements only
   agent-browser click @e2                # Click by ref from snapshot
   agent-browser fill @e3 "test@example.com"
+  agent-browser selector @e2             # Get stable CSS selector from ref
   agent-browser find role button click --name Submit
   agent-browser get text @e1
   agent-browser screenshot --full

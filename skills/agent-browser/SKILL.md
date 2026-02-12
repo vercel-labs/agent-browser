@@ -191,6 +191,20 @@ agent-browser find placeholder "Search" type "query"
 agent-browser find testid "submit-btn" click
 ```
 
+## Extract Stable Selectors
+
+Convert refs to stable CSS selectors for deterministic scripts that work across sessions:
+
+```bash
+agent-browser selector @e1              # Get best stable selector
+# Output: {"selector":"[data-testid=\"submit-btn\"]","type":"testid"}
+
+agent-browser selector @e1 --all        # Get all candidates
+# Output: {"candidates":[{"selector":"[data-testid=\"submit-btn\"]","type":"testid"},{"selector":"#submit","type":"id"}]}
+```
+
+**Selector types (by stability):** `testid` > `id` > `aria-label` > `data-cy`/`data-qa`/`data-test` > `class` > `structural`
+
 ## Deep-Dive Documentation
 
 | Reference | When to Use |

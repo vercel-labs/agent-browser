@@ -243,6 +243,8 @@ agent-browser console --clear             # Clear console
 agent-browser errors                      # View page errors
 agent-browser errors --clear              # Clear errors
 agent-browser highlight @e1               # Highlight element
+agent-browser selector @e1                # Get stable CSS selector from ref
+agent-browser selector @e1 --all          # Get all candidate selectors
 agent-browser trace start                 # Start recording trace
 agent-browser trace stop trace.zip        # Stop and save trace
 ```

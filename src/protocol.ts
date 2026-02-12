@@ -427,6 +427,12 @@ const highlightSchema = baseCommandSchema.extend({
   selector: z.string().min(1),
 });
 
+const selectorSchema = baseCommandSchema.extend({
+  action: z.literal('selector'),
+  selector: z.string().min(1),
+  all: z.boolean().optional(),
+});
+
 const clearSchema = baseCommandSchema.extend({
   action: z.literal('clear'),
   selector: z.string().min(1),
@@ -877,6 +883,7 @@ const commandSchema = z.discriminatedUnion('action', [
   tapSchema,
   clipboardSchema,
   highlightSchema,
+  selectorSchema,
   clearSchema,
   selectAllSchema,
   innerTextSchema,

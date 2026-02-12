@@ -641,6 +641,13 @@ export interface HighlightCommand extends BaseCommand {
   selector: string;
 }
 
+// Extract stable selector from ref
+export interface SelectorCommand extends BaseCommand {
+  action: 'selector';
+  selector: string;
+  all?: boolean;
+}
+
 // Clear input
 export interface ClearCommand extends BaseCommand {
   action: 'clear';
@@ -904,6 +911,7 @@ export type Command =
   | TapCommand
   | ClipboardCommand
   | HighlightCommand
+  | SelectorCommand
   | ClearCommand
   | SelectAllCommand
   | InnerTextCommand

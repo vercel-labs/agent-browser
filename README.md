@@ -230,6 +230,8 @@ agent-browser console --clear         # Clear console
 agent-browser errors                  # View page errors (uncaught JavaScript exceptions)
 agent-browser errors --clear          # Clear errors
 agent-browser highlight <sel>         # Highlight element
+agent-browser selector <@ref>         # Get stable CSS selector from ref
+agent-browser selector <@ref> --all   # Get all candidate selectors
 agent-browser state save <path>       # Save auth state
 agent-browser state load <path>       # Load auth state
 ```
@@ -397,6 +399,28 @@ agent-browser click "xpath=//button"
 agent-browser find role button click --name "Submit"
 agent-browser find label "Email" fill "test@test.com"
 ```
+
+### Extract Stable Selectors
+
+Convert refs to stable CSS selectors for use in deterministic scripts:
+
+```bash
+# Get the best stable selector for an element
+agent-browser selector @e1
+# Output: {"selector":"[data-testid=\"submit-btn\"]","type":"testid"}
+
+# Get all candidate selectors (sorted by stability)
+agent-browser selector @e1 --all
+# Output: {"candidates":[{"selector":"[data-testid=\"submit-btn\"]","type":"testid"},{"selector":"#submit","type":"id"}]}
+```
+
+**Selector types (in priority order):**
+- `testid` - `data-testid` attribute (most stable)
+- `id` - Element ID (if not auto-generated)
+- `aria-label` - ARIA label attribute
+- `data-cy`, `data-qa`, `data-test`, `data-e2e` - Test attributes
+- `class` - Unique class combinations (filters utility classes)
+- `structural` - CSS path with `nth-of-type` (last resort)
 
 ## Agent Mode
 
