@@ -157,6 +157,7 @@ import type {
   RecordingStartData,
   RecordingStopData,
   RecordingRestartData,
+  HarStopData,
   InputEventData,
   StylesData,
 } from './types.js';
@@ -1755,18 +1756,15 @@ async function handleHarStart(
   browser: BrowserManager
 ): Promise<Response> {
   await browser.startHarRecording();
-  browser.startRequestTracking();
   return successResponse(command.id, { started: true });
 }
 
-async function handleHarStop(command: HarStopCommand, browser: BrowserManager): Promise<Response> {
-  // HAR recording is handled at context level
-  // For now, we save tracked requests as a simplified HAR-like format
-  const requests = browser.getRequests();
-  return successResponse(command.id, {
-    path: command.path,
-    requestCount: requests.length,
-  });
+async function handleHarStop(
+  command: HarStopCommand,
+  browser: BrowserManager
+): Promise<Response<HarStopData>> {
+  const result = await browser.stopHarRecording(command.path);
+  return successResponse(command.id, result);
 }
 
 async function handleStateSave(
