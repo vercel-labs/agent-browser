@@ -143,18 +143,44 @@ pub fn run_install(with_deps: bool) {
 
     println!("{}", color::cyan("Installing Chromium browser..."));
 
+    // Determine the package directory to use the correct Playwright version.
+    // The daemon.js is located at <pkg>/dist/daemon.js or <pkg>/daemon.js.
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+
+    let pkg_dir = exe_dir.as_ref().and_then(|dir| {
+        // Try to find node_modules relative to the binary
+        let candidates = [
+            dir.join(".."),           // exe in <pkg>/bin/ or <pkg>/dist/
+            dir.join("../.."),        // exe in <pkg>/node_modules/.bin/
+            dir.to_path_buf(),        // exe in <pkg>/
+        ];
+        candidates.into_iter().find(|d| d.join("node_modules/playwright-core").exists())
+    });
+
+    // Use the project-local playwright-core CLI if available to ensure version alignment.
+    // This prevents installing a mismatched browser version (#107).
     // On Windows, we need to use cmd.exe to run npx because npx is actually npx.cmd
     // and Command::new() doesn't resolve .cmd files the way the shell does.
-    // Pass the entire command as a single string to /c to handle paths with spaces.
-    #[cfg(windows)]
-    let status = Command::new("cmd")
-        .args(["/c", "npx playwright install chromium"])
-        .status();
-
-    #[cfg(not(windows))]
-    let status = Command::new("npx")
-        .args(["playwright", "install", "chromium"])
-        .status();
+    let status = if let Some(ref dir) = pkg_dir {
+        let pw_cli = dir.join("node_modules/playwright-core/cli.js");
+        if pw_cli.exists() {
+            Command::new("node")
+                .args([pw_cli.to_string_lossy().as_ref(), "install", "chromium"])
+                .status()
+        } else {
+            #[cfg(windows)]
+            { Command::new("cmd").args(["/c", "npx playwright-core install chromium"]).current_dir(dir).status() }
+            #[cfg(not(windows))]
+            { Command::new("npx").args(["playwright-core", "install", "chromium"]).current_dir(dir).status() }
+        }
+    } else {
+        #[cfg(windows)]
+        { Command::new("cmd").args(["/c", "npx playwright-core install chromium"]).status() }
+        #[cfg(not(windows))]
+        { Command::new("npx").args(["playwright-core", "install", "chromium"]).status()  }
+    };
 
     match status {
         Ok(s) if s.success() => {
