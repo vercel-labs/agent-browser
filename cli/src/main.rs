@@ -415,6 +415,7 @@ fn main() {
 
     // Launch headed browser or configure browser options (without CDP or provider)
     if (flags.headed
+        || flags.executable_path.is_some()
         || flags.profile.is_some()
         || flags.state.is_some()
         || flags.proxy.is_some()
@@ -433,6 +434,11 @@ fn main() {
         let cmd_obj = launch_cmd
             .as_object_mut()
             .expect("json! macro guarantees object type");
+
+        // Add executable path if specified
+        if let Some(ref exec_path) = flags.executable_path {
+            cmd_obj.insert("executablePath".to_string(), json!(exec_path));
+        }
 
         // Add profile path if specified
         if let Some(ref profile_path) = flags.profile {
