@@ -92,17 +92,16 @@ pub fn get_socket_dir() -> PathBuf {
     }
 
     // 2. XDG_RUNTIME_DIR (Linux standard, ignore empty string)
-    // Only use if the directory exists and is writable (avoids WSL permission issues)
+    // Always test writability to match daemon behavior (avoids WSL permission issues)
     if let Ok(runtime_dir) = env::var("XDG_RUNTIME_DIR") {
         if !runtime_dir.is_empty() {
             let candidate = PathBuf::from(&runtime_dir).join("agent-browser");
-            if candidate.exists()
-                || fs::create_dir_all(&candidate)
-                    .and_then(|_| {
-                        let test = candidate.join(".write_test");
-                        fs::write(&test, b"").and_then(|_| fs::remove_file(&test))
-                    })
-                    .is_ok()
+            if fs::create_dir_all(&candidate)
+                .and_then(|_| {
+                    let test = candidate.join(".write_test");
+                    fs::write(&test, b"").and_then(|_| fs::remove_file(&test))
+                })
+                .is_ok()
             {
                 return candidate;
             }

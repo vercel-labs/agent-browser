@@ -86,6 +86,7 @@ export class BrowserManager {
   private dialogHandler: ((dialog: Dialog) => Promise<void>) | null = null;
   private trackedRequests: TrackedRequest[] = [];
   private isTrackingRequests: boolean = false;
+  private isTrackingBodies: boolean = false;
   private routes: Map<string, (route: Route) => Promise<void>> = new Map();
   private consoleMessages: ConsoleMessage[] = [];
   private pageErrors: PageError[] = [];
@@ -307,6 +308,8 @@ export class BrowserManager {
    * Start tracking requests
    */
   startRequestTracking(includeBody?: boolean): void {
+    // Allow upgrading to body tracking even if already tracking
+    if (includeBody) this.isTrackingBodies = true;
     if (this.isTrackingRequests) return;
     this.isTrackingRequests = true;
     const page = this.getPage();
@@ -326,7 +329,7 @@ export class BrowserManager {
       if (tracked) {
         tracked.status = response.status();
         tracked.responseHeaders = response.headers();
-        if (includeBody) {
+        if (this.isTrackingBodies) {
           try {
             tracked.responseBody = await response.text();
           } catch {
