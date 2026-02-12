@@ -263,6 +263,10 @@ export async function executeIOSCommand(command: Command, manager: IOSManager): 
       case 'recording_restart':
         return errorResponse(id, 'Video recording is not yet supported on iOS.');
 
+      case 'har_start':
+      case 'har_stop':
+        return errorResponse(id, 'HAR recording is not yet supported on iOS.');
+
       default:
         return errorResponse(id, `Unknown or unsupported iOS command: ${action}`);
     }
