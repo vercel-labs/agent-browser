@@ -1115,10 +1115,17 @@ export class BrowserManager {
     const fileAccessArgs = options.allowFileAccess
       ? ['--allow-file-access-from-files', '--allow-file-access']
       : [];
+    // Chromium refuses to run as root without --no-sandbox
+    const isRoot =
+      process.platform !== 'win32' &&
+      typeof process.getuid === 'function' &&
+      process.getuid() === 0;
+    const sandboxArgs = isRoot ? ['--no-sandbox'] : [];
+    const extraArgs = [...fileAccessArgs, ...sandboxArgs];
     const baseArgs = options.args
-      ? [...fileAccessArgs, ...options.args]
-      : fileAccessArgs.length > 0
-        ? fileAccessArgs
+      ? [...extraArgs, ...options.args]
+      : extraArgs.length > 0
+        ? extraArgs
         : undefined;
 
     let context: BrowserContext;
