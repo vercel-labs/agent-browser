@@ -59,7 +59,9 @@ const navigateSchema = baseCommandSchema.extend({
 
 const clickSchema = baseCommandSchema.extend({
   action: z.literal('click'),
-  selector: z.string().min(1),
+  selector: z.string().min(1).optional(),
+  x: z.number().optional(),
+  y: z.number().optional(),
   button: z.enum(['left', 'right', 'middle']).optional(),
   clickCount: z.number().positive().optional(),
   delay: z.number().nonnegative().optional(),

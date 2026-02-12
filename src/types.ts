@@ -41,7 +41,9 @@ export interface NavigateCommand extends BaseCommand {
 
 export interface ClickCommand extends BaseCommand {
   action: 'click';
-  selector: string;
+  selector?: string;
+  x?: number;
+  y?: number;
   button?: 'left' | 'right' | 'middle';
   clickCount?: number;
   delay?: number;
