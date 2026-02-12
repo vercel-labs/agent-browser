@@ -1,5 +1,11 @@
 # agent-browser
 
+## 0.9.3
+
+### Patch Changes
+
+- d03e238: Added support for custom executable path in CLI browser launch options. Documentation site received UI improvements including a new chat component with sheet-based interface and updated dependencies.
+
 ## 0.9.2
 
 ### Patch Changes
