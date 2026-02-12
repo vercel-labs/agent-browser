@@ -192,6 +192,19 @@ async function safeUncheck(locator: import('playwright-core').Locator): Promise<
 }
 
 /**
+ * Apply a positional modifier (first/last/nth) to a Playwright locator.
+ * position 0 = first, -1 = last, any other number = nth(n).
+ */
+function applyPosition(
+  locator: import('playwright-core').Locator,
+  position?: number
+): import('playwright-core').Locator {
+  if (position === undefined) return locator;
+  if (position === -1) return locator.last();
+  return locator.nth(position);
+}
+
+/**
  * Convert Playwright errors to AI-friendly messages
  * @internal Exported for testing
  */
@@ -934,7 +947,8 @@ async function handleGetByRole(
   browser: BrowserManager
 ): Promise<Response> {
   const page = browser.getPage();
-  const locator = page.getByRole(command.role as any, { name: command.name, exact: command.exact });
+  const base = page.getByRole(command.role as any, { name: command.name, exact: command.exact });
+  const locator = applyPosition(base, command.position);
 
   switch (command.subaction) {
     case 'click':
@@ -957,7 +971,8 @@ async function handleGetByText(
   browser: BrowserManager
 ): Promise<Response> {
   const page = browser.getPage();
-  const locator = page.getByText(command.text, { exact: command.exact });
+  const base = page.getByText(command.text, { exact: command.exact });
+  const locator = applyPosition(base, command.position);
 
   switch (command.subaction) {
     case 'click':
@@ -974,7 +989,8 @@ async function handleGetByLabel(
   browser: BrowserManager
 ): Promise<Response> {
   const page = browser.getPage();
-  const locator = page.getByLabel(command.label, { exact: command.exact });
+  const base = page.getByLabel(command.label, { exact: command.exact });
+  const locator = applyPosition(base, command.position);
 
   switch (command.subaction) {
     case 'click':
@@ -994,7 +1010,8 @@ async function handleGetByPlaceholder(
   browser: BrowserManager
 ): Promise<Response> {
   const page = browser.getPage();
-  const locator = page.getByPlaceholder(command.placeholder, { exact: command.exact });
+  const base = page.getByPlaceholder(command.placeholder, { exact: command.exact });
+  const locator = applyPosition(base, command.position);
 
   switch (command.subaction) {
     case 'click':
@@ -1697,7 +1714,8 @@ async function handleGetByAltText(
   browser: BrowserManager
 ): Promise<Response> {
   const page = browser.getPage();
-  const locator = page.getByAltText(command.text, { exact: command.exact });
+  const base = page.getByAltText(command.text, { exact: command.exact });
+  const locator = applyPosition(base, command.position);
 
   switch (command.subaction) {
     case 'click':
@@ -1714,7 +1732,8 @@ async function handleGetByTitle(
   browser: BrowserManager
 ): Promise<Response> {
   const page = browser.getPage();
-  const locator = page.getByTitle(command.text, { exact: command.exact });
+  const base = page.getByTitle(command.text, { exact: command.exact });
+  const locator = applyPosition(base, command.position);
 
   switch (command.subaction) {
     case 'click':
@@ -1731,7 +1750,8 @@ async function handleGetByTestId(
   browser: BrowserManager
 ): Promise<Response> {
   const page = browser.getPage();
-  const locator = page.getByTestId(command.testId);
+  const base = page.getByTestId(command.testId);
+  const locator = applyPosition(base, command.position);
 
   switch (command.subaction) {
     case 'click':

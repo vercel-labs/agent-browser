@@ -129,6 +129,7 @@ const getByRoleSchema = baseCommandSchema.extend({
   exact: z.boolean().optional(),
   subaction: z.enum(['click', 'fill', 'check', 'hover']),
   value: z.string().optional(),
+  position: z.number().optional(),
 });
 
 const getByTextSchema = baseCommandSchema.extend({
@@ -136,6 +137,7 @@ const getByTextSchema = baseCommandSchema.extend({
   text: z.string().min(1),
   exact: z.boolean().optional(),
   subaction: z.enum(['click', 'hover']),
+  position: z.number().optional(),
 });
 
 const getByLabelSchema = baseCommandSchema.extend({
@@ -144,6 +146,7 @@ const getByLabelSchema = baseCommandSchema.extend({
   exact: z.boolean().optional(),
   subaction: z.enum(['click', 'fill', 'check']),
   value: z.string().optional(),
+  position: z.number().optional(),
 });
 
 const getByPlaceholderSchema = baseCommandSchema.extend({
@@ -152,6 +155,7 @@ const getByPlaceholderSchema = baseCommandSchema.extend({
   exact: z.boolean().optional(),
   subaction: z.enum(['click', 'fill']),
   value: z.string().optional(),
+  position: z.number().optional(),
 });
 
 const cookiesGetSchema = baseCommandSchema.extend({
@@ -514,6 +518,7 @@ const getByAltTextSchema = baseCommandSchema.extend({
   text: z.string().min(1),
   exact: z.boolean().optional(),
   subaction: z.enum(['click', 'hover']),
+  position: z.number().optional(),
 });
 
 const getByTitleSchema = baseCommandSchema.extend({
@@ -521,6 +526,7 @@ const getByTitleSchema = baseCommandSchema.extend({
   text: z.string().min(1),
   exact: z.boolean().optional(),
   subaction: z.enum(['click', 'hover']),
+  position: z.number().optional(),
 });
 
 const getByTestIdSchema = baseCommandSchema.extend({
@@ -528,6 +534,7 @@ const getByTestIdSchema = baseCommandSchema.extend({
   testId: z.string().min(1),
   subaction: z.enum(['click', 'fill', 'check', 'hover']),
   value: z.string().optional(),
+  position: z.number().optional(),
 });
 
 const nthSchema = baseCommandSchema.extend({

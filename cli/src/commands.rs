@@ -1031,21 +1031,36 @@ fn parse_find(rest: &[&str], id: &str) -> Result<Value, ParseError> {
             let value = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
                 context: format!("find {}", locator),
                 usage: match *locator {
-                    "role" => "find role <role> [action] [--name <name>] [--exact]",
-                    "text" => "find text <text> [action] [--exact]",
-                    "label" => "find label <label> [action] [text] [--exact]",
-                    "placeholder" => "find placeholder <text> [action] [text] [--exact]",
-                    "alt" => "find alt <text> [action] [--exact]",
-                    "title" => "find title <text> [action] [--exact]",
-                    "testid" => "find testid <id> [action] [text]",
+                    "role" => "find role <role> [first|last|nth <n>] [action] [--name <name>] [--exact]",
+                    "text" => "find text <text> [first|last] [action] [--exact]",
+                    "label" => "find label <label> [first|last] [action] [text] [--exact]",
+                    "placeholder" => "find placeholder <text> [first|last] [action] [text] [--exact]",
+                    "alt" => "find alt <text> [first|last] [action] [--exact]",
+                    "title" => "find title <text> [first|last] [action] [--exact]",
+                    "testid" => "find testid <id> [first|last] [action] [text]",
                     "first" => "find first <selector> [action] [text]",
                     "last" => "find last <selector> [action] [text]",
                     _ => "find <locator> <value> [action] [text]",
                 },
             })?;
-            let subaction = rest.get(2).unwrap_or(&"click");
-            let fill_value = if rest.len() > 3 {
-                Some(rest[3..].join(" "))
+
+            // Detect positional modifiers (first/last/nth) after locator value.
+            // Example: find role spinbutton first fill '20'
+            //   rest[0]=role, rest[1]=spinbutton, rest[2]=first, rest[3]=fill, rest[4]=20
+            let maybe_modifier = rest.get(2).map(|s| *s);
+            let (position, action_offset) = match maybe_modifier {
+                Some("first") => (Some(0i64), 3usize),
+                Some("last") => (Some(-1i64), 3usize),
+                Some("nth") => {
+                    let nth_idx = rest.get(3).and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
+                    (Some(nth_idx), 4usize)
+                }
+                _ => (None, 2usize),
+            };
+
+            let subaction = rest.get(action_offset).unwrap_or(&"click");
+            let fill_value = if rest.len() > action_offset + 1 {
+                Some(rest[action_offset + 1..].join(" "))
             } else {
                 None
             };
@@ -1056,15 +1071,25 @@ fn parse_find(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                     if let Some(v) = fill_value {
                         cmd["value"] = json!(v);
                     }
+                    if let Some(p) = position {
+                        cmd["position"] = json!(p);
+                    }
                     Ok(cmd)
                 }
-                "text" => Ok(
-                    json!({ "id": id, "action": "getbytext", "text": value, "subaction": subaction, "exact": exact }),
-                ),
+                "text" => {
+                    let mut cmd = json!({ "id": id, "action": "getbytext", "text": value, "subaction": subaction, "exact": exact });
+                    if let Some(p) = position {
+                        cmd["position"] = json!(p);
+                    }
+                    Ok(cmd)
+                }
                 "label" => {
                     let mut cmd = json!({ "id": id, "action": "getbylabel", "label": value, "subaction": subaction, "exact": exact });
                     if let Some(v) = fill_value {
                         cmd["value"] = json!(v);
+                    }
+                    if let Some(p) = position {
+                        cmd["position"] = json!(p);
                     }
                     Ok(cmd)
                 }
@@ -1073,18 +1098,32 @@ fn parse_find(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                     if let Some(v) = fill_value {
                         cmd["value"] = json!(v);
                     }
+                    if let Some(p) = position {
+                        cmd["position"] = json!(p);
+                    }
                     Ok(cmd)
                 }
-                "alt" => Ok(
-                    json!({ "id": id, "action": "getbyalttext", "text": value, "subaction": subaction, "exact": exact }),
-                ),
-                "title" => Ok(
-                    json!({ "id": id, "action": "getbytitle", "text": value, "subaction": subaction, "exact": exact }),
-                ),
+                "alt" => {
+                    let mut cmd = json!({ "id": id, "action": "getbyalttext", "text": value, "subaction": subaction, "exact": exact });
+                    if let Some(p) = position {
+                        cmd["position"] = json!(p);
+                    }
+                    Ok(cmd)
+                }
+                "title" => {
+                    let mut cmd = json!({ "id": id, "action": "getbytitle", "text": value, "subaction": subaction, "exact": exact });
+                    if let Some(p) = position {
+                        cmd["position"] = json!(p);
+                    }
+                    Ok(cmd)
+                }
                 "testid" => {
                     let mut cmd = json!({ "id": id, "action": "getbytestid", "testId": value, "subaction": subaction });
                     if let Some(v) = fill_value {
                         cmd["value"] = json!(v);
+                    }
+                    if let Some(p) = position {
+                        cmd["position"] = json!(p);
                     }
                     Ok(cmd)
                 }
@@ -2259,6 +2298,72 @@ mod tests {
     }
 
     // === Protocol alignment tests ===
+
+    #[test]
+    fn test_find_role_first_modifier() {
+        let cmd = parse_command(
+            &args("find role spinbutton first fill 20"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "getbyrole");
+        assert_eq!(cmd["role"], "spinbutton");
+        assert_eq!(cmd["subaction"], "fill");
+        assert_eq!(cmd["value"], "20");
+        assert_eq!(cmd["position"], 0);
+    }
+
+    #[test]
+    fn test_find_role_last_modifier() {
+        let cmd = parse_command(
+            &args("find role button last click"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "getbyrole");
+        assert_eq!(cmd["role"], "button");
+        assert_eq!(cmd["subaction"], "click");
+        assert_eq!(cmd["position"], -1);
+    }
+
+    #[test]
+    fn test_find_text_first_modifier() {
+        let cmd = parse_command(
+            &args("find text Submit first click"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "getbytext");
+        assert_eq!(cmd["text"], "Submit");
+        assert_eq!(cmd["subaction"], "click");
+        assert_eq!(cmd["position"], 0);
+    }
+
+    #[test]
+    fn test_find_role_without_modifier() {
+        let cmd = parse_command(
+            &args("find role button click"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "getbyrole");
+        assert_eq!(cmd["role"], "button");
+        assert_eq!(cmd["subaction"], "click");
+        assert!(cmd.get("position").is_none() || cmd["position"].is_null());
+    }
+
+    #[test]
+    fn test_find_role_nth_modifier() {
+        let cmd = parse_command(
+            &args("find role button nth 2 click"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "getbyrole");
+        assert_eq!(cmd["role"], "button");
+        assert_eq!(cmd["subaction"], "click");
+        assert_eq!(cmd["position"], 2);
+    }
 
     #[test]
     fn test_mouse_wheel() {
