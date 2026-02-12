@@ -134,11 +134,32 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
 
         // === Core Actions ===
         "click" => {
-            let sel = rest.get(0).ok_or_else(|| ParseError::MissingArguments {
-                context: "click".to_string(),
-                usage: "click <selector>",
-            })?;
-            Ok(json!({ "id": id, "action": "click", "selector": sel }))
+            // Support: click <selector> OR click --x 100 --y 200
+            let x_idx = rest.iter().position(|&s| s == "--x");
+            let y_idx = rest.iter().position(|&s| s == "--y");
+            if let (Some(xi), Some(yi)) = (x_idx, y_idx) {
+                let x: f64 = rest.get(xi + 1).ok_or_else(|| ParseError::MissingArguments {
+                    context: "click".to_string(),
+                    usage: "click --x <num> --y <num>",
+                })?.parse().map_err(|_| ParseError::InvalidValue {
+                    message: "x must be a number".to_string(),
+                    usage: "click --x <num> --y <num>",
+                })?;
+                let y: f64 = rest.get(yi + 1).ok_or_else(|| ParseError::MissingArguments {
+                    context: "click".to_string(),
+                    usage: "click --x <num> --y <num>",
+                })?.parse().map_err(|_| ParseError::InvalidValue {
+                    message: "y must be a number".to_string(),
+                    usage: "click --x <num> --y <num>",
+                })?;
+                Ok(json!({ "id": id, "action": "click", "x": x, "y": y }))
+            } else {
+                let sel = rest.get(0).ok_or_else(|| ParseError::MissingArguments {
+                    context: "click".to_string(),
+                    usage: "click <selector>  |  click --x <num> --y <num>",
+                })?;
+                Ok(json!({ "id": id, "action": "click", "selector": sel }))
+            }
         }
         "dblclick" => {
             let sel = rest.get(0).ok_or_else(|| ParseError::MissingArguments {

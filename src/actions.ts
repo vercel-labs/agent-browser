@@ -558,6 +558,21 @@ async function handleNavigate(
 }
 
 async function handleClick(command: ClickCommand, browser: BrowserManager): Promise<Response> {
+  // Support coordinate-based clicking (x, y)
+  if (command.x !== undefined && command.y !== undefined) {
+    const page = browser.getPage();
+    await page.mouse.click(command.x, command.y, {
+      button: command.button,
+      clickCount: command.clickCount,
+      delay: command.delay,
+    });
+    return successResponse(command.id, { clicked: true });
+  }
+
+  if (!command.selector) {
+    throw new Error('Either selector or x/y coordinates are required for click');
+  }
+
   // Support both refs (@e1) and regular selectors
   const locator = browser.getLocator(command.selector);
 
