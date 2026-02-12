@@ -1,5 +1,6 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::{json, Value};
+use std::fs;
 use std::io::{self, BufRead, IsTerminal, Read};
 use std::path::Path;
 
@@ -705,6 +706,31 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                     Ok(json!({ "id": id, "action": "cookies_set", "cookies": [cookie] }))
                 }
                 "clear" => Ok(json!({ "id": id, "action": "cookies_clear" })),
+                "save" => {
+                    let file = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
+                        context: "cookies save".to_string(),
+                        usage: "cookies save <file.json>",
+                    })?;
+                    let resolved = resolve_path(file);
+                    Ok(json!({ "id": id, "action": "cookies_get", "saveTo": resolved }))
+                }
+                "load" => {
+                    let file = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
+                        context: "cookies load".to_string(),
+                        usage: "cookies load <file.json>",
+                    })?;
+                    let resolved = resolve_path(file);
+                    // Read the file and parse as JSON array of cookies
+                    let content = fs::read_to_string(&resolved).map_err(|e| ParseError::InvalidValue {
+                        message: format!("Failed to read cookie file '{}': {}", resolved, e),
+                        usage: "cookies load <file.json>",
+                    })?;
+                    let cookies: serde_json::Value = serde_json::from_str(&content).map_err(|e| ParseError::InvalidValue {
+                        message: format!("Invalid JSON in cookie file: {}", e),
+                        usage: "cookies load <file.json>",
+                    })?;
+                    Ok(json!({ "id": id, "action": "cookies_set", "cookies": cookies }))
+                }
                 _ => Ok(json!({ "id": id, "action": "cookies_get" })),
             }
         }
