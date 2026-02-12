@@ -1246,11 +1246,13 @@ export class BrowserManager {
     ) {
       cdpUrl = cdpEndpoint;
     } else if (/^\d+$/.test(cdpEndpoint)) {
-      // Numeric string - treat as port number (handles JSON serialization quirks)
-      cdpUrl = `http://localhost:${cdpEndpoint}`;
+      // Numeric string - treat as port number
+      // Use 127.0.0.1 instead of localhost to avoid IPv6 resolution issues
+      // on Windows where Edge/Chrome bind to IPv4 only
+      cdpUrl = `http://127.0.0.1:${cdpEndpoint}`;
     } else {
       // Unknown format - still try as port for backward compatibility
-      cdpUrl = `http://localhost:${cdpEndpoint}`;
+      cdpUrl = `http://127.0.0.1:${cdpEndpoint}`;
     }
 
     // When using HTTP URLs, Playwright's connectOverCDP internally requests
@@ -1272,8 +1274,8 @@ export class BrowserManager {
     const browser = await chromium.connectOverCDP(connectUrl).catch(() => {
       throw new Error(
         `Failed to connect via CDP to ${cdpUrl}. ` +
-          (cdpUrl.includes('localhost')
-            ? `Make sure the app is running with --remote-debugging-port=${cdpEndpoint}`
+          (cdpUrl.includes('127.0.0.1') || cdpUrl.includes('localhost')
+            ? `Make sure the browser is running with --remote-debugging-port=${cdpEndpoint}`
             : 'Make sure the remote browser is accessible and the URL is correct.')
       );
     });
