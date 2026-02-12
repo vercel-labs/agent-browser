@@ -161,6 +161,20 @@ fn get_port_for_session(session: &str) -> u16 {
     49152 + ((hash.unsigned_abs() as u32 % 16383) as u16)
 }
 
+/// Read the actual port from the .port file written by the daemon.
+/// Falls back to the computed port if the file doesn't exist or can't be read.
+/// This handles cases where the daemon retried on a different port (e.g., EACCES).
+#[cfg(windows)]
+fn get_actual_port(session: &str) -> u16 {
+    let port_path = get_port_path(session);
+    if let Ok(content) = fs::read_to_string(&port_path) {
+        if let Ok(port) = content.trim().parse::<u16>() {
+            return port;
+        }
+    }
+    get_port_for_session(session)
+}
+
 #[cfg(unix)]
 fn is_daemon_running(session: &str) -> bool {
     let pid_path = get_pid_path(session);
@@ -183,7 +197,7 @@ fn is_daemon_running(session: &str) -> bool {
     if !pid_path.exists() {
         return false;
     }
-    let port = get_port_for_session(session);
+    let port = get_actual_port(session);
     TcpStream::connect_timeout(
         &format!("127.0.0.1:{}", port).parse().unwrap(),
         Duration::from_millis(100),
@@ -199,7 +213,7 @@ fn daemon_ready(session: &str) -> bool {
     }
     #[cfg(windows)]
     {
-        let port = get_port_for_session(session);
+        let port = get_actual_port(session);
         TcpStream::connect_timeout(
             &format!("127.0.0.1:{}", port).parse().unwrap(),
             Duration::from_millis(50),
@@ -495,7 +509,7 @@ fn connect(session: &str) -> Result<Connection, String> {
     }
     #[cfg(windows)]
     {
-        let port = get_port_for_session(session);
+        let port = get_actual_port(session);
         TcpStream::connect(format!("127.0.0.1:{}", port))
             .map(Connection::Tcp)
             .map_err(|e| format!("Failed to connect: {}", e))

@@ -385,25 +385,41 @@ export async function startDaemon(options?: {
 
   if (isWindows) {
     // Windows: use TCP socket on localhost
-    const port = getPortForSession(currentSession);
+    // Try the computed port first, then retry with alternatives if it's in an excluded range
+    const basePort = getPortForSession(currentSession);
     const portFile = getPortFile();
-    fs.writeFileSync(portFile, port.toString());
-    server.listen(port, '127.0.0.1', () => {
-      // Daemon is ready on TCP port
-    });
+    const maxRetries = 10;
+
+    const tryListen = (port: number, attempt: number) => {
+      server.listen(port, '127.0.0.1', () => {
+        fs.writeFileSync(portFile, port.toString());
+      });
+      server.once('error', (err: NodeJS.ErrnoException) => {
+        if (err.code === 'EACCES' && attempt < maxRetries) {
+          // Port is in Windows excluded range, try next port
+          server.removeAllListeners('error');
+          tryListen(port + 1 > 65535 ? 49152 : port + 1, attempt + 1);
+        } else {
+          console.error('Server error:', err);
+          cleanupSocket();
+          process.exit(1);
+        }
+      });
+    };
+    tryListen(basePort, 0);
   } else {
     // Unix: use Unix domain socket
     const socketPath = getSocketPath();
     server.listen(socketPath, () => {
       // Daemon is ready
     });
-  }
 
-  server.on('error', (err) => {
-    console.error('Server error:', err);
-    cleanupSocket();
-    process.exit(1);
-  });
+    server.on('error', (err) => {
+      console.error('Server error:', err);
+      cleanupSocket();
+      process.exit(1);
+    });
+  }
 
   // Handle shutdown signals
   const shutdown = async () => {
