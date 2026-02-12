@@ -110,7 +110,10 @@ export class BrowserManager {
     if (this.browser !== null) {
       return this.browser.isConnected();
     }
-    return this.isPersistentContext;
+    if (this.isPersistentContext) {
+      return this.contexts.length > 0 && this.pages.length > 0;
+    }
+    return false;
   }
 
   /**

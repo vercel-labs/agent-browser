@@ -169,7 +169,7 @@ async function safeCheck(locator: import('playwright-core').Locator): Promise<vo
     await locator.check({ timeout: 5000 });
   } catch (error) {
     if (isVisibilityError(error)) {
-      await locator.check({ force: true });
+      await locator.check({ force: true, timeout: 5000 });
     } else {
       throw error;
     }
@@ -184,7 +184,7 @@ async function safeUncheck(locator: import('playwright-core').Locator): Promise<
     await locator.uncheck({ timeout: 5000 });
   } catch (error) {
     if (isVisibilityError(error)) {
-      await locator.uncheck({ force: true });
+      await locator.uncheck({ force: true, timeout: 5000 });
     } else {
       throw error;
     }
@@ -200,6 +200,7 @@ function applyPosition(
   position?: number
 ): import('playwright-core').Locator {
   if (position === undefined) return locator;
+  if (!Number.isInteger(position) || position < -1) return locator;
   if (position === -1) return locator.last();
   return locator.nth(position);
 }

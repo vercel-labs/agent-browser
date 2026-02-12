@@ -1052,7 +1052,10 @@ fn parse_find(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                 Some("first") => (Some(0i64), 3usize),
                 Some("last") => (Some(-1i64), 3usize),
                 Some("nth") => {
-                    let nth_idx = rest.get(3).and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
+                    let nth_idx = rest.get(3).and_then(|s| s.parse::<i64>().ok()).ok_or_else(|| ParseError::InvalidValue {
+                        message: "nth modifier requires a numeric index (e.g., nth 2)".to_string(),
+                        usage: "find role <role> nth <index> [action]",
+                    })?;
                     (Some(nth_idx), 4usize)
                 }
                 _ => (None, 2usize),
@@ -2411,6 +2414,20 @@ mod tests {
         assert_eq!(cmd["action"], "nth");
         assert_eq!(cmd["index"], 2);
         assert!(cmd.get("value").is_none());
+    }
+
+    #[test]
+    fn test_find_role_nth_missing_index_errors() {
+        // "find role button nth click" - nth without a number should error
+        let result = parse_command(&args("find role button nth click"), &default_flags());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_find_role_nth_invalid_index_errors() {
+        // "find role button nth abc click" - nth with non-numeric should error
+        let result = parse_command(&args("find role button nth abc click"), &default_flags());
+        assert!(result.is_err());
     }
 
     // === Download Tests ===
