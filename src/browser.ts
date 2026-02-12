@@ -1222,7 +1222,23 @@ export class BrowserManager {
       cdpUrl = `http://localhost:${cdpEndpoint}`;
     }
 
-    const browser = await chromium.connectOverCDP(cdpUrl).catch(() => {
+    // When using HTTP URLs, Playwright's connectOverCDP internally requests
+    // /json/version/ (with trailing slash) which some Chrome versions don't
+    // handle correctly. Pre-fetch the WebSocket URL to bypass this issue.
+    let connectUrl = cdpUrl;
+    if (cdpUrl.startsWith('http://') || cdpUrl.startsWith('https://')) {
+      try {
+        const response = await fetch(`${cdpUrl}/json/version`);
+        const data = (await response.json()) as { webSocketDebuggerUrl?: string };
+        if (data.webSocketDebuggerUrl) {
+          connectUrl = data.webSocketDebuggerUrl;
+        }
+      } catch {
+        // Fall back to HTTP URL if pre-fetch fails
+      }
+    }
+
+    const browser = await chromium.connectOverCDP(connectUrl).catch(() => {
       throw new Error(
         `Failed to connect via CDP to ${cdpUrl}. ` +
           (cdpUrl.includes('localhost')
