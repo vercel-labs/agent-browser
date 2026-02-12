@@ -1170,13 +1170,15 @@ export class BrowserManager {
         env: { ...process.env },
       });
       this.cdpEndpoint = null;
+      // Expand ~ to home directory for storageState path
+      const resolvedStorageState = options.storageState?.replace(/^~\//, os.homedir() + '/');
       context = await this.browser.newContext({
         viewport,
         extraHTTPHeaders: options.headers,
         userAgent: options.userAgent,
         ...(options.proxy && { proxy: options.proxy }),
         ignoreHTTPSErrors: options.ignoreHTTPSErrors ?? false,
-        ...(options.storageState && { storageState: options.storageState }),
+        ...(resolvedStorageState && { storageState: resolvedStorageState }),
       });
     }
 
