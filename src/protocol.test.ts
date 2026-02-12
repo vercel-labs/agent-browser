@@ -1108,6 +1108,32 @@ describe('parseCommand', () => {
     });
   });
 
+  describe('selector', () => {
+    it('should parse selector command', () => {
+      const result = parseCommand(cmd({ id: '1', action: 'selector', selector: '@e1' }));
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.command.action).toBe('selector');
+        expect(result.command.selector).toBe('@e1');
+      }
+    });
+
+    it('should parse selector with all flag', () => {
+      const result = parseCommand(cmd({ id: '1', action: 'selector', selector: '@e1', all: true }));
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.command.action).toBe('selector');
+        expect(result.command.selector).toBe('@e1');
+        expect(result.command.all).toBe(true);
+      }
+    });
+
+    it('should reject selector without selector', () => {
+      const result = parseCommand(cmd({ id: '1', action: 'selector' }));
+      expect(result.success).toBe(false);
+    });
+  });
+
   describe('invalid commands', () => {
     it('should reject unknown action', () => {
       const result = parseCommand(cmd({ id: '1', action: 'unknown' }));

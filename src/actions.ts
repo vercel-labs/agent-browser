@@ -65,6 +65,7 @@ import type {
   TapCommand,
   ClipboardCommand,
   HighlightCommand,
+  SelectorCommand,
   ClearCommand,
   SelectAllCommand,
   InnerTextCommand,
@@ -363,6 +364,8 @@ export async function executeCommand(command: Command, browser: BrowserManager):
         return await handleClipboard(command, browser);
       case 'highlight':
         return await handleHighlight(command, browser);
+      case 'selector':
+        return await handleSelector(command, browser);
       case 'clear':
         return await handleClear(command, browser);
       case 'selectall':
@@ -1508,6 +1511,236 @@ async function handleHighlight(
   const page = browser.getPage();
   await page.locator(command.selector).highlight();
   return successResponse(command.id, { highlighted: true });
+}
+
+// Selector candidate with type and confidence
+interface SelectorCandidate {
+  selector: string;
+  type: string;
+  confidence: number;
+}
+
+// Browser-side script for extracting selector candidates
+const extractSelectorsScript = `(function(el) {
+  const results = [];
+
+  // Helper to check if a selector is unique (matches exactly 1 element)
+  const isUnique = (sel) => {
+    try {
+      return document.querySelectorAll(sel).length === 1;
+    } catch {
+      return false;
+    }
+  };
+
+  // Escape special CSS characters in attribute values
+  const escapeAttr = (str) => str.replace(/["\\\\]/g, '\\\\$&');
+
+  // 1. Check data-testid (highest priority)
+  const testId = el.getAttribute('data-testid');
+  if (testId) {
+    const sel = '[data-testid="' + escapeAttr(testId) + '"]';
+    if (isUnique(sel)) {
+      results.push({ selector: sel, type: 'testid', confidence: 100 });
+    }
+  }
+
+  // 2. Check id (if not auto-generated)
+  const id = el.getAttribute('id');
+  if (id) {
+    const autoIdPatterns = [
+      /^:r[0-9a-z]+:$/i,
+      /^react-/i,
+      /^ember\\d+$/i,
+      /^__[a-z]+_\\d+$/i,
+      /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i,
+      /^\\d+$/,
+      /^[a-z]{1,2}\\d{5,}$/i,
+    ];
+    const isAutoId = autoIdPatterns.some((p) => p.test(id));
+    if (!isAutoId) {
+      const sel = '#' + CSS.escape(id);
+      if (isUnique(sel)) {
+        results.push({ selector: sel, type: 'id', confidence: 95 });
+      }
+    }
+  }
+
+  // 3. Check aria-label
+  const ariaLabel = el.getAttribute('aria-label');
+  if (ariaLabel) {
+    const sel = '[aria-label="' + escapeAttr(ariaLabel) + '"]';
+    if (isUnique(sel)) {
+      results.push({ selector: sel, type: 'aria-label', confidence: 90 });
+    }
+  }
+
+  // 4. Check test attributes
+  const testAttrs = ['data-cy', 'data-qa', 'data-test', 'data-e2e'];
+  for (const attr of testAttrs) {
+    const val = el.getAttribute(attr);
+    if (val) {
+      const sel = '[' + attr + '="' + escapeAttr(val) + '"]';
+      if (isUnique(sel)) {
+        results.push({ selector: sel, type: attr, confidence: 85 });
+      }
+    }
+  }
+
+  // 5. Try unique class combinations (filter out utility classes)
+  const classList = Array.from(el.classList);
+  const utilityPatterns = [
+    /^(h|w|m|p|px|py|mx|my|mt|mb|ml|mr|pt|pb|pl|pr)-/,
+    /^(bg|text|border|rounded|shadow|opacity)-/,
+    /^(flex|grid|block|inline|hidden|visible)$/,
+    /^(absolute|relative|fixed|sticky)$/,
+    /^(z-|top-|right-|bottom-|left-)/,
+    /^(overflow|cursor|pointer-events)-/,
+    /^(sm|md|lg|xl|2xl):/,
+    /^(hover|focus|active|disabled):/,
+    /^(dark|light):/,
+    /^(transition|duration|ease|delay)-/,
+    /^(font|leading|tracking|text)-/,
+    /^(gap|space|divide)-/,
+    /^(items|justify|content|self)-/,
+    /^(col|row)-/,
+    /^(aspect|object)-/,
+    /^(min|max)-(h|w)-/,
+  ];
+
+  const meaningfulClasses = classList.filter(
+    (c) => !utilityPatterns.some((p) => p.test(c))
+  );
+
+  // Try single meaningful class
+  let foundClass = false;
+  for (const cls of meaningfulClasses) {
+    const sel = '.' + CSS.escape(cls);
+    if (isUnique(sel)) {
+      results.push({ selector: sel, type: 'class', confidence: 70 });
+      foundClass = true;
+      break;
+    }
+  }
+
+  // Try tag + class combination if single class didn't work
+  if (!foundClass && meaningfulClasses.length > 0) {
+    const tag = el.tagName.toLowerCase();
+    for (const cls of meaningfulClasses) {
+      const sel = tag + '.' + CSS.escape(cls);
+      if (isUnique(sel)) {
+        results.push({ selector: sel, type: 'class', confidence: 70 });
+        break;
+      }
+    }
+  }
+
+  // 6. Build structural path as last resort
+  if (results.length === 0) {
+    const parts = [];
+    let current = el;
+
+    while (current && current !== document.body && parts.length < 5) {
+      const tag = current.tagName.toLowerCase();
+      const parent = current.parentElement;
+
+      if (parent) {
+        const siblings = Array.from(parent.children).filter(
+          (c) => c.tagName === current.tagName
+        );
+        if (siblings.length > 1) {
+          const index = siblings.indexOf(current) + 1;
+          parts.unshift(tag + ':nth-of-type(' + index + ')');
+        } else {
+          parts.unshift(tag);
+        }
+      } else {
+        parts.unshift(tag);
+      }
+
+      current = parent;
+    }
+
+    const structuralPath = parts.join(' > ');
+    if (structuralPath && isUnique(structuralPath)) {
+      results.push({ selector: structuralPath, type: 'structural', confidence: 50 });
+    }
+  }
+
+  return results;
+})`;
+
+async function handleSelector(
+  command: SelectorCommand,
+  browser: BrowserManager
+): Promise<Response> {
+  const page = browser.getPage();
+
+  // Validate that the input is a ref
+  if (!browser.isRef(command.selector)) {
+    return errorResponse(
+      command.id,
+      `"${command.selector}" is not a valid ref. Use @e1, @e2, etc.`
+    );
+  }
+
+  // Get the locator from the ref
+  const locator = browser.getLocator(command.selector);
+
+  // Check if element exists
+  const count = await locator.count();
+  if (count === 0) {
+    return errorResponse(
+      command.id,
+      `Element "${command.selector}" not found. Run 'snapshot' to get updated refs.`
+    );
+  }
+
+  // Extract selector candidates from the element using browser-side script
+  const candidates = (await locator.evaluate((el, script) => {
+    const fn = eval(script);
+    return fn(el);
+  }, extractSelectorsScript)) as SelectorCandidate[];
+
+  // Validate candidates on the server side to ensure they still work
+  const validatedCandidates: Array<SelectorCandidate & { matchCount: number }> = [];
+
+  for (const candidate of candidates) {
+    try {
+      const matchCount = await page.locator(candidate.selector).count();
+      if (matchCount === 1) {
+        validatedCandidates.push({ ...candidate, matchCount });
+      }
+    } catch {
+      // Skip invalid selectors
+    }
+  }
+
+  if (validatedCandidates.length === 0) {
+    return errorResponse(
+      command.id,
+      `Could not generate a unique selector for "${command.selector}". All candidates matched multiple elements.`
+    );
+  }
+
+  // Sort by confidence (highest first)
+  validatedCandidates.sort((a, b) => b.confidence - a.confidence);
+
+  if (command.all) {
+    return successResponse(command.id, {
+      candidates: validatedCandidates.map((c) => ({
+        selector: c.selector,
+        type: c.type,
+      })),
+    });
+  }
+
+  // Return the best (most stable) selector
+  const best = validatedCandidates[0];
+  return successResponse(command.id, {
+    selector: best.selector,
+    type: best.type,
+  });
 }
 
 async function handleClear(command: ClearCommand, browser: BrowserManager): Promise<Response> {
