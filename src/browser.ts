@@ -132,6 +132,8 @@ export class BrowserManager {
   private harPage: Page | null = null;
   private harTempPath: string = '';
   private harTempDir: string = '';
+  private harPendingSave: boolean = false;
+  private harPreviousActivePageIndex: number | null = null;
 
   /**
    * Check if browser is launched
@@ -583,6 +585,12 @@ export class BrowserManager {
       );
     }
 
+    if (this.harPendingSave) {
+      throw new Error(
+        "HAR recording has unsaved data. Run 'har stop <path.har>' to save it before starting a new HAR capture."
+      );
+    }
+
     const currentPage = this.pages.length > 0 ? this.pages[this.activePageIndex] : null;
     const currentContext = currentPage?.context() ?? this.contexts[0] ?? null;
     const browser = this.browser ?? currentContext?.browser() ?? null;
@@ -623,6 +631,8 @@ export class BrowserManager {
 
     this.harPage = await this.harContext.newPage();
 
+    this.harPreviousActivePageIndex = this.pages.length > 0 ? this.activePageIndex : null;
+
     this.contexts.push(this.harContext);
     this.pages.push(this.harPage);
     this.activePageIndex = this.pages.length - 1;
@@ -642,31 +652,54 @@ export class BrowserManager {
   async stopHarRecording(
     outputPath: string
   ): Promise<{ path: string; entries: number; error?: string }> {
-    if (!this.harContext || !this.harPage || !this.harTempPath) {
+    if (!this.harContext && !this.harPendingSave) {
       return { path: outputPath, entries: 0, error: 'No HAR recording in progress' };
+    }
+
+    if (!this.harTempPath) {
+      return { path: outputPath, entries: 0, error: 'HAR recording data is unavailable' };
     }
 
     if (existsSync(outputPath)) {
       return { path: outputPath, entries: 0, error: `Output file already exists: ${outputPath}` };
     }
 
-    const harContext = this.harContext;
-    const harPage = this.harPage;
     const tempHarPath = this.harTempPath;
     const tempHarDir = this.harTempDir;
+    let recordingFinalized = this.harPendingSave;
 
     try {
-      const pageIndex = this.pages.indexOf(harPage);
-      if (pageIndex !== -1) {
-        this.pages.splice(pageIndex, 1);
-      }
-      const contextIndex = this.contexts.indexOf(harContext);
-      if (contextIndex !== -1) {
-        this.contexts.splice(contextIndex, 1);
+      const harPage = this.harPage;
+      const harContext = this.harContext;
+
+      if (harPage) {
+        const pageIndex = this.pages.indexOf(harPage);
+        if (pageIndex !== -1) {
+          this.pages.splice(pageIndex, 1);
+        }
+
+        await harPage.close();
       }
 
-      await harPage.close();
-      await harContext.close();
+      if (harContext) {
+        const contextIndex = this.contexts.indexOf(harContext);
+        if (contextIndex !== -1) {
+          this.contexts.splice(contextIndex, 1);
+        }
+
+        await harContext.close();
+      }
+
+      if (harPage || harContext) {
+        this.harContext = null;
+        this.harPage = null;
+        this.harPendingSave = true;
+        this.restoreActivePageIndexAfterHarCleanup();
+
+        await this.invalidateCDPSession();
+      }
+
+      recordingFinalized = true;
 
       mkdirSync(path.dirname(outputPath), { recursive: true });
 
@@ -688,40 +721,30 @@ export class BrowserManager {
         rmSync(tempHarDir, { recursive: true, force: true });
       }
 
-      this.harContext = null;
-      this.harPage = null;
       this.harTempPath = '';
       this.harTempDir = '';
-
-      if (this.pages.length > 0) {
-        this.activePageIndex = Math.min(this.activePageIndex, this.pages.length - 1);
-      } else {
-        this.activePageIndex = 0;
-      }
-
-      await this.invalidateCDPSession();
+      this.harPendingSave = false;
+      this.harPreviousActivePageIndex = null;
 
       return { path: outputPath, entries };
     } catch (error) {
-      await harPage.close().catch(() => {});
-      await harContext.close().catch(() => {});
+      if (!recordingFinalized) {
+        await this.harPage?.close().catch(() => {});
+        await this.harContext?.close().catch(() => {});
 
-      if (tempHarDir) {
-        rmSync(tempHarDir, { recursive: true, force: true });
+        if (tempHarDir) {
+          rmSync(tempHarDir, { recursive: true, force: true });
+        }
+
+        this.harContext = null;
+        this.harPage = null;
+        this.harTempPath = '';
+        this.harTempDir = '';
+        this.harPendingSave = false;
+        this.restoreActivePageIndexAfterHarCleanup();
+
+        await this.invalidateCDPSession();
       }
-
-      this.harContext = null;
-      this.harPage = null;
-      this.harTempPath = '';
-      this.harTempDir = '';
-
-      if (this.pages.length > 0) {
-        this.activePageIndex = Math.min(this.activePageIndex, this.pages.length - 1);
-      } else {
-        this.activePageIndex = 0;
-      }
-
-      await this.invalidateCDPSession();
 
       const message = error instanceof Error ? error.message : String(error);
       return { path: outputPath, entries: 0, error: message };
@@ -733,6 +756,20 @@ export class BrowserManager {
    */
   isHarRecording(): boolean {
     return this.harContext !== null;
+  }
+
+  private restoreActivePageIndexAfterHarCleanup(): void {
+    if (this.pages.length > 0) {
+      if (this.harPreviousActivePageIndex !== null) {
+        this.activePageIndex = Math.min(this.harPreviousActivePageIndex, this.pages.length - 1);
+      } else {
+        this.activePageIndex = Math.min(this.activePageIndex, this.pages.length - 1);
+      }
+    } else {
+      this.activePageIndex = 0;
+    }
+
+    this.harPreviousActivePageIndex = null;
   }
 
   private countHarEntries(harPath: string): number {
@@ -2293,7 +2330,7 @@ export class BrowserManager {
     }
 
     // Stop HAR recording if active (discards temporary HAR)
-    if (this.harContext) {
+    if (this.harContext || this.harPendingSave || this.harTempPath) {
       if (this.harPage) {
         const pageIndex = this.pages.indexOf(this.harPage);
         if (pageIndex !== -1) {
@@ -2301,11 +2338,16 @@ export class BrowserManager {
         }
         await this.harPage.close().catch(() => {});
       }
-      const contextIndex = this.contexts.indexOf(this.harContext);
-      if (contextIndex !== -1) {
-        this.contexts.splice(contextIndex, 1);
+
+      const harContext = this.harContext;
+      if (harContext) {
+        const contextIndex = this.contexts.indexOf(harContext);
+        if (contextIndex !== -1) {
+          this.contexts.splice(contextIndex, 1);
+        }
+        await harContext.close().catch(() => {});
       }
-      await this.harContext.close().catch(() => {});
+
       if (this.harTempDir) {
         rmSync(this.harTempDir, { recursive: true, force: true });
       }
@@ -2313,6 +2355,8 @@ export class BrowserManager {
       this.harPage = null;
       this.harTempPath = '';
       this.harTempDir = '';
+      this.harPendingSave = false;
+      this.harPreviousActivePageIndex = null;
     }
 
     // Stop screencast if active
