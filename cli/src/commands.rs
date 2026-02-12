@@ -159,7 +159,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                     message: format!("Failed to read from stdin: {}", e),
                     usage: "echo 'text' | agent-browser fill <selector> --stdin",
                 })?;
-                buf
+                buf.trim_end_matches('\n').trim_end_matches('\r').to_string()
             } else {
                 rest[1..].join(" ")
             };
@@ -177,7 +177,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                     message: format!("Failed to read from stdin: {}", e),
                     usage: "echo 'text' | agent-browser type <selector> --stdin",
                 })?;
-                buf
+                buf.trim_end_matches('\n').trim_end_matches('\r').to_string()
             } else {
                 rest[1..].join(" ")
             };
