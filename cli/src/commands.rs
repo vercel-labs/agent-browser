@@ -1428,6 +1428,7 @@ mod tests {
             provider: None,
             ignore_https_errors: false,
             allow_file_access: false,
+            kiosk: false,
             device: None,
             cli_executable_path: false,
             cli_extensions: false,
@@ -1438,6 +1439,7 @@ mod tests {
             cli_proxy: false,
             cli_proxy_bypass: false,
             cli_allow_file_access: false,
+            cli_kiosk: false,
         }
     }
 

@@ -1777,6 +1777,7 @@ Options:
   --json                     JSON output
   --full, -f                 Full page screenshot
   --headed                   Show browser window (not headless)
+  --kiosk                    Fullscreen kiosk mode (Chromium, implies --headed)
   --cdp <port>               Connect via CDP (Chrome DevTools Protocol)
   --debug                    Debug output
   --version, -V              Show version
