@@ -3,7 +3,17 @@
   "version": "0.9.2",
   "description": "Headless browser automation CLI for AI agents",
   "type": "module",
-  "main": "dist/daemon.js",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    },
+    "./daemon": {
+      "import": "./dist/daemon.js"
+    }
+  },
   "files": [
     "dist",
     "bin",
