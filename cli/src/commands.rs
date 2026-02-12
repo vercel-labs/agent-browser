@@ -91,6 +91,8 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                 || url_lower.starts_with("about:")
                 || url_lower.starts_with("data:")
                 || url_lower.starts_with("file:")
+                || url_lower.starts_with("chrome-extension://")
+                || url_lower.starts_with("chrome://")
             {
                 url.to_string()
             } else {
@@ -760,7 +762,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                     let mut cmd = json!({ "id": id, "action": "recording_start", "path": path });
                     if let Some(u) = url {
                         // Add https:// prefix if needed
-                        let url_str = if u.starts_with("http") {
+                        let url_str = if u.starts_with("http") || u.contains("://") {
                             u.to_string()
                         } else {
                             format!("https://{}", u)
@@ -780,7 +782,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                     let mut cmd = json!({ "id": id, "action": "recording_restart", "path": path });
                     if let Some(u) = url {
                         // Add https:// prefix if needed
-                        let url_str = if u.starts_with("http") {
+                        let url_str = if u.starts_with("http") || u.contains("://") {
                             u.to_string()
                         } else {
                             format!("https://{}", u)
@@ -1728,6 +1730,27 @@ mod tests {
         let cmd = parse_command(&args("open api.example.com"), &flags).unwrap();
         // Invalid JSON should result in no headers field (graceful handling)
         assert!(cmd.get("headers").is_none());
+    }
+
+    #[test]
+    fn test_navigate_chrome_extension_url() {
+        let cmd = parse_command(
+            &args("open chrome-extension://abcdefghijklmnop/popup.html"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "navigate");
+        assert_eq!(
+            cmd["url"],
+            "chrome-extension://abcdefghijklmnop/popup.html"
+        );
+    }
+
+    #[test]
+    fn test_navigate_chrome_url() {
+        let cmd = parse_command(&args("open chrome://settings"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "navigate");
+        assert_eq!(cmd["url"], "chrome://settings");
     }
 
     // === Set Headers Tests ===
