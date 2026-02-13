@@ -148,8 +148,8 @@ export class BrowserManager {
     compact?: boolean;
     selector?: string;
   }): Promise<EnhancedSnapshot> {
-    const page = this.getPage();
-    const snapshot = await getEnhancedSnapshot(page, options);
+    const frame = this.getFrame();
+    const snapshot = await getEnhancedSnapshot(frame, options);
     this.refMap = snapshot.refs;
     this.lastSnapshot = snapshot.tree;
     return snapshot;
@@ -173,7 +173,7 @@ export class BrowserManager {
     const refData = this.refMap[ref];
     if (!refData) return null;
 
-    const page = this.getPage();
+    const page = this.getFrame();
 
     // Check if this is a cursor-interactive element (uses CSS selector, not ARIA role)
     // These have pseudo-roles 'clickable' or 'focusable' and a CSS selector
@@ -214,8 +214,8 @@ export class BrowserManager {
     if (locator) return locator;
 
     // Otherwise treat as regular selector
-    const page = this.getPage();
-    return page.locator(selectorOrRef);
+    const frame = this.getFrame();
+    return frame.locator(selectorOrRef);
   }
 
   /**
