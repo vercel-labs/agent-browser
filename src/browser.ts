@@ -124,7 +124,10 @@ export class BrowserManager {
    * Check if browser is launched
    */
   isLaunched(): boolean {
-    return this.browser !== null || this.isPersistentContext;
+    if (this.browser !== null) {
+      return this.browser.isConnected();
+    }
+    return this.isPersistentContext;
   }
 
   /**
