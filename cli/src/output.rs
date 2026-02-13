@@ -1201,6 +1201,7 @@ Configures various browser settings and emulation options.
 
 Settings:
   viewport <w> <h>           Set viewport size
+  viewport --device <name>   Use device preset (e.g., "iPhone 15")
   device <name>              Emulate device (e.g., "iPhone 12")
   geo <lat> <lng>            Set geolocation
   offline [on|off]           Toggle offline mode
@@ -1215,6 +1216,7 @@ Global Options:
 
 Examples:
   agent-browser set viewport 1920 1080
+  agent-browser set viewport --device "iPhone 15"
   agent-browser set device "iPhone 12"
   agent-browser set geo 37.7749 -122.4194
   agent-browser set offline on

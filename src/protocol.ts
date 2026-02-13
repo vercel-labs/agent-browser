@@ -260,8 +260,9 @@ const permissionsSchema = baseCommandSchema.extend({
 
 const viewportSchema = baseCommandSchema.extend({
   action: z.literal('viewport'),
-  width: z.number().positive(),
-  height: z.number().positive(),
+  width: z.number().int().positive().optional(),
+  height: z.number().int().positive().optional(),
+  device: z.string().optional(),
 });
 
 const userAgentSchema = baseCommandSchema.extend({

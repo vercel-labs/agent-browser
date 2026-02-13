@@ -364,6 +364,10 @@ pub fn ensure_daemon(
             cmd.env("AGENT_BROWSER_SESSION_NAME", sn);
         }
 
+        if let Ok(script) = env::var("AGENT_BROWSER_INIT_SCRIPT") {
+            cmd.env("AGENT_BROWSER_INIT_SCRIPT", script);
+        }
+
         // Create new process group and session to fully detach
         unsafe {
             cmd.pre_exec(|| {
@@ -445,6 +449,10 @@ pub fn ensure_daemon(
 
         if let Some(sn) = session_name {
             cmd.env("AGENT_BROWSER_SESSION_NAME", sn);
+        }
+
+        if let Ok(script) = env::var("AGENT_BROWSER_INIT_SCRIPT") {
+            cmd.env("AGENT_BROWSER_INIT_SCRIPT", script);
         }
 
         // CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS

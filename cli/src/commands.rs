@@ -1308,25 +1308,33 @@ fn parse_set(rest: &[&str], id: &str) -> Result<Value, ParseError> {
 
     match rest.first().copied() {
         Some("viewport") => {
+            // Check for --device flag: set viewport --device "iPhone 15"
+            if rest.get(1).copied() == Some("--device") {
+                let dev = rest.get(2).ok_or_else(|| ParseError::MissingArguments {
+                    context: "set viewport".to_string(),
+                    usage: "set viewport --device <name>",
+                })?;
+                return Ok(json!({ "id": id, "action": "viewport", "device": dev }));
+            }
             let w_str = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
                 context: "set viewport".to_string(),
-                usage: "set viewport <width> <height>",
+                usage: "set viewport <width> <height>  OR  set viewport --device <name>",
             })?;
             let h_str = rest.get(2).ok_or_else(|| ParseError::MissingArguments {
                 context: "set viewport".to_string(),
-                usage: "set viewport <width> <height>",
+                usage: "set viewport <width> <height>  OR  set viewport --device <name>",
             })?;
             let w = w_str
                 .parse::<i32>()
                 .map_err(|_| ParseError::MissingArguments {
                     context: "set viewport".to_string(),
-                    usage: "set viewport <width> <height>",
+                    usage: "set viewport <width> <height>  OR  set viewport --device <name>",
                 })?;
             let h = h_str
                 .parse::<i32>()
                 .map_err(|_| ParseError::MissingArguments {
                     context: "set viewport".to_string(),
-                    usage: "set viewport <width> <height>",
+                    usage: "set viewport <width> <height>  OR  set viewport --device <name>",
                 })?;
             Ok(json!({ "id": id, "action": "viewport", "width": w, "height": h }))
         }
