@@ -141,6 +141,8 @@ import type {
   ConfirmCommand,
   DenyCommand,
   Annotation,
+  SaveFileCommand,
+  DropFileCommand,
   NavigateData,
   ScreenshotData,
   EvaluateData,
@@ -593,6 +595,10 @@ async function dispatchAction(command: Command, browser: BrowserManager): Promis
       return await handleDiffUrl(command, browser);
     case 'auth_login':
       return await handleAuthLogin(command, browser);
+    case 'savefile':
+      return await handleSaveFile(command, browser);
+    case 'dropfile':
+      return await handleDropFile(command, browser);
     default: {
       // TypeScript narrows to never here, but we handle it for safety
       const unknownCommand = command as { id: string; action: string };
@@ -2829,4 +2835,80 @@ function handleDeny(command: DenyCommand): Response {
     return errorResponse(command.id, `No pending confirmation with id '${command.confirmationId}'`);
   }
   return successResponse(command.id, { denied: true });
+}
+
+async function handleSaveFile(
+  command: SaveFileCommand,
+  browser: BrowserManager
+): Promise<Response> {
+  const page = browser.getPage();
+  let url: string;
+
+  if (command.selector) {
+    const locator = browser.getLocator(command.selector);
+    url = (await locator.getAttribute('src')) || (await locator.getAttribute('href')) || '';
+    if (!url) throw new Error('Element has no src or href attribute');
+    url = new URL(url, page.url()).href;
+  } else {
+    url = page.url();
+  }
+
+  const base64 = await page.evaluate(`(async () => {
+    const resp = await fetch(${JSON.stringify(url)});
+    if (!resp.ok) throw new Error('Fetch failed: ' + resp.status + ' ' + resp.statusText);
+    const blob = await resp.blob();
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result.split(',')[1]);
+      reader.onerror = () => reject(new Error('FileReader error'));
+      reader.readAsDataURL(blob);
+    });
+  })()`);
+
+  const buffer = Buffer.from(base64 as string, 'base64');
+  const outputDir = path.dirname(command.outputPath);
+  mkdirSync(outputDir, { recursive: true });
+  fs.writeFileSync(command.outputPath, buffer);
+
+  return successResponse(command.id, {
+    path: command.outputPath,
+    url,
+    size: buffer.length,
+  });
+}
+
+async function handleDropFile(
+  command: DropFileCommand,
+  browser: BrowserManager
+): Promise<Response> {
+  const page = browser.getPage();
+  const fileContent = fs.readFileSync(command.filePath);
+  if (fileContent.length > 10 * 1024 * 1024) {
+    throw new Error('File too large for dropfile (max 10MB). Use upload command for large files.');
+  }
+  const base64Content = fileContent.toString('base64');
+  const fileName = command.fileName || path.basename(command.filePath);
+  const mimeType = command.mimeType || 'application/octet-stream';
+
+  await page.evaluate(`(async () => {
+    const binary = atob(${JSON.stringify(base64Content)});
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+
+    const file = new File([bytes], ${JSON.stringify(fileName)}, { type: ${JSON.stringify(mimeType)} });
+    const dt = new DataTransfer();
+    dt.items.add(file);
+
+    const el = document.querySelector(${JSON.stringify(command.selector)});
+    if (!el) throw new Error('Element not found: ' + ${JSON.stringify(command.selector)});
+
+    el.dispatchEvent(new DragEvent('dragenter', { dataTransfer: dt, bubbles: true }));
+    el.dispatchEvent(new DragEvent('dragover', { dataTransfer: dt, bubbles: true }));
+    el.dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true }));
+  })()`);
+
+  return successResponse(command.id, {
+    selector: command.selector,
+    file: fileName,
+  });
 }
