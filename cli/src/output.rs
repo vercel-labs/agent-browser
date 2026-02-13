@@ -1865,7 +1865,7 @@ Options:
                              e.g., --proxy-bypass "localhost,*.internal.com"
   --ignore-https-errors      Ignore HTTPS certificate errors
   --allow-file-access        Allow file:// URLs to access local files (Chromium only)
-  -p, --provider <name>      Browser provider: ios, browserbase, kernel, browseruse
+  -p, --provider <name>      Browser provider: ios, browserbase, hyperbrowser, kernel, browseruse
   --device <name>            iOS device name (e.g., "iPhone 15 Pro")
   --json                     JSON output
   --full, -f                 Full page screenshot
@@ -1882,7 +1882,7 @@ Environment:
   AGENT_BROWSER_ENCRYPTION_KEY   64-char hex key for AES-256-GCM state encryption
   AGENT_BROWSER_STATE_EXPIRE_DAYS Auto-delete states older than N days (default: 30)
   AGENT_BROWSER_EXECUTABLE_PATH  Custom browser executable path
-  AGENT_BROWSER_PROVIDER         Browser provider (ios, browserbase, kernel, browseruse)
+  AGENT_BROWSER_PROVIDER         Browser provider (ios, browserbase, hyperbrowser, kernel, browseruse)
   AGENT_BROWSER_AUTO_CONNECT     Auto-discover and connect to running Chrome
   AGENT_BROWSER_STREAM_PORT      Enable WebSocket streaming on port (e.g., 9223)
   AGENT_BROWSER_IOS_DEVICE       Default iOS device name

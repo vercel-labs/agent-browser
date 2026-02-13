@@ -74,7 +74,7 @@ This enables control of:
 | --- | --- |
 | `--session <name>` | Use isolated session |
 | `--profile <path>` | Persistent browser profile directory |
-| `-p <provider>` | Cloud browser provider (`browserbase`, `browseruse`) |
+| `-p <provider>` | Cloud browser provider (`browserbase`, `browseruse`, `hyperbrowser`) |
 | `--headers <json>` | HTTP headers scoped to origin |
 | `--executable-path` | Custom browser executable |
 | `--args <args>` | Browser launch args (comma-separated) |
@@ -103,6 +103,10 @@ agent-browser -p browserbase open https://example.com
 # Browser Use
 export BROWSER_USE_API_KEY="your-api-key"
 agent-browser -p browseruse open https://example.com
+
+# Hyperbrowser
+export HYPERBROWSER_API_KEY="your-api-key"
+agent-browser -p hyperbrowser open https://example.com
 
 # Or via environment variable
 export AGENT_BROWSER_PROVIDER=browserbase
