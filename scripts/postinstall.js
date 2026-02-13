@@ -10,7 +10,7 @@
  */
 
 import { existsSync, mkdirSync, chmodSync, createWriteStream, unlinkSync, writeFileSync, symlinkSync, lstatSync } from 'fs';
-import { dirname, join } from 'path';
+import { dirname, join, relative } from 'path';
 import { fileURLToPath } from 'url';
 import { platform, arch } from 'os';
 import { get } from 'https';
@@ -20,8 +20,19 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = join(__dirname, '..');
 const binDir = join(projectRoot, 'bin');
 
+// Detect real hardware architecture (handles Rosetta 2 on Apple Silicon)
+function getRealArch() {
+  if (platform() === 'darwin') {
+    try {
+      const hwArch = execSync('sysctl -n hw.machine', { encoding: 'utf8' }).trim();
+      if (hwArch === 'arm64') return 'arm64';
+    } catch { /* fall through */ }
+  }
+  return arch();
+}
+
 // Platform detection
-const platformKey = `${platform()}-${arch()}`;
+const platformKey = `${platform()}-${getRealArch()}`;
 const ext = platform() === 'win32' ? '.exe' : '';
 const binaryName = `agent-browser-${platformKey}${ext}`;
 const binaryPath = join(binDir, binaryName);
@@ -172,7 +183,8 @@ async function fixUnixSymlink() {
   // Replace symlink to point directly to native binary
   try {
     unlinkSync(symlinkPath);
-    symlinkSync(binaryPath, symlinkPath);
+    const relTarget = relative(dirname(symlinkPath), binaryPath);
+    symlinkSync(relTarget, symlinkPath);
     console.log('✓ Optimized: symlink points to native binary (zero overhead)');
   } catch (err) {
     // Permission error or other issue - not critical, JS wrapper still works

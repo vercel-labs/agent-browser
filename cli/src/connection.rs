@@ -150,6 +150,19 @@ fn get_port_for_session(session: &str) -> u16 {
     49152 + ((hash.unsigned_abs() as u32 % 16383) as u16)
 }
 
+#[cfg(windows)]
+fn read_port_file(session: &str) -> Option<u16> {
+    let port_file = get_socket_dir().join(format!("{}.port", session));
+    fs::read_to_string(&port_file)
+        .ok()
+        .and_then(|s| s.trim().parse::<u16>().ok())
+}
+
+#[cfg(windows)]
+fn get_effective_port(session: &str) -> u16 {
+    read_port_file(session).unwrap_or_else(|| get_port_for_session(session))
+}
+
 #[cfg(unix)]
 fn is_daemon_running(session: &str) -> bool {
     let pid_path = get_pid_path(session);
@@ -172,7 +185,7 @@ fn is_daemon_running(session: &str) -> bool {
     if !pid_path.exists() {
         return false;
     }
-    let port = get_port_for_session(session);
+    let port = get_effective_port(session);
     TcpStream::connect_timeout(
         &format!("127.0.0.1:{}", port).parse().unwrap(),
         Duration::from_millis(100),
@@ -188,7 +201,7 @@ fn daemon_ready(session: &str) -> bool {
     }
     #[cfg(windows)]
     {
-        let port = get_port_for_session(session);
+        let port = get_effective_port(session);
         TcpStream::connect_timeout(
             &format!("127.0.0.1:{}", port).parse().unwrap(),
             Duration::from_millis(50),
@@ -277,6 +290,15 @@ pub fn ensure_daemon(
     let exe_path = env::current_exe().map_err(|e| e.to_string())?;
     // Canonicalize to resolve symlinks (e.g., npm global bin symlink -> actual binary)
     let exe_path = exe_path.canonicalize().unwrap_or(exe_path);
+    #[cfg(windows)]
+    let exe_path = {
+        let s = exe_path.to_string_lossy();
+        if s.starts_with("\\\\?\\") {
+            PathBuf::from(&s[4..])
+        } else {
+            exe_path
+        }
+    };
     let exe_dir = exe_path.parent().unwrap();
 
     let mut daemon_paths = vec![
@@ -459,10 +481,12 @@ pub fn ensure_daemon(
         thread::sleep(Duration::from_millis(100));
     }
 
-    Err(format!(
-        "Daemon failed to start (socket: {})",
-        get_socket_dir().join(format!("{}.sock", session)).display()
-    ))
+    #[cfg(unix)]
+    let err_detail = format!("socket: {}", get_socket_dir().join(format!("{}.sock", session)).display());
+    #[cfg(windows)]
+    let err_detail = format!("port: {}", get_effective_port(session));
+
+    Err(format!("Daemon failed to start ({})", err_detail))
 }
 
 fn connect(session: &str) -> Result<Connection, String> {
@@ -475,7 +499,7 @@ fn connect(session: &str) -> Result<Connection, String> {
     }
     #[cfg(windows)]
     {
-        let port = get_port_for_session(session);
+        let port = get_effective_port(session);
         TcpStream::connect(format!("127.0.0.1:{}", port))
             .map(Connection::Tcp)
             .map_err(|e| format!("Failed to connect: {}", e))
