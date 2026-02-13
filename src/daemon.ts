@@ -382,8 +382,8 @@ export async function startDaemon(options?: {
             if (isIOS && manager instanceof IOSManager) {
               // Auto-launch iOS Safari
               // Check for device in command first (for reused daemons), then fall back to env vars
-              const cmd = parseResult.command as { iosDevice?: string };
-              const iosDevice = cmd.iosDevice || process.env.AGENT_BROWSER_IOS_DEVICE;
+              const cmd = parseResult.command as { device?: string; iosDevice?: string };
+              const iosDevice = cmd.device || cmd.iosDevice || process.env.AGENT_BROWSER_IOS_DEVICE;
               await manager.launch({
                 device: iosDevice,
                 udid: process.env.AGENT_BROWSER_IOS_UDID,
