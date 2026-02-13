@@ -255,6 +255,18 @@ export class BrowserManager {
   }
 
   /**
+   * Navigate to a URL on the current page
+   */
+  async navigate(
+    url: string,
+    options?: { waitUntil?: 'load' | 'domcontentloaded' | 'networkidle' | 'commit' }
+  ): Promise<{ url: string; title: string }> {
+    const page = this.getPage();
+    await page.goto(url, { waitUntil: options?.waitUntil ?? 'load' });
+    return { url: page.url(), title: await page.title() };
+  }
+
+  /**
    * Get the current frame (or page's main frame if no frame is selected)
    */
   getFrame(): Frame {
