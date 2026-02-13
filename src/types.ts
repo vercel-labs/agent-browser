@@ -545,6 +545,10 @@ export interface DeviceListCommand extends BaseCommand {
   action: 'device_list';
 }
 
+export interface HelpCommand extends BaseCommand {
+  action: 'help';
+}
+
 // Video recording (Playwright native - requires launch-time setup)
 export interface VideoStartCommand extends BaseCommand {
   action: 'video_start';
