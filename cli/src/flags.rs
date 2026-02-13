@@ -120,7 +120,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
                     i += 1;
                 }
             }
-            "--profile" => {
+            "--profile" | "--user-data-dir" => {
                 if let Some(s) = args.get(i + 1) {
                     flags.profile = Some(s.clone());
                     flags.cli_profile = true;

@@ -10,21 +10,23 @@ allowed-tools: Bash(agent-browser:*)
 
 Every browser automation follows this pattern:
 
-1. **Navigate**: `agent-browser open <url>`
-2. **Snapshot**: `agent-browser snapshot -i` (get element refs like `@e1`, `@e2`)
-3. **Interact**: Use refs to click, fill, select
-4. **Re-snapshot**: After navigation or DOM changes, get fresh refs
+1. **Start a session**: Use `--session <name>` to isolate browser tasks. Always use a unique session name per independent task to prevent overlapping.
+2. **Navigate**: `agent-browser --session <name> open <url>`
+3. **Snapshot**: `agent-browser --session <name> snapshot -i` (get element refs like `@e1`, `@e2`)
+4. **Interact**: Use refs to click, fill, select
+5. **Re-snapshot**: After navigation or DOM changes, get fresh refs
+6. **Close when done**: `agent-browser --session <name> close`
 
 ```bash
-agent-browser open https://example.com/form
-agent-browser snapshot -i
+agent-browser --session task1 open https://example.com/form
+agent-browser --session task1 snapshot -i
 # Output: @e1 [input type="email"], @e2 [input type="password"], @e3 [button] "Submit"
 
-agent-browser fill @e1 "user@example.com"
-agent-browser fill @e2 "password123"
-agent-browser click @e3
-agent-browser wait --load networkidle
-agent-browser snapshot -i  # Check result
+agent-browser --session task1 fill @e1 "user@example.com"
+agent-browser --session task1 fill @e2 "password123"
+agent-browser --session task1 click @e3
+agent-browser --session task1 wait --load networkidle
+agent-browser --session task1 snapshot -i  # Check result
 ```
 
 ## Essential Commands

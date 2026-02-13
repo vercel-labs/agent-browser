@@ -51,6 +51,16 @@ agent-browser screenshot page.png
 agent-browser close
 ```
 
+> **Tip:** Use `npx agent-browser` instead of `agent-browser` for a zero-install experience.
+
+```bash
+# With npx (no install needed)
+npx agent-browser open example.com
+npx agent-browser snapshot
+npx agent-browser click @e2
+npx agent-browser close
+```
+
 ### Traditional Selectors (also supported)
 
 ```bash

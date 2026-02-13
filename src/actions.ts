@@ -1010,12 +1010,21 @@ async function handleGetByPlaceholder(
 }
 
 async function handleCookiesGet(
-  command: Command & { action: 'cookies_get'; urls?: string[] },
+  command: Command & { action: 'cookies_get'; urls?: string[]; saveTo?: string },
   browser: BrowserManager
 ): Promise<Response> {
   const page = browser.getPage();
   const context = page.context();
   const cookies = await context.cookies(command.urls);
+  if (command.saveTo) {
+    const fs = await import('fs');
+    fs.writeFileSync(command.saveTo, JSON.stringify(cookies, null, 2));
+    return successResponse(command.id, {
+      saved: true,
+      path: command.saveTo,
+      count: cookies.length,
+    });
+  }
   return successResponse(command.id, { cookies });
 }
 

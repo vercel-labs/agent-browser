@@ -1172,25 +1172,27 @@ export class BrowserManager {
 
     let context: BrowserContext;
     if (hasExtensions) {
-      // Extensions require persistent context in a temp directory
+      // Extensions require persistent context
       const extPaths = options.extensions!.join(',');
       const session = process.env.AGENT_BROWSER_SESSION || 'default';
       // Combine extension args with custom args and file access args
       const extArgs = [`--disable-extensions-except=${extPaths}`, `--load-extension=${extPaths}`];
       const allArgs = baseArgs ? [...extArgs, ...baseArgs] : extArgs;
-      context = await launcher.launchPersistentContext(
-        path.join(os.tmpdir(), `agent-browser-ext-${session}`),
-        {
-          headless: false,
-          executablePath: options.executablePath,
-          args: allArgs,
-          viewport,
-          extraHTTPHeaders: options.headers,
-          userAgent: options.userAgent,
-          ...(options.proxy && { proxy: options.proxy }),
-          ignoreHTTPSErrors: options.ignoreHTTPSErrors ?? false,
-        }
-      );
+      // Use profile path if provided, otherwise temp directory
+      const contextPath = hasProfile
+        ? options.profile!.replace(/^~\//, os.homedir() + '/')
+        : path.join(os.tmpdir(), `agent-browser-ext-${session}`);
+      context = await launcher.launchPersistentContext(contextPath, {
+        headless: false,
+        executablePath: options.executablePath,
+        args: allArgs,
+        viewport,
+        extraHTTPHeaders: options.headers,
+        userAgent: options.userAgent,
+        ...(options.proxy && { proxy: options.proxy }),
+        ignoreHTTPSErrors: options.ignoreHTTPSErrors ?? false,
+        env: { ...process.env },
+      });
       this.isPersistentContext = true;
     } else if (hasProfile) {
       // Profile uses persistent context for durable cookies/storage
