@@ -1,10 +1,43 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::{json, Value};
-use std::io::{self, BufRead};
+use std::io::{self, BufRead, IsTerminal, Read};
 
 use crate::color;
 use crate::flags::Flags;
 use crate::validation::{is_valid_session_name, session_name_error};
+
+/// Resolve a path to absolute, relative to the CLI's current working directory.
+/// The daemon runs in a different directory, so relative paths must be resolved
+/// before being sent over the socket.
+pub fn resolve_path(path: &str) -> String {
+    let expanded = if path == "~" {
+        get_home_dir().unwrap_or_else(|| path.to_string())
+    } else if let Some(rest) = path.strip_prefix("~/") {
+        match get_home_dir() {
+            Some(home) => format!("{}/{}", home, rest),
+            None => path.to_string(),
+        }
+    } else {
+        path.to_string()
+    };
+    let p = std::path::Path::new(&expanded);
+    if p.is_absolute() {
+        return expanded;
+    }
+    match std::env::current_dir() {
+        Ok(cwd) => cwd.join(p).to_string_lossy().to_string(),
+        Err(_) => expanded,
+    }
+}
+
+fn get_home_dir() -> Option<String> {
+    #[cfg(unix)]
+    { return std::env::var("HOME").ok(); }
+    #[cfg(windows)]
+    { return std::env::var("USERPROFILE").ok(); }
+    #[allow(unreachable_code)]
+    None
+}
 
 /// Error type for command parsing with contextual information
 #[derive(Debug)]
@@ -230,7 +263,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                 context: "upload".to_string(),
                 usage: "upload <selector> <files...>",
             })?;
-            Ok(json!({ "id": id, "action": "upload", "selector": sel, "files": &rest[1..] }))
+            Ok(json!({ "id": id, "action": "upload", "selector": sel, "files": rest[1..].iter().map(|f| resolve_path(f)).collect::<Vec<_>>() }))
         }
         "download" => {
             let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
@@ -241,7 +274,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                 context: "download".to_string(),
                 usage: "download <selector> <path>",
             })?;
-            Ok(json!({ "id": id, "action": "download", "selector": sel, "path": path }))
+            Ok(json!({ "id": id, "action": "download", "selector": sel, "path": resolve_path(path) }))
         }
 
         // === Keyboard ===
@@ -411,7 +444,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                     .unwrap();
                 if let Some(path) = rest.get(download_idx + 1) {
                     if !path.starts_with("--") {
-                        cmd["path"] = json!(path);
+                        cmd["path"] = json!(resolve_path(path));
                     }
                 }
                 // Check for optional timeout
@@ -471,7 +504,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                 _ => (None, None),
             };
             Ok(
-                json!({ "id": id, "action": "screenshot", "path": path, "selector": selector, "fullPage": flags.full, "annotate": flags.annotate }),
+                json!({ "id": id, "action": "screenshot", "path": path.map(resolve_path), "selector": selector, "fullPage": flags.full, "annotate": flags.annotate }),
             )
         }
         "pdf" => {
@@ -479,7 +512,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                 context: "pdf".to_string(),
                 usage: "pdf <path>",
             })?;
-            Ok(json!({ "id": id, "action": "pdf", "path": path }))
+            Ok(json!({ "id": id, "action": "pdf", "path": resolve_path(path) }))
         }
 
         // === Snapshot ===
@@ -954,7 +987,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                 Some("stop") => {
                     let mut cmd = json!({ "id": id, "action": "trace_stop" });
                     if let Some(path) = rest.get(1) {
-                        cmd["path"] = json!(path);
+                        cmd["path"] = json!(resolve_path(path));
                     }
                     Ok(cmd)
                 }
@@ -1017,7 +1050,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                     })?;
                     // Optional URL parameter
                     let url = rest.get(2);
-                    let mut cmd = json!({ "id": id, "action": "recording_start", "path": path });
+                    let mut cmd = json!({ "id": id, "action": "recording_start", "path": resolve_path(path) });
                     if let Some(u) = url {
                         // Add https:// prefix if needed (preserve special schemes)
                         let url_str = if u.starts_with("http") || u.contains("://") {
@@ -1037,7 +1070,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                     })?;
                     // Optional URL parameter
                     let url = rest.get(2);
-                    let mut cmd = json!({ "id": id, "action": "recording_restart", "path": path });
+                    let mut cmd = json!({ "id": id, "action": "recording_restart", "path": resolve_path(path) });
                     if let Some(u) = url {
                         // Add https:// prefix if needed (preserve special schemes)
                         let url_str = if u.starts_with("http") || u.contains("://") {
@@ -1084,14 +1117,14 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                         context: "state save".to_string(),
                         usage: "state save <path>",
                     })?;
-                    Ok(json!({ "id": id, "action": "state_save", "path": path }))
+                    Ok(json!({ "id": id, "action": "state_save", "path": resolve_path(path) }))
                 }
                 Some("load") => {
                     let path = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
                         context: "state load".to_string(),
                         usage: "state load <path>",
                     })?;
-                    Ok(json!({ "id": id, "action": "state_load", "path": path }))
+                    Ok(json!({ "id": id, "action": "state_load", "path": resolve_path(path) }))
                 }
                 Some("list") => {
                     Ok(json!({ "id": id, "action": "state_list" }))
@@ -2078,6 +2111,51 @@ mod tests {
         s.split_whitespace().map(String::from).collect()
     }
 
+    /// Assert that a JSON path value is an absolute path ending with the expected filename.
+    fn assert_resolved_path(cmd: &Value, key: &str, expected_filename: &str) {
+        let path = cmd[key].as_str().expect("path should be a string");
+        assert!(
+            Path::new(path).is_absolute(),
+            "path should be absolute, got: {}",
+            path
+        );
+        assert!(
+            path.ends_with(expected_filename),
+            "path should end with '{}', got: {}",
+            expected_filename,
+            path
+        );
+    }
+
+    // === resolve_path Tests ===
+
+    #[test]
+    fn test_resolve_path_absolute_unchanged() {
+        assert_eq!(resolve_path("/tmp/file.txt"), "/tmp/file.txt");
+    }
+
+    #[test]
+    fn test_resolve_path_relative_becomes_absolute() {
+        let result = resolve_path("file.txt");
+        assert!(
+            Path::new(&result).is_absolute(),
+            "expected absolute path, got: {}",
+            result
+        );
+        assert!(result.ends_with("file.txt"));
+    }
+
+    #[test]
+    fn test_resolve_path_dot_relative() {
+        let result = resolve_path("./subdir/file.txt");
+        assert!(
+            Path::new(&result).is_absolute(),
+            "expected absolute path, got: {}",
+            result
+        );
+        assert!(result.ends_with("subdir/file.txt"));
+    }
+
     // === Cookies Tests ===
 
     #[test]
@@ -2544,7 +2622,7 @@ mod tests {
     fn test_screenshot_path() {
         let cmd = parse_command(&args("screenshot out.png"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "screenshot");
-        assert_eq!(cmd["path"], "out.png");
+        assert_resolved_path(&cmd, "path", "out.png");
     }
 
     #[test]
@@ -2585,7 +2663,7 @@ mod tests {
         let cmd = parse_command(&args("screenshot ./output.png"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "screenshot");
         assert_eq!(cmd["selector"], serde_json::Value::Null);
-        assert_eq!(cmd["path"], "./output.png");
+        assert_resolved_path(&cmd, "path", "output.png");
     }
 
     #[test]
@@ -2593,7 +2671,29 @@ mod tests {
         let cmd = parse_command(&args("screenshot .btn ./button.png"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "screenshot");
         assert_eq!(cmd["selector"], ".btn");
-        assert_eq!(cmd["path"], "./button.png");
+        assert_resolved_path(&cmd, "path", "button.png");
+    }
+
+    #[test]
+    fn test_screenshot_absolute_path_unchanged() {
+        let cmd =
+            parse_command(&args("screenshot /tmp/out.png"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "screenshot");
+        assert_eq!(cmd["path"], "/tmp/out.png");
+    }
+
+    #[test]
+    fn test_pdf_resolves_relative_path() {
+        let cmd = parse_command(&args("pdf report.pdf"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "pdf");
+        assert_resolved_path(&cmd, "path", "report.pdf");
+    }
+
+    #[test]
+    fn test_pdf_absolute_path_unchanged() {
+        let cmd = parse_command(&args("pdf /tmp/report.pdf"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "pdf");
+        assert_eq!(cmd["path"], "/tmp/report.pdf");
     }
 
     // === Snapshot ===
@@ -2702,7 +2802,7 @@ mod tests {
     fn test_record_start() {
         let cmd = parse_command(&args("record start output.webm"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "recording_start");
-        assert_eq!(cmd["path"], "output.webm");
+        assert_resolved_path(&cmd, "path", "output.webm");
         assert!(cmd.get("url").is_none());
     }
 
@@ -2714,7 +2814,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cmd["action"], "recording_start");
-        assert_eq!(cmd["path"], "demo.webm");
+        assert_resolved_path(&cmd, "path", "demo.webm");
         assert_eq!(cmd["url"], "https://example.com");
     }
 
@@ -2726,7 +2826,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cmd["action"], "recording_start");
-        assert_eq!(cmd["path"], "demo.webm");
+        assert_resolved_path(&cmd, "path", "demo.webm");
         assert_eq!(cmd["url"], "https://example.com");
     }
 
@@ -2762,7 +2862,7 @@ mod tests {
     fn test_record_restart() {
         let cmd = parse_command(&args("record restart output.webm"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "recording_restart");
-        assert_eq!(cmd["path"], "output.webm");
+        assert_resolved_path(&cmd, "path", "output.webm");
         assert!(cmd.get("url").is_none());
     }
 
@@ -2774,7 +2874,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cmd["action"], "recording_restart");
-        assert_eq!(cmd["path"], "demo.webm");
+        assert_resolved_path(&cmd, "path", "demo.webm");
         assert_eq!(cmd["url"], "https://example.com");
     }
 
@@ -3032,7 +3132,7 @@ mod tests {
         let cmd = parse_command(&args("download #btn ./file.pdf"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "download");
         assert_eq!(cmd["selector"], "#btn");
-        assert_eq!(cmd["path"], "./file.pdf");
+        assert_resolved_path(&cmd, "path", "file.pdf");
     }
 
     #[test]
@@ -3040,7 +3140,7 @@ mod tests {
         let cmd = parse_command(&args("download @e5 ./report.xlsx"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "download");
         assert_eq!(cmd["selector"], "@e5");
-        assert_eq!(cmd["path"], "./report.xlsx");
+        assert_resolved_path(&cmd, "path", "report.xlsx");
     }
 
     #[test]
@@ -3076,7 +3176,7 @@ mod tests {
     fn test_wait_download_with_path() {
         let cmd = parse_command(&args("wait --download ./file.pdf"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "waitfordownload");
-        assert_eq!(cmd["path"], "./file.pdf");
+        assert_resolved_path(&cmd, "path", "file.pdf");
     }
 
     #[test]
@@ -3095,7 +3195,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cmd["action"], "waitfordownload");
-        assert_eq!(cmd["path"], "./file.pdf");
+        assert_resolved_path(&cmd, "path", "file.pdf");
         assert_eq!(cmd["timeout"], 30000);
     }
 
@@ -3103,7 +3203,7 @@ mod tests {
     fn test_wait_download_short_flag() {
         let cmd = parse_command(&args("wait -d ./file.pdf"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "waitfordownload");
-        assert_eq!(cmd["path"], "./file.pdf");
+        assert_resolved_path(&cmd, "path", "file.pdf");
     }
 
     // === Connect (CDP) tests ===
