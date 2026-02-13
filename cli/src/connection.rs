@@ -447,6 +447,10 @@ pub fn ensure_daemon(session: &str, opts: &DaemonOptions) -> Result<DaemonResult
             cmd.arg(daemon_path);
             apply_daemon_env(&mut cmd, session, opts);
 
+            if let Ok(script) = env::var("AGENT_BROWSER_INIT_SCRIPT") {
+                cmd.env("AGENT_BROWSER_INIT_SCRIPT", script);
+            }
+
             unsafe {
                 cmd.pre_exec(|| {
                     libc::setsid();
@@ -473,6 +477,10 @@ pub fn ensure_daemon(session: &str, opts: &DaemonOptions) -> Result<DaemonResult
                 .env("MSYS_NO_PATHCONV", "1")
                 .env("MSYS2_ARG_CONV_EXCL", "*");
             apply_daemon_env(&mut cmd, session, opts);
+
+            if let Ok(script) = env::var("AGENT_BROWSER_INIT_SCRIPT") {
+                cmd.env("AGENT_BROWSER_INIT_SCRIPT", script);
+            }
 
             const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
             const DETACHED_PROCESS: u32 = 0x00000008;

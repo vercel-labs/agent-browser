@@ -341,6 +341,7 @@ export class BrowserManager {
       context.setDefaultTimeout(getDefaultTimeout());
       this.contexts.push(context);
       this.setupContextTracking(context);
+      await this.addInitScriptIfConfigured(context);
       await this.ensureDomainFilter(context);
     } else {
       return;
@@ -955,6 +956,7 @@ export class BrowserManager {
       context.setDefaultTimeout(10000);
       this.contexts.push(context);
       this.setupContextTracking(context);
+      await this.addInitScriptIfConfigured(context);
       await this.ensureDomainFilter(context);
       await this.sanitizeExistingPages([page]);
       this.pages.push(page);
@@ -1098,6 +1100,7 @@ export class BrowserManager {
       context.setDefaultTimeout(getDefaultTimeout());
       this.contexts.push(context);
       this.setupContextTracking(context);
+      await this.addInitScriptIfConfigured(context);
       await this.ensureDomainFilter(context);
       await this.sanitizeExistingPages([page]);
       this.pages.push(page);
@@ -1173,6 +1176,7 @@ export class BrowserManager {
       context.setDefaultTimeout(getDefaultTimeout());
       this.contexts.push(context);
       this.setupContextTracking(context);
+      await this.addInitScriptIfConfigured(context);
       await this.ensureDomainFilter(context);
       await this.sanitizeExistingPages([page]);
       this.pages.push(page);
@@ -1476,6 +1480,7 @@ export class BrowserManager {
     context.setDefaultTimeout(getDefaultTimeout());
     this.contexts.push(context);
     this.setupContextTracking(context);
+    await this.addInitScriptIfConfigured(context);
     await this.ensureDomainFilter(context);
 
     const page = context.pages()[0] ?? (await context.newPage());
@@ -1553,6 +1558,7 @@ export class BrowserManager {
         context.setDefaultTimeout(10000);
         this.contexts.push(context);
         this.setupContextTracking(context);
+        await this.addInitScriptIfConfigured(context);
         await this.ensureDomainFilter(context);
       }
 
@@ -1748,6 +1754,21 @@ export class BrowserManager {
   }
 
   /**
+   * Add init script to context if AGENT_BROWSER_INIT_SCRIPT is set.
+   * Supports both file paths and inline scripts.
+   */
+  private async addInitScriptIfConfigured(context: BrowserContext): Promise<void> {
+    const initScript = process.env.AGENT_BROWSER_INIT_SCRIPT;
+    if (initScript) {
+      if (existsSync(initScript)) {
+        await context.addInitScript({ path: initScript });
+      } else {
+        await context.addInitScript(initScript);
+      }
+    }
+  }
+
+  /**
    * Set up tracking for new pages in a context (for CDP connections and popups/new tabs)
    * This handles pages created externally (e.g., via target="_blank" links, window.open)
    */
@@ -1813,6 +1834,7 @@ export class BrowserManager {
     context.setDefaultTimeout(getDefaultTimeout());
     this.contexts.push(context);
     this.setupContextTracking(context);
+    await this.addInitScriptIfConfigured(context);
     await this.ensureDomainFilter(context);
 
     const page = await context.newPage();
@@ -2555,3 +2577,4 @@ export class BrowserManager {
     this.frameCallback = null;
   }
 }
+
