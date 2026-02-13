@@ -2356,13 +2356,10 @@ Options:
   --color-scheme <scheme>    Color scheme: dark, light, no-preference (or AGENT_BROWSER_COLOR_SCHEME)
   --download-path <path>     Default download directory (or AGENT_BROWSER_DOWNLOAD_PATH)
   --session-name <name>      Auto-save/restore session state (cookies, localStorage)
-  --content-boundaries       Wrap page output in boundary markers (or AGENT_BROWSER_CONTENT_BOUNDARIES)
-  --max-output <chars>       Truncate page output to N chars (or AGENT_BROWSER_MAX_OUTPUT)
-  --allowed-domains <list>   Restrict navigation domains (or AGENT_BROWSER_ALLOWED_DOMAINS)
-  --action-policy <path>     Action policy JSON file (or AGENT_BROWSER_ACTION_POLICY)
-  --confirm-actions <list>   Categories requiring confirmation (or AGENT_BROWSER_CONFIRM_ACTIONS)
   --confirm-interactive      Interactive confirmation prompts; auto-denies if stdin is not a TTY (or AGENT_BROWSER_CONFIRM_INTERACTIVE)
   --config <path>            Use a custom config file (or AGENT_BROWSER_CONFIG env)
+  --allow-origins <origins>  Extra allowed WebSocket origins, comma-separated
+                             (or AGENT_BROWSER_ALLOWED_ORIGINS env)
   --debug                    Debug output
   --version, -V              Show version
 
@@ -2411,12 +2408,8 @@ Environment:
   AGENT_BROWSER_STREAM_PORT      Enable WebSocket streaming on port (e.g., 9223)
   AGENT_BROWSER_IOS_DEVICE       Default iOS device name
   AGENT_BROWSER_IOS_UDID         Default iOS device UDID
-  AGENT_BROWSER_CONTENT_BOUNDARIES Wrap page output in boundary markers
-  AGENT_BROWSER_MAX_OUTPUT       Max characters for page output
-  AGENT_BROWSER_ALLOWED_DOMAINS  Comma-separated allowed domain patterns
-  AGENT_BROWSER_ACTION_POLICY    Path to action policy JSON file
-  AGENT_BROWSER_CONFIRM_ACTIONS  Action categories requiring confirmation
   AGENT_BROWSER_CONFIRM_INTERACTIVE Enable interactive confirmation prompts
+  AGENT_BROWSER_ALLOWED_ORIGINS  Extra allowed WebSocket origins (comma-separated)
 
 Install (recommended, fastest - native Rust CLI):
   npm install -g agent-browser
