@@ -709,10 +709,16 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
         "frame" => {
             if rest.first().copied() == Some("main") {
                 Ok(json!({ "id": id, "action": "mainframe" }))
+            } else if rest.first().copied() == Some("locator") {
+                let sel = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
+                    context: "frame locator".to_string(),
+                    usage: "frame locator <selector>",
+                })?;
+                Ok(json!({ "id": id, "action": "framelocator", "selector": sel }))
             } else {
                 let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
                     context: "frame".to_string(),
-                    usage: "frame <selector|main>",
+                    usage: "frame <selector|main|locator>",
                 })?;
                 Ok(json!({ "id": id, "action": "frame", "selector": sel }))
             }
