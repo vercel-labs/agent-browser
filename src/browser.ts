@@ -1117,7 +1117,7 @@ export class BrowserManager {
     }
 
     if (cdpEndpoint) {
-      await this.connectViaCDP(cdpEndpoint);
+      await this.connectViaCDP(cdpEndpoint, options.headers);
       return;
     }
 
@@ -1310,7 +1310,7 @@ export class BrowserManager {
    * Connect to a running browser via CDP (Chrome DevTools Protocol)
    * @param cdpEndpoint Either a port number (as string) or a full WebSocket URL (ws:// or wss://)
    */
-  private async connectViaCDP(cdpEndpoint: string | undefined): Promise<void> {
+  private async connectViaCDP(cdpEndpoint: string | undefined, headers?: Record<string, string>): Promise<void> {
     if (!cdpEndpoint) {
       throw new Error('CDP endpoint is required for CDP connection');
     }
@@ -1374,6 +1374,14 @@ export class BrowserManager {
       }
 
       this.activePageIndex = 0;
+
+      // Apply custom headers post-connection (Playwright's connectOverCDP doesn't support
+      // connection-time headers, so we set them on the context after connecting)
+      if (headers && Object.keys(headers).length > 0) {
+        for (const context of contexts) {
+          await context.setExtraHTTPHeaders(headers);
+        }
+      }
     } catch (error) {
       // Clean up browser connection if validation or setup failed
       await browser.close().catch(() => {});
