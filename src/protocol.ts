@@ -236,6 +236,9 @@ const unrouteSchema = baseCommandSchema.extend({
 const requestsSchema = baseCommandSchema.extend({
   action: z.literal('requests'),
   filter: z.string().optional(),
+  host: z.string().optional(),
+  type: z.string().optional(),
+  redact: z.boolean().optional(),
   clear: z.boolean().optional(),
 });
 
@@ -668,6 +671,15 @@ const responseBodySchema = baseCommandSchema.extend({
   timeout: z.number().positive().optional(),
 });
 
+const networkDumpSchema = baseCommandSchema.extend({
+  action: z.literal('networkdump'),
+  outputPath: z.string().min(1),
+  filter: z.string().optional(),
+  host: z.string().optional(),
+  type: z.string().optional(),
+  redact: z.boolean().optional(),
+});
+
 // Screencast schemas for streaming browser viewport
 const screencastStartSchema = baseCommandSchema.extend({
   action: z.literal('screencast_start'),
@@ -949,6 +961,7 @@ const commandSchema = z.discriminatedUnion('action', [
   multiSelectSchema,
   waitForDownloadSchema,
   responseBodySchema,
+  networkDumpSchema,
   screencastStartSchema,
   screencastStopSchema,
   inputMouseSchema,
