@@ -714,6 +714,7 @@ const screenshotSchema = baseCommandSchema.extend({
   selector: z.string().min(1).nullish(),
   format: z.enum(['png', 'jpeg']).optional(),
   quality: z.number().min(0).max(100).optional(),
+  scale: z.union([z.enum(['css', 'device']), z.number().positive()]).optional(),
 });
 
 const snapshotSchema = baseCommandSchema.extend({
