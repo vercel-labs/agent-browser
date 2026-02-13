@@ -1194,10 +1194,28 @@ async function handleViewport(
       throw new Error(`Unknown device: "${command.device}". Available: ${available}...`);
     }
     await browser.setViewport(device.viewport.width, device.viewport.height);
+
+    // Apply or clear device scale factor (matching handleDevice behavior)
+    if (device.deviceScaleFactor && device.deviceScaleFactor !== 1) {
+      await browser.setDeviceScaleFactor(
+        device.deviceScaleFactor,
+        device.viewport.width,
+        device.viewport.height,
+        device.isMobile ?? false
+      );
+    } else {
+      try {
+        await browser.clearDeviceMetricsOverride();
+      } catch {
+        // Ignore error if override was never set
+      }
+    }
+
     return successResponse(command.id, {
       width: device.viewport.width,
       height: device.viewport.height,
       device: command.device,
+      deviceScaleFactor: device.deviceScaleFactor,
     });
   }
   if (!command.width || !command.height) {
