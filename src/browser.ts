@@ -81,6 +81,8 @@ export class BrowserManager {
   private browserbaseApiKey: string | null = null;
   private browserUseSessionId: string | null = null;
   private browserUseApiKey: string | null = null;
+  private hyperbrowserApiKey: string | null = null;
+  private hyperbrowserSessionId: string | null = null;
   private kernelSessionId: string | null = null;
   private kernelApiKey: string | null = null;
   private contexts: BrowserContext[] = [];
@@ -779,6 +781,22 @@ export class BrowserManager {
   }
 
   /**
+   * Close a Hyperbrowser session via API
+   */
+  private async closeHyperbrowserSession(sessionId: string, apiKey: string): Promise<void> {
+    const response = await fetch(`https://api.hyperbrowser.ai/api/session/${sessionId}/stop`, {
+      method: 'PUT',
+      headers: {
+        'X-API-Key': apiKey,
+      },
+    });
+
+    if (!response.ok) {
+      throw new Error(`Failed to close Hyperbrowser session: ${response.statusText}`);
+    }
+  }
+
+  /**
    * Close a Kernel session via API
    */
   private async closeKernelSession(sessionId: string, apiKey: string): Promise<void> {
@@ -851,6 +869,177 @@ export class BrowserManager {
     } catch (error) {
       await this.closeBrowserbaseSession(session.id, browserbaseApiKey).catch((sessionError) => {
         console.error('Failed to close Browserbase session during cleanup:', sessionError);
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Find or create a Hyperbrowser profile by name.
+   * Returns profile id + name for session attachment.
+   */
+  private async findOrCreateHyperbrowserProfile(
+    profileName: string,
+    apiKey: string
+  ): Promise<{ id: string; name: string }> {
+    type HyperbrowserProfile = { id?: string; name?: string };
+
+    const query = new URLSearchParams({
+      page: '1',
+      name: profileName,
+    });
+    const listResponse = await fetch(
+      `https://api.hyperbrowser.ai/api/profiles?${query.toString()}`,
+      {
+        method: 'GET',
+        headers: {
+          'X-API-Key': apiKey,
+        },
+      }
+    );
+
+    if (!listResponse.ok) {
+      throw new Error(`Failed to list Hyperbrowser profiles: ${listResponse.statusText}`);
+    }
+
+    let listResult: { profiles?: HyperbrowserProfile[] };
+    try {
+      listResult = (await listResponse.json()) as { profiles?: HyperbrowserProfile[] };
+    } catch (error) {
+      throw new Error(
+        `Failed to parse Hyperbrowser profile list response: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+
+    const existingProfile = listResult.profiles?.find(
+      (profile) => profile.name === profileName && !!profile.id
+    );
+    if (existingProfile?.id) {
+      return { id: existingProfile.id, name: existingProfile.name ?? profileName };
+    }
+
+    const createResponse = await fetch('https://api.hyperbrowser.ai/api/profile', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-API-Key': apiKey,
+      },
+      body: JSON.stringify({ name: profileName }),
+    });
+
+    if (!createResponse.ok) {
+      throw new Error(`Failed to create Hyperbrowser profile: ${createResponse.statusText}`);
+    }
+
+    let createdProfile: HyperbrowserProfile;
+    try {
+      createdProfile = (await createResponse.json()) as HyperbrowserProfile;
+    } catch (error) {
+      throw new Error(
+        `Failed to parse Hyperbrowser create profile response: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+
+    if (!createdProfile.id) {
+      throw new Error('Invalid Hyperbrowser profile response: missing id');
+    }
+
+    return {
+      id: createdProfile.id,
+      name: createdProfile.name ?? profileName,
+    };
+  }
+
+  /**
+   * Connect to Hyperbrowser remote browser via API.
+   * Requires HYPERBROWSER_API_KEY environment variable.
+   * Optional: HYPERBROWSER_PROFILE_NAME for persistent profile state.
+   */
+  private async connectToHyperbrowser(): Promise<void> {
+    const hyperbrowserApiKey = process.env.HYPERBROWSER_API_KEY;
+    if (!hyperbrowserApiKey) {
+      throw new Error('HYPERBROWSER_API_KEY is required when using hyperbrowser as a provider');
+    }
+
+    // Find or create profile if HYPERBROWSER_PROFILE_NAME is set
+    const profileName = process.env.HYPERBROWSER_PROFILE_NAME;
+    let profileConfig:
+      | {
+          profile: {
+            id: string;
+            persistChanges: boolean;
+          };
+        }
+      | undefined;
+
+    if (profileName) {
+      const profile = await this.findOrCreateHyperbrowserProfile(profileName, hyperbrowserApiKey);
+      profileConfig = {
+        profile: {
+          id: profile.id,
+          persistChanges: true, // Save cookies/state back to the profile when session ends
+        },
+      };
+    }
+
+    const response = await fetch('https://api.hyperbrowser.ai/api/session', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-API-Key': hyperbrowserApiKey,
+      },
+      ...(profileConfig ? { body: JSON.stringify(profileConfig) } : {}),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Failed to create Hyperbrowser session: ${response.statusText}`);
+    }
+
+    let session: { id: string; wsEndpoint: string };
+    try {
+      session = (await response.json()) as { id: string; wsEndpoint: string };
+    } catch (error) {
+      throw new Error(
+        `Failed to parse Hyperbrowser session response: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+
+    if (!session.id || !session.wsEndpoint) {
+      throw new Error(
+        `Invalid Hyperbrowser session response: missing ${!session.id ? 'id' : 'wsEndpoint'}`
+      );
+    }
+
+    const browser = await chromium.connectOverCDP(session.wsEndpoint).catch(() => {
+      throw new Error('Failed to connect to Hyperbrowser session via CDP');
+    });
+
+    try {
+      const contexts = browser.contexts();
+      let context: BrowserContext;
+      let page: Page;
+
+      if (contexts.length === 0) {
+        context = await browser.newContext();
+        page = await context.newPage();
+      } else {
+        context = contexts[0];
+        const pages = context.pages();
+        page = pages[0] ?? (await context.newPage());
+      }
+
+      this.hyperbrowserSessionId = session.id;
+      this.hyperbrowserApiKey = hyperbrowserApiKey;
+      this.browser = browser;
+      context.setDefaultTimeout(60000);
+      this.contexts.push(context);
+      this.pages.push(page);
+      this.activePageIndex = 0;
+      this.setupPageTracking(page);
+      this.setupContextTracking(context);
+    } catch (error) {
+      await this.closeHyperbrowserSession(session.id, hyperbrowserApiKey).catch((sessionError) => {
+        console.error('Failed to close Hyperbrowser session during cleanup:', sessionError);
       });
       throw error;
     }
@@ -1135,6 +1324,10 @@ export class BrowserManager {
     }
     if (provider === 'browseruse') {
       await this.connectToBrowserUse();
+      return;
+    }
+    if (provider === 'hyperbrowser') {
+      await this.connectToHyperbrowser();
       return;
     }
 
@@ -2140,6 +2333,14 @@ export class BrowserManager {
         }
       );
       this.browser = null;
+    } else if (this.hyperbrowserSessionId && this.hyperbrowserApiKey) {
+      await this.closeHyperbrowserSession(
+        this.hyperbrowserSessionId,
+        this.hyperbrowserApiKey
+      ).catch((error) => {
+        console.error('Failed to close Hyperbrowser session:', error);
+      });
+      this.browser = null;
     } else if (this.kernelSessionId && this.kernelApiKey) {
       await this.closeKernelSession(this.kernelSessionId, this.kernelApiKey).catch((error) => {
         console.error('Failed to close Kernel session:', error);
@@ -2172,6 +2373,8 @@ export class BrowserManager {
     this.browserbaseApiKey = null;
     this.browserUseSessionId = null;
     this.browserUseApiKey = null;
+    this.hyperbrowserSessionId = null;
+    this.hyperbrowserApiKey = null;
     this.kernelSessionId = null;
     this.kernelApiKey = null;
     this.isPersistentContext = false;
