@@ -37,6 +37,7 @@ import type {
   FocusCommand,
   DragCommand,
   FrameCommand,
+  FrameLocatorCommand,
   GetByRoleCommand,
   GetByTextCommand,
   GetByLabelCommand,
@@ -351,6 +352,8 @@ async function dispatchAction(command: Command, browser: BrowserManager): Promis
       return await handleFrame(command, browser);
     case 'mainframe':
       return await handleMainFrame(command, browser);
+    case 'framelocator':
+      return await handleFrameLocator(command, browser);
     case 'getbyrole':
       return await handleGetByRole(command, browser);
     case 'getbytext':
@@ -1204,6 +1207,14 @@ async function handleMainFrame(
   browser: BrowserManager
 ): Promise<Response> {
   browser.switchToMainFrame();
+  return successResponse(command.id, { switched: true });
+}
+
+async function handleFrameLocator(
+  command: FrameLocatorCommand,
+  browser: BrowserManager
+): Promise<Response> {
+  browser.setFrameLocator(command.selector);
   return successResponse(command.id, { switched: true });
 }
 

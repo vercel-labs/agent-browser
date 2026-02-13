@@ -107,6 +107,7 @@ export class BrowserManager {
   private pages: Page[] = [];
   private activePageIndex: number = 0;
   private activeFrame: Frame | null = null;
+  private activeFrameLocator: string | null = null;
   private dialogHandler: ((dialog: Dialog) => Promise<void>) | null = null;
   private trackedRequests: TrackedRequest[] = [];
   private routes: Map<string, (route: Route) => Promise<void>> = new Map();
@@ -311,6 +312,11 @@ export class BrowserManager {
     const locator = this.getLocatorFromRef(selectorOrRef);
     if (locator) return locator;
 
+    // Use frameLocator for cross-origin iframe interaction
+    if (this.activeFrameLocator) {
+      return this.getPage().frameLocator(this.activeFrameLocator).locator(selectorOrRef);
+    }
+
     // Otherwise treat as regular selector
     const page = this.getPage();
     return page.locator(selectorOrRef);
@@ -411,6 +417,15 @@ export class BrowserManager {
    * Switch back to main frame
    */
   switchToMainFrame(): void {
+    this.activeFrame = null;
+    this.activeFrameLocator = null;
+  }
+
+  /**
+   * Set a frame locator for cross-origin iframe interaction
+   */
+  setFrameLocator(selector: string | null): void {
+    this.activeFrameLocator = selector;
     this.activeFrame = null;
   }
 
