@@ -226,6 +226,7 @@ fn main() {
         flags.provider.as_deref(),
         flags.device.as_deref(),
         flags.session_name.as_deref(),
+        flags.allow_origins.as_deref(),
     ) {
         Ok(result) => result,
         Err(e) => {

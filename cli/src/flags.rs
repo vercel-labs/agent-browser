@@ -22,6 +22,7 @@ pub struct Flags {
     pub device: Option<String>,
     pub auto_connect: bool,
     pub session_name: Option<String>,
+    pub allow_origins: Option<String>,
 
     // Track which launch-time options were explicitly passed via CLI
     // (as opposed to being set only via environment variables)
@@ -69,6 +70,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
         device: env::var("AGENT_BROWSER_IOS_DEVICE").ok(),
         auto_connect: env::var("AGENT_BROWSER_AUTO_CONNECT").is_ok(),
         session_name: env::var("AGENT_BROWSER_SESSION_NAME").ok(),
+        allow_origins: env::var("AGENT_BROWSER_ALLOWED_ORIGINS").ok(),
         // Track CLI-passed flags (default false, set to true when flag is passed)
         cli_executable_path: false,
         cli_extensions: false,
@@ -186,6 +188,12 @@ pub fn parse_flags(args: &[String]) -> Flags {
                     i += 1;
                 }
             }
+            "--allow-origins" => {
+                if let Some(s) = args.get(i + 1) {
+                    flags.allow_origins = Some(s.clone());
+                    i += 1;
+                }
+            }
             _ => {}
         }
         i += 1;
@@ -224,6 +232,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--provider",
         "--device",
         "--session-name",
+        "--allow-origins",
     ];
 
     for arg in args.iter() {

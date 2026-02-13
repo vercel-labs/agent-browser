@@ -1,7 +1,11 @@
-import { describe, it, expect } from 'vitest';
-import { isAllowedOrigin } from './stream-server.js';
+import { describe, it, expect, afterEach } from 'vitest';
+import { isAllowedOrigin, setAllowedOrigins } from './stream-server.js';
 
 describe('isAllowedOrigin', () => {
+  afterEach(() => {
+    setAllowedOrigins([]);
+  });
+
   describe('allowed origins', () => {
     it('should allow connections with no origin (CLI tools)', () => {
       expect(isAllowedOrigin(undefined)).toBe(true);
@@ -37,6 +41,22 @@ describe('isAllowedOrigin', () => {
     it('should allow IPv6 loopback origins', () => {
       expect(isAllowedOrigin('http://[::1]')).toBe(true);
       expect(isAllowedOrigin('http://[::1]:3000')).toBe(true);
+    });
+
+    it('should allow vscode-webview:// origins', () => {
+      expect(isAllowedOrigin('vscode-webview://abc123')).toBe(true);
+      expect(isAllowedOrigin('vscode-webview://some-extension-id/index.html')).toBe(true);
+    });
+
+    it('should allow custom origins', () => {
+      setAllowedOrigins(['https://my-app.com']);
+      expect(isAllowedOrigin('https://my-app.com')).toBe(true);
+      expect(isAllowedOrigin('https://evil.com')).toBe(false);
+    });
+
+    it('should allow custom origin prefixes', () => {
+      setAllowedOrigins(['chrome-extension://']);
+      expect(isAllowedOrigin('chrome-extension://abcdef123456')).toBe(true);
     });
   });
 

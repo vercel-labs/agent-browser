@@ -308,6 +308,13 @@ export async function startDaemon(options?: {
       ? parseInt(process.env.AGENT_BROWSER_STREAM_PORT, 10)
       : 0);
 
+  // Configure custom allowed origins for stream server
+  const allowedOriginsEnv = process.env.AGENT_BROWSER_ALLOWED_ORIGINS;
+  if (allowedOriginsEnv) {
+    const { setAllowedOrigins } = await import('./stream-server.js');
+    setAllowedOrigins(allowedOriginsEnv.split(',').map(s => s.trim()));
+  }
+
   if (streamPort > 0 && !isIOS && manager instanceof BrowserManager) {
     streamServer = new StreamServer(manager, streamPort);
     await streamServer.start();

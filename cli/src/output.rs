@@ -1873,6 +1873,8 @@ Options:
   --cdp <port>               Connect via CDP (Chrome DevTools Protocol)
   --auto-connect             Auto-discover and connect to running Chrome
   --session-name <name>      Auto-save/restore session state (cookies, localStorage)
+  --allow-origins <origins>  Extra allowed WebSocket origins, comma-separated
+                             (or AGENT_BROWSER_ALLOWED_ORIGINS env)
   --debug                    Debug output
   --version, -V              Show version
 
@@ -1887,6 +1889,7 @@ Environment:
   AGENT_BROWSER_STREAM_PORT      Enable WebSocket streaming on port (e.g., 9223)
   AGENT_BROWSER_IOS_DEVICE       Default iOS device name
   AGENT_BROWSER_IOS_UDID         Default iOS device UDID
+  AGENT_BROWSER_ALLOWED_ORIGINS  Extra allowed WebSocket origins (comma-separated)
 
 Examples:
   agent-browser open example.com
