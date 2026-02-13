@@ -56,6 +56,7 @@ const navigateSchema = baseCommandSchema.extend({
   url: z.string().min(1),
   waitUntil: z.enum(['load', 'domcontentloaded', 'networkidle']).optional(),
   headers: z.record(z.string()).optional(),
+  iosDevice: z.string().optional(),
 });
 
 const clickSchema = baseCommandSchema.extend({
