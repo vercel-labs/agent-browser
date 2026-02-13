@@ -540,6 +540,20 @@ export interface DeviceListCommand extends BaseCommand {
   action: 'device_list';
 }
 
+export interface SaveFileCommand extends BaseCommand {
+  action: 'savefile';
+  outputPath: string;
+  selector?: string;
+}
+
+export interface DropFileCommand extends BaseCommand {
+  action: 'dropfile';
+  selector: string;
+  filePath: string;
+  fileName?: string;
+  mimeType?: string;
+}
+
 // Video recording (Playwright native - requires launch-time setup)
 export interface VideoStartCommand extends BaseCommand {
   action: 'video_start';
@@ -984,7 +998,9 @@ export type Command =
   | InputKeyboardCommand
   | InputTouchCommand
   | SwipeCommand
-  | DeviceListCommand;
+  | DeviceListCommand
+  | SaveFileCommand
+  | DropFileCommand;
 
 // Response types
 export interface SuccessResponse<T = unknown> {

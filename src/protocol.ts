@@ -824,6 +824,20 @@ const windowNewSchema = baseCommandSchema.extend({
     .optional(),
 });
 
+const saveFileSchema = baseCommandSchema.extend({
+  action: z.literal('savefile'),
+  outputPath: z.string().min(1),
+  selector: z.string().optional(),
+});
+
+const dropFileSchema = baseCommandSchema.extend({
+  action: z.literal('dropfile'),
+  selector: z.string().min(1),
+  filePath: z.string().min(1),
+  fileName: z.string().optional(),
+  mimeType: z.string().optional(),
+});
+
 // Union schema for all commands
 const commandSchema = z.discriminatedUnion('action', [
   launchSchema,
@@ -956,6 +970,8 @@ const commandSchema = z.discriminatedUnion('action', [
   inputTouchSchema,
   swipeSchema,
   deviceListSchema,
+  saveFileSchema,
+  dropFileSchema,
 ]);
 
 // Parse result type

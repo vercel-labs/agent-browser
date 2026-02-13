@@ -229,6 +229,39 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
             })?;
             Ok(json!({ "id": id, "action": "download", "selector": sel, "path": path }))
         }
+        "savefile" | "save" => {
+            let out_path = rest.first().ok_or_else(|| ParseError::MissingArguments {
+                context: "savefile".to_string(),
+                usage: "savefile <output-path> [--selector <sel>]",
+            })?;
+            let sel_idx = rest.iter().position(|&s| s == "--selector");
+            let selector = sel_idx.and_then(|i| rest.get(i + 1).copied());
+            let mut cmd = json!({ "id": id, "action": "savefile", "outputPath": out_path });
+            if let Some(s) = selector {
+                cmd["selector"] = json!(s);
+            }
+            Ok(cmd)
+        }
+        "dropfile" | "drop" => {
+            let selector = rest.first().ok_or_else(|| ParseError::MissingArguments {
+                context: "dropfile".to_string(),
+                usage: "dropfile <selector> <file-path> [--name <filename>] [--mime <type>]",
+            })?;
+            let file_path = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
+                context: "dropfile".to_string(),
+                usage: "dropfile <selector> <file-path>",
+            })?;
+            let mut cmd = json!({ "id": id, "action": "dropfile", "selector": selector, "filePath": file_path });
+            let name_idx = rest.iter().position(|&s| s == "--name");
+            if let Some(n) = name_idx.and_then(|i| rest.get(i + 1).copied()) {
+                cmd["fileName"] = json!(n);
+            }
+            let mime_idx = rest.iter().position(|&s| s == "--mime");
+            if let Some(m) = mime_idx.and_then(|i| rest.get(i + 1).copied()) {
+                cmd["mimeType"] = json!(m);
+            }
+            Ok(cmd)
+        }
 
         // === Keyboard ===
         "press" | "key" => {
