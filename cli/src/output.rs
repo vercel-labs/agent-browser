@@ -1778,6 +1778,7 @@ Options:
   --full, -f                 Full page screenshot
   --headed                   Show browser window (not headless)
   --cdp <port>               Connect via CDP (Chrome DevTools Protocol)
+  --auto-connect             Auto-discover and connect to running Chrome
   --debug                    Debug output
   --version, -V              Show version
 
@@ -1785,6 +1786,7 @@ Environment:
   AGENT_BROWSER_SESSION          Session name (default: "default")
   AGENT_BROWSER_EXECUTABLE_PATH  Custom browser executable path
   AGENT_BROWSER_PROVIDER         Browser provider (ios, browserbase, kernel, browseruse)
+  AGENT_BROWSER_AUTO_CONNECT     Auto-discover and connect to running Chrome
   AGENT_BROWSER_STREAM_PORT      Enable WebSocket streaming on port (e.g., 9223)
   AGENT_BROWSER_IOS_DEVICE       Default iOS device name
   AGENT_BROWSER_IOS_UDID         Default iOS device UDID
@@ -1798,6 +1800,7 @@ Examples:
   agent-browser get text @e1
   agent-browser screenshot --full
   agent-browser --cdp 9222 snapshot      # Connect via CDP port
+  agent-browser --auto-connect snapshot  # Auto-discover running Chrome
   agent-browser --profile ~/.myapp open example.com  # Persistent profile
 
 iOS Simulator (requires Xcode and Appium):

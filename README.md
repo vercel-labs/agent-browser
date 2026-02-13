@@ -345,6 +345,7 @@ The `-C` flag is useful for modern web apps that use custom clickable elements (
 | `--exact` | Exact text match |
 | `--headed` | Show browser window (not headless) |
 | `--cdp <port>` | Connect via Chrome DevTools Protocol |
+| `--auto-connect` | Auto-discover and connect to running Chrome (or `AGENT_BROWSER_AUTO_CONNECT` env) |
 | `--ignore-https-errors` | Ignore HTTPS certificate errors (useful for self-signed certs) |
 | `--allow-file-access` | Allow file:// URLs to access local files (Chromium only) |
 | `--debug` | Debug output |
@@ -554,6 +555,28 @@ This enables control of:
 - Chrome/Chromium instances with remote debugging
 - WebView2 applications
 - Any browser exposing a CDP endpoint
+
+### Auto-Connect
+
+Use `--auto-connect` to automatically discover and connect to a running Chrome instance without specifying a port:
+
+```bash
+# Auto-discover running Chrome with remote debugging
+agent-browser --auto-connect open example.com
+agent-browser --auto-connect snapshot
+
+# Or via environment variable
+AGENT_BROWSER_AUTO_CONNECT=1 agent-browser snapshot
+```
+
+Auto-connect discovers Chrome by:
+1. Reading Chrome's `DevToolsActivePort` file from the default user data directory
+2. Falling back to probing common debugging ports (9222, 9229)
+
+This is useful when:
+- Chrome 144+ has remote debugging enabled via `chrome://inspect/#remote-debugging` (which uses a dynamic port)
+- You want a zero-configuration connection to your existing browser
+- You don't want to track which port Chrome is using
 
 ## Streaming (Browser Preview)
 

@@ -1429,6 +1429,7 @@ mod tests {
             ignore_https_errors: false,
             allow_file_access: false,
             device: None,
+            auto_connect: false,
             cli_executable_path: false,
             cli_extensions: false,
             cli_profile: false,

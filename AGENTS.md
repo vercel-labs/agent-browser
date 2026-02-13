@@ -6,6 +6,19 @@ Instructions for AI coding agents working with this codebase.
 
 - Do not use emojis in code, output, or documentation. Unicode symbols (✓, ✗, →, ⚠) are acceptable.
 - CLI colored output uses `cli/src/color.rs`. This module respects the `NO_COLOR` environment variable. Never use hardcoded ANSI color codes.
+- CLI flags must always use kebab-case (e.g., `--auto-connect`, `--allow-file-access`). Never use camelCase for flags (e.g., `--autoConnect` is wrong).
+
+## Documentation
+
+When adding or changing user-facing features (new flags, commands, behaviors, environment variables, etc.), update **all** of the following:
+
+1. `cli/src/output.rs` -- `--help` output (flags list, examples, environment variables)
+2. `README.md` -- Options table, relevant feature sections, examples
+3. `skills/agent-browser/SKILL.md` -- so AI agents know about the feature
+4. `docs/src/app/` -- the Next.js docs site (MDX pages)
+5. Inline doc comments in the relevant source files
+
+This applies to changes that either human users or AI agents would need to know about. Do not skip any of these locations.
 
 <!-- opensrc:start -->
 

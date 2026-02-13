@@ -289,7 +289,27 @@ fn main() {
         if flags.json {
             println!(r#"{{"success":false,"error":"{}"}}"#, msg);
         } else {
-            eprintln!("\x1b[31m✗\x1b[0m {}", msg);
+            eprintln!("{} {}", color::error_indicator(), msg);
+        }
+        exit(1);
+    }
+
+    if flags.auto_connect && flags.cdp.is_some() {
+        let msg = "Cannot use --auto-connect and --cdp together";
+        if flags.json {
+            println!(r#"{{"success":false,"error":"{}"}}"#, msg);
+        } else {
+            eprintln!("{} {}", color::error_indicator(), msg);
+        }
+        exit(1);
+    }
+
+    if flags.auto_connect && flags.provider.is_some() {
+        let msg = "Cannot use --auto-connect and -p/--provider together";
+        if flags.json {
+            println!(r#"{{"success":false,"error":"{}"}}"#, msg);
+        } else {
+            eprintln!("{} {}", color::error_indicator(), msg);
         }
         exit(1);
     }
@@ -299,9 +319,40 @@ fn main() {
         if flags.json {
             println!(r#"{{"success":false,"error":"{}"}}"#, msg);
         } else {
-            eprintln!("\x1b[31m✗\x1b[0m {}", msg);
+            eprintln!("{} {}", color::error_indicator(), msg);
         }
         exit(1);
+    }
+
+    // Auto-connect to existing browser
+    if flags.auto_connect {
+        let mut launch_cmd = json!({
+            "id": gen_id(),
+            "action": "launch",
+            "autoConnect": true
+        });
+
+        if flags.ignore_https_errors {
+            launch_cmd["ignoreHTTPSErrors"] = json!(true);
+        }
+
+        let err = match send_command(launch_cmd, &flags.session) {
+            Ok(resp) if resp.success => None,
+            Ok(resp) => Some(
+                resp.error
+                    .unwrap_or_else(|| "Auto-connect failed".to_string()),
+            ),
+            Err(e) => Some(e.to_string()),
+        };
+
+        if let Some(msg) = err {
+            if flags.json {
+                println!(r#"{{"success":false,"error":"{}"}}"#, msg);
+            } else {
+                eprintln!("{} {}", color::error_indicator(), msg);
+            }
+            exit(1);
+        }
     }
 
     // Connect via CDP if --cdp flag is set

@@ -31,6 +31,7 @@ const launchSchema = baseCommandSchema.extend({
       { message: 'CDP URL must start with ws://, wss://, http://, or https://' }
     )
     .optional(),
+  autoConnect: z.boolean().optional(),
   executablePath: z.string().optional(),
   extensions: z.array(z.string()).optional(),
   headers: z.record(z.string()).optional(),

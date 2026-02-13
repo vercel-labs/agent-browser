@@ -122,6 +122,17 @@ agent-browser --session site2 snapshot -i
 agent-browser session list
 ```
 
+### Connect to Existing Chrome
+
+```bash
+# Auto-discover running Chrome with remote debugging enabled
+agent-browser --auto-connect open https://example.com
+agent-browser --auto-connect snapshot
+
+# Or with explicit CDP port
+agent-browser --cdp 9222 snapshot
+```
+
 ### Visual Browser (Debugging)
 
 ```bash

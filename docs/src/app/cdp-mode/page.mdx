@@ -34,6 +34,30 @@ The `--cdp` flag accepts either:
 - A port number (e.g., `9222`) for local connections via `http://localhost:{port}`
 - A full WebSocket URL (e.g., `wss://...` or `ws://...`) for remote browser services
 
+## Auto-Connect
+
+Use `--auto-connect` to automatically discover and connect to a running Chrome instance without specifying a port:
+
+```bash
+# Auto-discover running Chrome with remote debugging
+agent-browser --auto-connect open example.com
+agent-browser --auto-connect snapshot
+
+# Or via environment variable
+AGENT_BROWSER_AUTO_CONNECT=1 agent-browser snapshot
+```
+
+Auto-connect discovers Chrome by:
+
+1. Reading Chrome's `DevToolsActivePort` file from the default user data directory
+2. Falling back to probing common debugging ports (9222, 9229)
+
+This is useful when:
+
+- Chrome 144+ has remote debugging enabled via `chrome://inspect/#remote-debugging` (which uses a dynamic port)
+- You want a zero-configuration connection to your existing browser
+- You don't want to track which port Chrome is using
+
 ## Use cases
 
 This enables control of:
@@ -63,6 +87,7 @@ This enables control of:
 | `--exact` | Exact text match |
 | `--headed` | Show browser window |
 | `--cdp <port\|url>` | CDP connection (port or WebSocket URL) |
+| `--auto-connect` | Auto-discover and connect to running Chrome |
 | `--debug` | Debug output |
 
 ## Cloud providers

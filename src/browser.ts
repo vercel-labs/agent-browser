@@ -16,7 +16,7 @@ import {
 } from 'playwright-core';
 import path from 'node:path';
 import os from 'node:os';
-import { existsSync, mkdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, readFileSync } from 'node:fs';
 import type { LaunchCommand } from './types.js';
 import { type RefMap, type EnhancedSnapshot, getEnhancedSnapshot, parseRef } from './snapshot.js';
 
@@ -1082,10 +1082,14 @@ export class BrowserManager {
 
     if (this.isLaunched()) {
       const needsRelaunch =
-        (!cdpEndpoint && this.cdpEndpoint !== null) ||
-        (!!cdpEndpoint && this.needsCdpReconnect(cdpEndpoint));
+        (!cdpEndpoint && !options.autoConnect && this.cdpEndpoint !== null) ||
+        (!!cdpEndpoint && this.needsCdpReconnect(cdpEndpoint)) ||
+        (!!options.autoConnect && !this.isCdpConnectionAlive());
       if (needsRelaunch) {
         await this.close();
+      } else if (options.autoConnect && this.isCdpConnectionAlive()) {
+        // Already connected via auto-connect, no need to reconnect
+        return;
       } else {
         return;
       }
@@ -1093,6 +1097,11 @@ export class BrowserManager {
 
     if (cdpEndpoint) {
       await this.connectViaCDP(cdpEndpoint);
+      return;
+    }
+
+    if (options.autoConnect) {
+      await this.autoConnectViaCDP();
       return;
     }
 
@@ -1281,6 +1290,141 @@ export class BrowserManager {
       await browser.close().catch(() => {});
       throw error;
     }
+  }
+
+  /**
+   * Get Chrome's default user data directory paths for the current platform.
+   * Returns an array of candidate paths to check (stable, then beta/canary).
+   */
+  private getChromeUserDataDirs(): string[] {
+    const home = os.homedir();
+    const platform = os.platform();
+
+    if (platform === 'darwin') {
+      return [
+        path.join(home, 'Library', 'Application Support', 'Google', 'Chrome'),
+        path.join(home, 'Library', 'Application Support', 'Google', 'Chrome Canary'),
+        path.join(home, 'Library', 'Application Support', 'Chromium'),
+      ];
+    } else if (platform === 'win32') {
+      const localAppData = process.env.LOCALAPPDATA ?? path.join(home, 'AppData', 'Local');
+      return [
+        path.join(localAppData, 'Google', 'Chrome', 'User Data'),
+        path.join(localAppData, 'Google', 'Chrome SxS', 'User Data'),
+        path.join(localAppData, 'Chromium', 'User Data'),
+      ];
+    } else {
+      // Linux
+      return [
+        path.join(home, '.config', 'google-chrome'),
+        path.join(home, '.config', 'google-chrome-unstable'),
+        path.join(home, '.config', 'chromium'),
+      ];
+    }
+  }
+
+  /**
+   * Try to read the DevToolsActivePort file from a Chrome user data directory.
+   * Returns { port, wsPath } if found, or null if not available.
+   */
+  private readDevToolsActivePort(userDataDir: string): { port: number; wsPath: string } | null {
+    const filePath = path.join(userDataDir, 'DevToolsActivePort');
+    try {
+      if (!existsSync(filePath)) return null;
+      const content = readFileSync(filePath, 'utf-8').trim();
+      const lines = content.split('\n');
+      if (lines.length < 2) return null;
+
+      const port = parseInt(lines[0].trim(), 10);
+      const wsPath = lines[1].trim();
+
+      if (isNaN(port) || port <= 0 || port > 65535) return null;
+      if (!wsPath) return null;
+
+      return { port, wsPath };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Try to discover a Chrome CDP endpoint by querying an HTTP debug port.
+   * Returns the WebSocket debugger URL if available.
+   */
+  private async probeDebugPort(port: number): Promise<string | null> {
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/json/version`, {
+        signal: AbortSignal.timeout(2000),
+      });
+      if (!response.ok) return null;
+      const data = (await response.json()) as { webSocketDebuggerUrl?: string };
+      return data.webSocketDebuggerUrl ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Auto-discover and connect to a running Chrome/Chromium instance.
+   *
+   * Discovery strategy:
+   * 1. Read DevToolsActivePort from Chrome's default user data directories
+   * 2. If found, connect using the port and WebSocket path from that file
+   * 3. If not found, probe common debugging ports (9222, 9229)
+   * 4. If a port responds, connect via CDP
+   */
+  private async autoConnectViaCDP(): Promise<void> {
+    // Strategy 1: Check DevToolsActivePort files
+    const userDataDirs = this.getChromeUserDataDirs();
+    for (const dir of userDataDirs) {
+      const activePort = this.readDevToolsActivePort(dir);
+      if (activePort) {
+        // Verify the port is actually responding
+        const wsUrl = await this.probeDebugPort(activePort.port);
+        if (wsUrl) {
+          // Connect using the discovered WebSocket URL
+          await this.connectViaCDP(wsUrl);
+          return;
+        }
+        // Port from file exists but not responding; try HTTP endpoint directly
+        const httpUrl = `http://127.0.0.1:${activePort.port}`;
+        try {
+          await this.connectViaCDP(httpUrl);
+          return;
+        } catch {
+          // Port listed but not connectable, try next directory
+        }
+      }
+    }
+
+    // Strategy 2: Probe common debugging ports
+    const commonPorts = [9222, 9229];
+    for (const port of commonPorts) {
+      const wsUrl = await this.probeDebugPort(port);
+      if (wsUrl) {
+        await this.connectViaCDP(wsUrl);
+        return;
+      }
+    }
+
+    // Nothing found
+    const platform = os.platform();
+    let hint: string;
+    if (platform === 'darwin') {
+      hint =
+        'Start Chrome with: /Applications/Google\\ Chrome.app/Contents/MacOS/Google\\ Chrome --remote-debugging-port=9222\n' +
+        'Or enable remote debugging in Chrome 144+ at chrome://inspect/#remote-debugging';
+    } else if (platform === 'win32') {
+      hint =
+        'Start Chrome with: chrome.exe --remote-debugging-port=9222\n' +
+        'Or enable remote debugging in Chrome 144+ at chrome://inspect/#remote-debugging';
+    } else {
+      hint =
+        'Start Chrome with: google-chrome --remote-debugging-port=9222\n' +
+        'Or enable remote debugging in Chrome 144+ at chrome://inspect/#remote-debugging';
+    }
+
+    throw new Error(`No running Chrome instance with remote debugging found.\n${hint}`);
   }
 
   /**
