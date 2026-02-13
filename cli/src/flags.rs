@@ -21,6 +21,7 @@ pub struct Flags {
     pub allow_file_access: bool,
     pub device: Option<String>,
     pub auto_connect: bool,
+    pub session_name: Option<String>,
 
     // Track which launch-time options were explicitly passed via CLI
     // (as opposed to being set only via environment variables)
@@ -67,6 +68,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
         allow_file_access: env::var("AGENT_BROWSER_ALLOW_FILE_ACCESS").is_ok(),
         device: env::var("AGENT_BROWSER_IOS_DEVICE").ok(),
         auto_connect: env::var("AGENT_BROWSER_AUTO_CONNECT").is_ok(),
+        session_name: env::var("AGENT_BROWSER_SESSION_NAME").ok(),
         // Track CLI-passed flags (default false, set to true when flag is passed)
         cli_executable_path: false,
         cli_extensions: false,
@@ -178,6 +180,12 @@ pub fn parse_flags(args: &[String]) -> Flags {
                 }
             }
             "--auto-connect" => flags.auto_connect = true,
+            "--session-name" => {
+                if let Some(s) = args.get(i + 1) {
+                    flags.session_name = Some(s.clone());
+                    i += 1;
+                }
+            }
             _ => {}
         }
         i += 1;
@@ -215,6 +223,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "-p",
         "--provider",
         "--device",
+        "--session-name",
     ];
 
     for arg in args.iter() {

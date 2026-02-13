@@ -4,6 +4,7 @@ mod connection;
 mod flags;
 mod install;
 mod output;
+mod validation;
 
 use serde_json::json;
 use std::env;
@@ -179,6 +180,7 @@ fn main() {
                     ParseError::UnknownSubcommand { .. } => "unknown_subcommand",
                     ParseError::MissingArguments { .. } => "missing_arguments",
                     ParseError::InvalidValue { .. } => "invalid_value",
+                    ParseError::InvalidSessionName { .. } => "invalid_session_name",
                 };
                 println!(
                     r#"{{"success":false,"error":"{}","type":"{}"}}"#,
@@ -191,6 +193,22 @@ fn main() {
             exit(1);
         }
     };
+
+    // Validate session name before starting daemon
+    if let Some(ref name) = flags.session_name {
+        if !validation::is_valid_session_name(name) {
+            let msg = validation::session_name_error(name);
+            if flags.json {
+                println!(
+                    r#"{{"success":false,"error":"{}","type":"invalid_session_name"}}"#,
+                    msg.replace('"', "\\\"")
+                );
+            } else {
+                eprintln!("{} {}", color::error_indicator(), msg);
+            }
+            exit(1);
+        }
+    }
 
     let daemon_result = match ensure_daemon(
         &flags.session,
@@ -207,6 +225,7 @@ fn main() {
         flags.state.as_deref(),
         flags.provider.as_deref(),
         flags.device.as_deref(),
+        flags.session_name.as_deref(),
     ) {
         Ok(result) => result,
         Err(e) => {

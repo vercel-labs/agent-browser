@@ -1,8 +1,17 @@
+import * as fs from 'fs';
+import * as path from 'path';
 import type { Page, Frame } from 'playwright-core';
 import { mkdirSync } from 'node:fs';
-import path from 'node:path';
 import type { BrowserManager, ScreencastFrame } from './browser.js';
 import { getAppDir } from './daemon.js';
+import {
+  getSessionsDir,
+  readStateFile,
+  isValidSessionName,
+  isEncryptedPayload,
+  listStateFiles,
+  cleanupExpiredStates,
+} from './state-utils.js';
 import type {
   Command,
   Response,
@@ -58,6 +67,11 @@ import type {
   TraceStopCommand,
   HarStopCommand,
   StorageStateSaveCommand,
+  StateListCommand,
+  StateClearCommand,
+  StateShowCommand,
+  StateCleanCommand,
+  StateRenameCommand,
   ConsoleCommand,
   ErrorsCommand,
   KeyboardCommand,
@@ -349,6 +363,16 @@ export async function executeCommand(command: Command, browser: BrowserManager):
         return await handleStateSave(command, browser);
       case 'state_load':
         return await handleStateLoad(command, browser);
+      case 'state_list':
+        return await handleStateList(command);
+      case 'state_clear':
+        return await handleStateClear(command);
+      case 'state_show':
+        return await handleStateShow(command);
+      case 'state_clean':
+        return await handleStateClean(command);
+      case 'state_rename':
+        return await handleStateRename(command);
       case 'console':
         return await handleConsole(command, browser);
       case 'errors':
@@ -501,6 +525,32 @@ async function handleClick(command: ClickCommand, browser: BrowserManager): Prom
   const locator = browser.getLocator(command.selector);
 
   try {
+    // If --new-tab flag is set, get the href and open in a new tab
+    if (command.newTab) {
+      const fullUrl = await locator.evaluate((el) => {
+        const href = el.getAttribute('href');
+        // URL and document.baseURI are available in the browser context
+        return href
+          ? new (globalThis as any).URL(href, (globalThis as any).document.baseURI).toString()
+          : '';
+      });
+      if (!fullUrl) {
+        throw new Error(
+          `Element '${command.selector}' does not have an href attribute. --new-tab only works on links.`
+        );
+      }
+
+      await browser.newTab();
+      const newPage = browser.getPage();
+      await newPage.goto(fullUrl);
+
+      return successResponse(command.id, {
+        clicked: true,
+        newTab: true,
+        url: fullUrl,
+      });
+    }
+
     await locator.click({
       button: command.button,
       clickCount: command.clickCount,
@@ -1426,10 +1476,186 @@ async function handleStateLoad(
   command: Command & { action: 'state_load'; path: string },
   browser: BrowserManager
 ): Promise<Response> {
-  // Storage state is loaded at context creation
+  if (browser.isLaunched()) {
+    return errorResponse(
+      command.id,
+      'Cannot load state while browser is running. Close browser first, then relaunch with loaded state.'
+    );
+  }
+
+  if (!fs.existsSync(command.path)) {
+    return errorResponse(command.id, `State file not found: ${command.path}`);
+  }
+
+  await browser.launch({
+    id: command.id,
+    action: 'launch',
+    headless: true,
+    autoStateFilePath: command.path,
+  });
+
   return successResponse(command.id, {
-    note: 'Storage state must be loaded at browser launch. Use --state flag.',
+    loaded: true,
     path: command.path,
+  });
+}
+
+async function handleStateList(command: StateListCommand): Promise<Response> {
+  const sessionsDir = getSessionsDir();
+  const files = listStateFiles();
+
+  if (files.length === 0) {
+    return successResponse(command.id, { files: [], directory: sessionsDir });
+  }
+
+  const stateFiles = files
+    .map((filename) => {
+      const filepath = path.join(sessionsDir, filename);
+      const stats = fs.statSync(filepath);
+
+      let encrypted = false;
+      try {
+        const content = fs.readFileSync(filepath, 'utf-8');
+        const parsed = JSON.parse(content);
+        encrypted = isEncryptedPayload(parsed);
+      } catch {
+        // Ignore parse errors
+      }
+
+      return {
+        filename,
+        path: filepath,
+        size: stats.size,
+        modified: stats.mtime.toISOString(),
+        encrypted,
+      };
+    })
+    .sort((a, b) => new Date(b.modified).getTime() - new Date(a.modified).getTime());
+
+  return successResponse(command.id, { files: stateFiles, directory: sessionsDir });
+}
+
+async function handleStateClear(command: StateClearCommand): Promise<Response> {
+  const sessionsDir = getSessionsDir();
+
+  if (command.sessionName && !isValidSessionName(command.sessionName)) {
+    return errorResponse(
+      command.id,
+      'Invalid session name. Use only letters, numbers, dashes, and underscores.'
+    );
+  }
+
+  const files = listStateFiles();
+  if (files.length === 0) {
+    return successResponse(command.id, { cleared: 0, deleted: [] });
+  }
+
+  const deleted: string[] = [];
+
+  if (command.all) {
+    for (const file of files) {
+      fs.unlinkSync(path.join(sessionsDir, file));
+      deleted.push(file);
+    }
+  } else if (command.sessionName) {
+    for (const file of files) {
+      if (file.startsWith(`${command.sessionName}-`)) {
+        fs.unlinkSync(path.join(sessionsDir, file));
+        deleted.push(file);
+      }
+    }
+  }
+
+  return successResponse(command.id, { cleared: deleted.length, deleted });
+}
+
+async function handleStateShow(command: StateShowCommand): Promise<Response> {
+  const sessionsDir = getSessionsDir();
+
+  const baseName = command.filename.replace(/\.json$/, '');
+  if (!command.filename.endsWith('.json') || !isValidSessionName(baseName)) {
+    return errorResponse(
+      command.id,
+      'Invalid filename. Use only letters, numbers, dashes, and underscores (with .json extension).'
+    );
+  }
+
+  const filepath = path.join(sessionsDir, command.filename);
+
+  if (!fs.existsSync(filepath)) {
+    return errorResponse(command.id, `State file not found: ${command.filename}`);
+  }
+
+  try {
+    const { data: state, wasEncrypted } = readStateFile(filepath);
+    const stats = fs.statSync(filepath);
+
+    const stateObj = state as {
+      cookies?: Array<{ domain: string }>;
+      origins?: unknown[];
+    };
+    const cookies = stateObj.cookies?.length || 0;
+    const origins = stateObj.origins?.length || 0;
+    const domains = [...new Set((stateObj.cookies || []).map((c) => c.domain))];
+
+    return successResponse(command.id, {
+      filename: command.filename,
+      path: filepath,
+      size: stats.size,
+      modified: stats.mtime.toISOString(),
+      encrypted: wasEncrypted,
+      summary: {
+        cookies,
+        origins,
+        domains,
+      },
+      state,
+    });
+  } catch (e) {
+    return errorResponse(command.id, `Failed to parse state file: ${(e as Error).message}`);
+  }
+}
+
+async function handleStateClean(command: StateCleanCommand): Promise<Response> {
+  const deleted = cleanupExpiredStates(command.days);
+  const keptCount = listStateFiles().length;
+
+  return successResponse(command.id, {
+    cleaned: deleted.length,
+    deleted,
+    keptCount,
+    days: command.days,
+  });
+}
+
+async function handleStateRename(command: StateRenameCommand): Promise<Response> {
+  const sessionsDir = getSessionsDir();
+
+  if (!isValidSessionName(command.oldName) || !isValidSessionName(command.newName)) {
+    return errorResponse(
+      command.id,
+      'Invalid name. Use only letters, numbers, dashes, and underscores.'
+    );
+  }
+
+  const oldPath = path.join(sessionsDir, `${command.oldName}.json`);
+  const newPath = path.join(sessionsDir, `${command.newName}.json`);
+
+  if (!fs.existsSync(oldPath)) {
+    return errorResponse(command.id, `State file not found: ${command.oldName}.json`);
+  }
+
+  if (fs.existsSync(newPath)) {
+    return errorResponse(command.id, `Destination already exists: ${command.newName}.json`);
+  }
+
+  fs.renameSync(oldPath, newPath);
+
+  return successResponse(command.id, {
+    renamed: true,
+    oldName: `${command.oldName}.json`,
+    newName: `${command.newName}.json`,
+    path: newPath,
   });
 }
 

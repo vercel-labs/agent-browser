@@ -19,6 +19,13 @@ import os from 'node:os';
 import { existsSync, mkdirSync, rmSync, readFileSync } from 'node:fs';
 import type { LaunchCommand } from './types.js';
 import { type RefMap, type EnhancedSnapshot, getEnhancedSnapshot, parseRef } from './snapshot.js';
+import { safeHeaderMerge } from './state-utils.js';
+import {
+  getEncryptionKey,
+  isEncryptedPayload,
+  decryptData,
+  ENCRYPTION_KEY_ENV,
+} from './state-utils.js';
 
 // Screencast frame data from CDP
 export interface ScreencastFrame {
@@ -102,6 +109,16 @@ export class BrowserManager {
   private recordingPage: Page | null = null;
   private recordingOutputPath: string = '';
   private recordingTempDir: string = '';
+  private launchWarnings: string[] = [];
+
+  /**
+   * Get and clear launch warnings (e.g., decryption failures)
+   */
+  getAndClearWarnings(): string[] {
+    const warnings = this.launchWarnings;
+    this.launchWarnings = [];
+    return warnings;
+  }
 
   /**
    * Check if browser is launched
@@ -607,10 +624,7 @@ export class BrowserManager {
     const handler = async (route: Route) => {
       const requestHeaders = route.request().headers();
       await route.continue({
-        headers: {
-          ...requestHeaders,
-          ...headers,
-        },
+        headers: safeHeaderMerge(requestHeaders, headers),
       });
     };
 
@@ -669,6 +683,13 @@ export class BrowserManager {
     if (context) {
       await context.tracing.stop({ path });
     }
+  }
+
+  /**
+   * Get the current browser context (first context)
+   */
+  getContext(): BrowserContext | null {
+    return this.contexts[0] ?? null;
   }
 
   /**
@@ -1194,13 +1215,81 @@ export class BrowserManager {
         args: baseArgs,
       });
       this.cdpEndpoint = null;
+
+      // Check for auto-load state file (supports encrypted files)
+      let storageState:
+        | string
+        | {
+            cookies: Array<{
+              name: string;
+              value: string;
+              domain: string;
+              path: string;
+              expires: number;
+              httpOnly: boolean;
+              secure: boolean;
+              sameSite: 'Strict' | 'Lax' | 'None';
+            }>;
+            origins: Array<{
+              origin: string;
+              localStorage: Array<{ name: string; value: string }>;
+            }>;
+          }
+        | undefined = options.storageState ? options.storageState : undefined;
+
+      if (!storageState && options.autoStateFilePath) {
+        try {
+          const fs = await import('fs');
+          if (fs.existsSync(options.autoStateFilePath)) {
+            const content = fs.readFileSync(options.autoStateFilePath, 'utf8');
+            const parsed = JSON.parse(content);
+
+            if (isEncryptedPayload(parsed)) {
+              const key = getEncryptionKey();
+              if (key) {
+                try {
+                  const decrypted = decryptData(parsed, key);
+                  storageState = JSON.parse(decrypted);
+                  if (process.env.AGENT_BROWSER_DEBUG === '1') {
+                    console.error(
+                      `[DEBUG] Auto-loading session state (decrypted): ${options.autoStateFilePath}`
+                    );
+                  }
+                } catch (decryptErr) {
+                  const warning =
+                    'Failed to decrypt state file - wrong encryption key? Starting fresh.';
+                  this.launchWarnings.push(warning);
+                  console.error(`[WARN] ${warning}`);
+                  if (process.env.AGENT_BROWSER_DEBUG === '1') {
+                    console.error(`[DEBUG] Decryption error:`, decryptErr);
+                  }
+                }
+              } else {
+                const warning = `State file is encrypted but ${ENCRYPTION_KEY_ENV} not set - starting fresh`;
+                this.launchWarnings.push(warning);
+                console.error(`[WARN] ${warning}`);
+              }
+            } else {
+              storageState = options.autoStateFilePath;
+              if (process.env.AGENT_BROWSER_DEBUG === '1') {
+                console.error(`[DEBUG] Auto-loading session state: ${options.autoStateFilePath}`);
+              }
+            }
+          }
+        } catch (err) {
+          if (process.env.AGENT_BROWSER_DEBUG === '1') {
+            console.error(`[DEBUG] Failed to load state file, starting fresh:`, err);
+          }
+        }
+      }
+
       context = await this.browser.newContext({
         viewport,
         extraHTTPHeaders: options.headers,
         userAgent: options.userAgent,
+        storageState,
         ...(options.proxy && { proxy: options.proxy }),
         ignoreHTTPSErrors: options.ignoreHTTPSErrors ?? false,
-        ...(options.storageState && { storageState: options.storageState }),
       });
     }
 

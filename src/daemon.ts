@@ -8,6 +8,15 @@ import { parseCommand, serializeResponse, errorResponse } from './protocol.js';
 import { executeCommand } from './actions.js';
 import { executeIOSCommand } from './ios-actions.js';
 import { StreamServer } from './stream-server.js';
+import {
+  getSessionsDir,
+  ensureSessionsDir,
+  getEncryptionKey,
+  encryptData,
+  isValidSessionName,
+  cleanupExpiredStates,
+  getAutoStateFilePath,
+} from './state-utils.js';
 
 // Manager type - either desktop browser or iOS
 type Manager = BrowserManager | IOSManager;
@@ -23,6 +32,99 @@ let streamServer: StreamServer | null = null;
 
 // Default stream port (can be overridden with AGENT_BROWSER_STREAM_PORT)
 const DEFAULT_STREAM_PORT = 9223;
+
+/**
+ * Save state to file with optional encryption.
+ */
+async function saveStateToFile(
+  browser: BrowserManager,
+  filepath: string
+): Promise<{ encrypted: boolean }> {
+  const context = browser.getContext();
+  if (!context) {
+    throw new Error('No browser context available');
+  }
+
+  const state = await context.storageState();
+  const jsonData = JSON.stringify(state, null, 2);
+
+  const key = getEncryptionKey();
+  if (key) {
+    const encrypted = encryptData(jsonData, key);
+    fs.writeFileSync(filepath, JSON.stringify(encrypted, null, 2));
+    return { encrypted: true };
+  }
+
+  fs.writeFileSync(filepath, jsonData);
+  return { encrypted: false };
+}
+
+const AUTO_EXPIRE_ENV = 'AGENT_BROWSER_STATE_EXPIRE_DAYS';
+const DEFAULT_EXPIRE_DAYS = 30;
+
+function runCleanupExpiredStates(): void {
+  const expireDaysStr = process.env[AUTO_EXPIRE_ENV];
+  const expireDays = expireDaysStr ? parseInt(expireDaysStr, 10) : DEFAULT_EXPIRE_DAYS;
+
+  if (isNaN(expireDays) || expireDays <= 0) {
+    return;
+  }
+
+  try {
+    const deleted = cleanupExpiredStates(expireDays);
+    if (deleted.length > 0 && process.env.AGENT_BROWSER_DEBUG === '1') {
+      console.error(
+        `[DEBUG] Auto-expired ${deleted.length} state file(s) older than ${expireDays} days`
+      );
+    }
+  } catch (err) {
+    if (process.env.AGENT_BROWSER_DEBUG === '1') {
+      console.error(`[DEBUG] Failed to clean up expired states:`, err);
+    }
+  }
+}
+
+/**
+ * Get the validated session name and auto-state file path.
+ * Centralizes session name validation to prevent path traversal.
+ */
+function getSessionAutoStatePath(): string | undefined {
+  const sessionNameRaw = process.env.AGENT_BROWSER_SESSION_NAME;
+  if (!sessionNameRaw) return undefined;
+
+  if (!isValidSessionName(sessionNameRaw)) {
+    if (process.env.AGENT_BROWSER_DEBUG === '1') {
+      console.error(`[SECURITY] Invalid session name rejected: ${sessionNameRaw}`);
+    }
+    return undefined;
+  }
+
+  const sessionId = process.env.AGENT_BROWSER_SESSION || 'default';
+  try {
+    const autoStatePath = getAutoStateFilePath(sessionNameRaw, sessionId);
+    return autoStatePath && fs.existsSync(autoStatePath) ? autoStatePath : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Get the auto-state file path for saving (creates sessions dir if needed).
+ * Returns undefined if no valid session name is configured.
+ */
+function getSessionSaveStatePath(): string | undefined {
+  const sessionNameRaw = process.env.AGENT_BROWSER_SESSION_NAME;
+  if (!sessionNameRaw) return undefined;
+
+  if (!isValidSessionName(sessionNameRaw)) return undefined;
+
+  const sessionId = process.env.AGENT_BROWSER_SESSION || 'default';
+  try {
+    return getAutoStateFilePath(sessionNameRaw, sessionId) ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 /**
  * Set the current session
@@ -178,14 +280,17 @@ export async function startDaemon(options?: {
   streamPort?: number;
   provider?: string;
 }): Promise<void> {
-  // Ensure socket directory exists
+  // Ensure socket directory exists with restricted permissions (owner-only access)
   const socketDir = getSocketDir();
   if (!fs.existsSync(socketDir)) {
-    fs.mkdirSync(socketDir, { recursive: true });
+    fs.mkdirSync(socketDir, { recursive: true, mode: 0o700 });
   }
 
   // Clean up any stale socket
   cleanupSocket();
+
+  // Clean up expired state files on startup
+  runCleanupExpiredStates();
 
   // Determine provider from options or environment
   const provider = options?.provider ?? process.env.AGENT_BROWSER_PROVIDER;
@@ -325,6 +430,7 @@ export async function startDaemon(options?: {
                 proxy,
                 ignoreHTTPSErrors: ignoreHTTPSErrors,
                 allowFileAccess: allowFileAccess,
+                autoStateFilePath: getSessionAutoStatePath(),
               });
             }
           }
@@ -340,8 +446,40 @@ export async function startDaemon(options?: {
             await manager.ensurePage();
           }
 
+          // Handle explicit launch with auto-load state
+          if (
+            parseResult.command.action === 'launch' &&
+            manager instanceof BrowserManager &&
+            !parseResult.command.autoStateFilePath
+          ) {
+            const autoStatePath = getSessionAutoStatePath();
+            if (autoStatePath) {
+              parseResult.command.autoStateFilePath = autoStatePath;
+            }
+          }
+
           // Handle close command specially - shuts down daemon
           if (parseResult.command.action === 'close') {
+            // Auto-save state before closing
+            if (manager instanceof BrowserManager && manager.isLaunched()) {
+              const savePath = getSessionSaveStatePath();
+              if (savePath) {
+                try {
+                  const { encrypted } = await saveStateToFile(manager, savePath);
+                  fs.chmodSync(savePath, 0o600);
+                  if (process.env.AGENT_BROWSER_DEBUG === '1') {
+                    console.error(
+                      `Auto-saved session state: ${savePath}${encrypted ? ' (encrypted)' : ''}`
+                    );
+                  }
+                } catch (err) {
+                  if (process.env.AGENT_BROWSER_DEBUG === '1') {
+                    console.error(`Failed to auto-save session state:`, err);
+                  }
+                }
+              }
+            }
+
             const response =
               isIOS && manager instanceof IOSManager
                 ? await executeIOSCommand(parseResult.command, manager)
@@ -364,6 +502,15 @@ export async function startDaemon(options?: {
             isIOS && manager instanceof IOSManager
               ? await executeIOSCommand(parseResult.command, manager)
               : await executeCommand(parseResult.command, manager as BrowserManager);
+
+          // Add any launch warnings to the response
+          if (manager instanceof BrowserManager) {
+            const warnings = manager.getAndClearWarnings();
+            if (warnings.length > 0 && response.success && response.data) {
+              (response.data as Record<string, unknown>).warnings = warnings;
+            }
+          }
+
           socket.write(serializeResponse(response) + '\n');
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);

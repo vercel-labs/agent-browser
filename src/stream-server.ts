@@ -114,8 +114,12 @@ export class StreamServer {
   start(): Promise<void> {
     return new Promise((resolve, reject) => {
       try {
+        // SECURITY: Bind to localhost only to prevent network exposure.
+        // The stream server allows direct input injection (mouse, keyboard, touch)
+        // which would be a critical security risk if exposed to the network.
         this.wss = new WebSocketServer({
           port: this.port,
+          host: '127.0.0.1',
           // Security: Reject cross-origin WebSocket connections from untrusted origins.
           // This prevents malicious web pages from connecting and injecting input events.
           // Localhost origins are allowed so browser-based stream viewers can connect.

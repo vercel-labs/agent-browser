@@ -408,6 +408,64 @@ pub fn print_response(resp: &Response, json_mode: bool, action: Option<&str>) {
             return;
         }
 
+        // State list
+        if let Some(files) = data.get("files").and_then(|v| v.as_array()) {
+            if let Some(dir) = data.get("directory").and_then(|v| v.as_str()) {
+                println!("{}", color::bold(&format!("Saved states in {}", dir)));
+            }
+            if files.is_empty() {
+                println!("{}", color::dim("  No state files found"));
+            } else {
+                for file in files {
+                    let filename = file.get("filename").and_then(|v| v.as_str()).unwrap_or("");
+                    let size = file.get("size").and_then(|v| v.as_i64()).unwrap_or(0);
+                    let modified = file.get("modified").and_then(|v| v.as_str()).unwrap_or("");
+                    let encrypted = file.get("encrypted").and_then(|v| v.as_bool()).unwrap_or(false);
+                    let size_str = if size > 1024 {
+                        format!("{:.1}KB", size as f64 / 1024.0)
+                    } else {
+                        format!("{}B", size)
+                    };
+                    let date_str = modified.split('T').next().unwrap_or(modified);
+                    let enc_str = if encrypted { " [encrypted]" } else { "" };
+                    println!("  {} {}", filename, color::dim(&format!("({}, {}){}", size_str, date_str, enc_str)));
+                }
+            }
+            return;
+        }
+
+        // State rename
+        if let Some(true) = data.get("renamed").and_then(|v| v.as_bool()) {
+            let old_name = data.get("oldName").and_then(|v| v.as_str()).unwrap_or("");
+            let new_name = data.get("newName").and_then(|v| v.as_str()).unwrap_or("");
+            println!("{} Renamed {} -> {}", color::success_indicator(), old_name, new_name);
+            return;
+        }
+
+        // State clear
+        if let Some(cleared) = data.get("cleared").and_then(|v| v.as_i64()) {
+            println!("{} Cleared {} state file(s)", color::success_indicator(), cleared);
+            return;
+        }
+
+        // State show summary
+        if let Some(summary) = data.get("summary") {
+            let cookies = summary.get("cookies").and_then(|v| v.as_i64()).unwrap_or(0);
+            let origins = summary.get("origins").and_then(|v| v.as_i64()).unwrap_or(0);
+            let encrypted = data.get("encrypted").and_then(|v| v.as_bool()).unwrap_or(false);
+            let enc_str = if encrypted { " (encrypted)" } else { "" };
+            println!("State file summary{}:", enc_str);
+            println!("  Cookies: {}", cookies);
+            println!("  Origins with localStorage: {}", origins);
+            return;
+        }
+
+        // State clean
+        if let Some(cleaned) = data.get("cleaned").and_then(|v| v.as_i64()) {
+            println!("{} Cleaned {} old state file(s)", color::success_indicator(), cleaned);
+            return;
+        }
+
         // Informational note
         if let Some(note) = data.get("note").and_then(|v| v.as_str()) {
             println!("{}", note);
@@ -504,10 +562,14 @@ Examples:
             r##"
 agent-browser click - Click an element
 
-Usage: agent-browser click <selector>
+Usage: agent-browser click <selector> [--new-tab]
 
 Clicks on the specified element. The selector can be a CSS selector,
 XPath, or an element reference from snapshot (e.g., @e1).
+
+Options:
+  --new-tab            Open link in a new tab instead of navigating current tab
+                       (only works on elements with href attribute)
 
 Global Options:
   --json               Output as JSON
@@ -518,6 +580,7 @@ Examples:
   agent-browser click @e1
   agent-browser click "button.primary"
   agent-browser click "//button[@type='submit']"
+  agent-browser click @e3 --new-tab
 "##
         }
         "dblclick" => {
@@ -1505,21 +1568,29 @@ Examples:
         // === State ===
         "state" => {
             r##"
-agent-browser state - Save/load browser state
+agent-browser state - Manage browser state
 
-Usage: agent-browser state <operation> <path>
+Usage: agent-browser state <operation> [args]
 
-Save or restore browser state (cookies, localStorage, sessionStorage).
+Save, restore, list, and manage browser state (cookies, localStorage, sessionStorage).
 
 Operations:
-  save <path>          Save current state to file
-  load <path>          Note: State must be loaded at browser launch via --state flag
+  save <path>                        Save current state to file
+  load <path>                        Load state from file
+  list                               List saved state files
+  show <filename>                    Show state summary
+  rename <old-name> <new-name>       Rename state file
+  clear [session-name] [--all]       Clear saved states
+  clean --older-than <days>          Delete expired state files
 
-Applying State:
-  Use --state flag when launching browser to load saved state:
-  agent-browser --state ./auth-state.json open https://example.com
+Automatic State Persistence:
+  Use --session-name to auto-save/restore state across restarts:
+  agent-browser --session-name myapp open https://example.com
+  Or set AGENT_BROWSER_SESSION_NAME environment variable.
 
-  Or set AGENT_BROWSER_STATE environment variable.
+State Encryption:
+  Set AGENT_BROWSER_ENCRYPTION_KEY (64-char hex) for AES-256-GCM encryption.
+  Generate a key: openssl rand -hex 32
 
 Global Options:
   --json               Output as JSON
@@ -1527,7 +1598,12 @@ Global Options:
 
 Examples:
   agent-browser state save ./auth-state.json
-  agent-browser --state ./auth-state.json open https://example.com
+  agent-browser state load ./auth-state.json
+  agent-browser state list
+  agent-browser state show myapp-default.json
+  agent-browser state rename old-name new-name
+  agent-browser state clear --all
+  agent-browser state clean --older-than 7
 "##
         }
 
@@ -1796,11 +1872,15 @@ Options:
   --headed                   Show browser window (not headless)
   --cdp <port>               Connect via CDP (Chrome DevTools Protocol)
   --auto-connect             Auto-discover and connect to running Chrome
+  --session-name <name>      Auto-save/restore session state (cookies, localStorage)
   --debug                    Debug output
   --version, -V              Show version
 
 Environment:
   AGENT_BROWSER_SESSION          Session name (default: "default")
+  AGENT_BROWSER_SESSION_NAME     Auto-save/restore state persistence name
+  AGENT_BROWSER_ENCRYPTION_KEY   64-char hex key for AES-256-GCM state encryption
+  AGENT_BROWSER_STATE_EXPIRE_DAYS Auto-delete states older than N days (default: 30)
   AGENT_BROWSER_EXECUTABLE_PATH  Custom browser executable path
   AGENT_BROWSER_PROVIDER         Browser provider (ios, browserbase, kernel, browseruse)
   AGENT_BROWSER_AUTO_CONNECT     Auto-discover and connect to running Chrome
@@ -1818,7 +1898,8 @@ Examples:
   agent-browser screenshot --full
   agent-browser --cdp 9222 snapshot      # Connect via CDP port
   agent-browser --auto-connect snapshot  # Auto-discover running Chrome
-  agent-browser --profile ~/.myapp open example.com  # Persistent profile
+  agent-browser --profile ~/.myapp open example.com    # Persistent profile
+  agent-browser --session-name myapp open example.com  # Auto-save/restore state
 
 iOS Simulator (requires Xcode and Appium):
   agent-browser -p ios open example.com                    # Use default iPhone

@@ -55,6 +55,92 @@ The profile directory stores:
 - Browser cache
 - Login sessions
 
+## Session persistence
+
+Use `--session-name` to automatically save and restore cookies and localStorage across browser restarts:
+
+```bash
+# Auto-save/load state for "twitter" session
+agent-browser --session-name twitter open twitter.com
+
+# Login once, then state persists automatically
+agent-browser --session-name twitter click "#login"
+
+# Or via environment variable
+export AGENT_BROWSER_SESSION_NAME=twitter
+agent-browser open twitter.com
+```
+
+State files are stored in `~/.agent-browser/sessions/` and automatically loaded on daemon start.
+
+### Session name rules
+
+Session names must contain only alphanumeric characters, hyphens, and underscores:
+
+```bash
+# Valid session names
+agent-browser --session-name my-project open example.com
+agent-browser --session-name test_session_v2 open example.com
+
+# Invalid (will be rejected)
+agent-browser --session-name "../bad" open example.com    # path traversal
+agent-browser --session-name "my session" open example.com # spaces
+agent-browser --session-name "foo/bar" open example.com    # slashes
+```
+
+## State encryption
+
+Encrypt saved state files (cookies, localStorage) using AES-256-GCM:
+
+```bash
+# Generate a 256-bit key (64 hex characters)
+openssl rand -hex 32
+
+# Set the encryption key
+export AGENT_BROWSER_ENCRYPTION_KEY=<your-64-char-hex-key>
+
+# State files are now encrypted automatically
+agent-browser --session-name secure-session open example.com
+
+# List states shows encryption status
+agent-browser state list
+```
+
+## State auto-expiration
+
+Automatically delete old state files to prevent accumulation:
+
+```bash
+# Set expiration (default: 30 days)
+export AGENT_BROWSER_STATE_EXPIRE_DAYS=7
+
+# Manually clean old states
+agent-browser state clean --older-than 7
+```
+
+## State management commands
+
+```bash
+# List all saved states
+agent-browser state list
+
+# Show state summary (cookies, origins, domains)
+agent-browser state show my-session-default.json
+
+# Rename a state file
+agent-browser state rename old-name new-name
+
+# Clear states for a specific session name
+agent-browser state clear my-session
+
+# Clear all saved states
+agent-browser state clear --all
+
+# Manual save/load (for custom paths)
+agent-browser state save ./backup.json
+agent-browser state load ./backup.json
+```
+
 ## Authenticated sessions
 
 Use `--headers` to set HTTP headers for a specific origin:
@@ -92,3 +178,12 @@ For headers on all domains:
 ```bash
 agent-browser set headers '{"X-Custom-Header": "value"}'
 ```
+
+## Environment variables
+
+| Variable | Description |
+|----------|-------------|
+| `AGENT_BROWSER_SESSION` | Browser session ID (default: "default") |
+| `AGENT_BROWSER_SESSION_NAME` | Auto-save/load state persistence name |
+| `AGENT_BROWSER_ENCRYPTION_KEY` | 64-char hex key for AES-256-GCM encryption |
+| `AGENT_BROWSER_STATE_EXPIRE_DAYS` | Auto-delete states older than N days (default: 30) |

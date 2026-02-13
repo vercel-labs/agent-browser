@@ -232,6 +232,12 @@ agent-browser errors --clear          # Clear errors
 agent-browser highlight <sel>         # Highlight element
 agent-browser state save <path>       # Save auth state
 agent-browser state load <path>       # Load auth state
+agent-browser state list              # List saved state files
+agent-browser state show <file>       # Show state summary
+agent-browser state rename <old> <new> # Rename state file
+agent-browser state clear [name]      # Clear states for session
+agent-browser state clear --all       # Clear all saved states
+agent-browser state clean --older-than <days>  # Delete old states
 ```
 
 ### Navigation
@@ -302,6 +308,40 @@ The profile directory stores:
 
 **Tip**: Use different profile paths for different projects to keep their browser state isolated.
 
+## Session Persistence
+
+Alternatively, use `--session-name` to automatically save and restore cookies and localStorage across browser restarts:
+
+```bash
+# Auto-save/load state for "twitter" session
+agent-browser --session-name twitter open twitter.com
+
+# Login once, then state persists automatically
+# State files stored in ~/.agent-browser/sessions/
+
+# Or via environment variable
+export AGENT_BROWSER_SESSION_NAME=twitter
+agent-browser open twitter.com
+```
+
+### State Encryption
+
+Encrypt saved session data at rest with AES-256-GCM:
+
+```bash
+# Generate key: openssl rand -hex 32
+export AGENT_BROWSER_ENCRYPTION_KEY=<64-char-hex-key>
+
+# State files are now encrypted automatically
+agent-browser --session-name secure open example.com
+```
+
+| Variable | Description |
+|----------|-------------|
+| `AGENT_BROWSER_SESSION_NAME` | Auto-save/load state persistence name |
+| `AGENT_BROWSER_ENCRYPTION_KEY` | 64-char hex key for AES-256-GCM encryption |
+| `AGENT_BROWSER_STATE_EXPIRE_DAYS` | Auto-delete states older than N days (default: 30) |
+
 ## Snapshot Options
 
 The `snapshot` command supports filtering to reduce output size:
@@ -346,6 +386,7 @@ The `-C` flag is useful for modern web apps that use custom clickable elements (
 | `--headed` | Show browser window (not headless) |
 | `--cdp <port>` | Connect via Chrome DevTools Protocol |
 | `--auto-connect` | Auto-discover and connect to running Chrome (or `AGENT_BROWSER_AUTO_CONNECT` env) |
+| `--session-name <name>` | Auto-save/restore session state (or `AGENT_BROWSER_SESSION_NAME` env) |
 | `--ignore-https-errors` | Ignore HTTPS certificate errors (useful for self-signed certs) |
 | `--allow-file-access` | Allow file:// URLs to access local files (Chromium only) |
 | `--debug` | Debug output |

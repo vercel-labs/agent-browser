@@ -149,8 +149,19 @@ agent-browser trace stop [path]       # Stop and save trace
 agent-browser console                 # View console messages
 agent-browser errors                  # View page errors
 agent-browser highlight <sel>         # Highlight element
-agent-browser state save <path>       # Save auth state
-agent-browser state load <path>       # Load auth state
+```
+
+## State management
+
+```bash
+agent-browser state save <path>       # Save auth state to file
+agent-browser state load <path>       # Load auth state from file
+agent-browser state list              # List saved state files
+agent-browser state show <file>       # Show state summary
+agent-browser state rename <old> <new> # Rename state file
+agent-browser state clear [name]      # Clear states for session name
+agent-browser state clear --all       # Clear all saved states
+agent-browser state clean --older-than <days>  # Delete old states
 ```
 
 ## Navigation
