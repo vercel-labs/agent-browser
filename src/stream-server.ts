@@ -30,7 +30,13 @@ export function isAllowedOrigin(origin: string | undefined): boolean {
   }
   // Check custom allowed origins
   for (const allowed of customAllowedOrigins) {
-    if (origin === allowed || origin.startsWith(allowed)) return true;
+    if (origin === allowed) return true;
+    if (origin.startsWith(allowed)) {
+      // Scheme prefixes (e.g. "chrome-extension://") match any extension ID after them
+      if (allowed.endsWith('://')) return true;
+      const next = origin[allowed.length];
+      if (next === undefined || next === '/' || next === ':') return true;
+    }
   }
   // Allow localhost/loopback origins (browser-based stream viewers)
   try {
