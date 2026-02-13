@@ -367,6 +367,34 @@ fn main() {
         }
     }
 
+    // Warn about flags that have no effect with --cdp (connecting to existing browser)
+    // Only warn about flags explicitly passed on the CLI, not those set via environment variables
+    if flags.cdp.is_some() {
+        let ineffective: Vec<&str> = [
+            flags.headed.then_some("--headed"),
+            flags.cli_executable_path.then_some("--executable-path"),
+            flags.cli_extensions.then_some("--extension"),
+            flags.cli_profile.then_some("--profile"),
+            flags.cli_state.then_some("--state"),
+            flags.cli_args.then_some("--args"),
+            flags.cli_user_agent.then_some("--user-agent"),
+            flags.cli_proxy.then_some("--proxy"),
+            flags.cli_proxy_bypass.then_some("--proxy-bypass"),
+            flags.cli_allow_file_access.then_some("--allow-file-access"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+
+        if !ineffective.is_empty() && !flags.json {
+            eprintln!(
+                "{} {} ignored with --cdp (connecting to existing browser, not launching a new one)",
+                color::warning_indicator(),
+                ineffective.join(", ")
+            );
+        }
+    }
+
     // Connect via CDP if --cdp flag is set
     // Accepts either a port number (e.g., "9222") or a full URL (e.g., "ws://..." or "wss://...")
     if let Some(ref cdp_value) = flags.cdp {

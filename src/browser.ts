@@ -1328,18 +1328,36 @@ export class BrowserManager {
     ) {
       cdpUrl = cdpEndpoint;
     } else if (/^\d+$/.test(cdpEndpoint)) {
-      // Numeric string - treat as port number (handles JSON serialization quirks)
-      cdpUrl = `http://localhost:${cdpEndpoint}`;
+      // Numeric string - treat as port number
+      // Use 127.0.0.1 instead of localhost to avoid IPv6 resolution issues
+      // on Windows where Edge/Chrome bind to IPv4 only
+      cdpUrl = `http://127.0.0.1:${cdpEndpoint}`;
     } else {
       // Unknown format - still try as port for backward compatibility
-      cdpUrl = `http://localhost:${cdpEndpoint}`;
+      cdpUrl = `http://127.0.0.1:${cdpEndpoint}`;
     }
 
-    const browser = await chromium.connectOverCDP(cdpUrl).catch(() => {
+    // When using HTTP URLs, Playwright's connectOverCDP internally requests
+    // /json/version/ (with trailing slash) which some Chrome versions don't
+    // handle correctly. Pre-fetch the WebSocket URL to bypass this issue.
+    let connectUrl = cdpUrl;
+    if (cdpUrl.startsWith('http://') || cdpUrl.startsWith('https://')) {
+      try {
+        const response = await fetch(`${cdpUrl}/json/version`);
+        const data = (await response.json()) as { webSocketDebuggerUrl?: string };
+        if (data.webSocketDebuggerUrl) {
+          connectUrl = data.webSocketDebuggerUrl;
+        }
+      } catch {
+        // Fall back to HTTP URL if pre-fetch fails
+      }
+    }
+
+    const browser = await chromium.connectOverCDP(connectUrl).catch(() => {
       throw new Error(
         `Failed to connect via CDP to ${cdpUrl}. ` +
-          (cdpUrl.includes('localhost')
-            ? `Make sure the app is running with --remote-debugging-port=${cdpEndpoint}`
+          (cdpUrl.includes('127.0.0.1') || cdpUrl.includes('localhost')
+            ? `Make sure the browser is running with --remote-debugging-port=${cdpEndpoint}`
             : 'Make sure the remote browser is accessible and the URL is correct.')
       );
     });
@@ -1351,8 +1369,11 @@ export class BrowserManager {
         throw new Error('No browser context found. Make sure the app has an open window.');
       }
 
-      // Filter out pages with empty URLs, which can cause Playwright to hang
-      const allPages = contexts.flatMap((context) => context.pages()).filter((page) => page.url());
+      // Filter out pages with empty string URLs (e.g., uninitialized tabs)
+      // Keep pages with about:blank, file://, or other valid URLs (including Electron apps)
+      const allPages = contexts
+        .flatMap((context) => context.pages())
+        .filter((page) => page.url() !== '');
 
       if (allPages.length === 0) {
         throw new Error('No page found. Make sure the app has loaded content.');
