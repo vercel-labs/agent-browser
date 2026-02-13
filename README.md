@@ -30,6 +30,33 @@ pnpm link --global  # Makes agent-browser available globally
 agent-browser install
 ```
 
+### Alternative Installation
+
+**Direct binary download** (no npm required):
+Download the pre-built binary for your platform from [GitHub Releases](https://github.com/vercel-labs/agent-browser/releases):
+- `agent-browser-darwin-arm64` (macOS Apple Silicon)
+- `agent-browser-darwin-x64` (macOS Intel)
+- `agent-browser-linux-x64` (Linux x64)
+- `agent-browser-linux-arm64` (Linux ARM64)
+- `agent-browser-win32-x64.exe` (Windows)
+
+```bash
+# Example: macOS Apple Silicon
+curl -L https://github.com/vercel-labs/agent-browser/releases/latest/download/agent-browser-darwin-arm64 -o agent-browser
+chmod +x agent-browser
+sudo mv agent-browser /usr/local/bin/
+```
+
+> **Note:** The native binary handles CLI parsing. You still need Node.js and the daemon (`npm install agent-browser` or set `AGENT_BROWSER_HOME`).
+
+**Build from source** (requires Rust):
+```bash
+git clone https://github.com/vercel-labs/agent-browser.git
+cd agent-browser
+npm install
+cd cli && cargo build --release
+```
+
 ### Linux Dependencies
 
 On Linux, install system dependencies:
