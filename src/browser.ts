@@ -1216,6 +1216,9 @@ export class BrowserManager {
       });
       this.cdpEndpoint = null;
 
+      // Expand ~ to home directory for storageState path
+      const expandedStorageState = options.storageState?.replace(/^~\//, os.homedir() + '/');
+
       // Check for auto-load state file (supports encrypted files)
       let storageState:
         | string
@@ -1235,7 +1238,7 @@ export class BrowserManager {
               localStorage: Array<{ name: string; value: string }>;
             }>;
           }
-        | undefined = options.storageState ? options.storageState : undefined;
+        | undefined = expandedStorageState ? expandedStorageState : undefined;
 
       if (!storageState && options.autoStateFilePath) {
         try {

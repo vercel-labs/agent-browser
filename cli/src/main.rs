@@ -500,17 +500,17 @@ fn main() {
 
         // Add executable path if specified
         if let Some(ref exec_path) = flags.executable_path {
-            cmd_obj.insert("executablePath".to_string(), json!(exec_path));
+            cmd_obj.insert("executablePath".to_string(), json!(commands::resolve_path(exec_path)));
         }
 
         // Add profile path if specified
         if let Some(ref profile_path) = flags.profile {
-            cmd_obj.insert("profile".to_string(), json!(profile_path));
+            cmd_obj.insert("profile".to_string(), json!(commands::resolve_path(profile_path)));
         }
 
         // Add state path if specified
         if let Some(ref state_path) = flags.state {
-            cmd_obj.insert("storageState".to_string(), json!(state_path));
+            cmd_obj.insert("storageState".to_string(), json!(commands::resolve_path(state_path)));
         }
 
         if let Some(ref proxy_str) = flags.proxy {
