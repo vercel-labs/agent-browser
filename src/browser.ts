@@ -104,6 +104,23 @@ export class BrowserManager {
   private recordingTempDir: string = '';
 
   /**
+   * Wrap a Playwright launch call to provide actionable guidance on missing executables.
+   */
+  private async wrapLaunch<T>(fn: () => Promise<T>): Promise<T> {
+    try {
+      return await fn();
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      if (msg.includes("Executable doesn't exist")) {
+        throw new Error(
+          `Browser executable not found. Run 'npx playwright-core install chromium' to install the correct version. Original error: ${msg}`
+        );
+      }
+      throw error;
+    }
+  }
+
+  /**
    * Check if browser is launched
    */
   isLaunched(): boolean {
@@ -1157,9 +1174,12 @@ export class BrowserManager {
       // Combine extension args with custom args and file access args
       const extArgs = [`--disable-extensions-except=${extPaths}`, `--load-extension=${extPaths}`];
       const allArgs = baseArgs ? [...extArgs, ...baseArgs] : extArgs;
-      context = await launcher.launchPersistentContext(
-        path.join(os.tmpdir(), `agent-browser-ext-${session}`),
-        {
+      // Use profile path if provided, otherwise temp directory
+      const contextPath = hasProfile
+        ? options.profile!.replace(/^~\//, os.homedir() + '/')
+        : path.join(os.tmpdir(), `agent-browser-ext-${session}`);
+      context = await this.wrapLaunch(() =>
+        launcher.launchPersistentContext(contextPath, {
           headless: false,
           executablePath: options.executablePath,
           args: allArgs,
@@ -1168,31 +1188,38 @@ export class BrowserManager {
           userAgent: options.userAgent,
           ...(options.proxy && { proxy: options.proxy }),
           ignoreHTTPSErrors: options.ignoreHTTPSErrors ?? false,
-        }
+          env: { ...process.env },
+        })
       );
       this.isPersistentContext = true;
     } else if (hasProfile) {
       // Profile uses persistent context for durable cookies/storage
       // Expand ~ to home directory since it won't be shell-expanded
       const profilePath = options.profile!.replace(/^~\//, os.homedir() + '/');
-      context = await launcher.launchPersistentContext(profilePath, {
-        headless: options.headless ?? true,
-        executablePath: options.executablePath,
-        args: baseArgs,
-        viewport,
-        extraHTTPHeaders: options.headers,
-        userAgent: options.userAgent,
-        ...(options.proxy && { proxy: options.proxy }),
-        ignoreHTTPSErrors: options.ignoreHTTPSErrors ?? false,
-      });
+      context = await this.wrapLaunch(() =>
+        launcher.launchPersistentContext(profilePath, {
+          headless: options.headless ?? true,
+          executablePath: options.executablePath,
+          args: baseArgs,
+          viewport,
+          extraHTTPHeaders: options.headers,
+          userAgent: options.userAgent,
+          ...(options.proxy && { proxy: options.proxy }),
+          ignoreHTTPSErrors: options.ignoreHTTPSErrors ?? false,
+          env: { ...process.env },
+        })
+      );
       this.isPersistentContext = true;
     } else {
       // Regular ephemeral browser
-      this.browser = await launcher.launch({
-        headless: options.headless ?? true,
-        executablePath: options.executablePath,
-        args: baseArgs,
-      });
+      this.browser = await this.wrapLaunch(() =>
+        launcher.launch({
+          headless: options.headless ?? true,
+          executablePath: options.executablePath,
+          args: baseArgs,
+          env: { ...process.env },
+        })
+      );
       this.cdpEndpoint = null;
       context = await this.browser.newContext({
         viewport,

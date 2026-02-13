@@ -709,9 +709,17 @@ const pressSchema = baseCommandSchema.extend({
 
 const screenshotSchema = baseCommandSchema.extend({
   action: z.literal('screenshot'),
-  path: z.string().nullable().optional(),
+  path: z
+    .string()
+    .nullable()
+    .optional()
+    .transform((v) => v ?? undefined),
   fullPage: z.boolean().optional(),
-  selector: z.string().min(1).nullish(),
+  selector: z
+    .string()
+    .min(1)
+    .nullish()
+    .transform((v) => v ?? undefined),
   format: z.enum(['png', 'jpeg']).optional(),
   quality: z.number().min(0).max(100).optional(),
 });
