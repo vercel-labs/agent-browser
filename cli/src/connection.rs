@@ -150,6 +150,19 @@ fn get_port_for_session(session: &str) -> u16 {
     49152 + ((hash.unsigned_abs() as u32 % 16383) as u16)
 }
 
+#[cfg(windows)]
+fn read_port_file(session: &str) -> Option<u16> {
+    let port_file = get_socket_dir().join(format!("{}.port", session));
+    fs::read_to_string(&port_file)
+        .ok()
+        .and_then(|s| s.trim().parse::<u16>().ok())
+}
+
+#[cfg(windows)]
+fn get_effective_port(session: &str) -> u16 {
+    read_port_file(session).unwrap_or_else(|| get_port_for_session(session))
+}
+
 #[cfg(unix)]
 fn is_daemon_running(session: &str) -> bool {
     let pid_path = get_pid_path(session);
@@ -178,7 +191,7 @@ fn is_daemon_running(session: &str) -> bool {
     if !pid_path.exists() {
         return false;
     }
-    let port = get_port_for_session(session);
+    let port = get_effective_port(session);
     TcpStream::connect_timeout(
         &format!("127.0.0.1:{}", port).parse().unwrap(),
         Duration::from_millis(100),
@@ -194,7 +207,7 @@ fn daemon_ready(session: &str) -> bool {
     }
     #[cfg(windows)]
     {
-        let port = get_port_for_session(session);
+        let port = get_effective_port(session);
         TcpStream::connect_timeout(
             &format!("127.0.0.1:{}", port).parse().unwrap(),
             Duration::from_millis(50),
@@ -536,7 +549,7 @@ pub fn ensure_daemon(session: &str, opts: &DaemonOptions) -> Result<DaemonResult
     #[cfg(windows)]
     let endpoint_info = format!(
         "port: 127.0.0.1:{}",
-        get_port_for_session(session)
+        get_effective_port(session)
     );
 
     Err(format!("Daemon failed to start ({})", endpoint_info))
@@ -552,7 +565,7 @@ fn connect(session: &str) -> Result<Connection, String> {
     }
     #[cfg(windows)]
     {
-        let port = get_port_for_session(session);
+        let port = get_effective_port(session);
         TcpStream::connect(format!("127.0.0.1:{}", port))
             .map(Connection::Tcp)
             .map_err(|e| format!("Failed to connect: {}", e))
