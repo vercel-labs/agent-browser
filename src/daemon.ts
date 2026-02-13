@@ -488,11 +488,13 @@ export async function startDaemon(options?: {
 
             if (!shuttingDown) {
               shuttingDown = true;
+              // Give close() (already called by executeCommand) time to finish,
+              // then cleanup and exit
               setTimeout(() => {
                 server.close();
                 cleanupSocket();
                 process.exit(0);
-              }, 100);
+              }, 1000);
             }
             return;
           }
@@ -556,6 +558,12 @@ export async function startDaemon(options?: {
     if (shuttingDown) return;
     shuttingDown = true;
 
+    // Force exit after 5 seconds if graceful shutdown hangs
+    const forceExit = setTimeout(() => {
+      cleanupSocket();
+      process.exit(1);
+    }, 5000);
+
     // Stop stream server if running
     if (streamServer) {
       await streamServer.stop();
@@ -570,6 +578,7 @@ export async function startDaemon(options?: {
     }
 
     await manager.close();
+    clearTimeout(forceExit);
     server.close();
     cleanupSocket();
     process.exit(0);
@@ -579,15 +588,46 @@ export async function startDaemon(options?: {
   process.on('SIGTERM', shutdown);
   process.on('SIGHUP', shutdown);
 
-  // Handle unexpected errors - always cleanup
-  process.on('uncaughtException', (err) => {
+  // Handle unexpected errors - always cleanup including browser
+  process.on('uncaughtException', async (err) => {
     console.error('Uncaught exception:', err);
+    if (shuttingDown) {
+      process.exit(1);
+      return;
+    }
+    shuttingDown = true;
+    // Force exit after 3s if close hangs
+    const forceExit = setTimeout(() => {
+      cleanupSocket();
+      process.exit(1);
+    }, 3000);
+    try {
+      await manager.close();
+    } catch {
+      // Ignore close errors during crash cleanup
+    }
+    clearTimeout(forceExit);
     cleanupSocket();
     process.exit(1);
   });
 
-  process.on('unhandledRejection', (reason) => {
+  process.on('unhandledRejection', async (reason) => {
     console.error('Unhandled rejection:', reason);
+    if (shuttingDown) {
+      process.exit(1);
+      return;
+    }
+    shuttingDown = true;
+    const forceExit = setTimeout(() => {
+      cleanupSocket();
+      process.exit(1);
+    }, 3000);
+    try {
+      await manager.close();
+    } catch {
+      // Ignore close errors during crash cleanup
+    }
+    clearTimeout(forceExit);
     cleanupSocket();
     process.exit(1);
   });
