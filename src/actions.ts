@@ -159,7 +159,67 @@ interface SnapshotData {
 }
 
 /**
- * Convert Playwright errors to AI-friendly messages
+ * Check if error is due to element visibility/actionability issues.
+ * Used to detect hidden checkboxes (e.g. Ant Design, Element UI)
+ * that need force:true to interact with.
+ */
+function isVisibilityError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    message.includes('not visible') ||
+    message.includes('to be visible') ||
+    (message.includes('Timeout') && message.includes('exceeded')) ||
+    message.includes('intercepts pointer events')
+  );
+}
+
+/**
+ * Check a checkbox with automatic fallback for hidden elements.
+ * First tries normally with a 5s timeout, then retries with force:true
+ * if the element isn't visible (common in UI frameworks like Ant Design).
+ */
+async function safeCheck(locator: import('playwright-core').Locator): Promise<void> {
+  try {
+    await locator.check({ timeout: 5000 });
+  } catch (error) {
+    if (isVisibilityError(error)) {
+      await locator.check({ force: true, timeout: 5000 });
+    } else {
+      throw error;
+    }
+  }
+}
+
+/**
+ * Uncheck a checkbox with automatic fallback for hidden elements.
+ */
+async function safeUncheck(locator: import('playwright-core').Locator): Promise<void> {
+  try {
+    await locator.uncheck({ timeout: 5000 });
+  } catch (error) {
+    if (isVisibilityError(error)) {
+      await locator.uncheck({ force: true, timeout: 5000 });
+    } else {
+      throw error;
+    }
+  }
+}
+
+/**
+ * Apply a positional modifier (first/last/nth) to a Playwright locator.
+ * position 0 = first, -1 = last, any other number = nth(n).
+ */
+function applyPosition(
+  locator: import('playwright-core').Locator,
+  position?: number
+): import('playwright-core').Locator {
+  if (position === undefined) return locator;
+  if (!Number.isInteger(position) || position < -1) return locator;
+  if (position === -1) return locator.last();
+  return locator.nth(position);
+}
+
+/**
  * @internal Exported for testing
  */
 export function toAIFriendlyError(error: unknown, selector: string): Error {
@@ -521,6 +581,21 @@ async function handleNavigate(
 }
 
 async function handleClick(command: ClickCommand, browser: BrowserManager): Promise<Response> {
+  // Support coordinate-based clicking (x, y)
+  if (command.x !== undefined && command.y !== undefined) {
+    const page = browser.getPage();
+    await page.mouse.click(command.x, command.y, {
+      button: command.button,
+      clickCount: command.clickCount,
+      delay: command.delay,
+    });
+    return successResponse(command.id, { clicked: true });
+  }
+
+  if (!command.selector) {
+    throw new Error('Either selector or x/y coordinates are required for click');
+  }
+
   // Support both refs (@e1) and regular selectors
   const locator = browser.getLocator(command.selector);
 
@@ -602,6 +677,7 @@ async function handleScreenshot(
   const options: Parameters<Page['screenshot']>[0] = {
     fullPage: command.fullPage,
     type: command.format ?? 'png',
+    scale: command.scale,
   };
 
   if (command.format === 'jpeg' && command.quality !== undefined) {
@@ -671,7 +747,7 @@ async function handleEvaluate(
   command: EvaluateCommand,
   browser: BrowserManager
 ): Promise<Response<EvaluateData>> {
-  const page = browser.getPage();
+  const page = browser.getFrame();
 
   // Evaluate the script directly as a string expression
   const result = await page.evaluate(command.script);
@@ -680,7 +756,7 @@ async function handleEvaluate(
 }
 
 async function handleWait(command: WaitCommand, browser: BrowserManager): Promise<Response> {
-  const page = browser.getPage();
+  const page = browser.getFrame();
 
   if (command.selector) {
     await page.waitForSelector(command.selector, {
@@ -698,7 +774,7 @@ async function handleWait(command: WaitCommand, browser: BrowserManager): Promis
 }
 
 async function handleScroll(command: ScrollCommand, browser: BrowserManager): Promise<Response> {
-  const page = browser.getPage();
+  const page = browser.getFrame();
 
   if (command.selector) {
     const element = browser.getLocator(command.selector);
@@ -769,7 +845,7 @@ async function handleContent(
   command: ContentCommand,
   browser: BrowserManager
 ): Promise<Response<ContentData>> {
-  const page = browser.getPage();
+  const page = browser.getFrame();
 
   let html: string;
   if (command.selector) {
@@ -936,8 +1012,9 @@ async function handleGetByRole(
   command: GetByRoleCommand,
   browser: BrowserManager
 ): Promise<Response> {
-  const page = browser.getPage();
-  const locator = page.getByRole(command.role as any, { name: command.name, exact: command.exact });
+  const page = browser.getFrame();
+  const base = page.getByRole(command.role as any, { name: command.name, exact: command.exact });
+  const locator = applyPosition(base, command.position);
 
   switch (command.subaction) {
     case 'click':
@@ -959,8 +1036,9 @@ async function handleGetByText(
   command: GetByTextCommand,
   browser: BrowserManager
 ): Promise<Response> {
-  const page = browser.getPage();
-  const locator = page.getByText(command.text, { exact: command.exact });
+  const page = browser.getFrame();
+  const base = page.getByText(command.text, { exact: command.exact });
+  const locator = applyPosition(base, command.position);
 
   switch (command.subaction) {
     case 'click':
@@ -976,8 +1054,9 @@ async function handleGetByLabel(
   command: GetByLabelCommand,
   browser: BrowserManager
 ): Promise<Response> {
-  const page = browser.getPage();
-  const locator = page.getByLabel(command.label, { exact: command.exact });
+  const page = browser.getFrame();
+  const base = page.getByLabel(command.label, { exact: command.exact });
+  const locator = applyPosition(base, command.position);
 
   switch (command.subaction) {
     case 'click':
@@ -996,8 +1075,9 @@ async function handleGetByPlaceholder(
   command: GetByPlaceholderCommand,
   browser: BrowserManager
 ): Promise<Response> {
-  const page = browser.getPage();
-  const locator = page.getByPlaceholder(command.placeholder, { exact: command.exact });
+  const page = browser.getFrame();
+  const base = page.getByPlaceholder(command.placeholder, { exact: command.exact });
+  const locator = applyPosition(base, command.position);
 
   switch (command.subaction) {
     case 'click':
@@ -1051,7 +1131,7 @@ async function handleStorageGet(
   command: StorageGetCommand,
   browser: BrowserManager
 ): Promise<Response> {
-  const page = browser.getPage();
+  const page = browser.getFrame();
   const storageType = command.type === 'local' ? 'localStorage' : 'sessionStorage';
 
   if (command.key) {
@@ -1077,7 +1157,7 @@ async function handleStorageSet(
   command: StorageSetCommand,
   browser: BrowserManager
 ): Promise<Response> {
-  const page = browser.getPage();
+  const page = browser.getFrame();
   const storageType = command.type === 'local' ? 'localStorage' : 'sessionStorage';
 
   await page.evaluate(
@@ -1090,7 +1170,7 @@ async function handleStorageClear(
   command: StorageClearCommand,
   browser: BrowserManager
 ): Promise<Response> {
-  const page = browser.getPage();
+  const page = browser.getFrame();
   const storageType = command.type === 'local' ? 'localStorage' : 'sessionStorage';
 
   await page.evaluate(`${storageType}.clear()`);
@@ -1139,7 +1219,7 @@ async function handleRequests(
   }
 
   // Start tracking if not already
-  browser.startRequestTracking();
+  browser.startRequestTracking(command.body);
 
   const requests = browser.getRequests(command.filter);
   return successResponse(command.id, { requests });
@@ -1347,7 +1427,7 @@ async function handleStyles(
   command: StylesCommand,
   browser: BrowserManager
 ): Promise<Response<StylesData>> {
-  const page = browser.getPage();
+  const page = browser.getFrame();
 
   // Shared extraction logic as a string to be eval'd in browser context
   const extractStylesScript = `(function(el) {
@@ -1800,7 +1880,7 @@ async function handleEvalHandle(
   command: Command & { action: 'evalhandle'; script: string },
   browser: BrowserManager
 ): Promise<Response> {
-  const page = browser.getPage();
+  const page = browser.getFrame();
   const handle = await page.evaluateHandle(command.script);
   const result = await handle.jsonValue().catch(() => 'Handle (non-serializable)');
   return successResponse(command.id, { result });
@@ -1822,7 +1902,7 @@ async function handleAddScript(
   command: AddScriptCommand,
   browser: BrowserManager
 ): Promise<Response> {
-  const page = browser.getPage();
+  const page = browser.getFrame();
 
   if (command.content) {
     await page.addScriptTag({ content: command.content });
@@ -1837,7 +1917,7 @@ async function handleAddStyle(
   command: AddStyleCommand,
   browser: BrowserManager
 ): Promise<Response> {
-  const page = browser.getPage();
+  const page = browser.getFrame();
 
   if (command.content) {
     await page.addStyleTag({ content: command.content });
@@ -1885,8 +1965,9 @@ async function handleGetByAltText(
   command: GetByAltTextCommand,
   browser: BrowserManager
 ): Promise<Response> {
-  const page = browser.getPage();
-  const locator = page.getByAltText(command.text, { exact: command.exact });
+  const page = browser.getFrame();
+  const base = page.getByAltText(command.text, { exact: command.exact });
+  const locator = applyPosition(base, command.position);
 
   switch (command.subaction) {
     case 'click':
@@ -1902,8 +1983,9 @@ async function handleGetByTitle(
   command: GetByTitleCommand,
   browser: BrowserManager
 ): Promise<Response> {
-  const page = browser.getPage();
-  const locator = page.getByTitle(command.text, { exact: command.exact });
+  const page = browser.getFrame();
+  const base = page.getByTitle(command.text, { exact: command.exact });
+  const locator = applyPosition(base, command.position);
 
   switch (command.subaction) {
     case 'click':
@@ -1919,8 +2001,9 @@ async function handleGetByTestId(
   command: GetByTestIdCommand,
   browser: BrowserManager
 ): Promise<Response> {
-  const page = browser.getPage();
-  const locator = page.getByTestId(command.testId);
+  const page = browser.getFrame();
+  const base = page.getByTestId(command.testId);
+  const locator = applyPosition(base, command.position);
 
   switch (command.subaction) {
     case 'click':
@@ -1975,7 +2058,7 @@ async function handleWaitForLoadState(
   command: WaitForLoadStateCommand,
   browser: BrowserManager
 ): Promise<Response> {
-  const page = browser.getPage();
+  const page = browser.getFrame();
   await page.waitForLoadState(command.state, { timeout: command.timeout });
   return successResponse(command.id, { state: command.state });
 }
@@ -1984,7 +2067,7 @@ async function handleSetContent(
   command: SetContentCommand,
   browser: BrowserManager
 ): Promise<Response> {
-  const page = browser.getPage();
+  const page = browser.getFrame();
   await page.setContent(command.html);
   return successResponse(command.id, { set: true });
 }
@@ -2060,7 +2143,7 @@ async function handleWaitForFunction(
   command: WaitForFunctionCommand,
   browser: BrowserManager
 ): Promise<Response> {
-  const page = browser.getPage();
+  const page = browser.getFrame();
   await page.waitForFunction(command.expression, { timeout: command.timeout });
   return successResponse(command.id, { waited: true });
 }

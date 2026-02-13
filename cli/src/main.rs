@@ -113,6 +113,92 @@ fn run_session(args: &[String], session: &str, json_mode: bool) {
                 }
             }
         }
+        Some("close-all") => {
+            let socket_dir = get_socket_dir();
+            let mut closed = 0u32;
+
+            if let Ok(entries) = fs::read_dir(&socket_dir) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if name.ends_with(".pid") {
+                        let session_name = name.strip_suffix(".pid").unwrap_or("");
+                        if session_name.is_empty() {
+                            continue;
+                        }
+                        let pid_path = socket_dir.join(&name);
+                        let running = if let Ok(pid_str) = fs::read_to_string(&pid_path) {
+                            if let Ok(pid) = pid_str.trim().parse::<u32>() {
+                                #[cfg(unix)]
+                                {
+                                    unsafe { libc::kill(pid as i32, 0) == 0 }
+                                }
+                                #[cfg(windows)]
+                                {
+                                    unsafe {
+                                        let handle = OpenProcess(
+                                            PROCESS_QUERY_LIMITED_INFORMATION,
+                                            0,
+                                            pid,
+                                        );
+                                        if handle != 0 {
+                                            CloseHandle(handle);
+                                            true
+                                        } else {
+                                            false
+                                        }
+                                    }
+                                }
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        };
+                        if running {
+                            let close_cmd = json!({ "id": 1, "action": "close" });
+                            match send_command(close_cmd, session_name) {
+                                Ok(_) => {
+                                    closed += 1;
+                                    if !json_mode {
+                                        println!(
+                                            "{} Closed session: {}",
+                                            color::green("✓"),
+                                            session_name
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    if !json_mode {
+                                        eprintln!(
+                                            "{} Failed to close session {}: {}",
+                                            color::red("✗"),
+                                            session_name,
+                                            e
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if json_mode {
+                println!(
+                    r#"{{"success":true,"data":{{"closed":{}}}}}"#,
+                    closed
+                );
+            } else if closed == 0 {
+                println!("No active sessions to close");
+            } else {
+                println!(
+                    "{} Closed {} session{}",
+                    color::green("✓"),
+                    closed,
+                    if closed == 1 { "" } else { "s" }
+                );
+            }
+        }
         None | Some(_) => {
             // Just show current session
             if json_mode {

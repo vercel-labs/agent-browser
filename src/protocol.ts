@@ -60,7 +60,9 @@ const navigateSchema = baseCommandSchema.extend({
 
 const clickSchema = baseCommandSchema.extend({
   action: z.literal('click'),
-  selector: z.string().min(1),
+  selector: z.string().min(1).optional(),
+  x: z.number().optional(),
+  y: z.number().optional(),
   button: z.enum(['left', 'right', 'middle']).optional(),
   clickCount: z.number().positive().optional(),
   delay: z.number().nonnegative().optional(),
@@ -131,6 +133,7 @@ const getByRoleSchema = baseCommandSchema.extend({
   exact: z.boolean().optional(),
   subaction: z.enum(['click', 'fill', 'check', 'hover']),
   value: z.string().optional(),
+  position: z.number().int().min(-1).optional(),
 });
 
 const getByTextSchema = baseCommandSchema.extend({
@@ -138,6 +141,7 @@ const getByTextSchema = baseCommandSchema.extend({
   text: z.string().min(1),
   exact: z.boolean().optional(),
   subaction: z.enum(['click', 'hover']),
+  position: z.number().int().min(-1).optional(),
 });
 
 const getByLabelSchema = baseCommandSchema.extend({
@@ -146,6 +150,7 @@ const getByLabelSchema = baseCommandSchema.extend({
   exact: z.boolean().optional(),
   subaction: z.enum(['click', 'fill', 'check']),
   value: z.string().optional(),
+  position: z.number().int().min(-1).optional(),
 });
 
 const getByPlaceholderSchema = baseCommandSchema.extend({
@@ -154,6 +159,7 @@ const getByPlaceholderSchema = baseCommandSchema.extend({
   exact: z.boolean().optional(),
   subaction: z.enum(['click', 'fill']),
   value: z.string().optional(),
+  position: z.number().int().min(-1).optional(),
 });
 
 const cookiesGetSchema = baseCommandSchema.extend({
@@ -237,6 +243,7 @@ const requestsSchema = baseCommandSchema.extend({
   action: z.literal('requests'),
   filter: z.string().optional(),
   clear: z.boolean().optional(),
+  body: z.boolean().optional(),
 });
 
 const downloadSchema = baseCommandSchema.extend({
@@ -542,6 +549,7 @@ const getByAltTextSchema = baseCommandSchema.extend({
   text: z.string().min(1),
   exact: z.boolean().optional(),
   subaction: z.enum(['click', 'hover']),
+  position: z.number().int().min(-1).optional(),
 });
 
 const getByTitleSchema = baseCommandSchema.extend({
@@ -549,6 +557,7 @@ const getByTitleSchema = baseCommandSchema.extend({
   text: z.string().min(1),
   exact: z.boolean().optional(),
   subaction: z.enum(['click', 'hover']),
+  position: z.number().int().min(-1).optional(),
 });
 
 const getByTestIdSchema = baseCommandSchema.extend({
@@ -556,6 +565,7 @@ const getByTestIdSchema = baseCommandSchema.extend({
   testId: z.string().min(1),
   subaction: z.enum(['click', 'fill', 'check', 'hover']),
   value: z.string().optional(),
+  position: z.number().int().min(-1).optional(),
 });
 
 const nthSchema = baseCommandSchema.extend({
@@ -741,6 +751,7 @@ const screenshotSchema = baseCommandSchema.extend({
   selector: z.string().min(1).nullish(),
   format: z.enum(['png', 'jpeg']).optional(),
   quality: z.number().min(0).max(100).optional(),
+  scale: z.enum(['css', 'device']).optional(),
 });
 
 const snapshotSchema = baseCommandSchema.extend({

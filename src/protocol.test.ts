@@ -62,9 +62,14 @@ describe('parseCommand', () => {
       }
     });
 
-    it('should reject click without selector', () => {
+    it('should accept click without selector when x/y provided', () => {
+      const result = parseCommand(cmd({ id: '1', action: 'click', x: 100, y: 200 }));
+      expect(result.success).toBe(true);
+    });
+
+    it('should accept click without selector (validated at action level)', () => {
       const result = parseCommand(cmd({ id: '1', action: 'click' }));
-      expect(result.success).toBe(false);
+      expect(result.success).toBe(true);
     });
   });
 

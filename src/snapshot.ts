@@ -17,7 +17,7 @@
  *   agent-browser click @e2             # Click element by ref
  */
 
-import type { Page, Locator } from 'playwright-core';
+import type { Page, Frame, Locator } from 'playwright-core';
 
 export interface RefMap {
   [ref: string]: {
@@ -143,7 +143,7 @@ function buildSelector(role: string, name?: string): string {
  * This finds elements with cursor: pointer or onclick handlers.
  */
 async function findCursorInteractiveElements(
-  page: Page,
+  page: Page | Frame,
   selector?: string
 ): Promise<
   Array<{
@@ -260,7 +260,7 @@ async function findCursorInteractiveElements(
  * Get enhanced snapshot with refs and optional filtering
  */
 export async function getEnhancedSnapshot(
-  page: Page,
+  page: Page | Frame,
   options: SnapshotOptions = {}
 ): Promise<EnhancedSnapshot> {
   resetRefs();
