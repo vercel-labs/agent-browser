@@ -1346,7 +1346,7 @@ export class BrowserManager {
 
     let context: BrowserContext;
     if (hasExtensions) {
-      // Extensions require persistent context in a temp directory
+      // Extensions require persistent context
       const extPaths = options.extensions!.join(',');
       const session = process.env.AGENT_BROWSER_SESSION || 'default';
       // Combine extension args with custom args and file access args
@@ -1365,6 +1365,7 @@ export class BrowserManager {
           ignoreHTTPSErrors: options.ignoreHTTPSErrors ?? false,
           ...(this.colorScheme && { colorScheme: this.colorScheme }),
           ...(this.downloadPath && { downloadsPath: this.downloadPath }),
+          env: { ...process.env },
         }
       );
       this.isPersistentContext = true;
