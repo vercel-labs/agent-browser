@@ -1196,6 +1196,16 @@ export class BrowserManager {
       // Profile uses persistent context for durable cookies/storage
       // Expand ~ to home directory since it won't be shell-expanded
       const profilePath = options.profile!.replace(/^~\//, os.homedir() + '/');
+
+      // Warn about known Chromium bug on Windows where headless mode
+      // silently discards cookies from persistent contexts
+      if (process.platform === 'win32' && (options.headless ?? true)) {
+        console.warn(
+          '[agent-browser] Warning: Headless mode on Windows may not persist cookies. ' +
+          'Use --headed or set AGENT_BROWSER_HEADED=1 for reliable cookie persistence.'
+        );
+      }
+
       context = await launcher.launchPersistentContext(profilePath, {
         headless: options.headless ?? true,
         executablePath: options.executablePath,
