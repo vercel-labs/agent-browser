@@ -233,6 +233,13 @@ async function findCursorInteractiveElements(
 
       if (!hasCursorPointer && !hasOnClick && !hasTabIndex) continue;
 
+      // Skip elements that only inherit cursor:pointer from an ancestor
+      // (the ancestor itself will be captured instead)
+      if (hasCursorPointer && !hasOnClick && !hasTabIndex) {
+        const parent = el.parentElement;
+        if (parent && getComputedStyle(parent).cursor === 'pointer') continue;
+      }
+
       const text = (el.textContent || '').trim().slice(0, 100);
       if (!text) continue;
 
@@ -287,11 +294,17 @@ export async function getEnhancedSnapshot(
 
     // Filter out elements whose text is already captured in the snapshot
     const existingTexts = new Set(Object.values(refs).map((r) => r.name?.toLowerCase()));
+    // Also extract quoted strings from the ARIA tree for broader dedup
+    for (const m of enhancedTree.matchAll(/"([^"]+)"/g)) {
+      existingTexts.add(m[1].toLowerCase());
+    }
 
     const additionalLines: string[] = [];
     for (const el of cursorElements) {
-      // Skip if text already captured (likely already in ARIA tree)
-      if (existingTexts.has(el.text.toLowerCase())) continue;
+      const elTextLower = el.text.toLowerCase();
+      // Skip if text already captured in the ARIA tree
+      if (existingTexts.has(elTextLower)) continue;
+      existingTexts.add(elTextLower);
 
       const ref = nextRef();
       const role = el.hasCursorPointer ? 'clickable' : el.hasOnClick ? 'clickable' : 'focusable';
