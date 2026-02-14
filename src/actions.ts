@@ -921,6 +921,9 @@ async function handleSnapshot(
   },
   browser: BrowserManager
 ): Promise<Response<SnapshotData>> {
+  // Save previous snapshot before getSnapshot() updates lastSnapshot
+  const previousSnapshot = command.diff ? browser.getLastSnapshot() : '';
+
   // Use enhanced snapshot with refs and optional filtering
   const { tree, refs } = await browser.getSnapshot({
     interactive: command.interactive,
@@ -933,20 +936,31 @@ async function handleSnapshot(
   const snapshot = tree || 'Empty page';
 
   // Incremental diff: only return changed lines
-  if (command.diff) {
-    const lastSnapshot = browser.getLastSnapshot();
-    if (lastSnapshot) {
-      const oldLines = new Set(lastSnapshot.split('\n'));
-      const newLines = snapshot.split('\n');
-      const newLinesSet = new Set(newLines);
-      const removed = lastSnapshot.split('\n').filter(line => !newLinesSet.has(line));
-      const added = newLines.filter(line => !oldLines.has(line));
-      const diffOutput = [
-        ...removed.map(l => `- ${l}`),
-        ...added.map(l => `+ ${l}`),
-      ].join('\n');
-      return successResponse(command.id, { snapshot: diffOutput || '(no changes)' });
+  if (command.diff && previousSnapshot) {
+    const oldLines = previousSnapshot.split('\n');
+    const newLines = snapshot.split('\n');
+    // Use frequency maps to correctly handle duplicate lines
+    const oldFreq = new Map<string, number>();
+    for (const line of oldLines) oldFreq.set(line, (oldFreq.get(line) || 0) + 1);
+    const newFreq = new Map<string, number>();
+    for (const line of newLines) newFreq.set(line, (newFreq.get(line) || 0) + 1);
+
+    const removed: string[] = [];
+    for (const [line, count] of oldFreq) {
+      const diff = count - (newFreq.get(line) || 0);
+      for (let i = 0; i < diff; i++) removed.push(line);
     }
+    const added: string[] = [];
+    for (const [line, count] of newFreq) {
+      const diff = count - (oldFreq.get(line) || 0);
+      for (let i = 0; i < diff; i++) added.push(line);
+    }
+
+    const diffOutput = [
+      ...removed.map(l => `- ${l}`),
+      ...added.map(l => `+ ${l}`),
+    ].join('\n');
+    return successResponse(command.id, { snapshot: diffOutput || '(no changes)' });
   }
 
   // Save to file instead of returning full snapshot
@@ -955,7 +969,9 @@ async function handleSnapshot(
     const path = await import('path');
     const resolvedPath = path.resolve(command.output);
     fs.writeFileSync(resolvedPath, snapshot, 'utf-8');
-    return successResponse(command.id, { saved: resolvedPath, size: snapshot.length } as any);
+    return successResponse(command.id, {
+      snapshot: `Snapshot saved to ${resolvedPath} (${snapshot.length} chars)`,
+    });
   }
 
   // Simplify refs for output (just role and name)
