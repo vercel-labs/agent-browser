@@ -483,8 +483,11 @@ describe('BrowserManager', () => {
         await localBrowser.switchTo(1);
         const activeBeforeHar = localBrowser.getActiveIndex();
         expect(activeBeforeHar).toBe(1);
+        expect(localBrowser.getPages()).toHaveLength(3);
 
         await localBrowser.startHarRecording();
+        expect(localBrowser.getPages()).toHaveLength(1);
+        expect(localBrowser.getActiveIndex()).toBe(0);
 
         const harPage = localBrowser.getPage();
         await harPage.goto('https://example.com', { waitUntil: 'load' });
@@ -492,6 +495,7 @@ describe('BrowserManager', () => {
         const result = await localBrowser.stopHarRecording(harPath);
 
         expect(result.error).toBeUndefined();
+        expect(localBrowser.getPages()).toHaveLength(3);
         expect(localBrowser.getActiveIndex()).toBe(activeBeforeHar);
       } finally {
         await localBrowser.close().catch(() => {});
