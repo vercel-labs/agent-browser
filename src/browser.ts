@@ -78,6 +78,11 @@ interface PageError {
   timestamp: number;
 }
 
+interface HarSuspendedPageSnapshot {
+  contextIndex: number;
+  url: string;
+}
+
 /**
  * Manages the Playwright browser lifecycle with multiple tabs/windows
  */
@@ -134,6 +139,8 @@ export class BrowserManager {
   private harTempDir: string = '';
   private harPendingSave: boolean = false;
   private harPreviousActivePageIndex: number | null = null;
+  private harSuspendedContexts: BrowserContext[] = [];
+  private harSuspendedPages: HarSuspendedPageSnapshot[] = [];
 
   /**
    * Check if browser is launched
@@ -616,6 +623,14 @@ export class BrowserManager {
       }
     }
 
+    const suspendedContexts = [...this.contexts];
+    const suspendedPages = [...this.pages];
+    const suspendedPageSnapshots: HarSuspendedPageSnapshot[] = suspendedPages.map((page) => ({
+      contextIndex: Math.max(0, suspendedContexts.indexOf(page.context())),
+      url: page.url(),
+    }));
+    const previousActivePageIndex = suspendedPages.length > 0 ? this.activePageIndex : null;
+
     const session = process.env.AGENT_BROWSER_SESSION || 'default';
     this.harTempDir = path.join(os.tmpdir(), `agent-browser-har-${session}-${Date.now()}`);
     mkdirSync(this.harTempDir, { recursive: true });
@@ -630,14 +645,20 @@ export class BrowserManager {
     this.harContext.setDefaultTimeout(10000);
 
     this.harPage = await this.harContext.newPage();
-
-    this.harPreviousActivePageIndex = this.pages.length > 0 ? this.activePageIndex : null;
-
-    this.contexts.push(this.harContext);
-    this.pages.push(this.harPage);
-    this.activePageIndex = this.pages.length - 1;
-
+    this.setupContextTracking(this.harContext);
     this.setupPageTracking(this.harPage);
+
+    this.harSuspendedContexts = suspendedContexts;
+    this.harSuspendedPages = suspendedPageSnapshots;
+    this.harPreviousActivePageIndex = previousActivePageIndex;
+
+    for (const page of suspendedPages) {
+      await page.close().catch(() => {});
+    }
+
+    this.contexts = [this.harContext];
+    this.pages = [this.harPage];
+    this.activePageIndex = 0;
 
     await this.invalidateCDPSession();
 
@@ -671,6 +692,7 @@ export class BrowserManager {
     try {
       const harPage = this.harPage;
       const harContext = this.harContext;
+      const restoreBrowser = this.browser ?? harContext?.browser() ?? null;
 
       if (harPage) {
         const pageIndex = this.pages.indexOf(harPage);
@@ -694,7 +716,7 @@ export class BrowserManager {
         this.harContext = null;
         this.harPage = null;
         this.harPendingSave = true;
-        this.restoreActivePageIndexAfterHarCleanup();
+        await this.restoreSuspendedPagesAfterHar(restoreBrowser);
 
         await this.invalidateCDPSession();
       }
@@ -741,7 +763,7 @@ export class BrowserManager {
         this.harTempPath = '';
         this.harTempDir = '';
         this.harPendingSave = false;
-        this.restoreActivePageIndexAfterHarCleanup();
+        await this.restoreSuspendedPagesAfterHar(this.browser);
 
         await this.invalidateCDPSession();
       }
@@ -756,6 +778,61 @@ export class BrowserManager {
    */
   isHarRecording(): boolean {
     return this.harContext !== null;
+  }
+
+  private async restoreSuspendedPagesAfterHar(fallbackBrowser: Browser | null): Promise<void> {
+    const suspendedContexts = [...this.harSuspendedContexts].filter((context) => {
+      if ('isClosed' in context && typeof (context as any).isClosed === 'function') {
+        return !(context as any).isClosed();
+      }
+      return true;
+    });
+    const suspendedPages = [...this.harSuspendedPages];
+
+    this.contexts = suspendedContexts;
+    this.pages = [];
+
+    for (const snapshot of suspendedPages) {
+      const targetContext = this.contexts[snapshot.contextIndex] ?? this.contexts[0] ?? null;
+      if (!targetContext) {
+        continue;
+      }
+
+      const page = await targetContext.newPage().catch(() => null);
+      if (!page) {
+        continue;
+      }
+
+      if (snapshot.url && snapshot.url !== 'about:blank') {
+        await page.goto(snapshot.url, { waitUntil: 'load' }).catch(() => {});
+      }
+
+      if (!this.pages.includes(page)) {
+        this.pages.push(page);
+        this.setupPageTracking(page);
+      }
+    }
+
+    if (this.contexts.length === 0 && fallbackBrowser) {
+      const fallbackContext = await fallbackBrowser.newContext().catch(() => null);
+      if (fallbackContext) {
+        fallbackContext.setDefaultTimeout(60000);
+        this.contexts.push(fallbackContext);
+        this.setupContextTracking(fallbackContext);
+      }
+    }
+
+    if (this.pages.length === 0 && this.contexts.length > 0) {
+      const page = await this.contexts[0].newPage().catch(() => null);
+      if (page && !this.pages.includes(page)) {
+        this.pages.push(page);
+        this.setupPageTracking(page);
+      }
+    }
+
+    this.restoreActivePageIndexAfterHarCleanup();
+    this.harSuspendedContexts = [];
+    this.harSuspendedPages = [];
   }
 
   private restoreActivePageIndexAfterHarCleanup(): void {
@@ -2357,6 +2434,12 @@ export class BrowserManager {
       this.harTempDir = '';
       this.harPendingSave = false;
       this.harPreviousActivePageIndex = null;
+
+      for (const suspendedContext of this.harSuspendedContexts) {
+        await suspendedContext.close().catch(() => {});
+      }
+      this.harSuspendedContexts = [];
+      this.harSuspendedPages = [];
     }
 
     // Stop screencast if active
