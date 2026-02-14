@@ -784,6 +784,8 @@ export interface ScreenshotCommand extends BaseCommand {
 
 export interface SnapshotCommand extends BaseCommand {
   action: 'snapshot';
+  diff?: boolean;
+  output?: string;
 }
 
 export interface EvaluateCommand extends BaseCommand {

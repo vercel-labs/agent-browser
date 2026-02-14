@@ -432,6 +432,15 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                             i += 1;
                         }
                     }
+                    "--diff" => {
+                        obj.insert("diff".to_string(), json!(true));
+                    }
+                    "--output" | "-o" => {
+                        if let Some(p) = rest.get(i + 1) {
+                            obj.insert("output".to_string(), json!(p));
+                            i += 1;
+                        }
+                    }
                     _ => {}
                 }
                 i += 1;

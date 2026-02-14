@@ -750,6 +750,8 @@ const snapshotSchema = baseCommandSchema.extend({
   maxDepth: z.number().nonnegative().optional(),
   compact: z.boolean().optional(),
   selector: z.string().optional(),
+  diff: z.boolean().optional(),
+  output: z.string().optional(),
 });
 
 const evaluateSchema = baseCommandSchema.extend({

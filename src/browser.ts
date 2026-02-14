@@ -152,6 +152,13 @@ export class BrowserManager {
   }
 
   /**
+   * Get the last snapshot text for diff comparison
+   */
+  getLastSnapshot(): string {
+    return this.lastSnapshot;
+  }
+
+  /**
    * Get a locator from a ref (e.g., "e1", "@e1", "ref=e1")
    * Returns null if ref doesn't exist or is invalid
    */
