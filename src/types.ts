@@ -68,11 +68,13 @@ export interface FillCommand extends BaseCommand {
 export interface CheckCommand extends BaseCommand {
   action: 'check';
   selector: string;
+  force?: boolean;
 }
 
 export interface UncheckCommand extends BaseCommand {
   action: 'uncheck';
   selector: string;
+  force?: boolean;
 }
 
 export interface UploadCommand extends BaseCommand {

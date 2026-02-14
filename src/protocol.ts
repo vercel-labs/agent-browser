@@ -84,11 +84,13 @@ const fillSchema = baseCommandSchema.extend({
 const checkSchema = baseCommandSchema.extend({
   action: z.literal('check'),
   selector: z.string().min(1),
+  force: z.boolean().optional(),
 });
 
 const uncheckSchema = baseCommandSchema.extend({
   action: z.literal('uncheck'),
   selector: z.string().min(1),
+  force: z.boolean().optional(),
 });
 
 const uploadSchema = baseCommandSchema.extend({
