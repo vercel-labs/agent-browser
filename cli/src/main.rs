@@ -221,6 +221,7 @@ fn main() {
         flags.proxy_bypass.as_deref(),
         flags.ignore_https_errors,
         flags.allow_file_access,
+        flags.stealth,
         flags.profile.as_deref(),
         flags.state.as_deref(),
         flags.provider.as_deref(),

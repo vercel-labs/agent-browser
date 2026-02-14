@@ -21,6 +21,7 @@ pub struct Flags {
     pub allow_file_access: bool,
     pub device: Option<String>,
     pub auto_connect: bool,
+    pub stealth: bool,
     pub session_name: Option<String>,
 
     // Track which launch-time options were explicitly passed via CLI
@@ -68,6 +69,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
         allow_file_access: env::var("AGENT_BROWSER_ALLOW_FILE_ACCESS").is_ok(),
         device: env::var("AGENT_BROWSER_IOS_DEVICE").ok(),
         auto_connect: env::var("AGENT_BROWSER_AUTO_CONNECT").is_ok(),
+        stealth: env::var("AGENT_BROWSER_STEALTH").is_ok(),
         session_name: env::var("AGENT_BROWSER_SESSION_NAME").ok(),
         // Track CLI-passed flags (default false, set to true when flag is passed)
         cli_executable_path: false,
@@ -180,6 +182,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
                 }
             }
             "--auto-connect" => flags.auto_connect = true,
+            "--stealth" => flags.stealth = true,
             "--session-name" => {
                 if let Some(s) = args.get(i + 1) {
                     flags.session_name = Some(s.clone());
@@ -206,6 +209,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--ignore-https-errors",
         "--allow-file-access",
         "--auto-connect",
+        "--stealth",
     ];
     // Global flags that take a value (need to skip the next arg too)
     const GLOBAL_FLAGS_WITH_VALUE: &[&str] = &[
