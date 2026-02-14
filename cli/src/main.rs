@@ -226,6 +226,7 @@ fn main() {
         flags.provider.as_deref(),
         flags.device.as_deref(),
         flags.session_name.as_deref(),
+        flags.browser.as_deref(),
     ) {
         Ok(result) => result,
         Err(e) => {
@@ -281,6 +282,11 @@ fn main() {
             },
             flags.ignore_https_errors.then_some("--ignore-https-errors"),
             flags.cli_allow_file_access.then_some("--allow-file-access"),
+            if flags.cli_browser {
+                Some("--browser")
+            } else {
+                None
+            },
         ]
         .into_iter()
         .flatten()

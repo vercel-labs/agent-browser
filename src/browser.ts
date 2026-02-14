@@ -1144,18 +1144,23 @@ export class BrowserManager {
       return;
     }
 
-    const browserType = options.browser ?? 'chromium';
-    if (hasExtensions && browserType !== 'chromium') {
+    let effectiveBrowser = options.browser ?? 'chromium';
+    // Auto-fallback to Firefox on ARM64 Linux where Chromium is unavailable
+    if (effectiveBrowser === 'chromium' && process.arch === 'arm64' && process.platform === 'linux') {
+      effectiveBrowser = 'firefox';
+      this.launchWarnings.push('Chromium unavailable on ARM64 Linux; using Firefox instead');
+    }
+    if (hasExtensions && effectiveBrowser !== 'chromium') {
       throw new Error('Extensions are only supported in Chromium');
     }
 
     // allowFileAccess is only supported in Chromium
-    if (options.allowFileAccess && browserType !== 'chromium') {
+    if (options.allowFileAccess && effectiveBrowser !== 'chromium') {
       throw new Error('allowFileAccess is only supported in Chromium');
     }
 
     const launcher =
-      browserType === 'firefox' ? firefox : browserType === 'webkit' ? webkit : chromium;
+      effectiveBrowser === 'firefox' ? firefox : effectiveBrowser === 'webkit' ? webkit : chromium;
     const viewport = options.viewport ?? { width: 1280, height: 720 };
 
     // Build base args array with file access flags if enabled
