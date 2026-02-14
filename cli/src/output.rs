@@ -1658,7 +1658,7 @@ Examples:
             r##"
 agent-browser connect - Connect to browser via CDP
 
-Usage: agent-browser connect <port|url>
+Usage: agent-browser connect <port|url> [--headers <json>]
 
 Connects to a running browser instance via Chrome DevTools Protocol (CDP).
 This allows controlling browsers, Electron apps, or remote browser services.
@@ -1666,6 +1666,10 @@ This allows controlling browsers, Electron apps, or remote browser services.
 Arguments:
   <port>               Local port number (e.g., 9222)
   <url>                Full WebSocket URL (ws://, wss://, http://, https://)
+
+Options:
+  --headers <json>     Custom headers for WebSocket connection (JSON format)
+                       Useful for authenticated services like AWS AgentCore Browser
 
 Supported URL formats:
   - Port number: 9222 (connects to http://localhost:9222)
@@ -1686,6 +1690,9 @@ Examples:
 
   # Connect to remote browser service
   agent-browser connect "wss://browser-service.example.com/cdp?token=xyz"
+
+  # Connect with custom headers (e.g., AWS SigV4 authentication)
+  agent-browser connect "wss://..." --headers '{"Authorization":"AWS4-HMAC-SHA256..."}'
 
   # After connecting, run commands normally
   agent-browser snapshot
@@ -1865,7 +1872,7 @@ Options:
                              e.g., --proxy-bypass "localhost,*.internal.com"
   --ignore-https-errors      Ignore HTTPS certificate errors
   --allow-file-access        Allow file:// URLs to access local files (Chromium only)
-  -p, --provider <name>      Browser provider: ios, browserbase, kernel, browseruse
+  -p, --provider <name>      Browser provider: ios, browserbase, kernel, browseruse, agentcore
   --device <name>            iOS device name (e.g., "iPhone 15 Pro")
   --json                     JSON output
   --full, -f                 Full page screenshot
@@ -1882,7 +1889,7 @@ Environment:
   AGENT_BROWSER_ENCRYPTION_KEY   64-char hex key for AES-256-GCM state encryption
   AGENT_BROWSER_STATE_EXPIRE_DAYS Auto-delete states older than N days (default: 30)
   AGENT_BROWSER_EXECUTABLE_PATH  Custom browser executable path
-  AGENT_BROWSER_PROVIDER         Browser provider (ios, browserbase, kernel, browseruse)
+  AGENT_BROWSER_PROVIDER         Browser provider (ios, browserbase, kernel, browseruse, agentcore)
   AGENT_BROWSER_AUTO_CONNECT     Auto-discover and connect to running Chrome
   AGENT_BROWSER_STREAM_PORT      Enable WebSocket streaming on port (e.g., 9223)
   AGENT_BROWSER_IOS_DEVICE       Default iOS device name
