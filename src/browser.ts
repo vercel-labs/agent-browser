@@ -1189,6 +1189,7 @@ export class BrowserManager {
           userAgent: options.userAgent,
           ...(options.proxy && { proxy: options.proxy }),
           ignoreHTTPSErrors: options.ignoreHTTPSErrors ?? false,
+          env: { ...process.env },
         }
       );
       this.isPersistentContext = true;
@@ -1205,6 +1206,7 @@ export class BrowserManager {
         userAgent: options.userAgent,
         ...(options.proxy && { proxy: options.proxy }),
         ignoreHTTPSErrors: options.ignoreHTTPSErrors ?? false,
+        env: { ...process.env },
       });
       this.isPersistentContext = true;
     } else {
@@ -1213,6 +1215,7 @@ export class BrowserManager {
         headless: options.headless ?? true,
         executablePath: options.executablePath,
         args: baseArgs,
+        env: { ...process.env },
       });
       this.cdpEndpoint = null;
 
