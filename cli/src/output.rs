@@ -272,13 +272,43 @@ pub fn print_response(resp: &Response, json_mode: bool, action: Option<&str>) {
             println!("{} Browser closed", color::success_indicator());
             return;
         }
+        // HAR stop result
+        if action == Some("har_stop") && data.get("entries").is_some() {
+            let path = data
+                .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let entries = data.get("entries").and_then(|v| v.as_i64()).unwrap_or(0);
+
+            if let Some(error) = data.get("error").and_then(|v| v.as_str()) {
+                println!(
+                    "{} HAR save failed for {} - {}",
+                    color::warning_indicator(),
+                    color::green(path),
+                    error
+                );
+            } else {
+                println!(
+                    "{} HAR saved to {} ({} entries)",
+                    color::success_indicator(),
+                    color::green(path),
+                    entries
+                );
+            }
+            return;
+        }
         // Recording start (has "started" field)
         if let Some(started) = data.get("started").and_then(|v| v.as_bool()) {
             if started {
-                if let Some(path) = data.get("path").and_then(|v| v.as_str()) {
-                    println!("{} Recording started: {}", color::success_indicator(), path);
-                } else {
-                    println!("{} Recording started", color::success_indicator());
+                match action.unwrap_or("") {
+                    "har_start" => println!("{} HAR recording started", color::success_indicator()),
+                    _ => {
+                        if let Some(path) = data.get("path").and_then(|v| v.as_str()) {
+                            println!("{} Recording started: {}", color::success_indicator(), path);
+                        } else {
+                            println!("{} Recording started", color::success_indicator());
+                        }
+                    }
                 }
                 return;
             }
@@ -1466,6 +1496,34 @@ Examples:
 "##
         }
 
+        // === HAR ===
+        "har" => {
+            r##"
+agent-browser har - Record network traffic to HAR
+
+Usage: agent-browser har start
+       agent-browser har stop <path.har>
+
+Capture network requests/responses as a HAR file using Playwright's native HAR recording.
+Creates a fresh browser context but preserves cookies and localStorage.
+If a page is already open, HAR recording starts from the current URL.
+
+Operations:
+  start                 Start HAR recording
+  stop <path.har>       Stop recording and save HAR file
+
+Global Options:
+  --json               Output as JSON
+  --session <name>     Use specific session
+
+Examples:
+  agent-browser open https://example.com
+  agent-browser har start
+  agent-browser click "a"
+  agent-browser har stop ./network.har
+"##
+        }
+
         // === Record (video) ===
         "record" => {
             r##"
@@ -1829,6 +1887,7 @@ Tabs:
 
 Debug:
   trace start|stop [path]    Record trace
+  har start|stop <path.har>  Capture network HAR
   record start <path> [url]  Start video recording (WebM)
   record stop                Stop and save video
   console [--clear]          View console logs

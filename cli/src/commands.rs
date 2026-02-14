@@ -763,6 +763,28 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
             }
         }
 
+        "har" => {
+            const VALID: &[&str] = &["start", "stop"];
+            match rest.get(0).map(|s| *s) {
+                Some("start") => Ok(json!({ "id": id, "action": "har_start" })),
+                Some("stop") => {
+                    let path = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
+                        context: "har stop".to_string(),
+                        usage: "har stop <path.har>",
+                    })?;
+                    Ok(json!({ "id": id, "action": "har_stop", "path": path }))
+                }
+                Some(sub) => Err(ParseError::UnknownSubcommand {
+                    subcommand: sub.to_string(),
+                    valid_options: VALID,
+                }),
+                None => Err(ParseError::MissingArguments {
+                    context: "har".to_string(),
+                    usage: "har <start|stop> [path]",
+                }),
+            }
+        }
+
         // === Recording (Playwright native video recording) ===
         "record" => {
             const VALID: &[&str] = &["start", "stop", "restart"];
@@ -2143,6 +2165,51 @@ mod tests {
     }
 
     // === Unknown command ===
+
+    // === HAR Tests ===
+
+    #[test]
+    fn test_har_start() {
+        let cmd = parse_command(&args("har start"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "har_start");
+    }
+
+    #[test]
+    fn test_har_stop() {
+        let cmd = parse_command(&args("har stop output.har"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "har_stop");
+        assert_eq!(cmd["path"], "output.har");
+    }
+
+    #[test]
+    fn test_har_stop_missing_path() {
+        let result = parse_command(&args("har stop"), &default_flags());
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::MissingArguments { .. }
+        ));
+    }
+
+    #[test]
+    fn test_har_invalid_subcommand() {
+        let result = parse_command(&args("har foo"), &default_flags());
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::UnknownSubcommand { .. }
+        ));
+    }
+
+    #[test]
+    fn test_har_missing_subcommand() {
+        let result = parse_command(&args("har"), &default_flags());
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::MissingArguments { .. }
+        ));
+    }
 
     // === Record Tests ===
 

@@ -1080,6 +1080,12 @@ export interface RecordingRestartData {
   stopped: boolean;
 }
 
+export interface HarStopData {
+  path: string;
+  entries: number;
+  error?: string;
+}
+
 export interface InputEventData {
   injected: boolean;
 }

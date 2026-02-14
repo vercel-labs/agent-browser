@@ -63,6 +63,8 @@ agent-browser wait 2000               # Wait milliseconds
 agent-browser screenshot              # Screenshot to temp dir
 agent-browser screenshot --full       # Full page screenshot
 agent-browser pdf output.pdf          # Save as PDF
+agent-browser har start               # Start HAR capture
+agent-browser har stop output.har     # Stop and save HAR file
 ```
 
 ## Common Patterns
@@ -163,6 +165,17 @@ agent-browser highlight @e1          # Highlight element
 agent-browser record start demo.webm # Record session
 ```
 
+### Network Capture (HAR)
+
+```bash
+agent-browser open https://example.com
+agent-browser snapshot -i
+agent-browser har start
+agent-browser click @e1
+agent-browser wait --load networkidle
+agent-browser har stop network.har
+```
+
 ### Local Files (PDFs, HTML)
 
 ```bash
@@ -197,6 +210,8 @@ agent-browser -p ios close
 **Requirements:** macOS with Xcode, Appium (`npm install -g appium && appium driver install xcuitest`)
 
 **Real devices:** Works with physical iOS devices if pre-configured. Use `--device "<UDID>"` where UDID is from `xcrun xctrace list devices`.
+
+**iOS limitations:** `record` and `har` commands are not supported in iOS mode.
 
 ## Ref Lifecycle (Important)
 

@@ -245,6 +245,8 @@ agent-browser errors --clear              # Clear errors
 agent-browser highlight @e1               # Highlight element
 agent-browser trace start                 # Start recording trace
 agent-browser trace stop trace.zip        # Stop and save trace
+agent-browser har start                   # Start HAR capture
+agent-browser har stop network.har        # Stop and save HAR file
 ```
 
 ## Environment Variables

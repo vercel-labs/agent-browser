@@ -2,6 +2,9 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vites
 import { BrowserManager } from './browser.js';
 import { executeCommand } from './actions.js';
 import { chromium } from 'playwright-core';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 describe('BrowserManager', () => {
   let browser: BrowserManager;
@@ -281,6 +284,105 @@ describe('BrowserManager', () => {
       const buffer = await page.screenshot();
       expect(buffer).toBeInstanceOf(Buffer);
       expect(buffer.length).toBeGreaterThan(0);
+    });
+  });
+
+  describe('har recording', () => {
+    it('should record network traffic and save a HAR file', async () => {
+      const tmpDir = mkdtempSync(path.join(os.tmpdir(), 'agent-browser-har-test-'));
+      const harPath = path.join(tmpDir, 'session.har');
+
+      try {
+        await browser.startHarRecording();
+
+        const page = browser.getPage();
+        await page.goto('https://example.com', { waitUntil: 'load' });
+
+        const result = await browser.stopHarRecording(harPath);
+
+        expect(result.error).toBeUndefined();
+        expect(result.path).toBe(harPath);
+        expect(existsSync(harPath)).toBe(true);
+        expect(result.entries).toBeGreaterThan(0);
+
+        const har = JSON.parse(readFileSync(harPath, 'utf8')) as {
+          log?: {
+            entries?: unknown[];
+          };
+        };
+
+        expect(Array.isArray(har.log?.entries)).toBe(true);
+        expect(har.log?.entries?.length ?? 0).toBeGreaterThan(0);
+      } finally {
+        rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it('should restore the previously active tab after stopping HAR recording', async () => {
+      const localBrowser = new BrowserManager();
+      const tmpDir = mkdtempSync(path.join(os.tmpdir(), 'agent-browser-har-tabs-test-'));
+      const harPath = path.join(tmpDir, 'session.har');
+
+      try {
+        await localBrowser.launch({ headless: true });
+
+        await localBrowser.newTab();
+        await localBrowser.newTab();
+
+        await localBrowser.switchTo(1);
+        const activeBeforeHar = localBrowser.getActiveIndex();
+        expect(activeBeforeHar).toBe(1);
+        expect(localBrowser.getPages()).toHaveLength(3);
+
+        await localBrowser.startHarRecording();
+        expect(localBrowser.getPages()).toHaveLength(1);
+        expect(localBrowser.getActiveIndex()).toBe(0);
+
+        const harPage = localBrowser.getPage();
+        await harPage.goto('https://example.com', { waitUntil: 'load' });
+
+        const result = await localBrowser.stopHarRecording(harPath);
+
+        expect(result.error).toBeUndefined();
+        expect(localBrowser.getPages()).toHaveLength(3);
+        expect(localBrowser.getActiveIndex()).toBe(activeBeforeHar);
+      } finally {
+        await localBrowser.close().catch(() => {});
+        rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it('should preserve HAR data when save fails and allow retry', async () => {
+      const localBrowser = new BrowserManager();
+      const tmpDir = mkdtempSync(path.join(os.tmpdir(), 'agent-browser-har-retry-test-'));
+      const invalidParent = path.join(tmpDir, 'not-a-directory');
+      const failingPath = path.join(invalidParent, 'session.har');
+      const retryPath = path.join(tmpDir, 'session-retry.har');
+
+      try {
+        await localBrowser.launch({ headless: true });
+
+        await localBrowser.startHarRecording();
+
+        const harPage = localBrowser.getPage();
+        await harPage.goto('https://example.com', { waitUntil: 'load' });
+
+        writeFileSync(invalidParent, 'blocking file');
+        const failedResult = await localBrowser.stopHarRecording(failingPath);
+
+        expect(failedResult.error).toBeDefined();
+        expect(failedResult.error).not.toContain('No HAR recording in progress');
+
+        const retryResult = await localBrowser.stopHarRecording(retryPath);
+
+        expect(retryResult.error).toBeUndefined();
+        expect(retryResult.path).toBe(retryPath);
+        expect(existsSync(retryPath)).toBe(true);
+        expect(retryResult.entries).toBeGreaterThan(0);
+      } finally {
+        await localBrowser.close().catch(() => {});
+        rmSync(tmpDir, { recursive: true, force: true });
+      }
     });
   });
 
