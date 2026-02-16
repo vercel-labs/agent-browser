@@ -672,6 +672,23 @@ describe('parseCommand', () => {
     });
   });
 
+  describe('har', () => {
+    it('should parse har_start', () => {
+      const result = parseCommand(cmd({ id: '1', action: 'har_start' }));
+      expect(result.success).toBe(true);
+    });
+
+    it('should parse har_stop', () => {
+      const result = parseCommand(cmd({ id: '1', action: 'har_stop', path: 'network.har' }));
+      expect(result.success).toBe(true);
+    });
+
+    it('should reject har_stop without path', () => {
+      const result = parseCommand(cmd({ id: '1', action: 'har_stop' }));
+      expect(result.success).toBe(false);
+    });
+  });
+
   describe('console and errors', () => {
     it('should parse console', () => {
       const result = parseCommand(cmd({ id: '1', action: 'console' }));
