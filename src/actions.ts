@@ -511,7 +511,7 @@ async function handleNavigate(
   }
 
   await page.goto(command.url, {
-    waitUntil: command.waitUntil ?? 'load',
+    waitUntil: command.waitUntil ?? 'domcontentloaded',
   });
 
   return successResponse(command.id, {

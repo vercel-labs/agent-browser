@@ -496,6 +496,10 @@ https:// is automatically prepended.
 
 Aliases: goto, navigate
 
+Options:
+  --wait-until <strategy>  When to consider navigation done (default: domcontentloaded)
+                           Values: load, domcontentloaded, networkidle
+
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
@@ -506,6 +510,7 @@ Examples:
   agent-browser open example.com
   agent-browser open https://github.com
   agent-browser open localhost:3000
+  agent-browser open example.com --wait-until networkidle
   agent-browser open api.example.com --headers '{"Authorization": "Bearer token"}'
     # ^ Headers only sent to api.example.com, not other domains
 "##
@@ -1877,6 +1882,8 @@ Options:
   --headed                   Show browser window (not headless)
   --cdp <port>               Connect via CDP (Chrome DevTools Protocol)
   --auto-connect             Auto-discover and connect to running Chrome
+  --wait-until <strategy>    Navigation wait strategy: load, domcontentloaded, networkidle
+                             (or AGENT_BROWSER_WAIT_UNTIL, default: domcontentloaded)
   --session-name <name>      Auto-save/restore session state (cookies, localStorage)
   --debug                    Debug output
   --version, -V              Show version
@@ -1890,6 +1897,7 @@ Environment:
   AGENT_BROWSER_PROVIDER         Browser provider (ios, browserbase, kernel, browseruse)
   AGENT_BROWSER_AUTO_CONNECT     Auto-discover and connect to running Chrome
   AGENT_BROWSER_STREAM_PORT      Enable WebSocket streaming on port (e.g., 9223)
+  AGENT_BROWSER_WAIT_UNTIL       Navigation wait strategy (default: domcontentloaded)
   AGENT_BROWSER_IOS_DEVICE       Default iOS device name
   AGENT_BROWSER_IOS_UDID         Default iOS device UDID
 

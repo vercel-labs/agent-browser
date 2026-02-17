@@ -101,6 +101,10 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                 format!("https://{}", url)
             };
             let mut nav_cmd = json!({ "id": id, "action": "navigate", "url": url });
+            // If --wait-until flag is set, include waitUntil strategy
+            if let Some(ref wait_until) = flags.wait_until {
+                nav_cmd["waitUntil"] = json!(wait_until);
+            }
             // If --headers flag is set, include headers (scoped to this origin)
             if let Some(ref headers_json) = flags.headers {
                 let headers = serde_json::from_str::<serde_json::Value>(headers_json)
@@ -1537,6 +1541,7 @@ mod tests {
             device: None,
             auto_connect: false,
             session_name: None,
+            wait_until: None,
             cli_executable_path: false,
             cli_extensions: false,
             cli_profile: false,
@@ -1839,6 +1844,38 @@ mod tests {
         let err = result.unwrap_err();
         let msg = err.format();
         assert!(msg.contains("Invalid JSON for --headers"));
+    }
+
+    #[test]
+    fn test_navigate_with_wait_until() {
+        let mut flags = default_flags();
+        flags.wait_until = Some("domcontentloaded".to_string());
+        let cmd = parse_command(&args("open example.com"), &flags).unwrap();
+        assert_eq!(cmd["action"], "navigate");
+        assert_eq!(cmd["waitUntil"], "domcontentloaded");
+    }
+
+    #[test]
+    fn test_navigate_with_wait_until_load() {
+        let mut flags = default_flags();
+        flags.wait_until = Some("load".to_string());
+        let cmd = parse_command(&args("open example.com"), &flags).unwrap();
+        assert_eq!(cmd["waitUntil"], "load");
+    }
+
+    #[test]
+    fn test_navigate_with_wait_until_networkidle() {
+        let mut flags = default_flags();
+        flags.wait_until = Some("networkidle".to_string());
+        let cmd = parse_command(&args("open example.com"), &flags).unwrap();
+        assert_eq!(cmd["waitUntil"], "networkidle");
+    }
+
+    #[test]
+    fn test_navigate_without_wait_until() {
+        let cmd = parse_command(&args("open example.com"), &default_flags()).unwrap();
+        // waitUntil should not be present when flag is not set (daemon uses its own default)
+        assert!(cmd.get("waitUntil").is_none());
     }
 
     // === Set Headers Tests ===
