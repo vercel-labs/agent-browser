@@ -678,10 +678,10 @@ export class BrowserManager {
   /**
    * Stop tracing and save
    */
-  async stopTracing(path: string): Promise<void> {
+  async stopTracing(path?: string): Promise<void> {
     const context = this.contexts[0];
     if (context) {
-      await context.tracing.stop({ path });
+      await context.tracing.stop(path ? { path } : undefined);
     }
   }
 

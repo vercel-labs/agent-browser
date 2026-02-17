@@ -132,8 +132,8 @@ const STRUCTURAL_ROLES = new Set([
  */
 function buildSelector(role: string, name?: string): string {
   if (name) {
-    const escapedName = name.replace(/"/g, '\\"');
-    return `getByRole('${role}', { name: "${escapedName}", exact: true })`;
+    const escapedName = JSON.stringify(name);
+    return `getByRole('${role}', { name: ${escapedName}, exact: true })`;
   }
   return `getByRole('${role}')`;
 }
@@ -307,7 +307,7 @@ export async function getEnhancedSnapshot(
       existingTexts.add(elTextLower);
 
       const ref = nextRef();
-      const role = el.hasCursorPointer ? 'clickable' : el.hasOnClick ? 'clickable' : 'focusable';
+      const role = el.hasCursorPointer || el.hasOnClick ? 'clickable' : 'focusable';
 
       refs[ref] = {
         selector: el.selector,

@@ -576,7 +576,7 @@ export interface TraceStartCommand extends BaseCommand {
 
 export interface TraceStopCommand extends BaseCommand {
   action: 'trace_stop';
-  path: string;
+  path?: string;
 }
 
 // HAR recording

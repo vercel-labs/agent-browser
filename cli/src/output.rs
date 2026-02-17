@@ -344,6 +344,11 @@ pub fn print_response(resp: &Response, json_mode: bool, action: Option<&str>) {
                 return;
             }
         }
+        // Trace stop without path
+        if data.get("traceStopped").is_some() {
+            println!("{} Trace stopped", color::success_indicator());
+            return;
+        }
         // Path-based operations (screenshot/pdf/trace/har/download/state/video)
         if let Some(path) = data.get("path").and_then(|v| v.as_str()) {
             match action.unwrap_or("") {
@@ -1888,6 +1893,13 @@ Environment:
   AGENT_BROWSER_IOS_DEVICE       Default iOS device name
   AGENT_BROWSER_IOS_UDID         Default iOS device UDID
 
+Install (recommended, fastest - native Rust CLI):
+  npm install -g agent-browser
+  agent-browser install                  # Download Chromium (first time)
+
+Try without installing (slower, routes through Node.js):
+  npx agent-browser open example.com
+
 Examples:
   agent-browser open example.com
   agent-browser snapshot -i              # Interactive elements only
@@ -1896,6 +1908,7 @@ Examples:
   agent-browser find role button click --name Submit
   agent-browser get text @e1
   agent-browser screenshot --full
+  agent-browser wait --load networkidle  # Wait for slow pages to load
   agent-browser --cdp 9222 snapshot      # Connect via CDP port
   agent-browser --auto-connect snapshot  # Auto-discover running Chrome
   agent-browser --profile ~/.myapp open example.com    # Persistent profile

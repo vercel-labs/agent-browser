@@ -2,6 +2,210 @@ export const metadata = { title: "Changelog" }
 
 # Changelog
 
+## v0.10.0
+
+<p className="text-[#888] text-sm">February 2026</p>
+
+### New Features
+
+- **Session persistence** - Automatic save/restore of cookies and localStorage across browser restarts using `--session-name` flag
+- **Encrypted state** - Optional AES-256-GCM encryption for saved session state data
+- **State management commands** - New commands for listing, showing, renaming, clearing, and cleaning up session state files
+- **New tab on click** - Added `--new-tab` option for click commands to open links in new tabs
+
+```bash
+# Persist session state
+agent-browser --session-name myapp open https://example.com
+
+# Manage saved states
+agent-browser state list
+agent-browser state show myapp
+agent-browser state clear myapp
+```
+
+---
+
+## v0.9.4
+
+<p className="text-[#888] text-sm">February 2026</p>
+
+### Bug Fixes
+
+- Fixed all Clippy lint warnings in the Rust CLI
+
+---
+
+## v0.9.3
+
+<p className="text-[#888] text-sm">February 2026</p>
+
+### Improvements
+
+- Added support for custom executable path in CLI browser launch options
+- Documentation site UI improvements including a new chat component with sheet-based interface
+
+---
+
+## v0.9.2
+
+<p className="text-[#888] text-sm">February 2026</p>
+
+### Improvements
+
+- Migrated documentation site to MDX for improved content authoring
+- Added AI-powered docs chat feature
+- Updated README with Homebrew installation instructions for macOS users
+
+---
+
+## v0.9.1
+
+<p className="text-[#888] text-sm">February 2026</p>
+
+### New Features
+
+- **`--allow-file-access` flag** - Enable opening and interacting with local `file://` URLs (PDFs, HTML files) by passing Chromium flags that allow JavaScript access to local files
+- **`-C`/`--cursor` flag for snapshots** - Include cursor-interactive elements like divs with onclick handlers or `cursor:pointer` styles
+
+```bash
+agent-browser --allow-file-access open file:///path/to/document.pdf
+agent-browser snapshot -C
+```
+
+---
+
+## v0.9.0
+
+<p className="text-[#888] text-sm">February 2026</p>
+
+### New Features
+
+- **iOS Simulator support** - Mobile Safari testing via Appium with real device and simulator support
+
+```bash
+# List available iOS simulators
+agent-browser device list
+
+# Launch on iOS device
+agent-browser -p ios --device "iPhone 16 Pro" open https://example.com
+
+# Touch interactions
+agent-browser tap @e1
+agent-browser swipe up
+```
+
+---
+
+## v0.8.10
+
+<p className="text-[#888] text-sm">January 2026</p>
+
+### Improvements
+
+- Added `--stdin` flag for eval command to read JavaScript from stdin, enabling heredoc usage for multiline scripts
+- Fixed binary permission issues on macOS/Linux when postinstall scripts don't run
+
+---
+
+## v0.8.9
+
+<p className="text-[#888] text-sm">January 2026</p>
+
+### Improvements
+
+- Added `--stdin` flag for eval command to read JavaScript from stdin
+
+---
+
+## v0.8.8
+
+<p className="text-[#888] text-sm">January 2026</p>
+
+### Improvements
+
+- Added base64 encoding support for the eval command with `-b`/`--base64` flag to avoid shell escaping issues
+- Updated documentation with AI agent setup instructions
+
+---
+
+## v0.8.7
+
+<p className="text-[#888] text-sm">January 2026</p>
+
+### Bug Fixes
+
+- Fixed browser launch options not being passed correctly when using persistent profiles
+- Added pre-flight checks for socket path length limits and directory write permissions
+- Improved error handling to properly exit with failure status when browser launch fails
+
+---
+
+## v0.8.6
+
+<p className="text-[#888] text-sm">January 2026</p>
+
+### Bug Fixes
+
+- Improved daemon connection reliability with automatic retry logic for transient errors
+- CLI now cleans up stale socket and PID files before starting a new daemon
+
+---
+
+## v0.8.5
+
+<p className="text-[#888] text-sm">January 2026</p>
+
+### Bug Fixes
+
+- Fixed version synchronization to automatically update Cargo.lock alongside Cargo.toml during releases
+- Made the CLI binary executable in the npm package
+
+---
+
+## v0.8.4
+
+<p className="text-[#888] text-sm">January 2026</p>
+
+### Bug Fixes
+
+- Fixed "Daemon not found" error when running through AI agents by resolving symlinks in the executable path
+
+---
+
+## v0.8.3
+
+<p className="text-[#888] text-sm">January 2026</p>
+
+### Improvements
+
+- Replaced shell-based CLI wrappers with a cross-platform Node.js wrapper to enable npx support on Windows
+- Added postinstall logic to patch npm bin entry on global installs for zero-overhead native binary invocation
+- Added CI tests to verify global installation across all platforms
+
+---
+
+## v0.8.2
+
+<p className="text-[#888] text-sm">January 2026</p>
+
+### Bug Fixes
+
+- Fixed the Windows CMD wrapper to use the native binary directly instead of routing through Node.js
+- Added retry logic to CI install command for transient browser installation failures
+
+---
+
+## v0.8.1
+
+<p className="text-[#888] text-sm">January 2026</p>
+
+### Improvements
+
+- Improved release workflow to validate binary file sizes and ensure binaries are executable after npm install
+- Updated documentation site with a new mobile navigation system
+
+---
+
 ## v0.8.0
 
 <p className="text-[#888] text-sm">January 2026</p>

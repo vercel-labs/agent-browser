@@ -4,11 +4,41 @@ Headless browser automation CLI for AI agents. Fast Rust CLI with Node.js fallba
 
 ## Installation
 
-### npm (recommended)
+### Global Installation (recommended)
+
+Installs the native Rust binary for maximum performance:
 
 ```bash
 npm install -g agent-browser
 agent-browser install  # Download Chromium
+```
+
+This is the fastest option -- commands run through the native Rust CLI directly with sub-millisecond parsing overhead.
+
+### Quick Start (no install)
+
+Run directly with `npx` if you want to try it without installing globally:
+
+```bash
+npx agent-browser install   # Download Chromium (first time only)
+npx agent-browser open example.com
+```
+
+> **Note:** `npx` routes through Node.js before reaching the Rust CLI, so it is noticeably slower than a global install. For regular use, install globally.
+
+### Project Installation (local dependency)
+
+For projects that want to pin the version in `package.json`:
+
+```bash
+npm install agent-browser
+npx agent-browser install
+```
+
+Then use via `npx` or `package.json` scripts:
+
+```bash
+npx agent-browser open example.com
 ```
 
 ### Homebrew (macOS)
@@ -752,7 +782,7 @@ The daemon starts automatically on first command and persists between commands f
 
 ### Just ask the agent
 
-The simplest approach - just tell your agent to use it:
+The simplest approach -- just tell your agent to use it:
 
 ```
 Use agent-browser to test the login flow. Run agent-browser --help to see available commands.
@@ -760,7 +790,7 @@ Use agent-browser to test the login flow. Run agent-browser --help to see availa
 
 The `--help` output is comprehensive and most agents can figure it out from there.
 
-### AI Coding Assistants
+### AI Coding Assistants (recommended)
 
 Add the skill to your AI coding assistant for richer context:
 
@@ -768,7 +798,17 @@ Add the skill to your AI coding assistant for richer context:
 npx skills add vercel-labs/agent-browser
 ```
 
-This works with Claude Code, Codex, Cursor, Gemini CLI, GitHub Copilot, Goose, OpenCode, and Windsurf.
+This works with Claude Code, Codex, Cursor, Gemini CLI, GitHub Copilot, Goose, OpenCode, and Windsurf. The skill is fetched from the repository, so it stays up to date automatically -- do not copy `SKILL.md` from `node_modules` as it will become stale.
+
+### Claude Code
+
+Install as a Claude Code skill:
+
+```bash
+npx skills add vercel-labs/agent-browser
+```
+
+This adds the skill to `.claude/skills/agent-browser/SKILL.md` in your project. The skill teaches Claude Code the full agent-browser workflow, including the snapshot-ref interaction pattern, session management, and timeout handling.
 
 ### AGENTS.md / CLAUDE.md
 

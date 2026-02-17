@@ -47,6 +47,7 @@ const launchSchema = baseCommandSchema.extend({
   userAgent: z.string().optional(),
   provider: z.string().optional(),
   ignoreHTTPSErrors: z.boolean().optional(),
+  allowFileAccess: z.boolean().optional(),
   profile: z.string().optional(),
   storageState: z.string().optional(),
 });
@@ -369,7 +370,7 @@ const traceStartSchema = baseCommandSchema.extend({
 
 const traceStopSchema = baseCommandSchema.extend({
   action: z.literal('trace_stop'),
-  path: z.string().min(1),
+  path: z.string().min(1).optional(),
 });
 
 const harStartSchema = baseCommandSchema.extend({
@@ -989,7 +990,26 @@ export function parseCommand(input: string): ParseResult {
     return { success: false, error: `Validation error: ${errors}`, id };
   }
 
-  return { success: true, command: result.data as Command };
+  const command = result.data as Command;
+
+  // Post-parse validation for commands that need cross-field checks
+  if (
+    (command.action === 'addscript' || command.action === 'addstyle') &&
+    !command.content &&
+    !command.url
+  ) {
+    return { success: false, error: 'Either content or url must be provided', id };
+  }
+
+  if (command.action === 'frame' && !command.selector && !command.name && !command.url) {
+    return {
+      success: false,
+      error: 'frame command requires at least one of: selector, name, or url',
+      id,
+    };
+  }
+
+  return { success: true, command };
 }
 
 /**

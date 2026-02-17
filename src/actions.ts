@@ -1442,7 +1442,10 @@ async function handleTraceStop(
   browser: BrowserManager
 ): Promise<Response> {
   await browser.stopTracing(command.path);
-  return successResponse(command.id, { path: command.path });
+  return successResponse(
+    command.id,
+    command.path ? { path: command.path } : { traceStopped: true }
+  );
 }
 
 async function handleHarStart(
