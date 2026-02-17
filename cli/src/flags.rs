@@ -53,7 +53,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
         headed: false,
         debug: false,
         session: env::var("AGENT_BROWSER_SESSION").unwrap_or_else(|_| "default".to_string()),
-        headers: None,
+        headers: env::var("AGENT_BROWSER_HEADERS").ok(),
         executable_path: env::var("AGENT_BROWSER_EXECUTABLE_PATH").ok(),
         cdp: None,
         extensions: extensions_env,
