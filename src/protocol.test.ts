@@ -733,6 +733,21 @@ describe('parseCommand', () => {
       expect(result.success).toBe(true);
     });
 
+    it('should reject frame with no selector, name, or url', () => {
+      const result = parseCommand(cmd({ id: '1', action: 'frame' }));
+      expect(result.success).toBe(false);
+    });
+
+    it('should parse frame with name', () => {
+      const result = parseCommand(cmd({ id: '1', action: 'frame', name: 'myframe' }));
+      expect(result.success).toBe(true);
+    });
+
+    it('should parse frame with url', () => {
+      const result = parseCommand(cmd({ id: '1', action: 'frame', url: 'https://example.com' }));
+      expect(result.success).toBe(true);
+    });
+
     it('should parse mainframe', () => {
       const result = parseCommand(cmd({ id: '1', action: 'mainframe' }));
       expect(result.success).toBe(true);

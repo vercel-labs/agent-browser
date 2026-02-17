@@ -103,9 +103,12 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
             let mut nav_cmd = json!({ "id": id, "action": "navigate", "url": url });
             // If --headers flag is set, include headers (scoped to this origin)
             if let Some(ref headers_json) = flags.headers {
-                if let Ok(headers) = serde_json::from_str::<serde_json::Value>(headers_json) {
-                    nav_cmd["headers"] = headers;
-                }
+                let headers = serde_json::from_str::<serde_json::Value>(headers_json)
+                    .map_err(|_| ParseError::InvalidValue {
+                        message: format!("Invalid JSON for --headers: {}", headers_json),
+                        usage: "open <url> --headers '{\"Key\": \"Value\"}'",
+                    })?;
+                nav_cmd["headers"] = headers;
             }
             // Include iOS device info if specified (needed for auto-launch with existing daemon)
             if flags.provider.as_deref() == Some("ios") {
@@ -1830,9 +1833,12 @@ mod tests {
     fn test_navigate_with_invalid_headers_json() {
         let mut flags = default_flags();
         flags.headers = Some("not valid json".to_string());
-        let cmd = parse_command(&args("open api.example.com"), &flags).unwrap();
-        // Invalid JSON should result in no headers field (graceful handling)
-        assert!(cmd.get("headers").is_none());
+        let result = parse_command(&args("open api.example.com"), &flags);
+        // Invalid JSON should return a ParseError, not silently drop headers
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        let msg = err.format();
+        assert!(msg.contains("Invalid JSON for --headers"));
     }
 
     // === Set Headers Tests ===

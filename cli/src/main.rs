@@ -336,6 +336,16 @@ fn main() {
         exit(1);
     }
 
+    if flags.cdp.is_some() && !flags.extensions.is_empty() {
+        let msg = "Cannot use --extension with --cdp (extensions require local browser)";
+        if flags.json {
+            println!(r#"{{"success":false,"error":"{}"}}"#, msg);
+        } else {
+            eprintln!("{} {}", color::error_indicator(), msg);
+        }
+        exit(1);
+    }
+
     // Auto-connect to existing browser
     if flags.auto_connect {
         let mut launch_cmd = json!({

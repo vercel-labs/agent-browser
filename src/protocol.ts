@@ -1001,6 +1001,14 @@ export function parseCommand(input: string): ParseResult {
     return { success: false, error: 'Either content or url must be provided', id };
   }
 
+  if (command.action === 'frame' && !command.selector && !command.name && !command.url) {
+    return {
+      success: false,
+      error: 'frame command requires at least one of: selector, name, or url',
+      id,
+    };
+  }
+
   return { success: true, command };
 }
 
