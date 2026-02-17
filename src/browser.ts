@@ -853,15 +853,20 @@ export class BrowserManager {
    */
   private async connectToAgentCore(): Promise<void> {
     const region =
-      process.env.AGENTCORE_REGION || process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION || 'us-east-1';
+      process.env.AGENTCORE_REGION ||
+      process.env.AWS_REGION ||
+      process.env.AWS_DEFAULT_REGION ||
+      'us-east-1';
     const identifier = process.env.AGENTCORE_BROWSER_ID || 'aws.browser.v1';
     const host = `bedrock-agentcore.${region}.amazonaws.com`;
     const endpoint = `https://${host}`;
 
     // Start browser session
+    const profileId = process.env.AGENTCORE_PROFILE_ID;
     const startBody = JSON.stringify({
       name: `agent-browser-${crypto.randomUUID().slice(0, 8)}`,
       sessionTimeoutSeconds: parseInt(process.env.AGENTCORE_SESSION_TIMEOUT || '3600', 10),
+      ...(profileId && { profileConfiguration: { profileIdentifier: profileId } }),
     });
 
     const startUrl = `${endpoint}/browsers/${encodeURIComponent(identifier)}/sessions/start`;
@@ -881,7 +886,9 @@ export class BrowserManager {
 
     if (!startResponse.ok) {
       const text = await startResponse.text().catch(() => '');
-      throw new Error(`Failed to start AgentCore browser session: ${startResponse.statusText} ${text}`);
+      throw new Error(
+        `Failed to start AgentCore browser session: ${startResponse.statusText} ${text}`
+      );
     }
 
     const session = (await startResponse.json()) as {
@@ -901,7 +908,12 @@ export class BrowserManager {
     const wsPath = `/browser-streams/${session.browserIdentifier}/sessions/${session.sessionId}/automation`;
     const wsUrl = `wss://${host}${wsPath}`;
 
-    const wsHeaders = await this.signAgentCoreRequest('GET', `https://${host}${wsPath}`, region, {});
+    const wsHeaders = await this.signAgentCoreRequest(
+      'GET',
+      `https://${host}${wsPath}`,
+      region,
+      {}
+    );
     const cdpHeaders: Record<string, string> = {
       ...wsHeaders,
       Upgrade: 'websocket',
@@ -1508,7 +1520,10 @@ export class BrowserManager {
    * @param cdpEndpoint Either a port number (as string) or a full WebSocket URL (ws:// or wss://)
    * @param headers Optional headers for WebSocket connection (e.g., for AWS SigV4 authentication)
    */
-  private async connectViaCDP(cdpEndpoint: string | undefined, headers?: Record<string, string>): Promise<void> {
+  private async connectViaCDP(
+    cdpEndpoint: string | undefined,
+    headers?: Record<string, string>
+  ): Promise<void> {
     if (!cdpEndpoint) {
       throw new Error('CDP endpoint is required for CDP connection');
     }
