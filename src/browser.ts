@@ -83,6 +83,8 @@ export class BrowserManager {
   private browserUseApiKey: string | null = null;
   private kernelSessionId: string | null = null;
   private kernelApiKey: string | null = null;
+  private browserlessStopUrl: string | null = null;
+  private browserlessApiToken: string | null = null;
   private contexts: BrowserContext[] = [];
   private pages: Page[] = [];
   private activePageIndex: number = 0;
@@ -125,6 +127,31 @@ export class BrowserManager {
    */
   isLaunched(): boolean {
     return this.browser !== null || this.isPersistentContext;
+  }
+
+  /**
+   * Handles boolean env vars and parsing (e.g., "true", "1", "false", "0"),
+   * with a default value if not set or invalid
+   */
+  parseBooleanEnvVar(name: string, defaultValue: boolean): boolean {
+    const truthyVals = ['1', 'true'];
+    const falsyVals = ['0', 'false'];
+
+    if (!Object.hasOwn(process.env, name)) {
+      return defaultValue;
+    }
+
+    const param = process.env[name]!.toLowerCase();
+
+    if (truthyVals.includes(param)) {
+      return true;
+    }
+
+    if (falsyVals.includes(param)) {
+      return false;
+    }
+
+    return defaultValue;
   }
 
   /**
@@ -795,6 +822,19 @@ export class BrowserManager {
   }
 
   /**
+   * Close a Browserless session via its stop URL
+   */
+  private async closeBrowserlessSession(stopUrl: string): Promise<void> {
+    const response = await fetch(stopUrl, {
+      method: 'DELETE',
+    });
+
+    if (!response.ok) {
+      throw new Error(`Failed to close Browserless session: ${response.statusText}`);
+    }
+  }
+
+  /**
    * Connect to Browserbase remote browser via CDP.
    * Requires BROWSERBASE_API_KEY and BROWSERBASE_PROJECT_ID environment variables.
    */
@@ -1071,6 +1111,97 @@ export class BrowserManager {
   }
 
   /**
+   * Connect to Browserless remote browser via CDP.
+   * Requires BROWSERLESS_TOKEN environment variable.
+   */
+  private async connectToBrowserless(): Promise<void> {
+    const browserlessToken = process.env.BROWSERLESS_TOKEN;
+    if (!browserlessToken) {
+      throw new Error('BROWSERLESS_TOKEN is required when using browserless as a provider');
+    }
+
+    const supportedBrowsers = ['chromium', 'chrome'];
+    const apiUrl = process.env.BROWSERLESS_API_URL || 'https://production-sfo.browserless.io';
+    const browserType = process.env.BROWSERLESS_BROWSER_TYPE || 'chromium';
+    const ttl = parseInt(process.env.BROWSERLESS_TTL || '300000', 10);
+    const stealth = this.parseBooleanEnvVar('BROWSERLESS_STEALTH', true);
+
+    if (!supportedBrowsers.includes(browserType)) {
+      throw new Error(
+        `BROWSERLESS_BROWSER_TYPE "${browserType}" is not supported. Only ${supportedBrowsers.join(', ')} are allowed.`
+      );
+    }
+
+    const response = await fetch(
+      `${apiUrl}/session?token=${encodeURIComponent(browserlessToken)}`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          ttl,
+          stealth,
+          browser: browserType,
+        }),
+      }
+    );
+
+    if (!response.ok) {
+      throw new Error(`Failed to create Browserless session: ${response.statusText}`);
+    }
+
+    let session: { connect: string; stop: string };
+    try {
+      session = (await response.json()) as { connect: string; stop: string };
+    } catch (error) {
+      throw new Error(
+        `Failed to parse Browserless session response: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+
+    if (!session.connect || !session.stop) {
+      throw new Error(
+        `Invalid Browserless session response: missing ${!session.connect ? 'connect' : 'stop'}`
+      );
+    }
+
+    const browser = await chromium.connectOverCDP(session.connect).catch(() => {
+      throw new Error('Failed to connect to Browserless session via CDP');
+    });
+
+    try {
+      const contexts = browser.contexts();
+      let context: BrowserContext;
+      let page: Page;
+
+      if (contexts.length === 0) {
+        context = await browser.newContext();
+        page = await context.newPage();
+      } else {
+        context = contexts[0];
+        const pages = context.pages();
+        page = pages[0] ?? (await context.newPage());
+      }
+
+      this.browserlessStopUrl = session.stop;
+      this.browserlessApiToken = browserlessToken;
+      this.browser = browser;
+      context.setDefaultTimeout(60000);
+      this.contexts.push(context);
+      this.pages.push(page);
+      this.activePageIndex = 0;
+      this.setupPageTracking(page);
+      this.setupContextTracking(context);
+    } catch (error) {
+      await this.closeBrowserlessSession(session.stop).catch((sessionError) => {
+        console.error('Failed to close Browserless session during cleanup:', sessionError);
+      });
+      throw error;
+    }
+  }
+
+  /**
    * Launch the browser with the specified options
    * If already launched, this is a no-op (browser stays open)
    */
@@ -1141,6 +1272,10 @@ export class BrowserManager {
     // Kernel: requires explicit opt-in via -p kernel flag or AGENT_BROWSER_PROVIDER=kernel
     if (provider === 'kernel') {
       await this.connectToKernel();
+      return;
+    }
+    if (provider === 'browserless') {
+      await this.connectToBrowserless();
       return;
     }
 
@@ -2145,6 +2280,11 @@ export class BrowserManager {
         console.error('Failed to close Kernel session:', error);
       });
       this.browser = null;
+    } else if (this.browserlessStopUrl) {
+      await this.closeBrowserlessSession(this.browserlessStopUrl).catch((error) => {
+        console.error('Failed to close Browserless session:', error);
+      });
+      this.browser = null;
     } else if (this.cdpEndpoint !== null) {
       // CDP: only disconnect, don't close external app's pages
       if (this.browser) {
@@ -2174,6 +2314,8 @@ export class BrowserManager {
     this.browserUseApiKey = null;
     this.kernelSessionId = null;
     this.kernelApiKey = null;
+    this.browserlessStopUrl = null;
+    this.browserlessApiToken = null;
     this.isPersistentContext = false;
     this.activePageIndex = 0;
     this.refMap = {};
