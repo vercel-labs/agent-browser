@@ -1,5 +1,11 @@
 # agent-browser
 
+## 0.11.1
+
+### Patch Changes
+
+- c6fc7df: Added documentation for command chaining with && across README, CLI help output, docs, and skill files, explaining how to efficiently chain multiple agent-browser commands in a single shell invocation since the browser persists via a background daemon.
+
 ## 0.11.0
 
 ### Minor Changes
