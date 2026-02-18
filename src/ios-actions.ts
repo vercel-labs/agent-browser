@@ -150,6 +150,12 @@ export async function executeIOSCommand(command: Command, manager: IOSManager): 
         return successResponse(id, { value });
       }
 
+      case 'innerhtml': {
+        const cmd = command as any;
+        const html = await manager.getInnerHtml(cmd.selector);
+        return successResponse(id, { html });
+      }
+
       case 'isvisible': {
         const cmd = command as any;
         const visible = await manager.isVisible(cmd.selector);
