@@ -9,6 +9,10 @@ use std::sync::OnceLock;
 /// Returns true if color output is enabled (NO_COLOR is NOT set)
 pub fn is_enabled() -> bool {
     static COLORS_ENABLED: OnceLock<bool> = OnceLock::new();
+    if cfg!(test) {
+        // Avoid caching in tests so NO_COLOR can be toggled deterministically.
+        return env::var("NO_COLOR").is_err();
+    }
     *COLORS_ENABLED.get_or_init(|| env::var("NO_COLOR").is_err())
 }
 
@@ -124,19 +128,81 @@ pub fn console_level_prefix(level: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, MutexGuard};
+
+    // Mutex to prevent parallel tests from interfering with env vars
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    /// RAII guard that locks env mutex and restores env vars on drop
+    struct EnvGuard<'a> {
+        _lock: MutexGuard<'a, ()>,
+        vars: Vec<(String, Option<String>)>,
+    }
+
+    impl<'a> EnvGuard<'a> {
+        fn new(var_names: &[&str]) -> Self {
+            let lock = ENV_MUTEX.lock().unwrap();
+            let vars = var_names
+                .iter()
+                .map(|&name| (name.to_string(), env::var(name).ok()))
+                .collect();
+            Self { _lock: lock, vars }
+        }
+    }
+
+    impl Drop for EnvGuard<'_> {
+        fn drop(&mut self) {
+            for (name, value) in &self.vars {
+                match value {
+                    Some(v) => env::set_var(name, v),
+                    None => env::remove_var(name),
+                }
+            }
+        }
+    }
 
     #[test]
     fn test_red_contains_ansi_codes() {
-        // Test the format structure (actual color depends on NO_COLOR env)
-        let formatted = format!("\x1b[31m{}\x1b[0m", "error");
+        let _guard = EnvGuard::new(&["NO_COLOR"]);
+        let text = "error";
+        env::remove_var("NO_COLOR");
+        let formatted = red(text);
+
         assert!(formatted.contains("\x1b[31m"));
+        assert!(formatted.contains(text));
         assert!(formatted.contains("\x1b[0m"));
     }
 
     #[test]
+    fn test_red_no_color() {
+        let _guard = EnvGuard::new(&["NO_COLOR"]);
+        let text = "error";
+        env::set_var("NO_COLOR", "1");
+        let formatted = red(text);
+
+        assert_eq!(formatted, text);
+    }
+
+    #[test]
     fn test_green_contains_ansi_codes() {
-        let formatted = format!("\x1b[32m{}\x1b[0m", "success");
+        let _guard = EnvGuard::new(&["NO_COLOR"]);
+        let text = "success";
+        env::remove_var("NO_COLOR");
+        let formatted = green(text);
+
         assert!(formatted.contains("\x1b[32m"));
+        assert!(formatted.contains(text));
+        assert!(formatted.contains("\x1b[0m"));
+    }
+
+    #[test]
+    fn test_green_no_color() {
+        let _guard = EnvGuard::new(&["NO_COLOR"]);
+        let text = "success";
+        env::set_var("NO_COLOR", "1");
+        let formatted = green(text);
+
+        assert_eq!(formatted, text);
     }
 
     #[test]
