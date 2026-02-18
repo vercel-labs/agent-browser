@@ -95,7 +95,7 @@ agent-browser find role button click --name "Submit"
 
 ```bash
 agent-browser open <url>              # Navigate to URL (aliases: goto, navigate)
-agent-browser click <sel>             # Click element
+agent-browser click <sel>             # Click element (--new-tab to open in new tab)
 agent-browser dblclick <sel>          # Double-click element
 agent-browser focus <sel>             # Focus element
 agent-browser type <sel> <text>       # Type into element
@@ -130,6 +130,7 @@ agent-browser get title               # Get page title
 agent-browser get url                 # Get current URL
 agent-browser get count <sel>         # Count matching elements
 agent-browser get box <sel>           # Get bounding box
+agent-browser get styles <sel>        # Get computed styles
 ```
 
 ### Check State
@@ -155,7 +156,9 @@ agent-browser find last <sel> <action> [value]        # Last match
 agent-browser find nth <n> <sel> <action> [value]     # Nth match
 ```
 
-**Actions:** `click`, `fill`, `check`, `hover`, `text`
+**Actions:** `click`, `fill`, `type`, `hover`, `focus`, `check`, `uncheck`, `text`
+
+**Options:** `--name <name>` (filter role by accessible name), `--exact` (require exact text match)
 
 **Examples:**
 
@@ -256,6 +259,8 @@ agent-browser dialog dismiss          # Dismiss
 ```bash
 agent-browser trace start [path]      # Start recording trace
 agent-browser trace stop [path]       # Stop and save trace
+agent-browser profiler start          # Start Chrome DevTools profiling
+agent-browser profiler stop [path]    # Stop and save profile (.json)
 agent-browser console                 # View console messages (log, error, warn, info)
 agent-browser console --clear         # Clear console
 agent-browser errors                  # View page errors (uncaught JavaScript exceptions)
@@ -404,25 +409,65 @@ The `-C` flag is useful for modern web apps that use custom clickable elements (
 | Option                     | Description                                                                       |
 | -------------------------- | --------------------------------------------------------------------------------- |
 | `--session <name>`         | Use isolated session (or `AGENT_BROWSER_SESSION` env)                             |
+| `--session-name <name>`    | Auto-save/restore session state (or `AGENT_BROWSER_SESSION_NAME` env)             |
 | `--profile <path>`         | Persistent browser profile directory (or `AGENT_BROWSER_PROFILE` env)             |
+| `--state <path>`           | Load storage state from JSON file (or `AGENT_BROWSER_STATE` env)                  |
 | `--headers <json>`         | Set HTTP headers scoped to the URL's origin                                       |
 | `--executable-path <path>` | Custom browser executable (or `AGENT_BROWSER_EXECUTABLE_PATH` env)                |
+| `--extension <path>`       | Load browser extension (repeatable; or `AGENT_BROWSER_EXTENSIONS` env)            |
 | `--args <args>`            | Browser launch args, comma or newline separated (or `AGENT_BROWSER_ARGS` env)     |
 | `--user-agent <ua>`        | Custom User-Agent string (or `AGENT_BROWSER_USER_AGENT` env)                      |
 | `--proxy <url>`            | Proxy server URL with optional auth (or `AGENT_BROWSER_PROXY` env)                |
 | `--proxy-bypass <hosts>`   | Hosts to bypass proxy (or `AGENT_BROWSER_PROXY_BYPASS` env)                       |
-| `-p, --provider <name>`    | Cloud browser provider (or `AGENT_BROWSER_PROVIDER` env)                          |
-| `--json`                   | JSON output (for agents)                                                          |
-| `--full, -f`               | Full page screenshot                                                              |
-| `--name, -n`               | Locator name filter                                                               |
-| `--exact`                  | Exact text match                                                                  |
-| `--headed`                 | Show browser window (not headless)                                                |
-| `--cdp <port>`             | Connect via Chrome DevTools Protocol                                              |
-| `--auto-connect`           | Auto-discover and connect to running Chrome (or `AGENT_BROWSER_AUTO_CONNECT` env) |
-| `--session-name <name>`    | Auto-save/restore session state (or `AGENT_BROWSER_SESSION_NAME` env)             |
 | `--ignore-https-errors`    | Ignore HTTPS certificate errors (useful for self-signed certs)                    |
 | `--allow-file-access`      | Allow file:// URLs to access local files (Chromium only)                          |
+| `-p, --provider <name>`    | Cloud browser provider (or `AGENT_BROWSER_PROVIDER` env)                          |
+| `--device <name>`          | iOS device name, e.g. "iPhone 15 Pro" (or `AGENT_BROWSER_IOS_DEVICE` env)         |
+| `--json`                   | JSON output (for agents)                                                          |
+| `--full, -f`               | Full page screenshot                                                              |
+| `--headed`                 | Show browser window (not headless)                                                |
+| `--cdp <port\|url>`        | Connect via Chrome DevTools Protocol (port or WebSocket URL)                      |
+| `--auto-connect`           | Auto-discover and connect to running Chrome (or `AGENT_BROWSER_AUTO_CONNECT` env) |
+| `--config <path>`          | Use a custom config file (or `AGENT_BROWSER_CONFIG` env)                          |
 | `--debug`                  | Debug output                                                                      |
+
+## Configuration
+
+Create an `agent-browser.json` file to set persistent defaults instead of repeating flags on every command.
+
+**Locations (lowest to highest priority):**
+
+1. `~/.agent-browser/config.json` -- user-level defaults
+2. `./agent-browser.json` -- project-level overrides (in working directory)
+3. `AGENT_BROWSER_*` environment variables override config file values
+4. CLI flags override everything
+
+**Example `agent-browser.json`:**
+
+```json
+{
+  "headed": true,
+  "proxy": "http://localhost:8080",
+  "profile": "./browser-data",
+  "userAgent": "my-agent/1.0",
+  "ignoreHttpsErrors": true
+}
+```
+
+Use `--config <path>` or `AGENT_BROWSER_CONFIG` to load a specific config file instead of the defaults:
+
+```bash
+agent-browser --config ./ci-config.json open example.com
+AGENT_BROWSER_CONFIG=./ci-config.json agent-browser open example.com
+```
+
+All options from the table above can be set in the config file using camelCase keys (e.g., `--executable-path` becomes `"executablePath"`, `--proxy-bypass` becomes `"proxyBypass"`). Unknown keys are ignored for forward compatibility.
+
+Boolean flags accept an optional `true`/`false` value to override config settings. For example, `--headed false` disables `"headed": true` from config. A bare `--headed` is equivalent to `--headed true`.
+
+Auto-discovered config files that are missing are silently ignored. If `--config <path>` points to a missing or invalid file, agent-browser exits with an error. Extensions from user and project configs are merged (concatenated), not replaced.
+
+> **Tip:** If your project-level `agent-browser.json` contains environment-specific values (paths, proxies), consider adding it to `.gitignore`.
 
 ## Selectors
 
@@ -501,6 +546,23 @@ agent-browser fill @e3 "input text"
 # 4. Get new snapshot if page changed
 agent-browser snapshot -i --json
 ```
+
+### Command Chaining
+
+Commands can be chained with `&&` in a single shell invocation. The browser persists via a background daemon, so chaining is safe and more efficient:
+
+```bash
+# Open, wait for load, and snapshot in one call
+agent-browser open example.com && agent-browser wait --load networkidle && agent-browser snapshot -i
+
+# Chain multiple interactions
+agent-browser fill @e1 "user@example.com" && agent-browser fill @e2 "pass" && agent-browser click @e3
+
+# Navigate and screenshot
+agent-browser open example.com && agent-browser wait --load networkidle && agent-browser screenshot page.png
+```
+
+Use `&&` when you don't need intermediate output. Run commands separately when you need to parse output first (e.g., snapshot to discover refs before interacting).
 
 ## Headed Mode
 

@@ -275,10 +275,21 @@ pub fn print_response(resp: &Response, json_mode: bool, action: Option<&str>) {
         // Recording start (has "started" field)
         if let Some(started) = data.get("started").and_then(|v| v.as_bool()) {
             if started {
-                if let Some(path) = data.get("path").and_then(|v| v.as_str()) {
-                    println!("{} Recording started: {}", color::success_indicator(), path);
-                } else {
-                    println!("{} Recording started", color::success_indicator());
+                match action {
+                    Some("profiler_start") => {
+                        println!("{} Profiling started", color::success_indicator());
+                    }
+                    _ => {
+                        if let Some(path) = data.get("path").and_then(|v| v.as_str()) {
+                            println!(
+                                "{} Recording started: {}",
+                                color::success_indicator(),
+                                path
+                            );
+                        } else {
+                            println!("{} Recording started", color::success_indicator());
+                        }
+                    }
                 }
                 return;
             }
@@ -366,6 +377,12 @@ pub fn print_response(resp: &Response, json_mode: bool, action: Option<&str>) {
                     "{} Trace saved to {}",
                     color::success_indicator(),
                     color::green(path)
+                ),
+                "profiler_stop" => println!(
+                    "{} Profile saved to {} ({} events)",
+                    color::success_indicator(),
+                    color::green(path),
+                    data.get("eventCount").and_then(|c| c.as_u64()).unwrap_or(0)
                 ),
                 "har_stop" => println!(
                     "{} HAR saved to {}",
@@ -1471,6 +1488,46 @@ Examples:
 "##
         }
 
+        // === Profile (CDP Tracing) ===
+        "profiler" => {
+            r##"
+agent-browser profiler - Record Chrome DevTools performance profile
+
+Usage: agent-browser profiler <operation> [options]
+
+Record a performance profile using Chrome DevTools Protocol (CDP) Tracing.
+The output JSON file can be loaded into Chrome DevTools Performance panel,
+Perfetto UI (https://ui.perfetto.dev/), or other trace analysis tools.
+
+Operations:
+  start                Start profiling
+  stop [path]          Stop profiling and save to file
+
+Start Options:
+  --categories <list>  Comma-separated trace categories (default includes
+                       devtools.timeline, v8.execute, blink, and others)
+
+Global Options:
+  --json               Output as JSON
+  --session <name>     Use specific session
+
+Examples:
+  # Basic profiling
+  agent-browser profiler start
+  agent-browser navigate https://example.com
+  agent-browser click "#button"
+  agent-browser profiler stop ./trace.json
+
+  # With custom categories
+  agent-browser profiler start --categories "devtools.timeline,v8.execute,blink.user_timing"
+  agent-browser profiler stop ./custom-trace.json
+
+The output file can be viewed in:
+  - Chrome DevTools: Performance panel > Load profile
+  - Perfetto: https://ui.perfetto.dev/
+"##
+        }
+
         // === Record (video) ===
         "record" => {
             r##"
@@ -1833,7 +1890,8 @@ Tabs:
   tab [new|list|close|<n>]   Manage tabs
 
 Debug:
-  trace start|stop [path]    Record trace
+  trace start|stop [path]    Record Playwright trace
+  profiler start|stop [path] Record Chrome DevTools profile
   record start <path> [url]  Start video recording (WebM)
   record stop                Stop and save video
   console [--clear]          View console logs
@@ -1878,17 +1936,45 @@ Options:
   --cdp <port>               Connect via CDP (Chrome DevTools Protocol)
   --auto-connect             Auto-discover and connect to running Chrome
   --session-name <name>      Auto-save/restore session state (cookies, localStorage)
+  --config <path>            Use a custom config file (or AGENT_BROWSER_CONFIG env)
   --debug                    Debug output
   --version, -V              Show version
 
+Configuration:
+  agent-browser looks for agent-browser.json in these locations (lowest to highest priority):
+    1. ~/.agent-browser/config.json      User-level defaults
+    2. ./agent-browser.json              Project-level overrides
+    3. Environment variables             Override config file values
+    4. CLI flags                         Override everything
+
+  Use --config <path> to load a specific config file instead of the defaults.
+  If --config points to a missing or invalid file, agent-browser exits with an error.
+
+  Boolean flags accept an optional true/false value to override config:
+    --headed           (same as --headed true)
+    --headed false     (disables "headed": true from config)
+
+  Extensions from user and project configs are merged (not replaced).
+
+  Example agent-browser.json:
+    {{"headed": true, "proxy": "http://localhost:8080", "profile": "./browser-data"}}
+
 Environment:
+  AGENT_BROWSER_CONFIG           Path to config file (or use --config)
   AGENT_BROWSER_SESSION          Session name (default: "default")
   AGENT_BROWSER_SESSION_NAME     Auto-save/restore state persistence name
   AGENT_BROWSER_ENCRYPTION_KEY   64-char hex key for AES-256-GCM state encryption
   AGENT_BROWSER_STATE_EXPIRE_DAYS Auto-delete states older than N days (default: 30)
   AGENT_BROWSER_EXECUTABLE_PATH  Custom browser executable path
+  AGENT_BROWSER_EXTENSIONS       Comma-separated browser extension paths
+  AGENT_BROWSER_HEADED           Show browser window (not headless)
+  AGENT_BROWSER_JSON             JSON output
+  AGENT_BROWSER_FULL             Full page screenshot
+  AGENT_BROWSER_DEBUG            Debug output
+  AGENT_BROWSER_IGNORE_HTTPS_ERRORS Ignore HTTPS certificate errors
   AGENT_BROWSER_PROVIDER         Browser provider (ios, browserbase, kernel, browseruse, browserless)
   AGENT_BROWSER_AUTO_CONNECT     Auto-discover and connect to running Chrome
+  AGENT_BROWSER_ALLOW_FILE_ACCESS Allow file:// URLs to access local files
   AGENT_BROWSER_STREAM_PORT      Enable WebSocket streaming on port (e.g., 9223)
   AGENT_BROWSER_IOS_DEVICE       Default iOS device name
   AGENT_BROWSER_IOS_UDID         Default iOS device UDID
@@ -1913,6 +1999,13 @@ Examples:
   agent-browser --auto-connect snapshot  # Auto-discover running Chrome
   agent-browser --profile ~/.myapp open example.com    # Persistent profile
   agent-browser --session-name myapp open example.com  # Auto-save/restore state
+
+Command Chaining:
+  Chain commands with && in a single shell call (browser persists via daemon):
+
+  agent-browser open example.com && agent-browser wait --load networkidle && agent-browser snapshot -i
+  agent-browser fill @e1 "user@example.com" && agent-browser fill @e2 "pass" && agent-browser click @e3
+  agent-browser open example.com && agent-browser wait --load networkidle && agent-browser screenshot page.png
 
 iOS Simulator (requires Xcode and Appium):
   agent-browser -p ios open example.com                    # Use default iPhone

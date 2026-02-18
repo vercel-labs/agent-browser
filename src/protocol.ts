@@ -16,6 +16,7 @@ const launchSchema = baseCommandSchema.extend({
       width: z.number().positive(),
       height: z.number().positive(),
     })
+    .nullable()
     .optional(),
   browser: z.enum(['chromium', 'firefox', 'webkit']).optional(),
   cdpPort: z.number().positive().optional(),
@@ -370,6 +371,16 @@ const traceStartSchema = baseCommandSchema.extend({
 
 const traceStopSchema = baseCommandSchema.extend({
   action: z.literal('trace_stop'),
+  path: z.string().min(1).optional(),
+});
+
+const profilerStartSchema = baseCommandSchema.extend({
+  action: z.literal('profiler_start'),
+  categories: z.array(z.string()).optional(),
+});
+
+const profilerStopSchema = baseCommandSchema.extend({
+  action: z.literal('profiler_stop'),
   path: z.string().min(1).optional(),
 });
 
@@ -822,6 +833,7 @@ const windowNewSchema = baseCommandSchema.extend({
       width: z.number().positive(),
       height: z.number().positive(),
     })
+    .nullable()
     .optional(),
 });
 
@@ -896,6 +908,8 @@ const commandSchema = z.discriminatedUnion('action', [
   recordingRestartSchema,
   traceStartSchema,
   traceStopSchema,
+  profilerStartSchema,
+  profilerStopSchema,
   harStartSchema,
   harStopSchema,
   stateSaveSchema,

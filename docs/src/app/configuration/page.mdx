@@ -1,0 +1,136 @@
+export const metadata = { title: "Configuration" }
+
+# Configuration
+
+Create an `agent-browser.json` file to set persistent defaults instead of repeating flags on every command.
+
+## Config File Locations
+
+agent-browser checks two locations, merged in priority order:
+
+| Priority | Location | Scope |
+|----------|----------|-------|
+| 1 (lowest) | `~/.agent-browser/config.json` | User-level defaults |
+| 2 | `./agent-browser.json` | Project-level overrides |
+| 3 | `AGENT_BROWSER_*` env vars | Override config values |
+| 4 (highest) | CLI flags | Override everything |
+
+Project-level values override user-level values. Environment variables override both. CLI flags always win.
+
+Use `--config <path>` or the `AGENT_BROWSER_CONFIG` environment variable to load a specific config file instead of the default locations:
+
+```bash
+agent-browser --config ./ci-config.json open example.com
+AGENT_BROWSER_CONFIG=./ci-config.json agent-browser open example.com
+```
+
+## Example Config
+
+```json
+{
+  "headed": true,
+  "proxy": "http://localhost:8080",
+  "profile": "./browser-data",
+  "userAgent": "my-agent/1.0",
+  "ignoreHttpsErrors": true
+}
+```
+
+## All Options
+
+Every CLI flag can be set in the config file using its camelCase equivalent:
+
+| Config Key | CLI Flag | Type |
+|------------|----------|------|
+| `headed` | `--headed` | boolean |
+| `json` | `--json` | boolean |
+| `full` | `--full, -f` | boolean |
+| `debug` | `--debug` | boolean |
+| `session` | `--session` | string |
+| `sessionName` | `--session-name` | string |
+| `executablePath` | `--executable-path` | string |
+| `extensions` | `--extension` | string[] |
+| `profile` | `--profile` | string |
+| `state` | `--state` | string |
+| `proxy` | `--proxy` | string |
+| `proxyBypass` | `--proxy-bypass` | string |
+| `args` | `--args` | string |
+| `userAgent` | `--user-agent` | string |
+| `provider` | `-p, --provider` | string |
+| `device` | `--device` | string |
+| `ignoreHttpsErrors` | `--ignore-https-errors` | boolean |
+| `allowFileAccess` | `--allow-file-access` | boolean |
+| `cdp` | `--cdp` | string |
+| `autoConnect` | `--auto-connect` | boolean |
+| `headers` | `--headers` | string (JSON) |
+
+## Common Configurations
+
+### Local Development
+
+```json
+{
+  "headed": true,
+  "profile": "./browser-data"
+}
+```
+
+### Behind a Proxy
+
+```json
+{
+  "proxy": "http://proxy.corp.example.com:8080",
+  "proxyBypass": "localhost,*.internal.com",
+  "ignoreHttpsErrors": true
+}
+```
+
+### CI / Devcontainer
+
+```json
+{
+  "args": "--no-sandbox,--disable-gpu",
+  "ignoreHttpsErrors": true
+}
+```
+
+### iOS Testing
+
+```json
+{
+  "provider": "ios",
+  "device": "iPhone 16 Pro"
+}
+```
+
+## Overriding Boolean Options
+
+Boolean flags accept an optional `true`/`false` value to override config settings:
+
+```bash
+agent-browser --headed false open example.com
+```
+
+A bare flag is equivalent to passing `true`:
+
+```bash
+agent-browser --headed open example.com       # same as --headed true
+agent-browser --headed true open example.com  # explicit
+```
+
+This applies to all boolean flags: `--headed`, `--debug`, `--json`, `--ignore-https-errors`, `--allow-file-access`, `--auto-connect`.
+
+## Extensions Merging
+
+Extensions from user-level and project-level configs are **concatenated**, not replaced. For example, if `~/.agent-browser/config.json` specifies `["/ext1"]` and `./agent-browser.json` specifies `["/ext2"]`, the result is `["/ext1", "/ext2"]`.
+
+The `AGENT_BROWSER_EXTENSIONS` environment variable and CLI `--extension` flags follow the standard priority rules (env replaces config, CLI appends).
+
+## Error Handling
+
+- **Auto-discovered config files** (`~/.agent-browser/config.json`, `./agent-browser.json`) that are missing are silently ignored.
+- **`--config <path>`** with a missing or malformed file exits with an error.
+- **Malformed JSON** in auto-discovered files prints a warning to stderr and continues without that file.
+- **Unknown keys** are silently ignored for forward compatibility.
+
+> **Tip:** If your project-level `agent-browser.json` contains environment-specific values (paths, proxies), consider adding it to `.gitignore`.

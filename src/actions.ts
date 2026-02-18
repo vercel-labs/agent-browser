@@ -65,6 +65,8 @@ import type {
   StylesCommand,
   TraceStartCommand,
   TraceStopCommand,
+  ProfilerStartCommand,
+  ProfilerStopCommand,
   HarStopCommand,
   StorageStateSaveCommand,
   StateListCommand,
@@ -355,6 +357,10 @@ export async function executeCommand(command: Command, browser: BrowserManager):
         return await handleTraceStart(command, browser);
       case 'trace_stop':
         return await handleTraceStop(command, browser);
+      case 'profiler_start':
+        return await handleProfilerStart(command, browser);
+      case 'profiler_stop':
+        return await handleProfilerStop(command, browser);
       case 'har_start':
         return await handleHarStart(command, browser);
       case 'har_stop':
@@ -1446,6 +1452,31 @@ async function handleTraceStop(
     command.id,
     command.path ? { path: command.path } : { traceStopped: true }
   );
+}
+
+async function handleProfilerStart(
+  command: ProfilerStartCommand,
+  browser: BrowserManager
+): Promise<Response> {
+  await browser.startProfiling({ categories: command.categories });
+  return successResponse(command.id, { started: true });
+}
+
+async function handleProfilerStop(
+  command: ProfilerStopCommand,
+  browser: BrowserManager
+): Promise<Response> {
+  let outputPath = command.path;
+  if (!outputPath) {
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const random = Math.random().toString(36).substring(2, 8);
+    const filename = `profile-${timestamp}-${random}.json`;
+    const profileDir = path.join(getAppDir(), 'tmp', 'profiles');
+    mkdirSync(profileDir, { recursive: true });
+    outputPath = path.join(profileDir, filename);
+  }
+  const result = await browser.stopProfiling(outputPath);
+  return successResponse(command.id, result);
 }
 
 async function handleHarStart(

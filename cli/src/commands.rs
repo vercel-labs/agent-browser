@@ -765,6 +765,43 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
             }
         }
 
+        // === Profiler (CDP Tracing / Chromium profiling) ===
+        "profiler" => {
+            const VALID: &[&str] = &["start", "stop"];
+            match rest.first().copied() {
+                Some("start") => {
+                    let mut cmd = json!({ "id": id, "action": "profiler_start" });
+                    if let Some(idx) = rest.iter().position(|s| *s == "--categories") {
+                        if let Some(cats) = rest.get(idx + 1) {
+                            let categories: Vec<&str> = cats.split(',').collect();
+                            cmd["categories"] = json!(categories);
+                        } else {
+                            return Err(ParseError::MissingArguments {
+                                context: "profiler start --categories".to_string(),
+                                usage: "--categories <list>",
+                            });
+                        }
+                    }
+                    Ok(cmd)
+                }
+                Some("stop") => {
+                    let mut cmd = json!({ "id": id, "action": "profiler_stop" });
+                    if let Some(path) = rest.get(1) {
+                        cmd["path"] = json!(path);
+                    }
+                    Ok(cmd)
+                }
+                Some(sub) => Err(ParseError::UnknownSubcommand {
+                    subcommand: sub.to_string(),
+                    valid_options: VALID,
+                }),
+                None => Err(ParseError::MissingArguments {
+                    context: "profiler".to_string(),
+                    usage: "profiler <start|stop> [options]",
+                }),
+            }
+        }
+
         // === Recording (Playwright native video recording) ===
         "record" => {
             const VALID: &[&str] = &["start", "stop", "restart"];
@@ -2242,6 +2279,73 @@ mod tests {
     #[test]
     fn test_record_missing_subcommand() {
         let result = parse_command(&args("record"), &default_flags());
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::MissingArguments { .. }
+        ));
+    }
+
+    // === Profile (CDP Tracing) Tests ===
+
+    #[test]
+    fn test_profiler_start() {
+        let cmd = parse_command(&args("profiler start"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "profiler_start");
+        assert!(cmd.get("categories").is_none());
+    }
+
+    #[test]
+    fn test_profiler_start_with_categories() {
+        let cmd = parse_command(
+            &args("profiler start --categories devtools.timeline,v8.execute"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "profiler_start");
+        let categories = cmd["categories"].as_array().unwrap();
+        assert_eq!(categories.len(), 2);
+        assert_eq!(categories[0], "devtools.timeline");
+        assert_eq!(categories[1], "v8.execute");
+    }
+
+    #[test]
+    fn test_profiler_start_categories_missing_value() {
+        let result = parse_command(&args("profiler start --categories"), &default_flags());
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::MissingArguments { .. }
+        ));
+    }
+
+    #[test]
+    fn test_profiler_stop_with_path() {
+        let cmd = parse_command(&args("profiler stop trace.json"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "profiler_stop");
+        assert_eq!(cmd["path"], "trace.json");
+    }
+
+    #[test]
+    fn test_profiler_stop_no_path() {
+        let cmd = parse_command(&args("profiler stop"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "profiler_stop");
+        assert!(cmd.get("path").is_none());
+    }
+
+    #[test]
+    fn test_profiler_invalid_subcommand() {
+        let result = parse_command(&args("profiler foo"), &default_flags());
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::UnknownSubcommand { .. }
+        ));
+    }
+
+    #[test]
+    fn test_profiler_missing_subcommand() {
+        let result = parse_command(&args("profiler"), &default_flags());
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),

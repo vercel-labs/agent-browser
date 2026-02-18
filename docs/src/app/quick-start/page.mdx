@@ -63,6 +63,23 @@ agent-browser wait --url "**/dashboard"  # Wait for URL pattern
 agent-browser wait 2000                  # Wait milliseconds
 ```
 
+## Command chaining
+
+Chain commands with `&&` in a single shell call. The browser persists via a background daemon, so chaining is safe and efficient:
+
+```bash
+# Open, wait, and snapshot in one call
+agent-browser open example.com && agent-browser wait --load networkidle && agent-browser snapshot -i
+
+# Chain multiple interactions
+agent-browser fill @e1 "user@example.com" && agent-browser fill @e2 "pass" && agent-browser click @e3
+
+# Navigate and capture
+agent-browser open example.com && agent-browser wait --load networkidle && agent-browser screenshot page.png
+```
+
+Use `&&` when you don't need intermediate output. Run commands separately when you need to parse output first (e.g., snapshot to discover refs before interacting).
+
 ## JSON output
 
 For programmatic parsing in scripts:

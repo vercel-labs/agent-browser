@@ -27,6 +27,23 @@ agent-browser wait --load networkidle
 agent-browser snapshot -i  # Check result
 ```
 
+## Command Chaining
+
+Commands can be chained with `&&` in a single shell invocation. The browser persists between commands via a background daemon, so chaining is safe and more efficient than separate calls.
+
+```bash
+# Chain open + wait + snapshot in one call
+agent-browser open https://example.com && agent-browser wait --load networkidle && agent-browser snapshot -i
+
+# Chain multiple interactions
+agent-browser fill @e1 "user@example.com" && agent-browser fill @e2 "password123" && agent-browser click @e3
+
+# Navigate and capture
+agent-browser open https://example.com && agent-browser wait --load networkidle && agent-browser screenshot page.png
+```
+
+**When to chain:** Use `&&` when you don't need to read the output of an intermediate command before proceeding (e.g., open + wait + screenshot). Run commands separately when you need to parse the output first (e.g., snapshot to discover refs, then interact using those refs).
+
 ## Essential Commands
 
 ```bash
@@ -41,6 +58,7 @@ agent-browser snapshot -s "#selector" # Scope to CSS selector
 
 # Interaction (use @refs from snapshot)
 agent-browser click @e1               # Click element
+agent-browser click @e1 --new-tab     # Click and open in new tab
 agent-browser fill @e2 "text"         # Clear and type text
 agent-browser type @e2 "text"         # Type without clearing
 agent-browser select @e1 "option"     # Select dropdown option
@@ -161,6 +179,8 @@ agent-browser --cdp 9222 snapshot
 agent-browser --headed open https://example.com
 agent-browser highlight @e1          # Highlight element
 agent-browser record start demo.webm # Record session
+agent-browser profiler start         # Start Chrome DevTools profiling
+agent-browser profiler stop trace.json # Stop and save profile (path optional)
 ```
 
 ### Local Files (PDFs, HTML)
@@ -299,6 +319,20 @@ agent-browser eval -b "$(echo -n 'Array.from(document.querySelectorAll("a")).map
 - Nested quotes, arrow functions, template literals, or multiline -> use `eval --stdin <<'EVALEOF'`
 - Programmatic/generated scripts -> use `eval -b` with base64
 
+## Configuration File
+
+Create `agent-browser.json` in the project root for persistent settings:
+
+```json
+{
+  "headed": true,
+  "proxy": "http://localhost:8080",
+  "profile": "./browser-data"
+}
+```
+
+Priority (lowest to highest): `~/.agent-browser/config.json` < `./agent-browser.json` < env vars < CLI flags. Use `--config <path>` or `AGENT_BROWSER_CONFIG` env var for a custom config file (exits with error if missing/invalid). All CLI options map to camelCase keys (e.g., `--executable-path` -> `"executablePath"`). Boolean flags accept `true`/`false` values (e.g., `--headed false` overrides config). Extensions from user and project configs are merged, not replaced.
+
 ## Deep-Dive Documentation
 
 | Reference | When to Use |
@@ -308,6 +342,7 @@ agent-browser eval -b "$(echo -n 'Array.from(document.querySelectorAll("a")).map
 | [references/session-management.md](references/session-management.md) | Parallel sessions, state persistence, concurrent scraping |
 | [references/authentication.md](references/authentication.md) | Login flows, OAuth, 2FA handling, state reuse |
 | [references/video-recording.md](references/video-recording.md) | Recording workflows for debugging and documentation |
+| [references/profiling.md](references/profiling.md) | Chrome DevTools profiling for performance analysis |
 | [references/proxy-support.md](references/proxy-support.md) | Proxy configuration, geo-testing, rotating proxies |
 
 ## Ready-to-Use Templates

@@ -598,6 +598,31 @@ describe('parseCommand', () => {
         expect(result.command.allowFileAccess).toBe(false);
       }
     });
+
+    it('should parse launch with viewport dimensions', () => {
+      const result = parseCommand(
+        cmd({ id: '1', action: 'launch', viewport: { width: 1920, height: 1080 } })
+      );
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.command.viewport).toEqual({ width: 1920, height: 1080 });
+      }
+    });
+
+    it('should parse launch with viewport null', () => {
+      const result = parseCommand(cmd({ id: '1', action: 'launch', viewport: null }));
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.command.viewport).toBeNull();
+      }
+    });
+
+    it('should reject launch with invalid viewport', () => {
+      const result = parseCommand(
+        cmd({ id: '1', action: 'launch', viewport: { width: -1, height: 720 } })
+      );
+      expect(result.success).toBe(false);
+    });
   });
 
   describe('mouse actions', () => {
