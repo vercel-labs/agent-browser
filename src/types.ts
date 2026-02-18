@@ -44,7 +44,9 @@ export interface NavigateCommand extends BaseCommand {
 
 export interface ClickCommand extends BaseCommand {
   action: 'click';
-  selector: string;
+  selector?: string;
+  x?: number;
+  y?: number;
   button?: 'left' | 'right' | 'middle';
   clickCount?: number;
   delay?: number;
@@ -115,6 +117,7 @@ export interface GetByRoleCommand extends BaseCommand {
   exact?: boolean;
   subaction: 'click' | 'fill' | 'check' | 'hover';
   value?: string;
+  position?: number;
 }
 
 export interface GetByTextCommand extends BaseCommand {
@@ -122,6 +125,7 @@ export interface GetByTextCommand extends BaseCommand {
   text: string;
   exact?: boolean;
   subaction: 'click' | 'hover';
+  position?: number;
 }
 
 export interface GetByLabelCommand extends BaseCommand {
@@ -130,6 +134,7 @@ export interface GetByLabelCommand extends BaseCommand {
   exact?: boolean;
   subaction: 'click' | 'fill' | 'check';
   value?: string;
+  position?: number;
 }
 
 export interface GetByPlaceholderCommand extends BaseCommand {
@@ -138,6 +143,7 @@ export interface GetByPlaceholderCommand extends BaseCommand {
   exact?: boolean;
   subaction: 'click' | 'fill';
   value?: string;
+  position?: number;
 }
 
 export interface CookiesGetCommand extends BaseCommand {
@@ -228,6 +234,7 @@ export interface RequestsCommand extends BaseCommand {
   action: 'requests';
   filter?: string; // URL pattern to filter
   clear?: boolean;
+  body?: boolean; // Include response bodies
 }
 
 // Download handling
@@ -343,6 +350,7 @@ export interface GetByAltTextCommand extends BaseCommand {
   text: string;
   exact?: boolean;
   subaction: 'click' | 'hover';
+  position?: number;
 }
 
 export interface GetByTitleCommand extends BaseCommand {
@@ -350,6 +358,7 @@ export interface GetByTitleCommand extends BaseCommand {
   text: string;
   exact?: boolean;
   subaction: 'click' | 'hover';
+  position?: number;
 }
 
 export interface GetByTestIdCommand extends BaseCommand {
@@ -357,6 +366,7 @@ export interface GetByTestIdCommand extends BaseCommand {
   testId: string;
   subaction: 'click' | 'fill' | 'check' | 'hover';
   value?: string;
+  position?: number;
 }
 
 // Nth element selection
@@ -780,6 +790,7 @@ export interface ScreenshotCommand extends BaseCommand {
   selector?: string;
   format?: 'png' | 'jpeg';
   quality?: number;
+  scale?: 'css' | 'device';
 }
 
 export interface SnapshotCommand extends BaseCommand {
