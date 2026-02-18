@@ -84,6 +84,8 @@ export class BrowserManager {
   private browserUseApiKey: string | null = null;
   private kernelSessionId: string | null = null;
   private kernelApiKey: string | null = null;
+  private notteSessionId: string | null = null;
+  private notteApiKey: string | null = null;
   private contexts: BrowserContext[] = [];
   private pages: Page[] = [];
   private activePageIndex: number = 0;
@@ -805,6 +807,22 @@ export class BrowserManager {
   }
 
   /**
+   * Close a Notte session via API
+   */
+  private async closeNotteSession(sessionId: string, apiKey: string): Promise<void> {
+    const response = await fetch(`https://api.notte.cc/sessions/${sessionId}/stop`, {
+      method: 'DELETE',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+      },
+    });
+
+    if (!response.ok) {
+      throw new Error(`Failed to close Notte session: ${response.statusText}`);
+    }
+  }
+
+  /**
    * Connect to Browserbase remote browser via CDP.
    * Requires BROWSERBASE_API_KEY and BROWSERBASE_PROJECT_ID environment variables.
    */
@@ -1008,6 +1026,94 @@ export class BrowserManager {
   }
 
   /**
+   * Connect to Notte remote browser via CDP.
+   * Requires NOTTE_API_KEY environment variable.
+   */
+  private async connectToNotte(): Promise<void> {
+    const notteApiKey = process.env.NOTTE_API_KEY;
+    if (!notteApiKey) {
+      throw new Error('NOTTE_API_KEY is required when using notte as a provider');
+    }
+
+    const response = await fetch('https://api.notte.cc/sessions/start', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${notteApiKey}`,
+      },
+      body: JSON.stringify({
+        headless: true,
+        max_duration_minutes: parseInt(process.env.NOTTE_TIMEOUT_MINUTES || '15', 10),
+        idle_timeout_minutes: parseInt(process.env.NOTTE_TIMEOUT_MINUTES || '15', 10),
+        browser_type: process.env.NOTTE_BROWSER_TYPE === 'chrome' ? 'chrome' : 'chromium',
+        proxies: process.env.NOTTE_PROXIES?.toLowerCase() !== 'false',
+      }),
+    });
+
+    if (!response.ok) {
+      let errorBody = '';
+      try {
+        errorBody = await response.text();
+      } catch {
+        // ignore
+      }
+      throw new Error(
+        `Failed to create Notte session: ${response.status} ${response.statusText}${errorBody ? ` - ${errorBody}` : ''}`
+      );
+    }
+
+    let session: { session_id: string; cdp_url: string };
+    try {
+      session = (await response.json()) as { session_id: string; cdp_url: string };
+    } catch (error) {
+      throw new Error(
+        `Failed to parse Notte session response: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+
+    if (!session.session_id || !session.cdp_url) {
+      throw new Error(
+        `Invalid Notte session response: missing ${!session.session_id ? 'session_id' : 'cdp_url'}`
+      );
+    }
+
+    const browser = await chromium.connectOverCDP(session.cdp_url).catch(() => {
+      throw new Error('Failed to connect to Notte session via CDP');
+    });
+
+    try {
+      const contexts = browser.contexts();
+      let context: BrowserContext;
+      let page: Page;
+
+      // Notte sessions have one default context and page
+      if (contexts.length === 0) {
+        context = await browser.newContext();
+        page = await context.newPage();
+      } else {
+        context = contexts[0];
+        const pages = context.pages();
+        page = pages[0] ?? (await context.newPage());
+      }
+
+      this.notteSessionId = session.session_id;
+      this.notteApiKey = notteApiKey;
+      this.browser = browser;
+      context.setDefaultTimeout(60000);
+      this.contexts.push(context);
+      this.pages.push(page);
+      this.activePageIndex = 0;
+      this.setupPageTracking(page);
+      this.setupContextTracking(context);
+    } catch (error) {
+      await this.closeNotteSession(session.session_id, notteApiKey).catch((sessionError) => {
+        console.error('Failed to close Notte session during cleanup:', sessionError);
+      });
+      throw error;
+    }
+  }
+
+  /**
    * Connect to Browser Use remote browser via CDP.
    * Requires BROWSER_USE_API_KEY environment variable.
    */
@@ -1151,6 +1257,12 @@ export class BrowserManager {
     // Kernel: requires explicit opt-in via -p kernel flag or AGENT_BROWSER_PROVIDER=kernel
     if (provider === 'kernel') {
       await this.connectToKernel();
+      return;
+    }
+
+    // Notte: requires explicit opt-in via -p notte flag or AGENT_BROWSER_PROVIDER=notte
+    if (provider === 'notte') {
+      await this.connectToNotte();
       return;
     }
 
@@ -2334,6 +2446,11 @@ export class BrowserManager {
     } else if (this.kernelSessionId && this.kernelApiKey) {
       await this.closeKernelSession(this.kernelSessionId, this.kernelApiKey).catch((error) => {
         console.error('Failed to close Kernel session:', error);
+      });
+      this.browser = null;
+    } else if (this.notteSessionId && this.notteApiKey) {
+      await this.closeNotteSession(this.notteSessionId, this.notteApiKey).catch((error) => {
+        console.error('Failed to close Notte session:', error);
       });
       this.browser = null;
     } else if (this.cdpEndpoint !== null) {

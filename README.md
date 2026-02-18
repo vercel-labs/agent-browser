@@ -1064,6 +1064,37 @@ When enabled, agent-browser connects to a Kernel cloud session instead of launch
 
 Get your API key from the [Kernel Dashboard](https://dashboard.onkernel.com).
 
+### Notte
+
+[Notte](https://notte.cc) provides cloud browsers with built-in anti-detection, proxy rotation, and automatic captcha solving.
+
+To enable Notte, use the `-p` flag:
+
+```bash
+export NOTTE_API_KEY="your-api-key"
+agent-browser -p notte open https://example.com
+```
+
+Or use environment variables for CI/scripts:
+
+```bash
+export AGENT_BROWSER_PROVIDER=notte
+export NOTTE_API_KEY="your-api-key"
+agent-browser open https://example.com
+```
+
+Optional configuration via environment variables:
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `NOTTE_BROWSER_TYPE` | Browser type (`chromium`/`chrome`) | `chromium` |
+| `NOTTE_TIMEOUT_MINUTES` | Session max duration in minutes (1-15) | `15` |
+| `NOTTE_PROXIES` | Enable proxy rotation (`true`/`false`) | `true` |
+
+When enabled, agent-browser connects to a Notte cloud session instead of launching a local browser. All commands work identically.
+
+Get your API key from the [Notte Dashboard](https://app.notte.cc).
+
 ## License
 
 Apache-2.0
