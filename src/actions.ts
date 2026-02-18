@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import type { Page, Frame } from 'playwright-core';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import type { BrowserManager, ScreencastFrame } from './browser.js';
 import { getAppDir } from './daemon.js';
 import {
@@ -616,14 +616,26 @@ async function handleScreenshot(
 ): Promise<Response<ScreenshotData>> {
   const page = browser.getPage();
 
+  // Resolve format: explicit > file extension > default png
+  let format = command.format;
+  if (!format && command.path) {
+    const ext = command.path.split('.').pop()?.toLowerCase();
+    if (ext === 'webp') format = 'webp';
+    else if (ext === 'jpg' || ext === 'jpeg') format = 'jpeg';
+    else if (ext === 'png') format = 'png';
+  }
+  format = format ?? 'png';
+
   const options: Parameters<Page['screenshot']>[0] = {
     fullPage: command.fullPage,
-    type: command.format ?? 'png',
+    type: format === 'webp' ? 'png' : format, // Playwright doesn't support webp, use png as placeholder
   };
 
-  if (command.format === 'jpeg' && command.quality !== undefined) {
+  if ((format === 'jpeg' || format === 'webp') && command.quality !== undefined) {
     options.quality = command.quality;
   }
+
+  const needsCDP = format === 'webp'; // Playwright doesn't support webp, must use CDP
 
   let target: Page | ReturnType<Page['locator']> = page;
   if (command.selector) {
@@ -635,7 +647,7 @@ async function handleScreenshot(
   try {
     let savePath = command.path;
     if (!savePath) {
-      const ext = command.format === 'jpeg' ? 'jpg' : 'png';
+      const ext = format === 'jpeg' ? 'jpg' : format;
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
       const random = Math.random().toString(36).substring(2, 8);
       const filename = `screenshot-${timestamp}-${random}.${ext}`;
@@ -782,7 +794,28 @@ async function handleScreenshot(
       }
     }
 
-    await target.screenshot({ ...options, path: savePath });
+    if (needsCDP && !command.selector) {
+      try {
+        const cdp = await browser.getCDPSession();
+        const cdpParams: Record<string, unknown> = {
+          format: 'webp',
+          captureBeyondViewport: !!command.fullPage,
+        };
+        if (command.quality !== undefined) {
+          cdpParams.quality = command.quality;
+        }
+        const result = await cdp.send('Page.captureScreenshot', cdpParams);
+        writeFileSync(savePath, Buffer.from((result as { data: string }).data, 'base64'));
+      } finally {
+        // no device metrics override to clear for webp-only path
+      }
+    } else if (needsCDP && command.selector) {
+      throw new Error(
+        'WebP format is not supported for element screenshots. Use --format png or --format jpeg instead.'
+      );
+    } else {
+      await target.screenshot({ ...options, path: savePath });
+    }
 
     if (overlayInjected) {
       await removeAnnotationOverlay(page);
