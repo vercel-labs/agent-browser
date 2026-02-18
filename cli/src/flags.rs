@@ -1,4 +1,33 @@
 use std::env;
+use std::fs;
+use std::path::PathBuf;
+
+fn load_config() -> serde_json::Value {
+    let mut config = serde_json::json!({});
+
+    // User-level config
+    if let Some(home) = env::var("HOME").ok().or_else(|| env::var("USERPROFILE").ok()) {
+        let user_config = PathBuf::from(&home).join(".agent-browserrc.json");
+        if let Ok(content) = fs::read_to_string(&user_config) {
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&content) {
+                config = parsed;
+            }
+        }
+    }
+
+    // Project-level config (overrides user-level)
+    if let Ok(content) = fs::read_to_string(".agent-browserrc.json") {
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&content) {
+            if let (Some(base), Some(project)) = (config.as_object_mut(), parsed.as_object()) {
+                for (key, value) in project {
+                    base.insert(key.clone(), value.clone());
+                }
+            }
+        }
+    }
+
+    config
+}
 
 pub struct Flags {
     pub json: bool,
@@ -37,6 +66,8 @@ pub struct Flags {
 }
 
 pub fn parse_flags(args: &[String]) -> Flags {
+    let config = load_config();
+
     let extensions_env = env::var("AGENT_BROWSER_EXTENSIONS")
         .ok()
         .map(|s| {
@@ -50,25 +81,47 @@ pub fn parse_flags(args: &[String]) -> Flags {
     let mut flags = Flags {
         json: false,
         full: false,
-        headed: false,
+        headed: env::var("AGENT_BROWSER_HEADED").is_ok()
+            || config.get("headed").and_then(|v| v.as_bool()).unwrap_or(false),
         debug: false,
-        session: env::var("AGENT_BROWSER_SESSION").unwrap_or_else(|_| "default".to_string()),
+        session: env::var("AGENT_BROWSER_SESSION").ok()
+            .or_else(|| config.get("session").and_then(|v| v.as_str()).map(String::from))
+            .unwrap_or_else(|| "default".to_string()),
         headers: None,
-        executable_path: env::var("AGENT_BROWSER_EXECUTABLE_PATH").ok(),
+        executable_path: env::var("AGENT_BROWSER_EXECUTABLE_PATH").ok()
+            .or_else(|| config.get("executablePath").and_then(|v| v.as_str()).map(String::from)),
         cdp: None,
-        extensions: extensions_env,
-        profile: env::var("AGENT_BROWSER_PROFILE").ok(),
-        state: env::var("AGENT_BROWSER_STATE").ok(),
-        proxy: env::var("AGENT_BROWSER_PROXY").ok(),
-        proxy_bypass: env::var("AGENT_BROWSER_PROXY_BYPASS").ok(),
-        args: env::var("AGENT_BROWSER_ARGS").ok(),
-        user_agent: env::var("AGENT_BROWSER_USER_AGENT").ok(),
-        provider: env::var("AGENT_BROWSER_PROVIDER").ok(),
-        ignore_https_errors: false,
-        allow_file_access: env::var("AGENT_BROWSER_ALLOW_FILE_ACCESS").is_ok(),
-        device: env::var("AGENT_BROWSER_IOS_DEVICE").ok(),
-        auto_connect: env::var("AGENT_BROWSER_AUTO_CONNECT").is_ok(),
-        session_name: env::var("AGENT_BROWSER_SESSION_NAME").ok(),
+        extensions: if !extensions_env.is_empty() {
+            extensions_env
+        } else {
+            config.get("extensions")
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default()
+        },
+        profile: env::var("AGENT_BROWSER_PROFILE").ok()
+            .or_else(|| config.get("profile").and_then(|v| v.as_str()).map(String::from)),
+        state: env::var("AGENT_BROWSER_STATE").ok()
+            .or_else(|| config.get("state").and_then(|v| v.as_str()).map(String::from)),
+        proxy: env::var("AGENT_BROWSER_PROXY").ok()
+            .or_else(|| config.get("proxy").and_then(|v| v.as_str()).map(String::from)),
+        proxy_bypass: env::var("AGENT_BROWSER_PROXY_BYPASS").ok()
+            .or_else(|| config.get("proxyBypass").and_then(|v| v.as_str()).map(String::from)),
+        args: env::var("AGENT_BROWSER_ARGS").ok()
+            .or_else(|| config.get("args").and_then(|v| v.as_str()).map(String::from)),
+        user_agent: env::var("AGENT_BROWSER_USER_AGENT").ok()
+            .or_else(|| config.get("userAgent").and_then(|v| v.as_str()).map(String::from)),
+        provider: env::var("AGENT_BROWSER_PROVIDER").ok()
+            .or_else(|| config.get("provider").and_then(|v| v.as_str()).map(String::from)),
+        ignore_https_errors: config.get("ignoreHttpsErrors").and_then(|v| v.as_bool()).unwrap_or(false),
+        allow_file_access: env::var("AGENT_BROWSER_ALLOW_FILE_ACCESS").is_ok()
+            || config.get("allowFileAccess").and_then(|v| v.as_bool()).unwrap_or(false),
+        device: env::var("AGENT_BROWSER_IOS_DEVICE").ok()
+            .or_else(|| config.get("device").and_then(|v| v.as_str()).map(String::from)),
+        auto_connect: env::var("AGENT_BROWSER_AUTO_CONNECT").is_ok()
+            || config.get("autoConnect").and_then(|v| v.as_bool()).unwrap_or(false),
+        session_name: env::var("AGENT_BROWSER_SESSION_NAME").ok()
+            .or_else(|| config.get("sessionName").and_then(|v| v.as_str()).map(String::from)),
         // Track CLI-passed flags (default false, set to true when flag is passed)
         cli_executable_path: false,
         cli_extensions: false,
