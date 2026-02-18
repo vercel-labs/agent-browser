@@ -653,6 +653,10 @@ async function handleScreenshot(
       savePath = path.join(screenshotDir, filename);
     }
 
+    if (command.path) {
+      mkdirSync(path.dirname(savePath), { recursive: true });
+    }
+
     let annotations: Annotation[] | undefined;
 
     if (command.annotate) {
