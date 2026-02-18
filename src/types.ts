@@ -579,7 +579,11 @@ export interface TraceStopCommand extends BaseCommand {
   path?: string;
 }
 
-// CDP Profiling (Chrome DevTools trace format)
+/**
+ * Chrome Trace Event format. All fields are optional because CDP trace event
+ * shapes vary across categories and event phases -- this type is intentionally
+ * loose to accept any valid trace event without data loss.
+ */
 export interface TraceEvent {
   cat?: string;
   name?: string;
@@ -599,7 +603,7 @@ export interface ProfilerStartCommand extends BaseCommand {
 
 export interface ProfilerStopCommand extends BaseCommand {
   action: 'profiler_stop';
-  path: string; // Output file path (.json)
+  path?: string;
 }
 
 // HAR recording

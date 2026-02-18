@@ -771,21 +771,25 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
             match rest.first().copied() {
                 Some("start") => {
                     let mut cmd = json!({ "id": id, "action": "profiler_start" });
-                    // Parse optional --categories flag
                     if let Some(idx) = rest.iter().position(|s| *s == "--categories") {
                         if let Some(cats) = rest.get(idx + 1) {
                             let categories: Vec<&str> = cats.split(',').collect();
                             cmd["categories"] = json!(categories);
+                        } else {
+                            return Err(ParseError::MissingArguments {
+                                context: "profiler start --categories".to_string(),
+                                usage: "--categories <list>",
+                            });
                         }
                     }
                     Ok(cmd)
                 }
                 Some("stop") => {
-                    let path = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
-                        context: "profiler stop".to_string(),
-                        usage: "profiler stop <output.json>",
-                    })?;
-                    Ok(json!({ "id": id, "action": "profiler_stop", "path": path }))
+                    let mut cmd = json!({ "id": id, "action": "profiler_stop" });
+                    if let Some(path) = rest.get(1) {
+                        cmd["path"] = json!(path);
+                    }
+                    Ok(cmd)
                 }
                 Some(sub) => Err(ParseError::UnknownSubcommand {
                     subcommand: sub.to_string(),
@@ -2306,20 +2310,27 @@ mod tests {
     }
 
     #[test]
-    fn test_profiler_stop() {
+    fn test_profiler_start_categories_missing_value() {
+        let result = parse_command(&args("profiler start --categories"), &default_flags());
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::MissingArguments { .. }
+        ));
+    }
+
+    #[test]
+    fn test_profiler_stop_with_path() {
         let cmd = parse_command(&args("profiler stop trace.json"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "profiler_stop");
         assert_eq!(cmd["path"], "trace.json");
     }
 
     #[test]
-    fn test_profiler_stop_missing_path() {
-        let result = parse_command(&args("profiler stop"), &default_flags());
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            ParseError::MissingArguments { .. }
-        ));
+    fn test_profiler_stop_no_path() {
+        let cmd = parse_command(&args("profiler stop"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "profiler_stop");
+        assert!(cmd.get("path").is_none());
     }
 
     #[test]

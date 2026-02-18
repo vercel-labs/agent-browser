@@ -1466,7 +1466,16 @@ async function handleProfilerStop(
   command: ProfilerStopCommand,
   browser: BrowserManager
 ): Promise<Response> {
-  const result = await browser.stopProfiling(command.path);
+  let outputPath = command.path;
+  if (!outputPath) {
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const random = Math.random().toString(36).substring(2, 8);
+    const filename = `profile-${timestamp}-${random}.json`;
+    const profileDir = path.join(getAppDir(), 'tmp', 'profiles');
+    mkdirSync(profileDir, { recursive: true });
+    outputPath = path.join(profileDir, filename);
+  }
+  const result = await browser.stopProfiling(outputPath);
   return successResponse(command.id, result);
 }
 

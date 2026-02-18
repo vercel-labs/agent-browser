@@ -29,7 +29,7 @@ tool that accepts Chrome Trace Event format.
 |---------|-------------|
 | `profiler start` | Start recording a performance profile |
 | `profiler start --categories <list>` | Start with custom trace categories |
-| `profiler stop <path>` | Stop profiling and save to file |
+| `profiler stop [path]` | Stop profiling and save to file |
 
 ## Trace categories
 
@@ -97,5 +97,6 @@ On Windows it is omitted.
 ## Limitations
 
 - Only works with Chromium-based browsers (Chrome, Edge). Not supported on Firefox or WebKit.
-- Trace data accumulates in memory while profiling is active. Stop profiling promptly after the area of interest.
+- Trace data accumulates in memory while profiling is active (capped at 5 million events). Stop profiling promptly after the area of interest.
 - Data collection on stop has a 30-second timeout. If the browser is unresponsive, the stop command may fail.
+- When no output path is provided, the profile is saved to an auto-generated path under the agent-browser temp directory.

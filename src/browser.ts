@@ -122,8 +122,10 @@ export class BrowserManager {
   }
 
   // CDP profiling state
+  private static readonly MAX_PROFILE_EVENTS = 5_000_000;
   private profilingActive: boolean = false;
   private profileChunks: TraceEvent[] = [];
+  private profileEventsDropped: boolean = false;
   private profileCompleteResolver: (() => void) | null = null;
   private profileDataHandler: ((params: { value?: TraceEvent[] }) => void) | null = null;
   private profileCompleteHandler: (() => void) | null = null;
@@ -1845,6 +1847,15 @@ export class BrowserManager {
 
     const dataHandler = (params: { value?: TraceEvent[] }) => {
       if (params.value) {
+        if (this.profileChunks.length >= BrowserManager.MAX_PROFILE_EVENTS) {
+          if (!this.profileEventsDropped) {
+            this.profileEventsDropped = true;
+            console.warn(
+              `Profiling: exceeded ${BrowserManager.MAX_PROFILE_EVENTS} events, dropping further data`
+            );
+          }
+          return;
+        }
         this.profileChunks.push(...params.value);
       }
     };
@@ -1893,6 +1904,7 @@ export class BrowserManager {
     // Only commit state after the CDP call succeeds
     this.profilingActive = true;
     this.profileChunks = [];
+    this.profileEventsDropped = false;
     this.profileDataHandler = dataHandler;
     this.profileCompleteHandler = completeHandler;
   }
@@ -1909,8 +1921,14 @@ export class BrowserManager {
 
     const TRACE_TIMEOUT_MS = 30_000;
     const completePromise = new Promise<void>((resolve, reject) => {
-      this.profileCompleteResolver = resolve;
-      setTimeout(() => reject(new Error('Profiling data collection timed out')), TRACE_TIMEOUT_MS);
+      const timer = setTimeout(
+        () => reject(new Error('Profiling data collection timed out')),
+        TRACE_TIMEOUT_MS
+      );
+      this.profileCompleteResolver = () => {
+        clearTimeout(timer);
+        resolve();
+      };
     });
 
     await cdp.send('Tracing.end');
@@ -1941,7 +1959,7 @@ export class BrowserManager {
     }
 
     const dir = path.dirname(outputPath);
-    await mkdir(dir, { recursive: true }).catch(() => {});
+    await mkdir(dir, { recursive: true });
 
     await writeFile(outputPath, JSON.stringify(traceData));
 
@@ -1949,6 +1967,7 @@ export class BrowserManager {
 
     this.profilingActive = false;
     this.profileChunks = [];
+    this.profileEventsDropped = false;
     this.profileCompleteResolver = null;
     this.profileDataHandler = null;
     this.profileCompleteHandler = null;
@@ -2283,6 +2302,7 @@ export class BrowserManager {
       }
       this.profilingActive = false;
       this.profileChunks = [];
+      this.profileEventsDropped = false;
       this.profileCompleteResolver = null;
       this.profileDataHandler = null;
       this.profileCompleteHandler = null;

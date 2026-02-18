@@ -381,7 +381,7 @@ const profilerStartSchema = baseCommandSchema.extend({
 
 const profilerStopSchema = baseCommandSchema.extend({
   action: z.literal('profiler_stop'),
-  path: z.string().min(1),
+  path: z.string().min(1).optional(),
 });
 
 const harStartSchema = baseCommandSchema.extend({

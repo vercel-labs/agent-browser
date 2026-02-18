@@ -163,7 +163,7 @@ agent-browser --headed open https://example.com
 agent-browser highlight @e1          # Highlight element
 agent-browser record start demo.webm # Record session
 agent-browser profiler start         # Start Chrome DevTools profiling
-agent-browser profiler stop trace.json # Stop and save profile
+agent-browser profiler stop trace.json # Stop and save profile (path optional)
 ```
 
 ### Local Files (PDFs, HTML)
