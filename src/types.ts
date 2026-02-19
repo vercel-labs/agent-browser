@@ -203,6 +203,7 @@ export interface PdfCommand extends BaseCommand {
     | 'A4'
     | 'A5'
     | 'A6';
+  pageRanges?: string;
 }
 
 // Network interception

@@ -404,11 +404,35 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
             )
         }
         "pdf" => {
-            let path = rest.first().ok_or_else(|| ParseError::MissingArguments {
+            let mut cmd = json!({ "id": id, "action": "pdf" });
+            let obj = cmd.as_object_mut().unwrap();
+            let mut path: Option<&str> = None;
+            let mut i = 0;
+
+            while i < rest.len() {
+                match rest[i] {
+                    "-p" | "--pages" => {
+                        if let Some(p) = rest.get(i + 1) {
+                            obj.insert("pageRanges".to_string(), json!(p));
+                            i += 1;
+                        }
+                    }
+                    arg => {
+                        if path.is_none() {
+                            path = Some(arg);
+                        }
+                    }
+                }
+                i += 1;
+            }
+
+            let path = path.ok_or_else(|| ParseError::MissingArguments {
                 context: "pdf".to_string(),
-                usage: "pdf <path>",
+                usage: "pdf <path> [--pages <range>]",
             })?;
-            Ok(json!({ "id": id, "action": "pdf", "path": path }))
+
+            obj.insert("path".to_string(), json!(path));
+            Ok(cmd)
         }
 
         // === Snapshot ===

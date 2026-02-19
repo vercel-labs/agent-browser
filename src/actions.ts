@@ -1272,10 +1272,20 @@ async function handleDialog(command: DialogCommand, browser: BrowserManager): Pr
 
 async function handlePdf(command: PdfCommand, browser: BrowserManager): Promise<Response> {
   const page = browser.getPage();
-  await page.pdf({
+  const options: {
+    path: string;
+    format: string;
+    pageRanges?: string;
+  } = {
     path: command.path,
     format: command.format ?? 'Letter',
-  });
+  };
+
+  if (command.pageRanges) {
+    options.pageRanges = command.pageRanges;
+  }
+
+  await page.pdf(options);
   return successResponse(command.id, { path: command.path });
 }
 
