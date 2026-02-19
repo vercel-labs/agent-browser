@@ -162,6 +162,7 @@ agent-browser find nth <n> <sel> <action> [value]     # Nth match
 **Options:** `--name <name>` (filter role by accessible name), `--exact` (require exact text match)
 
 **Examples:**
+
 ```bash
 agent-browser find role button click --name "Submit"
 agent-browser find text "Sign In" click
@@ -259,6 +260,8 @@ agent-browser dialog dismiss          # Dismiss
 ```bash
 agent-browser trace start [path]      # Start recording trace
 agent-browser trace stop [path]       # Stop and save trace
+agent-browser har start               # Start HAR capture
+agent-browser har stop <path.har>     # Stop and save HAR file
 agent-browser profiler start          # Start Chrome DevTools profiling
 agent-browser profiler stop [path]    # Stop and save profile (.json)
 agent-browser console                 # View console messages (log, error, warn, info)
@@ -315,6 +318,7 @@ agent-browser session
 ```
 
 Each session has its own:
+
 - Browser instance
 - Cookies and storage
 - Navigation history
@@ -336,6 +340,7 @@ AGENT_BROWSER_PROFILE=~/.myapp-profile agent-browser open myapp.com
 ```
 
 The profile directory stores:
+
 - Cookies and localStorage
 - IndexedDB data
 - Service workers
@@ -372,10 +377,10 @@ export AGENT_BROWSER_ENCRYPTION_KEY=<64-char-hex-key>
 agent-browser --session-name secure open example.com
 ```
 
-| Variable | Description |
-|----------|-------------|
-| `AGENT_BROWSER_SESSION_NAME` | Auto-save/load state persistence name |
-| `AGENT_BROWSER_ENCRYPTION_KEY` | 64-char hex key for AES-256-GCM encryption |
+| Variable                          | Description                                        |
+| --------------------------------- | -------------------------------------------------- |
+| `AGENT_BROWSER_SESSION_NAME`      | Auto-save/load state persistence name              |
+| `AGENT_BROWSER_ENCRYPTION_KEY`    | 64-char hex key for AES-256-GCM encryption         |
 | `AGENT_BROWSER_STATE_EXPIRE_DAYS` | Auto-delete states older than N days (default: 30) |
 
 ## Snapshot Options
@@ -392,13 +397,13 @@ agent-browser snapshot -s "#main"         # Scope to CSS selector
 agent-browser snapshot -i -c -d 5         # Combine options
 ```
 
-| Option | Description |
-|--------|-------------|
-| `-i, --interactive` | Only show interactive elements (buttons, links, inputs) |
-| `-C, --cursor` | Include cursor-interactive elements (cursor:pointer, onclick, tabindex) |
-| `-c, --compact` | Remove empty structural elements |
-| `-d, --depth <n>` | Limit tree depth |
-| `-s, --selector <sel>` | Scope to CSS selector |
+| Option                 | Description                                                             |
+| ---------------------- | ----------------------------------------------------------------------- |
+| `-i, --interactive`    | Only show interactive elements (buttons, links, inputs)                 |
+| `-C, --cursor`         | Include cursor-interactive elements (cursor:pointer, onclick, tabindex) |
+| `-c, --compact`        | Remove empty structural elements                                        |
+| `-d, --depth <n>`      | Limit tree depth                                                        |
+| `-s, --selector <sel>` | Scope to CSS selector                                                   |
 
 The `-C` flag is useful for modern web apps that use custom clickable elements (divs, spans) instead of standard buttons/links.
 
@@ -425,31 +430,31 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 
 ## Options
 
-| Option | Description |
-|--------|-------------|
-| `--session <name>` | Use isolated session (or `AGENT_BROWSER_SESSION` env) |
-| `--session-name <name>` | Auto-save/restore session state (or `AGENT_BROWSER_SESSION_NAME` env) |
-| `--profile <path>` | Persistent browser profile directory (or `AGENT_BROWSER_PROFILE` env) |
-| `--state <path>` | Load storage state from JSON file (or `AGENT_BROWSER_STATE` env) |
-| `--headers <json>` | Set HTTP headers scoped to the URL's origin |
-| `--executable-path <path>` | Custom browser executable (or `AGENT_BROWSER_EXECUTABLE_PATH` env) |
-| `--extension <path>` | Load browser extension (repeatable; or `AGENT_BROWSER_EXTENSIONS` env) |
-| `--args <args>` | Browser launch args, comma or newline separated (or `AGENT_BROWSER_ARGS` env) |
-| `--user-agent <ua>` | Custom User-Agent string (or `AGENT_BROWSER_USER_AGENT` env) |
-| `--proxy <url>` | Proxy server URL with optional auth (or `AGENT_BROWSER_PROXY` env) |
-| `--proxy-bypass <hosts>` | Hosts to bypass proxy (or `AGENT_BROWSER_PROXY_BYPASS` env) |
-| `--ignore-https-errors` | Ignore HTTPS certificate errors (useful for self-signed certs) |
-| `--allow-file-access` | Allow file:// URLs to access local files (Chromium only) |
-| `-p, --provider <name>` | Cloud browser provider (or `AGENT_BROWSER_PROVIDER` env) |
-| `--device <name>` | iOS device name, e.g. "iPhone 15 Pro" (or `AGENT_BROWSER_IOS_DEVICE` env) |
-| `--json` | JSON output (for agents) |
-| `--full, -f` | Full page screenshot |
-| `--annotate` | Annotated screenshot with numbered element labels (or `AGENT_BROWSER_ANNOTATE` env) |
-| `--headed` | Show browser window (not headless) |
-| `--cdp <port\|url>` | Connect via Chrome DevTools Protocol (port or WebSocket URL) |
-| `--auto-connect` | Auto-discover and connect to running Chrome (or `AGENT_BROWSER_AUTO_CONNECT` env) |
-| `--config <path>` | Use a custom config file (or `AGENT_BROWSER_CONFIG` env) |
-| `--debug` | Debug output |
+| Option                     | Description                                                                         |
+| -------------------------- | ----------------------------------------------------------------------------------- |
+| `--session <name>`         | Use isolated session (or `AGENT_BROWSER_SESSION` env)                               |
+| `--session-name <name>`    | Auto-save/restore session state (or `AGENT_BROWSER_SESSION_NAME` env)               |
+| `--profile <path>`         | Persistent browser profile directory (or `AGENT_BROWSER_PROFILE` env)               |
+| `--state <path>`           | Load storage state from JSON file (or `AGENT_BROWSER_STATE` env)                    |
+| `--headers <json>`         | Set HTTP headers scoped to the URL's origin                                         |
+| `--executable-path <path>` | Custom browser executable (or `AGENT_BROWSER_EXECUTABLE_PATH` env)                  |
+| `--extension <path>`       | Load browser extension (repeatable; or `AGENT_BROWSER_EXTENSIONS` env)              |
+| `--args <args>`            | Browser launch args, comma or newline separated (or `AGENT_BROWSER_ARGS` env)       |
+| `--user-agent <ua>`        | Custom User-Agent string (or `AGENT_BROWSER_USER_AGENT` env)                        |
+| `--proxy <url>`            | Proxy server URL with optional auth (or `AGENT_BROWSER_PROXY` env)                  |
+| `--proxy-bypass <hosts>`   | Hosts to bypass proxy (or `AGENT_BROWSER_PROXY_BYPASS` env)                         |
+| `--ignore-https-errors`    | Ignore HTTPS certificate errors (useful for self-signed certs)                      |
+| `--allow-file-access`      | Allow file:// URLs to access local files (Chromium only)                            |
+| `-p, --provider <name>`    | Cloud browser provider (or `AGENT_BROWSER_PROVIDER` env)                            |
+| `--device <name>`          | iOS device name, e.g. "iPhone 15 Pro" (or `AGENT_BROWSER_IOS_DEVICE` env)           |
+| `--json`                   | JSON output (for agents)                                                            |
+| `--full, -f`               | Full page screenshot                                                                |
+| `--annotate`               | Annotated screenshot with numbered element labels (or `AGENT_BROWSER_ANNOTATE` env) |
+| `--headed`                 | Show browser window (not headless)                                                  |
+| `--cdp <port\|url>`        | Connect via Chrome DevTools Protocol (port or WebSocket URL)                        |
+| `--auto-connect`           | Auto-discover and connect to running Chrome (or `AGENT_BROWSER_AUTO_CONNECT` env)   |
+| `--config <path>`          | Use a custom config file (or `AGENT_BROWSER_CONFIG` env)                            |
+| `--debug`                  | Debug output                                                                        |
 
 ## Configuration
 
@@ -512,6 +517,7 @@ agent-browser hover @e4                   # Hover the link
 ```
 
 **Why use refs?**
+
 - **Deterministic**: Ref points to exact element from snapshot
 - **Fast**: No DOM re-query needed
 - **AI-friendly**: Snapshot + ref workflow is optimal for LLMs
@@ -610,6 +616,7 @@ agent-browser open other-site.com
 ```
 
 This is useful for:
+
 - **Skipping login flows** - Authenticate via headers instead of UI
 - **Switching users** - Start new sessions with different auth tokens
 - **API testing** - Access protected endpoints directly
@@ -631,6 +638,7 @@ agent-browser set headers '{"X-Custom-Header": "value"}'
 ## Custom Browser Executable
 
 Use a custom browser executable instead of the bundled Chromium. This is useful for:
+
 - **Serverless deployment**: Use lightweight Chromium builds like `@sparticuz/chromium` (~50MB vs ~684MB)
 - **System browsers**: Use an existing Chrome/Chromium installation
 - **Custom builds**: Use modified browser builds
@@ -676,6 +684,7 @@ agent-browser screenshot report.png
 ```
 
 The `--allow-file-access` flag adds Chromium flags (`--allow-file-access-from-files`, `--allow-file-access`) that allow `file://` URLs to:
+
 - Load and render local files
 - Access other local files via JavaScript (XHR, fetch)
 - Load local resources (images, scripts, stylesheets)
@@ -703,10 +712,12 @@ agent-browser --cdp "wss://your-browser-service.com/cdp?token=..." snapshot
 ```
 
 The `--cdp` flag accepts either:
+
 - A port number (e.g., `9222`) for local connections via `http://localhost:{port}`
 - A full WebSocket URL (e.g., `wss://...` or `ws://...`) for remote browser services
 
 This enables control of:
+
 - Electron apps
 - Chrome/Chromium instances with remote debugging
 - WebView2 applications
@@ -726,10 +737,12 @@ AGENT_BROWSER_AUTO_CONNECT=1 agent-browser snapshot
 ```
 
 Auto-connect discovers Chrome by:
+
 1. Reading Chrome's `DevToolsActivePort` file from the default user data directory
 2. Falling back to probing common debugging ports (9222, 9229)
 
 This is useful when:
+
 - Chrome 144+ has remote debugging enabled via `chrome://inspect/#remote-debugging` (which uses a dynamic port)
 - You want a zero-configuration connection to your existing browser
 - You don't want to track which port Chrome is using
@@ -753,6 +766,7 @@ This starts a WebSocket server on the specified port that streams the browser vi
 Connect to `ws://localhost:9223` to receive frames and send input:
 
 **Receive frames:**
+
 ```json
 {
   "type": "frame",
@@ -769,6 +783,7 @@ Connect to `ws://localhost:9223` to receive frames and send input:
 ```
 
 **Send mouse events:**
+
 ```json
 {
   "type": "input_mouse",
@@ -781,6 +796,7 @@ Connect to `ws://localhost:9223` to receive frames and send input:
 ```
 
 **Send keyboard events:**
+
 ```json
 {
   "type": "input_keyboard",
@@ -791,6 +807,7 @@ Connect to `ws://localhost:9223` to receive frames and send input:
 ```
 
 **Send touch events:**
+
 ```json
 {
   "type": "input_touch",
@@ -811,16 +828,19 @@ await browser.launch({ headless: true });
 await browser.navigate('https://example.com');
 
 // Start screencast
-await browser.startScreencast((frame) => {
-  // frame.data is base64-encoded image
-  // frame.metadata contains viewport info
-  console.log('Frame received:', frame.metadata.deviceWidth, 'x', frame.metadata.deviceHeight);
-}, {
-  format: 'jpeg',
-  quality: 80,
-  maxWidth: 1280,
-  maxHeight: 720,
-});
+await browser.startScreencast(
+  (frame) => {
+    // frame.data is base64-encoded image
+    // frame.metadata contains viewport info
+    console.log('Frame received:', frame.metadata.deviceWidth, 'x', frame.metadata.deviceHeight);
+  },
+  {
+    format: 'jpeg',
+    quality: 80,
+    maxWidth: 1280,
+    maxHeight: 720,
+  }
+);
 
 // Inject mouse events
 await browser.injectMouseEvent({
@@ -855,13 +875,13 @@ The daemon starts automatically on first command and persists between commands f
 
 ## Platforms
 
-| Platform | Binary | Fallback |
-|----------|--------|----------|
-| macOS ARM64 | Native Rust | Node.js |
-| macOS x64 | Native Rust | Node.js |
-| Linux ARM64 | Native Rust | Node.js |
-| Linux x64 | Native Rust | Node.js |
-| Windows x64 | Native Rust | Node.js |
+| Platform    | Binary      | Fallback |
+| ----------- | ----------- | -------- |
+| macOS ARM64 | Native Rust | Node.js  |
+| macOS x64   | Native Rust | Node.js  |
+| Linux ARM64 | Native Rust | Node.js  |
+| Linux x64   | Native Rust | Node.js  |
+| Windows x64 | Native Rust | Node.js  |
 
 ## Usage with AI Agents
 
@@ -905,6 +925,7 @@ For more consistent results, add to your project or global instructions file:
 Use `agent-browser` for web automation. Run `agent-browser --help` for all commands.
 
 Core workflow:
+
 1. `agent-browser open <url>` - Navigate to page
 2. `agent-browser snapshot -i` - Get interactive elements with refs (@e1, @e2)
 3. `agent-browser click @e1` / `fill @e2 "text"` - Interact using refs
@@ -956,11 +977,11 @@ export AGENT_BROWSER_IOS_DEVICE="iPhone 16 Pro"
 agent-browser open https://example.com
 ```
 
-| Variable | Description |
-|----------|-------------|
-| `AGENT_BROWSER_PROVIDER` | Set to `ios` to enable iOS mode |
+| Variable                   | Description                                     |
+| -------------------------- | ----------------------------------------------- |
+| `AGENT_BROWSER_PROVIDER`   | Set to `ios` to enable iOS mode                 |
 | `AGENT_BROWSER_IOS_DEVICE` | Device name (e.g., "iPhone 16 Pro", "iPad Pro") |
-| `AGENT_BROWSER_IOS_UDID` | Device UDID (alternative to device name) |
+| `AGENT_BROWSER_IOS_UDID`   | Device UDID (alternative to device name)        |
 
 **Supported devices:** All iOS Simulators available in Xcode (iPhones, iPads), plus real iOS devices.
 
@@ -971,6 +992,7 @@ agent-browser open https://example.com
 Appium also supports real iOS devices connected via USB. This requires additional one-time setup:
 
 **1. Get your device UDID:**
+
 ```bash
 xcrun xctrace list devices
 # or
@@ -978,6 +1000,7 @@ system_profiler SPUSBDataType | grep -A 5 "iPhone\|iPad"
 ```
 
 **2. Sign WebDriverAgent (one-time):**
+
 ```bash
 # Open the WebDriverAgent Xcode project
 cd ~/.appium/node_modules/appium-xcuitest-driver/node_modules/appium-webdriveragent
@@ -985,12 +1008,14 @@ open WebDriverAgent.xcodeproj
 ```
 
 In Xcode:
+
 - Select the `WebDriverAgentRunner` target
 - Go to Signing & Capabilities
 - Select your Team (requires Apple Developer account, free tier works)
 - Let Xcode manage signing automatically
 
 **3. Use with agent-browser:**
+
 ```bash
 # Connect device via USB, then:
 agent-browser -p ios --device "<DEVICE_UDID>" open https://example.com
@@ -1000,6 +1025,7 @@ agent-browser -p ios --device "John's iPhone" open https://example.com
 ```
 
 **Real device notes:**
+
 - First run installs WebDriverAgent to the device (may require Trust prompt)
 - Device must be unlocked and connected via USB
 - Slightly slower initial connection than simulator
@@ -1074,12 +1100,12 @@ agent-browser open https://example.com
 
 Optional configuration via environment variables:
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `KERNEL_HEADLESS` | Run browser in headless mode (`true`/`false`) | `false` |
-| `KERNEL_STEALTH` | Enable stealth mode to avoid bot detection (`true`/`false`) | `true` |
-| `KERNEL_TIMEOUT_SECONDS` | Session timeout in seconds | `300` |
-| `KERNEL_PROFILE_NAME` | Browser profile name for persistent cookies/logins (created if it doesn't exist) | (none) |
+| Variable                 | Description                                                                      | Default |
+| ------------------------ | -------------------------------------------------------------------------------- | ------- |
+| `KERNEL_HEADLESS`        | Run browser in headless mode (`true`/`false`)                                    | `false` |
+| `KERNEL_STEALTH`         | Enable stealth mode to avoid bot detection (`true`/`false`)                      | `true`  |
+| `KERNEL_TIMEOUT_SECONDS` | Session timeout in seconds                                                       | `300`   |
+| `KERNEL_PROFILE_NAME`    | Browser profile name for persistent cookies/logins (created if it doesn't exist) | (none)  |
 
 When enabled, agent-browser connects to a Kernel cloud session instead of launching a local browser. All commands work identically.
 
