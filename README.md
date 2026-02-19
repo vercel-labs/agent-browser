@@ -112,6 +112,7 @@ agent-browser scrollintoview <sel>    # Scroll element into view (alias: scrolli
 agent-browser drag <src> <tgt>        # Drag and drop
 agent-browser upload <sel> <files>    # Upload files
 agent-browser screenshot [path]       # Take screenshot (--full for full page, saves to a temporary directory if no path)
+agent-browser screenshot --annotate   # Annotated screenshot with numbered element labels
 agent-browser pdf <path>              # Save as PDF
 agent-browser snapshot                # Accessibility tree with refs (best for AI)
 agent-browser eval <js>               # Run JavaScript (-b for base64, --stdin for piped input)
@@ -404,32 +405,54 @@ agent-browser snapshot -i -c -d 5         # Combine options
 
 The `-C` flag is useful for modern web apps that use custom clickable elements (divs, spans) instead of standard buttons/links.
 
+## Annotated Screenshots
+
+The `--annotate` flag overlays numbered labels on interactive elements in the screenshot. Each label `[N]` corresponds to ref `@eN`, so the same refs work for both visual and text-based workflows.
+
+```bash
+agent-browser screenshot --annotate
+# -> Screenshot saved to /tmp/screenshot-2026-02-17T12-00-00-abc123.png
+#    [1] @e1 button "Submit"
+#    [2] @e2 link "Home"
+#    [3] @e3 textbox "Email"
+```
+
+After an annotated screenshot, refs are cached so you can immediately interact with elements:
+
+```bash
+agent-browser screenshot --annotate ./page.png
+agent-browser click @e2     # Click the "Home" link labeled [2]
+```
+
+This is useful for multimodal AI models that can reason about visual layout, unlabeled icon buttons, canvas elements, or visual state that the text accessibility tree cannot capture.
+
 ## Options
 
-| Option                     | Description                                                                       |
-| -------------------------- | --------------------------------------------------------------------------------- |
-| `--session <name>`         | Use isolated session (or `AGENT_BROWSER_SESSION` env)                             |
-| `--session-name <name>`    | Auto-save/restore session state (or `AGENT_BROWSER_SESSION_NAME` env)             |
-| `--profile <path>`         | Persistent browser profile directory (or `AGENT_BROWSER_PROFILE` env)             |
-| `--state <path>`           | Load storage state from JSON file (or `AGENT_BROWSER_STATE` env)                  |
-| `--headers <json>`         | Set HTTP headers scoped to the URL's origin                                       |
-| `--executable-path <path>` | Custom browser executable (or `AGENT_BROWSER_EXECUTABLE_PATH` env)                |
-| `--extension <path>`       | Load browser extension (repeatable; or `AGENT_BROWSER_EXTENSIONS` env)            |
-| `--args <args>`            | Browser launch args, comma or newline separated (or `AGENT_BROWSER_ARGS` env)     |
-| `--user-agent <ua>`        | Custom User-Agent string (or `AGENT_BROWSER_USER_AGENT` env)                      |
-| `--proxy <url>`            | Proxy server URL with optional auth (or `AGENT_BROWSER_PROXY` env)                |
-| `--proxy-bypass <hosts>`   | Hosts to bypass proxy (or `AGENT_BROWSER_PROXY_BYPASS` env)                       |
-| `--ignore-https-errors`    | Ignore HTTPS certificate errors (useful for self-signed certs)                    |
-| `--allow-file-access`      | Allow file:// URLs to access local files (Chromium only)                          |
-| `-p, --provider <name>`    | Cloud browser provider (or `AGENT_BROWSER_PROVIDER` env)                          |
-| `--device <name>`          | iOS device name, e.g. "iPhone 15 Pro" (or `AGENT_BROWSER_IOS_DEVICE` env)         |
-| `--json`                   | JSON output (for agents)                                                          |
-| `--full, -f`               | Full page screenshot                                                              |
-| `--headed`                 | Show browser window (not headless)                                                |
-| `--cdp <port\|url>`        | Connect via Chrome DevTools Protocol (port or WebSocket URL)                      |
-| `--auto-connect`           | Auto-discover and connect to running Chrome (or `AGENT_BROWSER_AUTO_CONNECT` env) |
-| `--config <path>`          | Use a custom config file (or `AGENT_BROWSER_CONFIG` env)                          |
-| `--debug`                  | Debug output                                                                      |
+| Option | Description |
+|--------|-------------|
+| `--session <name>` | Use isolated session (or `AGENT_BROWSER_SESSION` env) |
+| `--session-name <name>` | Auto-save/restore session state (or `AGENT_BROWSER_SESSION_NAME` env) |
+| `--profile <path>` | Persistent browser profile directory (or `AGENT_BROWSER_PROFILE` env) |
+| `--state <path>` | Load storage state from JSON file (or `AGENT_BROWSER_STATE` env) |
+| `--headers <json>` | Set HTTP headers scoped to the URL's origin |
+| `--executable-path <path>` | Custom browser executable (or `AGENT_BROWSER_EXECUTABLE_PATH` env) |
+| `--extension <path>` | Load browser extension (repeatable; or `AGENT_BROWSER_EXTENSIONS` env) |
+| `--args <args>` | Browser launch args, comma or newline separated (or `AGENT_BROWSER_ARGS` env) |
+| `--user-agent <ua>` | Custom User-Agent string (or `AGENT_BROWSER_USER_AGENT` env) |
+| `--proxy <url>` | Proxy server URL with optional auth (or `AGENT_BROWSER_PROXY` env) |
+| `--proxy-bypass <hosts>` | Hosts to bypass proxy (or `AGENT_BROWSER_PROXY_BYPASS` env) |
+| `--ignore-https-errors` | Ignore HTTPS certificate errors (useful for self-signed certs) |
+| `--allow-file-access` | Allow file:// URLs to access local files (Chromium only) |
+| `-p, --provider <name>` | Cloud browser provider (or `AGENT_BROWSER_PROVIDER` env) |
+| `--device <name>` | iOS device name, e.g. "iPhone 15 Pro" (or `AGENT_BROWSER_IOS_DEVICE` env) |
+| `--json` | JSON output (for agents) |
+| `--full, -f` | Full page screenshot |
+| `--annotate` | Annotated screenshot with numbered element labels (or `AGENT_BROWSER_ANNOTATE` env) |
+| `--headed` | Show browser window (not headless) |
+| `--cdp <port\|url>` | Connect via Chrome DevTools Protocol (port or WebSocket URL) |
+| `--auto-connect` | Auto-discover and connect to running Chrome (or `AGENT_BROWSER_AUTO_CONNECT` env) |
+| `--config <path>` | Use a custom config file (or `AGENT_BROWSER_CONFIG` env) |
+| `--debug` | Debug output |
 
 ## Configuration
 

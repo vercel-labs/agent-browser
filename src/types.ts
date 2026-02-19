@@ -807,6 +807,7 @@ export interface ScreenshotCommand extends BaseCommand {
   selector?: string;
   format?: 'png' | 'jpeg';
   quality?: number;
+  annotate?: boolean;
 }
 
 export interface SnapshotCommand extends BaseCommand {
@@ -1036,9 +1037,18 @@ export interface NavigateData {
   title: string;
 }
 
+export interface Annotation {
+  ref: string;
+  number: number;
+  role: string;
+  name?: string;
+  box: { x: number; y: number; width: number; height: number };
+}
+
 export interface ScreenshotData {
   path?: string;
   base64?: string;
+  annotations?: Annotation[];
 }
 
 export interface SnapshotData {

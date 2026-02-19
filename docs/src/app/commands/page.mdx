@@ -23,6 +23,7 @@ agent-browser scrollintoview <sel>    # Scroll element into view
 agent-browser drag <src> <dst>        # Drag and drop
 agent-browser upload <sel> <files>    # Upload files
 agent-browser screenshot [path]       # Screenshot (--full for full page)
+agent-browser screenshot --annotate   # Annotated screenshot with numbered element labels
 agent-browser pdf <path>              # Save page as PDF
 agent-browser snapshot                # Accessibility tree with refs
 agent-browser eval <js>               # Run JavaScript
@@ -236,6 +237,7 @@ agent-browser reload                  # Reload page
 --device <name>          # iOS device name (e.g., "iPhone 15 Pro")
 --json                   # JSON output (for scripts)
 --full, -f               # Full page screenshot
+--annotate               # Annotated screenshot with numbered element labels
 --headed                 # Show browser window (not headless)
 --cdp <port|url>         # Connect via Chrome DevTools Protocol (port or WebSocket URL)
 --auto-connect           # Auto-discover and connect to running Chrome

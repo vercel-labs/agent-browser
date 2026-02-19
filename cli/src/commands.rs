@@ -2,6 +2,7 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::{json, Value};
 use std::io::{self, BufRead};
 
+use crate::color;
 use crate::flags::Flags;
 use crate::validation::{is_valid_session_name, session_name_error};
 
@@ -81,6 +82,13 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
     let cmd = args[0].as_str();
     let rest: Vec<&str> = args[1..].iter().map(|s| s.as_str()).collect();
     let id = gen_id();
+
+    if flags.annotate && cmd != "screenshot" {
+        eprintln!(
+            "{} --annotate only applies to the screenshot command",
+            color::warning_indicator()
+        );
+    }
 
     match cmd {
         // === Navigation ===
@@ -392,7 +400,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                 _ => (None, None),
             };
             Ok(
-                json!({ "id": id, "action": "screenshot", "path": path, "selector": selector, "fullPage": flags.full }),
+                json!({ "id": id, "action": "screenshot", "path": path, "selector": selector, "fullPage": flags.full, "annotate": flags.annotate }),
             )
         }
         "pdf" => {
@@ -1583,6 +1591,7 @@ mod tests {
             cli_proxy: false,
             cli_proxy_bypass: false,
             cli_allow_file_access: false,
+            annotate: false,
         }
     }
 

@@ -363,11 +363,37 @@ pub fn print_response(resp: &Response, json_mode: bool, action: Option<&str>) {
         // Path-based operations (screenshot/pdf/trace/har/download/state/video)
         if let Some(path) = data.get("path").and_then(|v| v.as_str()) {
             match action.unwrap_or("") {
-                "screenshot" => println!(
-                    "{} Screenshot saved to {}",
-                    color::success_indicator(),
-                    color::green(path)
-                ),
+                "screenshot" => {
+                    println!(
+                        "{} Screenshot saved to {}",
+                        color::success_indicator(),
+                        color::green(path)
+                    );
+                    if let Some(annotations) = data.get("annotations").and_then(|v| v.as_array()) {
+                        for ann in annotations {
+                            let num = ann.get("number").and_then(|n| n.as_u64()).unwrap_or(0);
+                            let ref_id = ann.get("ref").and_then(|r| r.as_str()).unwrap_or("");
+                            let role = ann.get("role").and_then(|r| r.as_str()).unwrap_or("");
+                            let name = ann.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                            if name.is_empty() {
+                                println!(
+                                    "   {} @{} {}",
+                                    color::dim(&format!("[{}]", num)),
+                                    ref_id,
+                                    role,
+                                );
+                            } else {
+                                println!(
+                                    "   {} @{} {} {:?}",
+                                    color::dim(&format!("[{}]", num)),
+                                    ref_id,
+                                    role,
+                                    name,
+                                );
+                            }
+                        }
+                    }
+                }
                 "pdf" => println!(
                     "{} PDF saved to {}",
                     color::success_indicator(),
@@ -965,6 +991,10 @@ saves to a temporary directory with a generated filename.
 
 Options:
   --full, -f           Capture full page (not just viewport)
+  --annotate           Overlay numbered labels on interactive elements.
+                       Each label [N] corresponds to ref @eN from snapshot.
+                       Prints a legend mapping labels to element roles/names.
+                       With --json, annotations are included in the response.
 
 Global Options:
   --json               Output as JSON
@@ -974,6 +1004,9 @@ Examples:
   agent-browser screenshot
   agent-browser screenshot ./screenshot.png
   agent-browser screenshot --full ./full-page.png
+  agent-browser screenshot --annotate              # Labeled screenshot + legend
+  agent-browser screenshot --annotate ./page.png   # Save annotated screenshot
+  agent-browser screenshot --annotate --json       # JSON output with annotations
 "##
         }
         "pdf" => {
@@ -1932,6 +1965,7 @@ Options:
   --device <name>            iOS device name (e.g., "iPhone 15 Pro")
   --json                     JSON output
   --full, -f                 Full page screenshot
+  --annotate                 Annotated screenshot with numbered labels and legend
   --headed                   Show browser window (not headless)
   --cdp <port>               Connect via CDP (Chrome DevTools Protocol)
   --auto-connect             Auto-discover and connect to running Chrome
@@ -1970,6 +2004,7 @@ Environment:
   AGENT_BROWSER_HEADED           Show browser window (not headless)
   AGENT_BROWSER_JSON             JSON output
   AGENT_BROWSER_FULL             Full page screenshot
+  AGENT_BROWSER_ANNOTATE         Annotated screenshot with numbered labels and legend
   AGENT_BROWSER_DEBUG            Debug output
   AGENT_BROWSER_IGNORE_HTTPS_ERRORS Ignore HTTPS certificate errors
   AGENT_BROWSER_PROVIDER         Browser provider (ios, browserbase, kernel, browseruse, browserless)
@@ -1994,6 +2029,7 @@ Examples:
   agent-browser find role button click --name Submit
   agent-browser get text @e1
   agent-browser screenshot --full
+  agent-browser screenshot --annotate    # Labeled screenshot for vision models
   agent-browser wait --load networkidle  # Wait for slow pages to load
   agent-browser --cdp 9222 snapshot      # Connect via CDP port
   agent-browser --auto-connect snapshot  # Auto-discover running Chrome

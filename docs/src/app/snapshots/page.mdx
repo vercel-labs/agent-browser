@@ -78,12 +78,28 @@ agent-browser snapshot -i    # Get fresh refs
 agent-browser click @e1      # Use new refs
 ```
 
+## Annotated screenshots
+
+For visual context alongside text snapshots, use `screenshot --annotate` to overlay numbered labels on interactive elements. Each label `[N]` maps to ref `@eN`:
+
+```bash
+agent-browser screenshot --annotate ./page.png
+# -> Screenshot saved to ./page.png
+#    [1] @e1 button "Submit"
+#    [2] @e2 link "Home"
+#    [3] @e3 textbox "Email"
+agent-browser click @e2
+```
+
+Annotated screenshots also cache refs, so you can interact with elements immediately. This is useful when the text snapshot is insufficient -- unlabeled icons, canvas content, or visual layout verification.
+
 ## Best practices
 
 1. Use `-i` to reduce output to actionable elements
 2. Re-snapshot after page changes to get updated refs
 3. Scope with `-s` for specific page sections
 4. Use `-d` to limit depth on complex pages
+5. Use `screenshot --annotate` when visual context is needed alongside refs
 
 ## JSON output
 

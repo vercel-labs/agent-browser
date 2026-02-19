@@ -284,6 +284,133 @@ describe('BrowserManager', () => {
     });
   });
 
+  describe('annotated screenshots', () => {
+    afterAll(async () => {
+      await browser.getPage().goto('https://example.com');
+    });
+
+    it('should return annotations with correct shape', async () => {
+      const page = browser.getPage();
+      await page.setContent(`
+        <html><body>
+          <button>Submit</button>
+          <a href="#">Home</a>
+          <input type="text" placeholder="Email" />
+        </body></html>
+      `);
+
+      const result = await executeCommand(
+        { id: 'ann-1', action: 'screenshot', annotate: true },
+        browser
+      );
+
+      expect(result.success).toBe(true);
+      const data = result.data as { path?: string; annotations?: unknown[] };
+      expect(data.path).toBeDefined();
+      expect(data.annotations).toBeDefined();
+      expect(data.annotations!.length).toBeGreaterThan(0);
+
+      for (const ann of data.annotations! as Array<{
+        ref: string;
+        number: number;
+        role: string;
+        name?: string;
+        box: { x: number; y: number; width: number; height: number };
+      }>) {
+        expect(ann.ref).toMatch(/^e\d+$/);
+        expect(typeof ann.number).toBe('number');
+        expect(typeof ann.role).toBe('string');
+        expect(typeof ann.box.x).toBe('number');
+        expect(typeof ann.box.y).toBe('number');
+        expect(typeof ann.box.width).toBe('number');
+        expect(typeof ann.box.height).toBe('number');
+      }
+    });
+
+    it('should clean up overlay from DOM after screenshot', async () => {
+      const page = browser.getPage();
+      await page.setContent(`
+        <html><body>
+          <button>Click me</button>
+        </body></html>
+      `);
+
+      await executeCommand({ id: 'ann-2', action: 'screenshot', annotate: true }, browser);
+
+      const overlay = await page.$('#__agent_browser_annotations__');
+      expect(overlay).toBeNull();
+    });
+
+    it('should scope annotations to selector element', async () => {
+      const page = browser.getPage();
+      await page.setContent(`
+        <html><body>
+          <button id="outside">Outside</button>
+          <div id="container" style="padding:20px;">
+            <button id="inside">Inside</button>
+          </div>
+        </body></html>
+      `);
+
+      const result = await executeCommand(
+        { id: 'ann-3', action: 'screenshot', annotate: true, selector: '#container' },
+        browser
+      );
+
+      expect(result.success).toBe(true);
+      const data = result.data as { annotations?: Array<{ name?: string }> };
+      expect(data.annotations).toBeDefined();
+
+      const names = data.annotations!.map((a) => a.name).filter(Boolean);
+      expect(names).toContain('Inside');
+      expect(names).not.toContain('Outside');
+    });
+
+    it('should succeed with no annotations on static page', async () => {
+      const page = browser.getPage();
+      await page.setContent(`
+        <html><body>
+          <p>Just some text, no interactive elements.</p>
+        </body></html>
+      `);
+
+      const result = await executeCommand(
+        { id: 'ann-4', action: 'screenshot', annotate: true },
+        browser
+      );
+
+      expect(result.success).toBe(true);
+      const data = result.data as { path?: string; annotations?: unknown[] };
+      expect(data.path).toBeDefined();
+      expect(data.annotations).toBeUndefined();
+    });
+
+    it('should return document-relative coords for fullPage screenshots', async () => {
+      const page = browser.getPage();
+      await page.setContent(`
+        <html><body style="margin:0;">
+          <div style="height:2000px;"></div>
+          <button id="below-fold" style="margin:0;">Bottom</button>
+        </body></html>
+      `);
+
+      const result = await executeCommand(
+        { id: 'ann-5', action: 'screenshot', annotate: true, fullPage: true },
+        browser
+      );
+
+      expect(result.success).toBe(true);
+      const data = result.data as {
+        annotations?: Array<{ name?: string; box: { y: number } }>;
+      };
+      expect(data.annotations).toBeDefined();
+
+      const bottom = data.annotations!.find((a) => a.name === 'Bottom');
+      expect(bottom).toBeDefined();
+      expect(bottom!.box.y).toBeGreaterThanOrEqual(2000);
+    });
+  });
+
   describe('evaluate', () => {
     it('should evaluate JavaScript', async () => {
       const page = browser.getPage();

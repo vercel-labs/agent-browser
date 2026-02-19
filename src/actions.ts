@@ -123,6 +123,7 @@ import type {
   RecordingStartCommand,
   RecordingStopCommand,
   RecordingRestartCommand,
+  Annotation,
   NavigateData,
   ScreenshotData,
   EvaluateData,
@@ -599,6 +600,16 @@ async function handlePress(command: PressCommand, browser: BrowserManager): Prom
   return successResponse(command.id, { pressed: true });
 }
 
+const ANNOTATION_OVERLAY_ID = '__agent_browser_annotations__';
+
+async function removeAnnotationOverlay(page: Page): Promise<void> {
+  await page
+    .evaluate(
+      `(() => { const el = document.getElementById(${JSON.stringify(ANNOTATION_OVERLAY_ID)}); if (el) el.remove(); })()`
+    )
+    .catch(() => {});
+}
+
 async function handleScreenshot(
   command: ScreenshotCommand,
   browser: BrowserManager
@@ -619,6 +630,8 @@ async function handleScreenshot(
     target = browser.getLocator(command.selector);
   }
 
+  let overlayInjected = false;
+
   try {
     let savePath = command.path;
     if (!savePath) {
@@ -631,9 +644,158 @@ async function handleScreenshot(
       savePath = path.join(screenshotDir, filename);
     }
 
+    let annotations: Annotation[] | undefined;
+
+    if (command.annotate) {
+      const { refs } = await browser.getSnapshot({ interactive: true });
+
+      const entries = Object.entries(refs);
+      const results = await Promise.all(
+        entries.map(async ([ref, data]): Promise<Annotation | null> => {
+          try {
+            const locator = browser.getLocatorFromRef(ref);
+            if (!locator) return null;
+            const box = await locator.boundingBox();
+            if (!box || box.width === 0 || box.height === 0) return null;
+            const num = parseInt(ref.replace('e', ''), 10);
+            return {
+              ref,
+              number: num,
+              role: data.role,
+              name: data.name || undefined,
+              box: {
+                x: Math.round(box.x),
+                y: Math.round(box.y),
+                width: Math.round(box.width),
+                height: Math.round(box.height),
+              },
+            };
+          } catch {
+            return null;
+          }
+        })
+      );
+
+      // When a selector is provided the screenshot is cropped to that element,
+      // so filter to annotations that overlap the target and shift coordinates.
+      let targetBox: { x: number; y: number; width: number; height: number } | null = null;
+      if (command.selector) {
+        const raw = await browser.getLocator(command.selector).boundingBox();
+        if (raw) {
+          targetBox = {
+            x: Math.round(raw.x),
+            y: Math.round(raw.y),
+            width: Math.round(raw.width),
+            height: Math.round(raw.height),
+          };
+        }
+      }
+
+      const filtered = results.filter((a): a is Annotation => a !== null);
+
+      // Filter by selector overlap if needed, but keep viewport-relative coords
+      // for overlay positioning. Coordinate shifting happens later for metadata only.
+      let overlayItems: Annotation[];
+      if (targetBox) {
+        const tb = targetBox;
+        overlayItems = filtered
+          .filter((a) => {
+            const ax2 = a.box.x + a.box.width;
+            const ay2 = a.box.y + a.box.height;
+            const bx2 = tb.x + tb.width;
+            const by2 = tb.y + tb.height;
+            return a.box.x < bx2 && ax2 > tb.x && a.box.y < by2 && ay2 > tb.y;
+          })
+          .sort((a, b) => a.number - b.number);
+      } else {
+        overlayItems = filtered.sort((a, b) => a.number - b.number);
+      }
+
+      if (overlayItems.length > 0) {
+        const overlayData = overlayItems.map((a) => ({
+          number: a.number,
+          x: a.box.x,
+          y: a.box.y,
+          width: a.box.width,
+          height: a.box.height,
+        }));
+
+        // Uses position:absolute with document-relative coords so labels render
+        // correctly for both viewport and fullPage screenshots, and when the
+        // screenshot is scoped to a selector element.
+        await page.evaluate(`(() => {
+          var items = ${JSON.stringify(overlayData)};
+          var id = ${JSON.stringify(ANNOTATION_OVERLAY_ID)};
+          var sx = window.scrollX || 0;
+          var sy = window.scrollY || 0;
+          var c = document.createElement('div');
+          c.id = id;
+          c.style.cssText = 'position:absolute;top:0;left:0;width:0;height:0;pointer-events:none;z-index:2147483647;';
+          for (var i = 0; i < items.length; i++) {
+            var it = items[i];
+            var dx = it.x + sx;
+            var dy = it.y + sy;
+            var b = document.createElement('div');
+            b.style.cssText = 'position:absolute;left:' + dx + 'px;top:' + dy + 'px;width:' + it.width + 'px;height:' + it.height + 'px;border:2px solid rgba(255,0,0,0.8);box-sizing:border-box;pointer-events:none;';
+            var l = document.createElement('div');
+            l.textContent = String(it.number);
+            var labelTop = dy < 14 ? '2px' : '-14px';
+            l.style.cssText = 'position:absolute;top:' + labelTop + ';left:-2px;background:rgba(255,0,0,0.9);color:#fff;font:bold 11px/14px monospace;padding:0 4px;border-radius:2px;white-space:nowrap;';
+            b.appendChild(l);
+            c.appendChild(b);
+          }
+          document.documentElement.appendChild(c);
+        })()`);
+        overlayInjected = true;
+      }
+
+      // Build returned annotation metadata with image-relative coordinates.
+      // Selector: shift to target-element-relative.
+      // fullPage: convert to document-relative (matching fullPage image origin).
+      // Default: viewport-relative (unchanged).
+      if (targetBox) {
+        const tb = targetBox;
+        annotations = overlayItems.map((a) => ({
+          ...a,
+          box: {
+            x: a.box.x - tb.x,
+            y: a.box.y - tb.y,
+            width: a.box.width,
+            height: a.box.height,
+          },
+        }));
+      } else if (command.fullPage) {
+        const scroll = (await page.evaluate(
+          `({x: window.scrollX || 0, y: window.scrollY || 0})`
+        )) as { x: number; y: number };
+        annotations = overlayItems.map((a) => ({
+          ...a,
+          box: {
+            x: a.box.x + scroll.x,
+            y: a.box.y + scroll.y,
+            width: a.box.width,
+            height: a.box.height,
+          },
+        }));
+      } else {
+        annotations = overlayItems;
+      }
+    }
+
     await target.screenshot({ ...options, path: savePath });
-    return successResponse(command.id, { path: savePath });
+
+    if (overlayInjected) {
+      await removeAnnotationOverlay(page);
+    }
+
+    return successResponse(command.id, {
+      path: savePath,
+      ...(annotations && annotations.length > 0 ? { annotations } : {}),
+    });
   } catch (error) {
+    if (overlayInjected) {
+      await removeAnnotationOverlay(page);
+    }
     if (command.selector) {
       throw toAIFriendlyError(error, command.selector);
     }

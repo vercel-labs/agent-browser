@@ -129,6 +129,11 @@ describe('parseCommand', () => {
       );
       expect(result.success).toBe(true);
     });
+
+    it('should parse screenshot with annotate', () => {
+      const result = parseCommand(cmd({ id: '1', action: 'screenshot', annotate: true }));
+      expect(result.success).toBe(true);
+    });
   });
 
   describe('cookies', () => {
