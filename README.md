@@ -446,7 +446,7 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 | `--full, -f` | Full page screenshot |
 | `--annotate` | Annotated screenshot with numbered element labels (or `AGENT_BROWSER_ANNOTATE` env) |
 | `--headed` | Show browser window (not headless) |
-| `--cdp <port\|url>` | Connect via Chrome DevTools Protocol (port or WebSocket URL) |
+| `--cdp <port\|url>` | Connect via Chrome DevTools Protocol (port or WebSocket URL; or `AGENT_BROWSER_CDP` env) |
 | `--auto-connect` | Auto-discover and connect to running Chrome (or `AGENT_BROWSER_AUTO_CONNECT` env) |
 | `--config <path>` | Use a custom config file (or `AGENT_BROWSER_CONFIG` env) |
 | `--debug` | Debug output |
@@ -700,6 +700,10 @@ agent-browser --cdp 9222 snapshot
 
 # Connect to remote browser via WebSocket URL
 agent-browser --cdp "wss://your-browser-service.com/cdp?token=..." snapshot
+
+# Or via environment variable
+export AGENT_BROWSER_CDP=9222
+agent-browser snapshot
 ```
 
 The `--cdp` flag accepts either:

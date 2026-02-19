@@ -1967,7 +1967,7 @@ Options:
   --full, -f                 Full page screenshot
   --annotate                 Annotated screenshot with numbered labels and legend
   --headed                   Show browser window (not headless)
-  --cdp <port>               Connect via CDP (Chrome DevTools Protocol)
+  --cdp <port>               Connect via CDP (Chrome DevTools Protocol) (or AGENT_BROWSER_CDP env)
   --auto-connect             Auto-discover and connect to running Chrome
   --session-name <name>      Auto-save/restore session state (cookies, localStorage)
   --config <path>            Use a custom config file (or AGENT_BROWSER_CONFIG env)
@@ -2008,6 +2008,7 @@ Environment:
   AGENT_BROWSER_DEBUG            Debug output
   AGENT_BROWSER_IGNORE_HTTPS_ERRORS Ignore HTTPS certificate errors
   AGENT_BROWSER_PROVIDER         Browser provider (ios, browserbase, kernel, browseruse)
+  AGENT_BROWSER_CDP              CDP connection (port or WebSocket URL)
   AGENT_BROWSER_AUTO_CONNECT     Auto-discover and connect to running Chrome
   AGENT_BROWSER_ALLOW_FILE_ACCESS Allow file:// URLs to access local files
   AGENT_BROWSER_STREAM_PORT      Enable WebSocket streaming on port (e.g., 9223)

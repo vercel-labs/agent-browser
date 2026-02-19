@@ -172,6 +172,9 @@ agent-browser --auto-connect snapshot
 
 # Or with explicit CDP port
 agent-browser --cdp 9222 snapshot
+
+# Or via environment variable
+AGENT_BROWSER_CDP=9222 agent-browser snapshot
 ```
 
 ### Visual Browser (Debugging)

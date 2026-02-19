@@ -250,7 +250,8 @@ pub fn parse_flags(args: &[String]) -> Flags {
         headers: config.headers,
         executable_path: env::var("AGENT_BROWSER_EXECUTABLE_PATH").ok()
             .or(config.executable_path),
-        cdp: config.cdp,
+        cdp: env::var("AGENT_BROWSER_CDP").ok()
+            .or(config.cdp),
         extensions,
         profile: env::var("AGENT_BROWSER_PROFILE").ok()
             .or(config.profile),

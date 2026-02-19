@@ -34,6 +34,20 @@ The `--cdp` flag accepts either:
 - A port number (e.g., `9222`) for local connections via `http://localhost:{port}`
 - A full WebSocket URL (e.g., `wss://...` or `ws://...`) for remote browser services
 
+You can also set the CDP endpoint via environment variable:
+
+```bash
+# Set once, use for all commands
+export AGENT_BROWSER_CDP=9222
+agent-browser snapshot
+
+# Works with URLs too
+export AGENT_BROWSER_CDP="wss://browser-service.com/cdp?token=..."
+agent-browser snapshot
+```
+
+The CLI `--cdp` flag takes precedence over `AGENT_BROWSER_CDP`.
+
 ## Auto-Connect
 
 Use `--auto-connect` to automatically discover and connect to a running Chrome instance without specifying a port:
@@ -86,7 +100,7 @@ This enables control of:
 | `--name, -n` | Locator name filter |
 | `--exact` | Exact text match |
 | `--headed` | Show browser window |
-| `--cdp <port\|url>` | CDP connection (port or WebSocket URL) |
+| `--cdp <port\|url>` | CDP connection (port or WebSocket URL, or `AGENT_BROWSER_CDP` env) |
 | `--auto-connect` | Auto-discover and connect to running Chrome |
 | `--debug` | Debug output |
 
