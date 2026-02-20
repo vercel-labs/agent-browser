@@ -371,10 +371,47 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
 
         // === Screenshot/PDF ===
         "screenshot" => {
+            // Extract --scale flag before positional parsing
+            let mut filtered_rest: Vec<&str> = Vec::new();
+            let mut scale_value: Option<serde_json::Value> = None;
+            let mut i = 0;
+            while i < rest.len() {
+                if rest[i] == "--scale" {
+                    if let Some(val) = rest.get(i + 1) {
+                        match *val {
+                            "css" | "device" => {
+                                scale_value = Some(json!(val));
+                            }
+                            _ => {
+                                if let Ok(n) = val.parse::<f64>() {
+                                    if n > 0.0 {
+                                        scale_value = Some(json!(n));
+                                    } else {
+                                        return Err(ParseError::InvalidValue {
+                                            message: "Scale must be a positive number".to_string(),
+                                            usage: "screenshot [selector] [path] [--scale css|device|<number>]",
+                                        });
+                                    }
+                                } else {
+                                    return Err(ParseError::InvalidValue {
+                                        message: format!("Invalid scale value: '{}'. Use 'css', 'device', or a positive number", val),
+                                        usage: "screenshot [selector] [path] [--scale css|device|<number>]",
+                                    });
+                                }
+                            }
+                        }
+                        i += 2;
+                        continue;
+                    }
+                }
+                filtered_rest.push(rest[i]);
+                i += 1;
+            }
+
             // screenshot [selector] [path]
             // selector: @ref or CSS selector
             // path: file path (contains / or . or ends with known extension)
-            let (selector, path) = match (rest.first(), rest.get(1)) {
+            let (selector, path) = match (filtered_rest.first(), filtered_rest.get(1)) {
                 (Some(first), Some(second)) => {
                     // Two args: first is selector, second is path
                     (Some(*first), Some(*second))
@@ -399,9 +436,11 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                 }
                 _ => (None, None),
             };
-            Ok(
-                json!({ "id": id, "action": "screenshot", "path": path, "selector": selector, "fullPage": flags.full, "annotate": flags.annotate }),
-            )
+            let mut cmd = json!({ "id": id, "action": "screenshot", "path": path, "selector": selector, "fullPage": flags.full, "annotate": flags.annotate });
+            if let Some(scale) = scale_value {
+                cmd["scale"] = scale;
+            }
+            Ok(cmd)
         }
         "pdf" => {
             let path = rest.first().ok_or_else(|| ParseError::MissingArguments {
