@@ -2,6 +2,7 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::{json, Value};
 use std::io::{self, BufRead};
 
+use crate::color;
 use crate::flags::Flags;
 use crate::validation::{is_valid_session_name, session_name_error};
 
@@ -82,6 +83,13 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
     let rest: Vec<&str> = args[1..].iter().map(|s| s.as_str()).collect();
     let id = gen_id();
 
+    if flags.annotate && cmd != "screenshot" {
+        eprintln!(
+            "{} --annotate only applies to the screenshot command",
+            color::warning_indicator()
+        );
+    }
+
     match cmd {
         // === Navigation ===
         "open" | "goto" | "navigate" => {
@@ -103,9 +111,12 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
             let mut nav_cmd = json!({ "id": id, "action": "navigate", "url": url });
             // If --headers flag is set, include headers (scoped to this origin)
             if let Some(ref headers_json) = flags.headers {
-                if let Ok(headers) = serde_json::from_str::<serde_json::Value>(headers_json) {
-                    nav_cmd["headers"] = headers;
-                }
+                let headers = serde_json::from_str::<serde_json::Value>(headers_json)
+                    .map_err(|_| ParseError::InvalidValue {
+                        message: format!("Invalid JSON for --headers: {}", headers_json),
+                        usage: "open <url> --headers '{\"Key\": \"Value\"}'",
+                    })?;
+                nav_cmd["headers"] = headers;
             }
             // Include iOS device info if specified (needed for auto-launch with existing daemon)
             if flags.provider.as_deref() == Some("ios") {
@@ -345,10 +356,8 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
 
             // Default: selector or timeout
             if let Some(arg) = rest.first() {
-                if arg.parse::<u64>().is_ok() {
-                    Ok(
-                        json!({ "id": id, "action": "wait", "timeout": arg.parse::<u64>().unwrap() }),
-                    )
+                if let Ok(timeout) = arg.parse::<u64>() {
+                    Ok(json!({ "id": id, "action": "wait", "timeout": timeout }))
                 } else {
                     Ok(json!({ "id": id, "action": "wait", "selector": arg }))
                 }
@@ -391,7 +400,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                 _ => (None, None),
             };
             Ok(
-                json!({ "id": id, "action": "screenshot", "path": path, "selector": selector, "fullPage": flags.full }),
+                json!({ "id": id, "action": "screenshot", "path": path, "selector": selector, "fullPage": flags.full, "annotate": flags.annotate }),
             )
         }
         "pdf" => {
@@ -684,7 +693,8 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                 Ok(cmd)
             }
             Some(n) if n.parse::<i32>().is_ok() => {
-                Ok(json!({ "id": id, "action": "tab_switch", "index": n.parse::<i32>().unwrap() }))
+                let index = n.parse::<i32>().expect("already checked parse succeeds");
+                Ok(json!({ "id": id, "action": "tab_switch", "index": index }))
             }
             _ => Ok(json!({ "id": id, "action": "tab_list" })),
         },
@@ -746,11 +756,11 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
             match rest.first().copied() {
                 Some("start") => Ok(json!({ "id": id, "action": "trace_start" })),
                 Some("stop") => {
-                    let path = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
-                        context: "trace stop".to_string(),
-                        usage: "trace stop <path>",
-                    })?;
-                    Ok(json!({ "id": id, "action": "trace_stop", "path": path }))
+                    let mut cmd = json!({ "id": id, "action": "trace_stop" });
+                    if let Some(path) = rest.get(1) {
+                        cmd["path"] = json!(path);
+                    }
+                    Ok(cmd)
                 }
                 Some(sub) => Err(ParseError::UnknownSubcommand {
                     subcommand: sub.to_string(),
@@ -759,6 +769,43 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                 None => Err(ParseError::MissingArguments {
                     context: "trace".to_string(),
                     usage: "trace <start|stop> [path]",
+                }),
+            }
+        }
+
+        // === Profiler (CDP Tracing / Chromium profiling) ===
+        "profiler" => {
+            const VALID: &[&str] = &["start", "stop"];
+            match rest.first().copied() {
+                Some("start") => {
+                    let mut cmd = json!({ "id": id, "action": "profiler_start" });
+                    if let Some(idx) = rest.iter().position(|s| *s == "--categories") {
+                        if let Some(cats) = rest.get(idx + 1) {
+                            let categories: Vec<&str> = cats.split(',').collect();
+                            cmd["categories"] = json!(categories);
+                        } else {
+                            return Err(ParseError::MissingArguments {
+                                context: "profiler start --categories".to_string(),
+                                usage: "--categories <list>",
+                            });
+                        }
+                    }
+                    Ok(cmd)
+                }
+                Some("stop") => {
+                    let mut cmd = json!({ "id": id, "action": "profiler_stop" });
+                    if let Some(path) = rest.get(1) {
+                        cmd["path"] = json!(path);
+                    }
+                    Ok(cmd)
+                }
+                Some(sub) => Err(ParseError::UnknownSubcommand {
+                    subcommand: sub.to_string(),
+                    valid_options: VALID,
+                }),
+                None => Err(ParseError::MissingArguments {
+                    context: "profiler".to_string(),
+                    usage: "profiler <start|stop> [options]",
                 }),
             }
         }
@@ -990,8 +1037,280 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
             }
         }
 
+        "diff" => parse_diff(&rest, &id, flags),
+
         _ => Err(ParseError::UnknownCommand {
             command: cmd.to_string(),
+        }),
+    }
+}
+
+fn parse_diff(rest: &[&str], id: &str, flags: &Flags) -> Result<Value, ParseError> {
+    const VALID: &[&str] = &["snapshot", "screenshot", "url"];
+
+    match rest.first().copied() {
+        Some("snapshot") => {
+            let mut cmd = json!({ "id": id, "action": "diff_snapshot" });
+            let obj = cmd.as_object_mut().unwrap();
+            let mut i = 1;
+            while i < rest.len() {
+                match rest[i] {
+                    "-b" | "--baseline" => {
+                        if let Some(path) = rest.get(i + 1) {
+                            obj.insert("baseline".to_string(), json!(path));
+                            i += 1;
+                        } else {
+                            return Err(ParseError::MissingArguments {
+                                context: "diff snapshot --baseline".to_string(),
+                                usage: "diff snapshot --baseline <file>",
+                            });
+                        }
+                    }
+                    "-s" | "--selector" => {
+                        if let Some(s) = rest.get(i + 1) {
+                            obj.insert("selector".to_string(), json!(s));
+                            i += 1;
+                        } else {
+                            return Err(ParseError::MissingArguments {
+                                context: "diff snapshot --selector".to_string(),
+                                usage: "diff snapshot --selector <sel>",
+                            });
+                        }
+                    }
+                    "-c" | "--compact" => {
+                        obj.insert("compact".to_string(), json!(true));
+                    }
+                    "-d" | "--depth" => {
+                        if let Some(d) = rest.get(i + 1) {
+                            match d.parse::<u32>() {
+                                Ok(n) => {
+                                    obj.insert("maxDepth".to_string(), json!(n));
+                                    i += 1;
+                                }
+                                Err(_) => {
+                                    return Err(ParseError::InvalidValue {
+                                        message: format!("Depth must be a non-negative integer, got: {}", d),
+                                        usage: "diff snapshot --depth <n>",
+                                    });
+                                }
+                            }
+                        } else {
+                            return Err(ParseError::MissingArguments {
+                                context: "diff snapshot --depth".to_string(),
+                                usage: "diff snapshot --depth <n>",
+                            });
+                        }
+                    }
+                    other if other.starts_with('-') => {
+                        return Err(ParseError::InvalidValue {
+                            message: format!("Unknown flag: {}", other),
+                            usage: "diff snapshot [--baseline <file>] [--selector <sel>] [--compact] [--depth <n>]",
+                        });
+                    }
+                    other => {
+                        return Err(ParseError::InvalidValue {
+                            message: format!("Unexpected argument: {}", other),
+                            usage: "diff snapshot [--baseline <file>] [--selector <sel>] [--compact] [--depth <n>]",
+                        });
+                    }
+                }
+                i += 1;
+            }
+            Ok(cmd)
+        }
+        Some("screenshot") => {
+            let mut cmd = json!({ "id": id, "action": "diff_screenshot" });
+            let obj = cmd.as_object_mut().unwrap();
+            let mut i = 1;
+            while i < rest.len() {
+                match rest[i] {
+                    "-b" | "--baseline" => {
+                        if let Some(path) = rest.get(i + 1) {
+                            obj.insert("baseline".to_string(), json!(path));
+                            i += 1;
+                        } else {
+                            return Err(ParseError::MissingArguments {
+                                context: "diff screenshot --baseline".to_string(),
+                                usage: "diff screenshot --baseline <file>",
+                            });
+                        }
+                    }
+                    "-o" | "--output" => {
+                        if let Some(path) = rest.get(i + 1) {
+                            obj.insert("output".to_string(), json!(path));
+                            i += 1;
+                        } else {
+                            return Err(ParseError::MissingArguments {
+                                context: "diff screenshot --output".to_string(),
+                                usage: "diff screenshot --output <file>",
+                            });
+                        }
+                    }
+                    "-t" | "--threshold" => {
+                        if let Some(t) = rest.get(i + 1) {
+                            match t.parse::<f64>() {
+                                Ok(n) if (0.0..=1.0).contains(&n) => {
+                                    obj.insert("threshold".to_string(), json!(n));
+                                    i += 1;
+                                }
+                                Ok(n) => {
+                                    return Err(ParseError::InvalidValue {
+                                        message: format!("Threshold must be between 0 and 1, got {}", n),
+                                        usage: "diff screenshot --threshold <0-1>",
+                                    });
+                                }
+                                Err(_) => {
+                                    return Err(ParseError::InvalidValue {
+                                        message: format!("Invalid threshold value: {}", t),
+                                        usage: "diff screenshot --threshold <0-1>",
+                                    });
+                                }
+                            }
+                        } else {
+                            return Err(ParseError::MissingArguments {
+                                context: "diff screenshot --threshold".to_string(),
+                                usage: "diff screenshot --threshold <0-1>",
+                            });
+                        }
+                    }
+                    "-s" | "--selector" => {
+                        if let Some(s) = rest.get(i + 1) {
+                            obj.insert("selector".to_string(), json!(s));
+                            i += 1;
+                        } else {
+                            return Err(ParseError::MissingArguments {
+                                context: "diff screenshot --selector".to_string(),
+                                usage: "diff screenshot --selector <sel>",
+                            });
+                        }
+                    }
+                    "--full" => {
+                        obj.insert("fullPage".to_string(), json!(true));
+                    }
+                    other if other.starts_with('-') => {
+                        return Err(ParseError::InvalidValue {
+                            message: format!("Unknown flag: {}", other),
+                            usage: "diff screenshot --baseline <file> [--output <file>] [--threshold <0-1>] [--selector <sel>] [--full]",
+                        });
+                    }
+                    other => {
+                        return Err(ParseError::InvalidValue {
+                            message: format!("Unexpected argument: {}", other),
+                            usage: "diff screenshot --baseline <file> [--output <file>] [--threshold <0-1>] [--selector <sel>] [--full]",
+                        });
+                    }
+                }
+                i += 1;
+            }
+            if flags.full {
+                obj.insert("fullPage".to_string(), json!(true));
+            }
+            if !obj.contains_key("baseline") {
+                return Err(ParseError::MissingArguments {
+                    context: "diff screenshot".to_string(),
+                    usage: "diff screenshot --baseline <file>",
+                });
+            }
+            Ok(cmd)
+        }
+        Some("url") => {
+            let url1 = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
+                context: "diff url".to_string(),
+                usage: "diff url <url1> <url2>",
+            })?;
+            let url2 = rest.get(2).ok_or_else(|| ParseError::MissingArguments {
+                context: "diff url".to_string(),
+                usage: "diff url <url1> <url2>",
+            })?;
+            let mut cmd = json!({
+                "id": id,
+                "action": "diff_url",
+                "url1": url1,
+                "url2": url2,
+            });
+            let obj = cmd.as_object_mut().unwrap();
+            let mut i = 3;
+            while i < rest.len() {
+                match rest[i] {
+                    "--screenshot" => {
+                        obj.insert("screenshot".to_string(), json!(true));
+                    }
+                    "--full" => {
+                        obj.insert("fullPage".to_string(), json!(true));
+                    }
+                    "--wait-until" => {
+                        if let Some(val) = rest.get(i + 1) {
+                            obj.insert("waitUntil".to_string(), json!(val));
+                            i += 1;
+                        } else {
+                            return Err(ParseError::MissingArguments {
+                                context: "diff url --wait-until".to_string(),
+                                usage: "diff url <url1> <url2> --wait-until <load|domcontentloaded|networkidle>",
+                            });
+                        }
+                    }
+                    "-s" | "--selector" => {
+                        if let Some(s) = rest.get(i + 1) {
+                            obj.insert("selector".to_string(), json!(s));
+                            i += 1;
+                        } else {
+                            return Err(ParseError::MissingArguments {
+                                context: "diff url --selector".to_string(),
+                                usage: "diff url <url1> <url2> --selector <sel>",
+                            });
+                        }
+                    }
+                    "-c" | "--compact" => {
+                        obj.insert("compact".to_string(), json!(true));
+                    }
+                    "-d" | "--depth" => {
+                        if let Some(d) = rest.get(i + 1) {
+                            match d.parse::<u32>() {
+                                Ok(n) => {
+                                    obj.insert("maxDepth".to_string(), json!(n));
+                                    i += 1;
+                                }
+                                Err(_) => {
+                                    return Err(ParseError::InvalidValue {
+                                        message: format!("Depth must be a non-negative integer, got: {}", d),
+                                        usage: "diff url <url1> <url2> --depth <n>",
+                                    });
+                                }
+                            }
+                        } else {
+                            return Err(ParseError::MissingArguments {
+                                context: "diff url --depth".to_string(),
+                                usage: "diff url <url1> <url2> --depth <n>",
+                            });
+                        }
+                    }
+                    other if other.starts_with('-') => {
+                        return Err(ParseError::InvalidValue {
+                            message: format!("Unknown flag: {}", other),
+                            usage: "diff url <url1> <url2> [--screenshot] [--full] [--wait-until <strategy>] [--selector <sel>] [--compact] [--depth <n>]",
+                        });
+                    }
+                    other => {
+                        return Err(ParseError::InvalidValue {
+                            message: format!("Unexpected argument: {}", other),
+                            usage: "diff url <url1> <url2> [--screenshot] [--full] [--wait-until <strategy>] [--selector <sel>] [--compact] [--depth <n>]",
+                        });
+                    }
+                }
+                i += 1;
+            }
+            if flags.full {
+                obj.insert("fullPage".to_string(), json!(true));
+            }
+            Ok(cmd)
+        }
+        Some(sub) => Err(ParseError::UnknownSubcommand {
+            subcommand: sub.to_string(),
+            valid_options: VALID,
+        }),
+        None => Err(ParseError::MissingArguments {
+            context: "diff".to_string(),
+            usage: "diff <snapshot|screenshot|url>",
         }),
     }
 }
@@ -1544,6 +1863,7 @@ mod tests {
             cli_proxy: false,
             cli_proxy_bypass: false,
             cli_allow_file_access: false,
+            annotate: false,
         }
     }
 
@@ -1831,9 +2151,12 @@ mod tests {
     fn test_navigate_with_invalid_headers_json() {
         let mut flags = default_flags();
         flags.headers = Some("not valid json".to_string());
-        let cmd = parse_command(&args("open api.example.com"), &flags).unwrap();
-        // Invalid JSON should result in no headers field (graceful handling)
-        assert!(cmd.get("headers").is_none());
+        let result = parse_command(&args("open api.example.com"), &flags);
+        // Invalid JSON should return a ParseError, not silently drop headers
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        let msg = err.format();
+        assert!(msg.contains("Invalid JSON for --headers"));
     }
 
     // === Set Headers Tests ===
@@ -2244,6 +2567,73 @@ mod tests {
         ));
     }
 
+    // === Profile (CDP Tracing) Tests ===
+
+    #[test]
+    fn test_profiler_start() {
+        let cmd = parse_command(&args("profiler start"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "profiler_start");
+        assert!(cmd.get("categories").is_none());
+    }
+
+    #[test]
+    fn test_profiler_start_with_categories() {
+        let cmd = parse_command(
+            &args("profiler start --categories devtools.timeline,v8.execute"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "profiler_start");
+        let categories = cmd["categories"].as_array().unwrap();
+        assert_eq!(categories.len(), 2);
+        assert_eq!(categories[0], "devtools.timeline");
+        assert_eq!(categories[1], "v8.execute");
+    }
+
+    #[test]
+    fn test_profiler_start_categories_missing_value() {
+        let result = parse_command(&args("profiler start --categories"), &default_flags());
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::MissingArguments { .. }
+        ));
+    }
+
+    #[test]
+    fn test_profiler_stop_with_path() {
+        let cmd = parse_command(&args("profiler stop trace.json"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "profiler_stop");
+        assert_eq!(cmd["path"], "trace.json");
+    }
+
+    #[test]
+    fn test_profiler_stop_no_path() {
+        let cmd = parse_command(&args("profiler stop"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "profiler_stop");
+        assert!(cmd.get("path").is_none());
+    }
+
+    #[test]
+    fn test_profiler_invalid_subcommand() {
+        let result = parse_command(&args("profiler foo"), &default_flags());
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::UnknownSubcommand { .. }
+        ));
+    }
+
+    #[test]
+    fn test_profiler_missing_subcommand() {
+        let result = parse_command(&args("profiler"), &default_flags());
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::MissingArguments { .. }
+        ));
+    }
+
     // === Eval Tests ===
 
     #[test]
@@ -2571,5 +2961,443 @@ mod tests {
         let cmd = parse_command(&args("connect 1"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "launch");
         assert_eq!(cmd["cdpPort"], 1);
+    }
+
+    // === Trace Tests ===
+
+    #[test]
+    fn test_trace_start() {
+        let cmd = parse_command(&args("trace start"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "trace_start");
+    }
+
+    #[test]
+    fn test_trace_stop_with_path() {
+        let cmd = parse_command(&args("trace stop ./trace.zip"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "trace_stop");
+        assert_eq!(cmd["path"], "./trace.zip");
+    }
+
+    #[test]
+    fn test_trace_stop_without_path() {
+        let cmd = parse_command(&args("trace stop"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "trace_stop");
+        assert!(cmd.get("path").is_none() || cmd["path"].is_null());
+    }
+
+    // === Diff Tests ===
+
+    #[test]
+    fn test_diff_snapshot_basic() {
+        let cmd = parse_command(&args("diff snapshot"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "diff_snapshot");
+    }
+
+    #[test]
+    fn test_diff_snapshot_baseline() {
+        let cmd =
+            parse_command(&args("diff snapshot --baseline before.txt"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "diff_snapshot");
+        assert_eq!(cmd["baseline"], "before.txt");
+    }
+
+    #[test]
+    fn test_diff_snapshot_selector_compact_depth() {
+        let cmd = parse_command(
+            &args("diff snapshot --selector #main --compact --depth 3"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "diff_snapshot");
+        assert_eq!(cmd["selector"], "#main");
+        assert_eq!(cmd["compact"], true);
+        assert_eq!(cmd["maxDepth"], 3);
+    }
+
+    #[test]
+    fn test_diff_snapshot_short_flags() {
+        let cmd =
+            parse_command(&args("diff snapshot -b snap.txt -s .content -c -d 2"), &default_flags())
+                .unwrap();
+        assert_eq!(cmd["action"], "diff_snapshot");
+        assert_eq!(cmd["baseline"], "snap.txt");
+        assert_eq!(cmd["selector"], ".content");
+        assert_eq!(cmd["compact"], true);
+        assert_eq!(cmd["maxDepth"], 2);
+    }
+
+    #[test]
+    fn test_diff_screenshot_baseline() {
+        let cmd = parse_command(
+            &args("diff screenshot --baseline before.png"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "diff_screenshot");
+        assert_eq!(cmd["baseline"], "before.png");
+    }
+
+    #[test]
+    fn test_diff_screenshot_all_options() {
+        let cmd = parse_command(
+            &args("diff screenshot --baseline b.png --output d.png --threshold 0.2 --selector #hero --full"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "diff_screenshot");
+        assert_eq!(cmd["baseline"], "b.png");
+        assert_eq!(cmd["output"], "d.png");
+        assert_eq!(cmd["threshold"], 0.2);
+        assert_eq!(cmd["selector"], "#hero");
+        assert_eq!(cmd["fullPage"], true);
+    }
+
+    #[test]
+    fn test_diff_screenshot_missing_baseline() {
+        let result = parse_command(&args("diff screenshot"), &default_flags());
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::MissingArguments { .. }
+        ));
+    }
+
+    #[test]
+    fn test_diff_screenshot_global_full_flag() {
+        let mut flags = default_flags();
+        flags.full = true;
+        let cmd =
+            parse_command(&args("diff screenshot --baseline b.png"), &flags).unwrap();
+        assert_eq!(cmd["action"], "diff_screenshot");
+        assert_eq!(cmd["fullPage"], true);
+    }
+
+    #[test]
+    fn test_diff_url_basic() {
+        let cmd = parse_command(
+            &args("diff url https://a.com https://b.com"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "diff_url");
+        assert_eq!(cmd["url1"], "https://a.com");
+        assert_eq!(cmd["url2"], "https://b.com");
+    }
+
+    #[test]
+    fn test_diff_url_with_screenshot_full() {
+        let cmd = parse_command(
+            &args("diff url https://a.com https://b.com --screenshot --full"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "diff_url");
+        assert_eq!(cmd["screenshot"], true);
+        assert_eq!(cmd["fullPage"], true);
+    }
+
+    #[test]
+    fn test_diff_url_with_wait_until() {
+        let cmd = parse_command(
+            &args("diff url https://a.com https://b.com --wait-until networkidle"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "diff_url");
+        assert_eq!(cmd["waitUntil"], "networkidle");
+    }
+
+    #[test]
+    fn test_diff_url_global_full_flag() {
+        let mut flags = default_flags();
+        flags.full = true;
+        let cmd =
+            parse_command(&args("diff url https://a.com https://b.com"), &flags).unwrap();
+        assert_eq!(cmd["fullPage"], true);
+    }
+
+    #[test]
+    fn test_diff_missing_subcommand() {
+        let result = parse_command(&args("diff"), &default_flags());
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::MissingArguments { .. }
+        ));
+    }
+
+    #[test]
+    fn test_diff_unknown_subcommand() {
+        let result = parse_command(&args("diff invalid"), &default_flags());
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::UnknownSubcommand { .. }
+        ));
+    }
+
+    #[test]
+    fn test_diff_snapshot_baseline_missing_value() {
+        let result = parse_command(&args("diff snapshot --baseline"), &default_flags());
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::MissingArguments { .. }
+        ));
+    }
+
+    #[test]
+    fn test_diff_snapshot_selector_missing_value() {
+        let result = parse_command(&args("diff snapshot --selector"), &default_flags());
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::MissingArguments { .. }
+        ));
+    }
+
+    #[test]
+    fn test_diff_snapshot_depth_missing_value() {
+        let result = parse_command(&args("diff snapshot --depth"), &default_flags());
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::MissingArguments { .. }
+        ));
+    }
+
+    #[test]
+    fn test_diff_screenshot_threshold_missing_value() {
+        let result = parse_command(
+            &args("diff screenshot --baseline b.png --threshold"),
+            &default_flags(),
+        );
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::MissingArguments { .. }
+        ));
+    }
+
+    #[test]
+    fn test_diff_screenshot_output_missing_value() {
+        let result = parse_command(
+            &args("diff screenshot --baseline b.png --output"),
+            &default_flags(),
+        );
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::MissingArguments { .. }
+        ));
+    }
+
+    #[test]
+    fn test_diff_url_wait_until_missing_value() {
+        let result = parse_command(
+            &args("diff url https://a.com https://b.com --wait-until"),
+            &default_flags(),
+        );
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::MissingArguments { .. }
+        ));
+    }
+
+    #[test]
+    fn test_diff_snapshot_unexpected_arg() {
+        let result = parse_command(&args("diff snapshot foo"), &default_flags());
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::InvalidValue { .. }
+        ));
+    }
+
+    #[test]
+    fn test_diff_screenshot_unexpected_arg() {
+        let result = parse_command(
+            &args("diff screenshot --baseline b.png unexpected"),
+            &default_flags(),
+        );
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::InvalidValue { .. }
+        ));
+    }
+
+    #[test]
+    fn test_diff_url_unexpected_arg() {
+        let result = parse_command(
+            &args("diff url https://a.com https://b.com extra"),
+            &default_flags(),
+        );
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::InvalidValue { .. }
+        ));
+    }
+
+    #[test]
+    fn test_diff_snapshot_unknown_flag() {
+        let result = parse_command(&args("diff snapshot --invalid"), &default_flags());
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::InvalidValue { .. }
+        ));
+    }
+
+    #[test]
+    fn test_diff_url_missing_urls() {
+        let result = parse_command(&args("diff url"), &default_flags());
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::MissingArguments { .. }
+        ));
+    }
+
+    #[test]
+    fn test_diff_url_missing_second_url() {
+        let result = parse_command(&args("diff url https://a.com"), &default_flags());
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::MissingArguments { .. }
+        ));
+    }
+
+    #[test]
+    fn test_diff_snapshot_depth_invalid_value() {
+        let result = parse_command(&args("diff snapshot --depth abc"), &default_flags());
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::InvalidValue { .. }
+        ));
+    }
+
+    #[test]
+    fn test_diff_screenshot_threshold_invalid_value() {
+        let result = parse_command(
+            &args("diff screenshot --baseline b.png --threshold abc"),
+            &default_flags(),
+        );
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::InvalidValue { .. }
+        ));
+    }
+
+    #[test]
+    fn test_diff_screenshot_threshold_out_of_range() {
+        let result = parse_command(
+            &args("diff screenshot --baseline b.png --threshold 1.5"),
+            &default_flags(),
+        );
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::InvalidValue { .. }
+        ));
+    }
+
+    #[test]
+    fn test_diff_screenshot_threshold_negative() {
+        let result = parse_command(
+            &args("diff screenshot --baseline b.png --threshold -0.5"),
+            &default_flags(),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_diff_url_with_selector() {
+        let cmd = parse_command(
+            &args("diff url https://a.com https://b.com --selector #main"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "diff_url");
+        assert_eq!(cmd["selector"], "#main");
+    }
+
+    #[test]
+    fn test_diff_url_with_compact_depth() {
+        let cmd = parse_command(
+            &args("diff url https://a.com https://b.com --compact --depth 3"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "diff_url");
+        assert_eq!(cmd["compact"], true);
+        assert_eq!(cmd["maxDepth"], 3);
+    }
+
+    #[test]
+    fn test_diff_url_with_short_snapshot_flags() {
+        let cmd = parse_command(
+            &args("diff url https://a.com https://b.com -s .content -c -d 2"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "diff_url");
+        assert_eq!(cmd["selector"], ".content");
+        assert_eq!(cmd["compact"], true);
+        assert_eq!(cmd["maxDepth"], 2);
+    }
+
+    #[test]
+    fn test_diff_url_depth_invalid_value() {
+        let result = parse_command(
+            &args("diff url https://a.com https://b.com --depth abc"),
+            &default_flags(),
+        );
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::InvalidValue { .. }
+        ));
+    }
+
+    #[test]
+    fn test_diff_snapshot_depth_negative_value() {
+        let result = parse_command(&args("diff snapshot --depth -1"), &default_flags());
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::InvalidValue { .. }
+        ));
+    }
+
+    #[test]
+    fn test_diff_url_depth_negative_value() {
+        let result = parse_command(
+            &args("diff url https://a.com https://b.com --depth -1"),
+            &default_flags(),
+        );
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::InvalidValue { .. }
+        ));
+    }
+
+    #[test]
+    fn test_diff_url_selector_missing_value() {
+        let result = parse_command(
+            &args("diff url https://a.com https://b.com --selector"),
+            &default_flags(),
+        );
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::MissingArguments { .. }
+        ));
     }
 }

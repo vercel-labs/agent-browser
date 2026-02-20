@@ -17,7 +17,8 @@ import {
 import path from 'node:path';
 import os from 'node:os';
 import { existsSync, mkdirSync, rmSync, readFileSync } from 'node:fs';
-import type { LaunchCommand } from './types.js';
+import { writeFile, mkdir } from 'node:fs/promises';
+import type { LaunchCommand, TraceEvent } from './types.js';
 import { type RefMap, type EnhancedSnapshot, getEnhancedSnapshot, parseRef } from './snapshot.js';
 import { safeHeaderMerge } from './state-utils.js';
 import {
@@ -122,6 +123,15 @@ export class BrowserManager {
     return warnings;
   }
 
+  // CDP profiling state
+  private static readonly MAX_PROFILE_EVENTS = 5_000_000;
+  private profilingActive: boolean = false;
+  private profileChunks: TraceEvent[] = [];
+  private profileEventsDropped: boolean = false;
+  private profileCompleteResolver: (() => void) | null = null;
+  private profileDataHandler: ((params: { value?: TraceEvent[] }) => void) | null = null;
+  private profileCompleteHandler: (() => void) | null = null;
+
   /**
    * Check if browser is launched
    */
@@ -144,6 +154,20 @@ export class BrowserManager {
     this.refMap = snapshot.refs;
     this.lastSnapshot = snapshot.tree;
     return snapshot;
+  }
+
+  /**
+   * Get the last snapshot tree text (empty string if no snapshot has been taken)
+   */
+  getLastSnapshot(): string {
+    return this.lastSnapshot;
+  }
+
+  /**
+   * Update the stored snapshot (used by diff to keep the baseline current)
+   */
+  setLastSnapshot(snapshot: string): void {
+    this.lastSnapshot = snapshot;
   }
 
   /**
@@ -680,10 +704,10 @@ export class BrowserManager {
   /**
    * Stop tracing and save
    */
-  async stopTracing(path: string): Promise<void> {
+  async stopTracing(path?: string): Promise<void> {
     const context = this.contexts[0];
     if (context) {
-      await context.tracing.stop({ path });
+      await context.tracing.stop(path ? { path } : undefined);
     }
   }
 
@@ -1349,7 +1373,6 @@ export class BrowserManager {
 
     const launcher =
       browserType === 'firefox' ? firefox : browserType === 'webkit' ? webkit : chromium;
-    const viewport = options.viewport ?? { width: 1280, height: 720 };
 
     // Build base args array with file access flags if enabled
     // --allow-file-access-from-files: allows file:// URLs to read other file:// URLs via XHR/fetch
@@ -1362,6 +1385,18 @@ export class BrowserManager {
       : fileAccessArgs.length > 0
         ? fileAccessArgs
         : undefined;
+
+    // Auto-detect args that control window size and disable viewport emulation
+    // so Playwright doesn't override the browser's own sizing behavior
+    const hasWindowSizeArgs = baseArgs?.some(
+      (arg) => arg === '--start-maximized' || arg.startsWith('--window-size=')
+    );
+    const viewport =
+      options.viewport !== undefined
+        ? options.viewport
+        : hasWindowSizeArgs
+          ? null
+          : { width: 1280, height: 720 };
 
     let context: BrowserContext;
     if (hasExtensions) {
@@ -1790,16 +1825,16 @@ export class BrowserManager {
   /**
    * Create a new window (new context)
    */
-  async newWindow(viewport?: {
-    width: number;
-    height: number;
-  }): Promise<{ index: number; total: number }> {
+  async newWindow(viewport?: { width: number; height: number } | null): Promise<{
+    index: number;
+    total: number;
+  }> {
     if (!this.browser) {
       throw new Error('Browser not launched');
     }
 
     const context = await this.browser.newContext({
-      viewport: viewport ?? { width: 1280, height: 720 },
+      viewport: viewport === undefined ? { width: 1280, height: 720 } : viewport,
     });
     context.setDefaultTimeout(60000);
     this.contexts.push(context);
@@ -1998,6 +2033,156 @@ export class BrowserManager {
     this.screencastActive = false;
     this.frameCallback = null;
     this.screencastFrameHandler = null;
+  }
+
+  /**
+   * Check if profiling is currently active
+   */
+  isProfilingActive(): boolean {
+    return this.profilingActive;
+  }
+
+  /**
+   * Start CDP profiling (Tracing)
+   */
+  async startProfiling(options?: { categories?: string[] }): Promise<void> {
+    if (this.profilingActive) {
+      throw new Error('Profiling already active');
+    }
+
+    const cdp = await this.getCDPSession();
+
+    const dataHandler = (params: { value?: TraceEvent[] }) => {
+      if (params.value) {
+        for (const evt of params.value) {
+          if (this.profileChunks.length >= BrowserManager.MAX_PROFILE_EVENTS) {
+            if (!this.profileEventsDropped) {
+              this.profileEventsDropped = true;
+              console.warn(
+                `Profiling: exceeded ${BrowserManager.MAX_PROFILE_EVENTS} events, dropping further data`
+              );
+            }
+            return;
+          }
+          this.profileChunks.push(evt);
+        }
+      }
+    };
+
+    const completeHandler = () => {
+      if (this.profileCompleteResolver) {
+        this.profileCompleteResolver();
+      }
+    };
+
+    cdp.on('Tracing.dataCollected', dataHandler);
+    cdp.on('Tracing.tracingComplete', completeHandler);
+
+    const categories = options?.categories ?? [
+      'devtools.timeline',
+      'disabled-by-default-devtools.timeline',
+      'disabled-by-default-devtools.timeline.frame',
+      'disabled-by-default-devtools.timeline.stack',
+      'v8.execute',
+      'disabled-by-default-v8.cpu_profiler',
+      'disabled-by-default-v8.cpu_profiler.hires',
+      'v8',
+      'disabled-by-default-v8.runtime_stats',
+      'blink',
+      'blink.user_timing',
+      'latencyInfo',
+      'renderer.scheduler',
+      'sequence_manager',
+      'toplevel',
+    ];
+
+    try {
+      await cdp.send('Tracing.start', {
+        traceConfig: {
+          includedCategories: categories,
+          enableSampling: true,
+        },
+        transferMode: 'ReportEvents',
+      });
+    } catch (error) {
+      cdp.off('Tracing.dataCollected', dataHandler);
+      cdp.off('Tracing.tracingComplete', completeHandler);
+      throw error;
+    }
+
+    // Only commit state after the CDP call succeeds
+    this.profilingActive = true;
+    this.profileChunks = [];
+    this.profileEventsDropped = false;
+    this.profileDataHandler = dataHandler;
+    this.profileCompleteHandler = completeHandler;
+  }
+
+  /**
+   * Stop CDP profiling and save to file
+   */
+  async stopProfiling(outputPath: string): Promise<{ path: string; eventCount: number }> {
+    if (!this.profilingActive) {
+      throw new Error('No profiling session active');
+    }
+
+    const cdp = await this.getCDPSession();
+
+    const TRACE_TIMEOUT_MS = 30_000;
+    const completePromise = new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error('Profiling data collection timed out')),
+        TRACE_TIMEOUT_MS
+      );
+      this.profileCompleteResolver = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+    });
+
+    await cdp.send('Tracing.end');
+
+    let chunks: TraceEvent[];
+    try {
+      await completePromise;
+      chunks = this.profileChunks;
+    } finally {
+      if (this.profileDataHandler) {
+        cdp.off('Tracing.dataCollected', this.profileDataHandler);
+      }
+      if (this.profileCompleteHandler) {
+        cdp.off('Tracing.tracingComplete', this.profileCompleteHandler);
+      }
+      this.profilingActive = false;
+      this.profileChunks = [];
+      this.profileEventsDropped = false;
+      this.profileCompleteResolver = null;
+      this.profileDataHandler = null;
+      this.profileCompleteHandler = null;
+    }
+
+    const clockDomain =
+      process.platform === 'linux'
+        ? 'LINUX_CLOCK_MONOTONIC'
+        : process.platform === 'darwin'
+          ? 'MAC_MACH_ABSOLUTE_TIME'
+          : undefined;
+
+    const traceData: Record<string, unknown> = {
+      traceEvents: chunks,
+    };
+    if (clockDomain) {
+      traceData.metadata = { 'clock-domain': clockDomain };
+    }
+
+    const dir = path.dirname(outputPath);
+    await mkdir(dir, { recursive: true });
+
+    await writeFile(outputPath, JSON.stringify(traceData));
+
+    const eventCount = chunks.length;
+
+    return { path: outputPath, eventCount };
   }
 
   /**
@@ -2311,6 +2496,26 @@ export class BrowserManager {
     // Stop screencast if active
     if (this.screencastActive) {
       await this.stopScreencast();
+    }
+
+    // Clean up profiling state if active (without saving)
+    if (this.profilingActive) {
+      const cdp = this.cdpSession;
+      if (cdp) {
+        if (this.profileDataHandler) {
+          cdp.off('Tracing.dataCollected', this.profileDataHandler);
+        }
+        if (this.profileCompleteHandler) {
+          cdp.off('Tracing.tracingComplete', this.profileCompleteHandler);
+        }
+        await cdp.send('Tracing.end').catch(() => {});
+      }
+      this.profilingActive = false;
+      this.profileChunks = [];
+      this.profileEventsDropped = false;
+      this.profileCompleteResolver = null;
+      this.profileDataHandler = null;
+      this.profileCompleteHandler = null;
     }
 
     // Clean up CDP session

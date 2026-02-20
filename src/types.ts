@@ -10,7 +10,7 @@ export interface BaseCommand {
 export interface LaunchCommand extends BaseCommand {
   action: 'launch';
   headless?: boolean;
-  viewport?: { width: number; height: number };
+  viewport?: { width: number; height: number } | null;
   browser?: 'chromium' | 'firefox' | 'webkit';
   headers?: Record<string, string>;
   executablePath?: string;
@@ -576,7 +576,34 @@ export interface TraceStartCommand extends BaseCommand {
 
 export interface TraceStopCommand extends BaseCommand {
   action: 'trace_stop';
-  path: string;
+  path?: string;
+}
+
+/**
+ * Chrome Trace Event format. All fields are optional because CDP trace event
+ * shapes vary across categories and event phases -- this type is intentionally
+ * loose to accept any valid trace event without data loss.
+ */
+export interface TraceEvent {
+  cat?: string;
+  name?: string;
+  ph?: string;
+  pid?: number;
+  tid?: number;
+  ts?: number;
+  dur?: number;
+  args?: Record<string, unknown>;
+  [key: string]: unknown;
+}
+
+export interface ProfilerStartCommand extends BaseCommand {
+  action: 'profiler_start';
+  categories?: string[]; // Optional trace categories (e.g., "devtools.timeline")
+}
+
+export interface ProfilerStopCommand extends BaseCommand {
+  action: 'profiler_stop';
+  path?: string;
 }
 
 // HAR recording
@@ -780,6 +807,7 @@ export interface ScreenshotCommand extends BaseCommand {
   selector?: string;
   format?: 'png' | 'jpeg';
   quality?: number;
+  annotate?: boolean;
 }
 
 export interface SnapshotCommand extends BaseCommand {
@@ -850,7 +878,7 @@ export interface TabCloseCommand extends BaseCommand {
 
 export interface WindowNewCommand extends BaseCommand {
   action: 'window_new';
-  viewport?: { width: number; height: number };
+  viewport?: { width: number; height: number } | null;
 }
 
 // Union of all command types
@@ -924,6 +952,8 @@ export type Command =
   | RecordingRestartCommand
   | TraceStartCommand
   | TraceStopCommand
+  | ProfilerStartCommand
+  | ProfilerStopCommand
   | HarStartCommand
   | HarStopCommand
   | StorageStateSaveCommand
@@ -984,7 +1014,40 @@ export type Command =
   | InputKeyboardCommand
   | InputTouchCommand
   | SwipeCommand
-  | DeviceListCommand;
+  | DeviceListCommand
+  | DiffSnapshotCommand
+  | DiffScreenshotCommand
+  | DiffUrlCommand;
+
+// Diff commands
+export interface DiffSnapshotCommand extends BaseCommand {
+  action: 'diff_snapshot';
+  baseline?: string;
+  selector?: string;
+  compact?: boolean;
+  maxDepth?: number;
+}
+
+export interface DiffScreenshotCommand extends BaseCommand {
+  action: 'diff_screenshot';
+  baseline: string;
+  output?: string;
+  threshold?: number;
+  selector?: string;
+  fullPage?: boolean;
+}
+
+export interface DiffUrlCommand extends BaseCommand {
+  action: 'diff_url';
+  url1: string;
+  url2: string;
+  screenshot?: boolean;
+  fullPage?: boolean;
+  waitUntil?: 'load' | 'domcontentloaded' | 'networkidle';
+  selector?: string;
+  compact?: boolean;
+  maxDepth?: number;
+}
 
 // Response types
 export interface SuccessResponse<T = unknown> {
@@ -1007,9 +1070,18 @@ export interface NavigateData {
   title: string;
 }
 
+export interface Annotation {
+  ref: string;
+  number: number;
+  role: string;
+  name?: string;
+  box: { x: number; y: number; width: number; height: number };
+}
+
 export interface ScreenshotData {
   path?: string;
   base64?: string;
+  annotations?: Annotation[];
 }
 
 export interface SnapshotData {
@@ -1104,6 +1176,29 @@ export interface ElementStyleInfo {
 
 export interface StylesData {
   elements: ElementStyleInfo[];
+}
+
+// Diff response data
+export interface DiffSnapshotData {
+  diff: string;
+  additions: number;
+  removals: number;
+  unchanged: number;
+  changed: boolean;
+}
+
+export interface DiffScreenshotData {
+  diffPath: string;
+  totalPixels: number;
+  differentPixels: number;
+  mismatchPercentage: number;
+  match: boolean;
+  dimensionMismatch?: boolean;
+}
+
+export interface DiffUrlData {
+  snapshot: DiffSnapshotData;
+  screenshot?: DiffScreenshotData;
 }
 
 // Browser state

@@ -65,6 +65,8 @@ import type {
   StylesCommand,
   TraceStartCommand,
   TraceStopCommand,
+  ProfilerStartCommand,
+  ProfilerStopCommand,
   HarStopCommand,
   StorageStateSaveCommand,
   StateListCommand,
@@ -121,9 +123,16 @@ import type {
   RecordingStartCommand,
   RecordingStopCommand,
   RecordingRestartCommand,
+  DiffSnapshotCommand,
+  DiffScreenshotCommand,
+  DiffUrlCommand,
+  Annotation,
   NavigateData,
   ScreenshotData,
   EvaluateData,
+  DiffSnapshotData,
+  DiffScreenshotData,
+  DiffUrlData,
   ContentData,
   TabListData,
   TabNewData,
@@ -138,6 +147,8 @@ import type {
   StylesData,
 } from './types.js';
 import { successResponse, errorResponse } from './protocol.js';
+import { diffSnapshots, diffScreenshots } from './diff.js';
+import { getEnhancedSnapshot } from './snapshot.js';
 
 // Callback for screencast frames - will be set by the daemon when streaming is active
 let screencastFrameCallback: ((frame: ScreencastFrame) => void) | null = null;
@@ -355,6 +366,10 @@ export async function executeCommand(command: Command, browser: BrowserManager):
         return await handleTraceStart(command, browser);
       case 'trace_stop':
         return await handleTraceStop(command, browser);
+      case 'profiler_start':
+        return await handleProfilerStart(command, browser);
+      case 'profiler_stop':
+        return await handleProfilerStop(command, browser);
       case 'har_start':
         return await handleHarStart(command, browser);
       case 'har_stop':
@@ -479,6 +494,12 @@ export async function executeCommand(command: Command, browser: BrowserManager):
         return await handleRecordingStop(command, browser);
       case 'recording_restart':
         return await handleRecordingRestart(command, browser);
+      case 'diff_snapshot':
+        return await handleDiffSnapshot(command, browser);
+      case 'diff_screenshot':
+        return await handleDiffScreenshot(command, browser);
+      case 'diff_url':
+        return await handleDiffUrl(command, browser);
       default: {
         // TypeScript narrows to never here, but we handle it for safety
         const unknownCommand = command as { id: string; action: string };
@@ -593,6 +614,16 @@ async function handlePress(command: PressCommand, browser: BrowserManager): Prom
   return successResponse(command.id, { pressed: true });
 }
 
+const ANNOTATION_OVERLAY_ID = '__agent_browser_annotations__';
+
+async function removeAnnotationOverlay(page: Page): Promise<void> {
+  await page
+    .evaluate(
+      `(() => { const el = document.getElementById(${JSON.stringify(ANNOTATION_OVERLAY_ID)}); if (el) el.remove(); })()`
+    )
+    .catch(() => {});
+}
+
 async function handleScreenshot(
   command: ScreenshotCommand,
   browser: BrowserManager
@@ -613,6 +644,8 @@ async function handleScreenshot(
     target = browser.getLocator(command.selector);
   }
 
+  let overlayInjected = false;
+
   try {
     let savePath = command.path;
     if (!savePath) {
@@ -625,9 +658,158 @@ async function handleScreenshot(
       savePath = path.join(screenshotDir, filename);
     }
 
+    let annotations: Annotation[] | undefined;
+
+    if (command.annotate) {
+      const { refs } = await browser.getSnapshot({ interactive: true });
+
+      const entries = Object.entries(refs);
+      const results = await Promise.all(
+        entries.map(async ([ref, data]): Promise<Annotation | null> => {
+          try {
+            const locator = browser.getLocatorFromRef(ref);
+            if (!locator) return null;
+            const box = await locator.boundingBox();
+            if (!box || box.width === 0 || box.height === 0) return null;
+            const num = parseInt(ref.replace('e', ''), 10);
+            return {
+              ref,
+              number: num,
+              role: data.role,
+              name: data.name || undefined,
+              box: {
+                x: Math.round(box.x),
+                y: Math.round(box.y),
+                width: Math.round(box.width),
+                height: Math.round(box.height),
+              },
+            };
+          } catch {
+            return null;
+          }
+        })
+      );
+
+      // When a selector is provided the screenshot is cropped to that element,
+      // so filter to annotations that overlap the target and shift coordinates.
+      let targetBox: { x: number; y: number; width: number; height: number } | null = null;
+      if (command.selector) {
+        const raw = await browser.getLocator(command.selector).boundingBox();
+        if (raw) {
+          targetBox = {
+            x: Math.round(raw.x),
+            y: Math.round(raw.y),
+            width: Math.round(raw.width),
+            height: Math.round(raw.height),
+          };
+        }
+      }
+
+      const filtered = results.filter((a): a is Annotation => a !== null);
+
+      // Filter by selector overlap if needed, but keep viewport-relative coords
+      // for overlay positioning. Coordinate shifting happens later for metadata only.
+      let overlayItems: Annotation[];
+      if (targetBox) {
+        const tb = targetBox;
+        overlayItems = filtered
+          .filter((a) => {
+            const ax2 = a.box.x + a.box.width;
+            const ay2 = a.box.y + a.box.height;
+            const bx2 = tb.x + tb.width;
+            const by2 = tb.y + tb.height;
+            return a.box.x < bx2 && ax2 > tb.x && a.box.y < by2 && ay2 > tb.y;
+          })
+          .sort((a, b) => a.number - b.number);
+      } else {
+        overlayItems = filtered.sort((a, b) => a.number - b.number);
+      }
+
+      if (overlayItems.length > 0) {
+        const overlayData = overlayItems.map((a) => ({
+          number: a.number,
+          x: a.box.x,
+          y: a.box.y,
+          width: a.box.width,
+          height: a.box.height,
+        }));
+
+        // Uses position:absolute with document-relative coords so labels render
+        // correctly for both viewport and fullPage screenshots, and when the
+        // screenshot is scoped to a selector element.
+        await page.evaluate(`(() => {
+          var items = ${JSON.stringify(overlayData)};
+          var id = ${JSON.stringify(ANNOTATION_OVERLAY_ID)};
+          var sx = window.scrollX || 0;
+          var sy = window.scrollY || 0;
+          var c = document.createElement('div');
+          c.id = id;
+          c.style.cssText = 'position:absolute;top:0;left:0;width:0;height:0;pointer-events:none;z-index:2147483647;';
+          for (var i = 0; i < items.length; i++) {
+            var it = items[i];
+            var dx = it.x + sx;
+            var dy = it.y + sy;
+            var b = document.createElement('div');
+            b.style.cssText = 'position:absolute;left:' + dx + 'px;top:' + dy + 'px;width:' + it.width + 'px;height:' + it.height + 'px;border:2px solid rgba(255,0,0,0.8);box-sizing:border-box;pointer-events:none;';
+            var l = document.createElement('div');
+            l.textContent = String(it.number);
+            var labelTop = dy < 14 ? '2px' : '-14px';
+            l.style.cssText = 'position:absolute;top:' + labelTop + ';left:-2px;background:rgba(255,0,0,0.9);color:#fff;font:bold 11px/14px monospace;padding:0 4px;border-radius:2px;white-space:nowrap;';
+            b.appendChild(l);
+            c.appendChild(b);
+          }
+          document.documentElement.appendChild(c);
+        })()`);
+        overlayInjected = true;
+      }
+
+      // Build returned annotation metadata with image-relative coordinates.
+      // Selector: shift to target-element-relative.
+      // fullPage: convert to document-relative (matching fullPage image origin).
+      // Default: viewport-relative (unchanged).
+      if (targetBox) {
+        const tb = targetBox;
+        annotations = overlayItems.map((a) => ({
+          ...a,
+          box: {
+            x: a.box.x - tb.x,
+            y: a.box.y - tb.y,
+            width: a.box.width,
+            height: a.box.height,
+          },
+        }));
+      } else if (command.fullPage) {
+        const scroll = (await page.evaluate(
+          `({x: window.scrollX || 0, y: window.scrollY || 0})`
+        )) as { x: number; y: number };
+        annotations = overlayItems.map((a) => ({
+          ...a,
+          box: {
+            x: a.box.x + scroll.x,
+            y: a.box.y + scroll.y,
+            width: a.box.width,
+            height: a.box.height,
+          },
+        }));
+      } else {
+        annotations = overlayItems;
+      }
+    }
+
     await target.screenshot({ ...options, path: savePath });
-    return successResponse(command.id, { path: savePath });
+
+    if (overlayInjected) {
+      await removeAnnotationOverlay(page);
+    }
+
+    return successResponse(command.id, {
+      path: savePath,
+      ...(annotations && annotations.length > 0 ? { annotations } : {}),
+    });
   } catch (error) {
+    if (overlayInjected) {
+      await removeAnnotationOverlay(page);
+    }
     if (command.selector) {
       throw toAIFriendlyError(error, command.selector);
     }
@@ -1442,7 +1624,35 @@ async function handleTraceStop(
   browser: BrowserManager
 ): Promise<Response> {
   await browser.stopTracing(command.path);
-  return successResponse(command.id, { path: command.path });
+  return successResponse(
+    command.id,
+    command.path ? { path: command.path } : { traceStopped: true }
+  );
+}
+
+async function handleProfilerStart(
+  command: ProfilerStartCommand,
+  browser: BrowserManager
+): Promise<Response> {
+  await browser.startProfiling({ categories: command.categories });
+  return successResponse(command.id, { started: true });
+}
+
+async function handleProfilerStop(
+  command: ProfilerStopCommand,
+  browser: BrowserManager
+): Promise<Response> {
+  let outputPath = command.path;
+  if (!outputPath) {
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const random = Math.random().toString(36).substring(2, 8);
+    const filename = `profile-${timestamp}-${random}.json`;
+    const profileDir = path.join(getAppDir(), 'tmp', 'profiles');
+    mkdirSync(profileDir, { recursive: true });
+    outputPath = path.join(profileDir, filename);
+  }
+  const result = await browser.stopProfiling(outputPath);
+  return successResponse(command.id, result);
 }
 
 async function handleHarStart(
@@ -2267,4 +2477,107 @@ async function handleRecordingRestart(
     previousPath: result.previousPath,
     stopped: result.stopped,
   });
+}
+
+// Diff handlers
+
+async function handleDiffSnapshot(
+  command: DiffSnapshotCommand,
+  browser: BrowserManager
+): Promise<Response> {
+  let before: string;
+
+  if (command.baseline) {
+    try {
+      before = fs.readFileSync(command.baseline, 'utf-8');
+    } catch {
+      return errorResponse(command.id, `Cannot read baseline file: ${command.baseline}`);
+    }
+  } else {
+    before = browser.getLastSnapshot();
+    if (!before) {
+      return errorResponse(
+        command.id,
+        'No previous snapshot in this session. Take a snapshot first, or use --baseline <file>.'
+      );
+    }
+  }
+
+  const page = browser.getPage();
+  const { tree } = await getEnhancedSnapshot(page, {
+    selector: command.selector,
+    compact: command.compact,
+    maxDepth: command.maxDepth,
+  });
+
+  const after = tree || 'Empty page';
+  const result = diffSnapshots(before, after);
+  browser.setLastSnapshot(after);
+  return successResponse(command.id, result);
+}
+
+async function handleDiffScreenshot(
+  command: DiffScreenshotCommand,
+  browser: BrowserManager
+): Promise<Response> {
+  if (!fs.existsSync(command.baseline)) {
+    return errorResponse(command.id, `Baseline file not found: ${command.baseline}`);
+  }
+
+  const page = browser.getPage();
+  let screenshotBuffer: Buffer;
+  if (command.selector) {
+    const locator = browser.getLocatorFromRef(command.selector) || page.locator(command.selector);
+    screenshotBuffer = await locator.screenshot({ type: 'png' });
+  } else {
+    screenshotBuffer = await page.screenshot({ fullPage: command.fullPage, type: 'png' });
+  }
+
+  const baselineBuffer = fs.readFileSync(command.baseline);
+  const ext = path.extname(command.baseline).toLowerCase();
+  const baselineMime = ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg' : 'image/png';
+
+  const result = await diffScreenshots(page.context(), baselineBuffer, screenshotBuffer, {
+    threshold: command.threshold,
+    outputPath: command.output,
+    baselineMime,
+  });
+
+  return successResponse(command.id, result);
+}
+
+async function handleDiffUrl(command: DiffUrlCommand, browser: BrowserManager): Promise<Response> {
+  const page = browser.getPage();
+
+  const waitUntil = command.waitUntil ?? 'load';
+  const snapshotOpts = {
+    selector: command.selector,
+    compact: command.compact,
+    maxDepth: command.maxDepth,
+  };
+
+  // Capture state of url1
+  await page.goto(command.url1, { waitUntil });
+  const { tree: tree1 } = await getEnhancedSnapshot(page, snapshotOpts);
+  const snapshot1 = tree1 || 'Empty page';
+  let screenshot1: Buffer | undefined;
+  if (command.screenshot) {
+    screenshot1 = await page.screenshot({ fullPage: command.fullPage, type: 'png' });
+  }
+
+  // Capture state of url2
+  await page.goto(command.url2, { waitUntil });
+  const { tree: tree2 } = await getEnhancedSnapshot(page, snapshotOpts);
+  const snapshot2 = tree2 || 'Empty page';
+
+  const snapshotDiff = diffSnapshots(snapshot1, snapshot2);
+
+  const result: DiffUrlData = { snapshot: snapshotDiff };
+
+  if (command.screenshot && screenshot1) {
+    const screenshot2 = await page.screenshot({ fullPage: command.fullPage, type: 'png' });
+    result.screenshot = await diffScreenshots(page.context(), screenshot1, screenshot2, {});
+  }
+
+  return successResponse(command.id, result);
 }

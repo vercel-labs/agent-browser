@@ -1,12 +1,44 @@
-export const metadata = { title: "Installation" }
+import { pageMetadata } from "@/lib/page-metadata"
+
+export const metadata = pageMetadata("installation")
 
 # Installation
 
-## npm (recommended)
+## Global installation (recommended)
+
+Installs the native Rust binary for maximum performance:
 
 ```bash
 npm install -g agent-browser
 agent-browser install  # Download Chromium
+```
+
+This is the fastest option -- commands run through the native Rust CLI directly with sub-millisecond parsing overhead.
+
+## Quick start (no install)
+
+Run directly with `npx` if you want to try it without installing globally:
+
+```bash
+npx agent-browser install   # Download Chromium (first time only)
+npx agent-browser open example.com
+```
+
+> **Note:** `npx` routes through Node.js before reaching the Rust CLI, so it is noticeably slower than a global install. For regular use, install globally.
+
+## Project installation (local dependency)
+
+For projects that want to pin the version in `package.json`:
+
+```bash
+npm install agent-browser
+npx agent-browser install
+```
+
+Then use via `npx` or `package.json` scripts:
+
+```bash
+npx agent-browser open example.com
 ```
 
 ## Homebrew (macOS)
@@ -73,6 +105,18 @@ export async function handler() {
 
 agent-browser works with any AI agent out of the box. For richer context:
 
+### AI coding assistants (recommended)
+
+Install the skill for your AI coding assistant:
+
+```bash
+npx skills add vercel-labs/agent-browser
+```
+
+This works with Claude Code, Codex, Cursor, Gemini CLI, GitHub Copilot, Goose, OpenCode, and Windsurf. The skill is fetched from the repository and stays up to date automatically.
+
+> **Do not** copy `SKILL.md` from `node_modules` -- it will become stale as new features are added. Always use `npx skills add` or reference the repository version.
+
 ### AGENTS.md / CLAUDE.md
 
 Add to your instructions file:
@@ -87,18 +131,4 @@ Core workflow:
 2. `agent-browser snapshot -i` - Get interactive elements with refs (@e1, @e2)
 3. `agent-browser click @e1` / `fill @e2 "text"` - Interact using refs
 4. Re-snapshot after page changes
-```
-
-### Claude Code skill
-
-```bash
-cp -r node_modules/agent-browser/skills/agent-browser .claude/skills/
-```
-
-Or download:
-
-```bash
-mkdir -p .claude/skills/agent-browser
-curl -o .claude/skills/agent-browser/SKILL.md \
-  https://raw.githubusercontent.com/vercel-labs/agent-browser/main/skills/agent-browser/SKILL.md
 ```

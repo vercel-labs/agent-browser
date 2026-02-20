@@ -1,12 +1,17 @@
-export const metadata = { title: "agent-browser" }
+import { pageMetadata } from "@/lib/page-metadata"
+
+export const metadata = pageMetadata("")
 
 # agent-browser
 
 Browser automation CLI designed for AI agents. Compact text output minimizes context usage. Fast Rust CLI with Node.js fallback.
 
 ```bash
-npm install -g agent-browser      # all platforms
+npm install -g agent-browser      # all platforms (fastest, native Rust CLI)
 brew install agent-browser        # macOS
+
+# or try without installing
+npx agent-browser open example.com
 ```
 
 ## Features

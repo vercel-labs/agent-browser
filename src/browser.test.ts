@@ -284,6 +284,133 @@ describe('BrowserManager', () => {
     });
   });
 
+  describe('annotated screenshots', () => {
+    afterAll(async () => {
+      await browser.getPage().goto('https://example.com');
+    });
+
+    it('should return annotations with correct shape', async () => {
+      const page = browser.getPage();
+      await page.setContent(`
+        <html><body>
+          <button>Submit</button>
+          <a href="#">Home</a>
+          <input type="text" placeholder="Email" />
+        </body></html>
+      `);
+
+      const result = await executeCommand(
+        { id: 'ann-1', action: 'screenshot', annotate: true },
+        browser
+      );
+
+      expect(result.success).toBe(true);
+      const data = result.data as { path?: string; annotations?: unknown[] };
+      expect(data.path).toBeDefined();
+      expect(data.annotations).toBeDefined();
+      expect(data.annotations!.length).toBeGreaterThan(0);
+
+      for (const ann of data.annotations! as Array<{
+        ref: string;
+        number: number;
+        role: string;
+        name?: string;
+        box: { x: number; y: number; width: number; height: number };
+      }>) {
+        expect(ann.ref).toMatch(/^e\d+$/);
+        expect(typeof ann.number).toBe('number');
+        expect(typeof ann.role).toBe('string');
+        expect(typeof ann.box.x).toBe('number');
+        expect(typeof ann.box.y).toBe('number');
+        expect(typeof ann.box.width).toBe('number');
+        expect(typeof ann.box.height).toBe('number');
+      }
+    });
+
+    it('should clean up overlay from DOM after screenshot', async () => {
+      const page = browser.getPage();
+      await page.setContent(`
+        <html><body>
+          <button>Click me</button>
+        </body></html>
+      `);
+
+      await executeCommand({ id: 'ann-2', action: 'screenshot', annotate: true }, browser);
+
+      const overlay = await page.$('#__agent_browser_annotations__');
+      expect(overlay).toBeNull();
+    });
+
+    it('should scope annotations to selector element', async () => {
+      const page = browser.getPage();
+      await page.setContent(`
+        <html><body>
+          <button id="outside">Outside</button>
+          <div id="container" style="padding:20px;">
+            <button id="inside">Inside</button>
+          </div>
+        </body></html>
+      `);
+
+      const result = await executeCommand(
+        { id: 'ann-3', action: 'screenshot', annotate: true, selector: '#container' },
+        browser
+      );
+
+      expect(result.success).toBe(true);
+      const data = result.data as { annotations?: Array<{ name?: string }> };
+      expect(data.annotations).toBeDefined();
+
+      const names = data.annotations!.map((a) => a.name).filter(Boolean);
+      expect(names).toContain('Inside');
+      expect(names).not.toContain('Outside');
+    });
+
+    it('should succeed with no annotations on static page', async () => {
+      const page = browser.getPage();
+      await page.setContent(`
+        <html><body>
+          <p>Just some text, no interactive elements.</p>
+        </body></html>
+      `);
+
+      const result = await executeCommand(
+        { id: 'ann-4', action: 'screenshot', annotate: true },
+        browser
+      );
+
+      expect(result.success).toBe(true);
+      const data = result.data as { path?: string; annotations?: unknown[] };
+      expect(data.path).toBeDefined();
+      expect(data.annotations).toBeUndefined();
+    });
+
+    it('should return document-relative coords for fullPage screenshots', async () => {
+      const page = browser.getPage();
+      await page.setContent(`
+        <html><body style="margin:0;">
+          <div style="height:2000px;"></div>
+          <button id="below-fold" style="margin:0;">Bottom</button>
+        </body></html>
+      `);
+
+      const result = await executeCommand(
+        { id: 'ann-5', action: 'screenshot', annotate: true, fullPage: true },
+        browser
+      );
+
+      expect(result.success).toBe(true);
+      const data = result.data as {
+        annotations?: Array<{ name?: string; box: { y: number } }>;
+      };
+      expect(data.annotations).toBeDefined();
+
+      const bottom = data.annotations!.find((a) => a.name === 'Bottom');
+      expect(bottom).toBeDefined();
+      expect(bottom!.box.y).toBeGreaterThanOrEqual(2000);
+    });
+  });
+
   describe('evaluate', () => {
     it('should evaluate JavaScript', async () => {
       const page = browser.getPage();
@@ -483,6 +610,42 @@ describe('BrowserManager', () => {
       const size = page.viewportSize();
       expect(size?.width).toBe(1920);
       expect(size?.height).toBe(1080);
+    });
+
+    it('should disable viewport when --start-maximized is in args', async () => {
+      const testBrowser = new BrowserManager();
+      await testBrowser.launch({ headless: true, args: ['--start-maximized'] });
+      const page = testBrowser.getPage();
+      expect(page.viewportSize()).toBeNull();
+      await testBrowser.close();
+    });
+
+    it('should disable viewport when --window-size is in args', async () => {
+      const testBrowser = new BrowserManager();
+      await testBrowser.launch({ headless: true, args: ['--window-size=800,600'] });
+      const page = testBrowser.getPage();
+      expect(page.viewportSize()).toBeNull();
+      await testBrowser.close();
+    });
+
+    it('should use default viewport when no window size args', async () => {
+      const testBrowser = new BrowserManager();
+      await testBrowser.launch({ headless: true });
+      const page = testBrowser.getPage();
+      expect(page.viewportSize()).toEqual({ width: 1280, height: 720 });
+      await testBrowser.close();
+    });
+
+    it('should use explicit viewport even with --start-maximized', async () => {
+      const testBrowser = new BrowserManager();
+      await testBrowser.launch({
+        headless: true,
+        args: ['--start-maximized'],
+        viewport: { width: 800, height: 600 },
+      });
+      const page = testBrowser.getPage();
+      expect(page.viewportSize()).toEqual({ width: 800, height: 600 });
+      await testBrowser.close();
     });
   });
 
@@ -827,6 +990,83 @@ describe('BrowserManager', () => {
 
       // Screencast should be stopped (it's page-specific)
       expect(browser.isScreencasting()).toBe(false);
+    });
+  });
+
+  describe('profiling (CDP tracing)', () => {
+    const fs = require('node:fs/promises');
+    const path = require('node:path');
+    const testOutputDir = '/tmp/agent-browser-test';
+
+    beforeAll(async () => {
+      // Ensure test output directory exists
+      await fs.mkdir(testOutputDir, { recursive: true }).catch(() => {});
+    });
+
+    afterEach(async () => {
+      // Stop profiling if still active
+      if (browser.isProfilingActive()) {
+        const tempPath = path.join(testOutputDir, 'cleanup.json');
+        await browser.stopProfiling(tempPath).catch(() => {});
+      }
+    });
+
+    it('should report profiling state correctly', () => {
+      expect(browser.isProfilingActive()).toBe(false);
+    });
+
+    it('should start profiling', async () => {
+      await browser.startProfiling();
+      expect(browser.isProfilingActive()).toBe(true);
+    });
+
+    it('should throw when starting profiling twice', async () => {
+      await browser.startProfiling();
+      await expect(browser.startProfiling()).rejects.toThrow('Profiling already active');
+    });
+
+    it('should stop profiling and write file', async () => {
+      await browser.startProfiling();
+
+      const outputPath = path.join(testOutputDir, 'test-profile.json');
+      const result = await browser.stopProfiling(outputPath);
+
+      expect(result.path).toBe(outputPath);
+      expect(typeof result.eventCount).toBe('number');
+      expect(browser.isProfilingActive()).toBe(false);
+
+      // Verify file was written
+      const fileExists = await fs
+        .access(outputPath)
+        .then(() => true)
+        .catch(() => false);
+      expect(fileExists).toBe(true);
+
+      // Verify file content is valid JSON with traceEvents
+      const content = await fs.readFile(outputPath, 'utf-8');
+      const data = JSON.parse(content);
+      expect(data).toHaveProperty('traceEvents');
+      expect(Array.isArray(data.traceEvents)).toBe(true);
+
+      // Cleanup
+      await fs.unlink(outputPath).catch(() => {});
+    });
+
+    it('should throw when stopping without start', async () => {
+      expect(browser.isProfilingActive()).toBe(false);
+      await expect(browser.stopProfiling('/tmp/should-not-exist.json')).rejects.toThrow(
+        'No profiling session active'
+      );
+    });
+
+    it('should start profiling with custom categories', async () => {
+      await browser.startProfiling({ categories: ['devtools.timeline', 'v8.execute'] });
+      expect(browser.isProfilingActive()).toBe(true);
+
+      // Stop and cleanup
+      const outputPath = path.join(testOutputDir, 'custom-categories.json');
+      await browser.stopProfiling(outputPath);
+      await fs.unlink(outputPath).catch(() => {});
     });
   });
 

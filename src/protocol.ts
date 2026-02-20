@@ -16,6 +16,7 @@ const launchSchema = baseCommandSchema.extend({
       width: z.number().positive(),
       height: z.number().positive(),
     })
+    .nullable()
     .optional(),
   browser: z.enum(['chromium', 'firefox', 'webkit']).optional(),
   cdpPort: z.number().positive().optional(),
@@ -47,6 +48,7 @@ const launchSchema = baseCommandSchema.extend({
   userAgent: z.string().optional(),
   provider: z.string().optional(),
   ignoreHTTPSErrors: z.boolean().optional(),
+  allowFileAccess: z.boolean().optional(),
   profile: z.string().optional(),
   storageState: z.string().optional(),
 });
@@ -369,7 +371,17 @@ const traceStartSchema = baseCommandSchema.extend({
 
 const traceStopSchema = baseCommandSchema.extend({
   action: z.literal('trace_stop'),
-  path: z.string().min(1),
+  path: z.string().min(1).optional(),
+});
+
+const profilerStartSchema = baseCommandSchema.extend({
+  action: z.literal('profiler_start'),
+  categories: z.array(z.string()).optional(),
+});
+
+const profilerStopSchema = baseCommandSchema.extend({
+  action: z.literal('profiler_stop'),
+  path: z.string().min(1).optional(),
 });
 
 const harStartSchema = baseCommandSchema.extend({
@@ -728,6 +740,36 @@ const deviceListSchema = baseCommandSchema.extend({
   action: z.literal('device_list'),
 });
 
+// Diff schemas
+const diffSnapshotSchema = baseCommandSchema.extend({
+  action: z.literal('diff_snapshot'),
+  baseline: z.string().optional(),
+  selector: z.string().optional(),
+  compact: z.boolean().optional(),
+  maxDepth: z.number().nonnegative().optional(),
+});
+
+const diffScreenshotSchema = baseCommandSchema.extend({
+  action: z.literal('diff_screenshot'),
+  baseline: z.string().min(1),
+  output: z.string().optional(),
+  threshold: z.number().min(0).max(1).optional(),
+  selector: z.string().min(1).optional(),
+  fullPage: z.boolean().optional(),
+});
+
+const diffUrlSchema = baseCommandSchema.extend({
+  action: z.literal('diff_url'),
+  url1: z.string().min(1),
+  url2: z.string().min(1),
+  screenshot: z.boolean().optional(),
+  fullPage: z.boolean().optional(),
+  waitUntil: z.enum(['load', 'domcontentloaded', 'networkidle']).optional(),
+  selector: z.string().optional(),
+  compact: z.boolean().optional(),
+  maxDepth: z.number().nonnegative().optional(),
+});
+
 const pressSchema = baseCommandSchema.extend({
   action: z.literal('press'),
   key: z.string().min(1),
@@ -741,6 +783,7 @@ const screenshotSchema = baseCommandSchema.extend({
   selector: z.string().min(1).nullish(),
   format: z.enum(['png', 'jpeg']).optional(),
   quality: z.number().min(0).max(100).optional(),
+  annotate: z.boolean().optional(),
 });
 
 const snapshotSchema = baseCommandSchema.extend({
@@ -821,6 +864,7 @@ const windowNewSchema = baseCommandSchema.extend({
       width: z.number().positive(),
       height: z.number().positive(),
     })
+    .nullable()
     .optional(),
 });
 
@@ -895,6 +939,8 @@ const commandSchema = z.discriminatedUnion('action', [
   recordingRestartSchema,
   traceStartSchema,
   traceStopSchema,
+  profilerStartSchema,
+  profilerStopSchema,
   harStartSchema,
   harStopSchema,
   stateSaveSchema,
@@ -956,6 +1002,9 @@ const commandSchema = z.discriminatedUnion('action', [
   inputTouchSchema,
   swipeSchema,
   deviceListSchema,
+  diffSnapshotSchema,
+  diffScreenshotSchema,
+  diffUrlSchema,
 ]);
 
 // Parse result type
@@ -989,7 +1038,26 @@ export function parseCommand(input: string): ParseResult {
     return { success: false, error: `Validation error: ${errors}`, id };
   }
 
-  return { success: true, command: result.data as Command };
+  const command = result.data as Command;
+
+  // Post-parse validation for commands that need cross-field checks
+  if (
+    (command.action === 'addscript' || command.action === 'addstyle') &&
+    !command.content &&
+    !command.url
+  ) {
+    return { success: false, error: 'Either content or url must be provided', id };
+  }
+
+  if (command.action === 'frame' && !command.selector && !command.name && !command.url) {
+    return {
+      success: false,
+      error: 'frame command requires at least one of: selector, name, or url',
+      id,
+    };
+  }
+
+  return { success: true, command };
 }
 
 /**
