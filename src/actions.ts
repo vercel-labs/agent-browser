@@ -2512,6 +2512,7 @@ async function handleDiffSnapshot(
 
   const after = tree || 'Empty page';
   const result = diffSnapshots(before, after);
+  browser.setLastSnapshot(after);
   return successResponse(command.id, result);
 }
 
@@ -2536,7 +2537,7 @@ async function handleDiffScreenshot(
   const ext = path.extname(command.baseline).toLowerCase();
   const baselineMime = ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg' : 'image/png';
 
-  const result = await diffScreenshots(page, baselineBuffer, screenshotBuffer, {
+  const result = await diffScreenshots(page.context(), baselineBuffer, screenshotBuffer, {
     threshold: command.threshold,
     outputPath: command.output,
     baselineMime,
@@ -2575,7 +2576,7 @@ async function handleDiffUrl(command: DiffUrlCommand, browser: BrowserManager): 
 
   if (command.screenshot && screenshot1) {
     const screenshot2 = await page.screenshot({ fullPage: command.fullPage, type: 'png' });
-    result.screenshot = await diffScreenshots(page, screenshot1, screenshot2, {});
+    result.screenshot = await diffScreenshots(page.context(), screenshot1, screenshot2, {});
   }
 
   return successResponse(command.id, result);

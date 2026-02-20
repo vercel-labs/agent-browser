@@ -162,6 +162,13 @@ export class BrowserManager {
   }
 
   /**
+   * Update the stored snapshot (used by diff to keep the baseline current)
+   */
+  setLastSnapshot(snapshot: string): void {
+    this.lastSnapshot = snapshot;
+  }
+
+  /**
    * Get the cached ref map from last snapshot
    */
   getRefMap(): RefMap {

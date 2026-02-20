@@ -1,4 +1,4 @@
-import type { Page } from 'playwright-core';
+import type { BrowserContext } from 'playwright-core';
 import type { DiffSnapshotData, DiffScreenshotData } from './types.js';
 import { writeFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';
@@ -176,7 +176,7 @@ const DIFF_ROUTE_PREFIX = 'https://agent-browser-diff.localhost';
  * through page.evaluate (which can be slow or hit CDP message size limits).
  */
 export async function diffScreenshots(
-  page: Page,
+  context: BrowserContext,
   baselineBuffer: Buffer,
   currentBuffer: Buffer,
   opts: { threshold?: number; outputPath?: string; baselineMime?: string }
@@ -189,7 +189,6 @@ export async function diffScreenshots(
   const baselineUrl = `${DIFF_ROUTE_PREFIX}/${nonce}/baseline.png`;
   const currentUrl = `${DIFF_ROUTE_PREFIX}/${nonce}/current.png`;
 
-  const context = page.context();
   const diffPage = await context.newPage();
 
   let blankRouted = false;

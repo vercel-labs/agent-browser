@@ -1089,7 +1089,7 @@ fn parse_diff(rest: &[&str], id: &str, flags: &Flags) -> Result<Value, ParseErro
                                 }
                                 Err(_) => {
                                     return Err(ParseError::InvalidValue {
-                                        message: format!("Invalid depth value: {}", d),
+                                        message: format!("Depth must be a non-negative integer, got: {}", d),
                                         usage: "diff snapshot --depth <n>",
                                     });
                                 }
@@ -1149,9 +1149,15 @@ fn parse_diff(rest: &[&str], id: &str, flags: &Flags) -> Result<Value, ParseErro
                     "-t" | "--threshold" => {
                         if let Some(t) = rest.get(i + 1) {
                             match t.parse::<f64>() {
-                                Ok(n) => {
+                                Ok(n) if (0.0..=1.0).contains(&n) => {
                                     obj.insert("threshold".to_string(), json!(n));
                                     i += 1;
+                                }
+                                Ok(n) => {
+                                    return Err(ParseError::InvalidValue {
+                                        message: format!("Threshold must be between 0 and 1, got {}", n),
+                                        usage: "diff screenshot --threshold <0-1>",
+                                    });
                                 }
                                 Err(_) => {
                                     return Err(ParseError::InvalidValue {
@@ -1266,7 +1272,7 @@ fn parse_diff(rest: &[&str], id: &str, flags: &Flags) -> Result<Value, ParseErro
                                 }
                                 Err(_) => {
                                     return Err(ParseError::InvalidValue {
-                                        message: format!("Invalid depth value: {}", d),
+                                        message: format!("Depth must be a non-negative integer, got: {}", d),
                                         usage: "diff url <url1> <url2> --depth <n>",
                                     });
                                 }
@@ -3286,6 +3292,28 @@ mod tests {
             result.unwrap_err(),
             ParseError::InvalidValue { .. }
         ));
+    }
+
+    #[test]
+    fn test_diff_screenshot_threshold_out_of_range() {
+        let result = parse_command(
+            &args("diff screenshot --baseline b.png --threshold 1.5"),
+            &default_flags(),
+        );
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::InvalidValue { .. }
+        ));
+    }
+
+    #[test]
+    fn test_diff_screenshot_threshold_negative() {
+        let result = parse_command(
+            &args("diff screenshot --baseline b.png --threshold -0.5"),
+            &default_flags(),
+        );
+        assert!(result.is_err());
     }
 
     #[test]
