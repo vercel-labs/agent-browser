@@ -242,6 +242,7 @@ export class BrowserManager {
       context.setDefaultTimeout(60000);
       this.contexts.push(context);
       this.setupContextTracking(context);
+      await this.addInitScriptIfConfigured(context);
     } else {
       return;
     }
@@ -855,6 +856,7 @@ export class BrowserManager {
       context.setDefaultTimeout(10000);
       this.contexts.push(context);
       this.setupContextTracking(context);
+      await this.addInitScriptIfConfigured(context);
       this.pages.push(page);
       this.activePageIndex = 0;
       this.setupPageTracking(page);
@@ -999,6 +1001,7 @@ export class BrowserManager {
       this.activePageIndex = 0;
       this.setupPageTracking(page);
       this.setupContextTracking(context);
+      await this.addInitScriptIfConfigured(context);
     } catch (error) {
       await this.closeKernelSession(session.session_id, kernelApiKey).catch((sessionError) => {
         console.error('Failed to close Kernel session during cleanup:', sessionError);
@@ -1072,6 +1075,7 @@ export class BrowserManager {
       this.activePageIndex = 0;
       this.setupPageTracking(page);
       this.setupContextTracking(context);
+      await this.addInitScriptIfConfigured(context);
     } catch (error) {
       await this.closeBrowserUseSession(session.id, browserUseApiKey).catch((sessionError) => {
         console.error('Failed to close Browser Use session during cleanup:', sessionError);
@@ -1317,6 +1321,7 @@ export class BrowserManager {
     context.setDefaultTimeout(60000);
     this.contexts.push(context);
     this.setupContextTracking(context);
+    await this.addInitScriptIfConfigured(context);
 
     const page = context.pages()[0] ?? (await context.newPage());
     // Only add if not already tracked (setupContextTracking may have already added it via 'page' event)
@@ -1387,6 +1392,7 @@ export class BrowserManager {
         context.setDefaultTimeout(10000);
         this.contexts.push(context);
         this.setupContextTracking(context);
+        await this.addInitScriptIfConfigured(context);
       }
 
       for (const page of allPages) {
@@ -1565,6 +1571,21 @@ export class BrowserManager {
         }
       }
     });
+  }
+
+  /**
+   * Add init script to context if AGENT_BROWSER_INIT_SCRIPT is set.
+   * Supports both file paths and inline scripts.
+   */
+  private async addInitScriptIfConfigured(context: BrowserContext): Promise<void> {
+    const initScript = process.env.AGENT_BROWSER_INIT_SCRIPT;
+    if (initScript) {
+      if (existsSync(initScript)) {
+        await context.addInitScript({ path: initScript });
+      } else {
+        await context.addInitScript(initScript);
+      }
+    }
   }
 
   /**
