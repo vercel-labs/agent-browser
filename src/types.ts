@@ -108,6 +108,11 @@ export interface MainFrameCommand extends BaseCommand {
   action: 'mainframe';
 }
 
+export interface FrameLocatorCommand extends BaseCommand {
+  action: 'framelocator';
+  selector: string;
+}
+
 export interface GetByRoleCommand extends BaseCommand {
   action: 'getbyrole';
   role: string;
@@ -896,6 +901,7 @@ export type Command =
   | DragCommand
   | FrameCommand
   | MainFrameCommand
+  | FrameLocatorCommand
   | GetByRoleCommand
   | GetByTextCommand
   | GetByLabelCommand

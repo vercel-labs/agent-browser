@@ -126,6 +126,11 @@ const mainframeSchema = baseCommandSchema.extend({
   action: z.literal('mainframe'),
 });
 
+const framelocatorSchema = baseCommandSchema.extend({
+  action: z.literal('framelocator'),
+  selector: z.string().min(1),
+});
+
 const getByRoleSchema = baseCommandSchema.extend({
   action: z.literal('getbyrole'),
   role: z.string().min(1),
@@ -883,6 +888,7 @@ const commandSchema = z.discriminatedUnion('action', [
   dragSchema,
   frameSchema,
   mainframeSchema,
+  framelocatorSchema,
   getByRoleSchema,
   getByTextSchema,
   getByLabelSchema,
