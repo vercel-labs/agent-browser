@@ -199,6 +199,8 @@ pub struct Flags {
     pub auto_connect: bool,
     pub session_name: Option<String>,
     pub annotate: bool,
+    pub screenshot_format: Option<String>,
+    pub screenshot_quality: Option<u32>,
 
     // Track which launch-time options were explicitly passed via CLI
     // (as opposed to being set only via environment variables)
@@ -278,6 +280,8 @@ pub fn parse_flags(args: &[String]) -> Flags {
             .or(config.session_name),
         annotate: env_var_is_truthy("AGENT_BROWSER_ANNOTATE")
             || config.annotate.unwrap_or(false),
+        screenshot_format: env::var("AGENT_BROWSER_SCREENSHOT_FORMAT").ok(),
+        screenshot_quality: env::var("AGENT_BROWSER_SCREENSHOT_QUALITY").ok().and_then(|s| s.parse().ok()),
         cli_executable_path: false,
         cli_extensions: false,
         cli_profile: false,
