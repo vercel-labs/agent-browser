@@ -1967,6 +1967,7 @@ Options:
   --full, -f                 Full page screenshot
   --annotate                 Annotated screenshot with numbered labels and legend
   --headed                   Show browser window (not headless)
+  --kiosk                    Fullscreen kiosk mode (Chromium, implies --headed)
   --cdp <port>               Connect via CDP (Chrome DevTools Protocol)
   --auto-connect             Auto-discover and connect to running Chrome
   --session-name <name>      Auto-save/restore session state (cookies, localStorage)

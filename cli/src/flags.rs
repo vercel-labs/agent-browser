@@ -195,6 +195,7 @@ pub struct Flags {
     pub provider: Option<String>,
     pub ignore_https_errors: bool,
     pub allow_file_access: bool,
+    pub kiosk: bool,
     pub device: Option<String>,
     pub auto_connect: bool,
     pub session_name: Option<String>,
@@ -211,6 +212,7 @@ pub struct Flags {
     pub cli_proxy: bool,
     pub cli_proxy_bypass: bool,
     pub cli_allow_file_access: bool,
+    pub cli_kiosk: bool,
 }
 
 pub fn parse_flags(args: &[String]) -> Flags {
@@ -270,6 +272,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
             || config.ignore_https_errors.unwrap_or(false),
         allow_file_access: env_var_is_truthy("AGENT_BROWSER_ALLOW_FILE_ACCESS")
             || config.allow_file_access.unwrap_or(false),
+        kiosk: env_var_is_truthy("AGENT_BROWSER_KIOSK"),
         device: env::var("AGENT_BROWSER_IOS_DEVICE").ok()
             .or(config.device),
         auto_connect: env_var_is_truthy("AGENT_BROWSER_AUTO_CONNECT")
@@ -287,6 +290,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
         cli_proxy: false,
         cli_proxy_bypass: false,
         cli_allow_file_access: false,
+        cli_kiosk: false,
     };
 
     let mut i = 0;
@@ -403,6 +407,10 @@ pub fn parse_flags(args: &[String]) -> Flags {
                 flags.cli_allow_file_access = true;
                 if consumed { i += 1; }
             }
+            "--kiosk" => {
+                flags.kiosk = true;
+                flags.cli_kiosk = true;
+            }
             "--device" => {
                 if let Some(d) = args.get(i + 1) {
                     flags.device = Some(d.clone());
@@ -450,6 +458,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--allow-file-access",
         "--auto-connect",
         "--annotate",
+        "--kiosk",
     ];
     // Global flags that always take a value (need to skip the next arg too)
     const GLOBAL_FLAGS_WITH_VALUE: &[&str] = &[
