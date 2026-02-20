@@ -1,5 +1,11 @@
 # agent-browser
 
+## 0.13.0
+
+### Minor Changes
+
+- ebd8717: Added new diff commands for comparing snapshots, screenshots, and URLs between page states. You can now run visual pixel diffs against baseline images, compare accessibility tree snapshots with customizable depth and selectors, and diff two URLs side-by-side with optional screenshot comparison.
+
 ## 0.12.0
 
 ### Minor Changes
