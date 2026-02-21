@@ -954,7 +954,7 @@ export class BrowserManager {
       const page = pages[0] ?? (await context.newPage());
 
       this.browser = browser;
-      context.setDefaultTimeout(10000);
+      context.setDefaultTimeout(60000);
       this.contexts.push(context);
       this.setupContextTracking(context);
       this.pages.push(page);
