@@ -396,11 +396,11 @@ export async function startDaemon(options?: {
                     .filter(Boolean)
                 : undefined;
 
-              // Parse args from env (comma or newline separated)
+              // Parse args from env (semicolon or newline separated)
               const argsEnv = process.env.AGENT_BROWSER_ARGS;
               const args = argsEnv
                 ? argsEnv
-                    .split(/[,\n]/)
+                    .split(/[;\n]/)
                     .map((a) => a.trim())
                     .filter((a) => a.length > 0)
                 : undefined;

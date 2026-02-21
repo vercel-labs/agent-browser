@@ -539,9 +539,9 @@ fn main() {
         }
 
         if let Some(ref a) = flags.args {
-            // Parse args (comma or newline separated)
+            // Parse args (semicolon or newline separated)
             let args_vec: Vec<String> = a
-                .split(&[',', '\n'][..])
+                .split(&[';', '\n'][..])
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect();
