@@ -150,6 +150,36 @@ fn get_port_for_session(session: &str) -> u16 {
     49152 + ((hash.unsigned_abs() as u32 % 16383) as u16)
 }
 
+#[cfg(windows)]
+fn read_port_file(session: &str) -> Option<u16> {
+    // On Windows the daemon writes the actual port it bound to.
+    // This lets the CLI connect even if the hashed port was unavailable.
+    let port_path = get_port_path(session);
+    let port_str = fs::read_to_string(port_path).ok()?;
+    port_str.trim().parse::<u16>().ok()
+}
+
+#[cfg(windows)]
+fn get_session_port(session: &str) -> u16 {
+    // Prefer the port file if present, otherwise fall back to the hash.
+    read_port_file(session).unwrap_or_else(|| get_port_for_session(session))
+}
+
+fn escape_powershell_single_quotes(value: &str) -> String {
+    value.replace('\'', "''")
+}
+
+#[cfg(windows)]
+fn normalize_windows_path(path: &PathBuf) -> String {
+    // Start-Process can fail with "\\?\"-prefixed paths ("Windows cannot access \\\?\").
+    // Strip the prefix to keep PowerShell and Explorer happy.
+    let path_str = path.to_string_lossy().into_owned();
+    path_str
+        .strip_prefix(r"\\?\")
+        .unwrap_or(&path_str)
+        .to_string()
+}
+
 #[cfg(unix)]
 fn is_daemon_running(session: &str) -> bool {
     let pid_path = get_pid_path(session);
@@ -172,10 +202,10 @@ fn is_daemon_running(session: &str) -> bool {
     if !pid_path.exists() {
         return false;
     }
-    let port = get_port_for_session(session);
+    let port = get_session_port(session);
     TcpStream::connect_timeout(
         &format!("127.0.0.1:{}", port).parse().unwrap(),
-        Duration::from_millis(100),
+        Duration::from_millis(200),
     )
     .is_ok()
 }
@@ -188,10 +218,10 @@ fn daemon_ready(session: &str) -> bool {
     }
     #[cfg(windows)]
     {
-        let port = get_port_for_session(session);
+        let port = get_session_port(session);
         TcpStream::connect_timeout(
             &format!("127.0.0.1:{}", port).parse().unwrap(),
-            Duration::from_millis(50),
+            Duration::from_millis(200),
         )
         .is_ok()
     }
@@ -382,14 +412,20 @@ pub fn ensure_daemon(
 
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt;
-
-        // On Windows, call node directly. Command::new handles PATH resolution (node.exe or node.cmd)
-        // and automatically quotes arguments containing spaces.
-        let mut cmd = Command::new("node");
-        cmd.arg(daemon_path)
-            .env("AGENT_BROWSER_DAEMON", "1")
-            .env("AGENT_BROWSER_SESSION", session);
+        // On Windows, spawn via PowerShell Start-Process for reliability.
+        let node_exe = "node";
+        let daemon_arg = escape_powershell_single_quotes(&normalize_windows_path(daemon_path));
+        let ps_cmd = format!(
+            "Start-Process -FilePath '{}' -ArgumentList @('{}') -WindowStyle Hidden",
+            node_exe, daemon_arg
+        );
+        let mut cmd = Command::new("powershell");
+        cmd.arg("-NoProfile")
+            .arg("-NonInteractive")
+            .arg("-Command")
+            .arg(ps_cmd)
+            .env("AGENT_BROWSER_SESSION", session)
+            .env("AGENT_BROWSER_DAEMON", "1");
 
         if headed {
             cmd.env("AGENT_BROWSER_HEADED", "1");
@@ -447,16 +483,24 @@ pub fn ensure_daemon(
             cmd.env("AGENT_BROWSER_SESSION_NAME", sn);
         }
 
-        // CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS
-        const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
-        const DETACHED_PROCESS: u32 = 0x00000008;
-
-        cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS)
+        let output = cmd
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
             .map_err(|e| format!("Failed to start daemon: {}", e))?;
+
+        if !output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let msg = format!(
+                "Failed to start daemon (powershell). stdout: {} stderr: {}",
+                stdout.trim(),
+                stderr.trim()
+            );
+            return Err(msg);
+        }
+
     }
 
     for _ in 0..50 {
@@ -484,7 +528,7 @@ fn connect(session: &str) -> Result<Connection, String> {
     }
     #[cfg(windows)]
     {
-        let port = get_port_for_session(session);
+        let port = get_session_port(session);
         TcpStream::connect(format!("127.0.0.1:{}", port))
             .map(Connection::Tcp)
             .map_err(|e| format!("Failed to connect: {}", e))
