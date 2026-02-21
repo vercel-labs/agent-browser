@@ -639,6 +639,8 @@ describe('parseCommand', () => {
           bridgeToken: 'token123',
           bridgeExtensionId: 'mmlmfjhmonkocbjadbfplnigmagldckm',
           bridgePlatform: 'windows',
+          bridgeBrowser: 'edge',
+          bridgeProfileDirectory: 'Profile 1',
         })
       );
       expect(result.success).toBe(true);
@@ -647,6 +649,8 @@ describe('parseCommand', () => {
         expect(result.command.bridgeToken).toBe('token123');
         expect(result.command.bridgeExtensionId).toBe('mmlmfjhmonkocbjadbfplnigmagldckm');
         expect(result.command.bridgePlatform).toBe('windows');
+        expect(result.command.bridgeBrowser).toBe('edge');
+        expect(result.command.bridgeProfileDirectory).toBe('Profile 1');
       }
     });
 
@@ -669,6 +673,18 @@ describe('parseCommand', () => {
           action: 'launch',
           provider: 'bridge',
           bridgePlatform: 'mac',
+        })
+      );
+      expect(result.success).toBe(false);
+    });
+
+    it('should reject launch with invalid bridgeBrowser', () => {
+      const result = parseCommand(
+        cmd({
+          id: '1',
+          action: 'launch',
+          provider: 'bridge',
+          bridgeBrowser: 'brave',
         })
       );
       expect(result.success).toBe(false);

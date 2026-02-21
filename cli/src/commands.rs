@@ -1875,8 +1875,11 @@ mod tests {
             bridge_token: None,
             bridge_extension_id: None,
             bridge_platform: None,
+            bridge_browser: None,
+            bridge_profile_directory: None,
             bridge_port_error: None,
             bridge_platform_error: None,
+            bridge_browser_error: None,
             cli_executable_path: false,
             cli_extensions: false,
             cli_profile: false,
@@ -1887,6 +1890,8 @@ mod tests {
             cli_proxy_bypass: false,
             cli_allow_file_access: false,
             cli_bridge_platform: false,
+            cli_bridge_browser: false,
+            cli_bridge_profile_directory: false,
             annotate: false,
         }
     }

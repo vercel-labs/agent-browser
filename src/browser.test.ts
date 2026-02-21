@@ -75,9 +75,18 @@ describe('BrowserManager', () => {
         bridgeToken: 'token-123',
         bridgeExtensionId: 'custom-extension-id',
         bridgePlatform: 'windows',
+        bridgeBrowser: 'edge',
+        bridgeProfileDirectory: 'Profile 1',
       });
 
-      expect(bridgeSpy).toHaveBeenCalledWith(9333, 'token-123', 'custom-extension-id', 'windows');
+      expect(bridgeSpy).toHaveBeenCalledWith(
+        9333,
+        'token-123',
+        'custom-extension-id',
+        'windows',
+        'edge',
+        'Profile 1'
+      );
       await manager.close();
     });
   });
@@ -89,6 +98,7 @@ describe('BrowserManager', () => {
 
       const relayMock = {
         start: vi.fn(async () => order.push('start')),
+        port: vi.fn(() => 9223),
         buildConnectUrl: vi.fn(() => 'chrome-extension://id/connect.html?x=1'),
         waitForExtensionConnection: vi.fn(async () => order.push('ready')),
         cdpEndpoint: vi.fn(() => 'ws://127.0.0.1:9223/cdp/abc'),
@@ -99,7 +109,6 @@ describe('BrowserManager', () => {
       vi.spyOn(manager as any, 'openBridgeConnectUrl').mockImplementation(async () => {
         order.push('open');
       });
-      vi.spyOn(manager as any, 'shouldAttemptBridgeWindowsBrowserFallback').mockReturnValue(false);
       vi.spyOn(manager as any, 'connectViaCDP').mockImplementation(async () => {
         order.push('cdp');
       });
@@ -119,6 +128,7 @@ describe('BrowserManager', () => {
       const manager = new BrowserManager();
       const relayMock = {
         start: vi.fn(async () => {}),
+        port: vi.fn(() => 9223),
         buildConnectUrl: vi.fn(() => 'chrome-extension://id/connect.html?x=1'),
         waitForExtensionConnection: vi.fn(async () => {
           throw new Error('Extension connection timeout');
@@ -129,7 +139,6 @@ describe('BrowserManager', () => {
 
       vi.spyOn(manager as any, 'createBridgeRelayServer').mockReturnValue(relayMock);
       vi.spyOn(manager as any, 'openBridgeConnectUrl').mockResolvedValue(undefined);
-      vi.spyOn(manager as any, 'shouldAttemptBridgeWindowsBrowserFallback').mockReturnValue(false);
       const cdpSpy = vi.spyOn(manager as any, 'connectViaCDP').mockResolvedValue(undefined);
 
       await expect(
@@ -143,40 +152,11 @@ describe('BrowserManager', () => {
       await manager.close();
     });
 
-    it('warns and tries browser-specific fallback when default bridge opener does not connect', async () => {
-      const manager = new BrowserManager() as any;
-      const relayMock = {
-        start: vi.fn(async () => {}),
-        buildConnectUrl: vi.fn(() => 'chrome-extension://id/connect.html?x=1'),
-        waitForExtensionConnection: vi.fn(async () => {
-          throw new Error('Extension connection timeout');
-        }),
-        cdpEndpoint: vi.fn(() => 'ws://127.0.0.1:9223/cdp/abc'),
-        stop: vi.fn(async () => {}),
-      };
-
-      vi.spyOn(manager, 'createBridgeRelayServer').mockReturnValue(relayMock);
-      vi.spyOn(manager, 'openBridgeConnectUrl').mockResolvedValue(undefined);
-      vi.spyOn(manager, 'shouldAttemptBridgeWindowsBrowserFallback').mockReturnValue(true);
-      const fallbackSpy = vi
-        .spyOn(manager, 'tryBridgeWindowsBrowserFallback')
-        .mockResolvedValue({ connected: true, failures: [] });
-      const cdpSpy = vi.spyOn(manager, 'connectViaCDP').mockResolvedValue(undefined);
-
-      await manager.connectViaBridge(9223, 'token', 'mmlmfjhmonkocbjadbfplnigmagldckm');
-
-      expect(fallbackSpy).toHaveBeenCalledWith(relayMock, 'chrome-extension://id/connect.html?x=1');
-      expect(cdpSpy).toHaveBeenCalledWith('ws://127.0.0.1:9223/cdp/abc');
-      expect(manager.getAndClearWarnings()[0]).toContain(
-        'default browser did not connect to the extension'
-      );
-      await manager.close();
-    });
-
     it('fails fast when bridge opener command cannot be launched', async () => {
       const manager = new BrowserManager();
       const relayMock = {
         start: vi.fn(async () => {}),
+        port: vi.fn(() => 9223),
         buildConnectUrl: vi.fn(() => 'chrome-extension://id/connect.html?x=1'),
         waitForExtensionConnection: vi.fn(async () => {}),
         cdpEndpoint: vi.fn(() => 'ws://127.0.0.1:9223/cdp/abc'),
@@ -213,13 +193,6 @@ describe('BrowserManager', () => {
       }
     });
 
-    it('quotes cmd URL arguments to preserve query params', () => {
-      const manager = new BrowserManager() as any;
-      expect(manager.quoteForCmd('https://example.com/connect?x=1&token=abc')).toBe(
-        '"https://example.com/connect?x=1&token=abc"'
-      );
-    });
-
     it('uses WSL-aware opener commands in auto mode', () => {
       const manager = new BrowserManager() as any;
       const isWslSpy = vi.spyOn(BrowserManager as any, 'isRunningInWsl');
@@ -236,25 +209,27 @@ describe('BrowserManager', () => {
           '/c',
           'start',
           '',
-          '"https://example.com/connect?x=1&token=abc"',
+          'https://example.com/connect?x=1&token=abc',
         ]);
       }
       isWslSpy.mockRestore();
     });
 
-    it('builds known-browser fallback opener commands on WSL', () => {
+    it('uses powershell first for explicit browser mode in WSL', () => {
       const manager = new BrowserManager() as any;
       const isWslSpy = vi.spyOn(BrowserManager as any, 'isRunningInWsl');
       isWslSpy.mockReturnValue(true);
       if (process.platform === 'linux') {
-        const commands = manager.resolveBridgeWindowsFallbackBrowserCommands(
-          'https://example.com/connect?x=1'
-        ) as Array<{ browser: string; command: string; args: string[] }>;
-        expect(commands[0]).toEqual({
-          browser: 'Chrome',
-          command: 'cmd.exe',
-          args: ['/c', 'start', '', 'chrome.exe', '"https://example.com/connect?x=1"'],
-        });
+        const commands = manager.resolveBridgeOpenCommands(
+          'edge-extension://abc/connect.html?token=1',
+          undefined,
+          'windows',
+          'edge',
+          'Profile 1'
+        ) as Array<{ command: string; args: string[] }>;
+        expect(commands[0].command).toBe('powershell.exe');
+        expect(commands[0].args.join(' ')).toContain("Start-Process -FilePath 'msedge'");
+        expect(commands[0].args.join(' ')).toContain("'--profile-directory=Profile 1'");
       }
       isWslSpy.mockRestore();
     });
@@ -302,7 +277,14 @@ describe('BrowserManager', () => {
       });
 
       expect(closeSpy).toHaveBeenCalled();
-      expect(bridgeSpy).toHaveBeenCalledWith(9223, undefined, undefined, undefined);
+      expect(bridgeSpy).toHaveBeenCalledWith(
+        9223,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined
+      );
       closeSpy.mockRestore();
       bridgeSpy.mockRestore();
     });
@@ -311,7 +293,7 @@ describe('BrowserManager', () => {
       const manager = new BrowserManager() as any;
       vi.spyOn(manager, 'resolveBridgeOpenCommands').mockReturnValue([
         { command: 'powershell.exe', args: ['-NoProfile'] },
-        { command: 'cmd.exe', args: ['/c', 'start', '', '"https://example.com"'] },
+        { command: 'cmd.exe', args: ['/c', 'start', '', 'https://example.com'] },
       ]);
       const spawnSpy = vi
         .spyOn(manager, 'spawnDetached')

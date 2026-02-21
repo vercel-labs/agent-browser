@@ -51,6 +51,8 @@ const launchSchema = baseCommandSchema.extend({
   bridgeToken: z.string().optional(),
   bridgeExtensionId: z.string().optional(),
   bridgePlatform: z.enum(['auto', 'linux', 'windows']).optional(),
+  bridgeBrowser: z.enum(['auto', 'edge', 'chrome']).optional(),
+  bridgeProfileDirectory: z.string().min(1).optional(),
   ignoreHTTPSErrors: z.boolean().optional(),
   allowFileAccess: z.boolean().optional(),
   profile: z.string().optional(),

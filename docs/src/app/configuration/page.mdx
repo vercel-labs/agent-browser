@@ -257,6 +257,27 @@ Every CLI flag can be set in the config file using its camelCase equivalent:
     </tr>
     <tr>
       <td>
+        <code>bridgeBrowser</code>
+      </td>
+      <td>
+        <code>--bridge-browser</code> / <code>AGENT_BROWSER_BRIDGE_BROWSER</code>
+      </td>
+      <td>
+        <code>auto</code> | <code>edge</code> | <code>chrome</code>
+      </td>
+    </tr>
+    <tr>
+      <td>
+        <code>bridgeProfileDirectory</code>
+      </td>
+      <td>
+        <code>--bridge-profile-directory</code> /{' '}
+        <code>AGENT_BROWSER_BRIDGE_PROFILE_DIRECTORY</code>
+      </td>
+      <td>string</td>
+    </tr>
+    <tr>
+      <td>
         <code>device</code>
       </td>
       <td>
@@ -360,8 +381,6 @@ Every CLI flag can be set in the config file using its camelCase equivalent:
   "bridgePlatform": "windows"
 }
 ```
-
-When `bridgePlatform` is `windows`, agent-browser opens the default Windows browser first. If the extension does not connect, it logs a warning and retries with Chrome, Edge, Brave, then Chromium.
 
 ## Overriding Boolean Options
 

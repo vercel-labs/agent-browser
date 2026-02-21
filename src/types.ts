@@ -33,6 +33,8 @@ export interface LaunchCommand extends BaseCommand {
   bridgeToken?: string;
   bridgeExtensionId?: string;
   bridgePlatform?: 'auto' | 'linux' | 'windows';
+  bridgeBrowser?: 'auto' | 'edge' | 'chrome';
+  bridgeProfileDirectory?: string;
   ignoreHTTPSErrors?: boolean;
   allowFileAccess?: boolean; // Enable file:// URL access and cross-origin file requests
   // Auto-load state file for session persistence

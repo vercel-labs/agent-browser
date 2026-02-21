@@ -2071,7 +2071,8 @@ Options:
   --allow-file-access        Allow file:// URLs to access local files (Chromium only)
   -p, --provider <name>      Browser provider: ios, bridge, browserbase, kernel, browseruse
   --bridge-platform <mode> Bridge opener platform for provider=bridge: auto, linux, windows
-                             windows uses default browser first, then Chrome/Edge/Brave/Chromium fallback
+  --bridge-browser <mode> Bridge browser for provider=bridge: auto, edge, chrome
+  --bridge-profile-directory <name> Browser profile directory for provider=bridge (e.g., "Profile 1")
   --device <name>            iOS device name (e.g., "iPhone 15 Pro")
   --json                     JSON output
   --full, -f                 Full page screenshot
@@ -2122,7 +2123,8 @@ Environment:
   AGENT_BROWSER_BRIDGE_TOKEN     Token to bypass Bridge approval dialog
   AGENT_BROWSER_BRIDGE_EXTENSION_ID Override Bridge extension ID
   AGENT_BROWSER_BRIDGE_PLATFORM Bridge opener platform: auto, linux, windows
-                                windows uses default browser first, then Chrome/Edge/Brave/Chromium fallback
+  AGENT_BROWSER_BRIDGE_BROWSER  Bridge browser: auto, edge, chrome
+  AGENT_BROWSER_BRIDGE_PROFILE_DIRECTORY Bridge profile directory (e.g., "Profile 1")
   AGENT_BROWSER_AUTO_CONNECT     Auto-discover and connect to running Chrome
   AGENT_BROWSER_ALLOW_FILE_ACCESS Allow file:// URLs to access local files
   AGENT_BROWSER_STREAM_PORT      Enable WebSocket streaming on port (e.g., 9223)
@@ -2150,6 +2152,7 @@ Examples:
   agent-browser --auto-connect snapshot  # Auto-discover running Chrome
   agent-browser -p bridge snapshot -i    # Connect to Playwright MCP Bridge extension
   agent-browser -p bridge --bridge-platform windows snapshot -i
+  agent-browser -p bridge --bridge-browser edge --bridge-profile-directory "Profile 1" snapshot -i
   agent-browser --profile ~/.myapp open example.com    # Persistent profile
   agent-browser --session-name myapp open example.com  # Auto-save/restore state
 

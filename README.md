@@ -460,6 +460,8 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 | `--allow-file-access`      | Allow file:// URLs to access local files (Chromium only)                                                   |
 | `-p, --provider <name>`    | Browser provider: `ios`, `bridge`, `browserbase`, `kernel`, `browseruse` (or `AGENT_BROWSER_PROVIDER` env) |
 | `--bridge-platform <mode>` | Bridge connect URL opener platform: `auto`, `linux`, `windows` (or `AGENT_BROWSER_BRIDGE_PLATFORM` env)      |
+| `--bridge-browser <mode>`  | Bridge browser mode: `auto`, `edge`, `chrome` (or `AGENT_BROWSER_BRIDGE_BROWSER` env)                        |
+| `--bridge-profile-directory <name>` | Bridge profile directory name (e.g., `Profile 1`) for provider=bridge (or `AGENT_BROWSER_BRIDGE_PROFILE_DIRECTORY` env) |
 | `--device <name>`          | iOS device name, e.g. "iPhone 15 Pro" (or `AGENT_BROWSER_IOS_DEVICE` env)                                  |
 | `--json`                   | JSON output (for agents)                                                                                   |
 | `--full, -f`               | Full page screenshot                                                                                       |
@@ -1073,6 +1075,8 @@ Bridge configuration:
 | `AGENT_BROWSER_BRIDGE_TOKEN`        | Optional extension token to skip approval prompts        | (none)                             |
 | `AGENT_BROWSER_BRIDGE_EXTENSION_ID` | Override extension ID (useful for unpacked/dev installs) | `mmlmfjhmonkocbjadbfplnigmagldckm` |
 | `AGENT_BROWSER_BRIDGE_PLATFORM`     | Bridge opener platform (`auto`, `linux`, `windows`)      | `auto`                             |
+| `AGENT_BROWSER_BRIDGE_BROWSER`      | Bridge browser mode (`auto`, `edge`, `chrome`)           | `auto`                             |
+| `AGENT_BROWSER_BRIDGE_PROFILE_DIRECTORY` | Browser profile directory (e.g., `Profile 1`)       | browser default profile            |
 
 Bridge opener platform examples:
 
@@ -1082,11 +1086,13 @@ agent-browser -p bridge --bridge-platform windows snapshot -i
 
 # Force Linux opener (xdg-open)
 agent-browser -p bridge --bridge-platform linux snapshot -i
+
+# Force Edge Profile 1 on Windows/WSL
+agent-browser -p bridge --bridge-browser edge --bridge-profile-directory "Profile 1" snapshot -i
 ```
 
 Notes:
 
-- In `windows` mode, agent-browser opens your default Windows browser first. If the extension does not connect, it prints a warning and tries Chrome, Edge, Brave, then Chromium.
 - The extension controls a real, user-selected Chromium tab.
 - Existing agent-browser snapshot/refs/actions work unchanged once connected.
 - Browser launch-time extension loading (`--extension`) is not supported with provider mode.

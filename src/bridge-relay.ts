@@ -221,10 +221,12 @@ export interface BridgeConnectUrlOptions {
   clientName: string;
   clientVersion: string;
   protocolVersion?: number;
+  extensionScheme?: 'chrome-extension' | 'edge-extension';
 }
 
 export class BridgeRelayServer {
-  private readonly port: number;
+  private readonly requestedPort: number;
+  private boundPort: number | null = null;
   private readonly host: string;
   private readonly cdpPath: string;
   private readonly extensionPath: string;
@@ -237,7 +239,7 @@ export class BridgeRelayServer {
   private started = false;
 
   constructor(options: BridgeRelayServerOptions) {
-    this.port = options.port;
+    this.requestedPort = options.port;
     this.host = options.host ?? '127.0.0.1';
     const uuid = randomUUID();
     this.cdpPath = `/cdp/${uuid}`;
@@ -282,7 +284,13 @@ export class BridgeRelayServer {
 
     await new Promise<void>((resolve, reject) => {
       this.httpServer!.once('error', reject);
-      this.httpServer!.listen(this.port, this.host, () => {
+      this.httpServer!.listen(this.requestedPort, this.host, () => {
+        const address = this.httpServer!.address();
+        if (address && typeof address !== 'string') {
+          this.boundPort = address.port;
+        } else {
+          this.boundPort = this.requestedPort;
+        }
         this.httpServer!.off('error', reject);
         resolve();
       });
@@ -290,15 +298,22 @@ export class BridgeRelayServer {
   }
 
   cdpEndpoint(): string {
-    return `ws://${this.host}:${this.port}${this.cdpPath}`;
+    const port = this.boundPort ?? this.requestedPort;
+    return `ws://${this.host}:${port}${this.cdpPath}`;
   }
 
   extensionEndpoint(): string {
-    return `ws://${this.host}:${this.port}${this.extensionPath}`;
+    const port = this.boundPort ?? this.requestedPort;
+    return `ws://${this.host}:${port}${this.extensionPath}`;
+  }
+
+  port(): number {
+    return this.boundPort ?? this.requestedPort;
   }
 
   buildConnectUrl(options: BridgeConnectUrlOptions): string {
-    const url = new URL(`chrome-extension://${options.extensionId}/connect.html`);
+    const scheme = options.extensionScheme ?? 'chrome-extension';
+    const url = new URL(`${scheme}://${options.extensionId}/connect.html`);
     url.searchParams.set('mcpRelayUrl', this.extensionEndpoint());
     url.searchParams.set(
       'client',
@@ -348,6 +363,7 @@ export class BridgeRelayServer {
     }
 
     this.started = false;
+    this.boundPort = null;
   }
 
   private handleCdpConnection(socket: WebSocket): void {

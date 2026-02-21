@@ -37,6 +37,8 @@ pub struct Config {
     pub bridge_token: Option<String>,
     pub bridge_extension_id: Option<String>,
     pub bridge_platform: Option<String>,
+    pub bridge_browser: Option<String>,
+    pub bridge_profile_directory: Option<String>,
 }
 
 impl Config {
@@ -74,6 +76,8 @@ impl Config {
             bridge_token: other.bridge_token.or(self.bridge_token),
             bridge_extension_id: other.bridge_extension_id.or(self.bridge_extension_id),
             bridge_platform: other.bridge_platform.or(self.bridge_platform),
+            bridge_browser: other.bridge_browser.or(self.bridge_browser),
+            bridge_profile_directory: other.bridge_profile_directory.or(self.bridge_profile_directory),
         }
     }
 }
@@ -81,6 +85,16 @@ impl Config {
 fn parse_bridge_platform_value(name: &str, value: &str) -> String {
     match try_parse_bridge_platform_value(name, value) {
         Ok(platform) => platform,
+        Err(message) => {
+            eprintln!("{} {}", color::error_indicator(), message);
+            std::process::exit(1);
+        }
+    }
+}
+
+fn parse_bridge_browser_value(name: &str, value: &str) -> String {
+    match try_parse_bridge_browser_value(name, value) {
+        Ok(browser) => browser,
         Err(message) => {
             eprintln!("{} {}", color::error_indicator(), message);
             std::process::exit(1);
@@ -108,6 +122,17 @@ fn try_parse_bridge_platform_value(name: &str, value: &str) -> Result<String, St
         "auto" | "linux" | "windows" => Ok(normalized),
         _ => Err(format!(
             "{} must be one of: auto, linux, windows (got '{}')",
+            name, value
+        )),
+    }
+}
+
+fn try_parse_bridge_browser_value(name: &str, value: &str) -> Result<String, String> {
+    let normalized = value.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "auto" | "edge" | "chrome" => Ok(normalized),
+        _ => Err(format!(
+            "{} must be one of: auto, edge, chrome (got '{}')",
             name, value
         )),
     }
@@ -171,6 +196,8 @@ fn extract_config_path(args: &[String]) -> Option<Option<String>> {
         "-p",
         "--provider",
         "--bridge-platform",
+        "--bridge-browser",
+        "--bridge-profile-directory",
         "--device",
         "--session-name",
     ];
@@ -246,8 +273,11 @@ pub struct Flags {
     pub bridge_token: Option<String>,
     pub bridge_extension_id: Option<String>,
     pub bridge_platform: Option<String>,
+    pub bridge_browser: Option<String>,
+    pub bridge_profile_directory: Option<String>,
     pub bridge_port_error: Option<String>,
     pub bridge_platform_error: Option<String>,
+    pub bridge_browser_error: Option<String>,
 
     // Track which launch-time options were explicitly passed via CLI
     // (as opposed to being set only via environment variables)
@@ -261,6 +291,8 @@ pub struct Flags {
     pub cli_proxy_bypass: bool,
     pub cli_allow_file_access: bool,
     pub cli_bridge_platform: bool,
+    pub cli_bridge_browser: bool,
+    pub cli_bridge_profile_directory: bool,
 }
 
 pub fn parse_flags(args: &[String]) -> Flags {
@@ -287,6 +319,8 @@ pub fn parse_flags(args: &[String]) -> Flags {
 
     let bridge_port_from_config = config.bridge_port;
     let bridge_platform_from_config = config.bridge_platform.clone();
+    let bridge_browser_from_config = config.bridge_browser.clone();
+    let bridge_profile_directory_from_config = config.bridge_profile_directory.clone();
 
     let (bridge_port, bridge_port_error) = match env::var("AGENT_BROWSER_BRIDGE_PORT") {
         Ok(raw) => match try_parse_port_value("AGENT_BROWSER_BRIDGE_PORT", &raw) {
@@ -304,6 +338,20 @@ pub fn parse_flags(args: &[String]) -> Flags {
         Err(_) => match bridge_platform_from_config {
             Some(raw) => match try_parse_bridge_platform_value("bridgePlatform", &raw) {
                 Ok(platform) => (Some(platform), None),
+                Err(error) => (None, Some(error)),
+            },
+            None => (None, None),
+        },
+    };
+
+    let (bridge_browser, bridge_browser_error) = match env::var("AGENT_BROWSER_BRIDGE_BROWSER") {
+        Ok(raw) => match try_parse_bridge_browser_value("AGENT_BROWSER_BRIDGE_BROWSER", &raw) {
+            Ok(browser) => (Some(browser), None),
+            Err(error) => (None, Some(error)),
+        },
+        Err(_) => match bridge_browser_from_config {
+            Some(raw) => match try_parse_bridge_browser_value("bridgeBrowser", &raw) {
+                Ok(browser) => (Some(browser), None),
                 Err(error) => (None, Some(error)),
             },
             None => (None, None),
@@ -355,8 +403,13 @@ pub fn parse_flags(args: &[String]) -> Flags {
             .ok()
             .or(config.bridge_extension_id),
         bridge_platform,
+        bridge_browser,
+        bridge_profile_directory: env::var("AGENT_BROWSER_BRIDGE_PROFILE_DIRECTORY")
+            .ok()
+            .or(bridge_profile_directory_from_config),
         bridge_port_error,
         bridge_platform_error,
+        bridge_browser_error,
         cli_executable_path: false,
         cli_extensions: false,
         cli_profile: false,
@@ -367,6 +420,8 @@ pub fn parse_flags(args: &[String]) -> Flags {
         cli_proxy_bypass: false,
         cli_allow_file_access: false,
         cli_bridge_platform: false,
+        cli_bridge_browser: false,
+        cli_bridge_profile_directory: false,
     };
 
     let mut i = 0;
@@ -489,6 +544,21 @@ pub fn parse_flags(args: &[String]) -> Flags {
                     i += 1;
                 }
             }
+            "--bridge-browser" => {
+                if let Some(value) = args.get(i + 1) {
+                    flags.bridge_browser = Some(parse_bridge_browser_value("--bridge-browser", value));
+                    flags.bridge_browser_error = None;
+                    flags.cli_bridge_browser = true;
+                    i += 1;
+                }
+            }
+            "--bridge-profile-directory" => {
+                if let Some(value) = args.get(i + 1) {
+                    flags.bridge_profile_directory = Some(value.clone());
+                    flags.cli_bridge_profile_directory = true;
+                    i += 1;
+                }
+            }
             "--ignore-https-errors" => {
                 let (val, consumed) = parse_bool_arg(args, i);
                 flags.ignore_https_errors = val;
@@ -572,6 +642,8 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "-p",
         "--provider",
         "--bridge-platform",
+        "--bridge-browser",
+        "--bridge-profile-directory",
         "--device",
         "--session-name",
         "--config",
@@ -744,6 +816,38 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_bridge_browser_flag() {
+        let flags = parse_flags(&args("-p bridge --bridge-browser edge snapshot -i"));
+        assert_eq!(flags.provider.as_deref(), Some("bridge"));
+        assert_eq!(flags.bridge_browser.as_deref(), Some("edge"));
+        assert!(flags.cli_bridge_browser);
+    }
+
+    #[test]
+    fn test_parse_bridge_profile_directory_flag() {
+        let input = vec![
+            "-p".to_string(),
+            "bridge".to_string(),
+            "--bridge-profile-directory".to_string(),
+            "Profile 1".to_string(),
+            "snapshot".to_string(),
+            "-i".to_string(),
+        ];
+        let flags = parse_flags(&input);
+        assert_eq!(flags.provider.as_deref(), Some("bridge"));
+        assert_eq!(flags.bridge_profile_directory.as_deref(), Some("Profile 1"));
+        assert!(flags.cli_bridge_profile_directory);
+    }
+
+    #[test]
+    fn test_clean_args_removes_bridge_browser_and_profile_directory() {
+        let cleaned = clean_args(&args(
+            "-p bridge --bridge-browser edge --bridge-profile-directory Profile1 snapshot -i",
+        ));
+        assert_eq!(cleaned, vec!["snapshot", "-i"]);
+    }
+
+    #[test]
     fn test_parse_flags_invalid_bridge_platform_in_config_is_deferred() {
         use std::io::Write;
 
@@ -798,9 +902,69 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_flags_invalid_bridge_browser_in_config_is_deferred() {
+        use std::io::Write;
+
+        let dir = std::env::temp_dir().join("ab-test-invalid-bridge-browser");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        let mut file = std::fs::File::create(&path).unwrap();
+        writeln!(file, "{{\"bridgeBrowser\":\"invalid-browser\"}}").unwrap();
+
+        let input = vec![
+            "--config".to_string(),
+            path.to_string_lossy().to_string(),
+            "snapshot".to_string(),
+            "-i".to_string(),
+        ];
+        let flags = parse_flags(&input);
+        assert!(flags.bridge_browser.is_none());
+        assert!(flags.bridge_browser_error.is_some());
+        assert!(!flags.cli_bridge_browser);
+
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn test_parse_flags_cli_bridge_browser_clears_deferred_config_error() {
+        use std::io::Write;
+
+        let dir = std::env::temp_dir().join("ab-test-cli-bridge-browser-clears-error");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        let mut file = std::fs::File::create(&path).unwrap();
+        writeln!(file, "{{\"bridgeBrowser\":\"invalid-browser\"}}").unwrap();
+
+        let input = vec![
+            "--config".to_string(),
+            path.to_string_lossy().to_string(),
+            "-p".to_string(),
+            "bridge".to_string(),
+            "--bridge-browser".to_string(),
+            "edge".to_string(),
+            "snapshot".to_string(),
+            "-i".to_string(),
+        ];
+        let flags = parse_flags(&input);
+        assert_eq!(flags.bridge_browser.as_deref(), Some("edge"));
+        assert!(flags.bridge_browser_error.is_none());
+        assert!(flags.cli_bridge_browser);
+
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn test_try_parse_bridge_platform_value_error() {
         let error = try_parse_bridge_platform_value("bridgePlatform", "bad").unwrap_err();
         assert!(error.contains("bridgePlatform must be one of"));
+    }
+
+    #[test]
+    fn test_try_parse_bridge_browser_value_error() {
+        let error = try_parse_bridge_browser_value("bridgeBrowser", "bad").unwrap_err();
+        assert!(error.contains("bridgeBrowser must be one of"));
     }
 
     #[test]
@@ -878,7 +1042,9 @@ mod tests {
             "bridgePort": 9223,
             "bridgeToken": "bridge-token",
             "bridgeExtensionId": "exampleextensionid",
-            "bridgePlatform": "windows"
+            "bridgePlatform": "windows",
+            "bridgeBrowser": "edge",
+            "bridgeProfileDirectory": "Profile 1"
         }"#;
         let config: Config = serde_json::from_str(json).unwrap();
         assert_eq!(config.headed, Some(true));
@@ -912,6 +1078,11 @@ mod tests {
             Some("exampleextensionid")
         );
         assert_eq!(config.bridge_platform.as_deref(), Some("windows"));
+        assert_eq!(config.bridge_browser.as_deref(), Some("edge"));
+        assert_eq!(
+            config.bridge_profile_directory.as_deref(),
+            Some("Profile 1")
+        );
     }
 
     #[test]
@@ -922,6 +1093,8 @@ mod tests {
             bridge_token: Some("token-from-config".to_string()),
             bridge_extension_id: Some("custom-extension-id".to_string()),
             bridge_platform: Some("linux".to_string()),
+            bridge_browser: Some("chrome".to_string()),
+            bridge_profile_directory: Some("Profile 2".to_string()),
             ..Config::default()
         };
 
@@ -934,6 +1107,11 @@ mod tests {
             Some("custom-extension-id")
         );
         assert_eq!(merged.bridge_platform.as_deref(), Some("linux"));
+        assert_eq!(merged.bridge_browser.as_deref(), Some("chrome"));
+        assert_eq!(
+            merged.bridge_profile_directory.as_deref(),
+            Some("Profile 2")
+        );
     }
 
     #[test]

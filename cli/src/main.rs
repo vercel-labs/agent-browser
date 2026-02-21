@@ -56,6 +56,17 @@ fn should_reject_bridge_platform(cli_bridge_platform: bool, provider: Option<&st
     cli_bridge_platform && provider != Some("bridge")
 }
 
+fn should_reject_bridge_browser(cli_bridge_browser: bool, provider: Option<&str>) -> bool {
+    cli_bridge_browser && provider != Some("bridge")
+}
+
+fn should_reject_bridge_profile_directory(
+    cli_bridge_profile_directory: bool,
+    provider: Option<&str>,
+) -> bool {
+    cli_bridge_profile_directory && provider != Some("bridge")
+}
+
 fn run_session(args: &[String], session: &str, json_mode: bool) {
     let subcommand = args.get(1).map(|s| s.as_str());
 
@@ -353,6 +364,29 @@ fn main() {
         exit(1);
     }
 
+    if should_reject_bridge_browser(flags.cli_bridge_browser, flags.provider.as_deref()) {
+        let msg = "Cannot use --bridge-browser without -p bridge";
+        if flags.json {
+            println!(r#"{{"success":false,"error":"{}"}}"#, msg);
+        } else {
+            eprintln!("{} {}", color::error_indicator(), msg);
+        }
+        exit(1);
+    }
+
+    if should_reject_bridge_profile_directory(
+        flags.cli_bridge_profile_directory,
+        flags.provider.as_deref(),
+    ) {
+        let msg = "Cannot use --bridge-profile-directory without -p bridge";
+        if flags.json {
+            println!(r#"{{"success":false,"error":"{}"}}"#, msg);
+        } else {
+            eprintln!("{} {}", color::error_indicator(), msg);
+        }
+        exit(1);
+    }
+
     if flags.cdp.is_some() && !flags.extensions.is_empty() {
         let msg = "Cannot use --extension with --cdp (extensions require local browser)";
         if flags.json {
@@ -501,6 +535,14 @@ fn main() {
                 }
                 exit(1);
             }
+            if let Some(err) = &flags.bridge_browser_error {
+                if flags.json {
+                    println!(r#"{{"success":false,"error":"{}"}}"#, err);
+                } else {
+                    eprintln!("{} {}", color::error_indicator(), err);
+                }
+                exit(1);
+            }
             launch_cmd["bridgePort"] = json!(flags.bridge_port.unwrap_or(9223));
             if let Some(token) = &flags.bridge_token {
                 launch_cmd["bridgeToken"] = json!(token);
@@ -510,6 +552,12 @@ fn main() {
             }
             if let Some(bridge_platform) = &flags.bridge_platform {
                 launch_cmd["bridgePlatform"] = json!(bridge_platform);
+            }
+            if let Some(bridge_browser) = &flags.bridge_browser {
+                launch_cmd["bridgeBrowser"] = json!(bridge_browser);
+            }
+            if let Some(bridge_profile_directory) = &flags.bridge_profile_directory {
+                launch_cmd["bridgeProfileDirectory"] = json!(bridge_profile_directory);
             }
         }
 
@@ -723,5 +771,31 @@ mod tests {
         assert!(!should_reject_bridge_platform(false, None));
         assert!(!should_reject_bridge_platform(false, Some("local")));
         assert!(!should_reject_bridge_platform(true, Some("bridge")));
+    }
+
+    #[test]
+    fn test_should_reject_bridge_browser_when_cli_flag_without_bridge_provider() {
+        assert!(should_reject_bridge_browser(true, None));
+        assert!(should_reject_bridge_browser(true, Some("local")));
+    }
+
+    #[test]
+    fn test_should_not_reject_bridge_browser_from_env_or_with_bridge_provider() {
+        assert!(!should_reject_bridge_browser(false, None));
+        assert!(!should_reject_bridge_browser(false, Some("local")));
+        assert!(!should_reject_bridge_browser(true, Some("bridge")));
+    }
+
+    #[test]
+    fn test_should_reject_bridge_profile_directory_without_bridge_provider() {
+        assert!(should_reject_bridge_profile_directory(true, None));
+        assert!(should_reject_bridge_profile_directory(true, Some("local")));
+    }
+
+    #[test]
+    fn test_should_not_reject_bridge_profile_directory_with_bridge_provider() {
+        assert!(!should_reject_bridge_profile_directory(false, None));
+        assert!(!should_reject_bridge_profile_directory(false, Some("local")));
+        assert!(!should_reject_bridge_profile_directory(true, Some("bridge")));
     }
 }

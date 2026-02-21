@@ -195,13 +195,17 @@ export AGENT_BROWSER_BRIDGE_PORT=9223
 export AGENT_BROWSER_BRIDGE_TOKEN="<token-from-extension>"
 export AGENT_BROWSER_BRIDGE_EXTENSION_ID="mmlmfjhmonkocbjadbfplnigmagldckm"
 export AGENT_BROWSER_BRIDGE_PLATFORM="windows"  # auto | linux | windows
+export AGENT_BROWSER_BRIDGE_BROWSER="edge"      # auto | edge | chrome
+export AGENT_BROWSER_BRIDGE_PROFILE_DIRECTORY="Profile 1"
 
 # WSL: force Windows host browser opener for connect URL
 agent-browser -p bridge --bridge-platform windows snapshot -i
-# In windows mode, default Windows browser is tried first, then Chrome/Edge/Brave/Chromium if needed.
 
 # Linux host: force xdg-open path
 agent-browser -p bridge --bridge-platform linux snapshot -i
+
+# Force Edge Profile 1 on Windows/WSL
+agent-browser -p bridge --bridge-browser edge --bridge-profile-directory "Profile 1" snapshot -i
 
 agent-browser -p bridge open https://example.com
 ```

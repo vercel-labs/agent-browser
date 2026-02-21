@@ -236,7 +236,9 @@ agent-browser reload                  # Reload page
 --ignore-https-errors    # Ignore HTTPS certificate errors
 --allow-file-access      # Allow file:// URLs to access local files (Chromium only)
 -p, --provider <name>    # Browser provider (ios, bridge, browserbase, kernel, browseruse)
---bridge-platform <mode> # Bridge opener platform (auto, linux, windows; windows tries default browser first)
+--bridge-platform <mode> # Bridge opener platform (auto, linux, windows)
+--bridge-browser <mode>  # Bridge browser (auto, edge, chrome)
+--bridge-profile-directory <name> # Bridge profile directory (e.g., "Profile 1")
 --device <name>          # iOS device name (e.g., "iPhone 15 Pro")
 --json                   # JSON output (for scripts)
 --full, -f               # Full page screenshot
