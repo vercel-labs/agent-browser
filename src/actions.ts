@@ -523,6 +523,10 @@ async function handleNavigate(
   return successResponse(command.id, {
     url: page.url(),
     title: await page.title(),
+    ...(browser.getAgentCoreSessionId() && {
+      agentCoreSessionId: browser.getAgentCoreSessionId()!,
+      agentCoreLiveViewUrl: browser.getAgentCoreLiveViewUrl()!,
+    }),
   });
 }
 

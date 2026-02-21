@@ -86,6 +86,7 @@ export class BrowserManager {
   private kernelSessionId: string | null = null;
   private kernelApiKey: string | null = null;
   private agentCoreSessionId: string | null = null;
+  private agentCoreLiveViewUrl: string | null = null;
   private agentCoreIdentifier: string | null = null;
   private agentCoreRegion: string | null = null;
   private contexts: BrowserContext[] = [];
@@ -738,6 +739,20 @@ export class BrowserManager {
   }
 
   /**
+   * Get AgentCore session ID (if connected via AgentCore provider)
+   */
+  getAgentCoreSessionId(): string | null {
+    return this.agentCoreSessionId;
+  }
+
+  /**
+   * Get AgentCore Live View URL (if connected via AgentCore provider)
+   */
+  getAgentCoreLiveViewUrl(): string | null {
+    return this.agentCoreLiveViewUrl;
+  }
+
+  /**
    * Check if an existing CDP connection is still alive
    * by verifying we can access browser contexts and that at least one has pages
    */
@@ -901,6 +916,7 @@ export class BrowserManager {
     this.agentCoreRegion = region;
 
     const liveView = `https://${region}.console.aws.amazon.com/bedrock-agentcore/browser/${session.browserIdentifier}/session/${session.sessionId}#`;
+    this.agentCoreLiveViewUrl = liveView;
     console.error(`Session: ${session.sessionId}`);
     console.error(`Live View: ${liveView}`);
 
@@ -2563,6 +2579,7 @@ export class BrowserManager {
     this.kernelSessionId = null;
     this.kernelApiKey = null;
     this.agentCoreSessionId = null;
+    this.agentCoreLiveViewUrl = null;
     this.agentCoreIdentifier = null;
     this.agentCoreRegion = null;
     this.isPersistentContext = false;

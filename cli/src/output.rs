@@ -22,6 +22,13 @@ pub fn print_response(resp: &Response, json_mode: bool, action: Option<&str>) {
             if let Some(title) = data.get("title").and_then(|v| v.as_str()) {
                 println!("{} {}", color::success_indicator(), color::bold(title));
                 println!("  {}", color::dim(url));
+                // Show AgentCore session info if available
+                if let Some(live_view) = data.get("agentCoreLiveViewUrl").and_then(|v| v.as_str()) {
+                    if let Some(session_id) = data.get("agentCoreSessionId").and_then(|v| v.as_str()) {
+                        eprintln!("Session: {}", session_id);
+                        eprintln!("Live View: {}", live_view);
+                    }
+                }
                 return;
             }
             println!("{}", url);
