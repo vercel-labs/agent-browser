@@ -16,9 +16,11 @@ import {
 } from 'playwright-core';
 import path from 'node:path';
 import os from 'node:os';
+import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, rmSync, readFileSync } from 'node:fs';
 import { writeFile, mkdir } from 'node:fs/promises';
 import type { LaunchCommand, TraceEvent } from './types.js';
+import { BridgeRelayServer } from './bridge-relay.js';
 import { type RefMap, type EnhancedSnapshot, getEnhancedSnapshot, parseRef } from './snapshot.js';
 import { safeHeaderMerge } from './state-utils.js';
 import {
@@ -71,10 +73,25 @@ interface PageError {
   timestamp: number;
 }
 
+type BridgePlatform = 'auto' | 'linux' | 'windows';
+
 /**
  * Manages the Playwright browser lifecycle with multiple tabs/windows
  */
 export class BrowserManager {
+  private static readonly BRIDGE_CONNECT_TIMEOUT_MS = 30000;
+  private static readonly BRIDGE_DEFAULT_CONNECT_TIMEOUT_MS = 8000;
+  private static readonly BRIDGE_FALLBACK_CONNECT_TIMEOUT_MS = 5000;
+  private static readonly BRIDGE_OPENER_VERIFY_EXIT_MS = 1200;
+  private static readonly BRIDGE_CLIENT_VERSION = BrowserManager.resolveBridgeClientVersion();
+  private static readonly DEFAULT_BRIDGE_EXTENSION_ID = 'mmlmfjhmonkocbjadbfplnigmagldckm';
+  private static readonly ALTERNATE_BRIDGE_EXTENSION_ID = 'jakfalbnbhgkpmoaakfflhflbfpkailf';
+  private static readonly BRIDGE_WINDOWS_FALLBACK_BROWSERS = [
+    { name: 'Chrome', executable: 'chrome.exe' },
+    { name: 'Edge', executable: 'msedge.exe' },
+    { name: 'Brave', executable: 'brave.exe' },
+    { name: 'Chromium', executable: 'chromium.exe' },
+  ] as const;
   private browser: Browser | null = null;
   private cdpEndpoint: string | null = null; // stores port number or full URL
   private isPersistentContext: boolean = false;
@@ -111,6 +128,7 @@ export class BrowserManager {
   private recordingOutputPath: string = '';
   private recordingTempDir: string = '';
   private launchWarnings: string[] = [];
+  private bridgeRelayServer: BridgeRelayServer | null = null;
 
   /**
    * Get and clear launch warnings (e.g., decryption failures)
@@ -119,6 +137,11 @@ export class BrowserManager {
     const warnings = this.launchWarnings;
     this.launchWarnings = [];
     return warnings;
+  }
+
+  private addLaunchWarning(warning: string): void {
+    this.launchWarnings.push(warning);
+    console.error(`[WARN] ${warning}`);
   }
 
   // CDP profiling state
@@ -772,6 +795,372 @@ export class BrowserManager {
     return false;
   }
 
+  private createBridgeRelayServer(port: number): BridgeRelayServer {
+    return new BridgeRelayServer({ port });
+  }
+
+  private static resolveBridgeClientVersion(): string {
+    try {
+      const packageJsonPath = new URL('../package.json', import.meta.url);
+      const packageJsonRaw = readFileSync(packageJsonPath, 'utf8');
+      const packageJson = JSON.parse(packageJsonRaw) as { version?: unknown };
+      if (typeof packageJson.version === 'string' && packageJson.version.length > 0) {
+        return packageJson.version;
+      }
+    } catch {
+      // Fall back to a generic value if package metadata is unavailable.
+    }
+    return 'unknown';
+  }
+
+  private resolveBridgePort(explicitPort?: number): number {
+    if (typeof explicitPort === 'number') {
+      return explicitPort;
+    }
+
+    const envPort = process.env.AGENT_BROWSER_BRIDGE_PORT;
+    if (!envPort) {
+      return 9223;
+    }
+
+    const parsed = parseInt(envPort, 10);
+    if (!Number.isFinite(parsed) || parsed < 1 || parsed > 65535) {
+      throw new Error(
+        `Invalid AGENT_BROWSER_BRIDGE_PORT: '${envPort}'. Expected an integer in range 1-65535.`
+      );
+    }
+    return parsed;
+  }
+
+  private static isRunningInWsl(): boolean {
+    if (process.platform !== 'linux') return false;
+    if (process.env.WSL_DISTRO_NAME || process.env.WSL_INTEROP) return true;
+    try {
+      const release = readFileSync('/proc/sys/kernel/osrelease', 'utf8').toLowerCase();
+      return release.includes('microsoft') || release.includes('wsl');
+    } catch {
+      return false;
+    }
+  }
+
+  private resolveBridgePlatform(explicitBridgePlatform?: string): BridgePlatform {
+    const raw = explicitBridgePlatform ?? process.env.AGENT_BROWSER_BRIDGE_PLATFORM ?? 'auto';
+    const normalized = raw.trim().toLowerCase();
+    if (normalized === 'auto' || normalized === 'linux' || normalized === 'windows') {
+      return normalized;
+    }
+    throw new Error(
+      `Invalid AGENT_BROWSER_BRIDGE_PLATFORM: '${raw}'. Expected one of: auto, linux, windows.`
+    );
+  }
+
+  private resolveBridgeWindowsOpenCommands(
+    url: string
+  ): Array<{ command: string; args: string[] }> {
+    const quotedUrl = this.quoteForCmd(url);
+    if (process.platform === 'win32') {
+      return [{ command: 'cmd', args: ['/c', 'start', '', quotedUrl] }];
+    }
+
+    if (process.platform === 'linux' && BrowserManager.isRunningInWsl()) {
+      const escapedUrl = url.replace(/'/g, "''");
+      return [
+        {
+          command: 'powershell.exe',
+          args: ['-NoProfile', '-Command', `Start-Process '${escapedUrl}'`],
+        },
+        { command: 'cmd.exe', args: ['/c', 'start', '', quotedUrl] },
+      ];
+    }
+
+    throw new Error(
+      'bridgePlatform=windows is only supported on Windows hosts or WSL Linux environments.'
+    );
+  }
+
+  private resolveBridgeWindowsFallbackBrowserCommands(
+    url: string
+  ): Array<{ browser: string; command: string; args: string[] }> {
+    const quotedUrl = this.quoteForCmd(url);
+    const command = process.platform === 'win32' ? 'cmd' : 'cmd.exe';
+    const isWindowsCapable =
+      process.platform === 'win32' ||
+      (process.platform === 'linux' && BrowserManager.isRunningInWsl());
+    if (!isWindowsCapable) return [];
+
+    return BrowserManager.BRIDGE_WINDOWS_FALLBACK_BROWSERS.map((candidate) => ({
+      browser: candidate.name,
+      command,
+      args: ['/c', 'start', '', candidate.executable, quotedUrl],
+    }));
+  }
+
+  private shouldAttemptBridgeWindowsBrowserFallback(
+    executablePath?: string,
+    explicitBridgePlatform?: string
+  ): boolean {
+    if (executablePath) return false;
+    const bridgePlatform = this.resolveBridgePlatform(explicitBridgePlatform);
+    if (bridgePlatform === 'windows') return true;
+    if (bridgePlatform !== 'auto') return false;
+    return (
+      process.platform === 'win32' ||
+      (process.platform === 'linux' && BrowserManager.isRunningInWsl())
+    );
+  }
+
+  private async tryBridgeWindowsBrowserFallback(
+    relay: BridgeRelayServer,
+    url: string
+  ): Promise<{ connected: boolean; failures: string[] }> {
+    const commands = this.resolveBridgeWindowsFallbackBrowserCommands(url);
+    const failures: string[] = [];
+
+    for (const { browser, command, args } of commands) {
+      try {
+        await this.spawnDetached(command, args);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        failures.push(`${browser}: opener failed (${detail})`);
+        continue;
+      }
+
+      try {
+        await relay.waitForExtensionConnection(BrowserManager.BRIDGE_FALLBACK_CONNECT_TIMEOUT_MS);
+        return { connected: true, failures };
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        failures.push(`${browser}: ${detail}`);
+      }
+    }
+
+    return { connected: false, failures };
+  }
+
+  private quoteForCmd(value: string): string {
+    return `"${value.replace(/"/g, '""')}"`;
+  }
+
+  private shouldVerifyBridgeOpenerExit(command: string): boolean {
+    const executable = path.basename(command).toLowerCase();
+    return (
+      executable === 'powershell.exe' ||
+      executable === 'pwsh.exe' ||
+      executable === 'cmd.exe' ||
+      executable === 'cmd'
+    );
+  }
+
+  private resolveBridgeOpenCommands(
+    url: string,
+    executablePath?: string,
+    explicitBridgePlatform?: string
+  ): Array<{ command: string; args: string[] }> {
+    if (executablePath) {
+      return [{ command: executablePath, args: [url] }];
+    }
+
+    const bridgePlatform = this.resolveBridgePlatform(explicitBridgePlatform);
+    if (bridgePlatform === 'windows') {
+      return this.resolveBridgeWindowsOpenCommands(url);
+    }
+
+    if (bridgePlatform === 'linux') {
+      if (process.platform !== 'linux') {
+        throw new Error('bridgePlatform=linux is only supported on Linux hosts.');
+      }
+      return [{ command: 'xdg-open', args: [url] }];
+    }
+
+    if (process.platform === 'darwin') {
+      return [{ command: 'open', args: [url] }];
+    }
+
+    if (process.platform === 'win32') {
+      return [{ command: 'cmd', args: ['/c', 'start', '', this.quoteForCmd(url)] }];
+    }
+
+    if (process.platform === 'linux') {
+      if (BrowserManager.isRunningInWsl()) {
+        return [
+          ...this.resolveBridgeWindowsOpenCommands(url),
+          { command: 'xdg-open', args: [url] },
+        ];
+      }
+      return [{ command: 'xdg-open', args: [url] }];
+    }
+
+    throw new Error(`Unsupported platform for bridge opener: ${process.platform}`);
+  }
+
+  private spawnDetached(command: string, args: string[]): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const child = spawn(command, args, {
+        detached: true,
+        stdio: 'ignore',
+      });
+      const verifyExit = this.shouldVerifyBridgeOpenerExit(command);
+
+      const onSpawn = () => {
+        child.off('error', onError);
+        child.unref();
+        if (!verifyExit) {
+          resolve();
+          return;
+        }
+
+        const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
+          clearTimeout(timeout);
+          if (code === 0 || code === null) {
+            resolve();
+          } else {
+            const signalMsg = signal ? ` (signal ${signal})` : '';
+            reject(new Error(`process exited with code ${code}${signalMsg}`));
+          }
+        };
+
+        const timeout = setTimeout(() => {
+          child.off('exit', onExit);
+          resolve();
+        }, BrowserManager.BRIDGE_OPENER_VERIFY_EXIT_MS);
+
+        child.once('exit', onExit);
+      };
+      const onError = (error: Error) => {
+        child.off('spawn', onSpawn);
+        reject(error);
+      };
+
+      child.once('spawn', onSpawn);
+      child.once('error', onError);
+    });
+  }
+
+  /**
+   * Open Playwright MCP Bridge connect URL with explicit opener control:
+   * - custom executable path (highest priority)
+   * - windows/linux/auto bridge opener modes (default browser launch).
+   * Browser-specific fallback attempts, when enabled, happen during connection wait.
+   */
+  private async openBridgeConnectUrl(
+    url: string,
+    executablePath?: string,
+    explicitBridgePlatform?: string
+  ): Promise<void> {
+    const commands = this.resolveBridgeOpenCommands(url, executablePath, explicitBridgePlatform);
+    const failures: string[] = [];
+
+    for (const { command, args } of commands) {
+      try {
+        await this.spawnDetached(command, args);
+        return;
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        failures.push(`'${command}': ${detail}`);
+      }
+    }
+
+    throw new Error(`Failed to run bridge opener (${failures.join('; ')})`);
+  }
+
+  private async connectViaBridge(
+    explicitPort?: number,
+    explicitToken?: string,
+    explicitExtensionId?: string,
+    explicitBridgePlatform?: string
+  ): Promise<void> {
+    const port = this.resolveBridgePort(explicitPort);
+    const token = explicitToken ?? process.env.AGENT_BROWSER_BRIDGE_TOKEN;
+    const extensionId =
+      explicitExtensionId ??
+      process.env.AGENT_BROWSER_BRIDGE_EXTENSION_ID ??
+      BrowserManager.DEFAULT_BRIDGE_EXTENSION_ID;
+    const executablePath = process.env.AGENT_BROWSER_EXECUTABLE_PATH;
+
+    const relay = this.createBridgeRelayServer(port);
+    this.bridgeRelayServer = relay;
+    await relay.start();
+
+    const connectUrl = relay.buildConnectUrl({
+      extensionId,
+      token,
+      clientName: 'agent-browser',
+      clientVersion: BrowserManager.BRIDGE_CLIENT_VERSION,
+      protocolVersion: 1,
+    });
+
+    try {
+      await this.openBridgeConnectUrl(connectUrl, executablePath, explicitBridgePlatform);
+    } catch (error) {
+      await relay.stop('Bridge connect URL launch failed').catch(() => {});
+      this.bridgeRelayServer = null;
+      const detail = error instanceof Error ? error.message : String(error);
+      const executableHint = executablePath
+        ? `\nAGENT_BROWSER_EXECUTABLE_PATH is set to '${executablePath}'. Verify this executable exists and is runnable.`
+        : '\nInstall a platform opener (open/cmd/xdg-open) or set AGENT_BROWSER_EXECUTABLE_PATH.';
+      throw new Error(
+        `Could not open Playwright MCP Bridge extension URL automatically.${executableHint}` +
+          `\nDetails: ${detail}`
+      );
+    }
+
+    const attemptWindowsFallback = this.shouldAttemptBridgeWindowsBrowserFallback(
+      executablePath,
+      explicitBridgePlatform
+    );
+    const defaultConnectTimeoutMs = attemptWindowsFallback
+      ? BrowserManager.BRIDGE_DEFAULT_CONNECT_TIMEOUT_MS
+      : BrowserManager.BRIDGE_CONNECT_TIMEOUT_MS;
+
+    try {
+      await relay.waitForExtensionConnection(defaultConnectTimeoutMs);
+    } catch (error) {
+      let connectError = error instanceof Error ? error.message : String(error);
+      if (attemptWindowsFallback) {
+        this.addLaunchWarning(
+          'Bridge: default browser did not connect to the extension. Trying known Windows browsers (Chrome, Edge, Brave, Chromium).'
+        );
+        const fallbackResult = await this.tryBridgeWindowsBrowserFallback(relay, connectUrl);
+        if (fallbackResult.connected) {
+          connectError = '';
+        } else if (fallbackResult.failures.length > 0) {
+          connectError += `; fallback attempts: ${fallbackResult.failures.join('; ')}`;
+        }
+      }
+
+      if (!connectError) {
+        // Fallback connected successfully.
+        return await this.connectViaCDP(relay.cdpEndpoint()).catch(async (cdpError) => {
+          await relay.stop('Bridge CDP connection failed').catch(() => {});
+          this.bridgeRelayServer = null;
+          throw cdpError;
+        });
+      }
+
+      await relay.stop('Bridge extension connection timeout').catch(() => {});
+      this.bridgeRelayServer = null;
+      const detail = connectError;
+      const tokenHint = token
+        ? '\nIf AGENT_BROWSER_BRIDGE_TOKEN is set, verify it matches the token shown in extension status page.'
+        : '';
+      throw new Error(
+        `Could not connect to Playwright MCP Bridge extension on port ${port}. ` +
+          `Install it from the Chrome Web Store: https://chromewebstore.google.com/detail/playwright-mcp-bridge/mmlmfjhmonkocbjadbfplnigmagldckm and ensure a Chromium-based browser is running.` +
+          `\nTried extension ID: ${extensionId}. Alternate known ID: ${BrowserManager.ALTERNATE_BRIDGE_EXTENSION_ID}.` +
+          `\nSet AGENT_BROWSER_BRIDGE_EXTENSION_ID to override.${tokenHint}` +
+          `\nDetails: ${detail}`
+      );
+    }
+
+    try {
+      await this.connectViaCDP(relay.cdpEndpoint());
+    } catch (error) {
+      await relay.stop('Bridge CDP connection failed').catch(() => {});
+      this.bridgeRelayServer = null;
+      throw error;
+    }
+  }
+
   /**
    * Close a Browserbase session via API
    */
@@ -1101,6 +1490,7 @@ export class BrowserManager {
   async launch(options: LaunchCommand): Promise<void> {
     // Determine CDP endpoint: prefer cdpUrl over cdpPort for flexibility
     const cdpEndpoint = options.cdpUrl ?? (options.cdpPort ? String(options.cdpPort) : undefined);
+    const provider = options.provider ?? process.env.AGENT_BROWSER_PROVIDER;
     const hasExtensions = !!options.extensions?.length;
     const hasProfile = !!options.profile;
     const hasStorageState = !!options.storageState;
@@ -1126,17 +1516,25 @@ export class BrowserManager {
     }
 
     if (this.isLaunched()) {
-      const needsRelaunch =
-        (!cdpEndpoint && !options.autoConnect && this.cdpEndpoint !== null) ||
-        (!!cdpEndpoint && this.needsCdpReconnect(cdpEndpoint)) ||
-        (!!options.autoConnect && !this.isCdpConnectionAlive());
-      if (needsRelaunch) {
+      if (provider === 'bridge') {
+        if (this.bridgeRelayServer && this.isCdpConnectionAlive()) {
+          // Reuse active bridge session across repeated provider launches.
+          return;
+        }
         await this.close();
-      } else if (options.autoConnect && this.isCdpConnectionAlive()) {
-        // Already connected via auto-connect, no need to reconnect
-        return;
       } else {
-        return;
+        const needsRelaunch =
+          (!cdpEndpoint && !options.autoConnect && this.cdpEndpoint !== null) ||
+          (!!cdpEndpoint && this.needsCdpReconnect(cdpEndpoint)) ||
+          (!!options.autoConnect && !this.isCdpConnectionAlive());
+        if (needsRelaunch) {
+          await this.close();
+        } else if (options.autoConnect && this.isCdpConnectionAlive()) {
+          // Already connected via auto-connect, no need to reconnect
+          return;
+        } else {
+          return;
+        }
       }
     }
 
@@ -1152,13 +1550,22 @@ export class BrowserManager {
 
     // Cloud browser providers require explicit opt-in via -p flag or AGENT_BROWSER_PROVIDER env var
     // -p flag takes precedence over env var
-    const provider = options.provider ?? process.env.AGENT_BROWSER_PROVIDER;
     if (provider === 'browserbase') {
       await this.connectToBrowserbase();
       return;
     }
     if (provider === 'browseruse') {
       await this.connectToBrowserUse();
+      return;
+    }
+
+    if (provider === 'bridge') {
+      await this.connectViaBridge(
+        options.bridgePort,
+        options.bridgeToken,
+        options.bridgeExtensionId,
+        options.bridgePlatform
+      );
       return;
     }
 
@@ -2370,6 +2777,10 @@ export class BrowserManager {
       }
     }
 
+    if (this.bridgeRelayServer) {
+      await this.bridgeRelayServer.stop('BrowserManager close').catch(() => {});
+    }
+
     this.pages = [];
     this.contexts = [];
     this.cdpEndpoint = null;
@@ -2384,5 +2795,6 @@ export class BrowserManager {
     this.refMap = {};
     this.lastSnapshot = '';
     this.frameCallback = null;
+    this.bridgeRelayServer = null;
   }
 }

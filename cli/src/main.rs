@@ -52,6 +52,10 @@ fn parse_proxy(proxy_str: &str) -> serde_json::Value {
     })
 }
 
+fn should_reject_bridge_platform(cli_bridge_platform: bool, provider: Option<&str>) -> bool {
+    cli_bridge_platform && provider != Some("bridge")
+}
+
 fn run_session(args: &[String], session: &str, json_mode: bool) {
     let subcommand = args.get(1).map(|s| s.as_str());
 
@@ -226,6 +230,9 @@ fn main() {
         flags.provider.as_deref(),
         flags.device.as_deref(),
         flags.session_name.as_deref(),
+        flags.bridge_port,
+        flags.bridge_token.as_deref(),
+        flags.bridge_extension_id.as_deref(),
     ) {
         Ok(result) => result,
         Err(e) => {
@@ -328,6 +335,16 @@ fn main() {
 
     if flags.provider.is_some() && !flags.extensions.is_empty() {
         let msg = "Cannot use --extension with -p/--provider (extensions require local browser)";
+        if flags.json {
+            println!(r#"{{"success":false,"error":"{}"}}"#, msg);
+        } else {
+            eprintln!("{} {}", color::error_indicator(), msg);
+        }
+        exit(1);
+    }
+
+    if should_reject_bridge_platform(flags.cli_bridge_platform, flags.provider.as_deref()) {
+        let msg = "Cannot use --bridge-platform without -p bridge";
         if flags.json {
             println!(r#"{{"success":false,"error":"{}"}}"#, msg);
         } else {
@@ -461,11 +478,40 @@ fn main() {
 
     // Launch with cloud provider if -p flag is set
     if let Some(ref provider) = flags.provider {
-        let launch_cmd = json!({
+        let mut launch_cmd = json!({
             "id": gen_id(),
             "action": "launch",
             "provider": provider
         });
+
+        if provider == "bridge" {
+            if let Some(err) = &flags.bridge_port_error {
+                if flags.json {
+                    println!(r#"{{"success":false,"error":"{}"}}"#, err);
+                } else {
+                    eprintln!("{} {}", color::error_indicator(), err);
+                }
+                exit(1);
+            }
+            if let Some(err) = &flags.bridge_platform_error {
+                if flags.json {
+                    println!(r#"{{"success":false,"error":"{}"}}"#, err);
+                } else {
+                    eprintln!("{} {}", color::error_indicator(), err);
+                }
+                exit(1);
+            }
+            launch_cmd["bridgePort"] = json!(flags.bridge_port.unwrap_or(9223));
+            if let Some(token) = &flags.bridge_token {
+                launch_cmd["bridgeToken"] = json!(token);
+            }
+            if let Some(extension_id) = &flags.bridge_extension_id {
+                launch_cmd["bridgeExtensionId"] = json!(extension_id);
+            }
+            if let Some(bridge_platform) = &flags.bridge_platform {
+                launch_cmd["bridgePlatform"] = json!(bridge_platform);
+            }
+        }
 
         let err = match send_command(launch_cmd, &flags.session) {
             Ok(resp) if resp.success => None,
@@ -664,5 +710,18 @@ mod tests {
         assert_eq!(result["server"], "http://proxy.com:8080");
         assert_eq!(result["username"], "user");
         assert_eq!(result["password"], "p@ss:w0rd");
+    }
+
+    #[test]
+    fn test_should_reject_bridge_platform_when_cli_flag_without_bridge_provider() {
+        assert!(should_reject_bridge_platform(true, None));
+        assert!(should_reject_bridge_platform(true, Some("local")));
+    }
+
+    #[test]
+    fn test_should_not_reject_bridge_platform_from_env_or_with_bridge_provider() {
+        assert!(!should_reject_bridge_platform(false, None));
+        assert!(!should_reject_bridge_platform(false, Some("local")));
+        assert!(!should_reject_bridge_platform(true, Some("bridge")));
     }
 }

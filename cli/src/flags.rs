@@ -33,6 +33,10 @@ pub struct Config {
     pub auto_connect: Option<bool>,
     pub headers: Option<String>,
     pub annotate: Option<bool>,
+    pub bridge_port: Option<u16>,
+    pub bridge_token: Option<String>,
+    pub bridge_extension_id: Option<String>,
+    pub bridge_platform: Option<String>,
 }
 
 impl Config {
@@ -66,7 +70,46 @@ impl Config {
             auto_connect: other.auto_connect.or(self.auto_connect),
             headers: other.headers.or(self.headers),
             annotate: other.annotate.or(self.annotate),
+            bridge_port: other.bridge_port.or(self.bridge_port),
+            bridge_token: other.bridge_token.or(self.bridge_token),
+            bridge_extension_id: other.bridge_extension_id.or(self.bridge_extension_id),
+            bridge_platform: other.bridge_platform.or(self.bridge_platform),
         }
+    }
+}
+
+fn parse_bridge_platform_value(name: &str, value: &str) -> String {
+    match try_parse_bridge_platform_value(name, value) {
+        Ok(platform) => platform,
+        Err(message) => {
+            eprintln!("{} {}", color::error_indicator(), message);
+            std::process::exit(1);
+        }
+    }
+}
+
+fn try_parse_port_value(name: &str, value: &str) -> Result<u16, String> {
+    match value.parse::<u32>() {
+        Ok(0) => Err(format!("{} must be greater than 0", name)),
+        Ok(port) if port > 65535 => {
+            Err(format!("{} must be in range 1-65535 (got {})", name, port))
+        }
+        Ok(port) => Ok(port as u16),
+        Err(_) => Err(format!(
+            "{} must be a valid port number (got '{}')",
+            name, value
+        )),
+    }
+}
+
+fn try_parse_bridge_platform_value(name: &str, value: &str) -> Result<String, String> {
+    let normalized = value.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "auto" | "linux" | "windows" => Ok(normalized),
+        _ => Err(format!(
+            "{} must be one of: auto, linux, windows (got '{}')",
+            name, value
+        )),
     }
 }
 
@@ -127,6 +170,7 @@ fn extract_config_path(args: &[String]) -> Option<Option<String>> {
         "--user-agent",
         "-p",
         "--provider",
+        "--bridge-platform",
         "--device",
         "--session-name",
     ];
@@ -153,8 +197,7 @@ pub fn load_config(args: &[String]) -> Result<Config, String> {
         });
 
     if let Some((source, maybe_path)) = explicit {
-        let path_str =
-            maybe_path.ok_or_else(|| format!("{} requires a file path", source))?;
+        let path_str = maybe_path.ok_or_else(|| format!("{} requires a file path", source))?;
         let path = PathBuf::from(&path_str);
         if !path.exists() {
             return Err(format!("config file not found: {}", path_str));
@@ -199,6 +242,12 @@ pub struct Flags {
     pub auto_connect: bool,
     pub session_name: Option<String>,
     pub annotate: bool,
+    pub bridge_port: Option<u16>,
+    pub bridge_token: Option<String>,
+    pub bridge_extension_id: Option<String>,
+    pub bridge_platform: Option<String>,
+    pub bridge_port_error: Option<String>,
+    pub bridge_platform_error: Option<String>,
 
     // Track which launch-time options were explicitly passed via CLI
     // (as opposed to being set only via environment variables)
@@ -211,6 +260,7 @@ pub struct Flags {
     pub cli_proxy: bool,
     pub cli_proxy_bypass: bool,
     pub cli_allow_file_access: bool,
+    pub cli_bridge_platform: bool,
 }
 
 pub fn parse_flags(args: &[String]) -> Flags {
@@ -235,49 +285,78 @@ pub fn parse_flags(args: &[String]) -> Flags {
         config.extensions.unwrap_or_default()
     };
 
+    let bridge_port_from_config = config.bridge_port;
+    let bridge_platform_from_config = config.bridge_platform.clone();
+
+    let (bridge_port, bridge_port_error) = match env::var("AGENT_BROWSER_BRIDGE_PORT") {
+        Ok(raw) => match try_parse_port_value("AGENT_BROWSER_BRIDGE_PORT", &raw) {
+            Ok(port) => (Some(port), None),
+            Err(error) => (None, Some(error)),
+        },
+        Err(_) => (bridge_port_from_config, None),
+    };
+
+    let (bridge_platform, bridge_platform_error) = match env::var("AGENT_BROWSER_BRIDGE_PLATFORM") {
+        Ok(raw) => match try_parse_bridge_platform_value("AGENT_BROWSER_BRIDGE_PLATFORM", &raw) {
+            Ok(platform) => (Some(platform), None),
+            Err(error) => (None, Some(error)),
+        },
+        Err(_) => match bridge_platform_from_config {
+            Some(raw) => match try_parse_bridge_platform_value("bridgePlatform", &raw) {
+                Ok(platform) => (Some(platform), None),
+                Err(error) => (None, Some(error)),
+            },
+            None => (None, None),
+        },
+    };
+
     let mut flags = Flags {
-        json: env_var_is_truthy("AGENT_BROWSER_JSON")
-            || config.json.unwrap_or(false),
-        full: env_var_is_truthy("AGENT_BROWSER_FULL")
-            || config.full.unwrap_or(false),
-        headed: env_var_is_truthy("AGENT_BROWSER_HEADED")
-            || config.headed.unwrap_or(false),
-        debug: env_var_is_truthy("AGENT_BROWSER_DEBUG")
-            || config.debug.unwrap_or(false),
-        session: env::var("AGENT_BROWSER_SESSION").ok()
+        json: env_var_is_truthy("AGENT_BROWSER_JSON") || config.json.unwrap_or(false),
+        full: env_var_is_truthy("AGENT_BROWSER_FULL") || config.full.unwrap_or(false),
+        headed: env_var_is_truthy("AGENT_BROWSER_HEADED") || config.headed.unwrap_or(false),
+        debug: env_var_is_truthy("AGENT_BROWSER_DEBUG") || config.debug.unwrap_or(false),
+        session: env::var("AGENT_BROWSER_SESSION")
+            .ok()
             .or(config.session)
             .unwrap_or_else(|| "default".to_string()),
         headers: config.headers,
-        executable_path: env::var("AGENT_BROWSER_EXECUTABLE_PATH").ok()
+        executable_path: env::var("AGENT_BROWSER_EXECUTABLE_PATH")
+            .ok()
             .or(config.executable_path),
         cdp: config.cdp,
         extensions,
-        profile: env::var("AGENT_BROWSER_PROFILE").ok()
-            .or(config.profile),
-        state: env::var("AGENT_BROWSER_STATE").ok()
-            .or(config.state),
-        proxy: env::var("AGENT_BROWSER_PROXY").ok()
-            .or(config.proxy),
-        proxy_bypass: env::var("AGENT_BROWSER_PROXY_BYPASS").ok()
+        profile: env::var("AGENT_BROWSER_PROFILE").ok().or(config.profile),
+        state: env::var("AGENT_BROWSER_STATE").ok().or(config.state),
+        proxy: env::var("AGENT_BROWSER_PROXY").ok().or(config.proxy),
+        proxy_bypass: env::var("AGENT_BROWSER_PROXY_BYPASS")
+            .ok()
             .or(config.proxy_bypass),
-        args: env::var("AGENT_BROWSER_ARGS").ok()
-            .or(config.args),
-        user_agent: env::var("AGENT_BROWSER_USER_AGENT").ok()
+        args: env::var("AGENT_BROWSER_ARGS").ok().or(config.args),
+        user_agent: env::var("AGENT_BROWSER_USER_AGENT")
+            .ok()
             .or(config.user_agent),
-        provider: env::var("AGENT_BROWSER_PROVIDER").ok()
-            .or(config.provider),
+        provider: env::var("AGENT_BROWSER_PROVIDER").ok().or(config.provider),
         ignore_https_errors: env_var_is_truthy("AGENT_BROWSER_IGNORE_HTTPS_ERRORS")
             || config.ignore_https_errors.unwrap_or(false),
         allow_file_access: env_var_is_truthy("AGENT_BROWSER_ALLOW_FILE_ACCESS")
             || config.allow_file_access.unwrap_or(false),
-        device: env::var("AGENT_BROWSER_IOS_DEVICE").ok()
-            .or(config.device),
+        device: env::var("AGENT_BROWSER_IOS_DEVICE").ok().or(config.device),
         auto_connect: env_var_is_truthy("AGENT_BROWSER_AUTO_CONNECT")
             || config.auto_connect.unwrap_or(false),
-        session_name: env::var("AGENT_BROWSER_SESSION_NAME").ok()
+        session_name: env::var("AGENT_BROWSER_SESSION_NAME")
+            .ok()
             .or(config.session_name),
-        annotate: env_var_is_truthy("AGENT_BROWSER_ANNOTATE")
-            || config.annotate.unwrap_or(false),
+        annotate: env_var_is_truthy("AGENT_BROWSER_ANNOTATE") || config.annotate.unwrap_or(false),
+        bridge_port,
+        bridge_token: env::var("AGENT_BROWSER_BRIDGE_TOKEN")
+            .ok()
+            .or(config.bridge_token),
+        bridge_extension_id: env::var("AGENT_BROWSER_BRIDGE_EXTENSION_ID")
+            .ok()
+            .or(config.bridge_extension_id),
+        bridge_platform,
+        bridge_port_error,
+        bridge_platform_error,
         cli_executable_path: false,
         cli_extensions: false,
         cli_profile: false,
@@ -287,6 +366,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
         cli_proxy: false,
         cli_proxy_bypass: false,
         cli_allow_file_access: false,
+        cli_bridge_platform: false,
     };
 
     let mut i = 0;
@@ -295,22 +375,30 @@ pub fn parse_flags(args: &[String]) -> Flags {
             "--json" => {
                 let (val, consumed) = parse_bool_arg(args, i);
                 flags.json = val;
-                if consumed { i += 1; }
+                if consumed {
+                    i += 1;
+                }
             }
             "--full" | "-f" => {
                 let (val, consumed) = parse_bool_arg(args, i);
                 flags.full = val;
-                if consumed { i += 1; }
+                if consumed {
+                    i += 1;
+                }
             }
             "--headed" => {
                 let (val, consumed) = parse_bool_arg(args, i);
                 flags.headed = val;
-                if consumed { i += 1; }
+                if consumed {
+                    i += 1;
+                }
             }
             "--debug" => {
                 let (val, consumed) = parse_bool_arg(args, i);
                 flags.debug = val;
-                if consumed { i += 1; }
+                if consumed {
+                    i += 1;
+                }
             }
             "--session" => {
                 if let Some(s) = args.get(i + 1) {
@@ -392,16 +480,29 @@ pub fn parse_flags(args: &[String]) -> Flags {
                     i += 1;
                 }
             }
+            "--bridge-platform" => {
+                if let Some(value) = args.get(i + 1) {
+                    flags.bridge_platform =
+                        Some(parse_bridge_platform_value("--bridge-platform", value));
+                    flags.bridge_platform_error = None;
+                    flags.cli_bridge_platform = true;
+                    i += 1;
+                }
+            }
             "--ignore-https-errors" => {
                 let (val, consumed) = parse_bool_arg(args, i);
                 flags.ignore_https_errors = val;
-                if consumed { i += 1; }
+                if consumed {
+                    i += 1;
+                }
             }
             "--allow-file-access" => {
                 let (val, consumed) = parse_bool_arg(args, i);
                 flags.allow_file_access = val;
                 flags.cli_allow_file_access = true;
-                if consumed { i += 1; }
+                if consumed {
+                    i += 1;
+                }
             }
             "--device" => {
                 if let Some(d) = args.get(i + 1) {
@@ -412,7 +513,9 @@ pub fn parse_flags(args: &[String]) -> Flags {
             "--auto-connect" => {
                 let (val, consumed) = parse_bool_arg(args, i);
                 flags.auto_connect = val;
-                if consumed { i += 1; }
+                if consumed {
+                    i += 1;
+                }
             }
             "--session-name" => {
                 if let Some(s) = args.get(i + 1) {
@@ -423,7 +526,9 @@ pub fn parse_flags(args: &[String]) -> Flags {
             "--annotate" => {
                 let (val, consumed) = parse_bool_arg(args, i);
                 flags.annotate = val;
-                if consumed { i += 1; }
+                if consumed {
+                    i += 1;
+                }
             }
             "--config" => {
                 // Already handled by load_config(); skip the value
@@ -466,6 +571,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--user-agent",
         "-p",
         "--provider",
+        "--bridge-platform",
         "--device",
         "--session-name",
         "--config",
@@ -618,6 +724,92 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_bridge_platform_flag() {
+        let flags = parse_flags(&args("-p bridge --bridge-platform windows snapshot -i"));
+        assert_eq!(flags.provider.as_deref(), Some("bridge"));
+        assert_eq!(flags.bridge_platform.as_deref(), Some("windows"));
+        assert!(flags.cli_bridge_platform);
+    }
+
+    #[test]
+    fn test_cli_bridge_platform_not_set_without_flag() {
+        let flags = parse_flags(&args("snapshot -i"));
+        assert!(!flags.cli_bridge_platform);
+    }
+
+    #[test]
+    fn test_clean_args_removes_bridge_platform() {
+        let cleaned = clean_args(&args("-p bridge --bridge-platform linux snapshot -i"));
+        assert_eq!(cleaned, vec!["snapshot", "-i"]);
+    }
+
+    #[test]
+    fn test_parse_flags_invalid_bridge_platform_in_config_is_deferred() {
+        use std::io::Write;
+
+        let dir = std::env::temp_dir().join("ab-test-invalid-bridge-platform");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        let mut file = std::fs::File::create(&path).unwrap();
+        writeln!(file, "{{\"bridgePlatform\":\"invalid-platform\"}}").unwrap();
+
+        let input = vec![
+            "--config".to_string(),
+            path.to_string_lossy().to_string(),
+            "snapshot".to_string(),
+            "-i".to_string(),
+        ];
+        let flags = parse_flags(&input);
+        assert!(flags.bridge_platform.is_none());
+        assert!(flags.bridge_platform_error.is_some());
+        assert!(!flags.cli_bridge_platform);
+
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn test_parse_flags_cli_bridge_platform_clears_deferred_config_error() {
+        use std::io::Write;
+
+        let dir = std::env::temp_dir().join("ab-test-cli-bridge-platform-clears-error");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        let mut file = std::fs::File::create(&path).unwrap();
+        writeln!(file, "{{\"bridgePlatform\":\"invalid-platform\"}}").unwrap();
+
+        let input = vec![
+            "--config".to_string(),
+            path.to_string_lossy().to_string(),
+            "-p".to_string(),
+            "bridge".to_string(),
+            "--bridge-platform".to_string(),
+            "windows".to_string(),
+            "snapshot".to_string(),
+            "-i".to_string(),
+        ];
+        let flags = parse_flags(&input);
+        assert_eq!(flags.bridge_platform.as_deref(), Some("windows"));
+        assert!(flags.bridge_platform_error.is_none());
+        assert!(flags.cli_bridge_platform);
+
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn test_try_parse_bridge_platform_value_error() {
+        let error = try_parse_bridge_platform_value("bridgePlatform", "bad").unwrap_err();
+        assert!(error.contains("bridgePlatform must be one of"));
+    }
+
+    #[test]
+    fn test_try_parse_port_value_error() {
+        let error = try_parse_port_value("AGENT_BROWSER_BRIDGE_PORT", "0").unwrap_err();
+        assert!(error.contains("must be greater than 0"));
+    }
+
+    #[test]
     fn test_cli_executable_path_tracking() {
         // When --executable-path is passed via CLI, cli_executable_path should be true
         let flags = parse_flags(&args("--executable-path /path/to/chrome snapshot"));
@@ -682,7 +874,11 @@ mod tests {
             "allowFileAccess": true,
             "cdp": "9222",
             "autoConnect": true,
-            "headers": "{\"Auth\":\"token\"}"
+            "headers": "{\"Auth\":\"token\"}",
+            "bridgePort": 9223,
+            "bridgeToken": "bridge-token",
+            "bridgeExtensionId": "exampleextensionid",
+            "bridgePlatform": "windows"
         }"#;
         let config: Config = serde_json::from_str(json).unwrap();
         assert_eq!(config.headed, Some(true));
@@ -692,7 +888,10 @@ mod tests {
         assert_eq!(config.session.as_deref(), Some("test-session"));
         assert_eq!(config.session_name.as_deref(), Some("my-app"));
         assert_eq!(config.executable_path.as_deref(), Some("/usr/bin/chromium"));
-        assert_eq!(config.extensions, Some(vec!["/ext1".to_string(), "/ext2".to_string()]));
+        assert_eq!(
+            config.extensions,
+            Some(vec!["/ext1".to_string(), "/ext2".to_string()])
+        );
         assert_eq!(config.profile.as_deref(), Some("/tmp/profile"));
         assert_eq!(config.state.as_deref(), Some("/tmp/state.json"));
         assert_eq!(config.proxy.as_deref(), Some("http://proxy:8080"));
@@ -706,6 +905,35 @@ mod tests {
         assert_eq!(config.cdp.as_deref(), Some("9222"));
         assert_eq!(config.auto_connect, Some(true));
         assert_eq!(config.headers.as_deref(), Some("{\"Auth\":\"token\"}"));
+        assert_eq!(config.bridge_port, Some(9223));
+        assert_eq!(config.bridge_token.as_deref(), Some("bridge-token"));
+        assert_eq!(
+            config.bridge_extension_id.as_deref(),
+            Some("exampleextensionid")
+        );
+        assert_eq!(config.bridge_platform.as_deref(), Some("windows"));
+    }
+
+    #[test]
+    fn test_parse_bridge_settings_from_config() {
+        let config = Config {
+            provider: Some("bridge".to_string()),
+            bridge_port: Some(9333),
+            bridge_token: Some("token-from-config".to_string()),
+            bridge_extension_id: Some("custom-extension-id".to_string()),
+            bridge_platform: Some("linux".to_string()),
+            ..Config::default()
+        };
+
+        let merged = Config::default().merge(config);
+        assert_eq!(merged.provider.as_deref(), Some("bridge"));
+        assert_eq!(merged.bridge_port, Some(9333));
+        assert_eq!(merged.bridge_token.as_deref(), Some("token-from-config"));
+        assert_eq!(
+            merged.bridge_extension_id.as_deref(),
+            Some("custom-extension-id")
+        );
+        assert_eq!(merged.bridge_platform.as_deref(), Some("linux"));
     }
 
     #[test]
@@ -1001,7 +1229,11 @@ mod tests {
         let merged = user.merge(project);
         assert_eq!(
             merged.extensions,
-            Some(vec!["/ext1".to_string(), "/ext2".to_string(), "/ext3".to_string()])
+            Some(vec![
+                "/ext1".to_string(),
+                "/ext2".to_string(),
+                "/ext3".to_string()
+            ])
         );
     }
 

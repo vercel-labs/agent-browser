@@ -1,6 +1,6 @@
-import { pageMetadata } from "@/lib/page-metadata"
+import { pageMetadata } from '@/lib/page-metadata';
 
-export const metadata = pageMetadata("configuration")
+export const metadata = pageMetadata('configuration');
 
 # Configuration
 
@@ -12,13 +12,39 @@ agent-browser checks two locations, merged in priority order:
 
 <table>
   <thead>
-    <tr><th>Priority</th><th>Location</th><th>Scope</th></tr>
+    <tr>
+      <th>Priority</th>
+      <th>Location</th>
+      <th>Scope</th>
+    </tr>
   </thead>
   <tbody>
-    <tr><td>1 (lowest)</td><td><code>~/.agent-browser/config.json</code></td><td>User-level defaults</td></tr>
-    <tr><td>2</td><td><code>./agent-browser.json</code></td><td>Project-level overrides</td></tr>
-    <tr><td>3</td><td><code>AGENT_BROWSER_*</code> env vars</td><td>Override config values</td></tr>
-    <tr><td>4 (highest)</td><td>CLI flags</td><td>Override everything</td></tr>
+    <tr>
+      <td>1 (lowest)</td>
+      <td>
+        <code>~/.agent-browser/config.json</code>
+      </td>
+      <td>User-level defaults</td>
+    </tr>
+    <tr>
+      <td>2</td>
+      <td>
+        <code>./agent-browser.json</code>
+      </td>
+      <td>Project-level overrides</td>
+    </tr>
+    <tr>
+      <td>3</td>
+      <td>
+        <code>AGENT_BROWSER_*</code> env vars
+      </td>
+      <td>Override config values</td>
+    </tr>
+    <tr>
+      <td>4 (highest)</td>
+      <td>CLI flags</td>
+      <td>Override everything</td>
+    </tr>
   </tbody>
 </table>
 
@@ -49,30 +75,240 @@ Every CLI flag can be set in the config file using its camelCase equivalent:
 
 <table>
   <thead>
-    <tr><th>Config Key</th><th>CLI Flag</th><th>Type</th></tr>
+    <tr>
+      <th>Config Key</th>
+      <th>CLI Flag</th>
+      <th>Type</th>
+    </tr>
   </thead>
   <tbody>
-    <tr><td><code>headed</code></td><td><code>--headed</code></td><td>boolean</td></tr>
-    <tr><td><code>json</code></td><td><code>--json</code></td><td>boolean</td></tr>
-    <tr><td><code>full</code></td><td><code>--full, -f</code></td><td>boolean</td></tr>
-    <tr><td><code>debug</code></td><td><code>--debug</code></td><td>boolean</td></tr>
-    <tr><td><code>session</code></td><td><code>--session</code></td><td>string</td></tr>
-    <tr><td><code>sessionName</code></td><td><code>--session-name</code></td><td>string</td></tr>
-    <tr><td><code>executablePath</code></td><td><code>--executable-path</code></td><td>string</td></tr>
-    <tr><td><code>extensions</code></td><td><code>--extension</code></td><td>string[]</td></tr>
-    <tr><td><code>profile</code></td><td><code>--profile</code></td><td>string</td></tr>
-    <tr><td><code>state</code></td><td><code>--state</code></td><td>string</td></tr>
-    <tr><td><code>proxy</code></td><td><code>--proxy</code></td><td>string</td></tr>
-    <tr><td><code>proxyBypass</code></td><td><code>--proxy-bypass</code></td><td>string</td></tr>
-    <tr><td><code>args</code></td><td><code>--args</code></td><td>string</td></tr>
-    <tr><td><code>userAgent</code></td><td><code>--user-agent</code></td><td>string</td></tr>
-    <tr><td><code>provider</code></td><td><code>-p, --provider</code></td><td>string</td></tr>
-    <tr><td><code>device</code></td><td><code>--device</code></td><td>string</td></tr>
-    <tr><td><code>ignoreHttpsErrors</code></td><td><code>--ignore-https-errors</code></td><td>boolean</td></tr>
-    <tr><td><code>allowFileAccess</code></td><td><code>--allow-file-access</code></td><td>boolean</td></tr>
-    <tr><td><code>cdp</code></td><td><code>--cdp</code></td><td>string</td></tr>
-    <tr><td><code>autoConnect</code></td><td><code>--auto-connect</code></td><td>boolean</td></tr>
-    <tr><td><code>headers</code></td><td><code>--headers</code></td><td>string (JSON)</td></tr>
+    <tr>
+      <td>
+        <code>headed</code>
+      </td>
+      <td>
+        <code>--headed</code>
+      </td>
+      <td>boolean</td>
+    </tr>
+    <tr>
+      <td>
+        <code>json</code>
+      </td>
+      <td>
+        <code>--json</code>
+      </td>
+      <td>boolean</td>
+    </tr>
+    <tr>
+      <td>
+        <code>full</code>
+      </td>
+      <td>
+        <code>--full, -f</code>
+      </td>
+      <td>boolean</td>
+    </tr>
+    <tr>
+      <td>
+        <code>debug</code>
+      </td>
+      <td>
+        <code>--debug</code>
+      </td>
+      <td>boolean</td>
+    </tr>
+    <tr>
+      <td>
+        <code>session</code>
+      </td>
+      <td>
+        <code>--session</code>
+      </td>
+      <td>string</td>
+    </tr>
+    <tr>
+      <td>
+        <code>sessionName</code>
+      </td>
+      <td>
+        <code>--session-name</code>
+      </td>
+      <td>string</td>
+    </tr>
+    <tr>
+      <td>
+        <code>executablePath</code>
+      </td>
+      <td>
+        <code>--executable-path</code>
+      </td>
+      <td>string</td>
+    </tr>
+    <tr>
+      <td>
+        <code>extensions</code>
+      </td>
+      <td>
+        <code>--extension</code>
+      </td>
+      <td>string[]</td>
+    </tr>
+    <tr>
+      <td>
+        <code>profile</code>
+      </td>
+      <td>
+        <code>--profile</code>
+      </td>
+      <td>string</td>
+    </tr>
+    <tr>
+      <td>
+        <code>state</code>
+      </td>
+      <td>
+        <code>--state</code>
+      </td>
+      <td>string</td>
+    </tr>
+    <tr>
+      <td>
+        <code>proxy</code>
+      </td>
+      <td>
+        <code>--proxy</code>
+      </td>
+      <td>string</td>
+    </tr>
+    <tr>
+      <td>
+        <code>proxyBypass</code>
+      </td>
+      <td>
+        <code>--proxy-bypass</code>
+      </td>
+      <td>string</td>
+    </tr>
+    <tr>
+      <td>
+        <code>args</code>
+      </td>
+      <td>
+        <code>--args</code>
+      </td>
+      <td>string</td>
+    </tr>
+    <tr>
+      <td>
+        <code>userAgent</code>
+      </td>
+      <td>
+        <code>--user-agent</code>
+      </td>
+      <td>string</td>
+    </tr>
+    <tr>
+      <td>
+        <code>provider</code>
+      </td>
+      <td>
+        <code>-p, --provider</code>
+      </td>
+      <td>string</td>
+    </tr>
+    <tr>
+      <td>
+        <code>bridgePort</code>
+      </td>
+      <td>
+        <code>AGENT_BROWSER_BRIDGE_PORT</code>
+      </td>
+      <td>number (1-65535)</td>
+    </tr>
+    <tr>
+      <td>
+        <code>bridgeToken</code>
+      </td>
+      <td>
+        <code>AGENT_BROWSER_BRIDGE_TOKEN</code>
+      </td>
+      <td>string</td>
+    </tr>
+    <tr>
+      <td>
+        <code>bridgeExtensionId</code>
+      </td>
+      <td>
+        <code>AGENT_BROWSER_BRIDGE_EXTENSION_ID</code>
+      </td>
+      <td>string</td>
+    </tr>
+    <tr>
+      <td>
+        <code>bridgePlatform</code>
+      </td>
+      <td>
+        <code>--bridge-platform</code> / <code>AGENT_BROWSER_BRIDGE_PLATFORM</code>
+      </td>
+      <td>
+        <code>auto</code> | <code>linux</code> | <code>windows</code>
+      </td>
+    </tr>
+    <tr>
+      <td>
+        <code>device</code>
+      </td>
+      <td>
+        <code>--device</code>
+      </td>
+      <td>string</td>
+    </tr>
+    <tr>
+      <td>
+        <code>ignoreHttpsErrors</code>
+      </td>
+      <td>
+        <code>--ignore-https-errors</code>
+      </td>
+      <td>boolean</td>
+    </tr>
+    <tr>
+      <td>
+        <code>allowFileAccess</code>
+      </td>
+      <td>
+        <code>--allow-file-access</code>
+      </td>
+      <td>boolean</td>
+    </tr>
+    <tr>
+      <td>
+        <code>cdp</code>
+      </td>
+      <td>
+        <code>--cdp</code>
+      </td>
+      <td>string</td>
+    </tr>
+    <tr>
+      <td>
+        <code>autoConnect</code>
+      </td>
+      <td>
+        <code>--auto-connect</code>
+      </td>
+      <td>boolean</td>
+    </tr>
+    <tr>
+      <td>
+        <code>headers</code>
+      </td>
+      <td>
+        <code>--headers</code>
+      </td>
+      <td>string (JSON)</td>
+    </tr>
   </tbody>
 </table>
 
@@ -114,6 +350,18 @@ Every CLI flag can be set in the config file using its camelCase equivalent:
   "device": "iPhone 16 Pro"
 }
 ```
+
+### Playwright MCP Bridge
+
+```json
+{
+  "provider": "bridge",
+  "bridgePort": 9223,
+  "bridgePlatform": "windows"
+}
+```
+
+When `bridgePlatform` is `windows`, agent-browser opens the default Windows browser first. If the extension does not connect, it logs a warning and retries with Chrome, Edge, Brave, then Chromium.
 
 ## Overriding Boolean Options
 

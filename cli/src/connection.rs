@@ -203,6 +203,25 @@ pub struct DaemonResult {
     pub already_running: bool,
 }
 
+fn apply_bridge_env(
+    cmd: &mut Command,
+    bridge_port: Option<u16>,
+    bridge_token: Option<&str>,
+    bridge_extension_id: Option<&str>,
+) {
+    if let Some(port) = bridge_port {
+        cmd.env("AGENT_BROWSER_BRIDGE_PORT", port.to_string());
+    }
+
+    if let Some(token) = bridge_token {
+        cmd.env("AGENT_BROWSER_BRIDGE_TOKEN", token);
+    }
+
+    if let Some(extension_id) = bridge_extension_id {
+        cmd.env("AGENT_BROWSER_BRIDGE_EXTENSION_ID", extension_id);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn ensure_daemon(
     session: &str,
@@ -220,6 +239,9 @@ pub fn ensure_daemon(
     provider: Option<&str>,
     device: Option<&str>,
     session_name: Option<&str>,
+    bridge_port: Option<u16>,
+    bridge_token: Option<&str>,
+    bridge_extension_id: Option<&str>,
 ) -> Result<DaemonResult, String> {
     // Check if daemon is running AND responsive
     if is_daemon_running(session) && daemon_ready(session) {
@@ -364,6 +386,8 @@ pub fn ensure_daemon(
             cmd.env("AGENT_BROWSER_SESSION_NAME", sn);
         }
 
+        apply_bridge_env(&mut cmd, bridge_port, bridge_token, bridge_extension_id);
+
         // Create new process group and session to fully detach
         unsafe {
             cmd.pre_exec(|| {
@@ -446,6 +470,8 @@ pub fn ensure_daemon(
         if let Some(sn) = session_name {
             cmd.env("AGENT_BROWSER_SESSION_NAME", sn);
         }
+
+        apply_bridge_env(&mut cmd, bridge_port, bridge_token, bridge_extension_id);
 
         // CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS
         const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;

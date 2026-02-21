@@ -628,6 +628,51 @@ describe('parseCommand', () => {
       );
       expect(result.success).toBe(false);
     });
+
+    it('should parse launch with bridge settings', () => {
+      const result = parseCommand(
+        cmd({
+          id: '1',
+          action: 'launch',
+          provider: 'bridge',
+          bridgePort: 9223,
+          bridgeToken: 'token123',
+          bridgeExtensionId: 'mmlmfjhmonkocbjadbfplnigmagldckm',
+          bridgePlatform: 'windows',
+        })
+      );
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.command.bridgePort).toBe(9223);
+        expect(result.command.bridgeToken).toBe('token123');
+        expect(result.command.bridgeExtensionId).toBe('mmlmfjhmonkocbjadbfplnigmagldckm');
+        expect(result.command.bridgePlatform).toBe('windows');
+      }
+    });
+
+    it('should reject launch with invalid bridgePort', () => {
+      const result = parseCommand(
+        cmd({
+          id: '1',
+          action: 'launch',
+          provider: 'bridge',
+          bridgePort: 0,
+        })
+      );
+      expect(result.success).toBe(false);
+    });
+
+    it('should reject launch with invalid bridgePlatform', () => {
+      const result = parseCommand(
+        cmd({
+          id: '1',
+          action: 'launch',
+          provider: 'bridge',
+          bridgePlatform: 'mac',
+        })
+      );
+      expect(result.success).toBe(false);
+    });
   });
 
   describe('mouse actions', () => {

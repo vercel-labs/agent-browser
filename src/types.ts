@@ -29,6 +29,10 @@ export interface LaunchCommand extends BaseCommand {
   args?: string[];
   userAgent?: string;
   provider?: string;
+  bridgePort?: number;
+  bridgeToken?: string;
+  bridgeExtensionId?: string;
+  bridgePlatform?: 'auto' | 'linux' | 'windows';
   ignoreHTTPSErrors?: boolean;
   allowFileAccess?: boolean; // Enable file:// URL access and cross-origin file requests
   // Auto-load state file for session persistence
