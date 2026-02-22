@@ -1,0 +1,148 @@
+import { pageMetadata } from "@/lib/page-metadata"
+
+export const metadata = pageMetadata("configuration")
+
+# Configuration
+
+Create an `agent-browser.json` file to set persistent defaults instead of repeating flags on every command.
+
+## Config File Locations
+
+agent-browser checks two locations, merged in priority order:
+
+<table>
+  <thead>
+    <tr><th>Priority</th><th>Location</th><th>Scope</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>1 (lowest)</td><td><code>~/.agent-browser/config.json</code></td><td>User-level defaults</td></tr>
+    <tr><td>2</td><td><code>./agent-browser.json</code></td><td>Project-level overrides</td></tr>
+    <tr><td>3</td><td><code>AGENT_BROWSER_*</code> env vars</td><td>Override config values</td></tr>
+    <tr><td>4 (highest)</td><td>CLI flags</td><td>Override everything</td></tr>
+  </tbody>
+</table>
+
+Project-level values override user-level values. Environment variables override both. CLI flags always win.
+
+Use `--config <path>` or the `AGENT_BROWSER_CONFIG` environment variable to load a specific config file instead of the default locations:
+
+```bash
+agent-browser --config ./ci-config.json open example.com
+AGENT_BROWSER_CONFIG=./ci-config.json agent-browser open example.com
+```
+
+## Example Config
+
+```json
+{
+  "headed": true,
+  "proxy": "http://localhost:8080",
+  "profile": "./browser-data",
+  "userAgent": "my-agent/1.0",
+  "ignoreHttpsErrors": true
+}
+```
+
+## All Options
+
+Every CLI flag can be set in the config file using its camelCase equivalent:
+
+<table>
+  <thead>
+    <tr><th>Config Key</th><th>CLI Flag</th><th>Type</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>headed</code></td><td><code>--headed</code></td><td>boolean</td></tr>
+    <tr><td><code>json</code></td><td><code>--json</code></td><td>boolean</td></tr>
+    <tr><td><code>full</code></td><td><code>--full, -f</code></td><td>boolean</td></tr>
+    <tr><td><code>debug</code></td><td><code>--debug</code></td><td>boolean</td></tr>
+    <tr><td><code>session</code></td><td><code>--session</code></td><td>string</td></tr>
+    <tr><td><code>sessionName</code></td><td><code>--session-name</code></td><td>string</td></tr>
+    <tr><td><code>executablePath</code></td><td><code>--executable-path</code></td><td>string</td></tr>
+    <tr><td><code>extensions</code></td><td><code>--extension</code></td><td>string[]</td></tr>
+    <tr><td><code>profile</code></td><td><code>--profile</code></td><td>string</td></tr>
+    <tr><td><code>state</code></td><td><code>--state</code></td><td>string</td></tr>
+    <tr><td><code>proxy</code></td><td><code>--proxy</code></td><td>string</td></tr>
+    <tr><td><code>proxyBypass</code></td><td><code>--proxy-bypass</code></td><td>string</td></tr>
+    <tr><td><code>args</code></td><td><code>--args</code></td><td>string</td></tr>
+    <tr><td><code>userAgent</code></td><td><code>--user-agent</code></td><td>string</td></tr>
+    <tr><td><code>provider</code></td><td><code>-p, --provider</code></td><td>string</td></tr>
+    <tr><td><code>device</code></td><td><code>--device</code></td><td>string</td></tr>
+    <tr><td><code>ignoreHttpsErrors</code></td><td><code>--ignore-https-errors</code></td><td>boolean</td></tr>
+    <tr><td><code>allowFileAccess</code></td><td><code>--allow-file-access</code></td><td>boolean</td></tr>
+    <tr><td><code>cdp</code></td><td><code>--cdp</code></td><td>string</td></tr>
+    <tr><td><code>autoConnect</code></td><td><code>--auto-connect</code></td><td>boolean</td></tr>
+    <tr><td><code>headers</code></td><td><code>--headers</code></td><td>string (JSON)</td></tr>
+  </tbody>
+</table>
+
+## Common Configurations
+
+### Local Development
+
+```json
+{
+  "headed": true,
+  "profile": "./browser-data"
+}
+```
+
+### Behind a Proxy
+
+```json
+{
+  "proxy": "http://proxy.corp.example.com:8080",
+  "proxyBypass": "localhost,*.internal.com",
+  "ignoreHttpsErrors": true
+}
+```
+
+### CI / Devcontainer
+
+```json
+{
+  "args": "--no-sandbox,--disable-gpu",
+  "ignoreHttpsErrors": true
+}
+```
+
+### iOS Testing
+
+```json
+{
+  "provider": "ios",
+  "device": "iPhone 16 Pro"
+}
+```
+
+## Overriding Boolean Options
+
+Boolean flags accept an optional `true`/`false` value to override config settings:
+
+```bash
+agent-browser --headed false open example.com
+```
+
+A bare flag is equivalent to passing `true`:
+
+```bash
+agent-browser --headed open example.com       # same as --headed true
+agent-browser --headed true open example.com  # explicit
+```
+
+This applies to all boolean flags: `--headed`, `--debug`, `--json`, `--ignore-https-errors`, `--allow-file-access`, `--auto-connect`.
+
+## Extensions Merging
+
+Extensions from user-level and project-level configs are **concatenated**, not replaced. For example, if `~/.agent-browser/config.json` specifies `["/ext1"]` and `./agent-browser.json` specifies `["/ext2"]`, the result is `["/ext1", "/ext2"]`.
+
+The `AGENT_BROWSER_EXTENSIONS` environment variable and CLI `--extension` flags follow the standard priority rules (env replaces config, CLI appends).
+
+## Error Handling
+
+- **Auto-discovered config files** (`~/.agent-browser/config.json`, `./agent-browser.json`) that are missing are silently ignored.
+- **`--config <path>`** with a missing or malformed file exits with an error.
+- **Malformed JSON** in auto-discovered files prints a warning to stderr and continues without that file.
+- **Unknown keys** are silently ignored for forward compatibility.
+
+> **Tip:** If your project-level `agent-browser.json` contains environment-specific values (paths, proxies), consider adding it to `.gitignore`.

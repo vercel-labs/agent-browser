@@ -1,4 +1,6 @@
-export const metadata = { title: "CDP Mode" }
+import { pageMetadata } from "@/lib/page-metadata"
+
+export const metadata = pageMetadata("cdp-mode")
 
 # CDP Mode
 
@@ -70,25 +72,30 @@ This enables control of:
 
 ## Global options
 
-| Option | Description |
-| --- | --- |
-| `--session <name>` | Use isolated session |
-| `--profile <path>` | Persistent browser profile directory |
-| `-p <provider>` | Cloud browser provider (`browserbase`, `browseruse`) |
-| `--headers <json>` | HTTP headers scoped to origin |
-| `--executable-path` | Custom browser executable |
-| `--args <args>` | Browser launch args (comma-separated) |
-| `--user-agent <ua>` | Custom User-Agent string |
-| `--proxy <url>` | Proxy server URL |
-| `--proxy-bypass <hosts>` | Hosts to bypass proxy |
-| `--json` | JSON output for scripts |
-| `--full, -f` | Full page screenshot |
-| `--name, -n` | Locator name filter |
-| `--exact` | Exact text match |
-| `--headed` | Show browser window |
-| `--cdp <port\|url>` | CDP connection (port or WebSocket URL) |
-| `--auto-connect` | Auto-discover and connect to running Chrome |
-| `--debug` | Debug output |
+<table>
+  <thead>
+    <tr><th>Option</th><th>Description</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>--session &lt;name&gt;</code></td><td>Use isolated session</td></tr>
+    <tr><td><code>--profile &lt;path&gt;</code></td><td>Persistent browser profile directory</td></tr>
+    <tr><td><code>-p &lt;provider&gt;</code></td><td>Cloud browser provider (<code>browserbase</code>, <code>browseruse</code>, <code>kernel</code>)</td></tr>
+    <tr><td><code>--headers &lt;json&gt;</code></td><td>HTTP headers scoped to origin</td></tr>
+    <tr><td><code>--executable-path</code></td><td>Custom browser executable</td></tr>
+    <tr><td><code>--args &lt;args&gt;</code></td><td>Browser launch args (comma-separated)</td></tr>
+    <tr><td><code>--user-agent &lt;ua&gt;</code></td><td>Custom User-Agent string</td></tr>
+    <tr><td><code>--proxy &lt;url&gt;</code></td><td>Proxy server URL</td></tr>
+    <tr><td><code>--proxy-bypass &lt;hosts&gt;</code></td><td>Hosts to bypass proxy</td></tr>
+    <tr><td><code>--json</code></td><td>JSON output for scripts</td></tr>
+    <tr><td><code>--full, -f</code></td><td>Full page screenshot</td></tr>
+    <tr><td><code>--name, -n</code></td><td>Locator name filter</td></tr>
+    <tr><td><code>--exact</code></td><td>Exact text match</td></tr>
+    <tr><td><code>--headed</code></td><td>Show browser window</td></tr>
+    <tr><td><code>{"--cdp <port|url>"}</code></td><td>CDP connection (port or WebSocket URL)</td></tr>
+    <tr><td><code>--auto-connect</code></td><td>Auto-discover and connect to running Chrome</td></tr>
+    <tr><td><code>--debug</code></td><td>Debug output</td></tr>
+  </tbody>
+</table>
 
 ## Cloud providers
 
@@ -103,6 +110,10 @@ agent-browser -p browserbase open https://example.com
 # Browser Use
 export BROWSER_USE_API_KEY="your-api-key"
 agent-browser -p browseruse open https://example.com
+
+# Kernel
+export KERNEL_API_KEY="your-api-key"
+agent-browser -p kernel open https://example.com
 
 # Or via environment variable
 export AGENT_BROWSER_PROVIDER=browserbase

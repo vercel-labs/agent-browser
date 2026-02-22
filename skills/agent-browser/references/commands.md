@@ -29,6 +29,7 @@ agent-browser snapshot -s "#main" # Scope to CSS selector
 
 ```bash
 agent-browser click @e1           # Click
+agent-browser click @e1 --new-tab # Click and open in new tab
 agent-browser dblclick @e1        # Double-click
 agent-browser focus @e1           # Focus element
 agent-browser fill @e2 "text"     # Clear and type
@@ -223,6 +224,7 @@ agent-browser --full ...              # Full page screenshot (-f)
 agent-browser --cdp <port> ...        # Connect via Chrome DevTools Protocol
 agent-browser -p <provider> ...       # Cloud browser provider (--provider)
 agent-browser --proxy <url> ...       # Use proxy server
+agent-browser --proxy-bypass <hosts>  # Hosts to bypass proxy
 agent-browser --headers <json> ...    # HTTP headers scoped to URL's origin
 agent-browser --executable-path <p>   # Custom browser executable
 agent-browser --extension <path> ...  # Load browser extension (repeatable)
@@ -245,6 +247,8 @@ agent-browser errors --clear              # Clear errors
 agent-browser highlight @e1               # Highlight element
 agent-browser trace start                 # Start recording trace
 agent-browser trace stop trace.zip        # Stop and save trace
+agent-browser profiler start              # Start Chrome DevTools profiling
+agent-browser profiler stop trace.json    # Stop and save profile
 ```
 
 ## Environment Variables

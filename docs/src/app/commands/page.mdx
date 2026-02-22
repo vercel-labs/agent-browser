@@ -1,4 +1,6 @@
-export const metadata = { title: "Commands" }
+import { pageMetadata } from "@/lib/page-metadata"
+
+export const metadata = pageMetadata("commands")
 
 # Commands
 
@@ -6,20 +8,29 @@ export const metadata = { title: "Commands" }
 
 ```bash
 agent-browser open <url>              # Navigate (aliases: goto, navigate)
-agent-browser click <sel>             # Click element
+agent-browser click <sel>             # Click element (--new-tab to open in new tab)
 agent-browser dblclick <sel>          # Double-click
 agent-browser fill <sel> <text>       # Clear and fill
 agent-browser type <sel> <text>       # Type into element
-agent-browser press <key>             # Press key (Enter, Tab, Control+a)
+agent-browser press <key>             # Press key (Enter, Tab, Control+a) (alias: key)
+agent-browser keydown <key>           # Hold key down
+agent-browser keyup <key>             # Release key
 agent-browser hover <sel>             # Hover element
+agent-browser focus <sel>             # Focus element
 agent-browser select <sel> <val>      # Select dropdown option
 agent-browser check <sel>             # Check checkbox
 agent-browser uncheck <sel>           # Uncheck checkbox
 agent-browser scroll <dir> [px]       # Scroll (up/down/left/right)
+agent-browser scrollintoview <sel>    # Scroll element into view
+agent-browser drag <src> <dst>        # Drag and drop
+agent-browser upload <sel> <files>    # Upload files
 agent-browser screenshot [path]       # Screenshot (--full for full page)
+agent-browser screenshot --annotate   # Annotated screenshot with numbered element labels
+agent-browser pdf <path>              # Save page as PDF
 agent-browser snapshot                # Accessibility tree with refs
 agent-browser eval <js>               # Run JavaScript
-agent-browser close                   # Close browser
+agent-browser connect <port|url>      # Connect to browser via CDP
+agent-browser close                   # Close browser (aliases: quit, exit)
 ```
 
 ## Get info
@@ -33,6 +44,7 @@ agent-browser get title               # Get page title
 agent-browser get url                 # Get current URL
 agent-browser get count <sel>         # Count matching elements
 agent-browser get box <sel>           # Get bounding box
+agent-browser get styles <sel>        # Get computed styles
 ```
 
 ## Check state
@@ -45,24 +57,35 @@ agent-browser is checked <sel>        # Check if checked
 
 ## Find elements
 
-Semantic locators with actions (`click`, `fill`, `check`, `hover`, `text`):
+Semantic locators with actions (`click`, `fill`, `type`, `hover`, `focus`, `check`, `uncheck`, `text`):
 
 ```bash
 agent-browser find role <role> <action> [value]
 agent-browser find text <text> <action>
 agent-browser find label <label> <action> [value]
 agent-browser find placeholder <ph> <action> [value]
+agent-browser find alt <text> <action>
+agent-browser find title <text> <action>
 agent-browser find testid <id> <action> [value]
 agent-browser find first <sel> <action> [value]
+agent-browser find last <sel> <action> [value]
 agent-browser find nth <n> <sel> <action> [value]
 ```
+
+Options:
+
+- `--name <name>` -- filter role by accessible name
+- `--exact` -- require exact text match
 
 Examples:
 
 ```bash
 agent-browser find role button click --name "Submit"
 agent-browser find label "Email" fill "test@test.com"
+agent-browser find alt "Logo" click
 agent-browser find first ".item" click
+agent-browser find last ".item" text
+agent-browser find nth 2 ".card" hover
 ```
 
 ## Wait
@@ -128,6 +151,8 @@ agent-browser network route <url> --abort      # Block requests
 agent-browser network route <url> --body <json>  # Mock response
 agent-browser network unroute [url]            # Remove routes
 agent-browser network requests                 # View tracked requests
+agent-browser network requests --clear         # Clear request log
+agent-browser network requests --filter <pat>  # Filter by URL pattern
 ```
 
 ## Tabs & frames
@@ -137,8 +162,16 @@ agent-browser tab                     # List tabs
 agent-browser tab new [url]           # New tab
 agent-browser tab <n>                 # Switch to tab
 agent-browser tab close [n]           # Close tab
+agent-browser window new              # Open new browser window
 agent-browser frame <sel>             # Switch to iframe
 agent-browser frame main              # Back to main frame
+```
+
+## Dialogs
+
+```bash
+agent-browser dialog accept [text]    # Accept dialog (with optional prompt text)
+agent-browser dialog dismiss          # Dismiss dialog
 ```
 
 ## Debug
@@ -146,8 +179,15 @@ agent-browser frame main              # Back to main frame
 ```bash
 agent-browser trace start [path]      # Start trace
 agent-browser trace stop [path]       # Stop and save trace
+agent-browser profiler start          # Start Chrome DevTools profiling
+agent-browser profiler stop [path]    # Stop and save profile (.json)
+agent-browser record start <path>     # Start video recording (WebM)
+agent-browser record stop             # Stop and save video
+agent-browser record restart <path>   # Stop current and start new recording
 agent-browser console                 # View console messages
+agent-browser console --clear         # Clear console log
 agent-browser errors                  # View page errors
+agent-browser errors --clear          # Clear error log
 agent-browser highlight <sel>         # Highlight element
 ```
 
@@ -164,6 +204,13 @@ agent-browser state clear --all       # Clear all saved states
 agent-browser state clean --older-than <days>  # Delete old states
 ```
 
+## Sessions
+
+```bash
+agent-browser session                 # Show current session name
+agent-browser session list            # List active sessions
+```
+
 ## Navigation
 
 ```bash
@@ -176,20 +223,40 @@ agent-browser reload                  # Reload page
 
 ```bash
 --session <name>         # Isolated browser session
+--session-name <name>    # Auto-save/restore session state (cookies, localStorage)
 --profile <path>         # Persistent browser profile directory
---headed                 # Show browser window (not headless)
---cdp <port>             # Connect via Chrome DevTools Protocol
---auto-connect           # Auto-discover and connect to running Chrome
+--state <path>           # Load storage state from JSON file
+--headers <json>         # HTTP headers scoped to URL's origin
 --executable-path <path> # Custom browser executable
+--extension <path>       # Load browser extension (repeatable)
 --args <args>            # Browser launch args (comma separated)
 --user-agent <ua>        # Custom User-Agent string
 --proxy <url>            # Proxy server URL
---headers <json>         # HTTP headers scoped to URL's origin
+--proxy-bypass <hosts>   # Hosts to bypass proxy
 --ignore-https-errors    # Ignore HTTPS certificate errors
 --allow-file-access      # Allow file:// URLs to access local files (Chromium only)
+-p, --provider <name>    # Browser provider (ios, browserbase, kernel, browseruse)
+--device <name>          # iOS device name (e.g., "iPhone 15 Pro")
 --json                   # JSON output (for scripts)
+--full, -f               # Full page screenshot
+--annotate               # Annotated screenshot with numbered element labels
+--headed                 # Show browser window (not headless)
+--cdp <port|url>         # Connect via Chrome DevTools Protocol (port or WebSocket URL)
+--auto-connect           # Auto-discover and connect to running Chrome
 --debug                  # Debug output
 ```
+
+## Command chaining
+
+Chain commands with `&&` in a single shell invocation. The browser persists via a background daemon, so chaining works naturally and is more efficient than separate calls:
+
+```bash
+agent-browser open example.com && agent-browser wait --load networkidle && agent-browser snapshot -i
+agent-browser fill @e1 "user@example.com" && agent-browser fill @e2 "pass" && agent-browser click @e3
+agent-browser open example.com && agent-browser wait --load networkidle && agent-browser screenshot page.png
+```
+
+Use `&&` when you don't need to read intermediate output. Run commands separately when you need to parse output first (e.g., snapshot to discover refs, then interact with those refs).
 
 ## Local files
 

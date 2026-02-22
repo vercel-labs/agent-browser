@@ -129,6 +129,11 @@ describe('parseCommand', () => {
       );
       expect(result.success).toBe(true);
     });
+
+    it('should parse screenshot with annotate', () => {
+      const result = parseCommand(cmd({ id: '1', action: 'screenshot', annotate: true }));
+      expect(result.success).toBe(true);
+    });
   });
 
   describe('cookies', () => {
@@ -597,6 +602,31 @@ describe('parseCommand', () => {
       if (result.success) {
         expect(result.command.allowFileAccess).toBe(false);
       }
+    });
+
+    it('should parse launch with viewport dimensions', () => {
+      const result = parseCommand(
+        cmd({ id: '1', action: 'launch', viewport: { width: 1920, height: 1080 } })
+      );
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.command.viewport).toEqual({ width: 1920, height: 1080 });
+      }
+    });
+
+    it('should parse launch with viewport null', () => {
+      const result = parseCommand(cmd({ id: '1', action: 'launch', viewport: null }));
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.command.viewport).toBeNull();
+      }
+    });
+
+    it('should reject launch with invalid viewport', () => {
+      const result = parseCommand(
+        cmd({ id: '1', action: 'launch', viewport: { width: -1, height: 720 } })
+      );
+      expect(result.success).toBe(false);
     });
   });
 
@@ -1175,6 +1205,209 @@ describe('parseCommand', () => {
 
     it('should reject addstyle with neither content nor url', () => {
       const result = parseCommand(cmd({ id: '1', action: 'addstyle' }));
+      expect(result.success).toBe(false);
+    });
+  });
+
+  describe('diff', () => {
+    it('should parse diff_snapshot with no options', () => {
+      const result = parseCommand(cmd({ id: '1', action: 'diff_snapshot' }));
+      expect(result.success).toBe(true);
+    });
+
+    it('should parse diff_snapshot with baseline', () => {
+      const result = parseCommand(
+        cmd({ id: '1', action: 'diff_snapshot', baseline: 'before.txt' })
+      );
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.command.baseline).toBe('before.txt');
+      }
+    });
+
+    it('should parse diff_snapshot with all options', () => {
+      const result = parseCommand(
+        cmd({
+          id: '1',
+          action: 'diff_snapshot',
+          baseline: 'snap.txt',
+          selector: '#main',
+          compact: true,
+          maxDepth: 3,
+        })
+      );
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.command.baseline).toBe('snap.txt');
+        expect(result.command.selector).toBe('#main');
+        expect(result.command.compact).toBe(true);
+        expect(result.command.maxDepth).toBe(3);
+      }
+    });
+
+    it('should reject diff_snapshot with negative maxDepth', () => {
+      const result = parseCommand(cmd({ id: '1', action: 'diff_snapshot', maxDepth: -1 }));
+      expect(result.success).toBe(false);
+    });
+
+    it('should parse diff_screenshot with baseline', () => {
+      const result = parseCommand(
+        cmd({ id: '1', action: 'diff_screenshot', baseline: 'before.png' })
+      );
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.command.baseline).toBe('before.png');
+      }
+    });
+
+    it('should parse diff_screenshot with all options', () => {
+      const result = parseCommand(
+        cmd({
+          id: '1',
+          action: 'diff_screenshot',
+          baseline: 'before.png',
+          output: 'diff.png',
+          threshold: 0.2,
+          selector: '#hero',
+          fullPage: true,
+        })
+      );
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.command.baseline).toBe('before.png');
+        expect(result.command.output).toBe('diff.png');
+        expect(result.command.threshold).toBe(0.2);
+        expect(result.command.selector).toBe('#hero');
+        expect(result.command.fullPage).toBe(true);
+      }
+    });
+
+    it('should reject diff_screenshot without baseline', () => {
+      const result = parseCommand(cmd({ id: '1', action: 'diff_screenshot' }));
+      expect(result.success).toBe(false);
+    });
+
+    it('should reject diff_screenshot with threshold out of range', () => {
+      const result = parseCommand(
+        cmd({ id: '1', action: 'diff_screenshot', baseline: 'b.png', threshold: 1.5 })
+      );
+      expect(result.success).toBe(false);
+    });
+
+    it('should parse diff_url with two URLs', () => {
+      const result = parseCommand(
+        cmd({ id: '1', action: 'diff_url', url1: 'https://a.com', url2: 'https://b.com' })
+      );
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.command.url1).toBe('https://a.com');
+        expect(result.command.url2).toBe('https://b.com');
+      }
+    });
+
+    it('should parse diff_url with screenshot and fullPage', () => {
+      const result = parseCommand(
+        cmd({
+          id: '1',
+          action: 'diff_url',
+          url1: 'https://a.com',
+          url2: 'https://b.com',
+          screenshot: true,
+          fullPage: true,
+        })
+      );
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.command.screenshot).toBe(true);
+        expect(result.command.fullPage).toBe(true);
+      }
+    });
+
+    it('should parse diff_url with waitUntil', () => {
+      const result = parseCommand(
+        cmd({
+          id: '1',
+          action: 'diff_url',
+          url1: 'https://a.com',
+          url2: 'https://b.com',
+          waitUntil: 'networkidle',
+        })
+      );
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.command.waitUntil).toBe('networkidle');
+      }
+    });
+
+    it('should reject diff_url without url1', () => {
+      const result = parseCommand(cmd({ id: '1', action: 'diff_url', url2: 'https://b.com' }));
+      expect(result.success).toBe(false);
+    });
+
+    it('should reject diff_url without url2', () => {
+      const result = parseCommand(cmd({ id: '1', action: 'diff_url', url1: 'https://a.com' }));
+      expect(result.success).toBe(false);
+    });
+
+    it('should reject diff_url with invalid waitUntil', () => {
+      const result = parseCommand(
+        cmd({
+          id: '1',
+          action: 'diff_url',
+          url1: 'https://a.com',
+          url2: 'https://b.com',
+          waitUntil: 'invalid',
+        })
+      );
+      expect(result.success).toBe(false);
+    });
+
+    it('should parse diff_url with selector', () => {
+      const result = parseCommand(
+        cmd({
+          id: '1',
+          action: 'diff_url',
+          url1: 'https://a.com',
+          url2: 'https://b.com',
+          selector: '#main',
+        })
+      );
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.command.selector).toBe('#main');
+      }
+    });
+
+    it('should parse diff_url with all snapshot options', () => {
+      const result = parseCommand(
+        cmd({
+          id: '1',
+          action: 'diff_url',
+          url1: 'https://a.com',
+          url2: 'https://b.com',
+          selector: '#content',
+          compact: true,
+          maxDepth: 5,
+        })
+      );
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.command.selector).toBe('#content');
+        expect(result.command.compact).toBe(true);
+        expect(result.command.maxDepth).toBe(5);
+      }
+    });
+
+    it('should reject diff_url with negative maxDepth', () => {
+      const result = parseCommand(
+        cmd({
+          id: '1',
+          action: 'diff_url',
+          url1: 'https://a.com',
+          url2: 'https://b.com',
+          maxDepth: -1,
+        })
+      );
       expect(result.success).toBe(false);
     });
   });

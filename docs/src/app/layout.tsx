@@ -21,8 +21,27 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "agent-browser",
+  metadataBase: new URL("https://agent-browser.dev"),
+  title: {
+    default: "agent-browser | Headless Browser Automation for AI",
+    template: "%s | agent-browser",
+  },
   description: "Headless browser automation CLI for AI agents",
+  openGraph: {
+    type: "website",
+    locale: "en_US",
+    url: "https://agent-browser.dev",
+    siteName: "agent-browser",
+    title: "agent-browser | Headless Browser Automation for AI",
+    description: "Headless browser automation CLI for AI agents",
+    images: [{ url: "/og", width: 1200, height: 630, alt: "agent-browser" }],
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: "agent-browser | Headless Browser Automation for AI",
+    description: "Headless browser automation CLI for AI agents",
+    images: ["/og"],
+  },
 };
 
 export default async function RootLayout({

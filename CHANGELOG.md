@@ -1,5 +1,29 @@
 # agent-browser
 
+## 0.13.0
+
+### Minor Changes
+
+- ebd8717: Added new diff commands for comparing snapshots, screenshots, and URLs between page states. You can now run visual pixel diffs against baseline images, compare accessibility tree snapshots with customizable depth and selectors, and diff two URLs side-by-side with optional screenshot comparison.
+
+## 0.12.0
+
+### Minor Changes
+
+- 69ffad0: Add annotated screenshots with the new --annotate flag, which overlays numbered labels on interactive elements and prints a legend mapping each label to its element ref. This enables multimodal AI models to reason about visual layout while using the same @eN refs for subsequent interactions. The flag can also be set via the AGENT_BROWSER_ANNOTATE environment variable.
+
+## 0.11.1
+
+### Patch Changes
+
+- c6fc7df: Added documentation for command chaining with && across README, CLI help output, docs, and skill files, explaining how to efficiently chain multiple agent-browser commands in a single shell invocation since the browser persists via a background daemon.
+
+## 0.11.0
+
+### Minor Changes
+
+- 5dc40b4: Added configuration file support with automatic loading from user and project directories, new profiler commands for Chrome DevTools profiling, computed styles getter, browser extension loading, storage state management, and iOS device emulation. Expanded click command with new-tab option, improved find command with additional actions and filtering options, and enhanced CDP connection to accept WebSocket URLs. Documentation has been significantly expanded with new sections for configuration, profiling, and proxy support.
+
 ## 0.10.0
 
 ### Minor Changes

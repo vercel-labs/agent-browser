@@ -1,0 +1,114 @@
+import { pageMetadata } from "@/lib/page-metadata"
+
+export const metadata = pageMetadata("profiler")
+
+# Profiler
+
+Capture Chrome DevTools performance profiles during browser automation.
+Use profiles to diagnose slow page loads, expensive JavaScript, layout thrashing,
+and other performance bottlenecks in agentic workflows.
+
+## Basic usage
+
+```bash
+# Start profiling
+agent-browser profiler start
+
+# Perform actions
+agent-browser navigate https://example.com
+agent-browser click "#button"
+
+# Stop and save profile
+agent-browser profiler stop ./trace.json
+```
+
+The output JSON file can be loaded into Chrome DevTools, Perfetto UI, or any
+tool that accepts Chrome Trace Event format.
+
+## Commands
+
+<table>
+  <thead>
+    <tr><th>Command</th><th>Description</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>profiler start</code></td><td>Start recording a performance profile</td></tr>
+    <tr><td><code>profiler start --categories &lt;list&gt;</code></td><td>Start with custom trace categories</td></tr>
+    <tr><td><code>profiler stop [path]</code></td><td>Stop profiling and save to file</td></tr>
+  </tbody>
+</table>
+
+## Trace categories
+
+The `--categories` flag accepts a comma-separated list of Chrome trace categories.
+
+```bash
+agent-browser profiler start --categories "devtools.timeline,v8.execute,blink.user_timing"
+```
+
+Default categories include `devtools.timeline`, `v8.execute`, `blink`,
+`blink.user_timing`, `latencyInfo`, `renderer.scheduler`, `toplevel`, and
+several `disabled-by-default-*` categories for detailed CPU profiling and
+call stack analysis.
+
+### Common categories
+
+<table>
+  <thead>
+    <tr><th>Category</th><th>What it captures</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>devtools.timeline</code></td><td>Standard DevTools performance events</td></tr>
+    <tr><td><code>v8.execute</code></td><td>Time spent running JavaScript</td></tr>
+    <tr><td><code>blink</code></td><td>Renderer events (layout, paint, style)</td></tr>
+    <tr><td><code>blink.user_timing</code></td><td><code>performance.mark()</code> and <code>performance.measure()</code> calls</td></tr>
+    <tr><td><code>latencyInfo</code></td><td>Input-to-display latency</td></tr>
+    <tr><td><code>disabled-by-default-v8.cpu_profiler</code></td><td>Sampling-based JS CPU profiling</td></tr>
+  </tbody>
+</table>
+
+## Output format
+
+The output is a JSON file in Chrome Trace Event format:
+
+```json
+{
+  "traceEvents": [
+    {
+      "cat": "devtools.timeline",
+      "name": "RunTask",
+      "ph": "X",
+      "ts": 12345,
+      "dur": 100,
+      "pid": 1,
+      "tid": 1
+    }
+  ],
+  "metadata": {
+    "clock-domain": "LINUX_CLOCK_MONOTONIC"
+  }
+}
+```
+
+The `metadata.clock-domain` field reflects the host platform (Linux or macOS).
+On Windows it is omitted.
+
+## Viewing profiles
+
+- **Chrome DevTools** -- Performance panel > Load profile
+- **Perfetto** -- https://ui.perfetto.dev/ (drag and drop the JSON file)
+- **Trace Viewer** -- `chrome://tracing` in any Chromium browser
+
+## Use cases
+
+- **Page load analysis** -- Profile navigation to identify slow resources, long tasks, or layout shifts
+- **Interaction profiling** -- Measure the cost of clicks, form fills, and other user interactions
+- **CI regression checks** -- Capture profiles per build and compare trace data over time
+- **Agent workflow optimization** -- Find which steps in an agentic flow are most expensive
+
+## Limitations
+
+- Only works with Chromium-based browsers (Chrome, Edge). Not supported on Firefox or WebKit.
+- Trace data accumulates in memory while profiling is active (capped at 5 million events). Stop profiling promptly after the area of interest.
+- Data collection on stop has a 30-second timeout. If the browser is unresponsive, the stop command may fail.
+- When no output path is provided, the profile is saved to an auto-generated path under the agent-browser temp directory.
