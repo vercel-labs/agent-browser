@@ -263,6 +263,38 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
             })?;
             Ok(json!({ "id": id, "action": "keyup", "key": key }))
         }
+        "keyboard" => {
+            let sub = rest.first().ok_or_else(|| ParseError::MissingArguments {
+                context: "keyboard".to_string(),
+                usage: "keyboard <type|inserttext> <text>",
+            })?;
+            match *sub {
+                "type" => {
+                    let text: String = rest[1..].join(" ");
+                    if text.is_empty() {
+                        return Err(ParseError::MissingArguments {
+                            context: "keyboard type".to_string(),
+                            usage: "keyboard type <text>",
+                        });
+                    }
+                    Ok(json!({ "id": id, "action": "keyboard", "subaction": "type", "text": text }))
+                }
+                "inserttext" | "insertText" => {
+                    let text: String = rest[1..].join(" ");
+                    if text.is_empty() {
+                        return Err(ParseError::MissingArguments {
+                            context: "keyboard inserttext".to_string(),
+                            usage: "keyboard inserttext <text>",
+                        });
+                    }
+                    Ok(json!({ "id": id, "action": "keyboard", "subaction": "insertText", "text": text }))
+                }
+                _ => Err(ParseError::UnknownSubcommand {
+                    subcommand: sub.to_string(),
+                    valid_options: &["type", "inserttext"],
+                }),
+            }
+        }
 
         // === Scroll ===
         "scroll" => {

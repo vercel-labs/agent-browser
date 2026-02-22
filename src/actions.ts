@@ -1894,8 +1894,21 @@ async function handleKeyboard(
   browser: BrowserManager
 ): Promise<Response> {
   const page = browser.getPage();
-  await page.keyboard.press(command.keys);
-  return successResponse(command.id, { pressed: command.keys });
+  const sub = command.subaction ?? 'press';
+
+  switch (sub) {
+    case 'type':
+      await page.keyboard.type(command.text ?? '', { delay: command.delay });
+      return successResponse(command.id, { typed: true, text: command.text });
+    case 'press':
+      await page.keyboard.press(command.keys ?? '');
+      return successResponse(command.id, { pressed: command.keys });
+    case 'insertText':
+      await page.keyboard.insertText(command.text ?? '');
+      return successResponse(command.id, { inserted: true, text: command.text });
+    default:
+      return errorResponse(command.id, `Unknown keyboard subaction: ${sub}`);
+  }
 }
 
 async function handleWheel(command: WheelCommand, browser: BrowserManager): Promise<Response> {
