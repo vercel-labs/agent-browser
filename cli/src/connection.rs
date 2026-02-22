@@ -278,6 +278,17 @@ pub fn ensure_daemon(
     let exe_path = env::current_exe().map_err(|e| e.to_string())?;
     // Canonicalize to resolve symlinks (e.g., npm global bin symlink -> actual binary)
     let exe_path = exe_path.canonicalize().unwrap_or(exe_path);
+    // On Windows, canonicalize() returns paths with NT extended-length prefix (\\?\)
+    // Node.js cannot handle this format, so strip it
+    #[cfg(target_os = "windows")]
+    let exe_path = {
+        let path_str = exe_path.to_string_lossy();
+        if path_str.starts_with(r"\\?\") {
+            PathBuf::from(&path_str[4..])
+        } else {
+            exe_path
+        }
+    };
     let exe_dir = exe_path.parent().unwrap();
 
     let mut daemon_paths = vec![
