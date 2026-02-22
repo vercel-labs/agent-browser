@@ -441,7 +441,10 @@ const errorsSchema = baseCommandSchema.extend({
 
 const keyboardSchema = baseCommandSchema.extend({
   action: z.literal('keyboard'),
-  keys: z.string().min(1),
+  subaction: z.enum(['type', 'press', 'insertText']).optional(),
+  keys: z.string().min(1).optional(),
+  text: z.string().min(1).optional(),
+  delay: z.number().optional(),
 });
 
 const wheelSchema = baseCommandSchema.extend({
@@ -1055,6 +1058,16 @@ export function parseCommand(input: string): ParseResult {
       error: 'frame command requires at least one of: selector, name, or url',
       id,
     };
+  }
+
+  if (command.action === 'keyboard') {
+    const sub = command.subaction ?? 'press';
+    if ((sub === 'type' || sub === 'insertText') && !command.text) {
+      return { success: false, error: `keyboard ${sub} requires text`, id };
+    }
+    if (sub === 'press' && !command.keys) {
+      return { success: false, error: 'keyboard press requires keys', id };
+    }
   }
 
   return { success: true, command };

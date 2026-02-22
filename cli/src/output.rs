@@ -713,6 +713,11 @@ Global Options:
 Examples:
   agent-browser type "#search" "hello"
   agent-browser type @e2 "additional text"
+
+See Also:
+  For typing into contenteditable editors (Lexical, ProseMirror, etc.)
+  without a selector, use 'keyboard type' instead:
+    agent-browser keyboard type "# My Heading"
 "##
         }
         "hover" => {
@@ -924,6 +929,42 @@ Global Options:
 Examples:
   agent-browser keyup Shift
   agent-browser keyup Control
+"##
+        }
+        "keyboard" => {
+            r##"
+agent-browser keyboard - Raw keyboard input (no selector needed)
+
+Usage: agent-browser keyboard <subcommand> <text>
+
+Sends keyboard input to whatever element currently has focus.
+Unlike 'type' which requires a selector, 'keyboard' operates on
+the current focus — essential for contenteditable editors like
+Lexical, ProseMirror, CodeMirror, and Monaco.
+
+Subcommands:
+  type <text>          Type text character-by-character with real
+                       key events (keydown, keypress, keyup per char)
+  inserttext <text>    Insert text without key events (like paste)
+
+Note: For key combos (Enter, Control+a), use the 'press' command
+directly — it already operates on the current focus.
+
+Global Options:
+  --json               Output as JSON
+  --session <name>     Use specific session
+
+Examples:
+  agent-browser keyboard type "Hello, World!"
+  agent-browser keyboard type "# My Heading"
+  agent-browser keyboard inserttext "pasted content"
+
+Use Cases:
+  # Type into a Lexical/ProseMirror contenteditable editor:
+  agent-browser click "[contenteditable]"
+  agent-browser keyboard type "# My Heading"
+  agent-browser press Enter
+  agent-browser keyboard type "Some paragraph text"
 "##
         }
 
@@ -1958,6 +1999,8 @@ Core Commands:
   type <sel> <text>          Type into element
   fill <sel> <text>          Clear and fill
   press <key>                Press key (Enter, Tab, Control+a)
+  keyboard type <text>       Type text with real keystrokes (no selector)
+  keyboard inserttext <text> Insert text without key events
   hover <sel>                Hover element
   focus <sel>                Focus element
   check <sel>                Check checkbox
