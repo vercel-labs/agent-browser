@@ -371,6 +371,60 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
 
         // === Screenshot/PDF ===
         "screenshot" => {
+            // Extract --format and --quality flags before positional parsing
+            let mut filtered_rest: Vec<&str> = Vec::new();
+            let mut format_value: Option<String> = None;
+            let mut quality_value: Option<u32> = None;
+            let mut i = 0;
+            while i < rest.len() {
+                if rest[i] == "--format" {
+                    if let Some(val) = rest.get(i + 1) {
+                        match *val {
+                            "png" | "jpeg" | "webp" => {
+                                format_value = Some(val.to_string());
+                            }
+                            _ => {
+                                return Err(ParseError::InvalidValue {
+                                    message: format!("Invalid format: '{}'. Use 'png', 'jpeg', or 'webp'", val),
+                                    usage: "screenshot [selector] [path] [--format png|jpeg|webp]",
+                                });
+                            }
+                        }
+                        i += 2;
+                        continue;
+                    } else {
+                        return Err(ParseError::MissingArguments {
+                            context: "--format requires a value".to_string(),
+                            usage: "screenshot [selector] [path] [--format png|jpeg|webp]",
+                        });
+                    }
+                } else if rest[i] == "--quality" {
+                    if let Some(val) = rest.get(i + 1) {
+                        match val.parse::<u32>() {
+                            Ok(q) if q <= 100 => {
+                                quality_value = Some(q);
+                            }
+                            _ => {
+                                return Err(ParseError::InvalidValue {
+                                    message: format!("Invalid quality: '{}'. Use a number between 0 and 100", val),
+                                    usage: "screenshot [selector] [path] [--quality 0-100]",
+                                });
+                            }
+                        }
+                        i += 2;
+                        continue;
+                    } else {
+                        return Err(ParseError::MissingArguments {
+                            context: "--quality requires a value".to_string(),
+                            usage: "screenshot [selector] [path] [--quality 0-100]",
+                        });
+                    }
+                }
+                filtered_rest.push(rest[i]);
+                i += 1;
+            }
+            let rest = filtered_rest;
+
             // screenshot [selector] [path]
             // selector: @ref or CSS selector
             // path: file path (contains / or . or ends with known extension)
@@ -399,9 +453,25 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                 }
                 _ => (None, None),
             };
-            Ok(
-                json!({ "id": id, "action": "screenshot", "path": path, "selector": selector, "fullPage": flags.full, "annotate": flags.annotate }),
-            )
+            let mut cmd = json!({ "id": id, "action": "screenshot", "path": path, "selector": selector, "fullPage": flags.full, "annotate": flags.annotate });
+            // Format resolution: --format flag > file extension > env var > omit for server default
+            let resolved_format = format_value.or_else(|| {
+                path.and_then(|p| {
+                    if p.ends_with(".webp") { Some("webp".to_string()) }
+                    else if p.ends_with(".jpg") || p.ends_with(".jpeg") { Some("jpeg".to_string()) }
+                    else if p.ends_with(".png") { Some("png".to_string()) }
+                    else { None }
+                })
+            }).or_else(|| flags.screenshot_format.clone());
+            if let Some(fmt) = resolved_format {
+                cmd["format"] = json!(fmt);
+            }
+            // Quality: --quality flag > env var > omit
+            let resolved_quality = quality_value.or(flags.screenshot_quality);
+            if let Some(q) = resolved_quality {
+                cmd["quality"] = json!(q);
+            }
+            Ok(cmd)
         }
         "pdf" => {
             let path = rest.first().ok_or_else(|| ParseError::MissingArguments {
@@ -1854,6 +1924,8 @@ mod tests {
             device: None,
             auto_connect: false,
             session_name: None,
+            screenshot_format: None,
+            screenshot_quality: None,
             cli_executable_path: false,
             cli_extensions: false,
             cli_profile: false,

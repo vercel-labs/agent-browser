@@ -1019,11 +1019,16 @@ Captures a screenshot of the current page. If no path is provided,
 saves to a temporary directory with a generated filename.
 
 Options:
-  --full, -f           Capture full page (not just viewport)
-  --annotate           Overlay numbered labels on interactive elements.
-                       Each label [N] corresponds to ref @eN from snapshot.
-                       Prints a legend mapping labels to element roles/names.
-                       With --json, annotations are included in the response.
+  --full, -f                 Capture full page (not just viewport)
+  --annotate                 Overlay numbered labels on interactive elements.
+                             Each label [N] corresponds to ref @eN from snapshot.
+                             Prints a legend mapping labels to element roles/names.
+                             With --json, annotations are included in the response.
+  --format <png|jpeg|webp>   Image format (default: png, or inferred from path)
+  --quality <0-100>          Compression quality (jpeg and webp only)
+
+Format is auto-detected from file extension when not specified.
+Set defaults via AGENT_BROWSER_SCREENSHOT_FORMAT and AGENT_BROWSER_SCREENSHOT_QUALITY.
 
 Global Options:
   --json               Output as JSON
@@ -1032,6 +1037,8 @@ Global Options:
 Examples:
   agent-browser screenshot
   agent-browser screenshot ./screenshot.png
+  agent-browser screenshot ./shot.webp
+  agent-browser screenshot --format webp --quality 80
   agent-browser screenshot --full ./full-page.png
   agent-browser screenshot --annotate              # Labeled screenshot + legend
   agent-browser screenshot --annotate ./page.png   # Save annotated screenshot
@@ -1969,7 +1976,7 @@ Core Commands:
   scroll <dir> [px]          Scroll (up/down/left/right)
   scrollintoview <sel>       Scroll element into view
   wait <sel|ms>              Wait for element or time
-  screenshot [path]          Take screenshot
+  screenshot [path]          Take screenshot (--format png|jpeg|webp, --quality)
   pdf <path>                 Save as PDF
   snapshot                   Accessibility tree with refs (for AI)
   eval <js>                  Run JavaScript
@@ -2106,6 +2113,8 @@ Environment:
   AGENT_BROWSER_STREAM_PORT      Enable WebSocket streaming on port (e.g., 9223)
   AGENT_BROWSER_IOS_DEVICE       Default iOS device name
   AGENT_BROWSER_IOS_UDID         Default iOS device UDID
+  AGENT_BROWSER_SCREENSHOT_FORMAT     Default screenshot format (png, jpeg, webp)
+  AGENT_BROWSER_SCREENSHOT_QUALITY    Default screenshot quality (0-100, jpeg/webp)
 
 Install (recommended, fastest - native Rust CLI):
   npm install -g agent-browser
