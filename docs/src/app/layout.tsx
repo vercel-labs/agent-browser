@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
+import { GeistPixelSquare } from "geist/font/pixel";
 import "./globals.css";
 import { ThemeProvider } from "@/components/theme-provider";
 import { MobileNavProvider } from "@/components/mobile-nav-context";
@@ -65,7 +66,7 @@ export default async function RootLayout({
         )}
       </head>
       <body
-        className={`${geist.variable} ${geistMono.variable} antialiased bg-background text-foreground`}
+        className={`${geist.variable} ${geistMono.variable} ${GeistPixelSquare.variable} antialiased bg-background text-foreground`}
       >
         <ThemeProvider>
           <MobileNavProvider>

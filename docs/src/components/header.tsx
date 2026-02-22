@@ -46,7 +46,7 @@ export function Header() {
             </svg>
           </span>
           <Link href="/">
-            <span className="font-medium tracking-tight text-lg">
+            <span className="font-medium tracking-tight text-lg" style={{ fontFamily: "var(--font-geist-pixel-square)" }}>
               agent-browser
             </span>
           </Link>
