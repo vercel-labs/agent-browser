@@ -430,6 +430,8 @@ export async function startDaemon(options?: {
                 proxy,
                 ignoreHTTPSErrors: ignoreHTTPSErrors,
                 allowFileAccess: allowFileAccess,
+                relayUrl: process.env.AGENT_BROWSER_RELAY_URL,
+                extensionToken: process.env.AGENT_BROWSER_EXTENSION_TOKEN,
                 autoStateFilePath: getSessionAutoStatePath(),
               });
             }

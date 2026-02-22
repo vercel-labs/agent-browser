@@ -1020,6 +1020,35 @@ agent-browser -p ios --device "John's iPhone" open https://example.com
 - Slightly slower initial connection than simulator
 - Tests against real Safari performance and behavior
 
+### Playwright Extension
+
+Connect to an existing Chrome browser tab via the [Playwright MCP browser extension](https://github.com/microsoft/playwright-mcp). This is useful for automating pages where you are already logged in or want to interact with a specific tab.
+
+**Setup:**
+1. Install the Playwright MCP extension in Chrome.
+2. Run `agent-browser` with the `playwright-extension` provider:
+
+```bash
+agent-browser -p playwright-extension open https://example.com
+```
+
+**Auto-connect:**
+If you have a `PLAYWRIGHT_MCP_EXTENSION_TOKEN` set, the extension will automatically connect to the target tab without a selection UI.
+
+```bash
+export AGENT_BROWSER_EXTENSION_TOKEN="your-token"
+agent-browser -p playwright-extension open https://example.com
+```
+
+| Option | Description |
+|--------|-------------|
+| `--relay-url <url>` | Playwright extension relay URL (optional) |
+| `--extension-token <token>` | Auto-connect token (bypasses tab selection UI) |
+
+**Constraints:**
+- **Single-tab only**: The extension supports exactly one active connection at a time. Multi-tab operations (opening new tabs, tab switching) are not supported.
+- **User-managed browser**: `agent-browser` cannot launch or close the browser; it only connects to an existing tab.
+
 ### Browserbase
 
 [Browserbase](https://browserbase.com) provides remote browser infrastructure to make deployment of agentic browsing agents easy. Use it when running the agent-browser CLI in an environment where a local browser isn't feasible.

@@ -180,6 +180,31 @@ agent-browser --auto-connect snapshot
 
 # Or with explicit CDP port
 agent-browser --cdp 9222 snapshot
+
+# Via Playwright MCP browser extension
+agent-browser -p playwright-extension open https://example.com
+```
+
+### Playwright Extension Provider
+
+Connect to an existing Chrome browser tab via the Playwright MCP extension. This is useful for automating pages where the user is already logged in.
+
+**Usage:**
+1. Install the Playwright MCP extension in Chrome.
+2. Run `agent-browser -p playwright-extension`.
+3. Open the generated connection URL in Chrome to connect.
+
+```bash
+agent-browser -p playwright-extension snapshot
+# ACTION REQUIRED: Open chrome-extension://... in Chrome
+```
+
+**Auto-connect:**
+Set `AGENT_BROWSER_EXTENSION_TOKEN` to bypass the tab selection UI.
+
+```bash
+export AGENT_BROWSER_EXTENSION_TOKEN="your-token"
+agent-browser -p playwright-extension open https://example.com
 ```
 
 ### Visual Browser (Debugging)

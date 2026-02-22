@@ -32,6 +32,8 @@ pub struct Config {
     pub cdp: Option<String>,
     pub auto_connect: Option<bool>,
     pub headers: Option<String>,
+    pub relay_url: Option<String>,
+    pub extension_token: Option<String>,
     pub annotate: Option<bool>,
 }
 
@@ -65,6 +67,8 @@ impl Config {
             cdp: other.cdp.or(self.cdp),
             auto_connect: other.auto_connect.or(self.auto_connect),
             headers: other.headers.or(self.headers),
+            relay_url: other.relay_url.or(self.relay_url),
+            extension_token: other.extension_token.or(self.extension_token),
             annotate: other.annotate.or(self.annotate),
         }
     }
@@ -153,8 +157,7 @@ pub fn load_config(args: &[String]) -> Result<Config, String> {
         });
 
     if let Some((source, maybe_path)) = explicit {
-        let path_str =
-            maybe_path.ok_or_else(|| format!("{} requires a file path", source))?;
+        let path_str = maybe_path.ok_or_else(|| format!("{} requires a file path", source))?;
         let path = PathBuf::from(&path_str);
         if !path.exists() {
             return Err(format!("config file not found: {}", path_str));
@@ -198,6 +201,8 @@ pub struct Flags {
     pub device: Option<String>,
     pub auto_connect: bool,
     pub session_name: Option<String>,
+    pub relay_url: Option<String>,
+    pub extension_token: Option<String>,
     pub annotate: bool,
 
     // Track which launch-time options were explicitly passed via CLI
@@ -236,48 +241,48 @@ pub fn parse_flags(args: &[String]) -> Flags {
     };
 
     let mut flags = Flags {
-        json: env_var_is_truthy("AGENT_BROWSER_JSON")
-            || config.json.unwrap_or(false),
-        full: env_var_is_truthy("AGENT_BROWSER_FULL")
-            || config.full.unwrap_or(false),
-        headed: env_var_is_truthy("AGENT_BROWSER_HEADED")
-            || config.headed.unwrap_or(false),
-        debug: env_var_is_truthy("AGENT_BROWSER_DEBUG")
-            || config.debug.unwrap_or(false),
-        session: env::var("AGENT_BROWSER_SESSION").ok()
+        json: env_var_is_truthy("AGENT_BROWSER_JSON") || config.json.unwrap_or(false),
+        full: env_var_is_truthy("AGENT_BROWSER_FULL") || config.full.unwrap_or(false),
+        headed: env_var_is_truthy("AGENT_BROWSER_HEADED") || config.headed.unwrap_or(false),
+        debug: env_var_is_truthy("AGENT_BROWSER_DEBUG") || config.debug.unwrap_or(false),
+        session: env::var("AGENT_BROWSER_SESSION")
+            .ok()
             .or(config.session)
             .unwrap_or_else(|| "default".to_string()),
         headers: config.headers,
-        executable_path: env::var("AGENT_BROWSER_EXECUTABLE_PATH").ok()
+        executable_path: env::var("AGENT_BROWSER_EXECUTABLE_PATH")
+            .ok()
             .or(config.executable_path),
         cdp: config.cdp,
         extensions,
-        profile: env::var("AGENT_BROWSER_PROFILE").ok()
-            .or(config.profile),
-        state: env::var("AGENT_BROWSER_STATE").ok()
-            .or(config.state),
-        proxy: env::var("AGENT_BROWSER_PROXY").ok()
-            .or(config.proxy),
-        proxy_bypass: env::var("AGENT_BROWSER_PROXY_BYPASS").ok()
+        profile: env::var("AGENT_BROWSER_PROFILE").ok().or(config.profile),
+        state: env::var("AGENT_BROWSER_STATE").ok().or(config.state),
+        proxy: env::var("AGENT_BROWSER_PROXY").ok().or(config.proxy),
+        proxy_bypass: env::var("AGENT_BROWSER_PROXY_BYPASS")
+            .ok()
             .or(config.proxy_bypass),
-        args: env::var("AGENT_BROWSER_ARGS").ok()
-            .or(config.args),
-        user_agent: env::var("AGENT_BROWSER_USER_AGENT").ok()
+        args: env::var("AGENT_BROWSER_ARGS").ok().or(config.args),
+        user_agent: env::var("AGENT_BROWSER_USER_AGENT")
+            .ok()
             .or(config.user_agent),
-        provider: env::var("AGENT_BROWSER_PROVIDER").ok()
-            .or(config.provider),
+        provider: env::var("AGENT_BROWSER_PROVIDER").ok().or(config.provider),
         ignore_https_errors: env_var_is_truthy("AGENT_BROWSER_IGNORE_HTTPS_ERRORS")
             || config.ignore_https_errors.unwrap_or(false),
         allow_file_access: env_var_is_truthy("AGENT_BROWSER_ALLOW_FILE_ACCESS")
             || config.allow_file_access.unwrap_or(false),
-        device: env::var("AGENT_BROWSER_IOS_DEVICE").ok()
-            .or(config.device),
+        device: env::var("AGENT_BROWSER_IOS_DEVICE").ok().or(config.device),
         auto_connect: env_var_is_truthy("AGENT_BROWSER_AUTO_CONNECT")
             || config.auto_connect.unwrap_or(false),
-        session_name: env::var("AGENT_BROWSER_SESSION_NAME").ok()
+        session_name: env::var("AGENT_BROWSER_SESSION_NAME")
+            .ok()
             .or(config.session_name),
-        annotate: env_var_is_truthy("AGENT_BROWSER_ANNOTATE")
-            || config.annotate.unwrap_or(false),
+        relay_url: env::var("AGENT_BROWSER_RELAY_URL")
+            .ok()
+            .or(config.relay_url),
+        extension_token: env::var("AGENT_BROWSER_EXTENSION_TOKEN")
+            .ok()
+            .or(config.extension_token),
+        annotate: env_var_is_truthy("AGENT_BROWSER_ANNOTATE") || config.annotate.unwrap_or(false),
         cli_executable_path: false,
         cli_extensions: false,
         cli_profile: false,
@@ -295,22 +300,30 @@ pub fn parse_flags(args: &[String]) -> Flags {
             "--json" => {
                 let (val, consumed) = parse_bool_arg(args, i);
                 flags.json = val;
-                if consumed { i += 1; }
+                if consumed {
+                    i += 1;
+                }
             }
             "--full" | "-f" => {
                 let (val, consumed) = parse_bool_arg(args, i);
                 flags.full = val;
-                if consumed { i += 1; }
+                if consumed {
+                    i += 1;
+                }
             }
             "--headed" => {
                 let (val, consumed) = parse_bool_arg(args, i);
                 flags.headed = val;
-                if consumed { i += 1; }
+                if consumed {
+                    i += 1;
+                }
             }
             "--debug" => {
                 let (val, consumed) = parse_bool_arg(args, i);
                 flags.debug = val;
-                if consumed { i += 1; }
+                if consumed {
+                    i += 1;
+                }
             }
             "--session" => {
                 if let Some(s) = args.get(i + 1) {
@@ -395,13 +408,17 @@ pub fn parse_flags(args: &[String]) -> Flags {
             "--ignore-https-errors" => {
                 let (val, consumed) = parse_bool_arg(args, i);
                 flags.ignore_https_errors = val;
-                if consumed { i += 1; }
+                if consumed {
+                    i += 1;
+                }
             }
             "--allow-file-access" => {
                 let (val, consumed) = parse_bool_arg(args, i);
                 flags.allow_file_access = val;
                 flags.cli_allow_file_access = true;
-                if consumed { i += 1; }
+                if consumed {
+                    i += 1;
+                }
             }
             "--device" => {
                 if let Some(d) = args.get(i + 1) {
@@ -412,7 +429,9 @@ pub fn parse_flags(args: &[String]) -> Flags {
             "--auto-connect" => {
                 let (val, consumed) = parse_bool_arg(args, i);
                 flags.auto_connect = val;
-                if consumed { i += 1; }
+                if consumed {
+                    i += 1;
+                }
             }
             "--session-name" => {
                 if let Some(s) = args.get(i + 1) {
@@ -420,10 +439,24 @@ pub fn parse_flags(args: &[String]) -> Flags {
                     i += 1;
                 }
             }
+            "--relay-url" => {
+                if let Some(s) = args.get(i + 1) {
+                    flags.relay_url = Some(s.clone());
+                    i += 1;
+                }
+            }
+            "--extension-token" => {
+                if let Some(s) = args.get(i + 1) {
+                    flags.extension_token = Some(s.clone());
+                    i += 1;
+                }
+            }
             "--annotate" => {
                 let (val, consumed) = parse_bool_arg(args, i);
                 flags.annotate = val;
-                if consumed { i += 1; }
+                if consumed {
+                    i += 1;
+                }
             }
             "--config" => {
                 // Already handled by load_config(); skip the value
@@ -468,6 +501,8 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--provider",
         "--device",
         "--session-name",
+        "--relay-url",
+        "--extension-token",
         "--config",
     ];
 
@@ -682,6 +717,8 @@ mod tests {
             "allowFileAccess": true,
             "cdp": "9222",
             "autoConnect": true,
+            "relayUrl": "ws://localhost:1234",
+            "extensionToken": "secret-token",
             "headers": "{\"Auth\":\"token\"}"
         }"#;
         let config: Config = serde_json::from_str(json).unwrap();
@@ -692,7 +729,10 @@ mod tests {
         assert_eq!(config.session.as_deref(), Some("test-session"));
         assert_eq!(config.session_name.as_deref(), Some("my-app"));
         assert_eq!(config.executable_path.as_deref(), Some("/usr/bin/chromium"));
-        assert_eq!(config.extensions, Some(vec!["/ext1".to_string(), "/ext2".to_string()]));
+        assert_eq!(
+            config.extensions,
+            Some(vec!["/ext1".to_string(), "/ext2".to_string()])
+        );
         assert_eq!(config.profile.as_deref(), Some("/tmp/profile"));
         assert_eq!(config.state.as_deref(), Some("/tmp/state.json"));
         assert_eq!(config.proxy.as_deref(), Some("http://proxy:8080"));
@@ -706,6 +746,8 @@ mod tests {
         assert_eq!(config.cdp.as_deref(), Some("9222"));
         assert_eq!(config.auto_connect, Some(true));
         assert_eq!(config.headers.as_deref(), Some("{\"Auth\":\"token\"}"));
+        assert_eq!(config.relay_url.as_deref(), Some("ws://localhost:1234"));
+        assert_eq!(config.extension_token.as_deref(), Some("secret-token"));
     }
 
     #[test]
@@ -827,6 +869,14 @@ mod tests {
     #[test]
     fn test_extract_config_path_skips_flag_values() {
         assert_eq!(extract_config_path(&args("--args --config open")), None);
+    }
+
+    #[test]
+    fn test_clean_args_removes_extension_flags() {
+        let cleaned = clean_args(&args(
+            "--relay-url ws://localhost:1234 --extension-token secret open example.com",
+        ));
+        assert_eq!(cleaned, vec!["open", "example.com"]);
     }
 
     #[test]
@@ -1001,7 +1051,11 @@ mod tests {
         let merged = user.merge(project);
         assert_eq!(
             merged.extensions,
-            Some(vec!["/ext1".to_string(), "/ext2".to_string(), "/ext3".to_string()])
+            Some(vec![
+                "/ext1".to_string(),
+                "/ext2".to_string(),
+                "/ext3".to_string()
+            ])
         );
     }
 

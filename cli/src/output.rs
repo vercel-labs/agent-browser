@@ -39,15 +39,11 @@ pub fn print_response(resp: &Response, json_mode: bool, action: Option<&str>) {
                     return;
                 }
                 Some("diff_url") => {
-                    if let Some(snap_data) =
-                        obj.get("snapshot").and_then(|v| v.as_object())
-                    {
+                    if let Some(snap_data) = obj.get("snapshot").and_then(|v| v.as_object()) {
                         println!("{}", color::bold("Snapshot diff:"));
                         print_snapshot_diff(snap_data);
                     }
-                    if let Some(ss_data) =
-                        obj.get("screenshot").and_then(|v| v.as_object())
-                    {
+                    if let Some(ss_data) = obj.get("screenshot").and_then(|v| v.as_object()) {
                         println!("\n{}", color::bold("Screenshot diff:"));
                         print_screenshot_diff(ss_data);
                     }
@@ -310,11 +306,7 @@ pub fn print_response(resp: &Response, json_mode: bool, action: Option<&str>) {
                     }
                     _ => {
                         if let Some(path) = data.get("path").and_then(|v| v.as_str()) {
-                            println!(
-                                "{} Recording started: {}",
-                                color::success_indicator(),
-                                path
-                            );
+                            println!("{} Recording started: {}", color::success_indicator(), path);
                         } else {
                             println!("{} Recording started", color::success_indicator());
                         }
@@ -497,7 +489,10 @@ pub fn print_response(resp: &Response, json_mode: bool, action: Option<&str>) {
                     let filename = file.get("filename").and_then(|v| v.as_str()).unwrap_or("");
                     let size = file.get("size").and_then(|v| v.as_i64()).unwrap_or(0);
                     let modified = file.get("modified").and_then(|v| v.as_str()).unwrap_or("");
-                    let encrypted = file.get("encrypted").and_then(|v| v.as_bool()).unwrap_or(false);
+                    let encrypted = file
+                        .get("encrypted")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
                     let size_str = if size > 1024 {
                         format!("{:.1}KB", size as f64 / 1024.0)
                     } else {
@@ -505,7 +500,11 @@ pub fn print_response(resp: &Response, json_mode: bool, action: Option<&str>) {
                     };
                     let date_str = modified.split('T').next().unwrap_or(modified);
                     let enc_str = if encrypted { " [encrypted]" } else { "" };
-                    println!("  {} {}", filename, color::dim(&format!("({}, {}){}", size_str, date_str, enc_str)));
+                    println!(
+                        "  {} {}",
+                        filename,
+                        color::dim(&format!("({}, {}){}", size_str, date_str, enc_str))
+                    );
                 }
             }
             return;
@@ -515,13 +514,22 @@ pub fn print_response(resp: &Response, json_mode: bool, action: Option<&str>) {
         if let Some(true) = data.get("renamed").and_then(|v| v.as_bool()) {
             let old_name = data.get("oldName").and_then(|v| v.as_str()).unwrap_or("");
             let new_name = data.get("newName").and_then(|v| v.as_str()).unwrap_or("");
-            println!("{} Renamed {} -> {}", color::success_indicator(), old_name, new_name);
+            println!(
+                "{} Renamed {} -> {}",
+                color::success_indicator(),
+                old_name,
+                new_name
+            );
             return;
         }
 
         // State clear
         if let Some(cleared) = data.get("cleared").and_then(|v| v.as_i64()) {
-            println!("{} Cleared {} state file(s)", color::success_indicator(), cleared);
+            println!(
+                "{} Cleared {} state file(s)",
+                color::success_indicator(),
+                cleared
+            );
             return;
         }
 
@@ -529,7 +537,10 @@ pub fn print_response(resp: &Response, json_mode: bool, action: Option<&str>) {
         if let Some(summary) = data.get("summary") {
             let cookies = summary.get("cookies").and_then(|v| v.as_i64()).unwrap_or(0);
             let origins = summary.get("origins").and_then(|v| v.as_i64()).unwrap_or(0);
-            let encrypted = data.get("encrypted").and_then(|v| v.as_bool()).unwrap_or(false);
+            let encrypted = data
+                .get("encrypted")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             let enc_str = if encrypted { " (encrypted)" } else { "" };
             println!("State file summary{}:", enc_str);
             println!("  Cookies: {}", cookies);
@@ -539,7 +550,11 @@ pub fn print_response(resp: &Response, json_mode: bool, action: Option<&str>) {
 
         // State clean
         if let Some(cleaned) = data.get("cleaned").and_then(|v| v.as_i64()) {
-            println!("{} Cleaned {} old state file(s)", color::success_indicator(), cleaned);
+            println!(
+                "{} Cleaned {} old state file(s)",
+                color::success_indicator(),
+                cleaned
+            );
             return;
         }
 
@@ -2054,7 +2069,9 @@ Options:
                              e.g., --proxy-bypass "localhost,*.internal.com"
   --ignore-https-errors      Ignore HTTPS certificate errors
   --allow-file-access        Allow file:// URLs to access local files (Chromium only)
-  -p, --provider <name>      Browser provider: ios, browserbase, kernel, browseruse
+  -p, --provider <name>      Browser provider: ios, browserbase, kernel, browseruse, playwright-extension
+  --relay-url <url>          Playwright extension relay URL (or AGENT_BROWSER_RELAY_URL env)
+  --extension-token <token>  Playwright extension auto-connect token (or AGENT_BROWSER_EXTENSION_TOKEN env)
   --device <name>            iOS device name (e.g., "iPhone 15 Pro")
   --json                     JSON output
   --full, -f                 Full page screenshot
@@ -2100,7 +2117,9 @@ Environment:
   AGENT_BROWSER_ANNOTATE         Annotated screenshot with numbered labels and legend
   AGENT_BROWSER_DEBUG            Debug output
   AGENT_BROWSER_IGNORE_HTTPS_ERRORS Ignore HTTPS certificate errors
-  AGENT_BROWSER_PROVIDER         Browser provider (ios, browserbase, kernel, browseruse)
+  AGENT_BROWSER_PROVIDER         Browser provider (ios, browserbase, kernel, browseruse, playwright-extension)
+  AGENT_BROWSER_RELAY_URL        Playwright extension relay URL
+  AGENT_BROWSER_EXTENSION_TOKEN  Playwright extension auto-connect token
   AGENT_BROWSER_AUTO_CONNECT     Auto-discover and connect to running Chrome
   AGENT_BROWSER_ALLOW_FILE_ACCESS Allow file:// URLs to access local files
   AGENT_BROWSER_STREAM_PORT      Enable WebSocket streaming on port (e.g., 9223)
@@ -2182,10 +2201,7 @@ fn print_screenshot_diff(data: &serde_json::Map<String, serde_json::Value>) {
         .get("mismatchPercentage")
         .and_then(|v| v.as_f64())
         .unwrap_or(0.0);
-    let is_match = data
-        .get("match")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+    let is_match = data.get("match").and_then(|v| v.as_bool()).unwrap_or(false);
     let dim_mismatch = data
         .get("dimensionMismatch")
         .and_then(|v| v.as_bool())
@@ -2196,7 +2212,10 @@ fn print_screenshot_diff(data: &serde_json::Map<String, serde_json::Value>) {
             color::error_indicator()
         );
     } else if is_match {
-        println!("{} Images match (0% difference)", color::success_indicator());
+        println!(
+            "{} Images match (0% difference)",
+            color::success_indicator()
+        );
     } else {
         println!(
             "{} {:.2}% pixels differ",
@@ -2207,7 +2226,10 @@ fn print_screenshot_diff(data: &serde_json::Map<String, serde_json::Value>) {
     if let Some(diff_path) = data.get("diffPath").and_then(|v| v.as_str()) {
         println!("  Diff image: {}", color::green(diff_path));
     }
-    let total = data.get("totalPixels").and_then(|v| v.as_i64()).unwrap_or(0);
+    let total = data
+        .get("totalPixels")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
     let different = data
         .get("differentPixels")
         .and_then(|v| v.as_i64())

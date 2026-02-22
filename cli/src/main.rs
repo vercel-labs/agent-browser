@@ -226,6 +226,8 @@ fn main() {
         flags.provider.as_deref(),
         flags.device.as_deref(),
         flags.session_name.as_deref(),
+        flags.relay_url.as_deref(),
+        flags.extension_token.as_deref(),
     ) {
         Ok(result) => result,
         Err(e) => {
@@ -281,6 +283,8 @@ fn main() {
             },
             flags.ignore_https_errors.then_some("--ignore-https-errors"),
             flags.cli_allow_file_access.then_some("--allow-file-access"),
+            flags.relay_url.as_ref().map(|_| "--relay-url"),
+            flags.extension_token.as_ref().map(|_| "--extension-token"),
         ]
         .into_iter()
         .flatten()
@@ -461,11 +465,20 @@ fn main() {
 
     // Launch with cloud provider if -p flag is set
     if let Some(ref provider) = flags.provider {
-        let launch_cmd = json!({
+        let mut launch_cmd = json!({
             "id": gen_id(),
             "action": "launch",
             "provider": provider
         });
+
+        if provider == "playwright-extension" {
+            if let Some(ref url) = flags.relay_url {
+                launch_cmd["relayUrl"] = json!(url);
+            }
+            if let Some(ref token) = flags.extension_token {
+                launch_cmd["extensionToken"] = json!(token);
+            }
+        }
 
         let err = match send_command(launch_cmd, &flags.session) {
             Ok(resp) if resp.success => None,

@@ -29,6 +29,8 @@ export interface LaunchCommand extends BaseCommand {
   args?: string[];
   userAgent?: string;
   provider?: string;
+  relayUrl?: string; // The extension's mcpRelayUrl
+  extensionToken?: string; // For auto-connect (bypasses tab selection UI)
   ignoreHTTPSErrors?: boolean;
   allowFileAccess?: boolean; // Enable file:// URL access and cross-origin file requests
   // Auto-load state file for session persistence

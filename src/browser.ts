@@ -21,6 +21,7 @@ import { writeFile, mkdir } from 'node:fs/promises';
 import type { LaunchCommand, TraceEvent } from './types.js';
 import { type RefMap, type EnhancedSnapshot, getEnhancedSnapshot, parseRef } from './snapshot.js';
 import { safeHeaderMerge } from './state-utils.js';
+import { PlaywrightExtensionProxy } from './playwright-extension-proxy.js';
 import {
   getEncryptionKey,
   isEncryptedPayload,
@@ -84,6 +85,7 @@ export class BrowserManager {
   private browserUseApiKey: string | null = null;
   private kernelSessionId: string | null = null;
   private kernelApiKey: string | null = null;
+  private extensionProxy: PlaywrightExtensionProxy | null = null;
   private contexts: BrowserContext[] = [];
   private pages: Page[] = [];
   private activePageIndex: number = 0;
@@ -1095,6 +1097,71 @@ export class BrowserManager {
   }
 
   /**
+   * Connect to an existing browser tab via Playwright MCP extension.
+   * Requires a local CDP proxy to translate between CDP and extension protocol.
+   */
+  private async connectToPlaywrightExtension(options: LaunchCommand): Promise<void> {
+    const token = options.extensionToken || process.env.PLAYWRIGHT_MCP_EXTENSION_TOKEN;
+
+    this.extensionProxy = new PlaywrightExtensionProxy();
+    const proxyInfo = await this.extensionProxy.start();
+
+    // The extension must connect TO this proxy's relayUrl.
+    const extensionId = 'jakfalbnbhgkpmoaakfflhflbfpkailf'; // Playwright MCP extension ID
+    const connectUrl = `chrome-extension://${extensionId}/connect.html?mcpRelayUrl=${encodeURIComponent(proxyInfo.relayUrl)}${token ? `&token=${token}` : ''}`;
+
+    if (process.env.AGENT_BROWSER_DEBUG === '1') {
+      console.error(`[DEBUG] Playwright extension proxy started`);
+      console.error(`[DEBUG] Relay URL: ${proxyInfo.relayUrl}`);
+      console.error(`[DEBUG] CDP URL: ${proxyInfo.cdpUrl}`);
+    }
+
+    console.error(`\n${'='.repeat(60)}`);
+    console.error(`ACTION REQUIRED: Connect the Playwright extension to the proxy.`);
+    console.error(`Open this URL in Chrome:`);
+    console.error(`\n${connectUrl}\n`);
+    console.error(`${'='.repeat(60)}\n`);
+
+    // Wait for extension to connect and handshake
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        reject(new Error('Timeout waiting for Playwright extension to connect (60s)'));
+      }, 60000);
+
+      const onReady = (targetInfo: any) => {
+        clearTimeout(timeout);
+        this.extensionProxy?.off('extension-disconnected', onDisconnect);
+        if (process.env.AGENT_BROWSER_DEBUG === '1') {
+          console.error(
+            `[DEBUG] Extension connected to tab: ${targetInfo.title || targetInfo.url}`
+          );
+        }
+        resolve();
+      };
+
+      const onDisconnect = () => {
+        clearTimeout(timeout);
+        this.extensionProxy?.off('extension-ready', onReady);
+        reject(new Error('Extension disconnected during handshake'));
+      };
+
+      this.extensionProxy?.once('extension-ready', onReady);
+      this.extensionProxy?.once('extension-disconnected', onDisconnect);
+    });
+
+    // Handle disconnection after handshake
+    this.extensionProxy?.on('extension-disconnected', () => {
+      if (process.env.AGENT_BROWSER_DEBUG === '1') {
+        console.error(`[DEBUG] Extension disconnected, closing browser`);
+      }
+      this.close().catch(() => {});
+    });
+
+    // Now connect Playwright to the proxy's CDP port
+    await this.connectViaCDP(proxyInfo.cdpUrl);
+  }
+
+  /**
    * Launch the browser with the specified options
    * If already launched, this is a no-op (browser stays open)
    */
@@ -1159,6 +1226,11 @@ export class BrowserManager {
     }
     if (provider === 'browseruse') {
       await this.connectToBrowserUse();
+      return;
+    }
+
+    if (provider === 'playwright-extension') {
+      await this.connectToPlaywrightExtension(options);
       return;
     }
 
@@ -2350,6 +2422,15 @@ export class BrowserManager {
         console.error('Failed to close Kernel session:', error);
       });
       this.browser = null;
+    } else if (this.extensionProxy) {
+      await this.extensionProxy.stop().catch((error) => {
+        console.error('Failed to stop extension proxy:', error);
+      });
+      this.extensionProxy = null;
+      if (this.browser) {
+        await this.browser.close().catch(() => {});
+        this.browser = null;
+      }
     } else if (this.cdpEndpoint !== null) {
       // CDP: only disconnect, don't close external app's pages
       if (this.browser) {
@@ -2379,6 +2460,7 @@ export class BrowserManager {
     this.browserUseApiKey = null;
     this.kernelSessionId = null;
     this.kernelApiKey = null;
+    this.extensionProxy = null;
     this.isPersistentContext = false;
     this.activePageIndex = 0;
     this.refMap = {};
