@@ -1040,7 +1040,7 @@ async function handleFill(command: FillCommand, browser: BrowserManager): Promis
 async function handleCheck(command: CheckCommand, browser: BrowserManager): Promise<Response> {
   const locator = browser.getLocator(command.selector);
   try {
-    await locator.check();
+    await locator.check({ force: command.force ?? false });
   } catch (error) {
     throw toAIFriendlyError(error, command.selector);
   }
@@ -1050,7 +1050,7 @@ async function handleCheck(command: CheckCommand, browser: BrowserManager): Prom
 async function handleUncheck(command: UncheckCommand, browser: BrowserManager): Promise<Response> {
   const locator = browser.getLocator(command.selector);
   try {
-    await locator.uncheck();
+    await locator.uncheck({ force: command.force ?? false });
   } catch (error) {
     throw toAIFriendlyError(error, command.selector);
   }
