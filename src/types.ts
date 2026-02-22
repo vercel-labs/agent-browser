@@ -666,10 +666,13 @@ export interface ErrorsCommand extends BaseCommand {
   clear?: boolean;
 }
 
-// Keyboard shortcuts
+// Raw keyboard input (no selector needed)
 export interface KeyboardCommand extends BaseCommand {
   action: 'keyboard';
-  keys: string; // e.g., "Control+a", "Shift+Tab"
+  subaction?: 'type' | 'press' | 'insertText'; // press kept for backward compat
+  keys?: string; // for legacy press path
+  text?: string; // for type/insertText
+  delay?: number; // for type (ms between keystrokes)
 }
 
 // Mouse wheel
