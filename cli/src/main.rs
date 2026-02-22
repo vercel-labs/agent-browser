@@ -9,7 +9,19 @@ mod validation;
 use serde_json::json;
 use std::env;
 use std::fs;
+use std::io::Write;
 use std::process::exit;
+
+/// Exit the process after flushing stdout.
+/// When stdout is piped (e.g., from Claude Code), it uses full buffering
+/// and `exit()` alone may not flush the buffer, causing the caller to hang.
+fn flush_and_exit(code: i32) -> ! {
+    let _ = std::io::stdout().flush();
+    exit(code)
+}
+
+#[cfg(unix)]
+use libc;
 
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::CloseHandle;
@@ -190,7 +202,7 @@ fn main() {
             } else {
                 eprintln!("{}", color::red(&e.format()));
             }
-            exit(1);
+            flush_and_exit(1);
         }
     };
 
@@ -234,7 +246,7 @@ fn main() {
             } else {
                 eprintln!("{} {}", color::error_indicator(), e);
             }
-            exit(1);
+            flush_and_exit(1);
         }
     };
 
@@ -323,7 +335,7 @@ fn main() {
         } else {
             eprintln!("{} {}", color::error_indicator(), msg);
         }
-        exit(1);
+        flush_and_exit(1);
     }
 
     if flags.provider.is_some() && !flags.extensions.is_empty() {
@@ -333,7 +345,7 @@ fn main() {
         } else {
             eprintln!("{} {}", color::error_indicator(), msg);
         }
-        exit(1);
+        flush_and_exit(1);
     }
 
     if flags.cdp.is_some() && !flags.extensions.is_empty() {
@@ -401,7 +413,7 @@ fn main() {
                     } else {
                         eprintln!("{} {}", color::error_indicator(), msg);
                     }
-                    exit(1);
+                    flush_and_exit(1);
                 }
                 Ok(p) if p > 65535 => {
                     let msg = format!(
@@ -413,7 +425,7 @@ fn main() {
                     } else {
                         eprintln!("{} {}", color::error_indicator(), msg);
                     }
-                    exit(1);
+                    flush_and_exit(1);
                 }
                 Ok(p) => p as u16,
                 Err(_) => {
@@ -426,7 +438,7 @@ fn main() {
                     } else {
                         eprintln!("{} {}", color::error_indicator(), msg);
                     }
-                    exit(1);
+                    flush_and_exit(1);
                 }
             };
             json!({
@@ -455,7 +467,7 @@ fn main() {
             } else {
                 eprintln!("{} {}", color::error_indicator(), msg);
             }
-            exit(1);
+            flush_and_exit(1);
         }
     }
 
@@ -482,7 +494,7 @@ fn main() {
             } else {
                 eprintln!("{} {}", color::error_indicator(), msg);
             }
-            exit(1);
+            flush_and_exit(1);
         }
     }
 
@@ -567,7 +579,7 @@ fn main() {
                 } else {
                     eprintln!("{} {}", color::error_indicator(), error_msg);
                 }
-                exit(1);
+                flush_and_exit(1);
             }
             Err(e) => {
                 if flags.json {
@@ -579,7 +591,7 @@ fn main() {
                         e
                     );
                 }
-                exit(1);
+                flush_and_exit(1);
             }
             Ok(_) => {
                 // Launch succeeded
@@ -594,7 +606,7 @@ fn main() {
             let action = cmd.get("action").and_then(|v| v.as_str());
             print_response(&resp, flags.json, action);
             if !success {
-                exit(1);
+                flush_and_exit(1);
             }
         }
         Err(e) => {
@@ -603,9 +615,12 @@ fn main() {
             } else {
                 eprintln!("{} {}", color::error_indicator(), e);
             }
-            exit(1);
+            flush_and_exit(1);
         }
     }
+
+    // Flush stdout before exiting — ensures piped output is delivered
+    let _ = std::io::stdout().flush();
 }
 
 #[cfg(test)]
