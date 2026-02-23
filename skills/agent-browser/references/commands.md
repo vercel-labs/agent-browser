@@ -222,7 +222,7 @@ agent-browser --json ...              # JSON output for parsing
 agent-browser --headed ...            # Show browser window (not headless)
 agent-browser --full ...              # Full page screenshot (-f)
 agent-browser --cdp <port> ...        # Connect via Chrome DevTools Protocol
-agent-browser -p <provider> ...       # Cloud browser provider (--provider)
+agent-browser -p <provider> ...       # Cloud browser provider (--provider: ios|browserbase|browseruse|kernel|steel)
 agent-browser --proxy <url> ...       # Use proxy server
 agent-browser --proxy-bypass <hosts>  # Hosts to bypass proxy
 agent-browser --headers <json> ...    # HTTP headers scoped to URL's origin
@@ -257,7 +257,9 @@ agent-browser profiler stop trace.json    # Stop and save profile
 AGENT_BROWSER_SESSION="mysession"            # Default session name
 AGENT_BROWSER_EXECUTABLE_PATH="/path/chrome" # Custom browser path
 AGENT_BROWSER_EXTENSIONS="/ext1,/ext2"       # Comma-separated extension paths
-AGENT_BROWSER_PROVIDER="browserbase"         # Cloud browser provider
+AGENT_BROWSER_PROVIDER="browserbase"         # Cloud browser provider (ios|browserbase|browseruse|kernel|steel)
+STEEL_API_KEY="your-api-key"                # Required when provider=steel
+STEEL_TIMEOUT_MS="300000"                   # Optional Steel timeout (ms)
 AGENT_BROWSER_STREAM_PORT="9223"             # WebSocket streaming port
 AGENT_BROWSER_HOME="/path/to/agent-browser"  # Custom install location
 ```

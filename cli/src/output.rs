@@ -2054,7 +2054,7 @@ Options:
                              e.g., --proxy-bypass "localhost,*.internal.com"
   --ignore-https-errors      Ignore HTTPS certificate errors
   --allow-file-access        Allow file:// URLs to access local files (Chromium only)
-  -p, --provider <name>      Browser provider: ios, browserbase, kernel, browseruse
+  -p, --provider <name>      Browser provider: ios, browserbase, browseruse, kernel, steel
   --device <name>            iOS device name (e.g., "iPhone 15 Pro")
   --json                     JSON output
   --full, -f                 Full page screenshot
@@ -2101,13 +2101,24 @@ Environment:
   AGENT_BROWSER_ANNOTATE         Annotated screenshot with numbered labels and legend
   AGENT_BROWSER_DEBUG            Debug output
   AGENT_BROWSER_IGNORE_HTTPS_ERRORS Ignore HTTPS certificate errors
-  AGENT_BROWSER_PROVIDER         Browser provider (ios, browserbase, kernel, browseruse)
+  AGENT_BROWSER_PROVIDER         Browser provider (ios, browserbase, browseruse, kernel, steel)
   AGENT_BROWSER_AUTO_CONNECT     Auto-discover and connect to running Chrome
   AGENT_BROWSER_ALLOW_FILE_ACCESS Allow file:// URLs to access local files
   AGENT_BROWSER_COLOR_SCHEME     Color scheme preference (dark, light, no-preference)
   AGENT_BROWSER_STREAM_PORT      Enable WebSocket streaming on port (e.g., 9223)
   AGENT_BROWSER_IOS_DEVICE       Default iOS device name
   AGENT_BROWSER_IOS_UDID         Default iOS device UDID
+  STEEL_API_KEY                  Steel API key (required with -p steel)
+  STEEL_TIMEOUT_MS               Steel session timeout in milliseconds (default: 300000)
+  STEEL_HEADLESS                 Steel session headless mode (true/false)
+  STEEL_SOLVE_CAPTCHA            Enable Steel CAPTCHA solving (true/false)
+  STEEL_USE_PROXY                Use Steel proxy network (true/false)
+  STEEL_PROXY_URL                Custom proxy URL for Steel session
+  STEEL_REGION                   Steel region (e.g., lax, ord, iad)
+  STEEL_BLOCK_ADS                Block ads in Steel session (true/false)
+  STEEL_PROFILE_ID               Existing Steel profile UUID
+  STEEL_PERSIST_PROFILE          Persist Steel profile changes (true/false)
+  STEEL_DEVICE                   Steel device profile (desktop, mobile)
 
 Install (recommended, fastest - native Rust CLI):
   npm install -g agent-browser
@@ -2131,6 +2142,7 @@ Examples:
   agent-browser --color-scheme dark open example.com  # Dark mode
   agent-browser --profile ~/.myapp open example.com    # Persistent profile
   agent-browser --session-name myapp open example.com  # Auto-save/restore state
+  STEEL_API_KEY=your-api-key agent-browser -p steel open example.com  # Steel cloud session
 
 Command Chaining:
   Chain commands with && in a single shell call (browser persists via daemon):

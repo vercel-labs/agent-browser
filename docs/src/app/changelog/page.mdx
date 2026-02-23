@@ -4,6 +4,21 @@ export const metadata = pageMetadata("changelog")
 
 # Changelog
 
+## Unreleased
+
+### New Features
+
+- **Steel cloud browser provider** - Connect to Steel sessions with `-p steel` / `AGENT_BROWSER_PROVIDER=steel`
+- **Steel session options via env vars** - Configure timeout, CAPTCHA solving, proxy usage, region, profile persistence, and device mode
+
+```bash
+export AGENT_BROWSER_PROVIDER=steel
+export STEEL_API_KEY=your-api-key
+agent-browser open https://example.com
+```
+
+---
+
 ## v0.10.0
 
 <p className="text-[#888] text-sm">February 2026</p>

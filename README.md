@@ -455,7 +455,7 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 | `--proxy-bypass <hosts>` | Hosts to bypass proxy (or `AGENT_BROWSER_PROXY_BYPASS` env) |
 | `--ignore-https-errors` | Ignore HTTPS certificate errors (useful for self-signed certs) |
 | `--allow-file-access` | Allow file:// URLs to access local files (Chromium only) |
-| `-p, --provider <name>` | Cloud browser provider (or `AGENT_BROWSER_PROVIDER` env) |
+| `-p, --provider <name>` | Cloud browser provider (`ios`, `browserbase`, `browseruse`, `kernel`, `steel`) (or `AGENT_BROWSER_PROVIDER` env) |
 | `--device <name>` | iOS device name, e.g. "iPhone 15 Pro" (or `AGENT_BROWSER_IOS_DEVICE` env) |
 | `--json` | JSON output (for agents) |
 | `--full, -f` | Full page screenshot |
@@ -1102,6 +1102,44 @@ When enabled, agent-browser connects to a Kernel cloud session instead of launch
 **Profile Persistence:** When `KERNEL_PROFILE_NAME` is set, the profile will be created if it doesn't already exist. Cookies, logins, and session data are automatically saved back to the profile when the browser session ends, making them available for future sessions.
 
 Get your API key from the [Kernel Dashboard](https://dashboard.onkernel.com).
+
+### Steel
+
+[Steel](https://steel.dev) provides cloud browser infrastructure for AI agents with proxy, CAPTCHA-solving, and profile features.
+
+To enable Steel, use the `-p` flag:
+
+```bash
+export STEEL_API_KEY="your-api-key"
+agent-browser -p steel open https://example.com
+```
+
+Or use environment variables for CI/scripts:
+
+```bash
+export AGENT_BROWSER_PROVIDER=steel
+export STEEL_API_KEY="your-api-key"
+agent-browser open https://example.com
+```
+
+Optional Steel configuration via environment variables:
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `STEEL_TIMEOUT_MS` | Session timeout in milliseconds | `300000` |
+| `STEEL_HEADLESS` | Run Steel browser headless (`true`/`false`) | provider default |
+| `STEEL_SOLVE_CAPTCHA` | Enable Steel CAPTCHA solving (`true`/`false`) | provider default |
+| `STEEL_USE_PROXY` | Enable Steel proxy network (`true`/`false`) | provider default |
+| `STEEL_PROXY_URL` | Custom proxy URL (overrides Steel-managed proxy) | (none) |
+| `STEEL_REGION` | Steel region (for example `lax`, `ord`, `iad`) | provider default |
+| `STEEL_BLOCK_ADS` | Enable Steel ad blocking (`true`/`false`) | provider default |
+| `STEEL_PROFILE_ID` | Existing Steel profile UUID to load | (none) |
+| `STEEL_PERSIST_PROFILE` | Persist profile changes (`true`/`false`) | provider default |
+| `STEEL_DEVICE` | Device profile (`desktop` or `mobile`) | `desktop` |
+
+When enabled, agent-browser creates a Steel session via `POST /v1/sessions`, connects over CDP, and explicitly releases the session on `close`.
+
+Get your API key from [Steel Dashboard](https://app.steel.dev/settings/api-keys).
 
 ## License
 

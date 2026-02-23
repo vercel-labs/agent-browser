@@ -84,6 +84,8 @@ export class BrowserManager {
   private browserUseApiKey: string | null = null;
   private kernelSessionId: string | null = null;
   private kernelApiKey: string | null = null;
+  private steelSessionId: string | null = null;
+  private steelApiKey: string | null = null;
   private contexts: BrowserContext[] = [];
   private pages: Page[] = [];
   private activePageIndex: number = 0;
@@ -784,6 +786,36 @@ export class BrowserManager {
   }
 
   /**
+   * Parse a boolean env var if provided.
+   * Accepts true/false/1/0 (case-insensitive).
+   */
+  private parseOptionalBooleanEnv(name: string): boolean | undefined {
+    const value = process.env[name];
+    if (value === undefined) return undefined;
+
+    const normalized = value.trim().toLowerCase();
+    if (normalized === 'true' || normalized === '1') return true;
+    if (normalized === 'false' || normalized === '0') return false;
+
+    throw new Error(`${name} must be one of: true, false, 1, 0`);
+  }
+
+  /**
+   * Parse a positive integer env var if provided.
+   */
+  private parseOptionalPositiveIntEnv(name: string): number | undefined {
+    const value = process.env[name];
+    if (value === undefined) return undefined;
+
+    const parsed = parseInt(value, 10);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      throw new Error(`${name} must be a positive integer`);
+    }
+
+    return parsed;
+  }
+
+  /**
    * Close a Browserbase session via API
    */
   private async closeBrowserbaseSession(sessionId: string, apiKey: string): Promise<void> {
@@ -826,6 +858,43 @@ export class BrowserManager {
 
     if (!response.ok) {
       throw new Error(`Failed to close Kernel session: ${response.statusText}`);
+    }
+  }
+
+  /**
+   * Close a Steel session via API.
+   * Steel sessions created through the Sessions API must be released explicitly.
+   */
+  private async closeSteelSession(sessionId: string, apiKey: string): Promise<void> {
+    const response = await fetch(`https://api.steel.dev/v1/sessions/${sessionId}/release`, {
+      method: 'POST',
+      headers: {
+        'steel-api-key': apiKey,
+      },
+      body: '{}',
+    });
+
+    if (!response.ok) {
+      throw new Error(`Failed to close Steel session: ${response.statusText}`);
+    }
+  }
+
+  /**
+   * Build a Steel CDP URL and ensure apiKey auth is present.
+   */
+  private buildSteelCdpUrl(websocketUrl: string, apiKey: string): string {
+    try {
+      const url = new URL(websocketUrl);
+      if (!url.searchParams.has('apiKey')) {
+        url.searchParams.set('apiKey', apiKey);
+      }
+      return url.toString();
+    } catch {
+      if (websocketUrl.includes('apiKey=')) {
+        return websocketUrl;
+      }
+      const separator = websocketUrl.includes('?') ? '&' : '?';
+      return `${websocketUrl}${separator}apiKey=${encodeURIComponent(apiKey)}`;
     }
   }
 
@@ -1033,6 +1102,148 @@ export class BrowserManager {
   }
 
   /**
+   * Connect to Steel remote browser via CDP.
+   * Requires STEEL_API_KEY environment variable.
+   */
+  private async connectToSteel(): Promise<void> {
+    const steelApiKey = process.env.STEEL_API_KEY;
+    if (!steelApiKey) {
+      throw new Error('STEEL_API_KEY is required when using steel as a provider');
+    }
+
+    const requestBody: {
+      timeout?: number;
+      headless?: boolean;
+      solveCaptcha?: boolean;
+      useProxy?: boolean;
+      proxyUrl?: string;
+      region?: string;
+      blockAds?: boolean;
+      profileId?: string;
+      persistProfile?: boolean;
+      deviceConfig?: { device: 'desktop' | 'mobile' };
+    } = {};
+
+    const timeout = this.parseOptionalPositiveIntEnv('STEEL_TIMEOUT_MS');
+    if (timeout !== undefined) {
+      requestBody.timeout = timeout;
+    }
+
+    const headless = this.parseOptionalBooleanEnv('STEEL_HEADLESS');
+    if (headless !== undefined) {
+      requestBody.headless = headless;
+    }
+
+    const solveCaptcha = this.parseOptionalBooleanEnv('STEEL_SOLVE_CAPTCHA');
+    if (solveCaptcha !== undefined) {
+      requestBody.solveCaptcha = solveCaptcha;
+    }
+
+    const useProxy = this.parseOptionalBooleanEnv('STEEL_USE_PROXY');
+    if (useProxy !== undefined) {
+      requestBody.useProxy = useProxy;
+    }
+
+    if (process.env.STEEL_PROXY_URL) {
+      requestBody.proxyUrl = process.env.STEEL_PROXY_URL;
+    }
+
+    if (process.env.STEEL_REGION) {
+      requestBody.region = process.env.STEEL_REGION;
+    }
+
+    const blockAds = this.parseOptionalBooleanEnv('STEEL_BLOCK_ADS');
+    if (blockAds !== undefined) {
+      requestBody.blockAds = blockAds;
+    }
+
+    if (process.env.STEEL_PROFILE_ID) {
+      requestBody.profileId = process.env.STEEL_PROFILE_ID;
+    }
+
+    const persistProfile = this.parseOptionalBooleanEnv('STEEL_PERSIST_PROFILE');
+    if (persistProfile !== undefined) {
+      requestBody.persistProfile = persistProfile;
+    }
+
+    const device = process.env.STEEL_DEVICE?.trim().toLowerCase();
+    if (device) {
+      if (device !== 'desktop' && device !== 'mobile') {
+        throw new Error('STEEL_DEVICE must be either "desktop" or "mobile"');
+      }
+      requestBody.deviceConfig = { device };
+    }
+
+    const response = await fetch('https://api.steel.dev/v1/sessions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'steel-api-key': steelApiKey,
+      },
+      body: JSON.stringify(requestBody),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Failed to create Steel session: ${response.statusText}`);
+    }
+
+    let session: { id: string; websocketUrl: string };
+    try {
+      session = (await response.json()) as { id: string; websocketUrl: string };
+    } catch (error) {
+      throw new Error(
+        `Failed to parse Steel session response: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+
+    if (!session.id || !session.websocketUrl) {
+      throw new Error(
+        `Invalid Steel session response: missing ${!session.id ? 'id' : 'websocketUrl'}`
+      );
+    }
+
+    let browser: Browser | null = null;
+
+    try {
+      const cdpUrl = this.buildSteelCdpUrl(session.websocketUrl, steelApiKey);
+      browser = await chromium.connectOverCDP(cdpUrl).catch(() => {
+        throw new Error('Failed to connect to Steel session via CDP');
+      });
+
+      const contexts = browser.contexts();
+      let context: BrowserContext;
+      let page: Page;
+
+      if (contexts.length === 0) {
+        context = await browser.newContext();
+        page = await context.newPage();
+      } else {
+        context = contexts[0];
+        const pages = context.pages();
+        page = pages[0] ?? (await context.newPage());
+      }
+
+      this.steelSessionId = session.id;
+      this.steelApiKey = steelApiKey;
+      this.browser = browser;
+      context.setDefaultTimeout(60000);
+      this.contexts.push(context);
+      this.pages.push(page);
+      this.activePageIndex = 0;
+      this.setupPageTracking(page);
+      this.setupContextTracking(context);
+    } catch (error) {
+      await this.closeSteelSession(session.id, steelApiKey).catch((sessionError) => {
+        console.error('Failed to close Steel session during cleanup:', sessionError);
+      });
+      if (browser) {
+        await browser.close().catch(() => {});
+      }
+      throw error;
+    }
+  }
+
+  /**
    * Connect to Browser Use remote browser via CDP.
    * Requires BROWSER_USE_API_KEY environment variable.
    */
@@ -1177,9 +1388,13 @@ export class BrowserManager {
       return;
     }
 
-    // Kernel: requires explicit opt-in via -p kernel flag or AGENT_BROWSER_PROVIDER=kernel
+    // Kernel and Steel: require explicit opt-in via -p flag or AGENT_BROWSER_PROVIDER
     if (provider === 'kernel') {
       await this.connectToKernel();
+      return;
+    }
+    if (provider === 'steel') {
+      await this.connectToSteel();
       return;
     }
 
@@ -2373,6 +2588,11 @@ export class BrowserManager {
         console.error('Failed to close Kernel session:', error);
       });
       this.browser = null;
+    } else if (this.steelSessionId && this.steelApiKey) {
+      await this.closeSteelSession(this.steelSessionId, this.steelApiKey).catch((error) => {
+        console.error('Failed to close Steel session:', error);
+      });
+      this.browser = null;
     } else if (this.cdpEndpoint !== null) {
       // CDP: only disconnect, don't close external app's pages
       if (this.browser) {
@@ -2402,6 +2622,8 @@ export class BrowserManager {
     this.browserUseApiKey = null;
     this.kernelSessionId = null;
     this.kernelApiKey = null;
+    this.steelSessionId = null;
+    this.steelApiKey = null;
     this.isPersistentContext = false;
     this.activePageIndex = 0;
     this.colorScheme = null;
