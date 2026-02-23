@@ -2110,15 +2110,9 @@ Environment:
   AGENT_BROWSER_IOS_UDID         Default iOS device UDID
   STEEL_API_KEY                  Steel API key (required with -p steel)
   STEEL_TIMEOUT_MS               Steel session timeout in milliseconds (default: 300000)
-  STEEL_HEADLESS                 Steel session headless mode (true/false)
-  STEEL_SOLVE_CAPTCHA            Enable Steel CAPTCHA solving (true/false)
-  STEEL_USE_PROXY                Use Steel proxy network (true/false)
-  STEEL_PROXY_URL                Custom proxy URL for Steel session
-  STEEL_REGION                   Steel region (e.g., lax, ord, iad)
-  STEEL_BLOCK_ADS                Block ads in Steel session (true/false)
   STEEL_PROFILE_ID               Existing Steel profile UUID
-  STEEL_PERSIST_PROFILE          Persist Steel profile changes (true/false)
-  STEEL_DEVICE                   Steel device profile (desktop, mobile)
+  STEEL_*                        Advanced Steel options (headless/captcha/proxy/region/ads/profile/device)
+                                 See README > Steel for the full list
 
 Install (recommended, fastest - native Rust CLI):
   npm install -g agent-browser
