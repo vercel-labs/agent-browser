@@ -2108,11 +2108,7 @@ Environment:
   AGENT_BROWSER_STREAM_PORT      Enable WebSocket streaming on port (e.g., 9223)
   AGENT_BROWSER_IOS_DEVICE       Default iOS device name
   AGENT_BROWSER_IOS_UDID         Default iOS device UDID
-  STEEL_API_KEY                  Steel API key (required with -p steel)
-  STEEL_TIMEOUT_MS               Steel session timeout in milliseconds (default: 300000)
-  STEEL_PROFILE_ID               Existing Steel profile UUID
-  STEEL_*                        Advanced Steel options (headless/captcha/proxy/region/ads/profile/device)
-                                 See README > Steel for the full list
+  Provider-specific env vars     See README provider sections for Browserbase/Browser Use/Kernel/Steel
 
 Install (recommended, fastest - native Rust CLI):
   npm install -g agent-browser
@@ -2136,7 +2132,6 @@ Examples:
   agent-browser --color-scheme dark open example.com  # Dark mode
   agent-browser --profile ~/.myapp open example.com    # Persistent profile
   agent-browser --session-name myapp open example.com  # Auto-save/restore state
-  STEEL_API_KEY=your-api-key agent-browser -p steel open example.com  # Steel cloud session
 
 Command Chaining:
   Chain commands with && in a single shell call (browser persists via daemon):
