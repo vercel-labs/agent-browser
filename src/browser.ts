@@ -786,36 +786,6 @@ export class BrowserManager {
   }
 
   /**
-   * Parse a boolean env var if provided.
-   * Accepts true/false/1/0 (case-insensitive).
-   */
-  private parseOptionalBooleanEnv(name: string): boolean | undefined {
-    const value = process.env[name];
-    if (value === undefined) return undefined;
-
-    const normalized = value.trim().toLowerCase();
-    if (normalized === 'true' || normalized === '1') return true;
-    if (normalized === 'false' || normalized === '0') return false;
-
-    throw new Error(`${name} must be one of: true, false, 1, 0`);
-  }
-
-  /**
-   * Parse a positive integer env var if provided.
-   */
-  private parseOptionalPositiveIntEnv(name: string): number | undefined {
-    const value = process.env[name];
-    if (value === undefined) return undefined;
-
-    const parsed = parseInt(value, 10);
-    if (!Number.isFinite(parsed) || parsed <= 0) {
-      throw new Error(`${name} must be a positive integer`);
-    }
-
-    return parsed;
-  }
-
-  /**
    * Close a Browserbase session via API
    */
   private async closeBrowserbaseSession(sessionId: string, apiKey: string): Promise<void> {
@@ -1111,6 +1081,17 @@ export class BrowserManager {
       throw new Error('STEEL_API_KEY is required when using steel as a provider');
     }
 
+    const parseSteelBoolean = (name: string): boolean | undefined => {
+      const value = process.env[name];
+      if (value === undefined) return undefined;
+
+      const normalized = value.trim().toLowerCase();
+      if (normalized === 'true' || normalized === '1') return true;
+      if (normalized === 'false' || normalized === '0') return false;
+
+      throw new Error(`${name} must be one of: true, false, 1, 0`);
+    };
+
     const requestBody: {
       timeout?: number;
       headless?: boolean;
@@ -1124,22 +1105,26 @@ export class BrowserManager {
       deviceConfig?: { device: 'desktop' | 'mobile' };
     } = {};
 
-    const timeout = this.parseOptionalPositiveIntEnv('STEEL_TIMEOUT_MS');
-    if (timeout !== undefined) {
+    const timeoutValue = process.env.STEEL_TIMEOUT_MS;
+    if (timeoutValue !== undefined) {
+      const timeout = parseInt(timeoutValue, 10);
+      if (!Number.isFinite(timeout) || timeout <= 0) {
+        throw new Error('STEEL_TIMEOUT_MS must be a positive integer');
+      }
       requestBody.timeout = timeout;
     }
 
-    const headless = this.parseOptionalBooleanEnv('STEEL_HEADLESS');
+    const headless = parseSteelBoolean('STEEL_HEADLESS');
     if (headless !== undefined) {
       requestBody.headless = headless;
     }
 
-    const solveCaptcha = this.parseOptionalBooleanEnv('STEEL_SOLVE_CAPTCHA');
+    const solveCaptcha = parseSteelBoolean('STEEL_SOLVE_CAPTCHA');
     if (solveCaptcha !== undefined) {
       requestBody.solveCaptcha = solveCaptcha;
     }
 
-    const useProxy = this.parseOptionalBooleanEnv('STEEL_USE_PROXY');
+    const useProxy = parseSteelBoolean('STEEL_USE_PROXY');
     if (useProxy !== undefined) {
       requestBody.useProxy = useProxy;
     }
@@ -1152,7 +1137,7 @@ export class BrowserManager {
       requestBody.region = process.env.STEEL_REGION;
     }
 
-    const blockAds = this.parseOptionalBooleanEnv('STEEL_BLOCK_ADS');
+    const blockAds = parseSteelBoolean('STEEL_BLOCK_ADS');
     if (blockAds !== undefined) {
       requestBody.blockAds = blockAds;
     }
@@ -1161,7 +1146,7 @@ export class BrowserManager {
       requestBody.profileId = process.env.STEEL_PROFILE_ID;
     }
 
-    const persistProfile = this.parseOptionalBooleanEnv('STEEL_PERSIST_PROFILE');
+    const persistProfile = parseSteelBoolean('STEEL_PERSIST_PROFILE');
     if (persistProfile !== undefined) {
       requestBody.persistProfile = persistProfile;
     }
