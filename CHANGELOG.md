@@ -1,5 +1,28 @@
 # agent-browser
 
+## 0.14.0
+
+### Minor Changes
+
+- b7665e5: - Added `keyboard` command for raw keyboard input -- type with real keystrokes, insert text, and press shortcuts at the currently focused element without needing a selector.
+  - Added `--color-scheme` flag and `AGENT_BROWSER_COLOR_SCHEME` env var for persistent dark/light mode preference across browser sessions.
+  - Fixed IPC EAGAIN errors (os error 35/11) by adding backpressure-aware socket writes, command serialization, and lowering the default Playwright timeout to 25s (configurable via `AGENT_BROWSER_DEFAULT_TIMEOUT`).
+  - Fixed remote debugging (CDP) reconnection.
+  - Fixed state load failing when no browser is running.
+  - Fixed `--annotate` flag warning appearing when not explicitly passed via CLI.
+
+## 0.13.0
+
+### Minor Changes
+
+- ebd8717: Added new diff commands for comparing snapshots, screenshots, and URLs between page states. You can now run visual pixel diffs against baseline images, compare accessibility tree snapshots with customizable depth and selectors, and diff two URLs side-by-side with optional screenshot comparison.
+
+## 0.12.0
+
+### Minor Changes
+
+- 69ffad0: Add annotated screenshots with the new --annotate flag, which overlays numbered labels on interactive elements and prints a legend mapping each label to its element ref. This enables multimodal AI models to reason about visual layout while using the same @eN refs for subsequent interactions. The flag can also be set via the AGENT_BROWSER_ANNOTATE environment variable.
+
 ## 0.11.1
 
 ### Patch Changes

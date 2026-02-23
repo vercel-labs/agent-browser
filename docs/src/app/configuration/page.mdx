@@ -1,4 +1,6 @@
-export const metadata = { title: "Configuration" }
+import { pageMetadata } from "@/lib/page-metadata"
+
+export const metadata = pageMetadata("configuration")
 
 # Configuration
 
@@ -8,12 +10,17 @@ Create an `agent-browser.json` file to set persistent defaults instead of repeat
 
 agent-browser checks two locations, merged in priority order:
 
-| Priority | Location | Scope |
-|----------|----------|-------|
-| 1 (lowest) | `~/.agent-browser/config.json` | User-level defaults |
-| 2 | `./agent-browser.json` | Project-level overrides |
-| 3 | `AGENT_BROWSER_*` env vars | Override config values |
-| 4 (highest) | CLI flags | Override everything |
+<table>
+  <thead>
+    <tr><th>Priority</th><th>Location</th><th>Scope</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>1 (lowest)</td><td><code>~/.agent-browser/config.json</code></td><td>User-level defaults</td></tr>
+    <tr><td>2</td><td><code>./agent-browser.json</code></td><td>Project-level overrides</td></tr>
+    <tr><td>3</td><td><code>AGENT_BROWSER_*</code> env vars</td><td>Override config values</td></tr>
+    <tr><td>4 (highest)</td><td>CLI flags</td><td>Override everything</td></tr>
+  </tbody>
+</table>
 
 Project-level values override user-level values. Environment variables override both. CLI flags always win.
 
@@ -40,29 +47,35 @@ AGENT_BROWSER_CONFIG=./ci-config.json agent-browser open example.com
 
 Every CLI flag can be set in the config file using its camelCase equivalent:
 
-| Config Key | CLI Flag | Type |
-|------------|----------|------|
-| `headed` | `--headed` | boolean |
-| `json` | `--json` | boolean |
-| `full` | `--full, -f` | boolean |
-| `debug` | `--debug` | boolean |
-| `session` | `--session` | string |
-| `sessionName` | `--session-name` | string |
-| `executablePath` | `--executable-path` | string |
-| `extensions` | `--extension` | string[] |
-| `profile` | `--profile` | string |
-| `state` | `--state` | string |
-| `proxy` | `--proxy` | string |
-| `proxyBypass` | `--proxy-bypass` | string |
-| `args` | `--args` | string |
-| `userAgent` | `--user-agent` | string |
-| `provider` | `-p, --provider` | string |
-| `device` | `--device` | string |
-| `ignoreHttpsErrors` | `--ignore-https-errors` | boolean |
-| `allowFileAccess` | `--allow-file-access` | boolean |
-| `cdp` | `--cdp` | string |
-| `autoConnect` | `--auto-connect` | boolean |
-| `headers` | `--headers` | string (JSON) |
+<table>
+  <thead>
+    <tr><th>Config Key</th><th>CLI Flag</th><th>Type</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>headed</code></td><td><code>--headed</code></td><td>boolean</td></tr>
+    <tr><td><code>json</code></td><td><code>--json</code></td><td>boolean</td></tr>
+    <tr><td><code>full</code></td><td><code>--full, -f</code></td><td>boolean</td></tr>
+    <tr><td><code>debug</code></td><td><code>--debug</code></td><td>boolean</td></tr>
+    <tr><td><code>session</code></td><td><code>--session</code></td><td>string</td></tr>
+    <tr><td><code>sessionName</code></td><td><code>--session-name</code></td><td>string</td></tr>
+    <tr><td><code>executablePath</code></td><td><code>--executable-path</code></td><td>string</td></tr>
+    <tr><td><code>extensions</code></td><td><code>--extension</code></td><td>string[]</td></tr>
+    <tr><td><code>profile</code></td><td><code>--profile</code></td><td>string</td></tr>
+    <tr><td><code>state</code></td><td><code>--state</code></td><td>string</td></tr>
+    <tr><td><code>proxy</code></td><td><code>--proxy</code></td><td>string</td></tr>
+    <tr><td><code>proxyBypass</code></td><td><code>--proxy-bypass</code></td><td>string</td></tr>
+    <tr><td><code>args</code></td><td><code>--args</code></td><td>string</td></tr>
+    <tr><td><code>userAgent</code></td><td><code>--user-agent</code></td><td>string</td></tr>
+    <tr><td><code>provider</code></td><td><code>-p, --provider</code></td><td>string</td></tr>
+    <tr><td><code>device</code></td><td><code>--device</code></td><td>string</td></tr>
+    <tr><td><code>ignoreHttpsErrors</code></td><td><code>--ignore-https-errors</code></td><td>boolean</td></tr>
+    <tr><td><code>allowFileAccess</code></td><td><code>--allow-file-access</code></td><td>boolean</td></tr>
+    <tr><td><code>cdp</code></td><td><code>--cdp</code></td><td>string</td></tr>
+    <tr><td><code>autoConnect</code></td><td><code>--auto-connect</code></td><td>boolean</td></tr>
+    <tr><td><code>colorScheme</code></td><td><code>--color-scheme</code></td><td>string (<code>dark</code>, <code>light</code>, <code>no-preference</code>)</td></tr>
+    <tr><td><code>headers</code></td><td><code>--headers</code></td><td>string (JSON)</td></tr>
+  </tbody>
+</table>
 
 ## Common Configurations
 
@@ -125,6 +138,29 @@ This applies to all boolean flags: `--headed`, `--debug`, `--json`, `--ignore-ht
 Extensions from user-level and project-level configs are **concatenated**, not replaced. For example, if `~/.agent-browser/config.json` specifies `["/ext1"]` and `./agent-browser.json` specifies `["/ext2"]`, the result is `["/ext1", "/ext2"]`.
 
 The `AGENT_BROWSER_EXTENSIONS` environment variable and CLI `--extension` flags follow the standard priority rules (env replaces config, CLI appends).
+
+## Environment Variables
+
+These environment variables configure additional daemon and runtime behavior:
+
+<table>
+  <thead>
+    <tr><th>Variable</th><th>Description</th><th>Default</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>AGENT_BROWSER_AUTO_CONNECT</code></td><td>Auto-discover and connect to a running Chrome instance.</td><td>(disabled)</td></tr>
+    <tr><td><code>AGENT_BROWSER_ALLOW_FILE_ACCESS</code></td><td>Allow <code>file://</code> URLs to access local files.</td><td>(disabled)</td></tr>
+    <tr><td><code>AGENT_BROWSER_COLOR_SCHEME</code></td><td>Color scheme preference (<code>dark</code>, <code>light</code>, <code>no-preference</code>).</td><td>(none)</td></tr>
+    <tr><td><code>AGENT_BROWSER_DEFAULT_TIMEOUT</code></td><td>Default Playwright timeout in ms. Keep below 30000 to avoid IPC timeouts.</td><td><code>25000</code></td></tr>
+    <tr><td><code>AGENT_BROWSER_SESSION_NAME</code></td><td>Auto-save/load state persistence name.</td><td>(none)</td></tr>
+    <tr><td><code>AGENT_BROWSER_STATE_EXPIRE_DAYS</code></td><td>Auto-delete saved session states older than N days.</td><td><code>30</code></td></tr>
+    <tr><td><code>AGENT_BROWSER_ENCRYPTION_KEY</code></td><td>64-char hex key for AES-256-GCM session encryption.</td><td>(none)</td></tr>
+    <tr><td><code>AGENT_BROWSER_STREAM_PORT</code></td><td>Enable WebSocket streaming on the specified port (e.g., <code>9223</code>).</td><td>(disabled)</td></tr>
+    <tr><td><code>AGENT_BROWSER_IOS_DEVICE</code></td><td>Default iOS device name for the <code>ios</code> provider.</td><td>(none)</td></tr>
+    <tr><td><code>AGENT_BROWSER_IOS_UDID</code></td><td>Default iOS device UDID for the <code>ios</code> provider.</td><td>(none)</td></tr>
+    <tr><td><code>AGENT_BROWSER_DEBUG</code></td><td>Enable debug output (<code>1</code> to enable).</td><td>(disabled)</td></tr>
+  </tbody>
+</table>
 
 ## Error Handling
 

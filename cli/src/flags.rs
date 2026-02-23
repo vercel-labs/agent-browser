@@ -32,6 +32,8 @@ pub struct Config {
     pub cdp: Option<String>,
     pub auto_connect: Option<bool>,
     pub headers: Option<String>,
+    pub annotate: Option<bool>,
+    pub color_scheme: Option<String>,
 }
 
 impl Config {
@@ -64,6 +66,8 @@ impl Config {
             cdp: other.cdp.or(self.cdp),
             auto_connect: other.auto_connect.or(self.auto_connect),
             headers: other.headers.or(self.headers),
+            annotate: other.annotate.or(self.annotate),
+            color_scheme: other.color_scheme.or(self.color_scheme),
         }
     }
 }
@@ -81,6 +85,15 @@ fn read_config_file(path: &Path) -> Option<Config> {
             );
             None
         }
+    }
+}
+
+/// Check if a boolean environment variable is set to a truthy value.
+/// Returns false when unset, empty, or set to "0", "false", or "no" (case-insensitive).
+fn env_var_is_truthy(name: &str) -> bool {
+    match env::var(name) {
+        Ok(val) => !matches!(val.to_lowercase().as_str(), "0" | "false" | "no" | ""),
+        Err(_) => false,
     }
 }
 
@@ -118,6 +131,7 @@ fn extract_config_path(args: &[String]) -> Option<Option<String>> {
         "--provider",
         "--device",
         "--session-name",
+        "--color-scheme",
     ];
     let mut i = 0;
     while i < args.len() {
@@ -187,6 +201,8 @@ pub struct Flags {
     pub device: Option<String>,
     pub auto_connect: bool,
     pub session_name: Option<String>,
+    pub annotate: bool,
+    pub color_scheme: Option<String>,
 
     // Track which launch-time options were explicitly passed via CLI
     // (as opposed to being set only via environment variables)
@@ -199,6 +215,7 @@ pub struct Flags {
     pub cli_proxy: bool,
     pub cli_proxy_bypass: bool,
     pub cli_allow_file_access: bool,
+    pub cli_annotate: bool,
 }
 
 pub fn parse_flags(args: &[String]) -> Flags {
@@ -224,13 +241,13 @@ pub fn parse_flags(args: &[String]) -> Flags {
     };
 
     let mut flags = Flags {
-        json: env::var("AGENT_BROWSER_JSON").is_ok()
+        json: env_var_is_truthy("AGENT_BROWSER_JSON")
             || config.json.unwrap_or(false),
-        full: env::var("AGENT_BROWSER_FULL").is_ok()
+        full: env_var_is_truthy("AGENT_BROWSER_FULL")
             || config.full.unwrap_or(false),
-        headed: env::var("AGENT_BROWSER_HEADED").is_ok()
+        headed: env_var_is_truthy("AGENT_BROWSER_HEADED")
             || config.headed.unwrap_or(false),
-        debug: env::var("AGENT_BROWSER_DEBUG").is_ok()
+        debug: env_var_is_truthy("AGENT_BROWSER_DEBUG")
             || config.debug.unwrap_or(false),
         session: env::var("AGENT_BROWSER_SESSION").ok()
             .or(config.session)
@@ -254,16 +271,20 @@ pub fn parse_flags(args: &[String]) -> Flags {
             .or(config.user_agent),
         provider: env::var("AGENT_BROWSER_PROVIDER").ok()
             .or(config.provider),
-        ignore_https_errors: env::var("AGENT_BROWSER_IGNORE_HTTPS_ERRORS").is_ok()
+        ignore_https_errors: env_var_is_truthy("AGENT_BROWSER_IGNORE_HTTPS_ERRORS")
             || config.ignore_https_errors.unwrap_or(false),
-        allow_file_access: env::var("AGENT_BROWSER_ALLOW_FILE_ACCESS").is_ok()
+        allow_file_access: env_var_is_truthy("AGENT_BROWSER_ALLOW_FILE_ACCESS")
             || config.allow_file_access.unwrap_or(false),
         device: env::var("AGENT_BROWSER_IOS_DEVICE").ok()
             .or(config.device),
-        auto_connect: env::var("AGENT_BROWSER_AUTO_CONNECT").is_ok()
+        auto_connect: env_var_is_truthy("AGENT_BROWSER_AUTO_CONNECT")
             || config.auto_connect.unwrap_or(false),
         session_name: env::var("AGENT_BROWSER_SESSION_NAME").ok()
             .or(config.session_name),
+        annotate: env_var_is_truthy("AGENT_BROWSER_ANNOTATE")
+            || config.annotate.unwrap_or(false),
+        color_scheme: env::var("AGENT_BROWSER_COLOR_SCHEME").ok()
+            .or(config.color_scheme),
         cli_executable_path: false,
         cli_extensions: false,
         cli_profile: false,
@@ -273,6 +294,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
         cli_proxy: false,
         cli_proxy_bypass: false,
         cli_allow_file_access: false,
+        cli_annotate: false,
     };
 
     let mut i = 0;
@@ -406,6 +428,18 @@ pub fn parse_flags(args: &[String]) -> Flags {
                     i += 1;
                 }
             }
+            "--annotate" => {
+                let (val, consumed) = parse_bool_arg(args, i);
+                flags.annotate = val;
+                flags.cli_annotate = true;
+                if consumed { i += 1; }
+            }
+            "--color-scheme" => {
+                if let Some(s) = args.get(i + 1) {
+                    flags.color_scheme = Some(s.clone());
+                    i += 1;
+                }
+            }
             "--config" => {
                 // Already handled by load_config(); skip the value
                 i += 1;
@@ -430,6 +464,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--ignore-https-errors",
         "--allow-file-access",
         "--auto-connect",
+        "--annotate",
     ];
     // Global flags that always take a value (need to skip the next arg too)
     const GLOBAL_FLAGS_WITH_VALUE: &[&str] = &[
@@ -448,6 +483,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--provider",
         "--device",
         "--session-name",
+        "--color-scheme",
         "--config",
     ];
 
@@ -623,6 +659,19 @@ mod tests {
     fn test_cli_profile_tracking() {
         let flags = parse_flags(&args("--profile /path/to/profile snapshot"));
         assert!(flags.cli_profile);
+    }
+
+    #[test]
+    fn test_cli_annotate_tracking() {
+        let flags = parse_flags(&args("--annotate screenshot"));
+        assert!(flags.cli_annotate);
+        assert!(flags.annotate);
+    }
+
+    #[test]
+    fn test_cli_annotate_not_set_without_flag() {
+        let flags = parse_flags(&args("screenshot"));
+        assert!(!flags.cli_annotate);
     }
 
     #[test]

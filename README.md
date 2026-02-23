@@ -101,6 +101,8 @@ agent-browser focus <sel>             # Focus element
 agent-browser type <sel> <text>       # Type into element
 agent-browser fill <sel> <text>       # Clear and fill
 agent-browser press <key>             # Press key (Enter, Tab, Control+a) (alias: key)
+agent-browser keyboard type <text>    # Type with real keystrokes (no selector, current focus)
+agent-browser keyboard inserttext <text>  # Insert text without key events (no selector)
 agent-browser keydown <key>           # Hold key down
 agent-browser keyup <key>             # Release key
 agent-browser hover <sel>             # Hover element
@@ -112,6 +114,7 @@ agent-browser scrollintoview <sel>    # Scroll element into view (alias: scrolli
 agent-browser drag <src> <tgt>        # Drag and drop
 agent-browser upload <sel> <files>    # Upload files
 agent-browser screenshot [path]       # Take screenshot (--full for full page, saves to a temporary directory if no path)
+agent-browser screenshot --annotate   # Annotated screenshot with numbered element labels
 agent-browser pdf <path>              # Save as PDF
 agent-browser snapshot                # Accessibility tree with refs (best for AI)
 agent-browser eval <js>               # Run JavaScript (-b for base64, --stdin for piped input)
@@ -251,6 +254,21 @@ agent-browser frame main              # Back to main frame
 ```bash
 agent-browser dialog accept [text]    # Accept (with optional prompt text)
 agent-browser dialog dismiss          # Dismiss
+```
+
+### Diff
+
+```bash
+agent-browser diff snapshot                              # Compare current vs last snapshot
+agent-browser diff snapshot --baseline before.txt        # Compare current vs saved snapshot file
+agent-browser diff snapshot --selector "#main" --compact # Scoped snapshot diff
+agent-browser diff screenshot --baseline before.png      # Visual pixel diff against baseline
+agent-browser diff screenshot --baseline b.png -o d.png  # Save diff image to custom path
+agent-browser diff screenshot --baseline b.png -t 0.2    # Adjust color threshold (0-1)
+agent-browser diff url https://v1.com https://v2.com     # Compare two URLs (snapshot diff)
+agent-browser diff url https://v1.com https://v2.com --screenshot  # Also visual diff
+agent-browser diff url https://v1.com https://v2.com --wait-until networkidle  # Custom wait strategy
+agent-browser diff url https://v1.com https://v2.com --selector "#main"  # Scope to element
 ```
 
 ### Debug
@@ -401,6 +419,27 @@ agent-browser snapshot -i -c -d 5         # Combine options
 
 The `-C` flag is useful for modern web apps that use custom clickable elements (divs, spans) instead of standard buttons/links.
 
+## Annotated Screenshots
+
+The `--annotate` flag overlays numbered labels on interactive elements in the screenshot. Each label `[N]` corresponds to ref `@eN`, so the same refs work for both visual and text-based workflows.
+
+```bash
+agent-browser screenshot --annotate
+# -> Screenshot saved to /tmp/screenshot-2026-02-17T12-00-00-abc123.png
+#    [1] @e1 button "Submit"
+#    [2] @e2 link "Home"
+#    [3] @e3 textbox "Email"
+```
+
+After an annotated screenshot, refs are cached so you can immediately interact with elements:
+
+```bash
+agent-browser screenshot --annotate ./page.png
+agent-browser click @e2     # Click the "Home" link labeled [2]
+```
+
+This is useful for multimodal AI models that can reason about visual layout, unlabeled icon buttons, canvas elements, or visual state that the text accessibility tree cannot capture.
+
 ## Options
 
 | Option | Description |
@@ -422,9 +461,11 @@ The `-C` flag is useful for modern web apps that use custom clickable elements (
 | `--device <name>` | iOS device name, e.g. "iPhone 15 Pro" (or `AGENT_BROWSER_IOS_DEVICE` env) |
 | `--json` | JSON output (for agents) |
 | `--full, -f` | Full page screenshot |
+| `--annotate` | Annotated screenshot with numbered element labels (or `AGENT_BROWSER_ANNOTATE` env) |
 | `--headed` | Show browser window (not headless) |
 | `--cdp <port\|url>` | Connect via Chrome DevTools Protocol (port or WebSocket URL) |
 | `--auto-connect` | Auto-discover and connect to running Chrome (or `AGENT_BROWSER_AUTO_CONNECT` env) |
+| `--color-scheme <scheme>` | Color scheme: `dark`, `light`, `no-preference` (or `AGENT_BROWSER_COLOR_SCHEME` env) |
 | `--config <path>` | Use a custom config file (or `AGENT_BROWSER_CONFIG` env) |
 | `--debug` | Debug output |
 
@@ -465,6 +506,23 @@ Boolean flags accept an optional `true`/`false` value to override config setting
 Auto-discovered config files that are missing are silently ignored. If `--config <path>` points to a missing or invalid file, agent-browser exits with an error. Extensions from user and project configs are merged (concatenated), not replaced.
 
 > **Tip:** If your project-level `agent-browser.json` contains environment-specific values (paths, proxies), consider adding it to `.gitignore`.
+
+## Default Timeout
+
+The default Playwright timeout for standard operations (clicks, waits, fills, etc.) is 25 seconds. This is intentionally below the CLI's 30-second IPC read timeout so that Playwright returns a proper error instead of the CLI timing out with EAGAIN.
+
+Override the default timeout via environment variable:
+
+```bash
+# Set a longer timeout for slow pages (in milliseconds)
+export AGENT_BROWSER_DEFAULT_TIMEOUT=45000
+```
+
+> **Note:** Setting this above 30000 (30s) may cause EAGAIN errors on slow operations because the CLI's read timeout will expire before Playwright responds. The CLI retries transient errors automatically, but response times will increase.
+
+| Variable | Description |
+|----------|-------------|
+| `AGENT_BROWSER_DEFAULT_TIMEOUT` | Default Playwright timeout in ms (default: 25000) |
 
 ## Selectors
 

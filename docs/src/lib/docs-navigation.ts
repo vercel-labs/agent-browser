@@ -30,6 +30,7 @@ export const navigation: NavSection[] = [
     title: "Features",
     items: [
       { name: "Sessions", href: "/sessions" },
+      { name: "Diffing", href: "/diffing" },
       { name: "CDP Mode", href: "/cdp-mode" },
       { name: "Streaming", href: "/streaming" },
       { name: "Profiler", href: "/profiler" },

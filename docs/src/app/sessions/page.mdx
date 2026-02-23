@@ -1,4 +1,6 @@
-export const metadata = { title: "Sessions" }
+import { pageMetadata } from "@/lib/page-metadata"
+
+export const metadata = pageMetadata("sessions")
 
 # Sessions
 
@@ -181,9 +183,14 @@ agent-browser set headers '{"X-Custom-Header": "value"}'
 
 ## Environment variables
 
-| Variable | Description |
-|----------|-------------|
-| `AGENT_BROWSER_SESSION` | Browser session ID (default: "default") |
-| `AGENT_BROWSER_SESSION_NAME` | Auto-save/load state persistence name |
-| `AGENT_BROWSER_ENCRYPTION_KEY` | 64-char hex key for AES-256-GCM encryption |
-| `AGENT_BROWSER_STATE_EXPIRE_DAYS` | Auto-delete states older than N days (default: 30) |
+<table>
+  <thead>
+    <tr><th>Variable</th><th>Description</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>AGENT_BROWSER_SESSION</code></td><td>Browser session ID (default: "default")</td></tr>
+    <tr><td><code>AGENT_BROWSER_SESSION_NAME</code></td><td>Auto-save/load state persistence name</td></tr>
+    <tr><td><code>AGENT_BROWSER_ENCRYPTION_KEY</code></td><td>64-char hex key for AES-256-GCM encryption</td></tr>
+    <tr><td><code>AGENT_BROWSER_STATE_EXPIRE_DAYS</code></td><td>Auto-delete states older than N days (default: 30)</td></tr>
+  </tbody>
+</table>

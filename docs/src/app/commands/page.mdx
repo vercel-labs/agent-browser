@@ -1,4 +1,6 @@
-export const metadata = { title: "Commands" }
+import { pageMetadata } from "@/lib/page-metadata"
+
+export const metadata = pageMetadata("commands")
 
 # Commands
 
@@ -11,6 +13,8 @@ agent-browser dblclick <sel>          # Double-click
 agent-browser fill <sel> <text>       # Clear and fill
 agent-browser type <sel> <text>       # Type into element
 agent-browser press <key>             # Press key (Enter, Tab, Control+a) (alias: key)
+agent-browser keyboard type <text>    # Type at current focus (no selector needed)
+agent-browser keyboard inserttext <text>  # Insert text without key events
 agent-browser keydown <key>           # Hold key down
 agent-browser keyup <key>             # Release key
 agent-browser hover <sel>             # Hover element
@@ -23,6 +27,7 @@ agent-browser scrollintoview <sel>    # Scroll element into view
 agent-browser drag <src> <dst>        # Drag and drop
 agent-browser upload <sel> <files>    # Upload files
 agent-browser screenshot [path]       # Screenshot (--full for full page)
+agent-browser screenshot --annotate   # Annotated screenshot with numbered element labels
 agent-browser pdf <path>              # Save page as PDF
 agent-browser snapshot                # Accessibility tree with refs
 agent-browser eval <js>               # Run JavaScript
@@ -122,7 +127,13 @@ agent-browser set geo <lat> <lng>     # Set geolocation
 agent-browser set offline [on|off]    # Toggle offline mode
 agent-browser set headers <json>      # Extra HTTP headers
 agent-browser set credentials <u> <p> # HTTP basic auth
-agent-browser set media [dark|light]  # Emulate color scheme
+agent-browser set media [dark|light]  # Emulate color scheme (persists for session)
+```
+
+Use `--color-scheme` for persistent dark/light mode across all commands:
+
+```bash
+agent-browser --color-scheme dark open https://example.com
 ```
 
 ## Cookies & storage
@@ -236,6 +247,7 @@ agent-browser reload                  # Reload page
 --device <name>          # iOS device name (e.g., "iPhone 15 Pro")
 --json                   # JSON output (for scripts)
 --full, -f               # Full page screenshot
+--annotate               # Annotated screenshot with numbered element labels
 --headed                 # Show browser window (not headless)
 --cdp <port|url>         # Connect via Chrome DevTools Protocol (port or WebSocket URL)
 --auto-connect           # Auto-discover and connect to running Chrome

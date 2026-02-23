@@ -2,6 +2,10 @@
 
 Instructions for AI coding agents working with this codebase.
 
+## Package Manager
+
+This project uses **pnpm**. Always use `pnpm` instead of `npm` or `yarn` for installing dependencies, running scripts, etc. (e.g., `pnpm install`, `pnpm run build`).
+
 ## Code Style
 
 - Do not use emojis in code, output, or documentation. Unicode symbols (✓, ✗, →, ⚠) are acceptable.
@@ -19,6 +23,8 @@ When adding or changing user-facing features (new flags, commands, behaviors, en
 5. Inline doc comments in the relevant source files
 
 This applies to changes that either human users or AI agents would need to know about. Do not skip any of these locations.
+
+In the `docs/src/app/` MDX files, always use HTML `<table>` syntax for tables (not markdown pipe tables). This matches the existing convention across the docs site.
 
 <!-- opensrc:start -->
 

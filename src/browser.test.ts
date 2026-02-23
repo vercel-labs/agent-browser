@@ -1,5 +1,5 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
-import { BrowserManager } from './browser.js';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
+import { BrowserManager, getDefaultTimeout } from './browser.js';
 import { executeCommand } from './actions.js';
 import { chromium } from 'playwright-core';
 
@@ -281,6 +281,133 @@ describe('BrowserManager', () => {
       const buffer = await page.screenshot();
       expect(buffer).toBeInstanceOf(Buffer);
       expect(buffer.length).toBeGreaterThan(0);
+    });
+  });
+
+  describe('annotated screenshots', () => {
+    afterAll(async () => {
+      await browser.getPage().goto('https://example.com');
+    });
+
+    it('should return annotations with correct shape', async () => {
+      const page = browser.getPage();
+      await page.setContent(`
+        <html><body>
+          <button>Submit</button>
+          <a href="#">Home</a>
+          <input type="text" placeholder="Email" />
+        </body></html>
+      `);
+
+      const result = await executeCommand(
+        { id: 'ann-1', action: 'screenshot', annotate: true },
+        browser
+      );
+
+      expect(result.success).toBe(true);
+      const data = result.data as { path?: string; annotations?: unknown[] };
+      expect(data.path).toBeDefined();
+      expect(data.annotations).toBeDefined();
+      expect(data.annotations!.length).toBeGreaterThan(0);
+
+      for (const ann of data.annotations! as Array<{
+        ref: string;
+        number: number;
+        role: string;
+        name?: string;
+        box: { x: number; y: number; width: number; height: number };
+      }>) {
+        expect(ann.ref).toMatch(/^e\d+$/);
+        expect(typeof ann.number).toBe('number');
+        expect(typeof ann.role).toBe('string');
+        expect(typeof ann.box.x).toBe('number');
+        expect(typeof ann.box.y).toBe('number');
+        expect(typeof ann.box.width).toBe('number');
+        expect(typeof ann.box.height).toBe('number');
+      }
+    });
+
+    it('should clean up overlay from DOM after screenshot', async () => {
+      const page = browser.getPage();
+      await page.setContent(`
+        <html><body>
+          <button>Click me</button>
+        </body></html>
+      `);
+
+      await executeCommand({ id: 'ann-2', action: 'screenshot', annotate: true }, browser);
+
+      const overlay = await page.$('#__agent_browser_annotations__');
+      expect(overlay).toBeNull();
+    });
+
+    it('should scope annotations to selector element', async () => {
+      const page = browser.getPage();
+      await page.setContent(`
+        <html><body>
+          <button id="outside">Outside</button>
+          <div id="container" style="padding:20px;">
+            <button id="inside">Inside</button>
+          </div>
+        </body></html>
+      `);
+
+      const result = await executeCommand(
+        { id: 'ann-3', action: 'screenshot', annotate: true, selector: '#container' },
+        browser
+      );
+
+      expect(result.success).toBe(true);
+      const data = result.data as { annotations?: Array<{ name?: string }> };
+      expect(data.annotations).toBeDefined();
+
+      const names = data.annotations!.map((a) => a.name).filter(Boolean);
+      expect(names).toContain('Inside');
+      expect(names).not.toContain('Outside');
+    });
+
+    it('should succeed with no annotations on static page', async () => {
+      const page = browser.getPage();
+      await page.setContent(`
+        <html><body>
+          <p>Just some text, no interactive elements.</p>
+        </body></html>
+      `);
+
+      const result = await executeCommand(
+        { id: 'ann-4', action: 'screenshot', annotate: true },
+        browser
+      );
+
+      expect(result.success).toBe(true);
+      const data = result.data as { path?: string; annotations?: unknown[] };
+      expect(data.path).toBeDefined();
+      expect(data.annotations).toBeUndefined();
+    });
+
+    it('should return document-relative coords for fullPage screenshots', async () => {
+      const page = browser.getPage();
+      await page.setContent(`
+        <html><body style="margin:0;">
+          <div style="height:2000px;"></div>
+          <button id="below-fold" style="margin:0;">Bottom</button>
+        </body></html>
+      `);
+
+      const result = await executeCommand(
+        { id: 'ann-5', action: 'screenshot', annotate: true, fullPage: true },
+        browser
+      );
+
+      expect(result.success).toBe(true);
+      const data = result.data as {
+        annotations?: Array<{ name?: string; box: { y: number } }>;
+      };
+      expect(data.annotations).toBeDefined();
+
+      const bottom = data.annotations!.find((a) => a.name === 'Bottom');
+      expect(bottom).toBeDefined();
+      expect(bottom!.box.y).toBeGreaterThanOrEqual(2000);
     });
   });
 
@@ -1125,9 +1252,7 @@ describe('BrowserManager', () => {
       process.env.AWS_SECRET_ACCESS_KEY = '';
       process.env.AWS_PROFILE = 'nonexistent-profile-xyz';
 
-      await expect(
-        testBrowser.launch({ provider: 'agentcore', headless: true })
-      ).rejects.toThrow();
+      await expect(testBrowser.launch({ provider: 'agentcore', headless: true })).rejects.toThrow();
 
       // Restore
       if (origEnv !== undefined) process.env.AWS_ACCESS_KEY_ID = origEnv;
@@ -1140,10 +1265,13 @@ describe('BrowserManager', () => {
     it('should use AGENTCORE_REGION env var', async () => {
       const testBrowser = new BrowserManager();
       const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
-        new Response(JSON.stringify({ browserIdentifier: 'aws.browser.v1', sessionId: 'test-123' }), {
-          status: 200,
-          headers: { 'content-type': 'application/json' },
-        })
+        new Response(
+          JSON.stringify({ browserIdentifier: 'aws.browser.v1', sessionId: 'test-123' }),
+          {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          }
+        )
       );
 
       process.env.AGENTCORE_REGION = 'eu-west-1';
@@ -1163,10 +1291,13 @@ describe('BrowserManager', () => {
     it('should call correct start session API path', async () => {
       const testBrowser = new BrowserManager();
       const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
-        new Response(JSON.stringify({ browserIdentifier: 'aws.browser.v1', sessionId: 'test-456' }), {
-          status: 200,
-          headers: { 'content-type': 'application/json' },
-        })
+        new Response(
+          JSON.stringify({ browserIdentifier: 'aws.browser.v1', sessionId: 'test-456' }),
+          {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          }
+        )
       );
 
       process.env.AGENTCORE_REGION = 'us-east-1';
@@ -1187,18 +1318,71 @@ describe('BrowserManager', () => {
 
     it('should throw on failed session start', async () => {
       const testBrowser = new BrowserManager();
-      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
-        new Response('Forbidden', { status: 403, statusText: 'Forbidden' })
-      );
+      const fetchSpy = vi
+        .spyOn(globalThis, 'fetch')
+        .mockResolvedValueOnce(new Response('Forbidden', { status: 403, statusText: 'Forbidden' }));
 
       process.env.AGENTCORE_REGION = 'us-east-1';
 
-      await expect(
-        testBrowser.launch({ provider: 'agentcore', headless: true })
-      ).rejects.toThrow('Failed to start AgentCore browser session');
+      await expect(testBrowser.launch({ provider: 'agentcore', headless: true })).rejects.toThrow(
+        'Failed to start AgentCore browser session'
+      );
 
       fetchSpy.mockRestore();
       delete process.env.AGENTCORE_REGION;
     });
+  });
+});
+
+describe('getDefaultTimeout', () => {
+  const originalEnv = { ...process.env };
+
+  afterEach(() => {
+    process.env = { ...originalEnv };
+  });
+
+  it('should return 25000 when env var is not set', () => {
+    delete process.env.AGENT_BROWSER_DEFAULT_TIMEOUT;
+    expect(getDefaultTimeout()).toBe(25000);
+  });
+
+  it('should return parsed value when env var is a valid positive integer', () => {
+    process.env.AGENT_BROWSER_DEFAULT_TIMEOUT = '10000';
+    expect(getDefaultTimeout()).toBe(10000);
+  });
+
+  it('should return 25000 for negative values', () => {
+    process.env.AGENT_BROWSER_DEFAULT_TIMEOUT = '-1';
+    expect(getDefaultTimeout()).toBe(25000);
+  });
+
+  it('should return 25000 for zero', () => {
+    process.env.AGENT_BROWSER_DEFAULT_TIMEOUT = '0';
+    expect(getDefaultTimeout()).toBe(25000);
+  });
+
+  it('should return 25000 for values below 1000ms floor', () => {
+    process.env.AGENT_BROWSER_DEFAULT_TIMEOUT = '500';
+    expect(getDefaultTimeout()).toBe(25000);
+  });
+
+  it('should accept exactly 1000ms as the minimum', () => {
+    process.env.AGENT_BROWSER_DEFAULT_TIMEOUT = '1000';
+    expect(getDefaultTimeout()).toBe(1000);
+  });
+
+  it('should return 25000 for non-numeric strings', () => {
+    process.env.AGENT_BROWSER_DEFAULT_TIMEOUT = 'abc';
+    expect(getDefaultTimeout()).toBe(25000);
+  });
+
+  it('should return 25000 for empty string', () => {
+    process.env.AGENT_BROWSER_DEFAULT_TIMEOUT = '';
+    expect(getDefaultTimeout()).toBe(25000);
+  });
+
+  it('should allow overriding above 25s for users who need longer timeouts', () => {
+    process.env.AGENT_BROWSER_DEFAULT_TIMEOUT = '60000';
+    expect(getDefaultTimeout()).toBe(60000);
   });
 });

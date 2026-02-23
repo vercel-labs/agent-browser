@@ -29,6 +29,24 @@ import {
   ENCRYPTION_KEY_ENV,
 } from './state-utils.js';
 
+/**
+ * Returns the default Playwright timeout in milliseconds for standard operations.
+ * Can be overridden via the AGENT_BROWSER_DEFAULT_TIMEOUT environment variable.
+ * Default is 25s, which is below the CLI's 30s IPC read timeout to ensure
+ * Playwright errors are returned before the CLI gives up with EAGAIN.
+ * CDP and recording contexts use a shorter fixed timeout (10s) and are not affected.
+ */
+export function getDefaultTimeout(): number {
+  const envValue = process.env.AGENT_BROWSER_DEFAULT_TIMEOUT;
+  if (envValue) {
+    const parsed = parseInt(envValue, 10);
+    if (!isNaN(parsed) && parsed >= 1000) {
+      return parsed;
+    }
+  }
+  return 25000;
+}
+
 // Screencast frame data from CDP
 export interface ScreencastFrame {
   data: string; // base64 encoded image
@@ -102,6 +120,15 @@ export class BrowserManager {
   private refMap: RefMap = {};
   private lastSnapshot: string = '';
   private scopedHeaderRoutes: Map<string, (route: Route) => Promise<void>> = new Map();
+  private colorScheme: 'light' | 'dark' | 'no-preference' | null = null;
+
+  /**
+   * Set the persistent color scheme preference.
+   * Applied automatically to all new pages and contexts.
+   */
+  setColorScheme(scheme: 'light' | 'dark' | 'no-preference' | null): void {
+    this.colorScheme = scheme;
+  }
 
   // CDP session for screencast and input injection
   private cdpSession: CDPSession | null = null;
@@ -157,6 +184,20 @@ export class BrowserManager {
     this.refMap = snapshot.refs;
     this.lastSnapshot = snapshot.tree;
     return snapshot;
+  }
+
+  /**
+   * Get the last snapshot tree text (empty string if no snapshot has been taken)
+   */
+  getLastSnapshot(): string {
+    return this.lastSnapshot;
+  }
+
+  /**
+   * Update the stored snapshot (used by diff to keep the baseline current)
+   */
+  setLastSnapshot(snapshot: string): void {
+    this.lastSnapshot = snapshot;
   }
 
   /**
@@ -243,8 +284,10 @@ export class BrowserManager {
     if (this.contexts.length > 0) {
       context = this.contexts[this.contexts.length - 1];
     } else if (this.browser) {
-      context = await this.browser.newContext();
-      context.setDefaultTimeout(60000);
+      context = await this.browser.newContext({
+        ...(this.colorScheme && { colorScheme: this.colorScheme }),
+      });
+      context.setDefaultTimeout(getDefaultTimeout());
       this.contexts.push(context);
       this.setupContextTracking(context);
     } else {
@@ -1189,7 +1232,7 @@ export class BrowserManager {
       this.kernelSessionId = session.session_id;
       this.kernelApiKey = kernelApiKey;
       this.browser = browser;
-      context.setDefaultTimeout(60000);
+      context.setDefaultTimeout(getDefaultTimeout());
       this.contexts.push(context);
       this.pages.push(page);
       this.activePageIndex = 0;
@@ -1262,7 +1305,7 @@ export class BrowserManager {
       this.browserUseSessionId = session.id;
       this.browserUseApiKey = browserUseApiKey;
       this.browser = browser;
-      context.setDefaultTimeout(60000);
+      context.setDefaultTimeout(getDefaultTimeout());
       this.contexts.push(context);
       this.pages.push(page);
       this.activePageIndex = 0;
@@ -1322,8 +1365,12 @@ export class BrowserManager {
       }
     }
 
+    if (options.colorScheme) {
+      this.colorScheme = options.colorScheme;
+    }
+
     if (cdpEndpoint) {
-      await this.connectViaCDP(cdpEndpoint, options.headers);
+      await this.connectViaCDP(cdpEndpoint, { headers: options.headers });
       return;
     }
 
@@ -1412,6 +1459,7 @@ export class BrowserManager {
           userAgent: options.userAgent,
           ...(options.proxy && { proxy: options.proxy }),
           ignoreHTTPSErrors: options.ignoreHTTPSErrors ?? false,
+          ...(this.colorScheme && { colorScheme: this.colorScheme }),
         }
       );
       this.isPersistentContext = true;
@@ -1428,6 +1476,7 @@ export class BrowserManager {
         userAgent: options.userAgent,
         ...(options.proxy && { proxy: options.proxy }),
         ignoreHTTPSErrors: options.ignoreHTTPSErrors ?? false,
+        ...(this.colorScheme && { colorScheme: this.colorScheme }),
       });
       this.isPersistentContext = true;
     } else {
@@ -1513,10 +1562,11 @@ export class BrowserManager {
         storageState,
         ...(options.proxy && { proxy: options.proxy }),
         ignoreHTTPSErrors: options.ignoreHTTPSErrors ?? false,
+        ...(this.colorScheme && { colorScheme: this.colorScheme }),
       });
     }
 
-    context.setDefaultTimeout(60000);
+    context.setDefaultTimeout(getDefaultTimeout());
     this.contexts.push(context);
     this.setupContextTracking(context);
 
@@ -1536,7 +1586,7 @@ export class BrowserManager {
    */
   private async connectViaCDP(
     cdpEndpoint: string | undefined,
-    headers?: Record<string, string>
+    options?: { headers?: Record<string, string>; timeout?: number }
   ): Promise<void> {
     if (!cdpEndpoint) {
       throw new Error('CDP endpoint is required for CDP connection');
@@ -1562,14 +1612,16 @@ export class BrowserManager {
       cdpUrl = `http://localhost:${cdpEndpoint}`;
     }
 
-    const browser = await chromium.connectOverCDP(cdpUrl, { headers }).catch(() => {
-      throw new Error(
-        `Failed to connect via CDP to ${cdpUrl}. ` +
-          (cdpUrl.includes('localhost')
-            ? `Make sure the app is running with --remote-debugging-port=${cdpEndpoint}`
-            : 'Make sure the remote browser is accessible and the URL is correct.')
-      );
-    });
+    const browser = await chromium
+      .connectOverCDP(cdpUrl, { headers: options?.headers, timeout: options?.timeout })
+      .catch(() => {
+        throw new Error(
+          `Failed to connect via CDP to ${cdpUrl}. ` +
+            (cdpUrl.includes('localhost')
+              ? `Make sure the app is running with --remote-debugging-port=${cdpEndpoint}`
+              : 'Make sure the remote browser is accessible and the URL is correct.')
+        );
+      });
 
     // Validate and set up state, cleaning up browser connection if anything fails
     try {
@@ -1695,20 +1747,27 @@ export class BrowserManager {
     for (const dir of userDataDirs) {
       const activePort = this.readDevToolsActivePort(dir);
       if (activePort) {
-        // Verify the port is actually responding
+        // Try HTTP discovery first (works with --remote-debugging-port mode)
         const wsUrl = await this.probeDebugPort(activePort.port);
         if (wsUrl) {
-          // Connect using the discovered WebSocket URL
           await this.connectViaCDP(wsUrl);
           return;
         }
-        // Port from file exists but not responding; try HTTP endpoint directly
-        const httpUrl = `http://127.0.0.1:${activePort.port}`;
+        // HTTP probe failed -- Chrome M144+ chrome://inspect remote debugging uses a
+        // WebSocket-only server with no HTTP endpoints. Connect using the WebSocket
+        // path read directly from DevToolsActivePort.
+        const directWsUrl = `ws://127.0.0.1:${activePort.port}${activePort.wsPath}`;
         try {
-          await this.connectViaCDP(httpUrl);
+          if (process.env.AGENT_BROWSER_DEBUG === '1') {
+            console.error(
+              `[DEBUG] HTTP probe failed on port ${activePort.port}, ` +
+                `attempting direct WebSocket connection to ${directWsUrl}`
+            );
+          }
+          await this.connectViaCDP(directWsUrl, { timeout: 60_000 });
           return;
         } catch {
-          // Port listed but not connectable, try next directory
+          // Direct WebSocket also failed, try next directory
         }
       }
     }
@@ -1747,6 +1806,10 @@ export class BrowserManager {
    * Set up console, error, and close tracking for a page
    */
   private setupPageTracking(page: Page): void {
+    if (this.colorScheme) {
+      page.emulateMedia({ colorScheme: this.colorScheme }).catch(() => {});
+    }
+
     page.on('console', (msg) => {
       this.consoleMessages.push({
         type: msg.type(),
@@ -1834,8 +1897,9 @@ export class BrowserManager {
 
     const context = await this.browser.newContext({
       viewport: viewport === undefined ? { width: 1280, height: 720 } : viewport,
+      ...(this.colorScheme && { colorScheme: this.colorScheme }),
     });
-    context.setDefaultTimeout(60000);
+    context.setDefaultTimeout(getDefaultTimeout());
     this.contexts.push(context);
     this.setupContextTracking(context);
 
@@ -2582,6 +2646,7 @@ export class BrowserManager {
     this.agentCoreRegion = null;
     this.isPersistentContext = false;
     this.activePageIndex = 0;
+    this.colorScheme = null;
     this.refMap = {};
     this.lastSnapshot = '';
     this.frameCallback = null;

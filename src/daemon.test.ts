@@ -1,7 +1,9 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as os from 'os';
 import * as path from 'path';
-import { getSocketDir } from './daemon.js';
+import * as net from 'net';
+import { EventEmitter } from 'events';
+import { getSocketDir, safeWrite } from './daemon.js';
 
 /**
  * HTTP request detection pattern used in daemon.ts to prevent cross-origin attacks.
@@ -92,5 +94,68 @@ describe('getSocketDir', () => {
       const expected = path.join(os.homedir(), '.agent-browser');
       expect(result).toBe(expected);
     });
+  });
+});
+
+function createMockSocket(opts: { destroyed?: boolean; writeReturns?: boolean } = {}) {
+  const emitter = new EventEmitter();
+  const socket = Object.assign(emitter, {
+    destroyed: opts.destroyed ?? false,
+    write: vi.fn().mockReturnValue(opts.writeReturns ?? true),
+    removeListener: emitter.removeListener.bind(emitter),
+  });
+  return socket as unknown as net.Socket;
+}
+
+describe('safeWrite', () => {
+  it('should resolve immediately when socket.write returns true', async () => {
+    const socket = createMockSocket({ writeReturns: true });
+    await safeWrite(socket, 'hello\n');
+    expect(socket.write).toHaveBeenCalledWith('hello\n');
+  });
+
+  it('should resolve immediately when socket is already destroyed', async () => {
+    const socket = createMockSocket({ destroyed: true });
+    await safeWrite(socket, 'hello\n');
+    expect(socket.write).not.toHaveBeenCalled();
+  });
+
+  it('should wait for drain event when socket.write returns false', async () => {
+    const socket = createMockSocket({ writeReturns: false });
+    const promise = safeWrite(socket, 'big payload');
+
+    // Simulate drain after a tick
+    setTimeout(() => socket.emit('drain'), 0);
+    await promise;
+
+    expect(socket.write).toHaveBeenCalledWith('big payload');
+  });
+
+  it('should reject on socket error while waiting for drain', async () => {
+    const socket = createMockSocket({ writeReturns: false });
+    const promise = safeWrite(socket, 'data');
+
+    setTimeout(() => socket.emit('error', new Error('connection reset')), 0);
+    await expect(promise).rejects.toThrow('connection reset');
+  });
+
+  it('should resolve on socket close while waiting for drain', async () => {
+    const socket = createMockSocket({ writeReturns: false });
+    const promise = safeWrite(socket, 'data');
+
+    setTimeout(() => socket.emit('close'), 0);
+    await promise;
+  });
+
+  it('should clean up listeners after drain resolves', async () => {
+    const socket = createMockSocket({ writeReturns: false });
+    const promise = safeWrite(socket, 'data');
+
+    setTimeout(() => socket.emit('drain'), 0);
+    await promise;
+
+    expect(socket.listenerCount('drain')).toBe(0);
+    expect(socket.listenerCount('error')).toBe(0);
+    expect(socket.listenerCount('close')).toBe(0);
   });
 });

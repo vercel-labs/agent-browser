@@ -358,6 +358,10 @@ fn main() {
             launch_cmd["ignoreHTTPSErrors"] = json!(true);
         }
 
+        if let Some(ref cs) = flags.color_scheme {
+            launch_cmd["colorScheme"] = json!(cs);
+        }
+
         let err = match send_command(launch_cmd, &flags.session) {
             Ok(resp) if resp.success => None,
             Ok(resp) => Some(
@@ -447,6 +451,10 @@ fn main() {
             launch_cmd["headers"] = headers;
         }
 
+        if let Some(ref cs) = flags.color_scheme {
+            launch_cmd["colorScheme"] = json!(cs);
+        }
+
         let err = match send_command(launch_cmd, &flags.session) {
             Ok(resp) if resp.success => None,
             Ok(resp) => Some(
@@ -468,11 +476,15 @@ fn main() {
 
     // Launch with cloud provider if -p flag is set
     if let Some(ref provider) = flags.provider {
-        let launch_cmd = json!({
+        let mut launch_cmd = json!({
             "id": gen_id(),
             "action": "launch",
             "provider": provider
         });
+
+        if let Some(ref cs) = flags.color_scheme {
+            launch_cmd["colorScheme"] = json!(cs);
+        }
 
         let err = match send_command(launch_cmd, &flags.session) {
             Ok(resp) if resp.success => None,
@@ -501,7 +513,8 @@ fn main() {
         || flags.proxy.is_some()
         || flags.args.is_some()
         || flags.user_agent.is_some()
-        || flags.allow_file_access)
+        || flags.allow_file_access
+        || flags.color_scheme.is_some())
         && flags.cdp.is_none()
         && flags.provider.is_none()
     {
@@ -561,6 +574,10 @@ fn main() {
 
         if flags.allow_file_access {
             launch_cmd["allowFileAccess"] = json!(true);
+        }
+
+        if let Some(ref cs) = flags.color_scheme {
+            launch_cmd["colorScheme"] = json!(cs);
         }
 
         match send_command(launch_cmd, &flags.session) {
