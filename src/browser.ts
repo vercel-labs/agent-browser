@@ -1363,7 +1363,10 @@ export class BrowserManager {
    * Connect to a running browser via CDP (Chrome DevTools Protocol)
    * @param cdpEndpoint Either a port number (as string) or a full WebSocket URL (ws:// or wss://)
    */
-  private async connectViaCDP(cdpEndpoint: string | undefined): Promise<void> {
+  private async connectViaCDP(
+    cdpEndpoint: string | undefined,
+    options?: { timeout?: number }
+  ): Promise<void> {
     if (!cdpEndpoint) {
       throw new Error('CDP endpoint is required for CDP connection');
     }
@@ -1388,14 +1391,16 @@ export class BrowserManager {
       cdpUrl = `http://localhost:${cdpEndpoint}`;
     }
 
-    const browser = await chromium.connectOverCDP(cdpUrl).catch(() => {
-      throw new Error(
-        `Failed to connect via CDP to ${cdpUrl}. ` +
-          (cdpUrl.includes('localhost')
-            ? `Make sure the app is running with --remote-debugging-port=${cdpEndpoint}`
-            : 'Make sure the remote browser is accessible and the URL is correct.')
-      );
-    });
+    const browser = await chromium
+      .connectOverCDP(cdpUrl, { timeout: options?.timeout })
+      .catch(() => {
+        throw new Error(
+          `Failed to connect via CDP to ${cdpUrl}. ` +
+            (cdpUrl.includes('localhost')
+              ? `Make sure the app is running with --remote-debugging-port=${cdpEndpoint}`
+              : 'Make sure the remote browser is accessible and the URL is correct.')
+        );
+      });
 
     // Validate and set up state, cleaning up browser connection if anything fails
     try {
@@ -1521,20 +1526,25 @@ export class BrowserManager {
     for (const dir of userDataDirs) {
       const activePort = this.readDevToolsActivePort(dir);
       if (activePort) {
-        // Verify the port is actually responding
+        // Try HTTP discovery first (works with --remote-debugging-port mode)
         const wsUrl = await this.probeDebugPort(activePort.port);
         if (wsUrl) {
-          // Connect using the discovered WebSocket URL
           await this.connectViaCDP(wsUrl);
           return;
         }
-        // Port from file exists but not responding; try HTTP endpoint directly
-        const httpUrl = `http://127.0.0.1:${activePort.port}`;
+        // HTTP probe failed -- Chrome M144+ chrome://inspect remote debugging uses a
+        // WebSocket-only server with no HTTP endpoints. Connect using the WebSocket
+        // path read directly from DevToolsActivePort.
+        const directWsUrl = `ws://127.0.0.1:${activePort.port}${activePort.wsPath}`;
         try {
-          await this.connectViaCDP(httpUrl);
+          console.error(
+            `[DEBUG] HTTP probe failed on port ${activePort.port}, ` +
+              `attempting direct WebSocket connection to ${directWsUrl}`
+          );
+          await this.connectViaCDP(directWsUrl, { timeout: 60_000 });
           return;
         } catch {
-          // Port listed but not connectable, try next directory
+          // Direct WebSocket also failed, try next directory
         }
       }
     }
