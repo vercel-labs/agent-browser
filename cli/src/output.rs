@@ -495,6 +495,19 @@ pub fn print_response(resp: &Response, json_mode: bool, action: Option<&str>) {
             return;
         }
 
+        // Launch response
+        if data.get("launched").and_then(|v| v.as_bool()).unwrap_or(false) {
+            // Show AgentCore session info if available
+            if let Some(live_view) = data.get("agentCoreLiveViewUrl").and_then(|v| v.as_str()) {
+                if let Some(session_id) = data.get("agentCoreSessionId").and_then(|v| v.as_str()) {
+                    eprintln!("Session: {}", session_id);
+                    eprintln!("Live View: {}", live_view);
+                }
+            }
+            println!("{} Browser launched", color::success_indicator());
+            return;
+        }
+
         // Informational note
         if let Some(note) = data.get("note").and_then(|v| v.as_str()) {
             println!("{}", note);

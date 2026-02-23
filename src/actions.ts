@@ -502,7 +502,13 @@ async function handleLaunch(
   browser: BrowserManager
 ): Promise<Response> {
   await browser.launch(command);
-  return successResponse(command.id, { launched: true });
+  return successResponse(command.id, {
+    launched: true,
+    ...(browser.getAgentCoreSessionId() && {
+      agentCoreSessionId: browser.getAgentCoreSessionId()!,
+      agentCoreLiveViewUrl: browser.getAgentCoreLiveViewUrl()!,
+    }),
+  });
 }
 
 async function handleNavigate(

@@ -915,6 +915,7 @@ export class BrowserManager {
     this.agentCoreIdentifier = session.browserIdentifier;
     this.agentCoreRegion = region;
 
+    // AWS Console Live View URL - trailing # is intentional (standard AWS Console convention)
     const liveView = `https://${region}.console.aws.amazon.com/bedrock-agentcore/browser/${session.browserIdentifier}/session/${session.sessionId}#`;
     this.agentCoreLiveViewUrl = liveView;
     console.error(`Session: ${session.sessionId}`);
@@ -930,13 +931,9 @@ export class BrowserManager {
       region,
       {}
     );
-    const cdpHeaders: Record<string, string> = {
-      ...wsHeaders,
-      Upgrade: 'websocket',
-      Connection: 'Upgrade',
-      'Sec-WebSocket-Version': '13',
-      'Sec-WebSocket-Key': crypto.randomBytes(16).toString('base64'),
-    };
+    // Only pass SigV4 auth headers; let Playwright handle WebSocket protocol headers
+    // (Upgrade, Connection, Sec-WebSocket-Key, Sec-WebSocket-Version)
+    const cdpHeaders: Record<string, string> = wsHeaders;
 
     // Connect via CDP with auth headers
     const browser = await chromium.connectOverCDP(wsUrl, { headers: cdpHeaders }).catch(() => {
@@ -961,6 +958,7 @@ export class BrowserManager {
       this.activePageIndex = 0;
       this.setupPageTracking(page);
     } catch (error) {
+      await browser.close().catch(() => {});
       await this.closeAgentCoreSession().catch((e) => {
         console.error('Failed to close AgentCore session during cleanup:', e);
       });
