@@ -28,6 +28,22 @@ import {
   ENCRYPTION_KEY_ENV,
 } from './state-utils.js';
 
+/**
+ * Returns the default Playwright timeout for standard operations.
+ * Can be overridden via the AGENT_BROWSER_DEFAULT_TIMEOUT environment variable.
+ * CDP and recording contexts use a shorter fixed timeout (10s) and are not affected.
+ */
+function getDefaultTimeout(): number {
+  const envValue = process.env.AGENT_BROWSER_DEFAULT_TIMEOUT;
+  if (envValue) {
+    const parsed = parseInt(envValue, 10);
+    if (!isNaN(parsed) && parsed > 0) {
+      return parsed;
+    }
+  }
+  return 60000;
+}
+
 // Screencast frame data from CDP
 export interface ScreencastFrame {
   data: string; // base64 encoded image
@@ -264,7 +280,7 @@ export class BrowserManager {
       context = await this.browser.newContext({
         ...(this.colorScheme && { colorScheme: this.colorScheme }),
       });
-      context.setDefaultTimeout(60000);
+      context.setDefaultTimeout(getDefaultTimeout());
       this.contexts.push(context);
       this.setupContextTracking(context);
     } else {
@@ -1018,7 +1034,7 @@ export class BrowserManager {
       this.kernelSessionId = session.session_id;
       this.kernelApiKey = kernelApiKey;
       this.browser = browser;
-      context.setDefaultTimeout(60000);
+      context.setDefaultTimeout(getDefaultTimeout());
       this.contexts.push(context);
       this.pages.push(page);
       this.activePageIndex = 0;
@@ -1091,7 +1107,7 @@ export class BrowserManager {
       this.browserUseSessionId = session.id;
       this.browserUseApiKey = browserUseApiKey;
       this.browser = browser;
-      context.setDefaultTimeout(60000);
+      context.setDefaultTimeout(getDefaultTimeout());
       this.contexts.push(context);
       this.pages.push(page);
       this.activePageIndex = 0;
@@ -1346,7 +1362,7 @@ export class BrowserManager {
       });
     }
 
-    context.setDefaultTimeout(60000);
+    context.setDefaultTimeout(getDefaultTimeout());
     this.contexts.push(context);
     this.setupContextTracking(context);
 
@@ -1666,7 +1682,7 @@ export class BrowserManager {
       viewport: viewport === undefined ? { width: 1280, height: 720 } : viewport,
       ...(this.colorScheme && { colorScheme: this.colorScheme }),
     });
-    context.setDefaultTimeout(60000);
+    context.setDefaultTimeout(getDefaultTimeout());
     this.contexts.push(context);
     this.setupContextTracking(context);
 
