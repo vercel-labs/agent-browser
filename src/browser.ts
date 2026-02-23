@@ -1537,10 +1537,12 @@ export class BrowserManager {
         // path read directly from DevToolsActivePort.
         const directWsUrl = `ws://127.0.0.1:${activePort.port}${activePort.wsPath}`;
         try {
-          console.error(
-            `[DEBUG] HTTP probe failed on port ${activePort.port}, ` +
-              `attempting direct WebSocket connection to ${directWsUrl}`
-          );
+          if (process.env.AGENT_BROWSER_DEBUG === '1') {
+            console.error(
+              `[DEBUG] HTTP probe failed on port ${activePort.port}, ` +
+                `attempting direct WebSocket connection to ${directWsUrl}`
+            );
+          }
           await this.connectViaCDP(directWsUrl, { timeout: 60_000 });
           return;
         } catch {
