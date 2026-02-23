@@ -83,7 +83,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
     let rest: Vec<&str> = args[1..].iter().map(|s| s.as_str()).collect();
     let id = gen_id();
 
-    if flags.annotate && cmd != "screenshot" {
+    if flags.cli_annotate && cmd != "screenshot" {
         eprintln!(
             "{} --annotate only applies to the screenshot command",
             color::warning_indicator()
@@ -1863,6 +1863,7 @@ mod tests {
             cli_proxy: false,
             cli_proxy_bypass: false,
             cli_allow_file_access: false,
+            cli_annotate: false,
             annotate: false,
             color_scheme: None,
         }

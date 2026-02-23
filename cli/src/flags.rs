@@ -215,6 +215,7 @@ pub struct Flags {
     pub cli_proxy: bool,
     pub cli_proxy_bypass: bool,
     pub cli_allow_file_access: bool,
+    pub cli_annotate: bool,
 }
 
 pub fn parse_flags(args: &[String]) -> Flags {
@@ -293,6 +294,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
         cli_proxy: false,
         cli_proxy_bypass: false,
         cli_allow_file_access: false,
+        cli_annotate: false,
     };
 
     let mut i = 0;
@@ -429,6 +431,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
             "--annotate" => {
                 let (val, consumed) = parse_bool_arg(args, i);
                 flags.annotate = val;
+                flags.cli_annotate = true;
                 if consumed { i += 1; }
             }
             "--color-scheme" => {
@@ -656,6 +659,19 @@ mod tests {
     fn test_cli_profile_tracking() {
         let flags = parse_flags(&args("--profile /path/to/profile snapshot"));
         assert!(flags.cli_profile);
+    }
+
+    #[test]
+    fn test_cli_annotate_tracking() {
+        let flags = parse_flags(&args("--annotate screenshot"));
+        assert!(flags.cli_annotate);
+        assert!(flags.annotate);
+    }
+
+    #[test]
+    fn test_cli_annotate_not_set_without_flag() {
+        let flags = parse_flags(&args("screenshot"));
+        assert!(!flags.cli_annotate);
     }
 
     #[test]
