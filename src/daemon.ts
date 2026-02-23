@@ -373,11 +373,12 @@ export async function startDaemon(options?: {
             continue;
           }
 
-          // Auto-launch if not already launched and this isn't a launch/close command
+          // Auto-launch if not already launched and this isn't a launch/close/state_load command
           if (
             !manager.isLaunched() &&
             parseResult.command.action !== 'launch' &&
-            parseResult.command.action !== 'close'
+            parseResult.command.action !== 'close' &&
+            parseResult.command.action !== 'state_load'
           ) {
             if (isIOS && manager instanceof IOSManager) {
               // Auto-launch iOS Safari
