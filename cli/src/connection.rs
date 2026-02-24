@@ -281,6 +281,25 @@ pub fn ensure_daemon(
     let exe_path = exe_path.canonicalize().unwrap_or(exe_path);
     let exe_dir = exe_path.parent().unwrap();
 
+    // Determine the working directory for the daemon
+    // We need to find a directory where daemon.js or dist/daemon.js exists
+    let daemon_cwd = if exe_dir.join("daemon.js").exists() {
+        exe_dir.to_path_buf()
+    } else if exe_dir.join("dist").join("daemon.js").exists() {
+        exe_dir.to_path_buf()
+    } else {
+        // Check if we're in a bin directory and the project is one level up
+        let parent_dir = exe_dir.parent().unwrap_or(&exe_dir);
+        if parent_dir.join("daemon.js").exists() {
+            parent_dir.to_path_buf()
+        } else if parent_dir.join("dist").join("daemon.js").exists() {
+            parent_dir.to_path_buf()
+        } else {
+            // Fallback to current working directory
+            env::current_dir().unwrap_or(exe_dir.to_path_buf())
+        }
+    };
+
     let mut daemon_paths = vec![
         exe_dir.join("daemon.js"),
         exe_dir.join("../dist/daemon.js"),
@@ -299,6 +318,19 @@ pub fn ensure_daemon(
         .find(|p| p.exists())
         .ok_or("Daemon not found. Set AGENT_BROWSER_HOME environment variable or run from project directory.")?;
 
+    // Remove any Windows extended length path prefix (\\?\) for compatibility with Node.js
+    let daemon_path = daemon_path.to_str()
+        .map(|s| {
+            let prefix = r"\\?\";
+            let normalized = if s.starts_with(prefix) {
+                &s[prefix.len()..]
+            } else {
+                s
+            };
+            PathBuf::from(normalized)
+        })
+        .unwrap_or_else(|| daemon_path.clone());
+
     // Spawn daemon as a fully detached background process
     #[cfg(unix)]
     {
@@ -307,7 +339,8 @@ pub fn ensure_daemon(
         let mut cmd = Command::new("node");
         cmd.arg(daemon_path)
             .env("AGENT_BROWSER_DAEMON", "1")
-            .env("AGENT_BROWSER_SESSION", session);
+            .env("AGENT_BROWSER_SESSION", session)
+            .current_dir(daemon_cwd.clone());
 
         if headed {
             cmd.env("AGENT_BROWSER_HEADED", "1");
@@ -392,9 +425,10 @@ pub fn ensure_daemon(
         // On Windows, call node directly. Command::new handles PATH resolution (node.exe or node.cmd)
         // and automatically quotes arguments containing spaces.
         let mut cmd = Command::new("node");
-        cmd.arg(daemon_path)
+        cmd.arg(&daemon_path)
             .env("AGENT_BROWSER_DAEMON", "1")
-            .env("AGENT_BROWSER_SESSION", session);
+            .env("AGENT_BROWSER_SESSION", session)
+            .current_dir(&daemon_cwd);
 
         if headed {
             cmd.env("AGENT_BROWSER_HEADED", "1");
