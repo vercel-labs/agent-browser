@@ -612,27 +612,48 @@ export async function startDaemon(options?: {
   // Write PID file before listening
   fs.writeFileSync(pidFile, process.pid.toString());
 
+  const handleServerError = (err: NodeJS.ErrnoException): void => {
+    console.error('Server error:', err);
+    cleanupSocket();
+    process.exit(1);
+  };
+
   if (isWindows) {
     // Windows: use TCP socket on localhost
-    const port = getPortForSession(currentSession);
     const portFile = getPortFile();
-    fs.writeFileSync(portFile, port.toString());
-    server.listen(port, '127.0.0.1', () => {
-      // Daemon is ready on TCP port
-    });
+    const preferredPort = getPortForSession(currentSession);
+
+    const listenOnPort = (port: number, allowFallback: boolean): void => {
+      // Try the hashed port first; if unavailable, retry with an OS-assigned port.
+      server.once('error', (err: NodeJS.ErrnoException) => {
+        if (allowFallback && (err.code === 'EADDRINUSE' || err.code === 'EACCES')) {
+          listenOnPort(0, false);
+          return;
+        }
+        handleServerError(err);
+      });
+
+      server.listen(port, '127.0.0.1', () => {
+        const address = server.address();
+        const actualPort = typeof address === 'string' ? parseInt(address, 10) : address?.port;
+        if (typeof actualPort === 'number') {
+          // Persist the actual port so the CLI can discover it reliably.
+          fs.writeFileSync(portFile, actualPort.toString());
+        }
+        server.on('error', handleServerError);
+        // Daemon is ready on TCP port
+      });
+    };
+
+    listenOnPort(preferredPort, true);
   } else {
     // Unix: use Unix domain socket
     const socketPath = getSocketPath();
     server.listen(socketPath, () => {
       // Daemon is ready
     });
+    server.on('error', handleServerError);
   }
-
-  server.on('error', (err) => {
-    console.error('Server error:', err);
-    cleanupSocket();
-    process.exit(1);
-  });
 
   // Handle shutdown signals
   const shutdown = async () => {
