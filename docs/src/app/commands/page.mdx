@@ -22,7 +22,7 @@ agent-browser focus <sel>             # Focus element
 agent-browser select <sel> <val>      # Select dropdown option
 agent-browser check <sel>             # Check checkbox
 agent-browser uncheck <sel>           # Uncheck checkbox
-agent-browser scroll <dir> [px]       # Scroll (up/down/left/right)
+agent-browser scroll <dir> [px]       # Scroll (up/down/left/right, --selector <sel>)
 agent-browser scrollintoview <sel>    # Scroll element into view
 agent-browser drag <src> <dst>        # Drag and drop
 agent-browser upload <sel> <files>    # Upload files
@@ -108,6 +108,8 @@ agent-browser wait --download [path]  # Wait for download
 agent-browser download <sel> <path>   # Click element to trigger download
 agent-browser wait --download [path]  # Wait for any download to complete
 ```
+
+Use `--download-path <dir>` (or `AGENT_BROWSER_DOWNLOAD_PATH` env) to set a default download directory. Without it, downloads go to a temporary directory that is deleted when the browser closes.
 
 ## Mouse
 

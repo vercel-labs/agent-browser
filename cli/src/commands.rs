@@ -298,12 +298,48 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
 
         // === Scroll ===
         "scroll" => {
-            let dir = rest.first().unwrap_or(&"down");
-            let amount = rest
-                .get(1)
-                .and_then(|s| s.parse::<i32>().ok())
-                .unwrap_or(300);
-            Ok(json!({ "id": id, "action": "scroll", "direction": dir, "amount": amount }))
+            let mut cmd = json!({ "id": id, "action": "scroll" });
+            let obj = cmd.as_object_mut().unwrap();
+            let mut positional_index = 0;
+            let mut i = 0;
+            while i < rest.len() {
+                match rest[i] {
+                    "-s" | "--selector" => {
+                        if let Some(s) = rest.get(i + 1) {
+                            obj.insert("selector".to_string(), json!(s));
+                            i += 1;
+                        } else {
+                            return Err(ParseError::MissingArguments {
+                                context: "scroll --selector".to_string(),
+                                usage: "scroll [direction] [amount] [--selector <sel>]",
+                            });
+                        }
+                    }
+                    arg if arg.starts_with('-') => {}
+                    _ => {
+                        match positional_index {
+                            0 => {
+                                obj.insert("direction".to_string(), json!(rest[i]));
+                            }
+                            1 => {
+                                if let Ok(n) = rest[i].parse::<i32>() {
+                                    obj.insert("amount".to_string(), json!(n));
+                                }
+                            }
+                            _ => {}
+                        }
+                        positional_index += 1;
+                    }
+                }
+                i += 1;
+            }
+            if !obj.contains_key("direction") {
+                obj.insert("direction".to_string(), json!("down"));
+            }
+            if !obj.contains_key("amount") {
+                obj.insert("amount".to_string(), json!(300));
+            }
+            Ok(cmd)
         }
         "scrollintoview" | "scrollinto" => {
             let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
@@ -1906,8 +1942,10 @@ mod tests {
             cli_proxy_bypass: false,
             cli_allow_file_access: false,
             cli_annotate: false,
+            cli_download_path: false,
             annotate: false,
             color_scheme: None,
+            download_path: None,
         }
     }
 
@@ -3438,6 +3476,87 @@ mod tests {
             &args("diff url https://a.com https://b.com --selector"),
             &default_flags(),
         );
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::MissingArguments { .. }
+        ));
+    }
+
+    // === Scroll Tests ===
+
+    #[test]
+    fn test_scroll_defaults() {
+        let cmd = parse_command(&args("scroll"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "scroll");
+        assert_eq!(cmd["direction"], "down");
+        assert_eq!(cmd["amount"], 300);
+        assert!(cmd.get("selector").is_none());
+    }
+
+    #[test]
+    fn test_scroll_direction_and_amount() {
+        let cmd = parse_command(&args("scroll up 200"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "scroll");
+        assert_eq!(cmd["direction"], "up");
+        assert_eq!(cmd["amount"], 200);
+    }
+
+    #[test]
+    fn test_scroll_with_selector() {
+        let cmd = parse_command(
+            &args("scroll down 500 --selector div.scroll-container"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "scroll");
+        assert_eq!(cmd["direction"], "down");
+        assert_eq!(cmd["amount"], 500);
+        assert_eq!(cmd["selector"], "div.scroll-container");
+    }
+
+    #[test]
+    fn test_scroll_with_selector_short_flag() {
+        let cmd = parse_command(
+            &args("scroll left 100 -s .sidebar"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "scroll");
+        assert_eq!(cmd["direction"], "left");
+        assert_eq!(cmd["amount"], 100);
+        assert_eq!(cmd["selector"], ".sidebar");
+    }
+
+    #[test]
+    fn test_scroll_selector_before_positional() {
+        let cmd = parse_command(
+            &args("scroll --selector .panel down 400"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "scroll");
+        assert_eq!(cmd["direction"], "down");
+        assert_eq!(cmd["amount"], 400);
+        assert_eq!(cmd["selector"], ".panel");
+    }
+
+    #[test]
+    fn test_scroll_selector_only() {
+        let cmd = parse_command(
+            &args("scroll --selector .content"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "scroll");
+        assert_eq!(cmd["direction"], "down");
+        assert_eq!(cmd["amount"], 300);
+        assert_eq!(cmd["selector"], ".content");
+    }
+
+    #[test]
+    fn test_scroll_selector_missing_value() {
+        let result = parse_command(&args("scroll down 500 --selector"), &default_flags());
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),

@@ -27,10 +27,15 @@ npm-debug.log*
 .DS_Store
 Thumbs.db
 
+# Python
+__pycache__/
+
 # Test artifacts
 *.png
 *.jpeg
 *.jpg
+*.webm
+test/e2e/.dogfood-output/
 
 # Package manager
 package-lock.json

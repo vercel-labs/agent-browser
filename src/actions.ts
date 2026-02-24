@@ -892,41 +892,41 @@ async function handleWait(command: WaitCommand, browser: BrowserManager): Promis
 async function handleScroll(command: ScrollCommand, browser: BrowserManager): Promise<Response> {
   const page = browser.getPage();
 
+  let deltaX = command.x ?? 0;
+  let deltaY = command.y ?? 0;
+  const hasExplicitDelta = command.x !== undefined || command.y !== undefined;
+
+  if (command.direction) {
+    const amount = command.amount ?? 100;
+    switch (command.direction) {
+      case 'up':
+        deltaY = -amount;
+        break;
+      case 'down':
+        deltaY = amount;
+        break;
+      case 'left':
+        deltaX = -amount;
+        break;
+      case 'right':
+        deltaX = amount;
+        break;
+    }
+  }
+
   if (command.selector) {
     const element = browser.getLocator(command.selector);
     await element.scrollIntoViewIfNeeded();
 
-    if (command.x !== undefined || command.y !== undefined) {
+    if (hasExplicitDelta || deltaX !== 0 || deltaY !== 0) {
       await element.evaluate(
         (el, { x, y }) => {
-          el.scrollBy(x ?? 0, y ?? 0);
+          el.scrollBy(x, y);
         },
-        { x: command.x, y: command.y }
+        { x: deltaX, y: deltaY }
       );
     }
   } else {
-    // Scroll the page
-    let deltaX = command.x ?? 0;
-    let deltaY = command.y ?? 0;
-
-    if (command.direction) {
-      const amount = command.amount ?? 100;
-      switch (command.direction) {
-        case 'up':
-          deltaY = -amount;
-          break;
-        case 'down':
-          deltaY = amount;
-          break;
-        case 'left':
-          deltaX = -amount;
-          break;
-        case 'right':
-          deltaX = amount;
-          break;
-      }
-    }
-
     await page.evaluate(`window.scrollBy(${deltaX}, ${deltaY})`);
   }
 
