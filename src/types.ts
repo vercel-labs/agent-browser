@@ -32,6 +32,7 @@ export interface LaunchCommand extends BaseCommand {
   ignoreHTTPSErrors?: boolean;
   allowFileAccess?: boolean; // Enable file:// URL access and cross-origin file requests
   colorScheme?: 'light' | 'dark' | 'no-preference'; // Persistent color scheme override
+  downloadPath?: string; // Directory for browser downloads (Playwright's downloadsPath)
   // Auto-load state file for session persistence
   autoStateFilePath?: string;
 }

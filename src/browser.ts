@@ -16,7 +16,7 @@ import {
 } from 'playwright-core';
 import path from 'node:path';
 import os from 'node:os';
-import { existsSync, mkdirSync, rmSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, readFileSync, statSync } from 'node:fs';
 import { writeFile, mkdir } from 'node:fs/promises';
 import type { LaunchCommand, TraceEvent } from './types.js';
 import { type RefMap, type EnhancedSnapshot, getEnhancedSnapshot, parseRef } from './snapshot.js';
@@ -116,6 +116,7 @@ export class BrowserManager {
   private lastSnapshot: string = '';
   private scopedHeaderRoutes: Map<string, (route: Route) => Promise<void>> = new Map();
   private colorScheme: 'light' | 'dark' | 'no-preference' | null = null;
+  private downloadPath: string | null = null;
 
   /**
    * Set the persistent color scheme preference.
@@ -1173,6 +1174,17 @@ export class BrowserManager {
       this.colorScheme = options.colorScheme;
     }
 
+    if (options.downloadPath) {
+      this.downloadPath = options.downloadPath;
+    }
+
+    if (this.downloadPath && (cdpEndpoint || options.autoConnect)) {
+      const warning =
+        "--download-path is ignored when connecting via CDP or auto-connect (downloads use the remote browser's configuration)";
+      this.launchWarnings.push(warning);
+      console.error(`[WARN] ${warning}`);
+    }
+
     if (cdpEndpoint) {
       await this.connectViaCDP(cdpEndpoint);
       return;
@@ -1186,6 +1198,12 @@ export class BrowserManager {
     // Cloud browser providers require explicit opt-in via -p flag or AGENT_BROWSER_PROVIDER env var
     // -p flag takes precedence over env var
     const provider = options.provider ?? process.env.AGENT_BROWSER_PROVIDER;
+    if (this.downloadPath && provider) {
+      const warning =
+        "--download-path is ignored when using a cloud provider (downloads use the remote browser's configuration)";
+      this.launchWarnings.push(warning);
+      console.error(`[WARN] ${warning}`);
+    }
     if (provider === 'browserbase') {
       await this.connectToBrowserbase();
       return;
@@ -1199,6 +1217,23 @@ export class BrowserManager {
     if (provider === 'kernel') {
       await this.connectToKernel();
       return;
+    }
+
+    if (this.downloadPath) {
+      const resolved = path.resolve(this.downloadPath);
+      const stat = statSync(resolved, { throwIfNoEntry: false });
+      if (stat && !stat.isDirectory()) {
+        throw new Error(`Download path is not a directory: ${resolved}`);
+      }
+      if (!stat) {
+        try {
+          mkdirSync(resolved, { recursive: true });
+        } catch (e: unknown) {
+          const msg = e instanceof Error ? e.message : String(e);
+          throw new Error(`Cannot create download directory '${resolved}': ${msg}`);
+        }
+      }
+      this.downloadPath = resolved;
     }
 
     const browserType = options.browser ?? 'chromium';
@@ -1258,6 +1293,7 @@ export class BrowserManager {
           ...(options.proxy && { proxy: options.proxy }),
           ignoreHTTPSErrors: options.ignoreHTTPSErrors ?? false,
           ...(this.colorScheme && { colorScheme: this.colorScheme }),
+          ...(this.downloadPath && { downloadsPath: this.downloadPath }),
         }
       );
       this.isPersistentContext = true;
@@ -1275,6 +1311,7 @@ export class BrowserManager {
         ...(options.proxy && { proxy: options.proxy }),
         ignoreHTTPSErrors: options.ignoreHTTPSErrors ?? false,
         ...(this.colorScheme && { colorScheme: this.colorScheme }),
+        ...(this.downloadPath && { downloadsPath: this.downloadPath }),
       });
       this.isPersistentContext = true;
     } else {
@@ -1283,6 +1320,7 @@ export class BrowserManager {
         headless: options.headless ?? true,
         executablePath: options.executablePath,
         args: baseArgs,
+        ...(this.downloadPath && { downloadsPath: this.downloadPath }),
       });
       this.cdpEndpoint = null;
 
