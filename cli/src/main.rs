@@ -124,7 +124,7 @@ fn run_session(args: &[String], session: &str, json_mode: bool) {
     }
 }
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Ignore SIGPIPE to prevent panic when piping to head/tail
     #[cfg(unix)]
     unsafe {
@@ -141,34 +141,34 @@ fn main() {
     if has_help {
         if let Some(cmd) = clean.first() {
             if print_command_help(cmd) {
-                return;
+                return Ok(());
             }
         }
         print_help();
-        return;
+        return Ok(());
     }
 
     if has_version {
         print_version();
-        return;
+        return Ok(());
     }
 
     if clean.is_empty() {
         print_help();
-        return;
+        return Ok(());
     }
 
     // Handle install separately
     if clean.first().map(|s| s.as_str()) == Some("install") {
         let with_deps = args.iter().any(|a| a == "--with-deps" || a == "-d");
         run_install(with_deps);
-        return;
+        return Ok(());
     }
 
     // Handle session separately (doesn't need daemon)
     if clean.first().map(|s| s.as_str()) == Some("session") {
         run_session(&clean, &flags.session, flags.json);
-        return;
+        return Ok(());
     }
 
     let cmd = match parse_command(&clean, &flags) {
@@ -630,6 +630,8 @@ fn main() {
             exit(1);
         }
     }
+
+    Ok(())
 }
 
 #[cfg(test)]
