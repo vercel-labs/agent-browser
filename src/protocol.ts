@@ -50,6 +50,7 @@ const launchSchema = baseCommandSchema.extend({
   ignoreHTTPSErrors: z.boolean().optional(),
   allowFileAccess: z.boolean().optional(),
   colorScheme: z.enum(['light', 'dark', 'no-preference']).optional(),
+  downloadPath: z.string().optional(),
   profile: z.string().optional(),
   storageState: z.string().optional(),
 });

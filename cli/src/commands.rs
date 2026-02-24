@@ -1898,6 +1898,7 @@ mod tests {
             cli_annotate: false,
             annotate: false,
             color_scheme: None,
+            download_path: None,
         }
     }
 

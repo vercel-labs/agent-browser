@@ -226,6 +226,7 @@ fn main() {
         flags.provider.as_deref(),
         flags.device.as_deref(),
         flags.session_name.as_deref(),
+        flags.download_path.as_deref(),
     ) {
         Ok(result) => result,
         Err(e) => {
@@ -507,7 +508,8 @@ fn main() {
         || flags.args.is_some()
         || flags.user_agent.is_some()
         || flags.allow_file_access
-        || flags.color_scheme.is_some())
+        || flags.color_scheme.is_some()
+        || flags.download_path.is_some())
         && flags.cdp.is_none()
         && flags.provider.is_none()
     {
@@ -571,6 +573,10 @@ fn main() {
 
         if let Some(ref cs) = flags.color_scheme {
             launch_cmd["colorScheme"] = json!(cs);
+        }
+
+        if let Some(ref dp) = flags.download_path {
+            launch_cmd["downloadPath"] = json!(dp);
         }
 
         match send_command(launch_cmd, &flags.session) {

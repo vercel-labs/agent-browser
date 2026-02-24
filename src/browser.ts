@@ -116,6 +116,7 @@ export class BrowserManager {
   private lastSnapshot: string = '';
   private scopedHeaderRoutes: Map<string, (route: Route) => Promise<void>> = new Map();
   private colorScheme: 'light' | 'dark' | 'no-preference' | null = null;
+  private downloadPath: string | null = null;
 
   /**
    * Set the persistent color scheme preference.
@@ -1173,6 +1174,10 @@ export class BrowserManager {
       this.colorScheme = options.colorScheme;
     }
 
+    if (options.downloadPath) {
+      this.downloadPath = options.downloadPath;
+    }
+
     if (cdpEndpoint) {
       await this.connectViaCDP(cdpEndpoint);
       return;
@@ -1258,6 +1263,7 @@ export class BrowserManager {
           ...(options.proxy && { proxy: options.proxy }),
           ignoreHTTPSErrors: options.ignoreHTTPSErrors ?? false,
           ...(this.colorScheme && { colorScheme: this.colorScheme }),
+          ...(this.downloadPath && { downloadsPath: this.downloadPath }),
         }
       );
       this.isPersistentContext = true;
@@ -1275,6 +1281,7 @@ export class BrowserManager {
         ...(options.proxy && { proxy: options.proxy }),
         ignoreHTTPSErrors: options.ignoreHTTPSErrors ?? false,
         ...(this.colorScheme && { colorScheme: this.colorScheme }),
+        ...(this.downloadPath && { downloadsPath: this.downloadPath }),
       });
       this.isPersistentContext = true;
     } else {
@@ -1283,6 +1290,7 @@ export class BrowserManager {
         headless: options.headless ?? true,
         executablePath: options.executablePath,
         args: baseArgs,
+        ...(this.downloadPath && { downloadsPath: this.downloadPath }),
       });
       this.cdpEndpoint = null;
 
