@@ -94,7 +94,7 @@ This enables control of:
   <tbody>
     <tr><td><code>--session &lt;name&gt;</code></td><td>Use isolated session</td></tr>
     <tr><td><code>--profile &lt;path&gt;</code></td><td>Persistent browser profile directory</td></tr>
-    <tr><td><code>-p &lt;provider&gt;</code></td><td>Cloud browser provider (<code>browserbase</code>, <code>browseruse</code>, <code>kernel</code>)</td></tr>
+    <tr><td><code>-p &lt;provider&gt;</code></td><td>Cloud browser provider (<code>browserbase</code>, <code>browseruse</code>, <code>kernel</code>, <code>steel</code>)</td></tr>
     <tr><td><code>--headers &lt;json&gt;</code></td><td>HTTP headers scoped to origin</td></tr>
     <tr><td><code>--executable-path</code></td><td>Custom browser executable</td></tr>
     <tr><td><code>--args &lt;args&gt;</code></td><td>Browser launch args (comma-separated)</td></tr>
@@ -130,6 +130,10 @@ agent-browser -p browseruse open https://example.com
 # Kernel
 export KERNEL_API_KEY="your-api-key"
 agent-browser -p kernel open https://example.com
+
+# Steel
+export STEEL_API_KEY="your-api-key"
+agent-browser -p steel open https://example.com
 
 # Or via environment variable
 export AGENT_BROWSER_PROVIDER=browserbase

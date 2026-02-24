@@ -55,6 +55,158 @@ describe('BrowserManager', () => {
     });
   });
 
+  describe('Steel provider', () => {
+    const steelEnvVars = [
+      'STEEL_API_KEY',
+      'STEEL_TIMEOUT_MS',
+      'STEEL_HEADLESS',
+      'STEEL_SOLVE_CAPTCHA',
+      'STEEL_USE_PROXY',
+      'STEEL_PROXY_URL',
+      'STEEL_REGION',
+      'STEEL_BLOCK_ADS',
+      'STEEL_PROFILE_ID',
+      'STEEL_PERSIST_PROFILE',
+      'STEEL_DEVICE',
+    ] as const;
+
+    beforeEach(() => {
+      for (const key of steelEnvVars) {
+        delete process.env[key];
+      }
+      vi.restoreAllMocks();
+    });
+
+    it('should require STEEL_API_KEY for steel provider', async () => {
+      const steelBrowser = new BrowserManager();
+      await expect(
+        steelBrowser.launch({ id: 'steel-missing-key', action: 'launch', provider: 'steel' })
+      ).rejects.toThrow('STEEL_API_KEY is required when using steel as a provider');
+    });
+
+    it('should create Steel session and connect over CDP with apiKey', async () => {
+      process.env.STEEL_API_KEY = 'test-steel-api-key';
+      process.env.STEEL_TIMEOUT_MS = '600000';
+      process.env.STEEL_HEADLESS = 'true';
+      process.env.STEEL_SOLVE_CAPTCHA = 'true';
+      process.env.STEEL_USE_PROXY = '1';
+      process.env.STEEL_PROXY_URL = 'http://proxy.example.com:8080';
+      process.env.STEEL_REGION = 'ord';
+      process.env.STEEL_BLOCK_ADS = 'false';
+      process.env.STEEL_PROFILE_ID = '00000000-0000-0000-0000-000000000000';
+      process.env.STEEL_PERSIST_PROFILE = 'true';
+      process.env.STEEL_DEVICE = 'mobile';
+
+      const fetchSpy = vi
+        .spyOn(globalThis, 'fetch')
+        .mockResolvedValueOnce({
+          ok: true,
+          statusText: 'Created',
+          json: async () => ({
+            id: 'steel-session-id',
+            websocketUrl: 'wss://connect.steel.dev?sessionId=steel-session-id',
+          }),
+        } as Response)
+        .mockResolvedValueOnce({
+          ok: true,
+          statusText: 'OK',
+        } as Response);
+
+      const mockPage = { on: vi.fn() };
+      const mockContext = {
+        pages: () => [mockPage],
+        newPage: vi.fn().mockResolvedValue(mockPage),
+        setDefaultTimeout: vi.fn(),
+        on: vi.fn(),
+      };
+      const mockBrowser = {
+        contexts: () => [mockContext],
+      };
+
+      const cdpSpy = vi.spyOn(chromium, 'connectOverCDP').mockResolvedValue(mockBrowser as any);
+
+      const steelBrowser = new BrowserManager();
+      await steelBrowser.launch({ id: 'steel-connect', action: 'launch', provider: 'steel' });
+
+      const createCall = fetchSpy.mock.calls[0];
+      expect(createCall[0]).toBe('https://api.steel.dev/v1/sessions');
+
+      const createInit = createCall[1] as RequestInit;
+      expect(createInit?.method).toBe('POST');
+      expect((createInit?.headers as Record<string, string>)['steel-api-key']).toBe(
+        'test-steel-api-key'
+      );
+
+      const payload = JSON.parse(String(createInit?.body));
+      expect(payload).toMatchObject({
+        timeout: 600000,
+        headless: true,
+        solveCaptcha: true,
+        useProxy: true,
+        proxyUrl: 'http://proxy.example.com:8080',
+        region: 'ord',
+        blockAds: false,
+        profileId: '00000000-0000-0000-0000-000000000000',
+        persistProfile: true,
+        deviceConfig: { device: 'mobile' },
+      });
+
+      expect(cdpSpy).toHaveBeenCalledWith(
+        'wss://connect.steel.dev/?sessionId=steel-session-id&apiKey=test-steel-api-key'
+      );
+
+      await steelBrowser.close();
+      expect(fetchSpy).toHaveBeenCalledWith(
+        'https://api.steel.dev/v1/sessions/steel-session-id/release',
+        {
+          method: 'POST',
+          headers: {
+            'steel-api-key': 'test-steel-api-key',
+          },
+          body: '{}',
+        }
+      );
+    });
+
+    it('should release Steel session when CDP connection fails', async () => {
+      process.env.STEEL_API_KEY = 'test-steel-api-key';
+
+      const fetchSpy = vi
+        .spyOn(globalThis, 'fetch')
+        .mockResolvedValueOnce({
+          ok: true,
+          statusText: 'Created',
+          json: async () => ({
+            id: 'steel-session-id',
+            websocketUrl: 'wss://connect.steel.dev?sessionId=steel-session-id',
+          }),
+        } as Response)
+        .mockResolvedValueOnce({
+          ok: true,
+          statusText: 'OK',
+        } as Response);
+
+      vi.spyOn(chromium, 'connectOverCDP').mockRejectedValue(new Error('CDP unavailable'));
+
+      const steelBrowser = new BrowserManager();
+      await expect(
+        steelBrowser.launch({ id: 'steel-connect-fail', action: 'launch', provider: 'steel' })
+      ).rejects.toThrow('Failed to connect to Steel session via CDP');
+
+      expect(fetchSpy).toHaveBeenNthCalledWith(
+        2,
+        'https://api.steel.dev/v1/sessions/steel-session-id/release',
+        {
+          method: 'POST',
+          headers: {
+            'steel-api-key': 'test-steel-api-key',
+          },
+          body: '{}',
+        }
+      );
+    });
+  });
+
   describe('stale session recovery (all pages closed)', () => {
     it('should recover when all pages are closed externally', async () => {
       const testBrowser = new BrowserManager();

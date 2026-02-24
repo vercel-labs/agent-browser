@@ -248,6 +248,24 @@ agent-browser -p ios close
 
 **Real devices:** Works with physical iOS devices if pre-configured. Use `--device "<UDID>"` where UDID is from `xcrun xctrace list devices`.
 
+### Cloud Provider (Steel)
+
+```bash
+# Use Steel cloud browser sessions
+export STEEL_API_KEY="your-api-key"
+agent-browser -p steel open https://example.com
+
+# Or set provider via environment variable
+export AGENT_BROWSER_PROVIDER=steel
+agent-browser open https://example.com
+
+# Optional session tuning
+export STEEL_TIMEOUT_MS=600000
+export STEEL_SOLVE_CAPTCHA=true
+export STEEL_USE_PROXY=true
+export STEEL_REGION=ord
+```
+
 ## Diffing (Verifying Changes)
 
 Use `diff snapshot` after performing an action to verify it had the intended effect. This compares the current accessibility tree against the last snapshot taken in the session.
