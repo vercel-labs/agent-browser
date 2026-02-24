@@ -1,7 +1,7 @@
 ---
 name: dogfood
 description: Systematically explore and test a web application to find bugs, UX issues, and other problems. Use when asked to "dogfood", "QA", "exploratory test", "find issues", "bug hunt", "test this app/site/platform", or review the quality of a web application. Produces a structured report with full reproduction evidence -- step-by-step screenshots, repro videos, and detailed repro steps for every issue -- so findings can be handed directly to the responsible teams.
-allowed-tools: Bash(npx agent-browser:*), Bash(agent-browser:*)
+allowed-tools: Bash(agent-browser:*), Bash(npx agent-browser:*)
 ---
 
 # Dogfood
@@ -21,6 +21,8 @@ Only the **Target URL** is required. Everything else has sensible defaults -- us
 | **Authentication** | None | `Sign in to user@example.com` |
 
 If the user says something like "dogfood vercel.com", start immediately with defaults. Do not ask clarifying questions unless authentication is mentioned but credentials are missing.
+
+Always use `agent-browser` directly -- never `npx agent-browser`. The direct binary uses the fast Rust client. `npx` routes through Node.js and is significantly slower.
 
 ## Workflow
 
