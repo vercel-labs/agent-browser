@@ -220,6 +220,7 @@ pub struct Flags {
     pub cli_proxy_bypass: bool,
     pub cli_allow_file_access: bool,
     pub cli_annotate: bool,
+    pub cli_download_path: bool,
 }
 
 pub fn parse_flags(args: &[String]) -> Flags {
@@ -301,6 +302,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
         cli_proxy_bypass: false,
         cli_allow_file_access: false,
         cli_annotate: false,
+        cli_download_path: false,
     };
 
     let mut i = 0;
@@ -449,6 +451,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
             "--download-path" => {
                 if let Some(s) = args.get(i + 1) {
                     flags.download_path = Some(s.clone());
+                    flags.cli_download_path = true;
                     i += 1;
                 }
             }
@@ -685,6 +688,19 @@ mod tests {
     fn test_cli_annotate_not_set_without_flag() {
         let flags = parse_flags(&args("screenshot"));
         assert!(!flags.cli_annotate);
+    }
+
+    #[test]
+    fn test_cli_download_path_tracking() {
+        let flags = parse_flags(&args("--download-path /tmp/dl snapshot"));
+        assert!(flags.cli_download_path);
+        assert_eq!(flags.download_path, Some("/tmp/dl".to_string()));
+    }
+
+    #[test]
+    fn test_cli_download_path_not_set_without_flag() {
+        let flags = parse_flags(&args("snapshot"));
+        assert!(!flags.cli_download_path);
     }
 
     #[test]

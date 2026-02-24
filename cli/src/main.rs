@@ -282,6 +282,7 @@ fn main() {
             },
             flags.ignore_https_errors.then_some("--ignore-https-errors"),
             flags.cli_allow_file_access.then_some("--allow-file-access"),
+            flags.cli_download_path.then_some("--download-path"),
         ]
         .into_iter()
         .flatten()
@@ -361,6 +362,10 @@ fn main() {
 
         if let Some(ref cs) = flags.color_scheme {
             launch_cmd["colorScheme"] = json!(cs);
+        }
+
+        if let Some(ref dp) = flags.download_path {
+            launch_cmd["downloadPath"] = json!(dp);
         }
 
         let err = match send_command(launch_cmd, &flags.session) {
@@ -447,6 +452,10 @@ fn main() {
 
         if let Some(ref cs) = flags.color_scheme {
             launch_cmd["colorScheme"] = json!(cs);
+        }
+
+        if let Some(ref dp) = flags.download_path {
+            launch_cmd["downloadPath"] = json!(dp);
         }
 
         let err = match send_command(launch_cmd, &flags.session) {

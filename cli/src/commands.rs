@@ -1896,6 +1896,7 @@ mod tests {
             cli_proxy_bypass: false,
             cli_allow_file_access: false,
             cli_annotate: false,
+            cli_download_path: false,
             annotate: false,
             color_scheme: None,
             download_path: None,
