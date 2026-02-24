@@ -7,7 +7,7 @@ import path from 'node:path';
 const AI_GATEWAY_URL =
   process.env.ANTHROPIC_BASE_URL || 'https://ai-gateway.vercel.sh';
 const API_KEY = process.env.AI_GATEWAY_API_KEY;
-const MODEL = process.env.DOGFOOD_MODEL || 'anthropic/claude-sonnet-4.5';
+const MODEL = process.env.DOGFOOD_MODEL || 'anthropic/claude-haiku-4.5';
 const CUSTOM_URL = process.env.DOGFOOD_URL;
 
 const FIXTURE_PATH = path.resolve('test/e2e/fixtures/buggy-app.html');
