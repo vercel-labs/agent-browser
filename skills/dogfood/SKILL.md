@@ -10,15 +10,17 @@ Systematically explore a web application, find issues, and produce a report with
 
 ## Setup
 
-Before starting, gather these from the user (ask if not provided):
+Only the **Target URL** is required. Everything else has sensible defaults -- use them unless the user explicitly provides an override.
 
-1. **Target URL** -- The app or page to test
-2. **Session name** -- For `--session` flag (e.g., `vercel-dogfood`, `app-qa`)
-3. **Output directory** -- Where to write the report, screenshots, and videos (default: `./dogfood-output/`)
-4. **Scope** -- Full app, or specific sections/features to focus on
-5. **Authentication** -- Credentials or instructions for signing in (ask the user for codes/OTPs when needed)
+| Parameter | Default | Example override |
+|-----------|---------|-----------------|
+| **Target URL** | _(required)_ | `vercel.com`, `http://localhost:3000` |
+| **Session name** | Slugified domain (e.g., `vercel.com` -> `vercel-com`) | `--session my-session` |
+| **Output directory** | `./dogfood-output/` | `Output directory: /tmp/qa` |
+| **Scope** | Full app | `Focus on the billing page` |
+| **Authentication** | None | `Sign in to user@example.com` |
 
-Check `agent-browser --help` for latest CLI usage before starting.
+If the user says something like "dogfood vercel.com", start immediately with defaults. Do not ask clarifying questions unless authentication is mentioned but credentials are missing.
 
 ## Workflow
 
@@ -107,6 +109,8 @@ Use your judgment on how deep to go. Spend more time on core features and less o
 
 ### 5. Document Issues (Repro-First)
 
+Steps 4 and 5 happen together -- explore and document in a single pass. When you find an issue, stop exploring and document it immediately before moving on. Do not explore the whole app first and document later.
+
 Every issue must be reproducible. When you find something wrong, do not just note it -- prove it with evidence. The goal is that someone reading the report can see exactly what happened and replay it.
 
 **For every issue, capture a full repro package:**
@@ -148,9 +152,11 @@ agent-browser --session {SESSION} record stop
 
 ### 6. Wrap Up
 
+Aim to find **5-10 well-documented issues**, then wrap up. Depth of evidence matters more than total count -- 5 issues with full repro beats 20 with vague descriptions.
+
 After exploring:
 
-1. Update the summary counts at the top of the report.
+1. Re-read the report and update the summary severity counts so they match the actual issues. Every `### ISSUE-` block must be reflected in the totals.
 2. Close the session:
 
 ```bash
@@ -166,9 +172,12 @@ agent-browser --session {SESSION} close
 - **Default to recording video.** Start a repro video for every issue. Video captures timing, transitions, and interaction details that screenshots miss. Only skip video for purely static visual issues (e.g., a typo).
 - **Write repro steps that map to screenshots.** Each numbered step in the report should reference its corresponding screenshot. A reader should be able to follow the steps visually without touching a browser.
 - **Be thorough but use judgment.** You are not following a test script -- you are exploring like a real user would. If something feels off, investigate.
-- **Write findings incrementally.** Append each issue to the report as you discover it. If the session is interrupted, findings are preserved.
+- **Write findings incrementally.** Append each issue to the report as you discover it. If the session is interrupted, findings are preserved. Never batch all issues for the end.
+- **Never delete output files.** Do not `rm` screenshots, videos, or the report mid-session. Do not close the session and restart. Work forward, not backward.
+- **Never read the target app's source code.** You are testing as a user, not auditing code. Do not read HTML, JS, or config files of the app under test. All findings must come from what you observe in the browser.
 - **Check the console.** Many issues are invisible in the UI but show up as JS errors or failed requests.
 - **Test like a user, not a robot.** Try common workflows end-to-end. Click things a real user would click. Enter realistic data.
+- **Be efficient with commands.** Batch multiple `agent-browser` commands in a single shell call when they are independent (e.g., `agent-browser ... screenshot ... && agent-browser ... console`). Use `agent-browser --session {SESSION} scroll down 300` for scrolling -- do not use `key` or `evaluate` to scroll.
 
 ## References
 
