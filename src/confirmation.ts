@@ -14,7 +14,7 @@ const AUTO_DENY_TIMEOUT_MS = 60_000;
 const pending = new Map<string, PendingConfirmation>();
 
 function generateId(): string {
-  return `c_${randomBytes(4).toString('hex')}`;
+  return `c_${randomBytes(8).toString('hex')}`;
 }
 
 export function requestConfirmation(

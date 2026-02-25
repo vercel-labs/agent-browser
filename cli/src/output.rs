@@ -24,20 +24,25 @@ pub struct OutputOptions {
 }
 
 fn truncate_if_needed(content: &str, max: Option<usize>) -> String {
-    match max {
-        Some(limit) => {
-            match content.char_indices().nth(limit).map(|(i, _)| i) {
-                Some(byte_offset) => {
-                    let remaining = content[byte_offset..].chars().count();
-                    format!(
-                        "{}\n[truncated: showing {} of {} chars. Use --max-output to adjust]",
-                        &content[..byte_offset], limit, limit + remaining
-                    )
-                }
-                None => content.to_string(),
-            }
+    let Some(limit) = max else {
+        return content.to_string();
+    };
+    // Fast path: byte length is a lower bound on char count, so if the
+    // byte length is within the limit the char count must be too.
+    if content.len() <= limit {
+        return content.to_string();
+    }
+    // Find the byte offset of the limit-th character.
+    match content.char_indices().nth(limit).map(|(i, _)| i) {
+        Some(byte_offset) => {
+            let total_chars = content.chars().count();
+            format!(
+                "{}\n[truncated: showing {} of {} chars. Use --max-output to adjust]",
+                &content[..byte_offset], limit, total_chars
+            )
         }
-        _ => content.to_string(),
+        // Content has fewer than `limit` chars despite more bytes
+        None => content.to_string(),
     }
 }
 
@@ -2348,7 +2353,7 @@ Options:
   --allowed-domains <list>   Restrict navigation domains (or AGENT_BROWSER_ALLOWED_DOMAINS)
   --action-policy <path>     Action policy JSON file (or AGENT_BROWSER_ACTION_POLICY)
   --confirm-actions <list>   Categories requiring confirmation (or AGENT_BROWSER_CONFIRM_ACTIONS)
-  --confirm-interactive      Interactive confirmation prompts (or AGENT_BROWSER_CONFIRM_INTERACTIVE)
+  --confirm-interactive      Interactive confirmation prompts; auto-denies if stdin is not a TTY (or AGENT_BROWSER_CONFIRM_INTERACTIVE)
   --config <path>            Use a custom config file (or AGENT_BROWSER_CONFIG env)
   --debug                    Debug output
   --version, -V              Show version

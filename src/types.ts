@@ -1141,14 +1141,39 @@ export interface ScreenshotData {
 
 export interface SnapshotData {
   snapshot: string;
+  refs?: Record<string, { role: string; name?: string }>;
+  origin?: string;
 }
 
 export interface EvaluateData {
   result: unknown;
+  origin?: string;
 }
 
 export interface ContentData {
   html: string;
+  origin?: string;
+}
+
+export interface TextData {
+  text: string | null;
+  origin?: string;
+}
+
+export interface AttributeData {
+  attribute: string;
+  value: string | null;
+  origin?: string;
+}
+
+export interface ValueData {
+  value: string;
+  origin?: string;
+}
+
+export interface ConsoleData {
+  messages: Array<{ type: string; text: string }>;
+  origin?: string;
 }
 
 export interface TabInfo {

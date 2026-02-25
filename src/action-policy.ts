@@ -174,6 +174,11 @@ const ACTION_CATEGORIES: Record<string, string> = {
   nth: 'get',
 };
 
+// User-facing categories used in policy files. '_internal' is excluded because
+// internal actions always bypass policy. 'unknown' is intentionally not a value
+// in ACTION_CATEGORIES -- it is only the fallback return of getActionCategory()
+// for unrecognized actions. If a user puts "unknown" in a policy file,
+// loadPolicyFile will warn about it as unrecognized, which is correct.
 export const KNOWN_CATEGORIES = new Set(
   Object.values(ACTION_CATEGORIES).filter((c) => c !== '_internal')
 );

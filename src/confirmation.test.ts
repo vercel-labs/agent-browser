@@ -14,7 +14,7 @@ describe('confirmation', () => {
     it('should return a confirmation ID', () => {
       const result = requestConfirmation('evaluate', 'eval', 'Evaluate JS', { script: 'test' });
       expect(result.confirmationId).toBeTruthy();
-      expect(result.confirmationId).toMatch(/^c_[0-9a-f]{8}$/);
+      expect(result.confirmationId).toMatch(/^c_[0-9a-f]{16}$/);
     });
 
     it('should generate unique IDs', () => {

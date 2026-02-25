@@ -5,6 +5,24 @@ export const metadata = pageMetadata("security")
 
 agent-browser includes security features to protect against credential exposure, prompt injection via untrusted page content, and unauthorized browser actions.
 
+## Threat Model
+
+These features are designed to mitigate the following threats when an LLM-based agent drives a browser:
+
+- **Credential exposure** -- Passwords stored in the auth vault are never included in LLM context. The CLI handles vault operations locally; credentials do not pass through the daemon's IPC channel.
+- **Prompt injection via page content** -- Malicious pages can embed text that looks like tool output or system instructions. Content boundary markers (`--content-boundaries`) let the orchestrator distinguish trusted tool output from untrusted page content.
+- **Unauthorized navigation / data exfiltration** -- A compromised or manipulated agent could navigate to attacker-controlled domains to exfiltrate data. The domain allowlist (`--allowed-domains`) blocks navigations, sub-resource requests, WebSocket connections, EventSource streams, and `sendBeacon` calls to non-allowed domains.
+- **Unauthorized destructive actions** -- Action policy (`--action-policy`) and confirmation gating (`--confirm-actions`) prevent the agent from performing dangerous operations (eval, downloads, uploads) without explicit approval.
+- **Context flooding** -- Large page outputs can overwhelm an LLM's context window. Output truncation (`--max-output`) caps the size of page-sourced content.
+
+### Known limitations
+
+- **WebSocket/EventSource blocking is best-effort.** It works by overriding browser constructors via an init script. If the `eval` action category is allowed, page scripts could theoretically restore the original constructors. Deny `eval` via `--action-policy` for maximum protection.
+- **Domain filter timing on remote connections.** When connecting to a pre-existing browser via CDP or a cloud provider, pages may have already loaded content before the domain filter is installed. agent-browser navigates disallowed pages to `about:blank` after the filter is active, but resources loaded before that point are not retroactively blocked.
+- **Content boundaries are defense-in-depth.** They rely on the LLM and orchestrator respecting the structural markers. A sufficiently capable adversarial page could attempt to mimic the boundary format, though the per-process CSPRNG nonce makes this impractical to predict.
+- **Confirmation timeout.** Pending confirmations auto-deny after 60 seconds. Orchestrators must respond within that window.
+- **Non-TTY auto-deny.** When `--confirm-interactive` is set but stdin is not a terminal (e.g., piped input), actions are automatically denied to prevent accidental approval in non-interactive contexts.
+
 ## Authentication Vault
 
 Store credentials locally and reference them by name. The LLM never sees passwords.
@@ -177,6 +195,8 @@ agent-browser --confirm-actions eval,download --confirm-interactive eval "docume
 ```
 
 Pending confirmations auto-deny after 60 seconds.
+
+> **Non-TTY behavior:** When `--confirm-interactive` is set but stdin is not a TTY (e.g., piped input or running inside an automated pipeline), actions are automatically denied. This prevents accidental approval in non-interactive contexts.
 
 ## Output Length Limits
 

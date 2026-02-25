@@ -249,6 +249,37 @@ export class BrowserManager {
   }
 
   /**
+   * Install the domain filter on a context if an allowlist is configured.
+   * Should be called before any pages navigate on the context.
+   */
+  private async ensureDomainFilter(context: BrowserContext): Promise<void> {
+    if (this.allowedDomains.length > 0) {
+      await installDomainFilter(context, this.allowedDomains);
+    }
+  }
+
+  /**
+   * After installing the domain filter, verify existing pages are on allowed
+   * domains. Pages that pre-date the filter (e.g. CDP/cloud connect) may have
+   * already navigated to disallowed domains. Navigate them to about:blank.
+   */
+  private async sanitizeExistingPages(pages: Page[]): Promise<void> {
+    if (this.allowedDomains.length === 0) return;
+    for (const page of pages) {
+      const url = page.url();
+      if (!url || url === 'about:blank') continue;
+      try {
+        const hostname = new URL(url).hostname.toLowerCase();
+        if (!isDomainAllowed(hostname, this.allowedDomains)) {
+          await page.goto('about:blank');
+        }
+      } catch {
+        await page.goto('about:blank').catch(() => {});
+      }
+    }
+  }
+
+  /**
    * Check if a URL is allowed by the domain allowlist.
    * Throws if the URL's domain is blocked. No-op if no allowlist is set.
    * Blocks non-http(s) schemes and unparseable URLs by default.
@@ -312,6 +343,7 @@ export class BrowserManager {
       context.setDefaultTimeout(getDefaultTimeout());
       this.contexts.push(context);
       this.setupContextTracking(context);
+      await this.ensureDomainFilter(context);
     } else {
       return;
     }
@@ -924,13 +956,9 @@ export class BrowserManager {
       this.browser = browser;
       context.setDefaultTimeout(10000);
       this.contexts.push(context);
-      // Register context tracking before domain filter so new pages created
-      // after this point are tracked. The existing page was created before the
-      // handler is registered, so it won't trigger a duplicate 'page' event.
       this.setupContextTracking(context);
-      if (this.allowedDomains.length > 0) {
-        await installDomainFilter(context, this.allowedDomains);
-      }
+      await this.ensureDomainFilter(context);
+      await this.sanitizeExistingPages([page]);
       this.pages.push(page);
       this.activePageIndex = 0;
       this.setupPageTracking(page);
@@ -1072,9 +1100,8 @@ export class BrowserManager {
       context.setDefaultTimeout(getDefaultTimeout());
       this.contexts.push(context);
       this.setupContextTracking(context);
-      if (this.allowedDomains.length > 0) {
-        await installDomainFilter(context, this.allowedDomains);
-      }
+      await this.ensureDomainFilter(context);
+      await this.sanitizeExistingPages([page]);
       this.pages.push(page);
       this.activePageIndex = 0;
       this.setupPageTracking(page);
@@ -1148,9 +1175,8 @@ export class BrowserManager {
       context.setDefaultTimeout(getDefaultTimeout());
       this.contexts.push(context);
       this.setupContextTracking(context);
-      if (this.allowedDomains.length > 0) {
-        await installDomainFilter(context, this.allowedDomains);
-      }
+      await this.ensureDomainFilter(context);
+      await this.sanitizeExistingPages([page]);
       this.pages.push(page);
       this.activePageIndex = 0;
       this.setupPageTracking(page);
@@ -1452,12 +1478,10 @@ export class BrowserManager {
     context.setDefaultTimeout(getDefaultTimeout());
     this.contexts.push(context);
     this.setupContextTracking(context);
-
-    if (this.allowedDomains.length > 0) {
-      await installDomainFilter(context, this.allowedDomains);
-    }
+    await this.ensureDomainFilter(context);
 
     const page = context.pages()[0] ?? (await context.newPage());
+    await this.sanitizeExistingPages([page]);
     // Only add if not already tracked (setupContextTracking may have already added it via 'page' event)
     if (!this.pages.includes(page)) {
       this.pages.push(page);
@@ -1531,10 +1555,10 @@ export class BrowserManager {
         context.setDefaultTimeout(10000);
         this.contexts.push(context);
         this.setupContextTracking(context);
-        if (this.allowedDomains.length > 0) {
-          await installDomainFilter(context, this.allowedDomains);
-        }
+        await this.ensureDomainFilter(context);
       }
+
+      await this.sanitizeExistingPages(allPages);
 
       for (const page of allPages) {
         this.pages.push(page);
@@ -1791,10 +1815,7 @@ export class BrowserManager {
     context.setDefaultTimeout(getDefaultTimeout());
     this.contexts.push(context);
     this.setupContextTracking(context);
-
-    if (this.allowedDomains.length > 0) {
-      await installDomainFilter(context, this.allowedDomains);
-    }
+    await this.ensureDomainFilter(context);
 
     const page = await context.newPage();
     // Only add if not already tracked (setupContextTracking may have already added it via 'page' event)

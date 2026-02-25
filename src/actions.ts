@@ -14,14 +14,7 @@ import {
   reloadPolicyIfChanged,
 } from './action-policy.js';
 import { requestConfirmation, getAndRemovePending } from './confirmation.js';
-import {
-  saveAuthProfile,
-  getAuthProfile,
-  getAuthProfileMeta,
-  listAuthProfiles,
-  deleteAuthProfile,
-  updateLastLogin,
-} from './auth-vault.js';
+import { getAuthProfile, updateLastLogin } from './auth-vault.js';
 import {
   getSessionsDir,
   readStateFile,
@@ -144,11 +137,7 @@ import type {
   DiffSnapshotCommand,
   DiffScreenshotCommand,
   DiffUrlCommand,
-  AuthSaveCommand,
   AuthLoginCommand,
-  AuthListCommand,
-  AuthDeleteCommand,
-  AuthShowCommand,
   ConfirmCommand,
   DenyCommand,
   Annotation,
@@ -171,7 +160,7 @@ import type {
   InputEventData,
   StylesData,
 } from './types.js';
-import { successResponse, errorResponse } from './protocol.js';
+import { successResponse, errorResponse, parseCommand } from './protocol.js';
 import { diffSnapshots, diffScreenshots } from './diff.js';
 import { getEnhancedSnapshot } from './snapshot.js';
 
@@ -602,16 +591,8 @@ async function dispatchAction(command: Command, browser: BrowserManager): Promis
       return await handleDiffScreenshot(command, browser);
     case 'diff_url':
       return await handleDiffUrl(command, browser);
-    case 'auth_save':
-      return handleAuthSave(command);
     case 'auth_login':
       return await handleAuthLogin(command, browser);
-    case 'auth_list':
-      return handleAuthList(command);
-    case 'auth_delete':
-      return handleAuthDelete(command);
-    case 'auth_show':
-      return handleAuthShow(command);
     default: {
       // TypeScript narrows to never here, but we handle it for safety
       const unknownCommand = command as { id: string; action: string };
@@ -2714,31 +2695,6 @@ async function handleDiffUrl(command: DiffUrlCommand, browser: BrowserManager): 
   return successResponse(command.id, result);
 }
 
-function handleAuthSave(command: AuthSaveCommand): Response {
-  try {
-    const meta = saveAuthProfile({
-      name: command.name,
-      url: command.url,
-      username: command.username,
-      password: command.password,
-      usernameSelector: command.usernameSelector,
-      passwordSelector: command.passwordSelector,
-      submitSelector: command.submitSelector,
-    });
-    return successResponse(command.id, {
-      saved: !meta.updated,
-      updated: meta.updated,
-      name: meta.name,
-      url: meta.url,
-      username: meta.username,
-    });
-  } catch (err) {
-    // Wrap to prevent password from leaking through error propagation
-    const msg = err instanceof Error ? err.message : 'Failed to save auth profile';
-    return errorResponse(command.id, msg);
-  }
-}
-
 async function handleAuthLogin(
   command: AuthLoginCommand,
   browser: BrowserManager
@@ -2753,7 +2709,6 @@ async function handleAuthLogin(
   const page = browser.getPage();
   await page.goto(profile.url, { waitUntil: 'load' });
 
-  // Use custom selectors if provided, otherwise auto-detect
   const usingAutoDetect =
     !profile.usernameSelector && !profile.passwordSelector && !profile.submitSelector;
   if (usingAutoDetect) {
@@ -2762,18 +2717,68 @@ async function handleAuthLogin(
         `If login fails, specify --username-selector/--password-selector/--submit-selector with auth save.`
     );
   }
-  const userSel =
-    profile.usernameSelector ||
-    'input[type="email"]:visible, input[name="username"]:visible, input[name="user"]:visible, input[name="email"]:visible, input[name="login"]:visible, input[id="username"]:visible, input[id="email"]:visible, input[id="login"]:visible, input[autocomplete="username"]:visible';
+
   const passSel = profile.passwordSelector || 'input[type="password"]:visible';
-  const submitSel =
-    profile.submitSelector ||
-    'button[type="submit"]:visible, input[type="submit"]:visible, button:has-text("Sign in"):visible, button:has-text("Log in"):visible';
+
+  // Auto-detect selectors ordered from most specific to broadest.
+  // Locale-dependent text matchers (e.g. "Sign in") are intentionally
+  // excluded -- they break on non-English pages.
+  const AUTO_USER_SELECTORS = [
+    'input[autocomplete="username"]:visible',
+    'input[type="email"]:visible',
+    'input[name="username"]:visible',
+    'input[name="email"]:visible',
+  ];
+  const AUTO_SUBMIT_SELECTORS = ['button[type="submit"]:visible', 'input[type="submit"]:visible'];
 
   try {
-    await page.locator(userSel).first().fill(profile.username);
+    // Resolve username field: custom selector or sequential auto-detect
+    let userLocator;
+    if (profile.usernameSelector) {
+      userLocator = page.locator(profile.usernameSelector).first();
+    } else {
+      userLocator = null;
+      for (const sel of AUTO_USER_SELECTORS) {
+        const loc = page.locator(sel).first();
+        if (await loc.isVisible({ timeout: 1000 }).catch(() => false)) {
+          userLocator = loc;
+          break;
+        }
+      }
+      if (!userLocator) {
+        return errorResponse(
+          command.id,
+          `Auth login failed for '${command.name}': could not find username field. ` +
+            `Specify --username-selector with auth save.`
+        );
+      }
+    }
+
+    // Resolve submit button: custom selector or sequential auto-detect
+    let submitLocator;
+    if (profile.submitSelector) {
+      submitLocator = page.locator(profile.submitSelector).first();
+    } else {
+      submitLocator = null;
+      for (const sel of AUTO_SUBMIT_SELECTORS) {
+        const loc = page.locator(sel).first();
+        if (await loc.isVisible({ timeout: 1000 }).catch(() => false)) {
+          submitLocator = loc;
+          break;
+        }
+      }
+      if (!submitLocator) {
+        return errorResponse(
+          command.id,
+          `Auth login failed for '${command.name}': could not find submit button. ` +
+            `Specify --submit-selector with auth save.`
+        );
+      }
+    }
+
+    await userLocator.fill(profile.username);
     await page.locator(passSel).first().fill(profile.password);
-    await page.locator(submitSel).first().click();
+    await submitLocator.click();
     await page.waitForLoadState('load');
   } catch (err) {
     return errorResponse(
@@ -2793,34 +2798,19 @@ async function handleAuthLogin(
   });
 }
 
-function handleAuthList(command: AuthListCommand): Response {
-  const profiles = listAuthProfiles();
-  return successResponse(command.id, { profiles });
-}
-
-function handleAuthDelete(command: AuthDeleteCommand): Response {
-  const deleted = deleteAuthProfile(command.name);
-  if (!deleted) {
-    return errorResponse(command.id, `Auth profile '${command.name}' not found`);
-  }
-  return successResponse(command.id, { deleted: true, name: command.name });
-}
-
-function handleAuthShow(command: AuthShowCommand): Response {
-  const meta = getAuthProfileMeta(command.name);
-  if (!meta) {
-    return errorResponse(command.id, `Auth profile '${command.name}' not found`);
-  }
-  return successResponse(command.id, { profile: meta });
-}
-
 async function handleConfirm(command: ConfirmCommand, browser: BrowserManager): Promise<Response> {
   const entry = getAndRemovePending(command.confirmationId);
   if (!entry) {
     return errorResponse(command.id, `No pending confirmation with id '${command.confirmationId}'`);
   }
 
-  const originalCommand = entry.command as unknown as Command;
+  // Re-validate the stored command through the schema to guard against
+  // shape drift between when the confirmation was issued and now.
+  const parseResult = parseCommand(JSON.stringify(entry.command));
+  if (!parseResult.success) {
+    return errorResponse(command.id, `Stored command is no longer valid: ${parseResult.error}`);
+  }
+  const originalCommand = parseResult.command;
 
   // Re-check deny list in case policy was updated since the confirmation was issued
   actionPolicy = reloadPolicyIfChanged();
