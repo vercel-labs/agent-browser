@@ -74,6 +74,12 @@ Every CLI flag can be set in the config file using its camelCase equivalent:
     <tr><td><code>autoConnect</code></td><td><code>--auto-connect</code></td><td>boolean</td></tr>
     <tr><td><code>colorScheme</code></td><td><code>--color-scheme</code></td><td>string (<code>dark</code>, <code>light</code>, <code>no-preference</code>)</td></tr>
     <tr><td><code>downloadPath</code></td><td><code>--download-path</code></td><td>string</td></tr>
+    <tr><td><code>contentBoundaries</code></td><td><code>--content-boundaries</code></td><td>boolean</td></tr>
+    <tr><td><code>maxOutput</code></td><td><code>--max-output</code></td><td>number</td></tr>
+    <tr><td><code>allowedDomains</code></td><td><code>--allowed-domains</code></td><td>string[]</td></tr>
+    <tr><td><code>actionPolicy</code></td><td><code>--action-policy</code></td><td>string</td></tr>
+    <tr><td><code>confirmActions</code></td><td><code>--confirm-actions</code></td><td>string</td></tr>
+    <tr><td><code>confirmInteractive</code></td><td><code>--confirm-interactive</code></td><td>boolean</td></tr>
     <tr><td><code>headers</code></td><td><code>--headers</code></td><td>string (JSON)</td></tr>
   </tbody>
 </table>
@@ -117,6 +123,17 @@ Every CLI flag can be set in the config file using its camelCase equivalent:
 }
 ```
 
+### AI Agent Security
+
+```json
+{
+  "contentBoundaries": true,
+  "maxOutput": 50000,
+  "allowedDomains": ["your-app.com", "*.your-app.com"],
+  "actionPolicy": "./policy.json"
+}
+```
+
 ## Overriding Boolean Options
 
 Boolean flags accept an optional `true`/`false` value to override config settings:
@@ -132,7 +149,7 @@ agent-browser --headed open example.com       # same as --headed true
 agent-browser --headed true open example.com  # explicit
 ```
 
-This applies to all boolean flags: `--headed`, `--debug`, `--json`, `--ignore-https-errors`, `--allow-file-access`, `--auto-connect`.
+This applies to all boolean flags: `--headed`, `--debug`, `--json`, `--ignore-https-errors`, `--allow-file-access`, `--auto-connect`, `--content-boundaries`, `--confirm-interactive`.
 
 ## Extensions Merging
 
@@ -161,6 +178,12 @@ These environment variables configure additional daemon and runtime behavior:
     <tr><td><code>AGENT_BROWSER_IOS_DEVICE</code></td><td>Default iOS device name for the <code>ios</code> provider.</td><td>(none)</td></tr>
     <tr><td><code>AGENT_BROWSER_IOS_UDID</code></td><td>Default iOS device UDID for the <code>ios</code> provider.</td><td>(none)</td></tr>
     <tr><td><code>AGENT_BROWSER_DEBUG</code></td><td>Enable debug output (<code>1</code> to enable).</td><td>(disabled)</td></tr>
+    <tr><td><code>AGENT_BROWSER_CONTENT_BOUNDARIES</code></td><td>Wrap page output in boundary markers for LLM safety.</td><td>(disabled)</td></tr>
+    <tr><td><code>AGENT_BROWSER_MAX_OUTPUT</code></td><td>Max characters for page output (truncates beyond limit).</td><td>(unlimited)</td></tr>
+    <tr><td><code>AGENT_BROWSER_ALLOWED_DOMAINS</code></td><td>Comma-separated allowed domain patterns (e.g., <code>example.com,*.example.com</code>).</td><td>(unrestricted)</td></tr>
+    <tr><td><code>AGENT_BROWSER_ACTION_POLICY</code></td><td>Path to action policy JSON file.</td><td>(none)</td></tr>
+    <tr><td><code>AGENT_BROWSER_CONFIRM_ACTIONS</code></td><td>Comma-separated action categories requiring confirmation.</td><td>(none)</td></tr>
+    <tr><td><code>AGENT_BROWSER_CONFIRM_INTERACTIVE</code></td><td>Enable interactive confirmation prompts (auto-denies if stdin is not a TTY).</td><td>(disabled)</td></tr>
   </tbody>
 </table>
 

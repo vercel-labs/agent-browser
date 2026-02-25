@@ -4,6 +4,123 @@ export const metadata = pageMetadata("changelog")
 
 # Changelog
 
+## v0.15.0
+
+<p className="text-[#888] text-sm">February 2026</p>
+
+### New Features
+
+- **Authentication vault** -- Store credentials locally (always AES-256-GCM encrypted) and reference them by name. The LLM never sees passwords. Commands: `auth save`, `auth login`, `auth list`, `auth show`, `auth delete`. Passwords can be piped via stdin (`--password-stdin`) to avoid shell history exposure.
+- **Content boundary markers** -- `--content-boundaries` wraps page-sourced output in structural delimiters with a per-process CSPRNG nonce, so LLMs can distinguish trusted tool output from untrusted page content. In `--json` mode, a `_boundary` object is injected with `nonce` and `origin` fields.
+- **Domain allowlist** -- `--allowed-domains` restricts navigation, sub-resource requests, WebSocket connections, and EventSource streams to trusted domains. Supports exact match and wildcard prefix patterns (e.g., `*.example.com`).
+- **Action policy** -- `--action-policy` gates actions using a static JSON policy file with `allow`/`deny` lists across 13 action categories. Auth vault operations bypass policy enforcement.
+- **Action confirmation** -- `--confirm-actions` requires explicit approval for sensitive action categories. New `confirm` and `deny` commands for orchestrator use. `--confirm-interactive` enables human-in-the-loop terminal prompts (auto-denies if stdin is not a TTY). Pending confirmations auto-deny after 60 seconds.
+- **Output length limits** -- `--max-output` truncates large page outputs to prevent LLM context flooding.
+- **`--download-path` option** -- Set a default download directory via flag, `AGENT_BROWSER_DOWNLOAD_PATH` env var, or `downloadPath` config key. Without it, downloads go to a temporary directory deleted when the browser closes.
+- **`--selector` flag for scroll** -- Scroll within a specific container element instead of the page: `agent-browser scroll down 500 --selector "div.scroll-container"`
+
+```bash
+# Auth vault
+echo "pass" | agent-browser auth save github --url https://github.com/login --username user --password-stdin
+agent-browser auth login github
+
+# Security flags
+agent-browser --content-boundaries --allowed-domains "example.com,*.example.com" --max-output 50000 open https://example.com
+
+# Download path
+agent-browser --download-path ./downloads open https://example.com
+
+# Scroll within container
+agent-browser scroll down 500 --selector "div.content"
+```
+
+### Environment Variables
+
+Six new environment variables for security configuration: `AGENT_BROWSER_CONTENT_BOUNDARIES`, `AGENT_BROWSER_MAX_OUTPUT`, `AGENT_BROWSER_ALLOWED_DOMAINS`, `AGENT_BROWSER_ACTION_POLICY`, `AGENT_BROWSER_CONFIRM_ACTIONS`, `AGENT_BROWSER_CONFIRM_INTERACTIVE`.
+
+---
+
+## v0.14.0
+
+<p className="text-[#888] text-sm">February 2026</p>
+
+### New Features
+
+- **`keyboard` command** -- Type with real keystrokes, insert text, and press shortcuts at the currently focused element without needing a selector (`keyboard type`, `keyboard inserttext`).
+- **`--color-scheme` flag** -- Persistent dark/light mode preference across browser sessions via flag or `AGENT_BROWSER_COLOR_SCHEME` env var.
+
+```bash
+agent-browser keyboard type "Hello world"
+agent-browser keyboard inserttext "pasted text"
+agent-browser --color-scheme dark open https://example.com
+```
+
+### Bug Fixes
+
+- Fixed IPC EAGAIN errors (os error 35/11) with backpressure-aware socket writes, command serialization, and lowered default Playwright timeout to 25s (configurable via `AGENT_BROWSER_DEFAULT_TIMEOUT`).
+- Fixed remote debugging (CDP) reconnection.
+- Fixed state load failing when no browser is running.
+- Fixed `--annotate` flag warning appearing when not explicitly passed via CLI.
+
+---
+
+## v0.13.0
+
+<p className="text-[#888] text-sm">February 2026</p>
+
+### New Features
+
+- **Diff commands** -- Compare snapshots, screenshots, and URLs between page states. Run visual pixel diffs against baseline images, compare accessibility tree snapshots with customizable depth and selectors, and diff two URLs side-by-side with optional screenshot comparison.
+
+```bash
+agent-browser diff snapshot
+agent-browser diff screenshot --baseline before.png
+agent-browser diff url https://staging.example.com https://prod.example.com
+```
+
+---
+
+## v0.12.0
+
+<p className="text-[#888] text-sm">February 2026</p>
+
+### New Features
+
+- **Annotated screenshots** -- `--annotate` flag overlays numbered labels on interactive elements and prints a legend mapping each label to its element ref. Enables multimodal AI models to reason about visual layout while using the same `@eN` refs for subsequent interactions. Also settable via `AGENT_BROWSER_ANNOTATE` env var.
+
+```bash
+agent-browser screenshot --annotate
+```
+
+---
+
+## v0.11.1
+
+<p className="text-[#888] text-sm">February 2026</p>
+
+### Documentation
+
+- Added documentation for command chaining with `&&` across README, CLI help output, docs, and skill files.
+
+---
+
+## v0.11.0
+
+<p className="text-[#888] text-sm">February 2026</p>
+
+### New Features
+
+- **Configuration file support** -- Automatic loading from user (`~/.agent-browser/config.json`) and project (`./agent-browser.json`) directories with priority-based merging.
+- **Profiler commands** -- Chrome DevTools profiling with `profiler start` and `profiler stop`.
+- **Browser extension loading** -- `--extension` flag to load browser extensions.
+- **Storage state management** -- `state save` and `state load` commands for auth state persistence.
+- **iOS device emulation** -- `--device` flag for device emulation.
+- **Enhanced click** -- `--new-tab` option for click commands.
+- **Enhanced find** -- Additional actions and filtering options.
+- **CDP WebSocket URLs** -- `--cdp` now accepts WebSocket URLs in addition to ports.
+
+---
+
 ## v0.10.0
 
 <p className="text-[#888] text-sm">February 2026</p>

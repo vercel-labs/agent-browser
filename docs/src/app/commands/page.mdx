@@ -201,6 +201,49 @@ agent-browser errors --clear          # Clear error log
 agent-browser highlight <sel>         # Highlight element
 ```
 
+## Auth vault
+
+```bash
+agent-browser auth save <name> [opts]    # Save auth profile
+agent-browser auth login <name>          # Login using saved credentials
+agent-browser auth list                  # List saved profiles (names and URLs only)
+agent-browser auth show <name>           # Show profile metadata (no passwords)
+agent-browser auth delete <name>         # Delete a saved profile
+```
+
+Save options:
+
+- `--url <url>` -- login page URL (required)
+- `--username <user>` -- username (required)
+- `--password <pass>` -- password (required unless `--password-stdin`)
+- `--password-stdin` -- read password from stdin (recommended to avoid shell history exposure)
+- `--username-selector <sel>` -- custom CSS selector for username field
+- `--password-selector <sel>` -- custom CSS selector for password field
+- `--submit-selector <sel>` -- custom CSS selector for submit button
+
+```bash
+echo "pass" | agent-browser auth save github --url https://github.com/login --username user --password-stdin
+agent-browser auth login github
+agent-browser auth list
+```
+
+## Confirmation
+
+When `--confirm-actions` is set, certain action categories return a `confirmation_required` response instead of executing immediately. Use `confirm` or `deny` to approve or reject the action.
+
+```bash
+agent-browser confirm <confirmation-id>  # Approve a pending action
+agent-browser deny <confirmation-id>     # Deny a pending action
+```
+
+Pending confirmations auto-deny after 60 seconds.
+
+```bash
+agent-browser --confirm-actions eval,download eval "document.title"
+# Returns confirmation_required with ID
+agent-browser confirm c_8f3a1234
+```
+
 ## State management
 
 ```bash
@@ -253,6 +296,15 @@ agent-browser reload                  # Reload page
 --headed                 # Show browser window (not headless)
 --cdp <port|url>         # Connect via Chrome DevTools Protocol (port or WebSocket URL)
 --auto-connect           # Auto-discover and connect to running Chrome
+--color-scheme <scheme>  # Color scheme: dark, light, no-preference
+--download-path <path>   # Default download directory
+--content-boundaries     # Wrap page output in boundary markers for LLM safety
+--max-output <chars>     # Truncate page output to N characters
+--allowed-domains <list> # Comma-separated allowed domain patterns
+--action-policy <path>   # Path to action policy JSON file
+--confirm-actions <list> # Action categories requiring confirmation
+--confirm-interactive    # Interactive confirmation prompts (auto-denies if stdin is not a TTY)
+--config <path>          # Use a custom config file
 --debug                  # Debug output
 ```
 
