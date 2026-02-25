@@ -399,9 +399,9 @@ agent-browser --session-name secure open example.com
 
 agent-browser includes security features for safe AI agent deployments:
 
-- **Authentication Vault** -- Store credentials locally, reference by name. The LLM never sees passwords: `echo "pass" | agent-browser auth save github --url https://github.com/login --username user --password-stdin` then `agent-browser auth login github`
+- **Authentication Vault** -- Store credentials locally (always encrypted), reference by name. The LLM never sees passwords. A key is auto-generated at `~/.agent-browser/.encryption-key` if `AGENT_BROWSER_ENCRYPTION_KEY` is not set: `echo "pass" | agent-browser auth save github --url https://github.com/login --username user --password-stdin` then `agent-browser auth login github`
 - **Content Boundary Markers** -- Wrap page output in delimiters so LLMs can distinguish tool output from untrusted content: `--content-boundaries`
-- **Domain Allowlist** -- Restrict navigation to trusted domains: `--allowed-domains "example.com,*.example.com"`
+- **Domain Allowlist** -- Restrict navigation to trusted domains (wildcards like `*.example.com` also match the bare domain): `--allowed-domains "example.com,*.example.com"`
 - **Action Policy** -- Gate destructive actions with a static policy file: `--action-policy ./policy.json`
 - **Action Confirmation** -- Require explicit approval for sensitive action categories: `--confirm-actions eval,download`
 - **Output Length Limits** -- Prevent context flooding: `--max-output 50000`

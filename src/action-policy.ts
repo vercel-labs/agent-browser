@@ -170,6 +170,10 @@ const ACTION_CATEGORIES: Record<string, string> = {
   nth: 'get',
 };
 
+export const KNOWN_CATEGORIES = new Set(
+  Object.values(ACTION_CATEGORIES).filter((c) => c !== '_internal')
+);
+
 export function getActionCategory(action: string): string {
   return ACTION_CATEGORIES[action] ?? 'unknown';
 }
@@ -183,6 +187,18 @@ export function loadPolicyFile(policyPath: string): ActionPolicy {
     throw new Error(
       `Invalid action policy: "default" must be "allow" or "deny", got "${policy.default}"`
     );
+  }
+
+  for (const list of [policy.allow, policy.deny]) {
+    if (!list) continue;
+    for (const category of list) {
+      if (!KNOWN_CATEGORIES.has(category)) {
+        console.warn(
+          `[agent-browser] Warning: unrecognized action category "${category}" in policy file. ` +
+            `Known categories: ${[...KNOWN_CATEGORIES].sort().join(', ')}`
+        );
+      }
+    }
   }
 
   return policy;
@@ -251,9 +267,11 @@ export function describeAction(action: string, command: Record<string, unknown>)
     case 'type':
       return `Type into ${command.selector}`;
     case 'click':
+      return `Click ${command.selector}`;
     case 'dblclick':
+      return `Double-click ${command.selector}`;
     case 'tap':
-      return `${action} ${command.selector}`;
+      return `Tap ${command.selector}`;
     case 'download':
       return `Download via ${command.selector} to ${command.path}`;
     case 'upload':

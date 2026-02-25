@@ -41,7 +41,7 @@ agent-browser auth save myapp \
   --submit-selector "button.login"
 ```
 
-Profiles are stored in `~/.agent-browser/auth/` and encrypted with AES-256-GCM when `AGENT_BROWSER_ENCRYPTION_KEY` is set.
+Profiles are stored in `~/.agent-browser/auth/` and always encrypted with AES-256-GCM. If `AGENT_BROWSER_ENCRYPTION_KEY` is not set, a key is auto-generated at `~/.agent-browser/.encryption-key` on first use. Back up this file or set the environment variable explicitly for portability.
 
 ## Content Boundary Markers
 
@@ -75,7 +75,7 @@ agent-browser --allowed-domains "example.com,*.example.com,github.com" open http
 export AGENT_BROWSER_ALLOWED_DOMAINS="example.com,*.example.com"
 ```
 
-Supports exact match (`github.com`) and wildcard prefix (`*.example.com`). Both page navigations and sub-resource requests (scripts, images, fetch, XHR, etc.) to non-allowed domains are blocked, preventing data exfiltration. Non-http(s) sub-resources (data URIs, blobs) are still allowed. When a request is blocked, the command returns an error.
+Supports exact match (`github.com`) and wildcard prefix (`*.example.com`, which also matches the bare domain `example.com`). Both page navigations and sub-resource requests (scripts, images, fetch, XHR, etc.) to non-allowed domains are blocked, preventing data exfiltration. Non-http(s) sub-resources (data URIs, blobs) are still allowed. When a request is blocked, the command returns an error.
 
 Config file:
 
@@ -132,6 +132,8 @@ Example policy (restrictive):
     <tr><td><code>state</code></td><td>state save/load, cookies set, storage set</td></tr>
   </tbody>
 </table>
+
+Auth vault operations (`auth save`, `auth login`, `auth list`, `auth show`, `auth delete`) and other internal/meta operations bypass action policy enforcement since they are trusted local operations. Domain allowlist restrictions still apply to `auth login` navigations.
 
 ## Action Confirmation
 

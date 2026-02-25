@@ -203,27 +203,90 @@ pub struct DaemonResult {
     pub already_running: bool,
 }
 
-#[allow(clippy::too_many_arguments)]
+pub struct DaemonOptions<'a> {
+    pub headed: bool,
+    pub executable_path: Option<&'a str>,
+    pub extensions: &'a [String],
+    pub args: Option<&'a str>,
+    pub user_agent: Option<&'a str>,
+    pub proxy: Option<&'a str>,
+    pub proxy_bypass: Option<&'a str>,
+    pub ignore_https_errors: bool,
+    pub allow_file_access: bool,
+    pub profile: Option<&'a str>,
+    pub state: Option<&'a str>,
+    pub provider: Option<&'a str>,
+    pub device: Option<&'a str>,
+    pub session_name: Option<&'a str>,
+    pub download_path: Option<&'a str>,
+    pub allowed_domains: Option<&'a [String]>,
+    pub action_policy: Option<&'a str>,
+    pub confirm_actions: Option<&'a str>,
+}
+
+fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
+    cmd.env("AGENT_BROWSER_DAEMON", "1")
+        .env("AGENT_BROWSER_SESSION", session);
+
+    if opts.headed {
+        cmd.env("AGENT_BROWSER_HEADED", "1");
+    }
+    if let Some(path) = opts.executable_path {
+        cmd.env("AGENT_BROWSER_EXECUTABLE_PATH", path);
+    }
+    if !opts.extensions.is_empty() {
+        cmd.env("AGENT_BROWSER_EXTENSIONS", opts.extensions.join(","));
+    }
+    if let Some(a) = opts.args {
+        cmd.env("AGENT_BROWSER_ARGS", a);
+    }
+    if let Some(ua) = opts.user_agent {
+        cmd.env("AGENT_BROWSER_USER_AGENT", ua);
+    }
+    if let Some(p) = opts.proxy {
+        cmd.env("AGENT_BROWSER_PROXY", p);
+    }
+    if let Some(pb) = opts.proxy_bypass {
+        cmd.env("AGENT_BROWSER_PROXY_BYPASS", pb);
+    }
+    if opts.ignore_https_errors {
+        cmd.env("AGENT_BROWSER_IGNORE_HTTPS_ERRORS", "1");
+    }
+    if opts.allow_file_access {
+        cmd.env("AGENT_BROWSER_ALLOW_FILE_ACCESS", "1");
+    }
+    if let Some(prof) = opts.profile {
+        cmd.env("AGENT_BROWSER_PROFILE", prof);
+    }
+    if let Some(st) = opts.state {
+        cmd.env("AGENT_BROWSER_STATE", st);
+    }
+    if let Some(p) = opts.provider {
+        cmd.env("AGENT_BROWSER_PROVIDER", p);
+    }
+    if let Some(d) = opts.device {
+        cmd.env("AGENT_BROWSER_IOS_DEVICE", d);
+    }
+    if let Some(sn) = opts.session_name {
+        cmd.env("AGENT_BROWSER_SESSION_NAME", sn);
+    }
+    if let Some(dp) = opts.download_path {
+        cmd.env("AGENT_BROWSER_DOWNLOAD_PATH", dp);
+    }
+    if let Some(ad) = opts.allowed_domains {
+        cmd.env("AGENT_BROWSER_ALLOWED_DOMAINS", ad.join(","));
+    }
+    if let Some(ap) = opts.action_policy {
+        cmd.env("AGENT_BROWSER_ACTION_POLICY", ap);
+    }
+    if let Some(ca) = opts.confirm_actions {
+        cmd.env("AGENT_BROWSER_CONFIRM_ACTIONS", ca);
+    }
+}
+
 pub fn ensure_daemon(
     session: &str,
-    headed: bool,
-    executable_path: Option<&str>,
-    extensions: &[String],
-    args: Option<&str>,
-    user_agent: Option<&str>,
-    proxy: Option<&str>,
-    proxy_bypass: Option<&str>,
-    ignore_https_errors: bool,
-    allow_file_access: bool,
-    profile: Option<&str>,
-    state: Option<&str>,
-    provider: Option<&str>,
-    device: Option<&str>,
-    session_name: Option<&str>,
-    download_path: Option<&str>,
-    allowed_domains: Option<&[String]>,
-    action_policy: Option<&str>,
-    confirm_actions: Option<&str>,
+    opts: &DaemonOptions,
 ) -> Result<DaemonResult, String> {
     // Check if daemon is running AND responsive
     if is_daemon_running(session) && daemon_ready(session) {
@@ -308,81 +371,8 @@ pub fn ensure_daemon(
         use std::os::unix::process::CommandExt;
 
         let mut cmd = Command::new("node");
-        cmd.arg(daemon_path)
-            .env("AGENT_BROWSER_DAEMON", "1")
-            .env("AGENT_BROWSER_SESSION", session);
-
-        if headed {
-            cmd.env("AGENT_BROWSER_HEADED", "1");
-        }
-
-        if let Some(path) = executable_path {
-            cmd.env("AGENT_BROWSER_EXECUTABLE_PATH", path);
-        }
-
-        if !extensions.is_empty() {
-            cmd.env("AGENT_BROWSER_EXTENSIONS", extensions.join(","));
-        }
-
-        if let Some(a) = args {
-            cmd.env("AGENT_BROWSER_ARGS", a);
-        }
-
-        if let Some(ua) = user_agent {
-            cmd.env("AGENT_BROWSER_USER_AGENT", ua);
-        }
-
-        if let Some(p) = proxy {
-            cmd.env("AGENT_BROWSER_PROXY", p);
-        }
-
-        if let Some(pb) = proxy_bypass {
-            cmd.env("AGENT_BROWSER_PROXY_BYPASS", pb);
-        }
-
-        if ignore_https_errors {
-            cmd.env("AGENT_BROWSER_IGNORE_HTTPS_ERRORS", "1");
-        }
-
-        if allow_file_access {
-            cmd.env("AGENT_BROWSER_ALLOW_FILE_ACCESS", "1");
-        }
-
-        if let Some(prof) = profile {
-            cmd.env("AGENT_BROWSER_PROFILE", prof);
-        }
-
-        if let Some(st) = state {
-            cmd.env("AGENT_BROWSER_STATE", st);
-        }
-
-        if let Some(p) = provider {
-            cmd.env("AGENT_BROWSER_PROVIDER", p);
-        }
-
-        if let Some(d) = device {
-            cmd.env("AGENT_BROWSER_IOS_DEVICE", d);
-        }
-
-        if let Some(sn) = session_name {
-            cmd.env("AGENT_BROWSER_SESSION_NAME", sn);
-        }
-
-        if let Some(dp) = download_path {
-            cmd.env("AGENT_BROWSER_DOWNLOAD_PATH", dp);
-        }
-
-        if let Some(ad) = allowed_domains {
-            cmd.env("AGENT_BROWSER_ALLOWED_DOMAINS", ad.join(","));
-        }
-
-        if let Some(ap) = action_policy {
-            cmd.env("AGENT_BROWSER_ACTION_POLICY", ap);
-        }
-
-        if let Some(ca) = confirm_actions {
-            cmd.env("AGENT_BROWSER_CONFIRM_ACTIONS", ca);
-        }
+        cmd.arg(daemon_path);
+        apply_daemon_env(&mut cmd, session, opts);
 
         // Create new process group and session to fully detach
         unsafe {
@@ -407,81 +397,8 @@ pub fn ensure_daemon(
         // On Windows, call node directly. Command::new handles PATH resolution (node.exe or node.cmd)
         // and automatically quotes arguments containing spaces.
         let mut cmd = Command::new("node");
-        cmd.arg(daemon_path)
-            .env("AGENT_BROWSER_DAEMON", "1")
-            .env("AGENT_BROWSER_SESSION", session);
-
-        if headed {
-            cmd.env("AGENT_BROWSER_HEADED", "1");
-        }
-
-        if let Some(path) = executable_path {
-            cmd.env("AGENT_BROWSER_EXECUTABLE_PATH", path);
-        }
-
-        if !extensions.is_empty() {
-            cmd.env("AGENT_BROWSER_EXTENSIONS", extensions.join(","));
-        }
-
-        if let Some(a) = args {
-            cmd.env("AGENT_BROWSER_ARGS", a);
-        }
-
-        if let Some(ua) = user_agent {
-            cmd.env("AGENT_BROWSER_USER_AGENT", ua);
-        }
-
-        if let Some(p) = proxy {
-            cmd.env("AGENT_BROWSER_PROXY", p);
-        }
-
-        if let Some(pb) = proxy_bypass {
-            cmd.env("AGENT_BROWSER_PROXY_BYPASS", pb);
-        }
-
-        if ignore_https_errors {
-            cmd.env("AGENT_BROWSER_IGNORE_HTTPS_ERRORS", "1");
-        }
-
-        if allow_file_access {
-            cmd.env("AGENT_BROWSER_ALLOW_FILE_ACCESS", "1");
-        }
-
-        if let Some(prof) = profile {
-            cmd.env("AGENT_BROWSER_PROFILE", prof);
-        }
-
-        if let Some(st) = state {
-            cmd.env("AGENT_BROWSER_STATE", st);
-        }
-
-        if let Some(p) = provider {
-            cmd.env("AGENT_BROWSER_PROVIDER", p);
-        }
-
-        if let Some(d) = device {
-            cmd.env("AGENT_BROWSER_IOS_DEVICE", d);
-        }
-
-        if let Some(sn) = session_name {
-            cmd.env("AGENT_BROWSER_SESSION_NAME", sn);
-        }
-
-        if let Some(dp) = download_path {
-            cmd.env("AGENT_BROWSER_DOWNLOAD_PATH", dp);
-        }
-
-        if let Some(ad) = allowed_domains {
-            cmd.env("AGENT_BROWSER_ALLOWED_DOMAINS", ad.join(","));
-        }
-
-        if let Some(ap) = action_policy {
-            cmd.env("AGENT_BROWSER_ACTION_POLICY", ap);
-        }
-
-        if let Some(ca) = confirm_actions {
-            cmd.env("AGENT_BROWSER_CONFIRM_ACTIONS", ca);
-        }
+        cmd.arg(daemon_path);
+        apply_daemon_env(&mut cmd, session, opts);
 
         // CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS
         const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;

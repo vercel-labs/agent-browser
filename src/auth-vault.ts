@@ -10,9 +10,11 @@ import path from 'node:path';
 import os from 'node:os';
 import {
   getEncryptionKey,
+  ensureEncryptionKey,
   encryptData,
   decryptData,
   isEncryptedPayload,
+  getKeyFilePath,
   type EncryptedPayload,
 } from './encryption.js';
 
@@ -71,7 +73,10 @@ function readProfile(name: string): AuthProfile | null {
   if (isEncryptedPayload(parsed)) {
     const key = getEncryptionKey();
     if (!key) {
-      throw new Error('AGENT_BROWSER_ENCRYPTION_KEY is required to read encrypted auth profiles');
+      throw new Error(
+        `Encryption key required to read encrypted auth profiles. ` +
+          `Set AGENT_BROWSER_ENCRYPTION_KEY or ensure ${getKeyFilePath()} exists.`
+      );
     }
     const decrypted = decryptData(parsed as EncryptedPayload, key);
     return JSON.parse(decrypted) as AuthProfile;
@@ -81,17 +86,12 @@ function readProfile(name: string): AuthProfile | null {
 }
 
 function writeProfile(profile: AuthProfile): void {
-  const key = getEncryptionKey();
+  const key = ensureEncryptionKey();
   const serialized = JSON.stringify(profile, null, 2);
-
-  if (key) {
-    const encrypted = encryptData(serialized, key);
-    writeFileSync(profilePath(profile.name), JSON.stringify(encrypted, null, 2), {
-      mode: 0o600,
-    });
-  } else {
-    writeFileSync(profilePath(profile.name), serialized, { mode: 0o600 });
-  }
+  const encrypted = encryptData(serialized, key);
+  writeFileSync(profilePath(profile.name), JSON.stringify(encrypted, null, 2), {
+    mode: 0o600,
+  });
 }
 
 export function saveAuthProfile(opts: {

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
@@ -7,6 +7,7 @@ import {
   checkPolicy,
   loadPolicyFile,
   describeAction,
+  KNOWN_CATEGORIES,
   type ActionPolicy,
 } from './action-policy.js';
 
@@ -145,6 +146,33 @@ describe('action-policy', () => {
       fs.writeFileSync(policyPath, 'not json');
       expect(() => loadPolicyFile(policyPath)).toThrow();
     });
+
+    it('should warn on unrecognized category names', () => {
+      const policyPath = path.join(tempDir, 'policy.json');
+      fs.writeFileSync(
+        policyPath,
+        JSON.stringify({ default: 'allow', deny: ['eval', 'typo_category'] })
+      );
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const policy = loadPolicyFile(policyPath);
+      expect(policy.default).toBe('allow');
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('unrecognized action category "typo_category"')
+      );
+      warnSpy.mockRestore();
+    });
+
+    it('should not warn on valid category names', () => {
+      const policyPath = path.join(tempDir, 'policy.json');
+      fs.writeFileSync(
+        policyPath,
+        JSON.stringify({ default: 'deny', allow: ['navigate', 'snapshot', 'get'] })
+      );
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      loadPolicyFile(policyPath);
+      expect(warnSpy).not.toHaveBeenCalled();
+      warnSpy.mockRestore();
+    });
   });
 
   describe('describeAction', () => {
@@ -162,7 +190,15 @@ describe('action-policy', () => {
     });
 
     it('should describe click actions', () => {
-      expect(describeAction('click', { selector: '#btn' })).toBe('click #btn');
+      expect(describeAction('click', { selector: '#btn' })).toBe('Click #btn');
+    });
+
+    it('should describe dblclick actions', () => {
+      expect(describeAction('dblclick', { selector: '#btn' })).toBe('Double-click #btn');
+    });
+
+    it('should describe tap actions', () => {
+      expect(describeAction('tap', { selector: '#btn' })).toBe('Tap #btn');
     });
 
     it('should describe fill actions', () => {

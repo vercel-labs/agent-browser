@@ -13,6 +13,7 @@ fn get_boundary_nonce() -> &'static str {
     })
 }
 
+#[derive(Default)]
 pub struct OutputOptions {
     pub json: bool,
     pub content_boundaries: bool,
@@ -238,16 +239,24 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
         }
         // Console logs
         if let Some(logs) = data.get("messages").and_then(|v| v.as_array()) {
-            let mut console_output = String::new();
-            for log in logs {
-                let level = log.get("type").and_then(|v| v.as_str()).unwrap_or("log");
-                let text = log.get("text").and_then(|v| v.as_str()).unwrap_or("");
-                console_output.push_str(&format!("{} {}\n", color::console_level_prefix(level), text));
+            if opts.content_boundaries {
+                let mut console_output = String::new();
+                for log in logs {
+                    let level = log.get("type").and_then(|v| v.as_str()).unwrap_or("log");
+                    let text = log.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                    console_output.push_str(&format!("{} {}\n", color::console_level_prefix(level), text));
+                }
+                if console_output.ends_with('\n') {
+                    console_output.pop();
+                }
+                print_with_boundaries(&console_output, origin, opts);
+            } else {
+                for log in logs {
+                    let level = log.get("type").and_then(|v| v.as_str()).unwrap_or("log");
+                    let text = log.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                    println!("{} {}", color::console_level_prefix(level), text);
+                }
             }
-            if console_output.ends_with('\n') {
-                console_output.pop();
-            }
-            print_with_boundaries(&console_output, origin, opts);
             return;
         }
         // Errors

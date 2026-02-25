@@ -3,6 +3,9 @@
  */
 
 import * as crypto from 'crypto';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import os from 'node:os';
 
 // ============================================
 // Constants
@@ -10,6 +13,7 @@ import * as crypto from 'crypto';
 export const ENCRYPTION_ALGORITHM = 'aes-256-gcm';
 export const ENCRYPTION_KEY_ENV = 'AGENT_BROWSER_ENCRYPTION_KEY';
 export const IV_LENGTH = 12; // 96 bits for GCM
+const KEY_FILE_NAME = '.encryption-key';
 
 /**
  * Encrypted payload structure.
@@ -22,27 +26,78 @@ export interface EncryptedPayload {
   data: string; // Base64 encoded ciphertext
 }
 
+export function getKeyFilePath(): string {
+  return join(os.homedir(), '.agent-browser', KEY_FILE_NAME);
+}
+
+function parseKeyHex(keyHex: string): Buffer | null {
+  if (!/^[a-fA-F0-9]{64}$/.test(keyHex.trim())) return null;
+  return Buffer.from(keyHex.trim(), 'hex');
+}
+
 /**
- * Get encryption key from environment variable.
+ * Get encryption key from environment variable or key file.
  * The key should be a 32-byte (256-bit) hex-encoded string (64 characters).
  * Generate with: openssl rand -hex 32
  *
- * @returns Buffer containing the key, or null if not set/invalid
+ * Checks (in order):
+ * 1. AGENT_BROWSER_ENCRYPTION_KEY env var
+ * 2. ~/.agent-browser/.encryption-key file
+ *
+ * @returns Buffer containing the key, or null if not available
  */
 export function getEncryptionKey(): Buffer | null {
   const keyHex = process.env[ENCRYPTION_KEY_ENV];
-  if (!keyHex) return null;
-
-  // Key should be 64 hex chars = 32 bytes = 256 bits
-  if (!/^[a-fA-F0-9]{64}$/.test(keyHex)) {
-    console.warn(
-      `Warning: ${ENCRYPTION_KEY_ENV} should be a 64-character hex string (256 bits). ` +
-        `Generate one with: openssl rand -hex 32`
-    );
-    return null;
+  if (keyHex) {
+    const key = parseKeyHex(keyHex);
+    if (!key) {
+      console.warn(
+        `Warning: ${ENCRYPTION_KEY_ENV} should be a 64-character hex string (256 bits). ` +
+          `Generate one with: openssl rand -hex 32`
+      );
+      return null;
+    }
+    return key;
   }
 
-  return Buffer.from(keyHex, 'hex');
+  const keyFilePath = getKeyFilePath();
+  if (existsSync(keyFilePath)) {
+    try {
+      const fileHex = readFileSync(keyFilePath, 'utf-8');
+      return parseKeyHex(fileHex);
+    } catch {
+      return null;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Ensure an encryption key is available, auto-generating one if needed.
+ * On first call without an existing key, generates a random 256-bit key
+ * and writes it to ~/.agent-browser/.encryption-key (mode 0600).
+ */
+export function ensureEncryptionKey(): Buffer {
+  const existing = getEncryptionKey();
+  if (existing) return existing;
+
+  const key = crypto.randomBytes(32);
+  const keyHex = key.toString('hex');
+
+  const dir = join(os.homedir(), '.agent-browser');
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+  }
+
+  const keyFilePath = getKeyFilePath();
+  writeFileSync(keyFilePath, keyHex + '\n', { mode: 0o600 });
+
+  console.error(
+    `[agent-browser] Auto-generated encryption key at ${keyFilePath} -- back up this file or set ${ENCRYPTION_KEY_ENV}`
+  );
+
+  return key;
 }
 
 /**

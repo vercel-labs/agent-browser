@@ -281,7 +281,7 @@ agent-browser snapshot
 
 ### Domain Allowlist
 
-Restrict navigation to trusted domains:
+Restrict navigation to trusted domains. Wildcards like `*.example.com` also match the bare domain `example.com`:
 
 ```bash
 export AGENT_BROWSER_ALLOWED_DOMAINS="example.com,*.example.com"
@@ -301,6 +301,8 @@ Example `policy.json`:
 ```json
 {"default": "deny", "allow": ["navigate", "snapshot", "click", "scroll", "wait", "get"]}
 ```
+
+Auth vault operations (`auth login`, etc.) bypass action policy but domain allowlist still applies.
 
 ### Output Limits
 

@@ -236,4 +236,43 @@ describe('auth-vault', () => {
       expect(metaAfter!.lastLoginAt).toBeTruthy();
     });
   });
+
+  describe('auto-generated encryption key', () => {
+    it('should auto-create key file and encrypt profile when no env var is set', () => {
+      delete process.env.AGENT_BROWSER_ENCRYPTION_KEY;
+
+      saveAuthProfile({
+        name: 'autokey',
+        url: 'https://example.com',
+        username: 'user',
+        password: 'secret',
+      });
+
+      const keyFilePath = path.join(tempHome, '.agent-browser', '.encryption-key');
+      expect(fs.existsSync(keyFilePath)).toBe(true);
+
+      const keyHex = fs.readFileSync(keyFilePath, 'utf-8').trim();
+      expect(keyHex).toMatch(/^[a-f0-9]{64}$/);
+
+      const profilePath = path.join(tempHome, '.agent-browser', 'auth', 'autokey.json');
+      const raw = JSON.parse(fs.readFileSync(profilePath, 'utf-8'));
+      expect(raw.encrypted).toBe(true);
+      expect(raw.iv).toBeTruthy();
+    });
+
+    it('should read back profile using auto-generated key', () => {
+      delete process.env.AGENT_BROWSER_ENCRYPTION_KEY;
+
+      saveAuthProfile({
+        name: 'readback',
+        url: 'https://example.com',
+        username: 'user',
+        password: 'secret123',
+      });
+
+      const profile = getAuthProfile('readback');
+      expect(profile).not.toBeNull();
+      expect(profile!.password).toBe('secret123');
+    });
+  });
 });

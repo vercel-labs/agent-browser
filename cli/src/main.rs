@@ -17,7 +17,7 @@ use windows_sys::Win32::Foundation::CloseHandle;
 use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
 
 use commands::{gen_id, parse_command, ParseError};
-use connection::{ensure_daemon, get_socket_dir, send_command};
+use connection::{ensure_daemon, get_socket_dir, send_command, DaemonOptions};
 use flags::{clean_args, parse_flags};
 use install::run_install;
 use output::{print_command_help, print_help, print_response_with_opts, print_version, OutputOptions};
@@ -234,28 +234,27 @@ fn main() {
         }
     }
 
-    let daemon_result = match ensure_daemon(
-        &flags.session,
-        flags.headed,
-        flags.executable_path.as_deref(),
-        &flags.extensions,
-        flags.args.as_deref(),
-        flags.user_agent.as_deref(),
-        flags.proxy.as_deref(),
-        flags.proxy_bypass.as_deref(),
-        flags.ignore_https_errors,
-        flags.allow_file_access,
-        flags.profile.as_deref(),
-        flags.state.as_deref(),
-        flags.provider.as_deref(),
-        flags.device.as_deref(),
-        flags.session_name.as_deref(),
-        flags.download_path.as_deref(),
-        flags.allowed_domains.as_deref(),
-        flags.action_policy.as_deref(),
-
-        flags.confirm_actions.as_deref(),
-    ) {
+    let daemon_opts = DaemonOptions {
+        headed: flags.headed,
+        executable_path: flags.executable_path.as_deref(),
+        extensions: &flags.extensions,
+        args: flags.args.as_deref(),
+        user_agent: flags.user_agent.as_deref(),
+        proxy: flags.proxy.as_deref(),
+        proxy_bypass: flags.proxy_bypass.as_deref(),
+        ignore_https_errors: flags.ignore_https_errors,
+        allow_file_access: flags.allow_file_access,
+        profile: flags.profile.as_deref(),
+        state: flags.state.as_deref(),
+        provider: flags.provider.as_deref(),
+        device: flags.device.as_deref(),
+        session_name: flags.session_name.as_deref(),
+        download_path: flags.download_path.as_deref(),
+        allowed_domains: flags.allowed_domains.as_deref(),
+        action_policy: flags.action_policy.as_deref(),
+        confirm_actions: flags.confirm_actions.as_deref(),
+    };
+    let daemon_result = match ensure_daemon(&flags.session, &daemon_opts) {
         Ok(result) => result,
         Err(e) => {
             if flags.json {
