@@ -279,6 +279,17 @@ pub fn ensure_daemon(
     let exe_path = env::current_exe().map_err(|e| e.to_string())?;
     // Canonicalize to resolve symlinks (e.g., npm global bin symlink -> actual binary)
     let exe_path = exe_path.canonicalize().unwrap_or(exe_path);
+    // On Windows, canonicalize returns \\?\ prefixed paths (extended-length paths).
+    // Node.js cannot handle these paths, so strip the prefix.
+    #[cfg(windows)]
+    let exe_path = {
+        let p = exe_path.to_string_lossy();
+        if let Some(stripped) = p.strip_prefix(r"\\?\") {
+            PathBuf::from(stripped)
+        } else {
+            exe_path
+        }
+    };
     let exe_dir = exe_path.parent().unwrap();
 
     let mut daemon_paths = vec![
@@ -477,9 +488,14 @@ pub fn ensure_daemon(
         thread::sleep(Duration::from_millis(100));
     }
 
+    #[cfg(unix)]
+    let socket_info = format!("socket: {}", get_socket_dir().join(format!("{}.sock", session)).display());
+    #[cfg(windows)]
+    let socket_info = format!("port: {} (TCP {})", get_socket_dir().join(format!("{}.port", session)).display(), get_port_for_session(session));
+
     Err(format!(
-        "Daemon failed to start (socket: {})",
-        get_socket_dir().join(format!("{}.sock", session)).display()
+        "Daemon failed to start ({})",
+        socket_info
     ))
 }
 
