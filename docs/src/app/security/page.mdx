@@ -11,6 +11,10 @@ Store credentials locally and reference them by name. The LLM never sees passwor
 
 ```bash
 # Save credentials (encrypted if AGENT_BROWSER_ENCRYPTION_KEY is set)
+# Recommended: pipe password via stdin to avoid shell history / process listing exposure
+echo "pass" | agent-browser auth save github --url https://github.com/login --username user --password-stdin
+
+# Or pass directly (a warning will be shown)
 agent-browser auth save github --url https://github.com/login --username user --password pass
 
 # Login using saved credentials
@@ -63,7 +67,7 @@ Affected output types: `snapshot`, `get text`, `get html`, `eval`, `console`.
 
 ## Domain Allowlist
 
-Restrict which domains the browser can navigate to, preventing redirect-based attacks:
+Restrict which domains the browser can interact with, preventing redirect-based attacks and data exfiltration:
 
 ```bash
 agent-browser --allowed-domains "example.com,*.example.com,github.com" open https://example.com
@@ -71,7 +75,7 @@ agent-browser --allowed-domains "example.com,*.example.com,github.com" open http
 export AGENT_BROWSER_ALLOWED_DOMAINS="example.com,*.example.com"
 ```
 
-Supports exact match (`github.com`) and wildcard prefix (`*.example.com`). When navigation is blocked, the command returns an error.
+Supports exact match (`github.com`) and wildcard prefix (`*.example.com`). Both page navigations and sub-resource requests (scripts, images, fetch, XHR, etc.) to non-allowed domains are blocked, preventing data exfiltration. Non-http(s) sub-resources (data URIs, blobs) are still allowed. When a request is blocked, the command returns an error.
 
 Config file:
 
@@ -117,7 +121,7 @@ Example policy (restrictive):
     <tr><td><code>navigate</code></td><td>open, back, forward, reload, tab new</td></tr>
     <tr><td><code>click</code></td><td>click, dblclick, tap</td></tr>
     <tr><td><code>fill</code></td><td>fill, type, keyboard type/inserttext, select, check, uncheck</td></tr>
-    <tr><td><code>eval</code></td><td>eval, evalhandle, addscript, addinitscript</td></tr>
+    <tr><td><code>eval</code></td><td>eval, evalhandle, addscript, addinitscript, addstyle, expose, setcontent</td></tr>
     <tr><td><code>download</code></td><td>download, waitfordownload</td></tr>
     <tr><td><code>upload</code></td><td>upload</td></tr>
     <tr><td><code>snapshot</code></td><td>snapshot, screenshot, pdf, diff</td></tr>

@@ -575,6 +575,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                     let mut url = None;
                     let mut username = None;
                     let mut password = None;
+                    let mut password_stdin = false;
                     let mut username_selector = None;
                     let mut password_selector = None;
                     let mut submit_selector = None;
@@ -585,26 +586,37 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                             "--url" => { url = rest.get(j + 1).cloned(); j += 1; }
                             "--username" => { username = rest.get(j + 1).cloned(); j += 1; }
                             "--password" => { password = rest.get(j + 1).cloned(); j += 1; }
+                            "--password-stdin" => { password_stdin = true; }
                             "--username-selector" => { username_selector = rest.get(j + 1).cloned(); j += 1; }
                             "--password-selector" => { password_selector = rest.get(j + 1).cloned(); j += 1; }
                             "--submit-selector" => { submit_selector = rest.get(j + 1).cloned(); j += 1; }
-                            _ => {}
+                            other => {
+                                if other.starts_with("--") {
+                                    return Err(ParseError::InvalidValue {
+                                        message: format!("unknown flag '{}' for auth save", other),
+                                        usage: "agent-browser auth save <name> --url <url> --username <user> --password <pass>",
+                                    });
+                                }
+                            }
                         }
                         j += 1;
                     }
 
                     let url_val = url.ok_or_else(|| ParseError::MissingArguments {
                         context: "auth save".to_string(),
-                        usage: "agent-browser auth save <name> --url <url> --username <user> --password <pass>",
+                        usage: "agent-browser auth save <name> --url <url> --username <user> --password <pass> [--password-stdin]",
                     })?;
                     let user_val = username.ok_or_else(|| ParseError::MissingArguments {
                         context: "auth save".to_string(),
-                        usage: "agent-browser auth save <name> --url <url> --username <user> --password <pass>",
+                        usage: "agent-browser auth save <name> --url <url> --username <user> --password <pass> [--password-stdin]",
                     })?;
-                    let pass_val = password.ok_or_else(|| ParseError::MissingArguments {
-                        context: "auth save".to_string(),
-                        usage: "agent-browser auth save <name> --url <url> --username <user> --password <pass>",
-                    })?;
+
+                    if !password_stdin && password.is_none() {
+                        return Err(ParseError::MissingArguments {
+                            context: "auth save".to_string(),
+                            usage: "agent-browser auth save <name> --url <url> --username <user> --password <pass> [--password-stdin]",
+                        });
+                    }
 
                     let mut cmd = json!({
                         "id": id,
@@ -612,8 +624,13 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                         "name": name,
                         "url": url_val,
                         "username": user_val,
-                        "password": pass_val,
                     });
+                    if password_stdin {
+                        cmd["passwordStdin"] = json!(true);
+                    }
+                    if let Some(pass_val) = password {
+                        cmd["password"] = json!(pass_val);
+                    }
                     if let Some(us) = username_selector {
                         cmd["usernameSelector"] = json!(us);
                     }
@@ -2051,6 +2068,7 @@ mod tests {
             action_policy: None,
             confirm_actions: None,
             confirm_interactive: false,
+
         }
     }
 

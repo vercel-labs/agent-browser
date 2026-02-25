@@ -221,7 +221,7 @@ pub fn ensure_daemon(
     device: Option<&str>,
     session_name: Option<&str>,
     download_path: Option<&str>,
-    allowed_domains: Option<&str>,
+    allowed_domains: Option<&[String]>,
     action_policy: Option<&str>,
     confirm_actions: Option<&str>,
 ) -> Result<DaemonResult, String> {
@@ -373,7 +373,7 @@ pub fn ensure_daemon(
         }
 
         if let Some(ad) = allowed_domains {
-            cmd.env("AGENT_BROWSER_ALLOWED_DOMAINS", ad);
+            cmd.env("AGENT_BROWSER_ALLOWED_DOMAINS", ad.join(","));
         }
 
         if let Some(ap) = action_policy {
@@ -472,7 +472,7 @@ pub fn ensure_daemon(
         }
 
         if let Some(ad) = allowed_domains {
-            cmd.env("AGENT_BROWSER_ALLOWED_DOMAINS", ad);
+            cmd.env("AGENT_BROWSER_ALLOWED_DOMAINS", ad.join(","));
         }
 
         if let Some(ap) = action_policy {

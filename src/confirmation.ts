@@ -51,7 +51,3 @@ export function getAndRemovePending(
   pending.delete(id);
   return { command: entry.command, action: entry.action };
 }
-
-export function hasPendingConfirmation(id: string): boolean {
-  return pending.has(id);
-}

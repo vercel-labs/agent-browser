@@ -2738,6 +2738,8 @@ async function handleAuthLogin(
     return errorResponse(command.id, `Auth profile '${command.name}' not found`);
   }
 
+  browser.checkDomainAllowed(profile.url);
+
   const page = browser.getPage();
   await page.goto(profile.url, { waitUntil: 'load' });
 

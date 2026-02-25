@@ -225,7 +225,7 @@ pub struct Flags {
     pub download_path: Option<String>,
     pub content_boundaries: bool,
     pub max_output: Option<usize>,
-    pub allowed_domains: Option<String>,
+    pub allowed_domains: Option<Vec<String>>,
     pub action_policy: Option<String>,
     pub confirm_actions: Option<String>,
     pub confirm_interactive: bool,
@@ -320,7 +320,8 @@ pub fn parse_flags(args: &[String]) -> Flags {
             .and_then(|s| s.parse().ok())
             .or(config.max_output),
         allowed_domains: env::var("AGENT_BROWSER_ALLOWED_DOMAINS").ok()
-            .or(config.allowed_domains.as_ref().map(|v| v.join(","))),
+            .map(|s| s.split(',').map(|d| d.trim().to_lowercase()).filter(|d| !d.is_empty()).collect())
+            .or(config.allowed_domains),
         action_policy: env::var("AGENT_BROWSER_ACTION_POLICY").ok()
             .or(config.action_policy),
         confirm_actions: env::var("AGENT_BROWSER_CONFIRM_ACTIONS").ok()
@@ -505,7 +506,9 @@ pub fn parse_flags(args: &[String]) -> Flags {
             }
             "--allowed-domains" => {
                 if let Some(s) = args.get(i + 1) {
-                    flags.allowed_domains = Some(s.clone());
+                    flags.allowed_domains = Some(
+                        s.split(',').map(|d| d.trim().to_lowercase()).filter(|d| !d.is_empty()).collect()
+                    );
                     i += 1;
                 }
             }

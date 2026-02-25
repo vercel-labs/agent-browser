@@ -26,9 +26,11 @@ export function parseDomainList(raw: string): string[] {
 }
 
 /**
- * Installs a context-level route that blocks navigation to domains not in the allowlist.
- * Only document requests (page navigations) are blocked; sub-resources are allowed
- * so pages that are already loaded continue to function.
+ * Installs a context-level route that enforces the domain allowlist.
+ * Both document navigations and sub-resource requests (scripts, images, fetch, etc.)
+ * to non-allowed domains are blocked, preventing data exfiltration.
+ * Non-http(s) schemes (data:, blob:, etc.) are allowed for sub-resources
+ * but blocked for document navigations.
  */
 export async function installDomainFilter(
   context: BrowserContext,
@@ -38,16 +40,14 @@ export async function installDomainFilter(
 
   await context.route('**/*', async (route: Route) => {
     const request = route.request();
-    if (request.resourceType() !== 'document') {
-      await route.continue();
-      return;
-    }
-
     const urlStr = request.url();
 
-    // Block non-http(s) schemes (data:, javascript:, etc.)
     if (!urlStr.startsWith('http://') && !urlStr.startsWith('https://')) {
-      await route.abort('blockedbyclient');
+      if (request.resourceType() === 'document') {
+        await route.abort('blockedbyclient');
+      } else {
+        await route.continue();
+      }
       return;
     }
 

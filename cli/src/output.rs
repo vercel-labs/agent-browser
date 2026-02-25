@@ -1,5 +1,3 @@
-use std::collections::hash_map::RandomState;
-use std::hash::{BuildHasher, Hasher};
 use std::sync::OnceLock;
 
 use crate::color;
@@ -9,10 +7,9 @@ static BOUNDARY_NONCE: OnceLock<String> = OnceLock::new();
 
 fn get_boundary_nonce() -> &'static str {
     BOUNDARY_NONCE.get_or_init(|| {
-        let state = RandomState::new();
-        let mut hasher = state.build_hasher();
-        hasher.write_u8(0);
-        format!("{:08x}", hasher.finish() as u32)
+        let mut buf = [0u8; 16];
+        getrandom::getrandom(&mut buf).expect("failed to generate random nonce");
+        buf.iter().map(|b| format!("{:02x}", b)).collect()
     })
 }
 
@@ -24,18 +21,15 @@ pub struct OutputOptions {
 
 fn truncate_if_needed(content: &str, max: Option<usize>) -> String {
     match max {
-        Some(limit) if content.len() > limit => {
-            // Find the largest valid UTF-8 char boundary at or before the byte limit
-            let safe_limit = (0..=limit)
-                .rev()
-                .find(|&i| content.is_char_boundary(i))
-                .unwrap_or(0);
-            let truncated = &content[..safe_limit];
+        Some(limit) => {
             let total_chars = content.chars().count();
-            let shown_chars = truncated.chars().count();
+            if total_chars <= limit {
+                return content.to_string();
+            }
+            let truncated: String = content.chars().take(limit).collect();
             format!(
                 "{}\n[truncated: showing {} of {} chars. Use --max-output to adjust]",
-                truncated, shown_chars, total_chars
+                truncated, limit, total_chars
             )
         }
         _ => content.to_string(),
@@ -1702,7 +1696,8 @@ Subcommands:
 Save Options:
   --url <url>              Login page URL (required)
   --username <user>        Username (required)
-  --password <pass>        Password (required)
+  --password <pass>        Password (required unless --password-stdin)
+  --password-stdin          Read password from stdin (recommended)
   --username-selector <s>  Custom CSS selector for username field
   --password-selector <s>  Custom CSS selector for password field
   --submit-selector <s>    Custom CSS selector for submit button
@@ -1712,6 +1707,7 @@ Global Options:
   --session <name>         Use specific session
 
 Examples:
+  echo "pass" | agent-browser auth save github --url https://github.com/login --username user --password-stdin
   agent-browser auth save github --url https://github.com/login --username user --password pass
   agent-browser auth login github
   agent-browser auth list
@@ -2267,7 +2263,7 @@ Debug:
   highlight <sel>            Highlight element
 
 Auth Vault:
-  auth save <name> [opts]    Save auth profile (--url, --username, --password)
+  auth save <name> [opts]    Save auth profile (--url, --username, --password/--password-stdin)
   auth login <name>          Login using saved credentials
   auth list                  List saved auth profiles
   auth show <name>           Show auth profile metadata

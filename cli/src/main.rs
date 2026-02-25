@@ -171,7 +171,7 @@ fn main() {
         return;
     }
 
-    let cmd = match parse_command(&clean, &flags) {
+    let mut cmd = match parse_command(&clean, &flags) {
         Ok(c) => c,
         Err(e) => {
             if flags.json {
@@ -193,6 +193,30 @@ fn main() {
             exit(1);
         }
     };
+
+    // Handle --password-stdin for auth save
+    if cmd.get("action").and_then(|v| v.as_str()) == Some("auth_save") {
+        if cmd.get("password").is_some() {
+            eprintln!(
+                "{} Passwords on the command line may be visible in process listings and shell history. Use --password-stdin instead.",
+                color::warning_indicator()
+            );
+        }
+        if cmd.get("passwordStdin").and_then(|v| v.as_bool()).unwrap_or(false) {
+            let mut pass = String::new();
+            if std::io::stdin().read_line(&mut pass).is_err() || pass.is_empty() {
+                eprintln!("{} Failed to read password from stdin", color::error_indicator());
+                exit(1);
+            }
+            let pass = pass.trim_end_matches('\n').trim_end_matches('\r');
+            if pass.is_empty() {
+                eprintln!("{} Password from stdin is empty", color::error_indicator());
+                exit(1);
+            }
+            cmd["password"] = json!(pass);
+            cmd.as_object_mut().unwrap().remove("passwordStdin");
+        }
+    }
 
     // Validate session name before starting daemon
     if let Some(ref name) = flags.session_name {
@@ -229,6 +253,7 @@ fn main() {
         flags.download_path.as_deref(),
         flags.allowed_domains.as_deref(),
         flags.action_policy.as_deref(),
+
         flags.confirm_actions.as_deref(),
     ) {
         Ok(result) => result,
@@ -592,8 +617,7 @@ fn main() {
         }
 
         if let Some(ref domains) = flags.allowed_domains {
-            let domain_list: Vec<&str> = domains.split(',').map(|d| d.trim()).filter(|d| !d.is_empty()).collect();
-            launch_cmd["allowedDomains"] = json!(domain_list);
+            launch_cmd["allowedDomains"] = json!(domains);
         }
 
         match send_command(launch_cmd, &flags.session) {

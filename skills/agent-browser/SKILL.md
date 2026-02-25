@@ -119,7 +119,8 @@ agent-browser wait --load networkidle
 
 ```bash
 # Save credentials once (encrypted with AGENT_BROWSER_ENCRYPTION_KEY)
-agent-browser auth save github --url https://github.com/login --username user --password pass
+# Recommended: pipe password via stdin to avoid shell history exposure
+echo "pass" | agent-browser auth save github --url https://github.com/login --username user --password-stdin
 
 # Login using saved profile (LLM never sees password)
 agent-browser auth login github
