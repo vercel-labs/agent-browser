@@ -397,7 +397,7 @@ agent-browser --session-name secure open example.com
 
 ## Security
 
-agent-browser includes security features for safe AI agent deployments:
+agent-browser includes security features for safe AI agent deployments. All features are opt-in -- existing workflows are unaffected until you explicitly enable a feature:
 
 - **Authentication Vault** -- Store credentials locally (always encrypted), reference by name. The LLM never sees passwords. A key is auto-generated at `~/.agent-browser/.encryption-key` if `AGENT_BROWSER_ENCRYPTION_KEY` is not set: `echo "pass" | agent-browser auth save github --url https://github.com/login --username user --password-stdin` then `agent-browser auth login github`
 - **Content Boundary Markers** -- Wrap page output in delimiters so LLMs can distinguish tool output from untrusted content: `--content-boundaries`

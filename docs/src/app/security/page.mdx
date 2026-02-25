@@ -5,6 +5,8 @@ export const metadata = pageMetadata("security")
 
 agent-browser includes security features to protect against credential exposure, prompt injection via untrusted page content, and unauthorized browser actions.
 
+All security features are opt-in. By default, agent-browser imposes no restrictions on navigation, actions, or output. Enable these features as needed for your deployment -- existing workflows are unaffected until you explicitly activate a feature.
+
 ## Threat Model
 
 These features are designed to mitigate the following threats when an LLM-based agent drives a browser:
