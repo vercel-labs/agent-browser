@@ -55,7 +55,23 @@ fn print_with_boundaries(content: &str, origin: Option<&str>, opts: &OutputOptio
 
 pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &OutputOptions) {
     if opts.json {
-        println!("{}", serde_json::to_string(resp).unwrap_or_default());
+        if opts.content_boundaries {
+            let mut json_val = serde_json::to_value(resp).unwrap_or_default();
+            if let Some(obj) = json_val.as_object_mut() {
+                let nonce = get_boundary_nonce();
+                let origin = obj.get("data")
+                    .and_then(|d| d.get("origin"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                obj.insert("_boundary".to_string(), serde_json::json!({
+                    "nonce": nonce,
+                    "origin": origin,
+                }));
+            }
+            println!("{}", serde_json::to_string(&json_val).unwrap_or_default());
+        } else {
+            println!("{}", serde_json::to_string(resp).unwrap_or_default());
+        }
         return;
     }
 

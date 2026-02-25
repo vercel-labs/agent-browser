@@ -281,7 +281,7 @@ agent-browser snapshot
 
 ### Domain Allowlist
 
-Restrict navigation to trusted domains. Wildcards like `*.example.com` also match the bare domain `example.com`:
+Restrict navigation to trusted domains. Wildcards like `*.example.com` also match the bare domain `example.com`. Sub-resource requests, WebSocket, and EventSource connections to non-allowed domains are also blocked. Include CDN domains your target pages depend on:
 
 ```bash
 export AGENT_BROWSER_ALLOWED_DOMAINS="example.com,*.example.com"

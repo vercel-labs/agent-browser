@@ -22,6 +22,10 @@ const ACTION_CATEGORIES: Record<string, string> = {
 
   fill: 'fill',
   type: 'fill',
+  // The `keyboard` action is a compound command that dispatches to sub-actions
+  // (type, inserttext, press, down, up). Its primary use is text input, so it
+  // maps to 'fill'. The interact-like sub-actions (press, down, up) are less
+  // common and don't have separate top-level action names in the protocol.
   keyboard: 'fill',
   inserttext: 'fill',
   select: 'fill',

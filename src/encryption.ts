@@ -3,6 +3,7 @@
  */
 
 import * as crypto from 'crypto';
+import { execSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import os from 'node:os';
@@ -28,6 +29,40 @@ export interface EncryptedPayload {
 
 export function getKeyFilePath(): string {
   return join(os.homedir(), '.agent-browser', KEY_FILE_NAME);
+}
+
+/**
+ * Restrict file permissions to the current user only.
+ * On Unix, the caller should use `mode: 0o600` when writing. This function
+ * handles Windows where Node's mode parameter is ignored.
+ */
+export function restrictFilePermissions(filePath: string): void {
+  if (os.platform() !== 'win32') return;
+  try {
+    execSync(`icacls "${filePath}" /inheritance:r /grant:r "%USERNAME%:F"`, {
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+  } catch {
+    // Best-effort; may fail in some environments (containers, restricted shells)
+  }
+}
+
+/**
+ * Restrict directory permissions to the current user only.
+ * On Unix, the caller should use `mode: 0o700` when creating. This function
+ * handles Windows where Node's mode parameter is ignored.
+ */
+export function restrictDirPermissions(dirPath: string): void {
+  if (os.platform() !== 'win32') return;
+  try {
+    execSync(`icacls "${dirPath}" /inheritance:r /grant:r "%USERNAME%:(OI)(CI)F"`, {
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+  } catch {
+    // Best-effort
+  }
 }
 
 function parseKeyHex(keyHex: string): Buffer | null {
@@ -88,10 +123,12 @@ export function ensureEncryptionKey(): Buffer {
   const dir = join(os.homedir(), '.agent-browser');
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true, mode: 0o700 });
+    restrictDirPermissions(dir);
   }
 
   const keyFilePath = getKeyFilePath();
   writeFileSync(keyFilePath, keyHex + '\n', { mode: 0o600 });
+  restrictFilePermissions(keyFilePath);
 
   console.error(
     `[agent-browser] Auto-generated encryption key at ${keyFilePath} -- back up this file or set ${ENCRYPTION_KEY_ENV}`

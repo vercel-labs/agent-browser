@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { isDomainAllowed, parseDomainList } from './domain-filter.js';
+import { isDomainAllowed, parseDomainList, buildWebSocketFilterScript } from './domain-filter.js';
 
 describe('domain-filter', () => {
   describe('isDomainAllowed', () => {
@@ -67,6 +67,39 @@ describe('domain-filter', () => {
 
     it('should preserve wildcard prefixes', () => {
       expect(parseDomainList('*.example.com')).toEqual(['*.example.com']);
+    });
+  });
+
+  describe('buildWebSocketFilterScript', () => {
+    it('should produce a valid JavaScript IIFE', () => {
+      const script = buildWebSocketFilterScript(['example.com', '*.github.com']);
+      expect(script).toContain('_allowedDomains');
+      expect(script).toContain('"example.com"');
+      expect(script).toContain('"*.github.com"');
+    });
+
+    it('should embed the domain list as JSON', () => {
+      const script = buildWebSocketFilterScript(['a.com']);
+      expect(script).toContain('["a.com"]');
+    });
+
+    it('should include WebSocket and EventSource patches', () => {
+      const script = buildWebSocketFilterScript(['a.com']);
+      expect(script).toContain('WebSocket');
+      expect(script).toContain('EventSource');
+      expect(script).toContain('SecurityError');
+    });
+
+    it('should handle empty allowlist', () => {
+      const script = buildWebSocketFilterScript([]);
+      expect(script).toContain('[]');
+    });
+
+    it('should include domain matching logic consistent with isDomainAllowed', () => {
+      const script = buildWebSocketFilterScript(['*.example.com']);
+      expect(script).toContain('_isDomainAllowed');
+      expect(script).toContain('slice(1)');
+      expect(script).toContain('slice(2)');
     });
   });
 });

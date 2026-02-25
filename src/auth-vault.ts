@@ -15,6 +15,8 @@ import {
   decryptData,
   isEncryptedPayload,
   getKeyFilePath,
+  restrictFilePermissions,
+  restrictDirPermissions,
   type EncryptedPayload,
 } from './encryption.js';
 
@@ -44,6 +46,7 @@ function getAuthDir(): string {
   const dir = path.join(os.homedir(), '.agent-browser', AUTH_DIR);
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true, mode: 0o700 });
+    restrictDirPermissions(dir);
   }
   return dir;
 }
@@ -89,9 +92,11 @@ function writeProfile(profile: AuthProfile): void {
   const key = ensureEncryptionKey();
   const serialized = JSON.stringify(profile, null, 2);
   const encrypted = encryptData(serialized, key);
-  writeFileSync(profilePath(profile.name), JSON.stringify(encrypted, null, 2), {
+  const filePath = profilePath(profile.name);
+  writeFileSync(filePath, JSON.stringify(encrypted, null, 2), {
     mode: 0o600,
   });
+  restrictFilePermissions(filePath);
 }
 
 export function saveAuthProfile(opts: {
