@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import type { Page, Frame } from 'playwright-core';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import type { BrowserManager, ScreencastFrame } from './browser.js';
 import { getAppDir } from './daemon.js';
 import {
@@ -730,6 +730,15 @@ async function handleScreenshot(
     options.quality = command.quality;
   }
 
+  // Default scale to 'css' (1x) when not specified
+  const scale = command.scale ?? 'css';
+  const isNumericScale = typeof scale === 'number';
+
+  // For string values ('css'/'device'), pass directly to Playwright
+  if (!isNumericScale) {
+    options.scale = scale;
+  }
+
   let target: Page | ReturnType<Page['locator']> = page;
   if (command.selector) {
     target = browser.getLocator(command.selector);
@@ -747,6 +756,10 @@ async function handleScreenshot(
       const screenshotDir = path.join(getAppDir(), 'tmp', 'screenshots');
       mkdirSync(screenshotDir, { recursive: true });
       savePath = path.join(screenshotDir, filename);
+    }
+
+    if (command.path) {
+      mkdirSync(path.dirname(savePath), { recursive: true });
     }
 
     let annotations: Annotation[] | undefined;
@@ -887,7 +900,34 @@ async function handleScreenshot(
       }
     }
 
-    await target.screenshot({ ...options, path: savePath });
+    // For numeric scale, use CDP Page.captureScreenshot directly since
+    // Playwright's page.screenshot() ignores CDP device metrics overrides.
+    // Falls back to Playwright for selector-scoped screenshots (CDP can't clip to elements).
+    if (isNumericScale && !command.selector) {
+      const viewport = page.viewportSize() ?? { width: 1280, height: 720 };
+      await browser.setDeviceScaleFactor(scale, viewport.width, viewport.height);
+      try {
+        const cdp = await browser.getCDPSession();
+        const cdpFormat = (command.format ?? 'png') === 'jpeg' ? 'jpeg' : 'png';
+        const cdpParams: Record<string, unknown> = {
+          format: cdpFormat,
+          captureBeyondViewport: !!command.fullPage,
+        };
+        if (cdpFormat === 'jpeg' && command.quality !== undefined) {
+          cdpParams.quality = command.quality;
+        }
+        const result = await cdp.send('Page.captureScreenshot', cdpParams);
+        writeFileSync(savePath, Buffer.from((result as { data: string }).data, 'base64'));
+      } finally {
+        await browser.clearDeviceMetricsOverride();
+      }
+    } else if (isNumericScale && command.selector) {
+      // Selector + numeric scale: CDP can't clip to elements, fall back to Playwright.
+      // The numeric scale won't apply since Playwright ignores CDP device metrics.
+      await target.screenshot({ ...options, scale: 'device', path: savePath });
+    } else {
+      await target.screenshot({ ...options, path: savePath });
+    }
 
     if (overlayInjected) {
       await removeAnnotationOverlay(page);

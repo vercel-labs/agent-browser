@@ -1225,17 +1225,21 @@ Examples:
             r##"
 agent-browser screenshot - Take a screenshot
 
-Usage: agent-browser screenshot [path]
+Usage: agent-browser screenshot [selector] [path] [options]
 
 Captures a screenshot of the current page. If no path is provided,
 saves to a temporary directory with a generated filename.
 
 Options:
-  --full, -f           Capture full page (not just viewport)
-  --annotate           Overlay numbered labels on interactive elements.
-                       Each label [N] corresponds to ref @eN from snapshot.
-                       Prints a legend mapping labels to element roles/names.
-                       With --json, annotations are included in the response.
+  --full, -f                 Capture full page (not just viewport)
+  --annotate                 Overlay numbered labels on interactive elements.
+                             Each label [N] corresponds to ref @eN from snapshot.
+                             Prints a legend mapping labels to element roles/names.
+                             With --json, annotations are included in the response.
+  --scale <css|device|N>     Screenshot scale factor (default: css)
+                             css: 1x logical pixels
+                             device: native device pixel ratio
+                             N: custom scale (e.g., 0.5, 1.5, 2)
 
 Global Options:
   --json               Output as JSON
@@ -1248,6 +1252,9 @@ Examples:
   agent-browser screenshot --annotate              # Labeled screenshot + legend
   agent-browser screenshot --annotate ./page.png   # Save annotated screenshot
   agent-browser screenshot --annotate --json       # JSON output with annotations
+  agent-browser screenshot --scale css
+  agent-browser screenshot --scale device
+  agent-browser screenshot --scale 0.5 ./half-res.png
 "##
         }
         "pdf" => {
@@ -2241,7 +2248,7 @@ Core Commands:
   scroll <dir> [px]          Scroll (up/down/left/right)
   scrollintoview <sel>       Scroll element into view
   wait <sel|ms>              Wait for element or time
-  screenshot [path]          Take screenshot
+  screenshot [path]          Take screenshot (--scale css|device|N)
   pdf <path>                 Save as PDF
   snapshot                   Accessibility tree with refs (for AI)
   eval <js>                  Run JavaScript
