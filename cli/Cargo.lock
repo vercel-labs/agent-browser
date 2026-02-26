@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "agent-browser"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "base64",
  "dirs",

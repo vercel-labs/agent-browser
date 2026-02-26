@@ -1,6 +1,6 @@
 [package]
 name = "agent-browser"
-version = "0.15.0"
+version = "0.15.1"
 edition = "2021"
 description = "Fast browser automation CLI for AI agents"
 license = "Apache-2.0"
