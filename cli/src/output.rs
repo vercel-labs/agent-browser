@@ -387,20 +387,42 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
             println!("{} Browser closed", color::success_indicator());
             return;
         }
+        // HAR stop result
+        if action == Some("har_stop") && data.get("entries").is_some() {
+            let path = data
+                .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let entries = data.get("entries").and_then(|v| v.as_i64()).unwrap_or(0);
+
+            if let Some(error) = data.get("error").and_then(|v| v.as_str()) {
+                println!(
+                    "{} HAR save failed for {} - {}",
+                    color::warning_indicator(),
+                    color::green(path),
+                    error
+                );
+            } else {
+                println!(
+                    "{} HAR saved to {} ({} entries)",
+                    color::success_indicator(),
+                    color::green(path),
+                    entries
+                );
+            }
+            return;
+        }
         // Recording start (has "started" field)
         if let Some(started) = data.get("started").and_then(|v| v.as_bool()) {
             if started {
-                match action {
-                    Some("profiler_start") => {
-                        println!("{} Profiling started", color::success_indicator());
+                match action.unwrap_or("") {
+                    "har_start" => println!("{} HAR recording started", color::success_indicator()),
+                    "profiler_start" => {
+                        println!("{} Profiling started", color::success_indicator())
                     }
                     _ => {
                         if let Some(path) = data.get("path").and_then(|v| v.as_str()) {
-                            println!(
-                                "{} Recording started: {}",
-                                color::success_indicator(),
-                                path
-                            );
+                            println!("{} Recording started: {}", color::success_indicator(), path);
                         } else {
                             println!("{} Recording started", color::success_indicator());
                         }
@@ -583,7 +605,10 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
                     let filename = file.get("filename").and_then(|v| v.as_str()).unwrap_or("");
                     let size = file.get("size").and_then(|v| v.as_i64()).unwrap_or(0);
                     let modified = file.get("modified").and_then(|v| v.as_str()).unwrap_or("");
-                    let encrypted = file.get("encrypted").and_then(|v| v.as_bool()).unwrap_or(false);
+                    let encrypted = file
+                        .get("encrypted")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
                     let size_str = if size > 1024 {
                         format!("{:.1}KB", size as f64 / 1024.0)
                     } else {
@@ -591,7 +616,11 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
                     };
                     let date_str = modified.split('T').next().unwrap_or(modified);
                     let enc_str = if encrypted { " [encrypted]" } else { "" };
-                    println!("  {} {}", filename, color::dim(&format!("({}, {}){}", size_str, date_str, enc_str)));
+                    println!(
+                        "  {} {}",
+                        filename,
+                        color::dim(&format!("({}, {}){}", size_str, date_str, enc_str))
+                    );
                 }
             }
             return;
@@ -601,13 +630,22 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
         if let Some(true) = data.get("renamed").and_then(|v| v.as_bool()) {
             let old_name = data.get("oldName").and_then(|v| v.as_str()).unwrap_or("");
             let new_name = data.get("newName").and_then(|v| v.as_str()).unwrap_or("");
-            println!("{} Renamed {} -> {}", color::success_indicator(), old_name, new_name);
+            println!(
+                "{} Renamed {} -> {}",
+                color::success_indicator(),
+                old_name,
+                new_name
+            );
             return;
         }
 
         // State clear
         if let Some(cleared) = data.get("cleared").and_then(|v| v.as_i64()) {
-            println!("{} Cleared {} state file(s)", color::success_indicator(), cleared);
+            println!(
+                "{} Cleared {} state file(s)",
+                color::success_indicator(),
+                cleared
+            );
             return;
         }
 
@@ -615,7 +653,10 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
         if let Some(summary) = data.get("summary") {
             let cookies = summary.get("cookies").and_then(|v| v.as_i64()).unwrap_or(0);
             let origins = summary.get("origins").and_then(|v| v.as_i64()).unwrap_or(0);
-            let encrypted = data.get("encrypted").and_then(|v| v.as_bool()).unwrap_or(false);
+            let encrypted = data
+                .get("encrypted")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             let enc_str = if encrypted { " (encrypted)" } else { "" };
             println!("State file summary{}:", enc_str);
             println!("  Cookies: {}", cookies);
@@ -625,7 +666,11 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
 
         // State clean
         if let Some(cleaned) = data.get("cleaned").and_then(|v| v.as_i64()) {
-            println!("{} Cleaned {} old state file(s)", color::success_indicator(), cleaned);
+            println!(
+                "{} Cleaned {} old state file(s)",
+                color::success_indicator(),
+                cleaned
+            );
             return;
         }
 
@@ -1860,6 +1905,34 @@ The output file can be viewed in:
 "##
         }
 
+        // === HAR ===
+        "har" => {
+            r##"
+agent-browser har - Record network traffic to HAR
+
+Usage: agent-browser har start
+       agent-browser har stop <path.har>
+
+Capture network requests/responses as a HAR file using Playwright's native HAR recording.
+Creates a fresh browser context but preserves cookies and localStorage.
+If a page is already open, HAR recording starts from the current URL.
+
+Operations:
+  start                 Start HAR recording
+  stop <path.har>       Stop recording and save HAR file
+
+Global Options:
+  --json               Output as JSON
+  --session <name>     Use specific session
+
+Examples:
+  agent-browser open https://example.com
+  agent-browser har start
+  agent-browser click "a"
+  agent-browser har stop ./network.har
+"##
+        }
+
         // === Record (video) ===
         "record" => {
             r##"
@@ -2290,6 +2363,7 @@ Diff:
 Debug:
   trace start|stop [path]    Record Playwright trace
   profiler start|stop [path] Record Chrome DevTools profile
+  har start|stop <path.har>  Capture network HAR
   record start <path> [url]  Start video recording (WebM)
   record stop                Stop and save video
   console [--clear]          View console logs
