@@ -2328,8 +2328,8 @@ Options:
   --headers <json>           HTTP headers scoped to URL's origin (for auth)
   --executable-path <path>   Custom browser executable (or AGENT_BROWSER_EXECUTABLE_PATH)
   --extension <path>         Load browser extensions (repeatable)
-  --args <args>              Browser launch args, comma or newline separated (or AGENT_BROWSER_ARGS)
-                             e.g., --args "--no-sandbox,--disable-blink-features=AutomationControlled"
+  --args <args>              Browser launch args, semicolon or newline separated (or AGENT_BROWSER_ARGS)
+                             e.g., --args "--no-sandbox;--disable-blink-features=AutomationControlled"
   --user-agent <ua>          Custom User-Agent (or AGENT_BROWSER_USER_AGENT)
   --proxy <server>           Proxy server URL (or AGENT_BROWSER_PROXY)
                              e.g., --proxy "http://user:pass@127.0.0.1:7890"

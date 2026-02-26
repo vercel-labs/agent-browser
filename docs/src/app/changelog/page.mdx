@@ -425,7 +425,7 @@ agent-browser wait --download ./output.zip --timeout 30000
 - **Browser launch configuration** - Fine-grained control over browser startup
 
 ```bash
-agent-browser --args "--disable-gpu,--no-sandbox" open example.com
+agent-browser --args "--disable-gpu;--no-sandbox" open example.com
 agent-browser --user-agent "Custom UA" open example.com
 agent-browser --proxy-bypass "localhost,*.internal" open example.com
 ```
