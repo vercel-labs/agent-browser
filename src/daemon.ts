@@ -229,6 +229,14 @@ export function getSocketDir(): string {
 export function getSocketPath(session?: string): string {
   const sess = session ?? currentSession;
   if (isWindows) {
+    try {
+      const portFile = getPortFile(sess);
+      if (fs.existsSync(portFile)) {
+        return fs.readFileSync(portFile, 'utf8').trim();
+      }
+    } catch {
+      // Ignore errors
+    }
     return String(getPortForSession(sess));
   }
   return path.join(getSocketDir(), `${sess}.sock`);
@@ -278,6 +286,17 @@ export function getConnectionInfo(
 ): { type: 'unix'; path: string } | { type: 'tcp'; port: number } {
   const sess = session ?? currentSession;
   if (isWindows) {
+    try {
+      const portFile = getPortFile(sess);
+      if (fs.existsSync(portFile)) {
+        const port = parseInt(fs.readFileSync(portFile, 'utf8').trim(), 10);
+        if (!isNaN(port)) {
+          return { type: 'tcp', port };
+        }
+      }
+    } catch {
+      // Ignore errors
+    }
     return { type: 'tcp', port: getPortForSession(sess) };
   }
   return { type: 'unix', path: path.join(getSocketDir(), `${sess}.sock`) };
@@ -620,12 +639,15 @@ export async function startDaemon(options?: {
   fs.writeFileSync(pidFile, process.pid.toString());
 
   if (isWindows) {
-    // Windows: use TCP socket on localhost
-    const port = getPortForSession(currentSession);
-    const portFile = getPortFile();
-    fs.writeFileSync(portFile, port.toString());
-    server.listen(port, '127.0.0.1', () => {
-      // Daemon is ready on TCP port
+    // Windows: use TCP socket on localhost with random port
+    // We bind to 0 to let the OS assign a free port, avoiding collisions
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address();
+      if (address && typeof address === 'object') {
+        const port = address.port;
+        const portFile = getPortFile();
+        fs.writeFileSync(portFile, port.toString());
+      }
     });
   } else {
     // Unix: use Unix domain socket
