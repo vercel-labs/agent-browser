@@ -1249,3 +1249,58 @@ describe('getDefaultTimeout', () => {
     expect(getDefaultTimeout()).toBe(60000);
   });
 });
+
+// Regression tests for https://github.com/vercel-labs/agent-browser/issues/555
+describe('request tracking — navigation requests captured without explicit startRequestTracking()', () => {
+  let browser: BrowserManager;
+
+  beforeAll(async () => {
+    browser = new BrowserManager();
+    await browser.launch({ headless: true });
+  });
+
+  afterAll(async () => {
+    await browser.close();
+  });
+
+  it('captures the document request for the first navigation without calling startRequestTracking()', async () => {
+    // Before the fix, requests were only tracked after the first `network requests`
+    // command, so the initial page.goto() was always missed.
+    await browser.getPage().goto('https://example.com');
+
+    const requests = browser.getRequests();
+    const docRequest = requests.find(
+      (r) => r.url.includes('example.com') && r.resourceType === 'document'
+    );
+    expect(docRequest).toBeDefined();
+  });
+
+  it('captures subsequent navigation requests without re-calling startRequestTracking()', async () => {
+    browser.clearRequests();
+    await browser.getPage().goto('https://example.com/');
+    await browser.getPage().goto('https://example.com/');
+
+    const requests = browser.getRequests();
+    const docRequests = requests.filter(
+      (r) => r.url.includes('example.com') && r.resourceType === 'document'
+    );
+    // Both navigations should have been recorded
+    expect(docRequests.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('startRequestTracking() is a no-op and does not cause duplicate entries', async () => {
+    browser.clearRequests();
+    // Calling startRequestTracking() explicitly (as the old code required)
+    // must not register a second listener and duplicate request entries.
+    browser.startRequestTracking();
+    await browser.getPage().goto('https://example.com/');
+
+    const requests = browser.getRequests();
+    const docRequests = requests.filter(
+      (r) => r.url.includes('example.com') && r.resourceType === 'document'
+    );
+    // Should be exactly 1, not 2 (which would happen if startRequestTracking
+    // registered an additional listener on top of the one set in setupPageTracking)
+    expect(docRequests.length).toBe(1);
+  });
+});
