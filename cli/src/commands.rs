@@ -3735,7 +3735,13 @@ mod tests {
 
     #[test]
     fn test_dialog_accept_with_text() {
-        let cmd = parse_command(&args("dialog accept \"my answer\""), &default_flags()).unwrap();
+        // Use explicit vec because args() splits on whitespace and cannot handle quoted strings
+        let test_args = vec![
+            "dialog".to_string(),
+            "accept".to_string(),
+            "my answer".to_string(),
+        ];
+        let cmd = parse_command(&test_args, &default_flags()).unwrap();
         assert_eq!(cmd["action"], "dialog");
         assert_eq!(cmd["response"], "accept");
         assert_eq!(cmd["promptText"], "my answer");
