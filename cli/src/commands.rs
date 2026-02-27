@@ -935,6 +935,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                     }
                     Ok(cmd)
                 }
+                Some("dismiss") => Ok(json!({ "id": id, "action": "dialog", "response": "dismiss" })),
                 Some(sub) => Err(ParseError::UnknownSubcommand {
                     subcommand: sub.to_string(),
                     valid_options: VALID,
@@ -3720,6 +3721,58 @@ mod tests {
         assert!(matches!(
             result.unwrap_err(),
             ParseError::MissingArguments { .. }
+        ));
+    }
+
+    // === dialog ===
+
+    #[test]
+    fn test_dialog_accept() {
+        let cmd = parse_command(&args("dialog accept"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "dialog");
+        assert_eq!(cmd["response"], "accept");
+    }
+
+    #[test]
+    fn test_dialog_accept_with_text() {
+        // Use explicit vec because args() splits on whitespace and cannot handle quoted strings
+        let test_args = vec![
+            "dialog".to_string(),
+            "accept".to_string(),
+            "my answer".to_string(),
+        ];
+        let cmd = parse_command(&test_args, &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "dialog");
+        assert_eq!(cmd["response"], "accept");
+        assert_eq!(cmd["promptText"], "my answer");
+    }
+
+    #[test]
+    fn test_dialog_dismiss() {
+        // Regression test for https://github.com/vercel-labs/agent-browser/issues/553
+        // `dialog dismiss` was crashing with "Unknown subcommand: dismiss"
+        let cmd = parse_command(&args("dialog dismiss"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "dialog");
+        assert_eq!(cmd["response"], "dismiss");
+    }
+
+    #[test]
+    fn test_dialog_missing_subcommand() {
+        let result = parse_command(&args("dialog"), &default_flags());
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::MissingArguments { .. }
+        ));
+    }
+
+    #[test]
+    fn test_dialog_unknown_subcommand() {
+        let result = parse_command(&args("dialog cancel"), &default_flags());
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::UnknownSubcommand { .. }
         ));
     }
 }
