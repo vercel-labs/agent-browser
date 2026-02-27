@@ -2439,7 +2439,7 @@ async function handleWaitForDownload(
   command: WaitForDownloadCommand,
   browser: BrowserManager
 ): Promise<Response> {
-  const download = await browser.waitForDownload(command.timeout ?? 25000);
+  const download = await browser.waitForDownload(command.timeout);
 
   let filePath: string;
   if (command.path) {

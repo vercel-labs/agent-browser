@@ -1284,23 +1284,23 @@ describe('wait --download — race condition fix', () => {
   });
 
   it('resolves when the download was triggered BEFORE calling waitForDownload()', async () => {
-    // Regression test for: https://github.com/vercel-labs/agent-browser/issues/XXX
+    // Regression test for: https://github.com/vercel-labs/agent-browser/issues/561
     //
     // Before the fix: `wait --download` called page.waitForEvent('download') lazily,
     // so if the download had already started, the event was missed → timeout.
     // After the fix: downloads are buffered from page creation; waitForDownload()
     // consumes from the buffer immediately.
 
-    // Trigger the download and wait long enough for the browser to emit the event
-    await browser.getPage().evaluate((url) => {
+    // Trigger the download and wait until Playwright confirms the event has fired
+    const page = browser.getPage();
+    const downloadEventPromise = page.waitForEvent('download');
+    await page.evaluate((url) => {
       const a = document.createElement('a');
       a.href = url;
       document.body.appendChild(a);
       a.click();
     }, DOWNLOAD_URL);
-
-    // Allow the download event to propagate through Playwright's event loop
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    await downloadEventPromise; // guarantees event fired before calling waitForDownload
 
     // waitForDownload must resolve immediately from buffer (not via a new waitForEvent)
     const start = Date.now();

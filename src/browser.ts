@@ -110,8 +110,8 @@ export class BrowserManager {
   private activeFrame: Frame | null = null;
   private dialogHandler: ((dialog: Dialog) => Promise<void>) | null = null;
   private trackedRequests: TrackedRequest[] = [];
-  private bufferedDownloads: Download[] = [];
-  private downloadWaiters: Array<(dl: Download) => void> = [];
+  private pageDownloadBuffers = new WeakMap<Page, Download[]>();
+  private pageDownloadWaiters = new WeakMap<Page, Array<(dl: Download) => void>>();
   private routes: Map<string, (route: Route) => Promise<void>> = new Map();
   private consoleMessages: ConsoleMessage[] = [];
   private pageErrors: PageError[] = [];
@@ -471,20 +471,32 @@ export class BrowserManager {
    * started before this call. Registered eagerly in setupPageTracking() so that
    * downloads triggered before this method is called are never missed.
    */
-  waitForDownload(timeout: number): Promise<Download> {
-    if (this.bufferedDownloads.length > 0) {
-      return Promise.resolve(this.bufferedDownloads.shift()!);
+  waitForDownload(timeout: number | undefined): Promise<Download> {
+    const ms = timeout ?? getDefaultTimeout();
+    const page = this.getPage();
+    const buf = this.pageDownloadBuffers.get(page);
+    if (buf && buf.length > 0) {
+      return Promise.resolve(buf.shift()!);
     }
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        const idx = this.downloadWaiters.indexOf(resolve);
-        if (idx >= 0) this.downloadWaiters.splice(idx, 1);
-        reject(new Error(`Timeout ${timeout}ms exceeded while waiting for download`));
-      }, timeout);
-      this.downloadWaiters.push((dl) => {
+      let waiters = this.pageDownloadWaiters.get(page);
+      if (!waiters) {
+        waiters = [];
+        this.pageDownloadWaiters.set(page, waiters);
+      }
+      const waiter = (dl: Download) => {
         clearTimeout(timer);
         resolve(dl);
-      });
+      };
+      const timer = setTimeout(() => {
+        const ws = this.pageDownloadWaiters.get(page);
+        if (ws) {
+          const idx = ws.indexOf(waiter);
+          if (idx >= 0) ws.splice(idx, 1);
+        }
+        reject(new Error(`Timeout ${ms}ms exceeded while waiting for download`));
+      }, ms);
+      waiters.push(waiter);
     });
   }
 
@@ -1749,11 +1761,16 @@ export class BrowserManager {
     }
 
     page.on('download', (dl: Download) => {
-      if (this.downloadWaiters.length > 0) {
-        const resolve = this.downloadWaiters.shift()!;
-        resolve(dl);
+      const waiters = this.pageDownloadWaiters.get(page);
+      if (waiters && waiters.length > 0) {
+        waiters.shift()!(dl);
       } else {
-        this.bufferedDownloads.push(dl);
+        let buf = this.pageDownloadBuffers.get(page);
+        if (!buf) {
+          buf = [];
+          this.pageDownloadBuffers.set(page, buf);
+        }
+        buf.push(dl);
       }
     });
 
