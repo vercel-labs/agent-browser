@@ -1266,6 +1266,7 @@ describe('request tracking — navigation requests captured without explicit sta
   it('captures the document request for the first navigation without calling startRequestTracking()', async () => {
     // Before the fix, requests were only tracked after the first `network requests`
     // command, so the initial page.goto() was always missed.
+    browser.clearRequests();
     await browser.getPage().goto('https://example.com');
 
     const requests = browser.getRequests();
