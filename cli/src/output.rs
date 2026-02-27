@@ -151,7 +151,37 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
             print_with_boundaries(html, origin, opts);
             return;
         }
-        // Value
+        // Storage get (all keys): { data: { key: value, ... } }
+        if let Some(storage_data) = data.get("data").and_then(|v| v.as_object()) {
+            if storage_data.is_empty() {
+                println!("{}", color::dim("(empty)"));
+            } else {
+                for (k, v) in storage_data {
+                    let val = v
+                        .as_str()
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| serde_json::to_string(v).unwrap_or_default());
+                    println!("{}: {}", k, val);
+                }
+            }
+            return;
+        }
+        // Storage get (single key): { key: "...", value: "..." | null }
+        if let Some(key) = data.get("key").and_then(|v| v.as_str()) {
+            match data.get("value") {
+                Some(v) if v.is_null() => println!("{}: (not set)", key),
+                Some(v) => {
+                    let val = v
+                        .as_str()
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| serde_json::to_string(v).unwrap_or_default());
+                    println!("{}: {}", key, val);
+                }
+                None => {}
+            }
+            return;
+        }
+        // Value (generic string result, e.g. get value command)
         if let Some(value) = data.get("value").and_then(|v| v.as_str()) {
             println!("{}", value);
             return;
@@ -318,10 +348,17 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
             }
             return;
         }
-        // Cleared requests
+        // Cleared requests or cookies — disambiguate by action
         if let Some(cleared) = data.get("cleared").and_then(|v| v.as_bool()) {
             if cleared {
-                println!("{} Request log cleared", color::success_indicator());
+                match action {
+                    Some("cookies_clear") => {
+                        println!("{} Cookies cleared", color::success_indicator());
+                    }
+                    _ => {
+                        println!("{} Request log cleared", color::success_indicator());
+                    }
+                }
                 return;
             }
         }
@@ -382,8 +419,21 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
             }
             return;
         }
-        // Closed
-        if data.get("closed").is_some() {
+        // Tab closed — closeTab returns { closed: <index>, remaining: <count> }
+        if let (Some(closed_idx), Some(remaining)) = (
+            data.get("closed").and_then(|v| v.as_i64()),
+            data.get("remaining").and_then(|v| v.as_i64()),
+        ) {
+            println!(
+                "{} Tab {} closed ({} remaining)",
+                color::success_indicator(),
+                closed_idx,
+                remaining
+            );
+            return;
+        }
+        // Browser closed — close() returns { closed: true }
+        if data.get("closed").and_then(|v| v.as_bool()) == Some(true) {
             println!("{} Browser closed", color::success_indicator());
             return;
         }
