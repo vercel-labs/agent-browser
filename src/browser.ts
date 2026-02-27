@@ -13,6 +13,7 @@ import {
   type Locator,
   type CDPSession,
   type Video,
+  type Download,
 } from 'playwright-core';
 import path from 'node:path';
 import os from 'node:os';
@@ -109,6 +110,8 @@ export class BrowserManager {
   private activeFrame: Frame | null = null;
   private dialogHandler: ((dialog: Dialog) => Promise<void>) | null = null;
   private trackedRequests: TrackedRequest[] = [];
+  private bufferedDownloads: Download[] = [];
+  private downloadWaiters: Array<(dl: Download) => void> = [];
   private routes: Map<string, (route: Route) => Promise<void>> = new Map();
   private consoleMessages: ConsoleMessage[] = [];
   private pageErrors: PageError[] = [];
@@ -459,6 +462,28 @@ export class BrowserManager {
         headers: request.headers(),
         timestamp: Date.now(),
         resourceType: request.resourceType(),
+      });
+    });
+  }
+
+  /**
+   * Wait for the next download, consuming from the buffer if a download already
+   * started before this call. Registered eagerly in setupPageTracking() so that
+   * downloads triggered before this method is called are never missed.
+   */
+  waitForDownload(timeout: number): Promise<Download> {
+    if (this.bufferedDownloads.length > 0) {
+      return Promise.resolve(this.bufferedDownloads.shift()!);
+    }
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        const idx = this.downloadWaiters.indexOf(resolve);
+        if (idx >= 0) this.downloadWaiters.splice(idx, 1);
+        reject(new Error(`Timeout ${timeout}ms exceeded while waiting for download`));
+      }, timeout);
+      this.downloadWaiters.push((dl) => {
+        clearTimeout(timer);
+        resolve(dl);
       });
     });
   }
@@ -1722,6 +1747,15 @@ export class BrowserManager {
     if (this.colorScheme) {
       page.emulateMedia({ colorScheme: this.colorScheme }).catch(() => {});
     }
+
+    page.on('download', (dl: Download) => {
+      if (this.downloadWaiters.length > 0) {
+        const resolve = this.downloadWaiters.shift()!;
+        resolve(dl);
+      } else {
+        this.bufferedDownloads.push(dl);
+      }
+    });
 
     page.on('console', (msg) => {
       this.consoleMessages.push({
