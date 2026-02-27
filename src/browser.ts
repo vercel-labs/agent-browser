@@ -13,6 +13,7 @@ import {
   type Locator,
   type CDPSession,
   type Video,
+  type Download,
 } from 'playwright-core';
 import path from 'node:path';
 import os from 'node:os';
@@ -109,6 +110,8 @@ export class BrowserManager {
   private activeFrame: Frame | null = null;
   private dialogHandler: ((dialog: Dialog) => Promise<void>) | null = null;
   private trackedRequests: TrackedRequest[] = [];
+  private pageDownloadBuffers = new WeakMap<Page, Download[]>();
+  private pageDownloadWaiters = new WeakMap<Page, Array<(dl: Download) => void>>();
   private routes: Map<string, (route: Route) => Promise<void>> = new Map();
   private consoleMessages: ConsoleMessage[] = [];
   private pageErrors: PageError[] = [];
@@ -460,6 +463,40 @@ export class BrowserManager {
         timestamp: Date.now(),
         resourceType: request.resourceType(),
       });
+    });
+  }
+
+  /**
+   * Wait for the next download, consuming from the buffer if a download already
+   * started before this call. Registered eagerly in setupPageTracking() so that
+   * downloads triggered before this method is called are never missed.
+   */
+  waitForDownload(timeout: number | undefined): Promise<Download> {
+    const ms = timeout ?? getDefaultTimeout();
+    const page = this.getPage();
+    const buf = this.pageDownloadBuffers.get(page);
+    if (buf && buf.length > 0) {
+      return Promise.resolve(buf.shift()!);
+    }
+    return new Promise((resolve, reject) => {
+      let waiters = this.pageDownloadWaiters.get(page);
+      if (!waiters) {
+        waiters = [];
+        this.pageDownloadWaiters.set(page, waiters);
+      }
+      const waiter = (dl: Download) => {
+        clearTimeout(timer);
+        resolve(dl);
+      };
+      const timer = setTimeout(() => {
+        const ws = this.pageDownloadWaiters.get(page);
+        if (ws) {
+          const idx = ws.indexOf(waiter);
+          if (idx >= 0) ws.splice(idx, 1);
+        }
+        reject(new Error(`Timeout ${ms}ms exceeded while waiting for download`));
+      }, ms);
+      waiters.push(waiter);
     });
   }
 
@@ -1722,6 +1759,20 @@ export class BrowserManager {
     if (this.colorScheme) {
       page.emulateMedia({ colorScheme: this.colorScheme }).catch(() => {});
     }
+
+    page.on('download', (dl: Download) => {
+      const waiters = this.pageDownloadWaiters.get(page);
+      if (waiters && waiters.length > 0) {
+        waiters.shift()!(dl);
+      } else {
+        let buf = this.pageDownloadBuffers.get(page);
+        if (!buf) {
+          buf = [];
+          this.pageDownloadBuffers.set(page, buf);
+        }
+        buf.push(dl);
+      }
+    });
 
     page.on('console', (msg) => {
       this.consoleMessages.push({

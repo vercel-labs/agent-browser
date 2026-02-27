@@ -1249,3 +1249,85 @@ describe('getDefaultTimeout', () => {
     expect(getDefaultTimeout()).toBe(60000);
   });
 });
+
+describe('wait --download — race condition fix', () => {
+  let browser: BrowserManager;
+
+  const DOWNLOAD_URL = 'https://example.com/agent-browser-test-download';
+
+  beforeAll(async () => {
+    browser = new BrowserManager();
+    await browser.launch({ headless: true });
+    await browser.getPage().goto('https://example.com');
+  });
+
+  afterAll(async () => {
+    await browser.close();
+  });
+
+  beforeEach(async () => {
+    // Route the test URL to return a downloadable response
+    await browser.getPage().route('**/agent-browser-test-download', (route) =>
+      route.fulfill({
+        status: 200,
+        headers: {
+          'Content-Type': 'application/octet-stream',
+          'Content-Disposition': 'attachment; filename="test.txt"',
+        },
+        body: 'agent-browser test download content',
+      })
+    );
+  });
+
+  afterEach(async () => {
+    await browser.getPage().unroute('**/agent-browser-test-download');
+  });
+
+  it('resolves when the download was triggered BEFORE calling waitForDownload()', async () => {
+    // Regression test for: https://github.com/vercel-labs/agent-browser/issues/561
+    //
+    // Before the fix: `wait --download` called page.waitForEvent('download') lazily,
+    // so if the download had already started, the event was missed → timeout.
+    // After the fix: downloads are buffered from page creation; waitForDownload()
+    // consumes from the buffer immediately.
+
+    // Trigger the download and wait until Playwright confirms the event has fired
+    const page = browser.getPage();
+    const downloadEventPromise = page.waitForEvent('download');
+    await page.evaluate((url) => {
+      const a = document.createElement('a');
+      a.href = url;
+      document.body.appendChild(a);
+      a.click();
+    }, DOWNLOAD_URL);
+    await downloadEventPromise; // guarantees event fired before calling waitForDownload
+
+    // waitForDownload must resolve immediately from buffer (not via a new waitForEvent)
+    const start = Date.now();
+    const download = await browser.waitForDownload(500);
+    const elapsed = Date.now() - start;
+
+    expect(download.suggestedFilename()).toBe('test.txt');
+    // Resolved from buffer — well under the 500ms timeout
+    expect(elapsed).toBeLessThan(400);
+  });
+
+  it('resolves when the download is triggered AFTER calling waitForDownload()', async () => {
+    // Normal flow: register the wait first, then trigger the download
+    const downloadPromise = browser.waitForDownload(5000);
+
+    await browser.getPage().evaluate((url) => {
+      const a = document.createElement('a');
+      a.href = url;
+      document.body.appendChild(a);
+      a.click();
+    }, DOWNLOAD_URL);
+
+    const download = await downloadPromise;
+    expect(download.suggestedFilename()).toBe('test.txt');
+  });
+
+  it('rejects with a timeout error when no download occurs', async () => {
+    await expect(browser.waitForDownload(300)).rejects.toThrow(/timeout/i);
+  });
+});
