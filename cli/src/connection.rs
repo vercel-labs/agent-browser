@@ -159,7 +159,13 @@ fn is_daemon_running(session: &str) -> bool {
     if let Ok(pid_str) = fs::read_to_string(&pid_path) {
         if let Ok(pid) = pid_str.trim().parse::<i32>() {
             unsafe {
-                return libc::kill(pid, 0) == 0;
+                if libc::kill(pid, 0) == 0 {
+                    return true;
+                }
+                // EPERM means the process exists but we lack permission to
+                // signal it (e.g. inside a macOS sandbox). Only ESRCH means
+                // the process is genuinely gone.
+                return std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH);
             }
         }
     }

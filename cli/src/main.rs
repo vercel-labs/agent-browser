@@ -170,7 +170,11 @@ fn run_session(args: &[String], session: &str, json_mode: bool) {
                             if let Ok(pid_str) = fs::read_to_string(&pid_path) {
                                 if let Ok(pid) = pid_str.trim().parse::<u32>() {
                                     #[cfg(unix)]
-                                    let running = unsafe { libc::kill(pid as i32, 0) == 0 };
+                                    let running = unsafe {
+                                        libc::kill(pid as i32, 0) == 0
+                                            || std::io::Error::last_os_error().raw_os_error()
+                                                != Some(libc::ESRCH)
+                                    };
                                     #[cfg(windows)]
                                     let running = unsafe {
                                         let handle =
