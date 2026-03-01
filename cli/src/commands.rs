@@ -2118,6 +2118,9 @@ mod tests {
             confirm_actions: None,
             confirm_interactive: false,
             native: false,
+            browser: None,
+            cli_browser: false,
+
         }
     }
 
