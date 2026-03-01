@@ -1117,6 +1117,37 @@ When enabled, agent-browser connects to a Browser Use cloud session instead of l
 
 Get your API key from the [Browser Use Cloud Dashboard](https://cloud.browser-use.com/settings?tab=api-keys). Free credits are available to get started, with pay-as-you-go pricing after.
 
+### Hyperbrowser
+
+[Hyperbrowser](https://hyperbrowser.ai) is a browser-as-a-service platform for AI agents and apps. Use it to run agent-browser in the cloud without managing local browser infrastructure.
+
+To enable Hyperbrowser, use the `-p` flag:
+
+```bash
+export HYPERBROWSER_API_KEY="your-api-key"
+agent-browser -p hyperbrowser open https://example.com
+```
+
+Or use environment variables for CI/scripts:
+
+```bash
+export AGENT_BROWSER_PROVIDER=hyperbrowser
+export HYPERBROWSER_API_KEY="your-api-key"
+agent-browser open https://example.com
+```
+
+When enabled, agent-browser connects to a Hyperbrowser cloud session instead of launching a local browser. All commands work identically.
+
+Optional configuration via environment variables:
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `HYPERBROWSER_PROFILE_NAME` | Browser profile name for persistent cookies/logins (created if it doesn't exist) | (none) |
+
+**Profile Persistence:** When `HYPERBROWSER_PROFILE_NAME` is set, the profile will be created if it doesn't already exist. Cookies, logins, and session data are automatically saved back to the profile when the browser session ends, making them available for future sessions.
+
+Get your API key from the [Hyperbrowser Dashboard](https://app.hyperbrowser.ai).
+
 ### Kernel
 
 [Kernel](https://www.kernel.sh) provides cloud browser infrastructure for AI agents with features like stealth mode and persistent profiles.
