@@ -262,7 +262,12 @@ export function isDaemonRunning(session?: string): boolean {
     // Check if process exists (works on both Unix and Windows)
     process.kill(pid, 0);
     return true;
-  } catch {
+  } catch (err: unknown) {
+    // EPERM means the process exists but we lack permission to signal it
+    // (e.g. caller is inside a macOS sandbox). Only ESRCH means it's gone.
+    if (err instanceof Error && (err as NodeJS.ErrnoException).code === 'EPERM') {
+      return true;
+    }
     // Process doesn't exist, clean up stale files
     cleanupSocket(session);
     return false;
