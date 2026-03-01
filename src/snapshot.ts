@@ -130,8 +130,8 @@ const STRUCTURAL_ROLES = new Set([
 /**
  * Build a selector string for storing in ref map
  */
-function buildSelector(role: string, name?: string): string {
-  if (name) {
+function buildSelector(role: string, name: string): string {
+  if (name !== undefined) {
     const escapedName = JSON.stringify(name);
     return `getByRole('${role}', { name: ${escapedName}, exact: true })`;
   }
@@ -404,12 +404,13 @@ function processAriaTree(ariaTree: string, refs: RefMap, options: SnapshotOption
 
       if (INTERACTIVE_ROLES.has(roleLower)) {
         const ref = nextRef();
-        const nth = tracker.getNextIndex(roleLower, name);
-        tracker.trackRef(roleLower, name, ref);
+        const resolvedName = name ?? '';
+        const nth = tracker.getNextIndex(roleLower, resolvedName);
+        tracker.trackRef(roleLower, resolvedName, ref);
         refs[ref] = {
-          selector: buildSelector(roleLower, name),
+          selector: buildSelector(roleLower, resolvedName),
           role: roleLower,
-          name,
+          name: resolvedName,
           nth, // Always store nth, we'll use it for duplicates
         };
 
@@ -531,13 +532,15 @@ function processLine(
 
   if (shouldHaveRef) {
     const ref = nextRef();
-    const nth = tracker.getNextIndex(roleLower, name);
-    tracker.trackRef(roleLower, name, ref);
+    // Normalize to "" so unnamed elements get exact-match selectors
+    const resolvedName = isInteractive ? (name ?? '') : name!;
+    const nth = tracker.getNextIndex(roleLower, resolvedName);
+    tracker.trackRef(roleLower, resolvedName, ref);
 
     refs[ref] = {
-      selector: buildSelector(roleLower, name),
+      selector: buildSelector(roleLower, resolvedName),
       role: roleLower,
-      name,
+      name: resolvedName,
       nth, // Always store nth, we'll clean up non-duplicates later
     };
 

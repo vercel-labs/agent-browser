@@ -154,6 +154,30 @@ describe('BrowserManager', () => {
     });
   });
 
+  describe('unnamed-button ref uniqueness', () => {
+    it('should click the correct unnamed button among named buttons', async () => {
+      const page = browser.getPage();
+      // 1 unnamed button among 2 named buttons
+      await page.setContent(`
+        <html><body>
+          <button>OK</button>
+          <button onclick="document.title='unnamed'"></button>
+          <button>Cancel</button>
+        </body></html>
+      `);
+
+      const snapshot = await browser.getSnapshot();
+      const refs = snapshot.refs;
+      const unnamedRefs = Object.entries(refs).filter(([, v]) => v.role === 'button' && !v.name);
+      expect(unnamedRefs.length).toBe(1);
+
+      const [refId] = unnamedRefs[0];
+      await executeCommand({ id: 'test', action: 'click', selector: `@${refId}` }, browser);
+      const title = await page.title();
+      expect(title).toBe('unnamed');
+    });
+  });
+
   describe('cursor-ref selector uniqueness', () => {
     it('should produce unique selectors for repeated DOM structures', async () => {
       const page = browser.getPage();
