@@ -693,8 +693,16 @@ async function handleNavigate(
 }
 
 async function handleClick(command: ClickCommand, browser: BrowserManager): Promise<Response> {
+  // Validate that both x and y are provided together
+  if ((command.x !== undefined) !== (command.y !== undefined)) {
+    throw new Error('Both x and y coordinates must be provided together for click');
+  }
+
   // Support coordinate-based clicking (x, y)
   if (command.x !== undefined && command.y !== undefined) {
+    if (command.newTab) {
+      throw new Error('--new-tab cannot be used with coordinate-based clicking (--x/--y)');
+    }
     const page = browser.getPage();
     await page.mouse.click(command.x, command.y, {
       button: command.button,
@@ -705,7 +713,7 @@ async function handleClick(command: ClickCommand, browser: BrowserManager): Prom
   }
 
   if (!command.selector) {
-    throw new Error('Either selector or x/y coordinates are required for click');
+    throw new Error('Either selector or both x and y coordinates are required for click');
   }
 
   // Support both refs (@e1) and regular selectors
@@ -1209,7 +1217,7 @@ async function handleFill(command: FillCommand, browser: BrowserManager): Promis
 async function handleCheck(command: CheckCommand, browser: BrowserManager): Promise<Response> {
   const locator = browser.getLocator(command.selector);
   try {
-    await locator.check();
+    await safeCheck(locator);
   } catch (error) {
     throw toAIFriendlyError(error, command.selector);
   }
@@ -1219,7 +1227,7 @@ async function handleCheck(command: CheckCommand, browser: BrowserManager): Prom
 async function handleUncheck(command: UncheckCommand, browser: BrowserManager): Promise<Response> {
   const locator = browser.getLocator(command.selector);
   try {
-    await locator.uncheck();
+    await safeUncheck(locator);
   } catch (error) {
     throw toAIFriendlyError(error, command.selector);
   }

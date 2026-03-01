@@ -138,7 +138,21 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
             // Support: click <selector> [--new-tab] OR click --x 100 --y 200
             let x_idx = rest.iter().position(|&s| s == "--x");
             let y_idx = rest.iter().position(|&s| s == "--y");
+            // Fix #1: error when only one of --x/--y is provided
+            if x_idx.is_some() != y_idx.is_some() {
+                return Err(ParseError::InvalidValue {
+                    message: "both --x and --y must be provided together".to_string(),
+                    usage: "click --x <num> --y <num>",
+                });
+            }
             if let (Some(xi), Some(yi)) = (x_idx, y_idx) {
+                // Fix #2: error when --new-tab used with coordinates
+                if rest.iter().any(|&s| s == "--new-tab") {
+                    return Err(ParseError::InvalidValue {
+                        message: "--new-tab cannot be used with coordinate-based clicking (--x/--y)".to_string(),
+                        usage: "click <selector> [--new-tab]  |  click --x <num> --y <num>",
+                    });
+                }
                 let x: f64 = rest.get(xi + 1).ok_or_else(|| ParseError::MissingArguments {
                     context: "click".to_string(),
                     usage: "click --x <num> --y <num>",
@@ -1670,12 +1684,12 @@ fn parse_find(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                 context: format!("find {}", locator),
                 usage: match *locator {
                     "role" => "find role <role> [first|last|nth <n>] [action] [--name <name>] [--exact]",
-                    "text" => "find text <text> [first|last] [action] [--exact]",
-                    "label" => "find label <label> [first|last] [action] [text] [--exact]",
-                    "placeholder" => "find placeholder <text> [first|last] [action] [text] [--exact]",
-                    "alt" => "find alt <text> [first|last] [action] [--exact]",
-                    "title" => "find title <text> [first|last] [action] [--exact]",
-                    "testid" => "find testid <id> [first|last] [action] [text]",
+                    "text" => "find text <text> [first|last|nth <n>] [action] [--exact]",
+                    "label" => "find label <label> [first|last|nth <n>] [action] [text] [--exact]",
+                    "placeholder" => "find placeholder <text> [first|last|nth <n>] [action] [text] [--exact]",
+                    "alt" => "find alt <text> [first|last|nth <n>] [action] [--exact]",
+                    "title" => "find title <text> [first|last|nth <n>] [action] [--exact]",
+                    "testid" => "find testid <id> [first|last|nth <n>] [action] [text]",
                     "first" => "find first <selector> [action] [text]",
                     "last" => "find last <selector> [action] [text]",
                     _ => "find <locator> <value> [action] [text]",

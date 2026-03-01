@@ -80,6 +80,7 @@ interface TrackedRequest {
   status?: number;
   responseHeaders?: Record<string, string>;
   responseBody?: string;
+  _requestId?: number;
 }
 
 interface ConsoleMessage {
@@ -115,6 +116,7 @@ export class BrowserManager {
   private isTrackingRequests: boolean = false;
   private isTrackingBodies: boolean = false;
   private responseListener: ((response: any) => Promise<void>) | null = null;
+  private requestIdCounter: number = 0;
   private routes: Map<string, (route: Route) => Promise<void>> = new Map();
   private consoleMessages: ConsoleMessage[] = [];
   private pageErrors: PageError[] = [];
@@ -455,22 +457,23 @@ export class BrowserManager {
    * Start tracking requests
    */
   startRequestTracking(includeBody?: boolean): void {
-    // Allow upgrading from no-body to body tracking
-    if (includeBody && !this.isTrackingBodies) {
-      this.isTrackingBodies = true;
-      if (this.isTrackingRequests) {
-        const page = this.getPage();
-        if (this.responseListener) {
-          page.removeListener('response', this.responseListener);
-        }
-        this.responseListener = this.createResponseListener(true);
-        page.on('response', this.responseListener);
-        return;
+    const wantBodies = !!includeBody;
+
+    // Upgrade or downgrade body tracking if tracking level changed
+    if (this.isTrackingRequests && wantBodies !== this.isTrackingBodies) {
+      this.isTrackingBodies = wantBodies;
+      const page = this.getPage();
+      if (this.responseListener) {
+        page.removeListener('response', this.responseListener);
       }
+      this.responseListener = this.createResponseListener(wantBodies);
+      page.on('response', this.responseListener);
+      return;
     }
 
     if (this.isTrackingRequests) return;
     this.isTrackingRequests = true;
+    this.isTrackingBodies = wantBodies;
     const page = this.getPage();
     page.on('request', (request: Request) => {
       this.trackedRequests.push({
@@ -479,17 +482,21 @@ export class BrowserManager {
         headers: request.headers(),
         timestamp: Date.now(),
         resourceType: request.resourceType(),
+        _requestId: ++this.requestIdCounter,
       });
     });
-    this.responseListener = this.createResponseListener(!!includeBody);
+    this.responseListener = this.createResponseListener(wantBodies);
     page.on('response', this.responseListener);
   }
 
   private createResponseListener(includeBody: boolean) {
     return async (response: any) => {
-      const tracked = this.trackedRequests.find(
-        (r) => r.url === response.url() && r.status === undefined
-      );
+      const request = response.request();
+      // Match by URL and find the earliest unmatched request (no status yet)
+      // using reverse order to match the most recent request to the same URL
+      const tracked = [...this.trackedRequests]
+        .reverse()
+        .find((r) => r.url === request.url() && r.status === undefined);
       if (tracked) {
         tracked.status = response.status();
         tracked.responseHeaders = response.headers();

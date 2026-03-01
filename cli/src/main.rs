@@ -257,7 +257,7 @@ fn run_session(args: &[String], session: &str, json_mode: bool) {
                             false
                         };
                         if running {
-                            let close_cmd = json!({ "id": 1, "action": "close" });
+                            let close_cmd = json!({ "id": "close-all", "action": "close" });
                             match send_command(close_cmd, session_name) {
                                 Ok(_) => {
                                     closed += 1;
