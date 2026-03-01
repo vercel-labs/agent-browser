@@ -924,6 +924,20 @@ const denySchema = baseCommandSchema.extend({
 });
 
 // Union schema for all commands
+const savefileSchema = baseCommandSchema.extend({
+  action: z.literal('savefile'),
+  outputPath: z.string().min(1),
+  selector: z.string().min(1).optional(),
+});
+
+const dropfileSchema = baseCommandSchema.extend({
+  action: z.literal('dropfile'),
+  selector: z.string().min(1),
+  filePath: z.string().min(1),
+  fileName: z.string().optional(),
+  mimeType: z.string().optional(),
+});
+
 const commandSchema = z.discriminatedUnion('action', [
   launchSchema,
   navigateSchema,
