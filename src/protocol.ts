@@ -1083,6 +1083,8 @@ const commandSchema = z.discriminatedUnion('action', [
   authListSchema,
   authDeleteSchema,
   authShowSchema,
+  savefileSchema,
+  dropfileSchema,
 ]);
 
 // Parse result type

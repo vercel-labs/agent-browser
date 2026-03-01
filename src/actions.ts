@@ -1186,19 +1186,15 @@ async function handleSaveFile(
     url = page.url();
   }
 
-  const base64 = await page.evaluate(`(async () => {
-    const resp = await fetch(${JSON.stringify(url)});
-    if (!resp.ok) throw new Error('Fetch failed: ' + resp.status + ' ' + resp.statusText);
-    const blob = await resp.blob();
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(reader.result.split(',')[1]);
-      reader.onerror = () => reject(new Error('FileReader error'));
-      reader.readAsDataURL(blob);
-    });
-  })()`);
+  // Fetch from Node.js context to avoid cross-origin restrictions
+  const cookies = await page.context().cookies([url]);
+  const cookieHeader = cookies.map((c) => `${c.name}=${c.value}`).join('; ');
+  const resp = await fetch(url, {
+    headers: cookieHeader ? { Cookie: cookieHeader } : {},
+  });
+  if (!resp.ok) throw new Error(`Fetch failed: ${resp.status} ${resp.statusText}`);
+  const buffer = Buffer.from(await resp.arrayBuffer());
 
-  const buffer = Buffer.from(base64 as string, 'base64');
   const outputDir = path.dirname(command.outputPath);
   mkdirSync(outputDir, { recursive: true });
   fs.writeFileSync(command.outputPath, buffer);
@@ -1223,29 +1219,34 @@ async function handleDropFile(
   const fileName = command.fileName || path.basename(command.filePath);
   const mimeType = command.mimeType || 'application/octet-stream';
 
-  await page.evaluate(`(async () => {
-    const binary = atob(${JSON.stringify(base64Content)});
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  // Resolve selector through the ref system, then dispatch drag events
+  const locator = browser.getLocator(command.selector);
+  const elementHandle = await locator.elementHandle();
+  if (!elementHandle) throw new Error('Element not found: ' + command.selector);
 
-    const file = new File([bytes], ${JSON.stringify(fileName)}, { type: ${JSON.stringify(mimeType)} });
-    const dt = new DataTransfer();
-    dt.items.add(file);
+  await elementHandle.evaluate(
+    `(el, args) => {
+      const [b64, fName, fMime] = args;
+      const binary = atob(b64);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
 
-    const el = document.querySelector(${JSON.stringify(command.selector)});
-    if (!el) throw new Error('Element not found: ' + ${JSON.stringify(command.selector)});
+      const file = new File([bytes], fName, { type: fMime });
+      const dt = new DataTransfer();
+      dt.items.add(file);
 
-    el.dispatchEvent(new DragEvent('dragenter', { dataTransfer: dt, bubbles: true }));
-    el.dispatchEvent(new DragEvent('dragover', { dataTransfer: dt, bubbles: true }));
-    el.dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true }));
-  })()`);
+      el.dispatchEvent(new DragEvent('dragenter', { dataTransfer: dt, bubbles: true }));
+      el.dispatchEvent(new DragEvent('dragover', { dataTransfer: dt, bubbles: true }));
+      el.dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true }));
+    }`,
+    [base64Content, fileName, mimeType]
+  );
 
   return successResponse(command.id, {
     selector: command.selector,
     file: fileName,
   });
 }
-
 
 async function handleDoubleClick(
   command: DoubleClickCommand,
