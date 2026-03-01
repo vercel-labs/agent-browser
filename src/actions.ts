@@ -1419,7 +1419,12 @@ async function handleRequests(
   // Start tracking if not already
   browser.startRequestTracking();
 
-  const requests = browser.getRequests(command.filter);
+  const requests = browser.getRequests({
+    filter: command.filter,
+    host: command.host,
+    type: command.type,
+    redact: command.redact,
+  });
   return successResponse(command.id, { requests });
 }
 
