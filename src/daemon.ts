@@ -458,7 +458,14 @@ export async function startDaemon(options?: {
 
               const ignoreHTTPSErrors = process.env.AGENT_BROWSER_IGNORE_HTTPS_ERRORS === '1';
               const allowFileAccess = process.env.AGENT_BROWSER_ALLOW_FILE_ACCESS === '1';
-              const browserType = process.env.AGENT_BROWSER_BROWSER as 'chromium' | 'firefox' | 'webkit' | undefined;
+              const browserEnv = process.env.AGENT_BROWSER_BROWSER;
+              const validBrowsers = ['chromium', 'firefox', 'webkit'] as const;
+              let browserType: 'chromium' | 'firefox' | 'webkit' | undefined;
+              if (browserEnv === 'chromium' || browserEnv === 'firefox' || browserEnv === 'webkit') {
+                browserType = browserEnv;
+              } else if (browserEnv) {
+                console.error(`[WARN] Invalid AGENT_BROWSER_BROWSER value "${browserEnv}". Expected one of: ${validBrowsers.join(', ')}. Falling back to default.`);
+              }
               const colorSchemeEnv = process.env.AGENT_BROWSER_COLOR_SCHEME;
               const colorScheme =
                 colorSchemeEnv === 'dark' ||

@@ -1311,7 +1311,9 @@ export class BrowserManager {
     // Auto-fallback to Firefox on ARM64 Linux where Chromium is unavailable
     if (effectiveBrowser === 'chromium' && !options.executablePath && process.arch === 'arm64' && process.platform === 'linux') {
       effectiveBrowser = 'firefox';
-      this.launchWarnings.push('Chromium unavailable on ARM64 Linux; using Firefox instead');
+      const warning = 'Chromium unavailable on ARM64 Linux; using Firefox instead';
+      this.launchWarnings.push(warning);
+      console.error(`[WARN] ${warning}`);
     }
     if (hasExtensions && effectiveBrowser !== 'chromium') {
       throw new Error('Extensions are only supported in Chromium');
