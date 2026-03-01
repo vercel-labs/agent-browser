@@ -150,6 +150,7 @@ fn extract_config_path(args: &[String]) -> Option<Option<String>> {
         "--provider",
         "--device",
         "--session-name",
+        "--browser",
         "--color-scheme",
         "--download-path",
         "--max-output",
@@ -234,6 +235,8 @@ pub struct Flags {
     pub action_policy: Option<String>,
     pub confirm_actions: Option<String>,
     pub confirm_interactive: bool,
+    pub browser: Option<String>,
+    pub cli_browser: bool,
 
     // Track which launch-time options were explicitly passed via CLI
     // (as opposed to being set only via environment variables)
@@ -579,6 +582,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--provider",
         "--device",
         "--session-name",
+        "--browser",
         "--color-scheme",
         "--download-path",
         "--max-output",
