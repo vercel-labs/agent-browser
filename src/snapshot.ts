@@ -131,11 +131,8 @@ const STRUCTURAL_ROLES = new Set([
  * Build a selector string for storing in ref map
  */
 function buildSelector(role: string, name: string): string {
-  if (name !== undefined) {
-    const escapedName = JSON.stringify(name);
-    return `getByRole('${role}', { name: ${escapedName}, exact: true })`;
-  }
-  return `getByRole('${role}')`;
+  const escapedName = JSON.stringify(name);
+  return `getByRole('${role}', { name: ${escapedName}, exact: true })`;
 }
 
 /**
