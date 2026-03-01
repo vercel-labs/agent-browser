@@ -1378,7 +1378,7 @@ export class BrowserManager {
       if (process.platform === 'win32' && (options.headless ?? true)) {
         console.warn(
           '[agent-browser] Warning: Headless mode on Windows may not persist cookies. ' +
-          'Use --headed or set AGENT_BROWSER_HEADED=1 for reliable cookie persistence.'
+            'Use --headed or set AGENT_BROWSER_HEADED=1 for reliable cookie persistence.'
         );
       }
 
