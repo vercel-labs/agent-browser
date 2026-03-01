@@ -234,6 +234,7 @@ pub struct DaemonOptions<'a> {
     pub action_policy: Option<&'a str>,
     pub confirm_actions: Option<&'a str>,
     pub native: bool,
+    pub headers: Option<&'a str>,
 }
 
 fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
@@ -284,6 +285,9 @@ fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
     }
     if let Some(sn) = opts.session_name {
         cmd.env("AGENT_BROWSER_SESSION_NAME", sn);
+    }
+    if let Some(h) = opts.headers.as_deref() {
+        cmd.env("AGENT_BROWSER_HEADERS", h);
     }
     if let Some(dp) = opts.download_path {
         cmd.env("AGENT_BROWSER_DOWNLOAD_PATH", dp);
