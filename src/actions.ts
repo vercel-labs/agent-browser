@@ -1475,7 +1475,7 @@ async function handleViewport(
       device: command.device,
     });
   }
-  if (!command.width || !command.height) {
+  if (command.width == null || command.height == null) {
     throw new Error('Either device name or width+height required');
   }
   await browser.setViewport(command.width, command.height);

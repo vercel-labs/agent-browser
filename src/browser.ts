@@ -2357,6 +2357,8 @@ export class BrowserManager {
       storageState,
     });
     this.recordingContext.setDefaultTimeout(10000);
+    this.setupContextTracking(this.recordingContext);
+    await this.addInitScriptIfConfigured(this.recordingContext);
 
     // Create a page in the recording context
     this.recordingPage = await this.recordingContext.newPage();
@@ -2577,4 +2579,3 @@ export class BrowserManager {
     this.frameCallback = null;
   }
 }
-
