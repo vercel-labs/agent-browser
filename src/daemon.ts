@@ -458,7 +458,8 @@ export async function startDaemon(options?: {
 
               const ignoreHTTPSErrors = process.env.AGENT_BROWSER_IGNORE_HTTPS_ERRORS === '1';
               const allowFileAccess = process.env.AGENT_BROWSER_ALLOW_FILE_ACCESS === '1';
-              const stealth = process.env.AGENT_BROWSER_STEALTH === '1';
+              const stealthEnv = (process.env.AGENT_BROWSER_STEALTH ?? '').toLowerCase();
+              const stealth = stealthEnv === '1' || stealthEnv === 'true' || stealthEnv === 'yes';
               const colorSchemeEnv = process.env.AGENT_BROWSER_COLOR_SCHEME;
               const colorScheme =
                 colorSchemeEnv === 'dark' ||

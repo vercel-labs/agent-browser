@@ -1327,7 +1327,10 @@ export class BrowserManager {
     const fileAccessArgs = options.allowFileAccess
       ? ['--allow-file-access-from-files', '--allow-file-access']
       : [];
-    const stealthArgs = options.stealth ? ['--disable-blink-features=AutomationControlled'] : [];
+    const stealthArgs =
+      options.stealth && browserType === 'chromium'
+        ? ['--disable-blink-features=AutomationControlled']
+        : [];
     this.stealthEnabled = options.stealth ?? false;
     const combinedArgs = [...fileAccessArgs, ...stealthArgs];
     const baseArgs = options.args
@@ -1481,6 +1484,9 @@ export class BrowserManager {
     this.contexts.push(context);
     this.setupContextTracking(context);
     await this.ensureDomainFilter(context);
+    if (this.stealthEnabled) {
+      await this.applyStealthEvasions(context);
+    }
 
     const page = context.pages()[0] ?? (await context.newPage());
     await this.sanitizeExistingPages([page]);
@@ -1491,7 +1497,6 @@ export class BrowserManager {
     }
     this.activePageIndex = this.pages.length > 0 ? this.pages.length - 1 : 0;
   }
-
 
   /**
    * Apply anti-bot-detection evasions to a browser context
@@ -1507,15 +1512,17 @@ export class BrowserManager {
       }
 
       // Fix permissions query
-      const originalQuery = window.navigator.permissions.query.bind(
-        window.navigator.permissions
-      );
-      window.navigator.permissions.query = function(parameters) {
-        if (parameters.name === 'notifications') {
-          return Promise.resolve({ state: Notification.permission });
-        }
-        return originalQuery(parameters);
-      };
+      if (window.navigator.permissions && window.navigator.permissions.query) {
+        const originalQuery = window.navigator.permissions.query.bind(
+          window.navigator.permissions
+        );
+        window.navigator.permissions.query = function(parameters) {
+          if (parameters.name === 'notifications') {
+            return Promise.resolve({ state: Notification.permission });
+          }
+          return originalQuery(parameters);
+        };
+      }
 
       // Fix plugins to look non-empty
       Object.defineProperty(navigator, 'plugins', {
@@ -1874,6 +1881,9 @@ export class BrowserManager {
     this.contexts.push(context);
     this.setupContextTracking(context);
     await this.ensureDomainFilter(context);
+    if (this.stealthEnabled) {
+      await this.applyStealthEvasions(context);
+    }
 
     const page = await context.newPage();
     // Only add if not already tracked (setupContextTracking may have already added it via 'page' event)
