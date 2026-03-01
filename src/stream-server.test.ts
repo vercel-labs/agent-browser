@@ -38,6 +38,21 @@ describe('isAllowedOrigin', () => {
       expect(isAllowedOrigin('http://[::1]')).toBe(true);
       expect(isAllowedOrigin('http://[::1]:3000')).toBe(true);
     });
+
+    it('should allow vscode-webview:// origins', () => {
+      expect(isAllowedOrigin('vscode-webview://extension-id')).toBe(true);
+      expect(isAllowedOrigin('vscode-webview://some.extension/path')).toBe(true);
+    });
+  });
+
+  describe('prefix matching edge cases', () => {
+    it('should not allow vscode-webview prefix without ://', () => {
+      expect(isAllowedOrigin('vscode-webview-fake://evil')).toBe(false);
+    });
+
+    it('should not allow partial file:// prefix spoofing', () => {
+      expect(isAllowedOrigin('file-evil://path')).toBe(false);
+    });
   });
 
   describe('rejected origins', () => {

@@ -7,7 +7,7 @@ import { IOSManager } from './ios-manager.js';
 import { parseCommand, serializeResponse, errorResponse } from './protocol.js';
 import { executeCommand, initActionPolicy } from './actions.js';
 import { executeIOSCommand } from './ios-actions.js';
-import {  StreamServer } , setAllowedOrigins } from './stream-server.js';
+import { StreamServer, setAllowedOrigins } from './stream-server.js';
 import {
   getSessionsDir,
   ensureSessionsDir,
@@ -461,7 +461,9 @@ export async function startDaemon(options?: {
 
               // Set custom allowed WebSocket origins
               if (process.env.AGENT_BROWSER_ALLOWED_ORIGINS) {
-                setAllowedOrigins(process.env.AGENT_BROWSER_ALLOWED_ORIGINS.split(',').map(s => s.trim()));
+                setAllowedOrigins(
+                  process.env.AGENT_BROWSER_ALLOWED_ORIGINS.split(',').map((s) => s.trim())
+                );
               }
               const colorSchemeEnv = process.env.AGENT_BROWSER_COLOR_SCHEME;
               const colorScheme =
