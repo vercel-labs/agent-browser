@@ -80,6 +80,7 @@ const ACTION_CATEGORIES: Record<string, string> = {
   route: 'network',
   unroute: 'network',
   requests: 'network',
+  networkdump: 'network',
 
   state_save: 'state',
   state_load: 'state',

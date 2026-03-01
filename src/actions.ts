@@ -2481,6 +2481,7 @@ async function handleResponseBody(
   return successResponse(command.id, {
     url: response.url(),
     status: response.status(),
+    headers: response.headers(),
     body: parsed,
   });
 }
