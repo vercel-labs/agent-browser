@@ -1,5 +1,5 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::io::{self, BufRead};
 
 use crate::color;
@@ -237,36 +237,58 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                 context: "savefile".to_string(),
                 usage: "savefile <output-path> [selector]",
             })?;
-            let selector = rest.get(1).map(|s| s.as_str());
-            Ok(json!({ "id": id, "action": "savefile", "outputPath": output, "selector": selector }))
+            let mut obj = Map::new();
+            obj.insert("id".into(), json!(id));
+            obj.insert("action".into(), json!("savefile"));
+            obj.insert("outputPath".into(), json!(output));
+            if let Some(sel) = rest.get(1) {
+                obj.insert("selector".into(), json!(sel));
+            }
+            Ok(Value::Object(obj))
         }
         "dropfile" => {
-            let file = rest.first().ok_or_else(|| ParseError::MissingArguments {
+            let selector = rest.first().ok_or_else(|| ParseError::MissingArguments {
                 context: "dropfile".to_string(),
-                usage: "dropfile <file-path> <selector> [--name <name>] [--mime <type>]",
+                usage: "dropfile <selector> <file-path> [--name <name>] [--mime <type>]",
             })?;
-            let selector = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
-                context: "dropfile selector".to_string(),
-                usage: "dropfile <file-path> <selector> [--name <name>] [--mime <type>]",
+            let file = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
+                context: "dropfile file-path".to_string(),
+                usage: "dropfile <selector> <file-path> [--name <name>] [--mime <type>]",
             })?;
             let mut name: Option<&str> = None;
             let mut mime: Option<&str> = None;
             let mut i = 2;
             while i < rest.len() {
                 match rest[i].as_str() {
-                    "--name" => { name = rest.get(i + 1).map(|s| s.as_str()); i += 2; }
-                    "--mime" => { mime = rest.get(i + 1).map(|s| s.as_str()); i += 2; }
+                    "--name" => {
+                        name = Some(rest.get(i + 1).ok_or_else(|| ParseError::MissingArguments {
+                            context: "--name flag".to_string(),
+                            usage: "dropfile <selector> <file-path> [--name <name>] [--mime <type>]",
+                        })?.as_str());
+                        i += 2;
+                    }
+                    "--mime" => {
+                        mime = Some(rest.get(i + 1).ok_or_else(|| ParseError::MissingArguments {
+                            context: "--mime flag".to_string(),
+                            usage: "dropfile <selector> <file-path> [--name <name>] [--mime <type>]",
+                        })?.as_str());
+                        i += 2;
+                    }
                     _ => { i += 1; }
                 }
             }
-            Ok(json!({
-                "id": id,
-                "action": "dropfile",
-                "filePath": file,
-                "selector": selector,
-                "fileName": name,
-                "mimeType": mime,
-            }))
+            let mut obj = Map::new();
+            obj.insert("id".into(), json!(id));
+            obj.insert("action".into(), json!("dropfile"));
+            obj.insert("filePath".into(), json!(file));
+            obj.insert("selector".into(), json!(selector));
+            if let Some(n) = name {
+                obj.insert("fileName".into(), json!(n));
+            }
+            if let Some(m) = mime {
+                obj.insert("mimeType".into(), json!(m));
+            }
+            Ok(Value::Object(obj))
         }
         "download" => {
             let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
