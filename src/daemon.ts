@@ -628,7 +628,9 @@ export async function startDaemon(options?: {
     // Windows: use TCP socket on localhost
     const port = getPortForSession(currentSession);
     const portFile = getPortFile();
-    fs.writeFileSync(portFile, port.toString());
+    const tmpPortFile = portFile + '.tmp';
+    fs.writeFileSync(tmpPortFile, port.toString());
+    fs.renameSync(tmpPortFile, portFile);
     server.listen(port, '127.0.0.1', () => {
       // Daemon is ready on TCP port
     });
