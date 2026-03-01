@@ -398,10 +398,12 @@ pub fn ensure_daemon(
     {
         use std::os::windows::process::CommandExt;
 
-        // On Windows, call node directly. Command::new handles PATH resolution (node.exe or node.cmd)
-        // and automatically quotes arguments containing spaces.
-        let mut cmd = Command::new("node");
-        cmd.arg(daemon_path);
+        // On Windows, use node.exe explicitly to avoid shell wrapper issues in Git Bash/MSYS2
+        let mut cmd = Command::new("node.exe");
+        cmd.arg(daemon_path)
+            // Prevent MSYS/Git Bash path translation from mangling arguments
+            .env("MSYS_NO_PATHCONV", "1")
+            .env("MSYS2_ARG_CONV_EXCL", "*");
         apply_daemon_env(&mut cmd, session, opts);
 
         // CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS
