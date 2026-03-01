@@ -110,16 +110,26 @@ function createMockSocket(opts: { destroyed?: boolean; writeReturns?: boolean } 
 /**
  * AGENT_BROWSER_HEADERS env var parsing.
  *
- * In daemon.ts the headers are parsed with JSON.parse() and forwarded to
- * BrowserManager.launch(). A full integration test would require a CDP
- * connection; here we validate the parsing contract (valid JSON → object,
- * invalid JSON → undefined) which mirrors the daemon implementation.
+ * In daemon.ts the headers are parsed with JSON.parse() and validated at
+ * runtime (must be a plain object with string values). Here we replicate the
+ * same validation contract so the test stays aligned with the daemon
+ * implementation.
  */
 describe('AGENT_BROWSER_HEADERS env parsing', () => {
   function parseHeaders(raw: string | undefined): Record<string, string> | undefined {
     if (!raw) return undefined;
     try {
-      return JSON.parse(raw);
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        const validated: Record<string, string> = {};
+        for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+          if (typeof value === 'string') {
+            validated[key] = value;
+          }
+        }
+        return Object.keys(validated).length > 0 ? validated : undefined;
+      }
+      return undefined;
     } catch {
       return undefined;
     }
@@ -141,8 +151,32 @@ describe('AGENT_BROWSER_HEADERS env parsing', () => {
     expect(parseHeaders(undefined)).toBeUndefined();
   });
 
-  it('should handle empty object', () => {
-    expect(parseHeaders('{}')).toEqual({});
+  it('should return undefined for empty object', () => {
+    expect(parseHeaders('{}')).toBeUndefined();
+  });
+
+  it('should reject arrays', () => {
+    expect(parseHeaders('["a","b"]')).toBeUndefined();
+  });
+
+  it('should reject non-object primitives', () => {
+    expect(parseHeaders('"just a string"')).toBeUndefined();
+    expect(parseHeaders('42')).toBeUndefined();
+    expect(parseHeaders('true')).toBeUndefined();
+    expect(parseHeaders('null')).toBeUndefined();
+  });
+
+  it('should strip non-string values and keep valid ones', () => {
+    const raw = '{"good":"value","bad":123,"also_good":"ok"}';
+    expect(parseHeaders(raw)).toEqual({
+      good: 'value',
+      also_good: 'ok',
+    });
+  });
+
+  it('should return undefined when all values are non-string', () => {
+    const raw = '{"a":1,"b":true,"c":null}';
+    expect(parseHeaders(raw)).toBeUndefined();
   });
 });
 
