@@ -400,6 +400,10 @@ pub fn ensure_daemon(
 
         // On Windows, call node directly. Command::new handles PATH resolution (node.exe or node.cmd)
         // and automatically quotes arguments containing spaces.
+        eprintln!("[DEBUG] Starting daemon: node {:?}", daemon_path);
+        eprintln!("[DEBUG] Session: {}", session);
+        eprintln!("[DEBUG] Port: {}", get_port_for_session(session));
+        
         let mut cmd = Command::new("node");
         cmd.arg(daemon_path);
         apply_daemon_env(&mut cmd, session, opts);
@@ -425,10 +429,15 @@ pub fn ensure_daemon(
         thread::sleep(Duration::from_millis(100));
     }
 
-    Err(format!(
-        "Daemon failed to start (socket: {})",
+    #[cfg(unix)]
+    let socket_info = format!(
+        "socket: {}",
         get_socket_dir().join(format!("{}.sock", session)).display()
-    ))
+    );
+    #[cfg(windows)]
+    let socket_info = format!("port: {}", get_port_for_session(session));
+
+    Err(format!("Daemon failed to start ({})", socket_info))
 }
 
 fn connect(session: &str) -> Result<Connection, String> {
@@ -714,3 +723,5 @@ mod tests {
         assert!(!is_transient_error("Daemon not found"));
     }
 }
+
+
