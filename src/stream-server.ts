@@ -1,4 +1,11 @@
 import { WebSocketServer, WebSocket } from 'ws';
+
+// Custom allowed origins set via setAllowedOrigins()
+let customAllowedOrigins: string[] = [];
+
+export function setAllowedOrigins(origins: string[]): void {
+  customAllowedOrigins = origins;
+}
 import type { BrowserManager, ScreencastFrame } from './browser.js';
 import { setScreencastFrameCallback } from './actions.js';
 
@@ -15,6 +22,19 @@ export function isAllowedOrigin(origin: string | undefined): boolean {
   // Allow file:// origins (local HTML files)
   if (origin.startsWith('file://')) {
     return true;
+  }
+  // Allow vscode-webview:// origins (VSCode Webview extensions)
+  if (origin.startsWith('vscode-webview://')) {
+    return true;
+  }
+  // Check custom allowed origins
+  for (const allowed of customAllowedOrigins) {
+    if (origin === allowed) return true;
+    if (origin.startsWith(allowed)) {
+      if (allowed.endsWith('://')) return true;
+      const next = origin[allowed.length];
+      if (next === undefined || next === '/' || next === ':') return true;
+    }
   }
   // Allow localhost/loopback origins (browser-based stream viewers)
   try {

@@ -236,6 +236,7 @@ pub struct Flags {
     pub confirm_actions: Option<String>,
     pub confirm_interactive: bool,
     pub native: bool,
+    pub allowed_origins: Option<String>,
 
     // Track which launch-time options were explicitly passed via CLI
     // (as opposed to being set only via environment variables)

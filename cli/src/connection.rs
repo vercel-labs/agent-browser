@@ -234,6 +234,7 @@ pub struct DaemonOptions<'a> {
     pub action_policy: Option<&'a str>,
     pub confirm_actions: Option<&'a str>,
     pub native: bool,
+    pub allowed_origins: Option<&'a str>,
 }
 
 fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
@@ -296,6 +297,9 @@ fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
     }
     if let Some(ca) = opts.confirm_actions {
         cmd.env("AGENT_BROWSER_CONFIRM_ACTIONS", ca);
+    }
+    if let Some(ao) = opts.allowed_origins {
+        cmd.env("AGENT_BROWSER_ALLOWED_ORIGINS", ao);
     }
 }
 
