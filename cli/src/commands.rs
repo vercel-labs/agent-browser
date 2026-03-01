@@ -234,6 +234,42 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
             })?;
             Ok(json!({ "id": id, "action": "upload", "selector": sel, "files": &rest[1..] }))
         }
+        "savefile" => {
+            let output = rest.first().ok_or_else(|| ParseError::MissingArguments {
+                context: "savefile".to_string(),
+                usage: "savefile <output-path> [selector]",
+            })?;
+            let selector = rest.get(1).map(|s| s.as_str());
+            Ok(json!({ "id": id, "action": "savefile", "outputPath": output, "selector": selector }))
+        }
+        "dropfile" => {
+            let file = rest.first().ok_or_else(|| ParseError::MissingArguments {
+                context: "dropfile".to_string(),
+                usage: "dropfile <file-path> <selector> [--name <name>] [--mime <type>]",
+            })?;
+            let selector = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
+                context: "dropfile selector".to_string(),
+                usage: "dropfile <file-path> <selector> [--name <name>] [--mime <type>]",
+            })?;
+            let mut name: Option<&str> = None;
+            let mut mime: Option<&str> = None;
+            let mut i = 2;
+            while i < rest.len() {
+                match rest[i].as_str() {
+                    "--name" => { name = rest.get(i + 1).map(|s| s.as_str()); i += 2; }
+                    "--mime" => { mime = rest.get(i + 1).map(|s| s.as_str()); i += 2; }
+                    _ => { i += 1; }
+                }
+            }
+            Ok(json!({
+                "id": id,
+                "action": "dropfile",
+                "filePath": file,
+                "selector": selector,
+                "fileName": name,
+                "mimeType": mime,
+            }))
+        }
         "download" => {
             let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
                 context: "download".to_string(),
