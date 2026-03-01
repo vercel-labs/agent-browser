@@ -2070,6 +2070,8 @@ mod tests {
             action_policy: None,
             confirm_actions: None,
             confirm_interactive: false,
+            browser: None,
+            cli_browser: false,
 
         }
     }
