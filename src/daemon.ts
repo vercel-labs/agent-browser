@@ -361,7 +361,7 @@ export async function startDaemon(options?: {
   const allowedOriginsEnv = process.env.AGENT_BROWSER_ALLOWED_ORIGINS;
   if (allowedOriginsEnv) {
     const { setAllowedOrigins } = await import('./stream-server.js');
-    setAllowedOrigins(allowedOriginsEnv.split(',').map(s => s.trim()));
+    setAllowedOrigins(allowedOriginsEnv.split(',').map((s) => s.trim()));
   }
 
   if (streamPort > 0 && !isIOS && manager instanceof BrowserManager) {
