@@ -229,6 +229,14 @@ fn main() {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
 
+    // Prevent MSYS/Git Bash path translation from mangling arguments
+    // in the current (arg-parsing) process, not just the child daemon.
+    #[cfg(windows)]
+    {
+        env::set_var("MSYS_NO_PATHCONV", "1");
+        env::set_var("MSYS2_ARG_CONV_EXCL", "*");
+    }
+
     let args: Vec<String> = env::args().skip(1).collect();
     let flags = parse_flags(&args);
     let clean = clean_args(&args);
