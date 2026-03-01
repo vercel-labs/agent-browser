@@ -284,7 +284,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
         session: env::var("AGENT_BROWSER_SESSION").ok()
             .or(config.session)
             .unwrap_or_else(|| "default".to_string()),
-        headers: config.headers,
+        headers: env::var("AGENT_BROWSER_HEADERS").ok().or(config.headers),
         executable_path: env::var("AGENT_BROWSER_EXECUTABLE_PATH").ok()
             .or(config.executable_path),
         cdp: config.cdp,

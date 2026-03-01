@@ -1257,7 +1257,7 @@ export class BrowserManager {
     }
 
     if (cdpEndpoint) {
-      await this.connectViaCDP(cdpEndpoint);
+      await this.connectViaCDP(cdpEndpoint, options.headers);
       return;
     }
 
@@ -1564,6 +1564,13 @@ export class BrowserManager {
       }
 
       this.activePageIndex = 0;
+
+      // Apply custom headers post-connection
+      if (headers && Object.keys(headers).length > 0) {
+        for (const context of contexts) {
+          await context.setExtraHTTPHeaders(headers);
+        }
+      }
     } catch (error) {
       // Clean up browser connection if validation or setup failed
       await browser.close().catch(() => {});
