@@ -1935,7 +1935,7 @@ fn parse_set(rest: &[&str], id: &str) -> Result<Value, ParseError> {
 }
 
 fn parse_network(rest: &[&str], id: &str) -> Result<Value, ParseError> {
-    const VALID: &[&str] = &["route", "unroute", "requests"];
+    const VALID: &[&str] = &["route", "unroute", "requests", "response", "dump"];
 
     match rest.first().copied() {
         Some("route") => {
@@ -1957,11 +1957,68 @@ fn parse_network(rest: &[&str], id: &str) -> Result<Value, ParseError> {
         }
         Some("requests") => {
             let clear = rest.contains(&"--clear");
+            let redact = rest.contains(&"--redact");
             let filter_idx = rest.iter().position(|&s| s == "--filter");
             let filter = filter_idx.and_then(|i| rest.get(i + 1).copied());
+            let host_idx = rest.iter().position(|&s| s == "--host");
+            let host = host_idx.and_then(|i| rest.get(i + 1).copied());
+            let type_idx = rest.iter().position(|&s| s == "--type");
+            let rtype = type_idx.and_then(|i| rest.get(i + 1).copied());
             let mut cmd = json!({ "id": id, "action": "requests", "clear": clear });
             if let Some(f) = filter {
                 cmd["filter"] = json!(f);
+            }
+            if let Some(h) = host {
+                cmd["host"] = json!(h);
+            }
+            if let Some(t) = rtype {
+                cmd["type"] = json!(t);
+            }
+            if redact {
+                cmd["redact"] = json!(true);
+            }
+            Ok(cmd)
+        }
+        Some("response") => {
+            let url = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
+                context: "network response".to_string(),
+                usage: "network response <url> [--timeout <ms>]",
+            })?;
+            let timeout_idx = rest.iter().position(|&s| s == "--timeout");
+            let timeout = timeout_idx.and_then(|i| rest.get(i + 1).and_then(|s| s.parse::<u64>().ok()));
+            let mut cmd = json!({ "id": id, "action": "responsebody", "url": url });
+            if let Some(t) = timeout {
+                cmd["timeout"] = json!(t);
+            }
+            Ok(cmd)
+        }
+        Some("dump") => {
+            let out_idx = rest.iter().position(|&s| s == "--out");
+            let out_path = out_idx
+                .and_then(|i| rest.get(i + 1).copied())
+                .ok_or_else(|| ParseError::MissingArguments {
+                    context: "network dump".to_string(),
+                    usage: "network dump --out <path> [--filter <url>] [--host <domain>] [--type <types>] [--redact]",
+                })?;
+            let redact = rest.contains(&"--redact");
+            let filter_idx = rest.iter().position(|&s| s == "--filter");
+            let filter = filter_idx.and_then(|i| rest.get(i + 1).copied());
+            let host_idx = rest.iter().position(|&s| s == "--host");
+            let host = host_idx.and_then(|i| rest.get(i + 1).copied());
+            let type_idx = rest.iter().position(|&s| s == "--type");
+            let rtype = type_idx.and_then(|i| rest.get(i + 1).copied());
+            let mut cmd = json!({ "id": id, "action": "networkdump", "outputPath": out_path });
+            if let Some(f) = filter {
+                cmd["filter"] = json!(f);
+            }
+            if let Some(h) = host {
+                cmd["host"] = json!(h);
+            }
+            if let Some(t) = rtype {
+                cmd["type"] = json!(t);
+            }
+            if redact {
+                cmd["redact"] = json!(true);
             }
             Ok(cmd)
         }
@@ -1971,7 +2028,7 @@ fn parse_network(rest: &[&str], id: &str) -> Result<Value, ParseError> {
         }),
         None => Err(ParseError::MissingArguments {
             context: "network".to_string(),
-            usage: "network <route|unroute|requests> [args...]",
+            usage: "network <route|unroute|requests|response|dump> [args...]",
         }),
     }
 }

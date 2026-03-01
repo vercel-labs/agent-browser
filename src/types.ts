@@ -231,7 +231,10 @@ export interface UnrouteCommand extends BaseCommand {
 // Request inspection
 export interface RequestsCommand extends BaseCommand {
   action: 'requests';
-  filter?: string; // URL pattern to filter
+  filter?: string;
+  host?: string;
+  type?: string;
+  redact?: boolean;
   clear?: boolean;
 }
 
@@ -489,6 +492,15 @@ export interface ResponseBodyCommand extends BaseCommand {
   action: 'responsebody';
   url: string;
   timeout?: number;
+}
+
+export interface NetworkDumpCommand extends BaseCommand {
+  action: 'networkdump';
+  outputPath: string;
+  filter?: string;
+  host?: string;
+  type?: string;
+  redact?: boolean;
 }
 
 // Screencast commands for streaming browser viewport
@@ -1016,6 +1028,7 @@ export type Command =
   | MultiSelectCommand
   | WaitForDownloadCommand
   | ResponseBodyCommand
+  | NetworkDumpCommand
   | ScreencastStartCommand
   | ScreencastStopCommand
   | InputMouseCommand

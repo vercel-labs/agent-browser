@@ -72,11 +72,14 @@ export interface ScreencastOptions {
 }
 
 interface TrackedRequest {
+  id: number;
   url: string;
   method: string;
   headers: Record<string, string>;
   timestamp: number;
   resourceType: string;
+  statusCode?: number;
+  responseHeaders?: Record<string, string>;
 }
 
 interface ConsoleMessage {
@@ -109,6 +112,9 @@ export class BrowserManager {
   private activeFrame: Frame | null = null;
   private dialogHandler: ((dialog: Dialog) => Promise<void>) | null = null;
   private trackedRequests: TrackedRequest[] = [];
+  private trackedRequestsById: Map<number, TrackedRequest> = new Map();
+  private requestIdCounter: number = 0;
+  private isTrackingRequests: boolean = false;
   private routes: Map<string, (route: Route) => Promise<void>> = new Map();
   private consoleMessages: ConsoleMessage[] = [];
   private pageErrors: PageError[] = [];
@@ -449,26 +455,88 @@ export class BrowserManager {
    * Start tracking requests
    */
   startRequestTracking(): void {
-    const page = this.getPage();
+    if (this.isTrackingRequests) return;
+    this.isTrackingRequests = true;
+    // Attach to current page
+    this.attachRequestListeners(this.getPage());
+  }
+
+  private attachRequestListeners(page: Page): void {
+    const requestMap = new WeakMap<Request, number>();
     page.on('request', (request: Request) => {
-      this.trackedRequests.push({
+      const id = ++this.requestIdCounter;
+      requestMap.set(request, id);
+      const tracked: TrackedRequest = {
+        id,
         url: request.url(),
         method: request.method(),
         headers: request.headers(),
         timestamp: Date.now(),
         resourceType: request.resourceType(),
-      });
+      };
+      this.trackedRequests.push(tracked);
+      this.trackedRequestsById.set(id, tracked);
+    });
+    page.on('response', (response) => {
+      const reqId = requestMap.get(response.request());
+      if (reqId !== undefined) {
+        const tracked = this.trackedRequestsById.get(reqId);
+        if (tracked) {
+          tracked.statusCode = response.status();
+          tracked.responseHeaders = response.headers();
+        }
+      }
     });
   }
 
   /**
    * Get tracked requests
    */
-  getRequests(filter?: string): TrackedRequest[] {
-    if (filter) {
-      return this.trackedRequests.filter((r) => r.url.includes(filter));
+  getRequests(options?: {
+    filter?: string;
+    host?: string;
+    type?: string;
+    redact?: boolean;
+  }): TrackedRequest[] {
+    let results = this.trackedRequests;
+
+    if (options?.filter) {
+      const f = options.filter;
+      results = results.filter((r) => r.url.includes(f));
     }
-    return this.trackedRequests;
+    if (options?.host) {
+      const host = options.host;
+      results = results.filter((r) => {
+        try {
+          return new URL(r.url).hostname.includes(host);
+        } catch {
+          return false;
+        }
+      });
+    }
+    if (options?.type) {
+      const types = options.type.split(',').map((t) => t.trim().toLowerCase());
+      results = results.filter((r) => types.includes(r.resourceType));
+    }
+    if (options?.redact) {
+      const sensitiveKeys = ['authorization', 'cookie', 'set-cookie', 'x-api-key', 'x-auth-token'];
+      results = results.map((r) => ({
+        ...r,
+        headers: Object.fromEntries(
+          Object.entries(r.headers).map(([k, v]) =>
+            sensitiveKeys.includes(k.toLowerCase()) ? [k, '[REDACTED]'] : [k, v]
+          )
+        ),
+        responseHeaders: r.responseHeaders
+          ? Object.fromEntries(
+              Object.entries(r.responseHeaders).map(([k, v]) =>
+                sensitiveKeys.includes(k.toLowerCase()) ? [k, '[REDACTED]'] : [k, v]
+              )
+            )
+          : undefined,
+      }));
+    }
+    return results;
   }
 
   /**
@@ -476,6 +544,7 @@ export class BrowserManager {
    */
   clearRequests(): void {
     this.trackedRequests = [];
+    this.trackedRequestsById.clear();
   }
 
   /**
@@ -1745,6 +1814,10 @@ export class BrowserManager {
         }
       }
     });
+
+    if (this.isTrackingRequests) {
+      this.attachRequestListeners(page);
+    }
   }
 
   /**
