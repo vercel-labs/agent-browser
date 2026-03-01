@@ -1,11 +1,8 @@
 /**
  * Converts raw MDX content to clean Markdown suitable for AI agents.
  *
- * Transformations:
- * - Remove `export` statements (metadata, etc.)
- * - Remove `import` statements
- * - Strip standalone JSX divs with className attributes
- * - Pass everything else through as-is (already valid Markdown)
+ * Strips export/import statements and standalone JSX divs with className
+ * attributes, passing everything else through as valid Markdown.
  */
 export function mdxToCleanMarkdown(raw: string): string {
   const lines = raw.split("\n");
@@ -16,12 +13,10 @@ export function mdxToCleanMarkdown(raw: string): string {
   for (const line of lines) {
     const trimmed = line.trim();
 
-    // Skip export and import statements
     if (trimmed.startsWith("export ") || trimmed.startsWith("import ")) {
       continue;
     }
 
-    // Track JSX blocks (like callout divs) and skip them
     if (
       !inJsxBlock &&
       trimmed.startsWith("<div ") &&
@@ -33,7 +28,6 @@ export function mdxToCleanMarkdown(raw: string): string {
     }
 
     if (inJsxBlock) {
-      // Count opening/closing div tags to handle nesting
       const opens = (line.match(/<div[\s>]/g) || []).length;
       const closes = (line.match(/<\/div>/g) || []).length;
       jsxDepth += opens - closes;
@@ -47,7 +41,6 @@ export function mdxToCleanMarkdown(raw: string): string {
     out.push(line);
   }
 
-  // Clean up leading blank lines
   let result = out.join("\n");
   result = result.replace(/^\n+/, "\n").trim();
   return result;

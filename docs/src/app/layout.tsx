@@ -1,18 +1,19 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import { Inter, Geist_Mono } from "next/font/google";
 import { GeistPixelSquare } from "geist/font/pixel";
 import "./globals.css";
 import { ThemeProvider } from "@/components/theme-provider";
-import { MobileNavProvider } from "@/components/mobile-nav-context";
 import { Header } from "@/components/header";
-import { Sidebar } from "@/components/sidebar";
+import { DocsSidebar } from "@/components/docs-sidebar";
+import { DocsMobileNav } from "@/components/docs-mobile-nav";
+import { CopyPageButton } from "@/components/copy-page-button";
 import { DocsChat } from "@/components/docs-chat";
 import { cookies } from "next/headers";
 import { SpeedInsights } from "@vercel/speed-insights/next";
 import { Analytics } from "@vercel/analytics/next";
 
-const geist = Geist({
-  variable: "--font-geist",
+const inter = Inter({
+  variable: "--font-inter",
   subsets: ["latin"],
 });
 
@@ -66,23 +67,23 @@ export default async function RootLayout({
         )}
       </head>
       <body
-        className={`${geist.variable} ${geistMono.variable} ${GeistPixelSquare.variable} antialiased bg-background text-foreground`}
+        className={`${inter.variable} ${geistMono.variable} ${GeistPixelSquare.variable} bg-white text-neutral-900 antialiased dark:bg-neutral-950 dark:text-neutral-100`}
       >
         <ThemeProvider>
-          <MobileNavProvider>
-            <Header />
-            <div className="flex min-h-[calc(100vh-3.5rem)]">
-              <Sidebar />
-              <main className="flex-1 overflow-auto">
-                <div className="max-w-2xl mx-auto px-4 sm:px-6 py-8 sm:py-12">
-                  <div className="prose">
-                    {children}
-                  </div>
-                </div>
-              </main>
+          <Header />
+          <DocsMobileNav />
+          <div className="max-w-5xl mx-auto px-6 py-8 lg:py-12 flex gap-16">
+            <aside className="w-48 shrink-0 hidden lg:block sticky top-28 h-[calc(100vh-7rem)] overflow-y-auto">
+              <DocsSidebar />
+            </aside>
+            <div className="flex-1 min-w-0 max-w-2xl pb-20">
+              <div className="flex justify-end mb-4">
+                <CopyPageButton />
+              </div>
+              <article className="prose">{children}</article>
             </div>
-            <DocsChat defaultOpen={chatOpen} defaultWidth={chatWidth} />
-          </MobileNavProvider>
+          </div>
+          <DocsChat defaultOpen={chatOpen} defaultWidth={chatWidth} />
         </ThemeProvider>
         <SpeedInsights />
         <Analytics />

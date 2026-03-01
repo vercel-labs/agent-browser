@@ -10,7 +10,10 @@ export async function CodeBlock({ code, lang = "bash" }: CodeBlockProps) {
   const trimmedCode = code.trim();
   const html = await codeToHtml(trimmedCode, {
     lang,
-    theme: "github-dark-default",
+    themes: {
+      light: "github-light-default",
+      dark: "github-dark-default",
+    },
   });
 
   return (

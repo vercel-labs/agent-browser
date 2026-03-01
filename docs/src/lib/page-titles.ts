@@ -2,6 +2,7 @@ export const PAGE_TITLES: Record<string, string> = {
   "": "Headless Browser\nAutomation for AI",
   installation: "Installation",
   "quick-start": "Quick Start",
+  skills: "Skills",
   commands: "Commands",
   configuration: "Configuration",
   selectors: "Selectors",

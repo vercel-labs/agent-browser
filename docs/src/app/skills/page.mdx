@@ -1,0 +1,60 @@
+import { pageMetadata } from "@/lib/page-metadata"
+
+export const metadata = pageMetadata("skills")
+
+# Skills
+
+agent-browser ships with skills that teach AI coding agents how to use it for specific workflows. Install a skill and your agent in Cursor, Claude Code, or Codex can automate browser tasks without manual guidance.
+
+## Available Skills
+
+- **agent-browser** — General browser automation: navigation, snapshots, forms, screenshots, data extraction, sessions, authentication, diffing, and the full command reference.
+- **dogfood** — Systematic exploratory testing. Navigates an app like a real user, finds bugs and UX issues, and produces a structured report with screenshots and repro videos.
+- **electron** — Automate any Electron app (VS Code, Slack, Discord, Figma, etc.) by connecting to its built-in Chrome DevTools Protocol port. This is how agent-browser drives native desktop apps like the Slack macOS app.
+- **slack** — Browser-based Slack automation. Check unreads, navigate channels, search conversations, send messages, and extract data — no API tokens needed.
+
+## Installation
+
+```bash
+npx skills add vercel-labs/agent-browser --skill agent-browser
+npx skills add vercel-labs/agent-browser --skill dogfood
+npx skills add vercel-labs/agent-browser --skill electron
+npx skills add vercel-labs/agent-browser --skill slack
+```
+
+After installing, your AI agent will automatically activate the right skill when it encounters a matching request.
+
+## agent-browser
+
+The core skill. Teaches agents the full agent-browser API: the navigate-snapshot-interact-re-snapshot workflow, all commands, command chaining, authentication (auth vault and state persistence), sessions, diffing, JavaScript evaluation, annotated screenshots, semantic locators, and configuration.
+
+Example agent interactions:
+
+- "Open example.com and fill out the contact form"
+- "Take a screenshot of the dashboard after logging in"
+- "Compare staging and production versions of the homepage"
+
+## dogfood
+
+A structured workflow for exploratory testing. The agent opens a target URL, systematically explores the app (navigating pages, testing forms, clicking buttons, checking console errors), and documents every issue it finds with:
+
+- Numbered repro steps
+- Step-by-step screenshots
+- Repro videos for interactive bugs
+- Severity classification
+
+The output is a markdown report in an output directory, ready to hand to the responsible team. Run it with a single prompt like "dogfood vercel.com" or "QA http://localhost:3000 — focus on the billing page".
+
+## electron
+
+Electron apps (VS Code, Slack, Discord, Figma, Notion, Spotify, etc.) are built on Chromium and expose a Chrome DevTools Protocol (CDP) port that agent-browser can connect to. This skill teaches agents how to launch or connect to any Electron app, then use the standard snapshot-interact workflow to automate it.
+
+Electron apps are built on Chromium, so they expose a Chrome DevTools Protocol (CDP) port that agent-browser can connect to. Launch the app with `--remote-debugging-port`, connect, and use the standard snapshot-interact workflow. This is the foundation that the **slack** skill builds on.
+
+## slack
+
+Browser-based Slack automation. Connects to an existing Slack session (via `agent-browser connect 9222`) or opens Slack in a new browser, then uses snapshots and element refs to navigate the UI. Covers checking unreads, navigating channels and DMs, searching conversations, extracting message data, and taking screenshots — all without needing Slack API tokens or bot setup.
+
+## Source
+
+All skill files are in the [`skills/`](https://github.com/vercel-labs/agent-browser/tree/main/skills) directory of the repository.
