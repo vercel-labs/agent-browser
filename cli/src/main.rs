@@ -251,6 +251,7 @@ fn main() {
     }
 
     // Prevent MSYS/Git Bash path translation from mangling arguments
+    // in the current (arg-parsing) process, not just the child daemon.
     #[cfg(windows)]
     {
         env::set_var("MSYS_NO_PATHCONV", "1");
