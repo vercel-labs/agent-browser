@@ -133,7 +133,7 @@ const mainframeSchema = baseCommandSchema.extend({
 
 const framelocatorSchema = baseCommandSchema.extend({
   action: z.literal('framelocator'),
-  selector: z.string().min(1),
+  selector: z.string().min(1).optional(),
 });
 
 const getByRoleSchema = baseCommandSchema.extend({

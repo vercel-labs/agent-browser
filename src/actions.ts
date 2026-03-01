@@ -1214,16 +1214,19 @@ async function handleFrameLocator(
   command: FrameLocatorCommand,
   browser: BrowserManager
 ): Promise<Response> {
-  browser.setFrameLocator(command.selector);
-  return successResponse(command.id, { switched: true });
+  browser.setFrameLocator(command.selector ?? null);
+  return successResponse(command.id, {
+    switched: !command.selector ? false : true,
+    cleared: !command.selector,
+  });
 }
 
 async function handleGetByRole(
   command: GetByRoleCommand,
   browser: BrowserManager
 ): Promise<Response> {
-  const page = browser.getPage();
-  const locator = page.getByRole(command.role as any, { name: command.name, exact: command.exact });
+  const base = browser.getLocatorBase();
+  const locator = base.getByRole(command.role as any, { name: command.name, exact: command.exact });
 
   switch (command.subaction) {
     case 'click':
@@ -1245,8 +1248,8 @@ async function handleGetByText(
   command: GetByTextCommand,
   browser: BrowserManager
 ): Promise<Response> {
-  const page = browser.getPage();
-  const locator = page.getByText(command.text, { exact: command.exact });
+  const base = browser.getLocatorBase();
+  const locator = base.getByText(command.text, { exact: command.exact });
 
   switch (command.subaction) {
     case 'click':
@@ -1262,8 +1265,8 @@ async function handleGetByLabel(
   command: GetByLabelCommand,
   browser: BrowserManager
 ): Promise<Response> {
-  const page = browser.getPage();
-  const locator = page.getByLabel(command.label, { exact: command.exact });
+  const base = browser.getLocatorBase();
+  const locator = base.getByLabel(command.label, { exact: command.exact });
 
   switch (command.subaction) {
     case 'click':
@@ -1282,8 +1285,8 @@ async function handleGetByPlaceholder(
   command: GetByPlaceholderCommand,
   browser: BrowserManager
 ): Promise<Response> {
-  const page = browser.getPage();
-  const locator = page.getByPlaceholder(command.placeholder, { exact: command.exact });
+  const base = browser.getLocatorBase();
+  const locator = base.getByPlaceholder(command.placeholder, { exact: command.exact });
 
   switch (command.subaction) {
     case 'click':
@@ -2219,8 +2222,8 @@ async function handleGetByAltText(
   command: GetByAltTextCommand,
   browser: BrowserManager
 ): Promise<Response> {
-  const page = browser.getPage();
-  const locator = page.getByAltText(command.text, { exact: command.exact });
+  const base = browser.getLocatorBase();
+  const locator = base.getByAltText(command.text, { exact: command.exact });
 
   switch (command.subaction) {
     case 'click':
@@ -2236,8 +2239,8 @@ async function handleGetByTitle(
   command: GetByTitleCommand,
   browser: BrowserManager
 ): Promise<Response> {
-  const page = browser.getPage();
-  const locator = page.getByTitle(command.text, { exact: command.exact });
+  const base = browser.getLocatorBase();
+  const locator = base.getByTitle(command.text, { exact: command.exact });
 
   switch (command.subaction) {
     case 'click':
@@ -2253,8 +2256,8 @@ async function handleGetByTestId(
   command: GetByTestIdCommand,
   browser: BrowserManager
 ): Promise<Response> {
-  const page = browser.getPage();
-  const locator = page.getByTestId(command.testId);
+  const base = browser.getLocatorBase();
+  const locator = base.getByTestId(command.testId);
 
   switch (command.subaction) {
     case 'click':

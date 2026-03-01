@@ -115,7 +115,7 @@ export interface MainFrameCommand extends BaseCommand {
 
 export interface FrameLocatorCommand extends BaseCommand {
   action: 'framelocator';
-  selector: string;
+  selector?: string;
 }
 
 export interface GetByRoleCommand extends BaseCommand {

@@ -782,6 +782,31 @@ describe('parseCommand', () => {
       const result = parseCommand(cmd({ id: '1', action: 'mainframe' }));
       expect(result.success).toBe(true);
     });
+
+    it('should parse framelocator with selector', () => {
+      const result = parseCommand(
+        cmd({ id: '1', action: 'framelocator', selector: 'iframe#child' })
+      );
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.command.action).toBe('framelocator');
+        expect((result.command as any).selector).toBe('iframe#child');
+      }
+    });
+
+    it('should parse framelocator without selector (clear)', () => {
+      const result = parseCommand(cmd({ id: '1', action: 'framelocator' }));
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.command.action).toBe('framelocator');
+        expect((result.command as any).selector).toBeUndefined();
+      }
+    });
+
+    it('should reject framelocator with empty selector', () => {
+      const result = parseCommand(cmd({ id: '1', action: 'framelocator', selector: '' }));
+      expect(result.success).toBe(false);
+    });
   });
 
   describe('screencast', () => {
