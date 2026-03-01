@@ -461,10 +461,16 @@ export async function startDaemon(options?: {
               const browserEnv = process.env.AGENT_BROWSER_BROWSER;
               const validBrowsers = ['chromium', 'firefox', 'webkit'] as const;
               let browserType: 'chromium' | 'firefox' | 'webkit' | undefined;
-              if (browserEnv === 'chromium' || browserEnv === 'firefox' || browserEnv === 'webkit') {
+              if (
+                browserEnv === 'chromium' ||
+                browserEnv === 'firefox' ||
+                browserEnv === 'webkit'
+              ) {
                 browserType = browserEnv;
               } else if (browserEnv) {
-                console.error(`[WARN] Invalid AGENT_BROWSER_BROWSER value "${browserEnv}". Expected one of: ${validBrowsers.join(', ')}. Falling back to default.`);
+                console.error(
+                  `[WARN] Invalid AGENT_BROWSER_BROWSER value "${browserEnv}". Expected one of: ${validBrowsers.join(', ')}. Falling back to default.`
+                );
               }
               const colorSchemeEnv = process.env.AGENT_BROWSER_COLOR_SCHEME;
               const colorScheme =
