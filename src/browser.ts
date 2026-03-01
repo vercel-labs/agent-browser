@@ -1257,7 +1257,7 @@ export class BrowserManager {
     }
 
     if (cdpEndpoint) {
-      await this.connectViaCDP(cdpEndpoint, options.headers);
+      await this.connectViaCDP(cdpEndpoint, { headers: options.headers });
       return;
     }
 
@@ -1494,7 +1494,7 @@ export class BrowserManager {
    */
   private async connectViaCDP(
     cdpEndpoint: string | undefined,
-    options?: { timeout?: number }
+    options?: { timeout?: number; headers?: Record<string, string> }
   ): Promise<void> {
     if (!cdpEndpoint) {
       throw new Error('CDP endpoint is required for CDP connection');
@@ -1567,6 +1567,7 @@ export class BrowserManager {
 
       // Apply custom headers post-connection (Playwright's connectOverCDP doesn't support
       // connection-time headers, so we set them on the context after connecting)
+      const headers = options?.headers;
       if (headers && Object.keys(headers).length > 0) {
         for (const context of contexts) {
           await context.setExtraHTTPHeaders(headers);

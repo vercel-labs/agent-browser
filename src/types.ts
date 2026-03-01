@@ -1036,7 +1036,8 @@ export type Command =
   | AuthDeleteCommand
   | AuthShowCommand
   | ConfirmCommand
-  | DenyCommand;
+  | DenyCommand
+  | HelpCommand;
 
 export interface AuthSaveCommand extends BaseCommand {
   action: 'auth_save';

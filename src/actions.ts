@@ -37,7 +37,7 @@ import type {
   FocusCommand,
   DragCommand,
   FrameCommand,
-
+  HelpCommand,
   GetByRoleCommand,
   GetByTextCommand,
   GetByLabelCommand,
@@ -161,7 +161,7 @@ import type {
   InputEventData,
   StylesData,
 } from './types.js';
-import { successResponse, errorResponse, parseCommand } from './protocol.js';
+import { successResponse, errorResponse, parseCommand, commandSchema } from './protocol.js';
 import { diffSnapshots, diffScreenshots } from './diff.js';
 import { getEnhancedSnapshot } from './snapshot.js';
 
@@ -594,12 +594,25 @@ async function dispatchAction(command: Command, browser: BrowserManager): Promis
       return await handleDiffUrl(command, browser);
     case 'auth_login':
       return await handleAuthLogin(command, browser);
+    case 'help':
+      return handleHelp(command);
     default: {
       // TypeScript narrows to never here, but we handle it for safety
       const unknownCommand = command as { id: string; action: string };
       return errorResponse(unknownCommand.id, `Unknown action: ${unknownCommand.action}`);
     }
   }
+}
+
+function handleHelp(command: HelpCommand): Response {
+  const actions = commandSchema.options
+    .map((opt) => {
+      const actionField = opt.shape.action;
+      return 'value' in actionField ? String(actionField.value) : undefined;
+    })
+    .filter((name): name is string => name !== undefined)
+    .sort();
+  return successResponse(command.id, { commands: actions });
 }
 
 async function handleLaunch(

@@ -748,6 +748,10 @@ const deviceListSchema = baseCommandSchema.extend({
   action: z.literal('device_list'),
 });
 
+const helpSchema = baseCommandSchema.extend({
+  action: z.literal('help'),
+});
+
 // Diff schemas
 const diffSnapshotSchema = baseCommandSchema.extend({
   action: z.literal('diff_snapshot'),
@@ -924,7 +928,7 @@ const denySchema = baseCommandSchema.extend({
 });
 
 // Union schema for all commands
-const commandSchema = z.discriminatedUnion('action', [
+export const commandSchema = z.discriminatedUnion('action', [
   launchSchema,
   navigateSchema,
   clickSchema,
@@ -1067,6 +1071,7 @@ const commandSchema = z.discriminatedUnion('action', [
   authListSchema,
   authDeleteSchema,
   authShowSchema,
+  helpSchema,
 ]);
 
 // Parse result type

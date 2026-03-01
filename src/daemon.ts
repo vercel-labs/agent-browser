@@ -463,9 +463,23 @@ export async function startDaemon(options?: {
               let headers: Record<string, string> | undefined;
               if (process.env.AGENT_BROWSER_HEADERS) {
                 try {
-                  headers = JSON.parse(process.env.AGENT_BROWSER_HEADERS);
+                  const parsed: unknown = JSON.parse(process.env.AGENT_BROWSER_HEADERS);
+                  if (
+                    typeof parsed === 'object' &&
+                    parsed !== null &&
+                    !Array.isArray(parsed) &&
+                    Object.values(parsed as Record<string, unknown>).every(
+                      (v) => typeof v === 'string'
+                    )
+                  ) {
+                    headers = parsed as Record<string, string>;
+                  } else {
+                    console.error(
+                      '[WARN] AGENT_BROWSER_HEADERS must be a JSON object with string values, ignoring'
+                    );
+                  }
                 } catch {
-                  /* ignore invalid JSON */
+                  console.error('[WARN] AGENT_BROWSER_HEADERS contains invalid JSON, ignoring');
                 }
               }
               const colorSchemeEnv = process.env.AGENT_BROWSER_COLOR_SCHEME;
