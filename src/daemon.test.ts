@@ -107,6 +107,45 @@ function createMockSocket(opts: { destroyed?: boolean; writeReturns?: boolean } 
   return socket as unknown as net.Socket;
 }
 
+/**
+ * AGENT_BROWSER_HEADERS env var parsing.
+ *
+ * In daemon.ts the headers are parsed with JSON.parse() and forwarded to
+ * BrowserManager.launch(). A full integration test would require a CDP
+ * connection; here we validate the parsing contract (valid JSON → object,
+ * invalid JSON → undefined) which mirrors the daemon implementation.
+ */
+describe('AGENT_BROWSER_HEADERS env parsing', () => {
+  function parseHeaders(raw: string | undefined): Record<string, string> | undefined {
+    if (!raw) return undefined;
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return undefined;
+    }
+  }
+
+  it('should parse valid JSON headers', () => {
+    const raw = '{"Authorization":"Bearer tok","X-Custom":"val"}';
+    expect(parseHeaders(raw)).toEqual({
+      Authorization: 'Bearer tok',
+      'X-Custom': 'val',
+    });
+  });
+
+  it('should return undefined for invalid JSON', () => {
+    expect(parseHeaders('{bad json')).toBeUndefined();
+  });
+
+  it('should return undefined when env var is not set', () => {
+    expect(parseHeaders(undefined)).toBeUndefined();
+  });
+
+  it('should handle empty object', () => {
+    expect(parseHeaders('{}')).toEqual({});
+  });
+});
+
 describe('safeWrite', () => {
   it('should resolve immediately when socket.write returns true', async () => {
     const socket = createMockSocket({ writeReturns: true });
