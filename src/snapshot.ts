@@ -23,7 +23,7 @@ export interface RefMap {
   [ref: string]: {
     selector: string;
     role: string;
-    name?: string;
+    name: string;
     /** Index for disambiguation when multiple elements have same role+name */
     nth?: number;
   };
@@ -290,7 +290,7 @@ export async function getEnhancedSnapshot(
     const cursorElements = await findCursorInteractiveElements(page, options.selector);
 
     // Filter out elements whose text is already captured in the snapshot
-    const existingTexts = new Set(Object.values(refs).map((r) => r.name?.toLowerCase()));
+    const existingTexts = new Set(Object.values(refs).map((r) => r.name.toLowerCase()));
     // Also extract quoted strings from the ARIA tree for broader dedup
     for (const m of enhancedTree.matchAll(/"([^"]+)"/g)) {
       existingTexts.add(m[1].toLowerCase());

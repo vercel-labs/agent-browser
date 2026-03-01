@@ -929,7 +929,7 @@ async function handleSnapshot(
   });
 
   // Simplify refs for output (just role and name)
-  const simpleRefs: Record<string, { role: string; name?: string }> = {};
+  const simpleRefs: Record<string, { role: string; name: string }> = {};
   for (const [ref, data] of Object.entries(refs)) {
     simpleRefs[ref] = { role: data.role, name: data.name };
   }

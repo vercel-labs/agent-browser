@@ -226,12 +226,10 @@ export class BrowserManager {
     }
 
     // Build locator with exact: true to avoid substring matches
-    let locator: Locator;
-    if (refData.name !== undefined) {
-      locator = page.getByRole(refData.role as any, { name: refData.name, exact: true });
-    } else {
-      locator = page.getByRole(refData.role as any);
-    }
+    let locator: Locator = page.getByRole(refData.role as any, {
+      name: refData.name,
+      exact: true,
+    });
 
     // If an nth index is stored (for disambiguation), use it
     if (refData.nth !== undefined) {
