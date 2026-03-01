@@ -112,6 +112,7 @@ export class BrowserManager {
   private activeFrame: Frame | null = null;
   private dialogHandler: ((dialog: Dialog) => Promise<void>) | null = null;
   private trackedRequests: TrackedRequest[] = [];
+  private trackedRequestsById: Map<number, TrackedRequest> = new Map();
   private requestIdCounter: number = 0;
   private isTrackingRequests: boolean = false;
   private routes: Map<string, (route: Route) => Promise<void>> = new Map();
@@ -467,19 +468,21 @@ export class BrowserManager {
     page.on('request', (request: Request) => {
       const id = ++this.requestIdCounter;
       requestMap.set(request, id);
-      this.trackedRequests.push({
+      const tracked: TrackedRequest = {
         id,
         url: request.url(),
         method: request.method(),
         headers: request.headers(),
         timestamp: Date.now(),
         resourceType: request.resourceType(),
-      });
+      };
+      this.trackedRequests.push(tracked);
+      this.trackedRequestsById.set(id, tracked);
     });
     page.on('response', (response) => {
       const reqId = requestMap.get(response.request());
       if (reqId !== undefined) {
-        const tracked = this.trackedRequests.find((r) => r.id === reqId);
+        const tracked = this.trackedRequestsById.get(reqId);
         if (tracked) {
           tracked.statusCode = response.status();
           tracked.responseHeaders = response.headers();
@@ -543,6 +546,7 @@ export class BrowserManager {
    */
   clearRequests(): void {
     this.trackedRequests = [];
+    this.trackedRequestsById.clear();
   }
 
   /**

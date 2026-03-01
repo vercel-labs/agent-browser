@@ -75,11 +75,11 @@ const ACTION_CATEGORIES: Record<string, string> = {
   isvisible: 'get',
   isenabled: 'get',
   ischecked: 'get',
-  responsebody: 'get',
 
   route: 'network',
   unroute: 'network',
   requests: 'network',
+  responsebody: 'network',
   networkdump: 'network',
 
   state_save: 'state',
