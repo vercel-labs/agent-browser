@@ -336,6 +336,8 @@ pub fn parse_flags(args: &[String]) -> Flags {
             .or(config.confirm_actions),
         confirm_interactive: env_var_is_truthy("AGENT_BROWSER_CONFIRM_INTERACTIVE")
             || config.confirm_interactive.unwrap_or(false),
+        browser: env::var("AGENT_BROWSER_BROWSER").ok(),
+        cli_browser: false,
         cli_executable_path: false,
         cli_extensions: false,
         cli_profile: false,
@@ -536,6 +538,13 @@ pub fn parse_flags(args: &[String]) -> Flags {
                 let (val, consumed) = parse_bool_arg(args, i);
                 flags.confirm_interactive = val;
                 if consumed { i += 1; }
+            }
+            "--browser" => {
+                if let Some(s) = args.get(i + 1) {
+                    flags.browser = Some(s.clone());
+                    flags.cli_browser = true;
+                    i += 1;
+                }
             }
             "--config" => {
                 // Already handled by load_config(); skip the value
