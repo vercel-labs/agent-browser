@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest';
-import { isAllowedOrigin } from './stream-server.js';
+import { describe, it, expect, beforeEach } from 'vitest';
+import { isAllowedOrigin, setAllowedOrigins } from './stream-server.js';
 
 describe('isAllowedOrigin', () => {
   describe('allowed origins', () => {
@@ -45,16 +45,6 @@ describe('isAllowedOrigin', () => {
     });
   });
 
-  describe('prefix matching edge cases', () => {
-    it('should not allow vscode-webview prefix without ://', () => {
-      expect(isAllowedOrigin('vscode-webview-fake://evil')).toBe(false);
-    });
-
-    it('should not allow partial file:// prefix spoofing', () => {
-      expect(isAllowedOrigin('file-evil://path')).toBe(false);
-    });
-  });
-
   describe('rejected origins', () => {
     it('should reject remote origins', () => {
       expect(isAllowedOrigin('https://evil.com')).toBe(false);
@@ -74,6 +64,63 @@ describe('isAllowedOrigin', () => {
     it('should reject invalid origin URLs', () => {
       expect(isAllowedOrigin('not-a-url')).toBe(false);
       expect(isAllowedOrigin('://missing-scheme')).toBe(false);
+    });
+
+    it('should not allow vscode-webview prefix without ://', () => {
+      expect(isAllowedOrigin('vscode-webview-fake://evil')).toBe(false);
+    });
+
+    it('should not allow partial file:// prefix spoofing', () => {
+      expect(isAllowedOrigin('file-evil://path')).toBe(false);
+    });
+  });
+
+  describe('custom allowed origins via setAllowedOrigins', () => {
+    beforeEach(() => {
+      setAllowedOrigins([]);
+    });
+
+    it('should allow exact custom origin', () => {
+      setAllowedOrigins(['https://my-app.example.com']);
+      expect(isAllowedOrigin('https://my-app.example.com')).toBe(true);
+      expect(isAllowedOrigin('https://other.example.com')).toBe(false);
+    });
+
+    it('should allow scheme-only prefix (ending with ://)', () => {
+      setAllowedOrigins(['custom-scheme://']);
+      expect(isAllowedOrigin('custom-scheme://anything')).toBe(true);
+      expect(isAllowedOrigin('custom-scheme://another/path')).toBe(true);
+      expect(isAllowedOrigin('custom-scheme-fake://bad')).toBe(false);
+    });
+
+    it('should allow origin with sub-path separator', () => {
+      setAllowedOrigins(['https://my-app.example.com']);
+      expect(isAllowedOrigin('https://my-app.example.com/path')).toBe(true);
+      expect(isAllowedOrigin('https://my-app.example.com:8080')).toBe(true);
+    });
+
+    it('should not allow partial hostname matches', () => {
+      setAllowedOrigins(['https://my-app.example.com']);
+      expect(isAllowedOrigin('https://my-app.example.com.evil.com')).toBe(false);
+    });
+
+    it('should trim and filter empty entries', () => {
+      setAllowedOrigins(['  https://trimmed.com  ', '', '  ']);
+      expect(isAllowedOrigin('https://trimmed.com')).toBe(true);
+    });
+
+    it('should handle multiple custom origins', () => {
+      setAllowedOrigins(['https://app1.com', 'https://app2.com']);
+      expect(isAllowedOrigin('https://app1.com')).toBe(true);
+      expect(isAllowedOrigin('https://app2.com')).toBe(true);
+      expect(isAllowedOrigin('https://app3.com')).toBe(false);
+    });
+
+    it('should reset when called with empty array', () => {
+      setAllowedOrigins(['https://allowed.com']);
+      expect(isAllowedOrigin('https://allowed.com')).toBe(true);
+      setAllowedOrigins([]);
+      expect(isAllowedOrigin('https://allowed.com')).toBe(false);
     });
   });
 });

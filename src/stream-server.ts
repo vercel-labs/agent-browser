@@ -4,7 +4,9 @@ import { WebSocketServer, WebSocket } from 'ws';
 let customAllowedOrigins: string[] = [];
 
 export function setAllowedOrigins(origins: string[]): void {
-  customAllowedOrigins = origins;
+  customAllowedOrigins = origins
+    .map((origin) => origin.trim())
+    .filter((origin) => origin.length > 0);
 }
 import type { BrowserManager, ScreencastFrame } from './browser.js';
 import { setScreencastFrameCallback } from './actions.js';

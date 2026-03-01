@@ -343,6 +343,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
         confirm_interactive: env_var_is_truthy("AGENT_BROWSER_CONFIRM_INTERACTIVE")
             || config.confirm_interactive.unwrap_or(false),
         native: env_var_is_truthy("AGENT_BROWSER_NATIVE") || config.native.unwrap_or(false),
+        allowed_origins: env::var("AGENT_BROWSER_ALLOWED_ORIGINS").ok(),
         cli_executable_path: false,
         cli_extensions: false,
         cli_profile: false,
@@ -549,6 +550,12 @@ pub fn parse_flags(args: &[String]) -> Flags {
                     i += 1;
                 }
             }
+            "--allow-origins" => {
+                if let Some(s) = args.get(i + 1) {
+                    flags.allowed_origins = Some(s.clone());
+                    i += 1;
+                }
+            }
             "--action-policy" => {
                 if let Some(s) = args.get(i + 1) {
                     flags.action_policy = Some(s.clone());
@@ -626,6 +633,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--download-path",
         "--max-output",
         "--allowed-domains",
+        "--allow-origins",
         "--action-policy",
         "--confirm-actions",
         "--config",

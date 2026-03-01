@@ -357,6 +357,20 @@ export async function startDaemon(options?: {
       ? parseInt(process.env.AGENT_BROWSER_STREAM_PORT, 10)
       : 0);
 
+  // Set custom allowed WebSocket origins (before stream server starts)
+  if (process.env.AGENT_BROWSER_ALLOWED_ORIGINS) {
+    const origins = Array.from(
+      new Set(
+        process.env.AGENT_BROWSER_ALLOWED_ORIGINS.split(',')
+          .map((s) => s.trim())
+          .filter((s) => s.length > 0)
+      )
+    );
+    if (origins.length > 0) {
+      setAllowedOrigins(origins);
+    }
+  }
+
   if (streamPort > 0 && !isIOS && manager instanceof BrowserManager) {
     streamServer = new StreamServer(manager, streamPort);
     await streamServer.start();
@@ -459,12 +473,6 @@ export async function startDaemon(options?: {
               const ignoreHTTPSErrors = process.env.AGENT_BROWSER_IGNORE_HTTPS_ERRORS === '1';
               const allowFileAccess = process.env.AGENT_BROWSER_ALLOW_FILE_ACCESS === '1';
 
-              // Set custom allowed WebSocket origins
-              if (process.env.AGENT_BROWSER_ALLOWED_ORIGINS) {
-                setAllowedOrigins(
-                  process.env.AGENT_BROWSER_ALLOWED_ORIGINS.split(',').map((s) => s.trim())
-                );
-              }
               const colorSchemeEnv = process.env.AGENT_BROWSER_COLOR_SCHEME;
               const colorScheme =
                 colorSchemeEnv === 'dark' ||
