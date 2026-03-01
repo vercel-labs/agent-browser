@@ -1151,14 +1151,23 @@ async function handleUncheck(command: UncheckCommand, browser: BrowserManager): 
 }
 
 async function handleUpload(command: UploadCommand, browser: BrowserManager): Promise<Response> {
-  const locator = browser.getLocator(command.selector);
   const files = Array.isArray(command.files) ? command.files : [command.files];
+
   try {
-    await locator.setInputFiles(files);
+    const absoluteFiles = files.map((file) => {
+      if (path.isAbsolute(file)) {
+        return file;
+      }
+      return path.resolve(process.cwd(), file);
+    });
+
+    const locator = browser.getLocator(command.selector);
+    await locator.setInputFiles(absoluteFiles);
+
+    return successResponse(command.id, { uploaded: absoluteFiles });
   } catch (error) {
     throw toAIFriendlyError(error, command.selector);
   }
-  return successResponse(command.id, { uploaded: files });
 }
 
 async function handleDoubleClick(
