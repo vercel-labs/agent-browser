@@ -31,6 +31,7 @@ export interface LaunchCommand extends BaseCommand {
   provider?: string;
   ignoreHTTPSErrors?: boolean;
   allowFileAccess?: boolean; // Enable file:// URL access and cross-origin file requests
+  stealth?: boolean; // Enable anti-bot-detection evasions
   colorScheme?: 'light' | 'dark' | 'no-preference'; // Persistent color scheme override
   downloadPath?: string; // Directory for browser downloads (Playwright's downloadsPath)
   allowedDomains?: string[];

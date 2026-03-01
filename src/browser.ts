@@ -116,6 +116,7 @@ export class BrowserManager {
   private refMap: RefMap = {};
   private lastSnapshot: string = '';
   private scopedHeaderRoutes: Map<string, (route: Route) => Promise<void>> = new Map();
+  private stealthEnabled: boolean = false;
   private colorScheme: 'light' | 'dark' | 'no-preference' | null = null;
   private downloadPath: string | null = null;
   private allowedDomains: string[] = [];
@@ -1326,10 +1327,13 @@ export class BrowserManager {
     const fileAccessArgs = options.allowFileAccess
       ? ['--allow-file-access-from-files', '--allow-file-access']
       : [];
+    const stealthArgs = options.stealth ? ['--disable-blink-features=AutomationControlled'] : [];
+    this.stealthEnabled = options.stealth ?? false;
+    const combinedArgs = [...fileAccessArgs, ...stealthArgs];
     const baseArgs = options.args
-      ? [...fileAccessArgs, ...options.args]
-      : fileAccessArgs.length > 0
-        ? fileAccessArgs
+      ? [...combinedArgs, ...options.args]
+      : combinedArgs.length > 0
+        ? combinedArgs
         : undefined;
 
     // Auto-detect args that control window size and disable viewport emulation
@@ -1486,6 +1490,62 @@ export class BrowserManager {
       this.setupPageTracking(page);
     }
     this.activePageIndex = this.pages.length > 0 ? this.pages.length - 1 : 0;
+  }
+
+
+  /**
+   * Apply anti-bot-detection evasions to a browser context
+   */
+  private async applyStealthEvasions(context: BrowserContext): Promise<void> {
+    await context.addInitScript(`
+      // Hide navigator.webdriver
+      Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+
+      // Fix chrome.runtime to look like a real browser
+      if (!window.chrome) {
+        window.chrome = { runtime: {} };
+      }
+
+      // Fix permissions query
+      const originalQuery = window.navigator.permissions.query.bind(
+        window.navigator.permissions
+      );
+      window.navigator.permissions.query = function(parameters) {
+        if (parameters.name === 'notifications') {
+          return Promise.resolve({ state: Notification.permission });
+        }
+        return originalQuery(parameters);
+      };
+
+      // Fix plugins to look non-empty
+      Object.defineProperty(navigator, 'plugins', {
+        get: () => [
+          { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+          { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '' },
+          { name: 'Native Client', filename: 'internal-nacl-plugin', description: '' },
+        ],
+      });
+
+      // Fix languages
+      Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+
+      // Prevent WebGL fingerprint detection
+      const getParameter = WebGLRenderingContext.prototype.getParameter;
+      WebGLRenderingContext.prototype.getParameter = function(parameter) {
+        if (parameter === 37445) return 'Intel Inc.';
+        if (parameter === 37446) return 'Intel Iris OpenGL Engine';
+        return getParameter.call(this, parameter);
+      };
+
+      if (typeof WebGL2RenderingContext !== 'undefined') {
+        const getParameter2 = WebGL2RenderingContext.prototype.getParameter;
+        WebGL2RenderingContext.prototype.getParameter = function(parameter) {
+          if (parameter === 37445) return 'Intel Inc.';
+          if (parameter === 37446) return 'Intel Iris OpenGL Engine';
+          return getParameter2.call(this, parameter);
+        };
+      }
+    `);
   }
 
   /**
@@ -2335,6 +2395,9 @@ export class BrowserManager {
       storageState,
     });
     this.recordingContext.setDefaultTimeout(10000);
+    if (this.stealthEnabled) {
+      await this.applyStealthEvasions(this.recordingContext);
+    }
 
     // Create a page in the recording context
     this.recordingPage = await this.recordingContext.newPage();

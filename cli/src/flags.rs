@@ -236,6 +236,7 @@ pub struct Flags {
     pub confirm_actions: Option<String>,
     pub confirm_interactive: bool,
     pub native: bool,
+    pub stealth: bool,
 
     // Track which launch-time options were explicitly passed via CLI
     // (as opposed to being set only via environment variables)
@@ -599,6 +600,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--ignore-https-errors",
         "--allow-file-access",
         "--auto-connect",
+        "--stealth",
         "--annotate",
         "--content-boundaries",
         "--confirm-interactive",
