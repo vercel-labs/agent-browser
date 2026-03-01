@@ -606,7 +606,13 @@ async function handleLaunch(
   browser: BrowserManager
 ): Promise<Response> {
   await browser.launch(command);
-  return successResponse(command.id, { launched: true });
+  return successResponse(command.id, {
+    launched: true,
+    ...(browser.getAgentCoreSessionId() && {
+      agentCoreSessionId: browser.getAgentCoreSessionId()!,
+      agentCoreLiveViewUrl: browser.getAgentCoreLiveViewUrl()!,
+    }),
+  });
 }
 
 async function handleNavigate(
@@ -629,6 +635,10 @@ async function handleNavigate(
   return successResponse(command.id, {
     url: page.url(),
     title: await page.title(),
+    ...(browser.getAgentCoreSessionId() && {
+      agentCoreSessionId: browser.getAgentCoreSessionId()!,
+      agentCoreLiveViewUrl: browser.getAgentCoreLiveViewUrl()!,
+    }),
   });
 }
 

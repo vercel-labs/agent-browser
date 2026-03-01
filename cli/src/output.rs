@@ -96,6 +96,13 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
             if let Some(title) = data.get("title").and_then(|v| v.as_str()) {
                 println!("{} {}", color::success_indicator(), color::bold(title));
                 println!("  {}", color::dim(url));
+                // Show AgentCore session info if available
+                if let Some(live_view) = data.get("agentCoreLiveViewUrl").and_then(|v| v.as_str()) {
+                    if let Some(session_id) = data.get("agentCoreSessionId").and_then(|v| v.as_str()) {
+                        eprintln!("Session: {}", session_id);
+                        eprintln!("Live View: {}", live_view);
+                    }
+                }
                 return;
             }
             println!("{}", url);
@@ -626,6 +633,19 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
         // State clean
         if let Some(cleaned) = data.get("cleaned").and_then(|v| v.as_i64()) {
             println!("{} Cleaned {} old state file(s)", color::success_indicator(), cleaned);
+            return;
+        }
+
+        // Launch response
+        if data.get("launched").and_then(|v| v.as_bool()).unwrap_or(false) {
+            // Show AgentCore session info if available
+            if let Some(live_view) = data.get("agentCoreLiveViewUrl").and_then(|v| v.as_str()) {
+                if let Some(session_id) = data.get("agentCoreSessionId").and_then(|v| v.as_str()) {
+                    eprintln!("Session: {}", session_id);
+                    eprintln!("Live View: {}", live_view);
+                }
+            }
+            println!("{} Browser launched", color::success_indicator());
             return;
         }
 
@@ -2052,7 +2072,7 @@ Examples:
             r##"
 agent-browser connect - Connect to browser via CDP
 
-Usage: agent-browser connect <port|url>
+Usage: agent-browser connect <port|url> [--headers <json>]
 
 Connects to a running browser instance via Chrome DevTools Protocol (CDP).
 This allows controlling browsers, Electron apps, or remote browser services.
@@ -2060,6 +2080,10 @@ This allows controlling browsers, Electron apps, or remote browser services.
 Arguments:
   <port>               Local port number (e.g., 9222)
   <url>                Full WebSocket URL (ws://, wss://, http://, https://)
+
+Options:
+  --headers <json>     Custom headers for WebSocket connection (JSON format)
+                       Useful for authenticated services like AWS AgentCore Browser
 
 Supported URL formats:
   - Port number: 9222 (connects to http://localhost:9222)
@@ -2080,6 +2104,9 @@ Examples:
 
   # Connect to remote browser service
   agent-browser connect "wss://browser-service.example.com/cdp?token=xyz"
+
+  # Connect with custom headers (e.g., AWS SigV4 authentication)
+  agent-browser connect "wss://..." --headers '{"Authorization":"AWS4-HMAC-SHA256..."}'
 
   # After connecting, run commands normally
   agent-browser snapshot
@@ -2337,7 +2364,7 @@ Options:
                              e.g., --proxy-bypass "localhost,*.internal.com"
   --ignore-https-errors      Ignore HTTPS certificate errors
   --allow-file-access        Allow file:// URLs to access local files (Chromium only)
-  -p, --provider <name>      Browser provider: ios, browserbase, kernel, browseruse
+  -p, --provider <name>      Browser provider: ios, browserbase, kernel, browseruse, agentcore
   --device <name>            iOS device name (e.g., "iPhone 15 Pro")
   --json                     JSON output
   --full, -f                 Full page screenshot
@@ -2391,7 +2418,7 @@ Environment:
   AGENT_BROWSER_ANNOTATE         Annotated screenshot with numbered labels and legend
   AGENT_BROWSER_DEBUG            Debug output
   AGENT_BROWSER_IGNORE_HTTPS_ERRORS Ignore HTTPS certificate errors
-  AGENT_BROWSER_PROVIDER         Browser provider (ios, browserbase, kernel, browseruse)
+  AGENT_BROWSER_PROVIDER         Browser provider (ios, browserbase, kernel, browseruse, agentcore)
   AGENT_BROWSER_AUTO_CONNECT     Auto-discover and connect to running Chrome
   AGENT_BROWSER_ALLOW_FILE_ACCESS Allow file:// URLs to access local files
   AGENT_BROWSER_COLOR_SCHEME     Color scheme preference (dark, light, no-preference)

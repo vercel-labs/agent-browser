@@ -56,6 +56,10 @@
   },
   "homepage": "https://github.com/vercel-labs/agent-browser#readme",
   "dependencies": {
+    "@aws-crypto/sha256-js": "^5.2.0",
+    "@aws-sdk/credential-providers": "^3.985.0",
+    "@smithy/protocol-http": "^5.3.8",
+    "@smithy/signature-v4": "^5.3.8",
     "node-simctl": "^7.4.0",
     "playwright-core": "^1.57.0",
     "webdriverio": "^9.15.0",

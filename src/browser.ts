@@ -16,6 +16,7 @@ import {
 } from 'playwright-core';
 import path from 'node:path';
 import os from 'node:os';
+import crypto from 'node:crypto';
 import { existsSync, mkdirSync, rmSync, readFileSync, statSync } from 'node:fs';
 import { writeFile, mkdir } from 'node:fs/promises';
 import type { LaunchCommand, TraceEvent } from './types.js';
@@ -103,6 +104,10 @@ export class BrowserManager {
   private browserUseApiKey: string | null = null;
   private kernelSessionId: string | null = null;
   private kernelApiKey: string | null = null;
+  private agentCoreSessionId: string | null = null;
+  private agentCoreLiveViewUrl: string | null = null;
+  private agentCoreIdentifier: string | null = null;
+  private agentCoreRegion: string | null = null;
   private contexts: BrowserContext[] = [];
   private pages: Page[] = [];
   private activePageIndex: number = 0;
@@ -834,6 +839,20 @@ export class BrowserManager {
   }
 
   /**
+   * Get AgentCore session ID (if connected via AgentCore provider)
+   */
+  getAgentCoreSessionId(): string | null {
+    return this.agentCoreSessionId;
+  }
+
+  /**
+   * Get AgentCore Live View URL (if connected via AgentCore provider)
+   */
+  getAgentCoreLiveViewUrl(): string | null {
+    return this.agentCoreLiveViewUrl;
+  }
+
+  /**
    * Check if an existing CDP connection is still alive
    * by verifying we can access browser contexts and that at least one has pages
    */
@@ -901,6 +920,183 @@ export class BrowserManager {
 
     if (!response.ok) {
       throw new Error(`Failed to close Kernel session: ${response.statusText}`);
+    }
+  }
+
+  /**
+   * Sign a request with AWS SigV4
+   */
+  private async signAgentCoreRequest(
+    method: string,
+    url: string,
+    region: string,
+    headers: Record<string, string>,
+    body?: string
+  ): Promise<Record<string, string>> {
+    const { fromNodeProviderChain } = await import('@aws-sdk/credential-providers');
+    const { SignatureV4 } = await import('@smithy/signature-v4');
+    const { HttpRequest } = await import('@smithy/protocol-http');
+    const { Sha256 } = await import('@aws-crypto/sha256-js');
+
+    const credentials = fromNodeProviderChain();
+    const signer = new SignatureV4({
+      service: 'bedrock-agentcore',
+      region,
+      credentials,
+      sha256: Sha256,
+    });
+
+    const parsed = new URL(url);
+    const request = new HttpRequest({
+      method,
+      protocol: parsed.protocol,
+      hostname: parsed.hostname,
+      path: parsed.pathname,
+      query: Object.fromEntries(parsed.searchParams),
+      headers: { host: parsed.hostname, ...headers },
+      body,
+    });
+
+    const signed = await signer.sign(request);
+    return signed.headers as Record<string, string>;
+  }
+
+  /**
+   * Connect to AWS Bedrock AgentCore Browser via CDP.
+   * Uses AWS credentials from environment/profile.
+   * Set AGENTCORE_REGION or AWS_REGION (default: us-east-1).
+   */
+  private async connectToAgentCore(): Promise<void> {
+    const region =
+      process.env.AGENTCORE_REGION ||
+      process.env.AWS_REGION ||
+      process.env.AWS_DEFAULT_REGION ||
+      'us-east-1';
+    const identifier = process.env.AGENTCORE_BROWSER_ID || 'aws.browser.v1';
+    const host = `bedrock-agentcore.${region}.amazonaws.com`;
+    const endpoint = `https://${host}`;
+
+    // Start browser session
+    const profileId = process.env.AGENTCORE_PROFILE_ID;
+    const startBody = JSON.stringify({
+      name: `agent-browser-${crypto.randomUUID().slice(0, 8)}`,
+      sessionTimeoutSeconds: parseInt(process.env.AGENTCORE_SESSION_TIMEOUT || '3600', 10),
+      ...(profileId && { profileConfiguration: { profileIdentifier: profileId } }),
+    });
+
+    const startUrl = `${endpoint}/browsers/${encodeURIComponent(identifier)}/sessions/start`;
+    const startHeaders = await this.signAgentCoreRequest(
+      'PUT',
+      startUrl,
+      region,
+      { 'content-type': 'application/json' },
+      startBody
+    );
+
+    const startResponse = await fetch(startUrl, {
+      method: 'PUT',
+      headers: startHeaders,
+      body: startBody,
+    });
+
+    if (!startResponse.ok) {
+      const text = await startResponse.text().catch(() => '');
+      throw new Error(
+        `Failed to start AgentCore browser session: ${startResponse.statusText} ${text}`
+      );
+    }
+
+    const session = (await startResponse.json()) as {
+      browserIdentifier: string;
+      sessionId: string;
+    };
+
+    this.agentCoreSessionId = session.sessionId;
+    this.agentCoreIdentifier = session.browserIdentifier;
+    this.agentCoreRegion = region;
+
+    // AWS Console Live View URL - trailing # is intentional (standard AWS Console convention)
+    const liveView = `https://${region}.console.aws.amazon.com/bedrock-agentcore/browser/${session.browserIdentifier}/session/${session.sessionId}#`;
+    this.agentCoreLiveViewUrl = liveView;
+    console.error(`Session: ${session.sessionId}`);
+    console.error(`Live View: ${liveView}`);
+
+    // Generate SigV4-signed WebSocket headers
+    const wsPath = `/browser-streams/${session.browserIdentifier}/sessions/${session.sessionId}/automation`;
+    const wsUrl = `wss://${host}${wsPath}`;
+
+    const wsHeaders = await this.signAgentCoreRequest(
+      'GET',
+      `https://${host}${wsPath}`,
+      region,
+      {}
+    );
+    // Only pass SigV4 auth headers; let Playwright handle WebSocket protocol headers
+    // (Upgrade, Connection, Sec-WebSocket-Key, Sec-WebSocket-Version)
+    const cdpHeaders: Record<string, string> = wsHeaders;
+
+    // Connect via CDP with auth headers
+    const browser = await chromium.connectOverCDP(wsUrl, { headers: cdpHeaders }).catch(() => {
+      throw new Error('Failed to connect to AgentCore browser session via CDP');
+    });
+
+    try {
+      const contexts = browser.contexts();
+      if (contexts.length === 0) {
+        throw new Error('No browser context found in AgentCore session');
+      }
+
+      const context = contexts[0];
+      const pages = context.pages().filter((p) => p.url());
+      const page = pages[0] ?? (await context.newPage());
+
+      this.browser = browser;
+      context.setDefaultTimeout(60000);
+      this.contexts.push(context);
+      this.setupContextTracking(context);
+      this.pages.push(page);
+      this.activePageIndex = 0;
+      this.setupPageTracking(page);
+    } catch (error) {
+      await browser.close().catch(() => {});
+      await this.closeAgentCoreSession().catch((e) => {
+        console.error('Failed to close AgentCore session during cleanup:', e);
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Close an AgentCore browser session via API
+   */
+  private async closeAgentCoreSession(): Promise<void> {
+    if (!this.agentCoreSessionId || !this.agentCoreIdentifier || !this.agentCoreRegion) return;
+
+    const region = this.agentCoreRegion;
+    const host = `bedrock-agentcore.${region}.amazonaws.com`;
+    const endpoint = `https://${host}`;
+
+    const body = JSON.stringify({
+      sessionId: this.agentCoreSessionId,
+    });
+
+    const url = `${endpoint}/browsers/${encodeURIComponent(this.agentCoreIdentifier)}/sessions/stop`;
+    const headers = await this.signAgentCoreRequest(
+      'PUT',
+      url,
+      region,
+      { 'content-type': 'application/json' },
+      body
+    );
+
+    const response = await fetch(url, {
+      method: 'PUT',
+      headers,
+      body,
+    });
+
+    if (!response.ok) {
+      throw new Error(`Failed to stop AgentCore session: ${response.statusText}`);
     }
   }
 
@@ -1257,7 +1453,7 @@ export class BrowserManager {
     }
 
     if (cdpEndpoint) {
-      await this.connectViaCDP(cdpEndpoint);
+      await this.connectViaCDP(cdpEndpoint, { headers: options.headers });
       return;
     }
 
@@ -1287,6 +1483,12 @@ export class BrowserManager {
     // Kernel: requires explicit opt-in via -p kernel flag or AGENT_BROWSER_PROVIDER=kernel
     if (provider === 'kernel') {
       await this.connectToKernel();
+      return;
+    }
+
+    // AgentCore: requires explicit opt-in via -p agentcore flag or AGENT_BROWSER_PROVIDER=agentcore
+    if (provider === 'agentcore') {
+      await this.connectToAgentCore();
       return;
     }
 
@@ -1491,10 +1693,11 @@ export class BrowserManager {
   /**
    * Connect to a running browser via CDP (Chrome DevTools Protocol)
    * @param cdpEndpoint Either a port number (as string) or a full WebSocket URL (ws:// or wss://)
+   * @param headers Optional headers for WebSocket connection (e.g., for AWS SigV4 authentication)
    */
   private async connectViaCDP(
     cdpEndpoint: string | undefined,
-    options?: { timeout?: number }
+    options?: { headers?: Record<string, string>; timeout?: number }
   ): Promise<void> {
     if (!cdpEndpoint) {
       throw new Error('CDP endpoint is required for CDP connection');
@@ -1521,7 +1724,7 @@ export class BrowserManager {
     }
 
     const browser = await chromium
-      .connectOverCDP(cdpUrl, { timeout: options?.timeout })
+      .connectOverCDP(cdpUrl, { headers: options?.headers, timeout: options?.timeout })
       .catch(() => {
         throw new Error(
           `Failed to connect via CDP to ${cdpUrl}. ` +
@@ -2518,6 +2721,11 @@ export class BrowserManager {
         console.error('Failed to close Kernel session:', error);
       });
       this.browser = null;
+    } else if (this.agentCoreSessionId) {
+      await this.closeAgentCoreSession().catch((error) => {
+        console.error('Failed to close AgentCore session:', error);
+      });
+      this.browser = null;
     } else if (this.cdpEndpoint !== null) {
       // CDP: only disconnect, don't close external app's pages
       if (this.browser) {
@@ -2547,6 +2755,10 @@ export class BrowserManager {
     this.browserUseApiKey = null;
     this.kernelSessionId = null;
     this.kernelApiKey = null;
+    this.agentCoreSessionId = null;
+    this.agentCoreLiveViewUrl = null;
+    this.agentCoreIdentifier = null;
+    this.agentCoreRegion = null;
     this.isPersistentContext = false;
     this.activePageIndex = 0;
     this.colorScheme = null;

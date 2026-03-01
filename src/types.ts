@@ -1123,6 +1123,8 @@ export type Response<T = unknown> = SuccessResponse<T> | ErrorResponse;
 export interface NavigateData {
   url: string;
   title: string;
+  agentCoreSessionId?: string;
+  agentCoreLiveViewUrl?: string;
 }
 
 export interface Annotation {
