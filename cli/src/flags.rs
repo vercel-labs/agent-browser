@@ -345,6 +345,8 @@ pub fn parse_flags(args: &[String]) -> Flags {
         confirm_interactive: env_var_is_truthy("AGENT_BROWSER_CONFIRM_INTERACTIVE")
             || config.confirm_interactive.unwrap_or(false),
         native: env_var_is_truthy("AGENT_BROWSER_NATIVE") || config.native.unwrap_or(false),
+        browser: env::var("AGENT_BROWSER_BROWSER").ok(),
+        cli_browser: false,
         cli_executable_path: false,
         cli_extensions: false,
         cli_profile: false,
@@ -575,6 +577,13 @@ pub fn parse_flags(args: &[String]) -> Flags {
                 flags.native = val;
                 flags.cli_native = true;
                 if consumed {
+                    i += 1;
+                }
+            }
+            "--browser" => {
+                if let Some(s) = args.get(i + 1) {
+                    flags.browser = Some(s.clone());
+                    flags.cli_browser = true;
                     i += 1;
                 }
             }
