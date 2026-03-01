@@ -42,6 +42,7 @@ pub struct Config {
     pub confirm_actions: Option<String>,
     pub confirm_interactive: Option<bool>,
     pub native: Option<bool>,
+    pub stealth: Option<bool>,
 }
 
 impl Config {
@@ -84,6 +85,7 @@ impl Config {
             confirm_actions: other.confirm_actions.or(self.confirm_actions),
             confirm_interactive: other.confirm_interactive.or(self.confirm_interactive),
             native: other.native.or(self.native),
+            stealth: other.stealth.or(self.stealth),
         }
     }
 }
@@ -343,6 +345,8 @@ pub fn parse_flags(args: &[String]) -> Flags {
         confirm_interactive: env_var_is_truthy("AGENT_BROWSER_CONFIRM_INTERACTIVE")
             || config.confirm_interactive.unwrap_or(false),
         native: env_var_is_truthy("AGENT_BROWSER_NATIVE") || config.native.unwrap_or(false),
+        stealth: env_var_is_truthy("AGENT_BROWSER_STEALTH")
+            || config.stealth.unwrap_or(false),
         cli_executable_path: false,
         cli_extensions: false,
         cli_profile: false,
@@ -575,6 +579,11 @@ pub fn parse_flags(args: &[String]) -> Flags {
                 if consumed {
                     i += 1;
                 }
+            }
+            "--stealth" => {
+                let (val, consumed) = parse_bool_arg(args, i);
+                flags.stealth = val;
+                if consumed { i += 1; }
             }
             "--config" => {
                 // Already handled by load_config(); skip the value
