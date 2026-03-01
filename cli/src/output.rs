@@ -1293,6 +1293,8 @@ Options:
   -c, --compact        Remove empty structural elements
   -d, --depth <n>      Limit tree depth
   -s, --selector <sel> Scope snapshot to CSS selector
+  --diff               Incremental diff vs previous snapshot (Myers algorithm)
+  -o, --output <path>  Save snapshot or diff to a file
 
 Global Options:
   --json               Output as JSON
@@ -1304,6 +1306,9 @@ Examples:
   agent-browser snapshot -i -C         # Interactive + cursor-interactive elements
   agent-browser snapshot --compact --depth 5
   agent-browser snapshot -s "#main-content"
+  agent-browser snapshot --diff        # Show changes since last snapshot
+  agent-browser snapshot --diff -o d.txt  # Save diff to file
+  agent-browser snapshot -o snap.txt   # Save full snapshot to file
 "##
         }
 

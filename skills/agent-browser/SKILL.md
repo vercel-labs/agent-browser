@@ -55,6 +55,9 @@ agent-browser close                   # Close browser
 agent-browser snapshot -i             # Interactive elements with refs (recommended)
 agent-browser snapshot -i -C          # Include cursor-interactive elements (divs with onclick, cursor:pointer)
 agent-browser snapshot -s "#selector" # Scope to CSS selector
+agent-browser snapshot --diff         # Incremental diff vs last snapshot (reduces tokens)
+agent-browser snapshot -o snap.txt    # Save snapshot to file
+agent-browser snapshot --diff -o d.txt # Save diff to file
 
 # Interaction (use @refs from snapshot)
 agent-browser click @e1               # Click element

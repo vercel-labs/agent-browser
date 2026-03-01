@@ -18,6 +18,9 @@ agent-browser snapshot -c                 # Compact (remove empty elements)
 agent-browser snapshot -d 3               # Limit depth to 3 levels
 agent-browser snapshot -s "#main"         # Scope to CSS selector
 agent-browser snapshot -i -c -d 5         # Combine options
+agent-browser snapshot --diff             # Incremental diff vs last snapshot
+agent-browser snapshot --diff -o diff.txt # Save diff to file
+agent-browser snapshot -o snapshot.txt    # Save full snapshot to file
 ```
 
 <table>
@@ -30,6 +33,8 @@ agent-browser snapshot -i -c -d 5         # Combine options
     <tr><td><code>-c, --compact</code></td><td>Remove empty structural elements</td></tr>
     <tr><td><code>-d, --depth</code></td><td>Limit tree depth</td></tr>
     <tr><td><code>-s, --selector</code></td><td>Scope to CSS selector</td></tr>
+    <tr><td><code>--diff</code></td><td>Return positional diff vs previous snapshot (uses Myers algorithm)</td></tr>
+    <tr><td><code>-o, --output</code></td><td>Save snapshot (or diff) to a file instead of stdout</td></tr>
   </tbody>
 </table>
 

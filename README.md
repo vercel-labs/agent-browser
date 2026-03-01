@@ -429,6 +429,9 @@ agent-browser snapshot -c                 # Compact (remove empty structural ele
 agent-browser snapshot -d 3               # Limit depth to 3 levels
 agent-browser snapshot -s "#main"         # Scope to CSS selector
 agent-browser snapshot -i -c -d 5         # Combine options
+agent-browser snapshot --diff             # Incremental diff vs previous snapshot
+agent-browser snapshot --diff -o diff.txt # Save diff to file
+agent-browser snapshot -o snapshot.txt    # Save full snapshot to file
 ```
 
 | Option | Description |
@@ -438,6 +441,8 @@ agent-browser snapshot -i -c -d 5         # Combine options
 | `-c, --compact` | Remove empty structural elements |
 | `-d, --depth <n>` | Limit tree depth |
 | `-s, --selector <sel>` | Scope to CSS selector |
+| `--diff` | Return positional diff vs previous snapshot (Myers algorithm). Refs are always included. |
+| `-o, --output <path>` | Save snapshot or diff to a file. Can be combined with `--diff`. |
 
 The `-C` flag is useful for modern web apps that use custom clickable elements (divs, spans) instead of standard buttons/links.
 

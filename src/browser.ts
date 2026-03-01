@@ -115,6 +115,7 @@ export class BrowserManager {
   private isRecordingHar: boolean = false;
   private refMap: RefMap = {};
   private lastSnapshot: string = '';
+  private snapshotCache: Map<string, string> = new Map();
   private scopedHeaderRoutes: Map<string, (route: Route) => Promise<void>> = new Map();
   private colorScheme: 'light' | 'dark' | 'no-preference' | null = null;
   private downloadPath: string | null = null;
@@ -185,17 +186,25 @@ export class BrowserManager {
   }
 
   /**
-   * Get the last snapshot tree text (empty string if no snapshot has been taken)
+   * Get the last snapshot tree text (empty string if no snapshot has been taken).
+   * When a cacheKey is provided, returns the snapshot stored under that key
+   * to avoid cross-mode pollution (e.g., --diff -i vs --diff).
    */
-  getLastSnapshot(): string {
+  getLastSnapshot(cacheKey?: string): string {
+    if (cacheKey) {
+      return this.snapshotCache.get(cacheKey) || '';
+    }
     return this.lastSnapshot;
   }
 
   /**
    * Update the stored snapshot (used by diff to keep the baseline current)
    */
-  setLastSnapshot(snapshot: string): void {
+  setLastSnapshot(snapshot: string, cacheKey?: string): void {
     this.lastSnapshot = snapshot;
+    if (cacheKey) {
+      this.snapshotCache.set(cacheKey, snapshot);
+    }
   }
 
   /**
@@ -203,13 +212,6 @@ export class BrowserManager {
    */
   getRefMap(): RefMap {
     return this.refMap;
-  }
-
-  /**
-   * Get the last snapshot text for diff comparison
-   */
-  getLastSnapshot(): string {
-    return this.lastSnapshot;
   }
 
   /**
@@ -2559,6 +2561,7 @@ export class BrowserManager {
     this.colorScheme = null;
     this.refMap = {};
     this.lastSnapshot = '';
+    this.snapshotCache.clear();
     this.frameCallback = null;
   }
 }
