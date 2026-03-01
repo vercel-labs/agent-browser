@@ -1,6 +1,6 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::{json, Value};
-use std::io::{self, BufRead, IsTerminal, Read};
+use std::io::{self, BufRead};
 
 use crate::color;
 use crate::flags::Flags;
@@ -14,7 +14,7 @@ pub fn resolve_path(path: &str) -> String {
         get_home_dir().unwrap_or_else(|| path.to_string())
     } else if let Some(rest) = path.strip_prefix("~/") {
         match get_home_dir() {
-            Some(home) => format!("{}/{}", home, rest),
+            Some(home) => std::path::PathBuf::from(home).join(rest).to_string_lossy().to_string(),
             None => path.to_string(),
         }
     } else {
@@ -2059,6 +2059,7 @@ fn parse_storage(rest: &[&str], id: &str) -> Result<Value, ParseError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     fn default_flags() -> Flags {
         Flags {
@@ -2153,7 +2154,13 @@ mod tests {
             "expected absolute path, got: {}",
             result
         );
-        assert!(result.ends_with("subdir/file.txt"));
+        let expected_suffix = Path::new("subdir").join("file.txt");
+        assert!(
+            result.ends_with(&expected_suffix.to_string_lossy().as_ref()),
+            "expected path ending with {:?}, got: {}",
+            expected_suffix,
+            result
+        );
     }
 
     // === Cookies Tests ===
