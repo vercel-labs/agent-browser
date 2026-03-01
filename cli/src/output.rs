@@ -318,10 +318,14 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
             }
             return;
         }
-        // Cleared requests
+        // Cleared (cookies or request log)
         if let Some(cleared) = data.get("cleared").and_then(|v| v.as_bool()) {
             if cleared {
-                println!("{} Request log cleared", color::success_indicator());
+                let label = match action {
+                    Some("cookies_clear") => "Cookies cleared",
+                    _ => "Request log cleared",
+                };
+                println!("{} {}", color::success_indicator(), label);
                 return;
             }
         }
@@ -382,9 +386,13 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
             }
             return;
         }
-        // Closed
+        // Closed (browser or tab)
         if data.get("closed").is_some() {
-            println!("{} Browser closed", color::success_indicator());
+            let label = match action {
+                Some("tab_close") => "Tab closed",
+                _ => "Browser closed",
+            };
+            println!("{} {}", color::success_indicator(), label);
             return;
         }
         // Recording start (has "started" field)
