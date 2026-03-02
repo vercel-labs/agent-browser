@@ -697,7 +697,7 @@ async function handlePress(command: PressCommand, browser: BrowserManager): Prom
   const page = browser.getPage();
 
   if (command.selector) {
-    await browser.getLocator(command.selector).press(command.key);
+    await browser.getLocator(command.selector).first().press(command.key);
   } else {
     await page.keyboard.press(command.key);
   }
@@ -958,7 +958,7 @@ async function handleWait(command: WaitCommand, browser: BrowserManager): Promis
   const page = browser.getPage();
 
   if (command.selector) {
-    await browser.getLocator(command.selector).waitFor({
+    await browser.getLocator(command.selector).first().waitFor({
       state: command.state ?? 'visible',
       timeout: command.timeout,
     });
@@ -2018,7 +2018,7 @@ async function handleWheel(command: WheelCommand, browser: BrowserManager): Prom
 }
 
 async function handleTap(command: TapCommand, browser: BrowserManager): Promise<Response> {
-  await browser.getLocator(command.selector).tap();
+  await browser.getLocator(command.selector).first().tap();
   return successResponse(command.id, { tapped: true });
 }
 
