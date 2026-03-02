@@ -267,11 +267,19 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
             })?;
             let mut cmd = json!({ "id": id, "action": "dropfile", "selector": selector, "filePath": file_path });
             let name_idx = rest.iter().position(|&s| s == "--name");
-            if let Some(n) = name_idx.and_then(|i| rest.get(i + 1).copied()) {
+            if let Some(i) = name_idx {
+                let n = rest.get(i + 1).copied().ok_or_else(|| ParseError::MissingArguments {
+                    context: "dropfile --name".to_string(),
+                    usage: "dropfile <selector> <file-path> --name <filename>",
+                })?;
                 cmd["fileName"] = json!(n);
             }
             let mime_idx = rest.iter().position(|&s| s == "--mime");
-            if let Some(m) = mime_idx.and_then(|i| rest.get(i + 1).copied()) {
+            if let Some(i) = mime_idx {
+                let m = rest.get(i + 1).copied().ok_or_else(|| ParseError::MissingArguments {
+                    context: "dropfile --mime".to_string(),
+                    usage: "dropfile <selector> <file-path> --mime <type>",
+                })?;
                 cmd["mimeType"] = json!(m);
             }
             Ok(cmd)
