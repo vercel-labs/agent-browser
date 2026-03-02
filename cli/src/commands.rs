@@ -1,7 +1,7 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::{json, Value};
 use std::fs;
-use std::io::{self, BufRead, IsTerminal, Read};
+use std::io::{self, BufRead};
 use std::path::Path;
 
 use crate::color;
@@ -9,13 +9,21 @@ use crate::flags::Flags;
 use crate::validation::{is_valid_session_name, session_name_error};
 
 pub fn resolve_path(path: &str) -> String {
-    let p = Path::new(path);
+    let path = if path.starts_with("~/") {
+        match std::env::var("HOME") {
+            Ok(home) => format!("{}/{}", home, &path[2..]),
+            Err(_) => path.to_string(),
+        }
+    } else {
+        path.to_string()
+    };
+    let p = Path::new(&path);
     if p.is_absolute() {
-        return path.to_string();
+        return path;
     }
     match std::env::current_dir() {
         Ok(cwd) => cwd.join(p).to_string_lossy().to_string(),
-        Err(_) => path.to_string(),
+        Err(_) => path,
     }
 }
 
@@ -903,6 +911,12 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                         message: format!("Invalid JSON in cookie file: {}", e),
                         usage: "cookies load <file.json>",
                     })?;
+                    if !cookies.is_array() {
+                        return Err(ParseError::InvalidValue {
+                            message: "Cookie file must contain a JSON array".to_string(),
+                            usage: "cookies load <file.json>",
+                        });
+                    }
                     Ok(json!({ "id": id, "action": "cookies_set", "cookies": cookies }))
                 }
                 _ => Ok(json!({ "id": id, "action": "cookies_get" })),
