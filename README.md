@@ -977,32 +977,42 @@ Core workflow:
 
 ## Integrations
 
-### iOS Simulator
+### iOS Safari (via Appium)
 
-Control real Mobile Safari in the iOS Simulator for authentic mobile web testing. Requires macOS with Xcode.
+agent-browser supports iOS Safari automation via Appium and the XCUITest driver.
 
-**Setup:**
-
-```bash
-# Install Appium and XCUITest driver
-npm install -g appium
-appium driver install xcuitest
-```
+**Prerequisites:**
+1. macOS with Xcode installed
+2. Install Appium and XCUITest driver:
+   ```bash
+   npm install -g appium
+   appium driver install xcuitest
+   ```
+3. Build WebDriverAgent for simulator:
+   ```bash
+   cd ~/.appium/node_modules/appium-xcuitest-driver/node_modules/appium-webdriveragent
+   xcodebuild build-for-testing -project WebDriverAgent.xcodeproj -scheme WebDriverAgentRunner -sdk iphonesimulator -derivedDataPath ./DerivedData CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO
+   ```
 
 **Usage:**
 
 ```bash
-# List available iOS simulators
-agent-browser device list
+# List available devices
+agent-browser -p ios device list
 
-# Launch Safari on a specific device
+# Open a URL on iOS Simulator
 agent-browser -p ios --device "iPhone 16 Pro" open https://example.com
+
+# Take a screenshot
+agent-browser -p ios screenshot ./ios-screenshot.png
+
+# Run JavaScript
+agent-browser -p ios eval "navigator.userAgent"
 
 # Same commands as desktop
 agent-browser -p ios snapshot -i
 agent-browser -p ios tap @e1
 agent-browser -p ios fill @e2 "text"
-agent-browser -p ios screenshot mobile.png
 
 # Mobile-specific commands
 agent-browser -p ios swipe up
@@ -1011,6 +1021,8 @@ agent-browser -p ios swipe down 500
 # Close session
 agent-browser -p ios close
 ```
+
+**Supported commands:** navigate, click, type, fill, screenshot, eval, scroll, swipe, wait, and more (27+ commands).
 
 Or use environment variables:
 
@@ -1029,6 +1041,11 @@ agent-browser open https://example.com
 **Supported devices:** All iOS Simulators available in Xcode (iPhones, iPads), plus real iOS devices.
 
 **Note:** The iOS provider boots the simulator, starts Appium, and controls Safari. First launch takes ~30-60 seconds; subsequent commands are fast.
+
+**Limitations:**
+- Tab/window management not supported (Safari mobile limitation)
+- No PDF generation
+- No screencast/video recording (requires CDP)
 
 #### Real Device Support
 
