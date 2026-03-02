@@ -1,6 +1,7 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::{json, Value};
 use std::io::{self, BufRead};
+use std::path::Path;
 
 use crate::color;
 use crate::flags::Flags;
@@ -14,11 +15,7 @@ pub fn resolve_path(path: &str) -> String {
     if path == "~" {
         if let Some(home) = dirs::home_dir() {
             return home.to_string_lossy().to_string();
-            Some(home) => {
-                let mut buf = std::path::PathBuf::from(home);
-                buf.push(rest);
-                buf.to_string_lossy().to_string()
-            }
+        }
         return path.to_string();
     }
     let expanded = if let Some(rest) = path.strip_prefix("~/") {
@@ -37,30 +34,7 @@ pub fn resolve_path(path: &str) -> String {
     match std::env::current_dir() {
         Ok(cwd) => cwd.join(p).to_string_lossy().to_string(),
         Err(_) => expanded,
-                buf.to_string_lossy().to_string()
-            }
-            None => path.to_string(),
-        }
-    } else {
-        path.to_string()
-    };
-    let p = std::path::Path::new(&expanded);
-    if p.is_absolute() {
-        return expanded;
     }
-    match std::env::current_dir() {
-        Ok(cwd) => cwd.join(p).to_string_lossy().to_string(),
-        Err(_) => expanded,
-    }
-}
-
-fn get_home_dir() -> Option<String> {
-    #[cfg(unix)]
-    { return std::env::var("HOME").ok(); }
-    #[cfg(windows)]
-    { return std::env::var("USERPROFILE").ok(); }
-    #[allow(unreachable_code)]
-    None
 }
 
 /// Error type for command parsing with contextual information
@@ -2177,16 +2151,12 @@ mod tests {
             Path::new(&result).is_absolute(),
             "expected absolute path, got: {}",
             result
+        );
         let path = Path::new(&result);
         assert_eq!(path.file_name(), Some(std::ffi::OsStr::new("file.txt")));
         assert_eq!(
             path.parent().and_then(|p| p.file_name()),
             Some(std::ffi::OsStr::new("subdir"))
-        );
-        assert!(
-            Path::new(&result).ends_with(Path::new("subdir").join("file.txt")),
-            "expected path ending with subdir/file.txt, got: {}",
-            result
         );
     }
 
