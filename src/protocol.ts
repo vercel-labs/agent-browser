@@ -166,7 +166,7 @@ const getByPlaceholderSchema = baseCommandSchema.extend({
 const cookiesGetSchema = baseCommandSchema.extend({
   action: z.literal('cookies_get'),
   urls: z.array(z.string()).optional(),
-  saveTo: z.string().optional(),
+  saveTo: z.string().min(1).optional(),
 });
 
 const cookiesSetSchema = baseCommandSchema.extend({

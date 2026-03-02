@@ -1691,6 +1691,8 @@ Operations:
   get                                Get all cookies (default)
   set <name> <value> [options]       Set a cookie with optional properties
   clear                              Clear all cookies
+  save <file.json>                   Save all cookies to a JSON file
+  load <file.json>                   Load cookies from a JSON file
 
 Cookie Set Options:
   --url <url>                        URL for the cookie (allows setting before page load)

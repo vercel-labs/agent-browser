@@ -10,7 +10,7 @@ allowed-tools: Bash(npx agent-browser:*), Bash(agent-browser:*)
 
 Every browser automation follows this pattern:
 
-1. **Start a session**: Use `--session <name>` to isolate browser tasks. Always use a unique session name per independent task to prevent overlapping.
+1. **Start a session**: Use `--session <name>` to isolate browser tasks. Always use a unique session name per independent task to prevent overlap.
 2. **Navigate**: `agent-browser --session <name> open <url>`
 3. **Snapshot**: `agent-browser --session <name> snapshot -i` (get element refs like `@e1`, `@e2`)
 4. **Interact**: Use refs to click, fill, select
