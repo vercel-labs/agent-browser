@@ -2154,11 +2154,9 @@ mod tests {
             "expected absolute path, got: {}",
             result
         );
-        let expected_suffix = Path::new("subdir").join("file.txt");
         assert!(
-            result.ends_with(&expected_suffix.to_string_lossy().as_ref()),
-            "expected path ending with {:?}, got: {}",
-            expected_suffix,
+            Path::new(&result).ends_with(Path::new("subdir").join("file.txt")),
+            "expected path ending with subdir/file.txt, got: {}",
             result
         );
     }
