@@ -253,7 +253,7 @@ fn run_session(args: &[String], session: &str, json_mode: bool) {
                             } else {
                                 false
                             }
-                        } else {
+                            let close_cmd = json!({ "id": "1", "action": "close" });
                             false
                         };
                         if running {
