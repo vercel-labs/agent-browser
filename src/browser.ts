@@ -1375,11 +1375,15 @@ export class BrowserManager {
 
       // Warn about known Chromium bug on Windows where headless mode
       // silently discards cookies from persistent contexts
-      if (process.platform === 'win32' && (options.headless ?? true)) {
-        console.warn(
-          '[agent-browser] Warning: Headless mode on Windows may not persist cookies. ' +
-            'Use --headed or set AGENT_BROWSER_HEADED=1 for reliable cookie persistence.'
-        );
+      if (
+        browserType === 'chromium' &&
+        process.platform === 'win32' &&
+        (options.headless ?? true)
+      ) {
+        const warning =
+          'Headless mode on Windows may not persist cookies. ' +
+          'Use --headed or set AGENT_BROWSER_HEADED=1 for reliable cookie persistence.';
+        this.launchWarnings.push(warning);
       }
 
       context = await launcher.launchPersistentContext(profilePath, {
