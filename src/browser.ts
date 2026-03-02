@@ -1529,11 +1529,17 @@ export class BrowserManager {
     if (cdpUrl.startsWith('http://') || cdpUrl.startsWith('https://')) {
       try {
         const response = await fetch(`${cdpUrl}/json/version`);
-        const data = (await response.json()) as { webSocketDebuggerUrl?: string };
-        if (data.webSocketDebuggerUrl) {
-          connectUrl = data.webSocketDebuggerUrl;
-        }
-      } catch {
+      const timeoutMs = options?.timeout ?? getDefaultTimeout();
+        const versionUrl = new URL('json/version', cdpUrl);
+        const response = await fetch(versionUrl.toString());
+        const response = await fetch(`${cdpUrl}/json/version`, {
+          signal: AbortSignal.timeout(timeoutMs),
+        });
+        if (response.ok) {
+          const data = (await response.json()) as { webSocketDebuggerUrl?: string };
+          if (data.webSocketDebuggerUrl) {
+            connectUrl = data.webSocketDebuggerUrl;
+          }
         // Fall back to HTTP URL if pre-fetch fails
       }
     }
