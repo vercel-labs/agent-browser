@@ -10,13 +10,29 @@ use crate::validation::{is_valid_session_name, session_name_error};
 /// The daemon runs in a different directory, so relative paths must be resolved
 /// before being sent over the socket.
 pub fn resolve_path(path: &str) -> String {
-    let expanded = if path == "~" {
-        get_home_dir().unwrap_or_else(|| path.to_string())
-    } else if let Some(rest) = path.strip_prefix("~/") {
-        match get_home_dir() {
-            Some(home) => {
-                let mut buf = std::path::PathBuf::from(home);
-                buf.push(rest);
+    // Expand ~ to home directory (may not be shell-expanded when quoted or from scripts)
+    if path == "~" {
+        if let Some(home) = dirs::home_dir() {
+            return home.to_string_lossy().to_string();
+        }
+        return path.to_string();
+    }
+    let expanded = if let Some(rest) = path.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            home.join(rest).to_string_lossy().to_string()
+        } else {
+            path.to_string()
+        }
+    } else {
+        path.to_string()
+    };
+    let p = Path::new(&expanded);
+    if p.is_absolute() {
+        return expanded;
+    }
+    match std::env::current_dir() {
+        Ok(cwd) => cwd.join(p).to_string_lossy().to_string(),
+        Err(_) => expanded,
                 buf.to_string_lossy().to_string()
             }
             None => path.to_string(),
