@@ -1530,8 +1530,7 @@ export class BrowserManager {
       const timeoutMs = options?.timeout ?? getDefaultTimeout();
       try {
         const versionUrl = new URL('json/version', cdpUrl);
-        const versionUrl = new URL('json/version', cdpUrl);
-        const response = await fetch(versionUrl.toString());
+        const response = await fetch(versionUrl.toString(), {
           signal: AbortSignal.timeout(timeoutMs),
         });
         if (response.ok) {
