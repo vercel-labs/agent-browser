@@ -6,7 +6,7 @@ import { setScreencastFrameCallback } from './actions.js';
 let customAllowedOrigins: string[] = [];
 
 export function setAllowedOrigins(origins: string[]): void {
-  customAllowedOrigins = origins;
+  customAllowedOrigins = [...origins].map((s) => s.trim()).filter(Boolean);
 }
 
 /**

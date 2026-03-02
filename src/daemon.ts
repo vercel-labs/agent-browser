@@ -7,7 +7,7 @@ import { IOSManager } from './ios-manager.js';
 import { parseCommand, serializeResponse, errorResponse } from './protocol.js';
 import { executeCommand, initActionPolicy } from './actions.js';
 import { executeIOSCommand } from './ios-actions.js';
-import { StreamServer } from './stream-server.js';
+import { StreamServer, setAllowedOrigins } from './stream-server.js';
 import {
   getSessionsDir,
   ensureSessionsDir,
@@ -341,6 +341,17 @@ export async function startDaemon(options?: {
   // Initialize action policy enforcement
   initActionPolicy();
 
+  // Configure custom allowed origins for stream server (before stream server starts)
+  const allowedOriginsEnv = process.env.AGENT_BROWSER_ALLOWED_ORIGINS;
+  if (allowedOriginsEnv) {
+    setAllowedOrigins(
+      allowedOriginsEnv
+        .split(',')
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0)
+    );
+  }
+
   // Determine provider from options or environment
   const provider = options?.provider ?? process.env.AGENT_BROWSER_PROVIDER;
   const isIOS = provider === 'ios';
@@ -356,13 +367,6 @@ export async function startDaemon(options?: {
     (process.env.AGENT_BROWSER_STREAM_PORT
       ? parseInt(process.env.AGENT_BROWSER_STREAM_PORT, 10)
       : 0);
-
-  // Configure custom allowed origins for stream server
-  const allowedOriginsEnv = process.env.AGENT_BROWSER_ALLOWED_ORIGINS;
-  if (allowedOriginsEnv) {
-    const { setAllowedOrigins } = await import('./stream-server.js');
-    setAllowedOrigins(allowedOriginsEnv.split(',').map((s) => s.trim()));
-  }
 
   if (streamPort > 0 && !isIOS && manager instanceof BrowserManager) {
     streamServer = new StreamServer(manager, streamPort);
