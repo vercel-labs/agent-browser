@@ -446,10 +446,14 @@ export class BrowserManager {
   }
 
   /**
-   * Start tracking requests
+   * Attach a request listener to a specific page.
+   * Called from setupPageTracking() so ALL requests — including the initial
+   * page navigation — are captured from the moment the page is created.
+   * This replaces the previous lazy-init approach where startRequestTracking()
+   * was called only on the first `network requests` command, which caused
+   * navigation requests made before that call to be silently dropped.
    */
-  startRequestTracking(): void {
-    const page = this.getPage();
+  private attachRequestListener(page: Page): void {
     page.on('request', (request: Request) => {
       this.trackedRequests.push({
         url: request.url(),
@@ -459,6 +463,15 @@ export class BrowserManager {
         resourceType: request.resourceType(),
       });
     });
+  }
+
+  /**
+   * Start tracking requests (kept for API compatibility; tracking now starts
+   * automatically on page creation via setupPageTracking).
+   */
+  startRequestTracking(): void {
+    // No-op: tracking is now initialised in setupPageTracking() for every
+    // page so that navigation requests are never missed.
   }
 
   /**
@@ -1720,6 +1733,9 @@ export class BrowserManager {
     if (this.colorScheme) {
       page.emulateMedia({ colorScheme: this.colorScheme }).catch(() => {});
     }
+
+    // Start request tracking immediately so navigation requests are never missed.
+    this.attachRequestListener(page);
 
     page.on('console', (msg) => {
       this.consoleMessages.push({
