@@ -1200,11 +1200,6 @@ export class BrowserManager {
     if (hasExtensions && cdpEndpoint) {
       throw new Error('Extensions cannot be used with CDP connection');
     }
-        const warningMessage =
-          '[agent-browser] Warning: Headless mode on Windows may not persist cookies. ' +
-          'Use --headed or set AGENT_BROWSER_HEADED=1 for reliable cookie persistence.';
-        console.warn(warningMessage);
-        this.launchWarnings?.push(warningMessage);
 
     if (hasStorageState && hasProfile) {
       throw new Error(
@@ -1381,10 +1376,11 @@ export class BrowserManager {
         process.platform === 'win32' &&
         (options.headless ?? true)
       ) {
-        const warning =
-          'Headless mode on Windows may not persist cookies. ' +
+        const warningMessage =
+          '[agent-browser] Warning: Headless mode on Windows may not persist cookies. ' +
           'Use --headed or set AGENT_BROWSER_HEADED=1 for reliable cookie persistence.';
-        this.launchWarnings.push(warning);
+        console.warn(warningMessage);
+        this.launchWarnings?.push(warningMessage);
       }
 
       context = await launcher.launchPersistentContext(profilePath, {
