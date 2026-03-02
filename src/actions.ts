@@ -1462,6 +1462,40 @@ async function handleViewport(
   command: ViewportCommand,
   browser: BrowserManager
 ): Promise<Response> {
+  if (command.device) {
+    const device = browser.getDevice(command.device);
+    if (!device) {
+      const available = browser.listDevices().slice(0, 10).join(', ');
+      throw new Error(`Unknown device: "${command.device}". Available: ${available}...`);
+    }
+    await browser.setViewport(device.viewport.width, device.viewport.height);
+
+    // Apply or clear device scale factor (matching handleDevice behavior)
+    if (device.deviceScaleFactor && device.deviceScaleFactor !== 1) {
+      await browser.setDeviceScaleFactor(
+        device.deviceScaleFactor,
+        device.viewport.width,
+        device.viewport.height,
+        device.isMobile ?? false
+      );
+    } else {
+      try {
+        await browser.clearDeviceMetricsOverride();
+      } catch {
+        // Ignore error if override was never set
+      }
+    }
+
+    return successResponse(command.id, {
+      width: device.viewport.width,
+      height: device.viewport.height,
+      device: command.device,
+      deviceScaleFactor: device.deviceScaleFactor,
+    });
+  }
+  if (!command.width || !command.height) {
+    throw new Error('Either device name or width+height required');
+  }
   await browser.setViewport(command.width, command.height);
   return successResponse(command.id, {
     width: command.width,
