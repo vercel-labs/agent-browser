@@ -458,6 +458,36 @@ export async function startDaemon(options?: {
 
               const ignoreHTTPSErrors = process.env.AGENT_BROWSER_IGNORE_HTTPS_ERRORS === '1';
               const allowFileAccess = process.env.AGENT_BROWSER_ALLOW_FILE_ACCESS === '1';
+
+              // Parse custom headers from env (JSON string)
+              let headers: Record<string, string> | undefined;
+              if (process.env.AGENT_BROWSER_HEADERS) {
+                try {
+                  const parsed = JSON.parse(process.env.AGENT_BROWSER_HEADERS);
+                  if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+                    const validated: Record<string, string> = {};
+                    for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+                      if (typeof value === 'string') {
+                        validated[key] = value;
+                      } else {
+                        console.warn(
+                          '[daemon] Ignoring non-string header value from AGENT_BROWSER_HEADERS for key:',
+                          key
+                        );
+                      }
+                    }
+                    headers = Object.keys(validated).length > 0 ? validated : undefined;
+                  } else {
+                    console.warn(
+                      '[daemon] AGENT_BROWSER_HEADERS must be a JSON object with string values; ignoring value.'
+                    );
+                  }
+                } catch {
+                  console.warn(
+                    '[daemon] Failed to parse AGENT_BROWSER_HEADERS as JSON; ignoring value.'
+                  );
+                }
+              }
               const colorSchemeEnv = process.env.AGENT_BROWSER_COLOR_SCHEME;
               const colorScheme =
                 colorSchemeEnv === 'dark' ||
@@ -478,6 +508,7 @@ export async function startDaemon(options?: {
                 proxy,
                 ignoreHTTPSErrors: ignoreHTTPSErrors,
                 allowFileAccess: allowFileAccess,
+                headers,
                 colorScheme,
                 autoStateFilePath: getSessionAutoStatePath(),
               });

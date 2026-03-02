@@ -155,4 +155,35 @@ describe('Launch Options', () => {
       expect(webdriver).toBe(false);
     });
   });
+
+  describe('CDP header propagation', () => {
+    it('should accept headers option in launch with cdpUrl', async () => {
+      browser = new BrowserManager();
+      // Verify the launch command accepts headers alongside cdpUrl without type errors.
+      // Connection will fail since there's no real CDP server, but the signature must compile.
+      await expect(
+        browser.launch({
+          headless: true,
+          cdpUrl: 'http://localhost:19222',
+          headers: {
+            'X-Test-Header': 'test-value',
+            Authorization: 'Bearer test-token',
+          },
+        })
+      ).rejects.toThrow(/Failed to connect via CDP/);
+    });
+
+    it('should accept headers option in launch with cdpPort', async () => {
+      browser = new BrowserManager();
+      await expect(
+        browser.launch({
+          headless: true,
+          cdpPort: 19222,
+          headers: {
+            'X-Custom': 'value',
+          },
+        })
+      ).rejects.toThrow(/Failed to connect via CDP/);
+    });
+  });
 });

@@ -1257,7 +1257,9 @@ export class BrowserManager {
     }
 
     if (cdpEndpoint) {
-      await this.connectViaCDP(cdpEndpoint);
+      await this.connectViaCDP(cdpEndpoint, {
+        headers: options.headers,
+      });
       return;
     }
 
@@ -1494,7 +1496,7 @@ export class BrowserManager {
    */
   private async connectViaCDP(
     cdpEndpoint: string | undefined,
-    options?: { timeout?: number }
+    options?: { timeout?: number; headers?: Record<string, string> }
   ): Promise<void> {
     if (!cdpEndpoint) {
       throw new Error('CDP endpoint is required for CDP connection');
@@ -1564,6 +1566,13 @@ export class BrowserManager {
       }
 
       this.activePageIndex = 0;
+
+      // Apply custom headers post-connection
+      if (options?.headers && Object.keys(options.headers).length > 0) {
+        for (const context of contexts) {
+          await context.setExtraHTTPHeaders(options.headers);
+        }
+      }
     } catch (error) {
       // Clean up browser connection if validation or setup failed
       await browser.close().catch(() => {});
