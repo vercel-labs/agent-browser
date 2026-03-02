@@ -1200,10 +1200,11 @@ export class BrowserManager {
     if (hasExtensions && cdpEndpoint) {
       throw new Error('Extensions cannot be used with CDP connection');
     }
-
-    if (hasProfile && cdpEndpoint) {
-      throw new Error('Profile cannot be used with CDP connection');
-    }
+        const warningMessage =
+          '[agent-browser] Warning: Headless mode on Windows may not persist cookies. ' +
+          'Use --headed or set AGENT_BROWSER_HEADED=1 for reliable cookie persistence.';
+        console.warn(warningMessage);
+        this.launchWarnings?.push(warningMessage);
 
     if (hasStorageState && hasProfile) {
       throw new Error(
