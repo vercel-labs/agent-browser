@@ -966,10 +966,8 @@ async function handleSnapshot(
 
   // Write to file if --output is specified (works with and without --diff)
   if (command.output) {
-    const nodefs = await import('fs');
-    const nodepath = await import('path');
-    const resolvedPath = nodepath.resolve(command.output);
-    nodefs.writeFileSync(resolvedPath, content, 'utf-8');
+    const resolvedPath = path.resolve(command.output);
+    fs.writeFileSync(resolvedPath, content, 'utf-8');
     return successResponse(command.id, {
       snapshot: `Snapshot saved to ${resolvedPath} (${content.length} chars)`,
       refs: refsPayload,

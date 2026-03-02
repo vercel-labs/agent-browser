@@ -2649,6 +2649,45 @@ mod tests {
         assert_eq!(cmd["maxDepth"], 3);
     }
 
+    #[test]
+    fn test_snapshot_diff() {
+        let cmd = parse_command(&args("snapshot --diff"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "snapshot");
+        assert_eq!(cmd["diff"], true);
+    }
+
+    #[test]
+    fn test_snapshot_output_short() {
+        let cmd = parse_command(&args("snapshot -o snap.txt"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "snapshot");
+        assert_eq!(cmd["output"], "snap.txt");
+    }
+
+    #[test]
+    fn test_snapshot_output_long() {
+        let cmd = parse_command(&args("snapshot --output snap.txt"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "snapshot");
+        assert_eq!(cmd["output"], "snap.txt");
+    }
+
+    #[test]
+    fn test_snapshot_diff_with_output() {
+        let cmd = parse_command(&args("snapshot --diff -o diff.txt"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "snapshot");
+        assert_eq!(cmd["diff"], true);
+        assert_eq!(cmd["output"], "diff.txt");
+    }
+
+    #[test]
+    fn test_snapshot_diff_interactive_output() {
+        let cmd =
+            parse_command(&args("snapshot -i --diff -o out.txt"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "snapshot");
+        assert_eq!(cmd["interactive"], true);
+        assert_eq!(cmd["diff"], true);
+        assert_eq!(cmd["output"], "out.txt");
+    }
+
     // === Wait ===
 
     #[test]

@@ -115,6 +115,7 @@ export class BrowserManager {
   private isRecordingHar: boolean = false;
   private refMap: RefMap = {};
   private lastSnapshot: string = '';
+  private static readonly MAX_SNAPSHOT_CACHE_SIZE = 50;
   private snapshotCache: Map<string, string> = new Map();
   private scopedHeaderRoutes: Map<string, (route: Route) => Promise<void>> = new Map();
   private colorScheme: 'light' | 'dark' | 'no-preference' | null = null;
@@ -204,6 +205,13 @@ export class BrowserManager {
     this.lastSnapshot = snapshot;
     if (cacheKey) {
       this.snapshotCache.set(cacheKey, snapshot);
+      // LRU eviction: remove oldest entry when cache exceeds max size
+      if (this.snapshotCache.size > BrowserManager.MAX_SNAPSHOT_CACHE_SIZE) {
+        const firstKey = this.snapshotCache.keys().next().value;
+        if (firstKey !== undefined) {
+          this.snapshotCache.delete(firstKey);
+        }
+      }
     }
   }
 

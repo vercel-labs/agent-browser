@@ -802,7 +802,7 @@ const snapshotSchema = baseCommandSchema.extend({
   compact: z.boolean().optional(),
   selector: z.string().optional(),
   diff: z.boolean().optional(),
-  output: z.string().optional(),
+  output: z.string().min(1).optional(),
 });
 
 const evaluateSchema = baseCommandSchema.extend({
