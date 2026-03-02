@@ -1310,8 +1310,14 @@ export class BrowserManager {
     let effectiveBrowser = options.browser ?? 'chromium';
     // Auto-fallback to Firefox on ARM64 Linux where Chromium is unavailable
     if (
+    // Auto-fallback to Firefox on ARM64 Linux where the bundled Chromium is unavailable.
+    // If the user has provided an explicit executablePath for Chromium, honor that choice.
+    if (
       effectiveBrowser === 'chromium' &&
-      !options.executablePath &&
+      process.arch === 'arm64' &&
+      process.platform === 'linux' &&
+      !options.executablePath
+    ) {
       process.arch === 'arm64' &&
       process.platform === 'linux'
     ) {
