@@ -1257,9 +1257,7 @@ export class BrowserManager {
     }
 
     if (cdpEndpoint) {
-      await this.connectViaCDP(cdpEndpoint, {
-        headers: options.headers,
-      });
+      await this.connectViaCDP(cdpEndpoint, options);
       return;
     }
 
