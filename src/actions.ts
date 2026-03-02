@@ -916,9 +916,24 @@ async function handleSnapshot(
     maxDepth?: number;
     compact?: boolean;
     selector?: string;
+    diff?: boolean;
+    output?: string;
   },
   browser: BrowserManager
 ): Promise<Response<SnapshotData>> {
+  // Build a cache key from snapshot options so --diff doesn't pollute
+  // across different option combinations (issue: cross-mode pollution)
+  const cacheKey = [
+    command.interactive ? 'i' : '',
+    command.cursor ? 'c' : '',
+    command.maxDepth != null ? `d${command.maxDepth}` : '',
+    command.compact ? 'z' : '',
+    command.selector || '',
+  ].join(':');
+
+  // Save previous snapshot BEFORE getSnapshot() updates it
+  const previousSnapshot = command.diff ? browser.getLastSnapshot(cacheKey) : '';
+
   // Use enhanced snapshot with refs and optional filtering
   const { tree, refs } = await browser.getSnapshot({
     interactive: command.interactive,
@@ -928,17 +943,42 @@ async function handleSnapshot(
     selector: command.selector,
   });
 
-  // Simplify refs for output (just role and name)
+  const snapshot = tree || 'Empty page';
+
+  // Update the options-keyed cache for future diffs
+  browser.setLastSnapshot(snapshot, cacheKey);
+
+  // Simplify refs for output (always computed, even in diff mode)
   const simpleRefs: Record<string, { role: string; name: string }> = {};
   for (const [ref, data] of Object.entries(refs)) {
     simpleRefs[ref] = { role: data.role, name: data.name };
   }
-
+  const refsPayload = Object.keys(simpleRefs).length > 0 ? simpleRefs : undefined;
   const page = browser.getPage();
+  const origin = page.url();
+
+  // Compute positional diff using Myers algorithm if requested
+  let content = snapshot;
+  if (command.diff && previousSnapshot) {
+    const result = diffSnapshots(previousSnapshot, snapshot);
+    content = result.changed ? result.diff : '(no changes)';
+  }
+
+  // Write to file if --output is specified (works with and without --diff)
+  if (command.output) {
+    const resolvedPath = path.resolve(command.output);
+    fs.writeFileSync(resolvedPath, content, 'utf-8');
+    return successResponse(command.id, {
+      snapshot: `Snapshot saved to ${resolvedPath} (${content.length} chars)`,
+      refs: refsPayload,
+      origin,
+    });
+  }
+
   return successResponse(command.id, {
-    snapshot: tree || 'Empty page',
-    refs: Object.keys(simpleRefs).length > 0 ? simpleRefs : undefined,
-    origin: page.url(),
+    snapshot: content,
+    refs: refsPayload,
+    origin,
   });
 }
 

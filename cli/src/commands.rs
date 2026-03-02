@@ -512,6 +512,15 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                             i += 1;
                         }
                     }
+                    "--diff" => {
+                        obj.insert("diff".to_string(), json!(true));
+                    }
+                    "--output" | "-o" => {
+                        if let Some(p) = rest.get(i + 1) {
+                            obj.insert("output".to_string(), json!(p));
+                            i += 1;
+                        }
+                    }
                     _ => {}
                 }
                 i += 1;
@@ -2638,6 +2647,45 @@ mod tests {
         let cmd = parse_command(&args("snapshot -d 3"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "snapshot");
         assert_eq!(cmd["maxDepth"], 3);
+    }
+
+    #[test]
+    fn test_snapshot_diff() {
+        let cmd = parse_command(&args("snapshot --diff"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "snapshot");
+        assert_eq!(cmd["diff"], true);
+    }
+
+    #[test]
+    fn test_snapshot_output_short() {
+        let cmd = parse_command(&args("snapshot -o snap.txt"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "snapshot");
+        assert_eq!(cmd["output"], "snap.txt");
+    }
+
+    #[test]
+    fn test_snapshot_output_long() {
+        let cmd = parse_command(&args("snapshot --output snap.txt"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "snapshot");
+        assert_eq!(cmd["output"], "snap.txt");
+    }
+
+    #[test]
+    fn test_snapshot_diff_with_output() {
+        let cmd = parse_command(&args("snapshot --diff -o diff.txt"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "snapshot");
+        assert_eq!(cmd["diff"], true);
+        assert_eq!(cmd["output"], "diff.txt");
+    }
+
+    #[test]
+    fn test_snapshot_diff_interactive_output() {
+        let cmd =
+            parse_command(&args("snapshot -i --diff -o out.txt"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "snapshot");
+        assert_eq!(cmd["interactive"], true);
+        assert_eq!(cmd["diff"], true);
+        assert_eq!(cmd["output"], "out.txt");
     }
 
     // === Wait ===
