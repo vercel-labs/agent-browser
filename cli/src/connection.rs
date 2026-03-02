@@ -384,6 +384,10 @@ pub fn ensure_daemon(
         cmd.arg(daemon_path);
         apply_daemon_env(&mut cmd, session, opts);
 
+        if let Ok(script) = env::var("AGENT_BROWSER_INIT_SCRIPT") {
+            cmd.env("AGENT_BROWSER_INIT_SCRIPT", script);
+        }
+
         // Create new process group and session to fully detach
         unsafe {
             cmd.pre_exec(|| {
@@ -409,6 +413,10 @@ pub fn ensure_daemon(
         let mut cmd = Command::new("node");
         cmd.arg(daemon_path);
         apply_daemon_env(&mut cmd, session, opts);
+
+        if let Ok(script) = env::var("AGENT_BROWSER_INIT_SCRIPT") {
+            cmd.env("AGENT_BROWSER_INIT_SCRIPT", script);
+        }
 
         // CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS
         const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;

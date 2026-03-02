@@ -959,6 +959,8 @@ npx skills add vercel-labs/agent-browser
 
 This adds the skill to `.claude/skills/agent-browser/SKILL.md` in your project. The skill teaches Claude Code the full agent-browser workflow, including the snapshot-ref interaction pattern, session management, and timeout handling.
 
+> **Skill documentation**: See [`skills/agent-browser/SKILL.md`](skills/agent-browser/SKILL.md) for the full Claude Code skill reference, including the core workflow, command patterns, and best practices for AI agents.
+
 ### AGENTS.md / CLAUDE.md
 
 For more consistent results, add to your project or global instructions file:

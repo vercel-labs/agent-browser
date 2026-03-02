@@ -267,9 +267,28 @@ const permissionsSchema = baseCommandSchema.extend({
 
 const viewportSchema = baseCommandSchema.extend({
   action: z.literal('viewport'),
-  width: z.number().positive(),
-  height: z.number().positive(),
+  width: z.number().int().positive().optional(),
+  height: z.number().int().positive().optional(),
+  device: z.string().optional(),
 });
+
+/** Validate viewport command: require either device OR both width+height. */
+function validateViewport(data: {
+  width?: number;
+  height?: number;
+  device?: string;
+}): string | null {
+  if (data.device != null) {
+    if (data.width != null || data.height != null) {
+      return 'Provide either "device" or both "width" and "height", not a mix';
+    }
+    return null;
+  }
+  if (data.width == null || data.height == null) {
+    return 'Provide either "device" or both "width" and "height"';
+  }
+  return null;
+}
 
 const userAgentSchema = baseCommandSchema.extend({
   action: z.literal('useragent'),
@@ -1126,6 +1145,13 @@ export function parseCommand(input: string): ParseResult {
     }
     if (sub === 'press' && !command.keys) {
       return { success: false, error: 'keyboard press requires keys', id };
+    }
+  }
+
+  if (command.action === 'viewport') {
+    const viewportError = validateViewport(command);
+    if (viewportError) {
+      return { success: false, error: viewportError, id };
     }
   }
 
