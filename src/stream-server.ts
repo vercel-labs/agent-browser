@@ -2,9 +2,17 @@ import { WebSocketServer, WebSocket } from 'ws';
 import type { BrowserManager, ScreencastFrame } from './browser.js';
 import { setScreencastFrameCallback } from './actions.js';
 
+// Custom allowed origins set via setAllowedOrigins()
+let customAllowedOrigins: string[] = [];
+
+export function setAllowedOrigins(origins: string[]): void {
+  customAllowedOrigins = [...origins].map((s) => s.trim()).filter(Boolean);
+}
+
 /**
  * Check whether a WebSocket connection origin should be allowed.
- * Allows: no origin (CLI tools), file:// origins, and localhost/loopback origins.
+ * Allows: no origin (CLI tools), file:// origins, vscode-webview:// origins,
+ * custom allowed origins, and localhost/loopback origins.
  * Rejects: all other origins (prevents malicious web pages from connecting).
  */
 export function isAllowedOrigin(origin: string | undefined): boolean {
@@ -15,6 +23,20 @@ export function isAllowedOrigin(origin: string | undefined): boolean {
   // Allow file:// origins (local HTML files)
   if (origin.startsWith('file://')) {
     return true;
+  }
+  // Allow vscode-webview:// origins (VSCode Webview extensions)
+  if (origin.startsWith('vscode-webview://')) {
+    return true;
+  }
+  // Check custom allowed origins
+  for (const allowed of customAllowedOrigins) {
+    if (origin === allowed) return true;
+    if (origin.startsWith(allowed)) {
+      // Scheme prefixes (e.g. "chrome-extension://") match any extension ID after them
+      if (allowed.endsWith('://')) return true;
+      const next = origin[allowed.length];
+      if (next === undefined || next === '/' || next === ':') return true;
+    }
   }
   // Allow localhost/loopback origins (browser-based stream viewers)
   try {

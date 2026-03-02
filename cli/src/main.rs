@@ -363,6 +363,7 @@ fn main() {
         allowed_domains: flags.allowed_domains.as_deref(),
         action_policy: flags.action_policy.as_deref(),
         confirm_actions: flags.confirm_actions.as_deref(),
+        allow_origins: flags.allow_origins.as_deref(),
     };
     let daemon_result = match ensure_daemon(&flags.session, &daemon_opts) {
         Ok(result) => result,

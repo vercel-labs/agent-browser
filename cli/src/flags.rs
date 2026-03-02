@@ -234,6 +234,7 @@ pub struct Flags {
     pub action_policy: Option<String>,
     pub confirm_actions: Option<String>,
     pub confirm_interactive: bool,
+    pub allow_origins: Option<String>,
 
     // Track which launch-time options were explicitly passed via CLI
     // (as opposed to being set only via environment variables)
@@ -333,6 +334,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
             .or(config.confirm_actions),
         confirm_interactive: env_var_is_truthy("AGENT_BROWSER_CONFIRM_INTERACTIVE")
             || config.confirm_interactive.unwrap_or(false),
+        allow_origins: env::var("AGENT_BROWSER_ALLOWED_ORIGINS").ok(),
         cli_executable_path: false,
         cli_extensions: false,
         cli_profile: false,
@@ -538,6 +540,12 @@ pub fn parse_flags(args: &[String]) -> Flags {
                 // Already handled by load_config(); skip the value
                 i += 1;
             }
+            "--allow-origins" => {
+                if let Some(s) = args.get(i + 1) {
+                    flags.allow_origins = Some(s.clone());
+                    i += 1;
+                }
+            }
             _ => {}
         }
         i += 1;
@@ -579,13 +587,8 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--provider",
         "--device",
         "--session-name",
-        "--color-scheme",
-        "--download-path",
-        "--max-output",
-        "--allowed-domains",
-        "--action-policy",
-        "--confirm-actions",
         "--config",
+        "--allow-origins",
     ];
 
     let mut i = 0;
