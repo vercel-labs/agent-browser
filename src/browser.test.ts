@@ -1273,3 +1273,69 @@ describe('getDefaultTimeout', () => {
     expect(getDefaultTimeout()).toBe(60000);
   });
 });
+
+describe('Windows headless cookie warning', () => {
+  const originalPlatform = process.platform;
+
+  afterEach(() => {
+    Object.defineProperty(process, 'platform', { value: originalPlatform });
+  });
+
+  function makeMockContext() {
+    const mockPage = { url: () => 'about:blank', on: vi.fn() };
+    return {
+      pages: () => [mockPage],
+      on: vi.fn(),
+      setDefaultTimeout: vi.fn(),
+      addInitScript: vi.fn(),
+      newPage: vi.fn().mockResolvedValue(mockPage),
+      route: vi.fn().mockResolvedValue(undefined),
+    };
+  }
+
+  it('should warn when chromium + Windows + headless + profile', async () => {
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+
+    const spy = vi
+      .spyOn(chromium, 'launchPersistentContext')
+      .mockResolvedValue(makeMockContext() as any);
+
+    const mgr = new BrowserManager();
+    await mgr.launch({ profile: '/tmp/test-profile', headless: true });
+
+    const warnings = mgr.getAndClearWarnings();
+    expect(warnings.some((w) => w.includes('may not persist cookies'))).toBe(true);
+    spy.mockRestore();
+  });
+
+  it('should NOT warn for non-chromium browsers on Windows', async () => {
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+
+    const { firefox } = await import('playwright-core');
+    const spy = vi
+      .spyOn(firefox, 'launchPersistentContext')
+      .mockResolvedValue(makeMockContext() as any);
+
+    const mgr = new BrowserManager();
+    await mgr.launch({ profile: '/tmp/test-profile', headless: true, browser: 'firefox' });
+
+    const warnings = mgr.getAndClearWarnings();
+    expect(warnings.some((w) => w.includes('may not persist cookies'))).toBe(false);
+    spy.mockRestore();
+  });
+
+  it('should NOT warn on non-Windows platforms', async () => {
+    Object.defineProperty(process, 'platform', { value: 'linux' });
+
+    const spy = vi
+      .spyOn(chromium, 'launchPersistentContext')
+      .mockResolvedValue(makeMockContext() as any);
+
+    const mgr = new BrowserManager();
+    await mgr.launch({ profile: '/tmp/test-profile', headless: true });
+
+    const warnings = mgr.getAndClearWarnings();
+    expect(warnings.some((w) => w.includes('may not persist cookies'))).toBe(false);
+    spy.mockRestore();
+  });
+});
