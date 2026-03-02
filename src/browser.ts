@@ -1371,7 +1371,7 @@ export class BrowserManager {
     } else if (hasProfile) {
       // Profile uses persistent context for durable cookies/storage
       // Expand ~ to home directory since it won't be shell-expanded
-      const profilePath = options.profile!.replace(/^~\//, os.homedir() + '/');
+      const profilePath = options.profile!.replace(/^~\//, os.homedir() + path.sep);
       context = await launcher.launchPersistentContext(profilePath, {
         headless: options.headless ?? true,
         executablePath: options.executablePath,
@@ -1395,6 +1395,9 @@ export class BrowserManager {
       });
       this.cdpEndpoint = null;
 
+      // Expand ~ to home directory for storageState path
+      const expandedStorageState = options.storageState?.replace(/^~\//, os.homedir() + path.sep);
+
       // Check for auto-load state file (supports encrypted files)
       let storageState:
         | string
@@ -1414,7 +1417,7 @@ export class BrowserManager {
               localStorage: Array<{ name: string; value: string }>;
             }>;
           }
-        | undefined = options.storageState ? options.storageState : undefined;
+        | undefined = expandedStorageState ? expandedStorageState : undefined;
 
       if (!storageState && options.autoStateFilePath) {
         try {
