@@ -77,6 +77,10 @@ interface TrackedRequest {
   headers: Record<string, string>;
   timestamp: number;
   resourceType: string;
+  status?: number;
+  responseHeaders?: Record<string, string>;
+  responseBody?: string;
+  _requestId?: number;
 }
 
 interface ConsoleMessage {
@@ -109,6 +113,10 @@ export class BrowserManager {
   private activeFrame: Frame | null = null;
   private dialogHandler: ((dialog: Dialog) => Promise<void>) | null = null;
   private trackedRequests: TrackedRequest[] = [];
+  private isTrackingRequests: boolean = false;
+  private isTrackingBodies: boolean = false;
+  private responseListener: ((response: any) => Promise<void>) | null = null;
+  private requestIdCounter: number = 0;
   private routes: Map<string, (route: Route) => Promise<void>> = new Map();
   private consoleMessages: ConsoleMessage[] = [];
   private pageErrors: PageError[] = [];
@@ -177,8 +185,8 @@ export class BrowserManager {
     compact?: boolean;
     selector?: string;
   }): Promise<EnhancedSnapshot> {
-    const page = this.getPage();
-    const snapshot = await getEnhancedSnapshot(page, options);
+    const frame = this.getFrame();
+    const snapshot = await getEnhancedSnapshot(frame, options);
     this.refMap = snapshot.refs;
     this.lastSnapshot = snapshot.tree;
     return snapshot;
@@ -216,7 +224,7 @@ export class BrowserManager {
     const refData = this.refMap[ref];
     if (!refData) return null;
 
-    const page = this.getPage();
+    const page = this.getFrame();
 
     // Check if this is a cursor-interactive element (uses CSS selector, not ARIA role)
     // These have pseudo-roles 'clickable' or 'focusable' and a CSS selector
@@ -310,8 +318,8 @@ export class BrowserManager {
     if (locator) return locator;
 
     // Otherwise treat as regular selector
-    const page = this.getPage();
-    return page.locator(selectorOrRef);
+    const frame = this.getFrame();
+    return frame.locator(selectorOrRef);
   }
 
   /**
@@ -448,7 +456,24 @@ export class BrowserManager {
   /**
    * Start tracking requests
    */
-  startRequestTracking(): void {
+  startRequestTracking(includeBody?: boolean): void {
+    const wantBodies = !!includeBody;
+
+    // Upgrade or downgrade body tracking if tracking level changed
+    if (this.isTrackingRequests && wantBodies !== this.isTrackingBodies) {
+      this.isTrackingBodies = wantBodies;
+      const page = this.getPage();
+      if (this.responseListener) {
+        page.removeListener('response', this.responseListener);
+      }
+      this.responseListener = this.createResponseListener(wantBodies);
+      page.on('response', this.responseListener);
+      return;
+    }
+
+    if (this.isTrackingRequests) return;
+    this.isTrackingRequests = true;
+    this.isTrackingBodies = wantBodies;
     const page = this.getPage();
     page.on('request', (request: Request) => {
       this.trackedRequests.push({
@@ -457,8 +482,33 @@ export class BrowserManager {
         headers: request.headers(),
         timestamp: Date.now(),
         resourceType: request.resourceType(),
+        _requestId: ++this.requestIdCounter,
       });
     });
+    this.responseListener = this.createResponseListener(wantBodies);
+    page.on('response', this.responseListener);
+  }
+
+  private createResponseListener(includeBody: boolean) {
+    return async (response: any) => {
+      const request = response.request();
+      // Match by URL and find the earliest unmatched request (no status yet)
+      // using reverse order to match the most recent request to the same URL
+      const tracked = [...this.trackedRequests]
+        .reverse()
+        .find((r) => r.url === request.url() && r.status === undefined);
+      if (tracked) {
+        tracked.status = response.status();
+        tracked.responseHeaders = response.headers();
+        if (includeBody) {
+          try {
+            tracked.responseBody = await response.text();
+          } catch {
+            // Response body may not be available (e.g., redirects)
+          }
+        }
+      }
+    };
   }
 
   /**
