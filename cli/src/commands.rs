@@ -14,7 +14,11 @@ pub fn resolve_path(path: &str) -> String {
         get_home_dir().unwrap_or_else(|| path.to_string())
     } else if let Some(rest) = path.strip_prefix("~/") {
         match get_home_dir() {
-            Some(home) => std::path::PathBuf::from(home).join(rest).to_string_lossy().to_string(),
+            Some(home) => {
+                let mut buf = std::path::PathBuf::from(home);
+                buf.push(rest);
+                buf.to_string_lossy().to_string()
+            }
             None => path.to_string(),
         }
     } else {
@@ -2153,6 +2157,11 @@ mod tests {
             Path::new(&result).is_absolute(),
             "expected absolute path, got: {}",
             result
+        let path = Path::new(&result);
+        assert_eq!(path.file_name(), Some(std::ffi::OsStr::new("file.txt")));
+        assert_eq!(
+            path.parent().and_then(|p| p.file_name()),
+            Some(std::ffi::OsStr::new("subdir"))
         );
         assert!(
             Path::new(&result).ends_with(Path::new("subdir").join("file.txt")),
