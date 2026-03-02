@@ -34,14 +34,6 @@ pub fn resolve_path(path: &str) -> String {
     match std::env::current_dir() {
         Ok(cwd) => cwd.join(p).to_string_lossy().to_string(),
         Err(_) => expanded,
-    };
-    let p = Path::new(&path);
-    if p.is_absolute() {
-        return path;
-    }
-    match std::env::current_dir() {
-        Ok(cwd) => cwd.join(p).to_string_lossy().to_string(),
-        Err(_) => path,
     }
 }
 
@@ -931,19 +923,10 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                 }
                 "clear" => Ok(json!({ "id": id, "action": "cookies_clear" })),
                 "save" => {
-                    let cookies: Value = serde_json::from_str(&content).map_err(|e| ParseError::InvalidValue {
-                        message: format!("Invalid JSON in cookie file: {}", e),
-                        usage: "cookies load <file.json>",
+                    let file = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
+                        context: "cookies save".to_string(),
+                        usage: "cookies save <file.json>",
                     })?;
-                    if !cookies.is_array() {
-                        return Err(ParseError::InvalidValue {
-                            message: format!(
-                                "Cookie file '{}' must contain a JSON array of cookies",
-                                resolved
-                            ),
-                            usage: "cookies load <file.json>",
-                        });
-                    }
                     let resolved = resolve_path(file);
                     Ok(json!({ "id": id, "action": "cookies_get", "saveTo": resolved }))
                 }
@@ -958,13 +941,16 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                         message: format!("Failed to read cookie file '{}': {}", resolved, e),
                         usage: "cookies load <file.json>",
                     })?;
-                    let cookies: serde_json::Value = serde_json::from_str(&content).map_err(|e| ParseError::InvalidValue {
+                    let cookies: Value = serde_json::from_str(&content).map_err(|e| ParseError::InvalidValue {
                         message: format!("Invalid JSON in cookie file: {}", e),
                         usage: "cookies load <file.json>",
                     })?;
                     if !cookies.is_array() {
                         return Err(ParseError::InvalidValue {
-                            message: "Cookie file must contain a JSON array".to_string(),
+                            message: format!(
+                                "Cookie file '{}' must contain a JSON array of cookies",
+                                resolved
+                            ),
                             usage: "cookies load <file.json>",
                         });
                     }

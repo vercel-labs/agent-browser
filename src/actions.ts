@@ -1304,6 +1304,7 @@ async function handleCookiesGet(
       saved: true,
       path: targetPath,
       count: cookies.length,
+      cookies,
     });
   }
   return successResponse(command.id, { cookies });
