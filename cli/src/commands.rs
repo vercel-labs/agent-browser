@@ -185,18 +185,34 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
             Ok(json!({ "id": id, "action": "focus", "selector": sel }))
         }
         "check" => {
-            let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
-                context: "check".to_string(),
-                usage: "check <selector>",
-            })?;
-            Ok(json!({ "id": id, "action": "check", "selector": sel }))
+            let force = rest.iter().any(|arg| *arg == "--force");
+            let sel = rest
+                .iter()
+                .find(|arg| **arg != "--force")
+                .ok_or_else(|| ParseError::MissingArguments {
+                    context: "check".to_string(),
+                    usage: "check <selector> [--force]",
+                })?;
+            if force {
+                Ok(json!({ "id": id, "action": "check", "selector": sel, "force": true }))
+            } else {
+                Ok(json!({ "id": id, "action": "check", "selector": sel }))
+            }
         }
         "uncheck" => {
-            let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
-                context: "uncheck".to_string(),
-                usage: "uncheck <selector>",
-            })?;
-            Ok(json!({ "id": id, "action": "uncheck", "selector": sel }))
+            let force = rest.iter().any(|arg| *arg == "--force");
+            let sel = rest
+                .iter()
+                .find(|arg| **arg != "--force")
+                .ok_or_else(|| ParseError::MissingArguments {
+                    context: "uncheck".to_string(),
+                    usage: "uncheck <selector> [--force]",
+                })?;
+            if force {
+                Ok(json!({ "id": id, "action": "uncheck", "selector": sel, "force": true }))
+            } else {
+                Ok(json!({ "id": id, "action": "uncheck", "selector": sel }))
+            }
         }
         "select" => {
             let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
