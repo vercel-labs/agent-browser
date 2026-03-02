@@ -14,7 +14,11 @@ pub fn resolve_path(path: &str) -> String {
     if path == "~" {
         if let Some(home) = dirs::home_dir() {
             return home.to_string_lossy().to_string();
-        }
+            Some(home) => {
+                let mut buf = std::path::PathBuf::from(home);
+                buf.push(rest);
+                buf.to_string_lossy().to_string()
+            }
         return path.to_string();
     }
     let expanded = if let Some(rest) = path.strip_prefix("~/") {
