@@ -1292,11 +1292,17 @@ async function handleCookiesGet(
   const context = page.context();
   const cookies = await context.cookies(command.urls);
   if (command.saveTo) {
-    const fs = await import('fs');
-    fs.writeFileSync(command.saveTo, JSON.stringify(cookies, null, 2));
+    const baseDir = getAppDir();
+    const targetPath = path.resolve(baseDir, command.saveTo);
+    // Ensure the resolved path stays within the allowed base directory
+    const normalizedBaseDir = path.resolve(baseDir) + path.sep;
+    if (!targetPath.startsWith(normalizedBaseDir)) {
+      return errorResponse(command.id, `Invalid save path for cookies: ${command.saveTo}`);
+    }
+    fs.writeFileSync(targetPath, JSON.stringify(cookies, null, 2));
     return successResponse(command.id, {
       saved: true,
-      path: command.saveTo,
+      path: targetPath,
       count: cookies.length,
     });
   }

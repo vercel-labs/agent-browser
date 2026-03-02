@@ -9,13 +9,31 @@ use crate::flags::Flags;
 use crate::validation::{is_valid_session_name, session_name_error};
 
 pub fn resolve_path(path: &str) -> String {
-    let path = if path.starts_with("~/") {
-        match std::env::var("HOME") {
-            Ok(home) => format!("{}/{}", home, &path[2..]),
-            Err(_) => path.to_string(),
+    // Expand "~" or "~/..." to the user's home directory before resolving.
+    let expanded = if path == "~" || path.starts_with("~/") {
+        if let Some(home) =
+            std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))
+        {
+            let mut buf = std::path::PathBuf::from(home);
+            if path.len() > 1 {
+                // Safe because we only slice when path starts with "~/"
+                buf.push(&path[2..]);
+            }
+            buf.to_string_lossy().to_string()
+        } else {
+            path.to_string()
         }
     } else {
         path.to_string()
+    };
+
+    let p = Path::new(&expanded);
+    if p.is_absolute() {
+        return p.to_string_lossy().to_string();
+    }
+    match std::env::current_dir() {
+        Ok(cwd) => cwd.join(p).to_string_lossy().to_string(),
+        Err(_) => expanded,
     };
     let p = Path::new(&path);
     if p.is_absolute() {
@@ -913,10 +931,19 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                 }
                 "clear" => Ok(json!({ "id": id, "action": "cookies_clear" })),
                 "save" => {
-                    let file = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
-                        context: "cookies save".to_string(),
-                        usage: "cookies save <file.json>",
+                    let cookies: Value = serde_json::from_str(&content).map_err(|e| ParseError::InvalidValue {
+                        message: format!("Invalid JSON in cookie file: {}", e),
+                        usage: "cookies load <file.json>",
                     })?;
+                    if !cookies.is_array() {
+                        return Err(ParseError::InvalidValue {
+                            message: format!(
+                                "Cookie file '{}' must contain a JSON array of cookies",
+                                resolved
+                            ),
+                            usage: "cookies load <file.json>",
+                        });
+                    }
                     let resolved = resolve_path(file);
                     Ok(json!({ "id": id, "action": "cookies_get", "saveTo": resolved }))
                 }
