@@ -1527,12 +1527,10 @@ export class BrowserManager {
     // handle correctly. Pre-fetch the WebSocket URL to bypass this issue.
     let connectUrl = cdpUrl;
     if (cdpUrl.startsWith('http://') || cdpUrl.startsWith('https://')) {
-      try {
-        const response = await fetch(`${cdpUrl}/json/version`);
       const timeoutMs = options?.timeout ?? getDefaultTimeout();
+      try {
         const versionUrl = new URL('json/version', cdpUrl);
-        const response = await fetch(versionUrl.toString());
-        const response = await fetch(`${cdpUrl}/json/version`, {
+        const response = await fetch(versionUrl.toString(), {
           signal: AbortSignal.timeout(timeoutMs),
         });
         if (response.ok) {
@@ -1540,8 +1538,9 @@ export class BrowserManager {
           if (data.webSocketDebuggerUrl) {
             connectUrl = data.webSocketDebuggerUrl;
           }
+        }
         // Fall back to HTTP URL if pre-fetch fails
-      }
+      } catch {}
     }
 
     const browser = await chromium
