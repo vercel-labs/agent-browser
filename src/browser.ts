@@ -1259,12 +1259,12 @@ export class BrowserManager {
     if (cdpEndpoint) {
       await this.connectViaCDP(cdpEndpoint, {
         headers: options.headers,
-      await this.connectViaCDP(cdpEndpoint, options);
+      });
       return;
     }
 
     if (options.autoConnect) {
-      await this.autoConnectViaCDP();
+      await this.autoConnectViaCDP(options.headers);
       return;
     }
 
@@ -1661,7 +1661,7 @@ export class BrowserManager {
    * 3. If not found, probe common debugging ports (9222, 9229)
    * 4. If a port responds, connect via CDP
    */
-  private async autoConnectViaCDP(): Promise<void> {
+  private async autoConnectViaCDP(headers?: Record<string, string>): Promise<void> {
     // Strategy 1: Check DevToolsActivePort files
     const userDataDirs = this.getChromeUserDataDirs();
     for (const dir of userDataDirs) {
@@ -1670,7 +1670,7 @@ export class BrowserManager {
         // Try HTTP discovery first (works with --remote-debugging-port mode)
         const wsUrl = await this.probeDebugPort(activePort.port);
         if (wsUrl) {
-          await this.connectViaCDP(wsUrl);
+          await this.connectViaCDP(wsUrl, { headers });
           return;
         }
         // HTTP probe failed -- Chrome M144+ chrome://inspect remote debugging uses a
@@ -1684,7 +1684,7 @@ export class BrowserManager {
                 `attempting direct WebSocket connection to ${directWsUrl}`
             );
           }
-          await this.connectViaCDP(directWsUrl, { timeout: 60_000 });
+          await this.connectViaCDP(directWsUrl, { timeout: 60_000, headers });
           return;
         } catch {
           // Direct WebSocket also failed, try next directory
@@ -1697,7 +1697,7 @@ export class BrowserManager {
     for (const port of commonPorts) {
       const wsUrl = await this.probeDebugPort(port);
       if (wsUrl) {
-        await this.connectViaCDP(wsUrl);
+        await this.connectViaCDP(wsUrl, { headers });
         return;
       }
     }
