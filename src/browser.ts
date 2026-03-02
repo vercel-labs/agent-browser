@@ -1259,7 +1259,7 @@ export class BrowserManager {
     if (cdpEndpoint) {
       await this.connectViaCDP(cdpEndpoint, options);
       return;
-      await this.connectViaCDP(cdpEndpoint, options);
+    }
 
     if (options.autoConnect) {
       await this.autoConnectViaCDP(options.headers);
