@@ -12,6 +12,18 @@ use std::time::Duration;
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
 
+/// Strip Windows UNC prefix (\\?\) from path.
+/// canonicalize() on Windows returns UNC paths which Node.js cannot handle.
+#[cfg(windows)]
+fn strip_unc_prefix(path: PathBuf) -> PathBuf {
+    let s = path.to_string_lossy();
+    if s.starts_with("\\\\?\\") {
+        PathBuf::from(&s[4..])
+    } else {
+        path
+    }
+}
+
 #[derive(Serialize)]
 #[allow(dead_code)]
 pub struct Request {
@@ -355,6 +367,9 @@ pub fn ensure_daemon(
     let exe_path = env::current_exe().map_err(|e| e.to_string())?;
     // Canonicalize to resolve symlinks (e.g., npm global bin symlink -> actual binary)
     let exe_path = exe_path.canonicalize().unwrap_or(exe_path);
+    // Strip UNC prefix on Windows (Node.js cannot handle \\?\ paths)
+    #[cfg(windows)]
+    let exe_path = strip_unc_prefix(exe_path);
     let exe_dir = exe_path.parent().unwrap();
 
     let mut daemon_paths = vec![
@@ -718,5 +733,18 @@ mod tests {
         assert!(!is_transient_error("Invalid JSON syntax"));
         assert!(!is_transient_error("Permission denied"));
         assert!(!is_transient_error("Daemon not found"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_strip_unc_prefix() {
+        assert_eq!(
+            strip_unc_prefix(PathBuf::from("\\\\?\\C:\\Users\\test")),
+            PathBuf::from("C:\\Users\\test")
+        );
+        assert_eq!(
+            strip_unc_prefix(PathBuf::from("C:\\Users\\test")),
+            PathBuf::from("C:\\Users\\test")
+        );
     }
 }
