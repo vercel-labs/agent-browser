@@ -1,5 +1,11 @@
 # agent-browser
 
+## 0.15.2
+
+### Patch Changes
+
+- 6aea316: Documentation site improvements and internal tooling updates including enhanced code blocks, mobile navigation, and docs chat components. CLI connection and output handling refinements. Skill creator reference documentation and scripts have been reorganized.
+
 ## 0.15.1
 
 ### Patch Changes
