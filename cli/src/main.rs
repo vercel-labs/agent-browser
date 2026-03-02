@@ -354,6 +354,7 @@ fn main() {
         proxy_bypass: flags.proxy_bypass.as_deref(),
         ignore_https_errors: flags.ignore_https_errors,
         allow_file_access: flags.allow_file_access,
+        stealth: flags.stealth,
         profile: flags.profile.as_deref(),
         state: flags.state.as_deref(),
         provider: flags.provider.as_deref(),
