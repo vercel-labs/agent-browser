@@ -253,12 +253,12 @@ export interface PermissionsCommand extends BaseCommand {
 }
 
 // Viewport
-export interface ViewportCommand extends BaseCommand {
+export type ViewportCommand = BaseCommand & {
   action: 'viewport';
-  width?: number;
-  height?: number;
-  device?: string;
-}
+} & (
+    | { device: string; width?: never; height?: never }
+    | { device?: never; width: number; height: number }
+  );
 
 // User agent
 export interface UserAgentCommand extends BaseCommand {

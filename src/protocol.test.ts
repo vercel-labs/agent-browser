@@ -647,6 +647,16 @@ describe('parseCommand', () => {
       expect(result.success).toBe(true);
     });
 
+    it('should parse viewport with device', () => {
+      const result = parseCommand(cmd({ id: '1', action: 'viewport', device: 'iPhone 15' }));
+      expect(result.success).toBe(true);
+    });
+
+    it('should reject viewport with empty device string', () => {
+      const result = parseCommand(cmd({ id: '1', action: 'viewport', device: '' }));
+      expect(result.success).toBe(false);
+    });
+
     it('should parse geolocation', () => {
       const result = parseCommand(
         cmd({ id: '1', action: 'geolocation', latitude: 37.7749, longitude: -122.4194 })

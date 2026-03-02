@@ -1187,6 +1187,11 @@ async function handleViewport(
   command: ViewportCommand,
   browser: BrowserManager
 ): Promise<Response> {
+  if (command.device && (command.width != null || command.height != null)) {
+    throw new Error(
+      'Viewport requires either {"device": "<name>"} or {"width": <n>, "height": <n>}, not both'
+    );
+  }
   if (command.device) {
     const device = browser.getDevice(command.device);
     if (!device) {
@@ -1219,7 +1224,9 @@ async function handleViewport(
     });
   }
   if (command.width == null || command.height == null) {
-    throw new Error('Either device name or width+height required');
+    throw new Error(
+      'Viewport requires either {"device": "<name>"} or {"width": <n>, "height": <n>}'
+    );
   }
   await browser.setViewport(command.width, command.height);
   return successResponse(command.id, {

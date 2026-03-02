@@ -262,7 +262,7 @@ const viewportSchema = baseCommandSchema.extend({
   action: z.literal('viewport'),
   width: z.number().int().positive().optional(),
   height: z.number().int().positive().optional(),
-  device: z.string().optional(),
+  device: z.string().min(1).optional(),
 });
 
 const userAgentSchema = baseCommandSchema.extend({
