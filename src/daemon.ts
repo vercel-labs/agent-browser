@@ -458,6 +458,30 @@ export async function startDaemon(options?: {
 
               const ignoreHTTPSErrors = process.env.AGENT_BROWSER_IGNORE_HTTPS_ERRORS === '1';
               const allowFileAccess = process.env.AGENT_BROWSER_ALLOW_FILE_ACCESS === '1';
+
+              // Parse custom headers from env (JSON string)
+              let headers: Record<string, string> | undefined;
+              if (process.env.AGENT_BROWSER_HEADERS) {
+                try {
+                  const parsed: unknown = JSON.parse(process.env.AGENT_BROWSER_HEADERS);
+                  if (
+                    typeof parsed === 'object' &&
+                    parsed !== null &&
+                    !Array.isArray(parsed) &&
+                    Object.values(parsed as Record<string, unknown>).every(
+                      (v) => typeof v === 'string'
+                    )
+                  ) {
+                    headers = parsed as Record<string, string>;
+                  } else {
+                    console.error(
+                      '[WARN] AGENT_BROWSER_HEADERS must be a JSON object with string values, ignoring'
+                    );
+                  }
+                } catch {
+                  console.error('[WARN] AGENT_BROWSER_HEADERS contains invalid JSON, ignoring');
+                }
+              }
               const colorSchemeEnv = process.env.AGENT_BROWSER_COLOR_SCHEME;
               const colorScheme =
                 colorSchemeEnv === 'dark' ||
@@ -478,6 +502,7 @@ export async function startDaemon(options?: {
                 proxy,
                 ignoreHTTPSErrors: ignoreHTTPSErrors,
                 allowFileAccess: allowFileAccess,
+                headers,
                 colorScheme,
                 autoStateFilePath: getSessionAutoStatePath(),
               });
