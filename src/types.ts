@@ -545,6 +545,20 @@ export interface DeviceListCommand extends BaseCommand {
   action: 'device_list';
 }
 
+export interface SaveFileCommand extends BaseCommand {
+  action: 'savefile';
+  outputPath: string;
+  selector?: string;
+}
+
+export interface DropFileCommand extends BaseCommand {
+  action: 'dropfile';
+  selector: string;
+  filePath: string;
+  fileName?: string;
+  mimeType?: string;
+}
+
 // Video recording (Playwright native - requires launch-time setup)
 export interface VideoStartCommand extends BaseCommand {
   action: 'video_start';
@@ -1032,7 +1046,9 @@ export type Command =
   | AuthDeleteCommand
   | AuthShowCommand
   | ConfirmCommand
-  | DenyCommand;
+  | DenyCommand
+  | SaveFileCommand
+  | DropFileCommand;
 
 export interface AuthSaveCommand extends BaseCommand {
   action: 'auth_save';
