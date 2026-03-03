@@ -1139,7 +1139,7 @@ agent-browser -p ios --device "John's iPhone" open https://example.com
 To enable Browserless, use the `-p` flag:
 
 ```bash
-export BROWSERLESS_TOKEN="your-api-token"
+export BROWSERLESS_API_KEY="your-api-token"
 agent-browser -p browserless open https://example.com
 ```
 
@@ -1147,7 +1147,7 @@ Or use environment variables for CI/scripts:
 
 ```bash
 export AGENT_BROWSER_PROVIDER=browserless
-export BROWSERLESS_TOKEN="your-api-token"
+export BROWSERLESS_API_KEY="your-api-token"
 agent-browser open https://example.com
 ```
 
