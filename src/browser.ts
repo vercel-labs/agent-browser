@@ -129,7 +129,6 @@ export class BrowserManager {
   private kernelSessionId: string | null = null;
   private kernelApiKey: string | null = null;
   private browserlessStopUrl: string | null = null;
-  private browserlessApiToken: string | null = null;
   private contexts: BrowserContext[] = [];
   private pages: Page[] = [];
   private activePageIndex: number = 0;
@@ -1228,12 +1227,12 @@ export class BrowserManager {
 
   /**
    * Connect to Browserless remote browser via CDP.
-   * Requires BROWSERLESS_TOKEN environment variable.
+   * Requires BROWSERLESS_API_KEY environment variable.
    */
   private async connectToBrowserless(): Promise<void> {
-    const browserlessToken = process.env.BROWSERLESS_TOKEN;
+    const browserlessToken = process.env.BROWSERLESS_API_KEY;
     if (!browserlessToken) {
-      throw new Error('BROWSERLESS_TOKEN is required when using browserless as a provider');
+      throw new Error('BROWSERLESS_API_KEY is required when using browserless as a provider');
     }
 
     const supportedBrowsers = ['chromium', 'chrome'];
@@ -2688,7 +2687,6 @@ export class BrowserManager {
     this.kernelSessionId = null;
     this.kernelApiKey = null;
     this.browserlessStopUrl = null;
-    this.browserlessApiToken = null;
     this.isPersistentContext = false;
     this.activePageIndex = 0;
     this.colorScheme = null;
