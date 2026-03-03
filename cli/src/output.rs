@@ -1,9 +1,92 @@
+use std::sync::OnceLock;
+
 use crate::color;
 use crate::connection::Response;
 
-pub fn print_response(resp: &Response, json_mode: bool, action: Option<&str>) {
-    if json_mode {
-        println!("{}", serde_json::to_string(resp).unwrap_or_default());
+static BOUNDARY_NONCE: OnceLock<String> = OnceLock::new();
+
+/// Per-process nonce for content boundary markers. Uses a CSPRNG (getrandom) so
+/// that untrusted page content cannot predict or spoof the boundary delimiter.
+/// Process ID or timestamps would be insufficient since pages can read those.
+fn get_boundary_nonce() -> &'static str {
+    BOUNDARY_NONCE.get_or_init(|| {
+        let mut buf = [0u8; 16];
+        getrandom::getrandom(&mut buf).expect("failed to generate random nonce");
+        buf.iter().map(|b| format!("{:02x}", b)).collect()
+    })
+}
+
+#[derive(Default)]
+pub struct OutputOptions {
+    pub json: bool,
+    pub content_boundaries: bool,
+    pub max_output: Option<usize>,
+}
+
+fn truncate_if_needed(content: &str, max: Option<usize>) -> String {
+    let Some(limit) = max else {
+        return content.to_string();
+    };
+    // Fast path: byte length is a lower bound on char count, so if the
+    // byte length is within the limit the char count must be too.
+    if content.len() <= limit {
+        return content.to_string();
+    }
+    // Find the byte offset of the limit-th character.
+    match content.char_indices().nth(limit).map(|(i, _)| i) {
+        Some(byte_offset) => {
+            let total_chars = content.chars().count();
+            format!(
+                "{}\n[truncated: showing {} of {} chars. Use --max-output to adjust]",
+                &content[..byte_offset],
+                limit,
+                total_chars
+            )
+        }
+        // Content has fewer than `limit` chars despite more bytes
+        None => content.to_string(),
+    }
+}
+
+fn print_with_boundaries(content: &str, origin: Option<&str>, opts: &OutputOptions) {
+    let content = truncate_if_needed(content, opts.max_output);
+    if opts.content_boundaries {
+        let origin_str = origin.unwrap_or("unknown");
+        let nonce = get_boundary_nonce();
+        println!(
+            "--- AGENT_BROWSER_PAGE_CONTENT nonce={} origin={} ---",
+            nonce, origin_str
+        );
+        println!("{}", content);
+        println!("--- END_AGENT_BROWSER_PAGE_CONTENT nonce={} ---", nonce);
+    } else {
+        println!("{}", content);
+    }
+}
+
+pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &OutputOptions) {
+    if opts.json {
+        if opts.content_boundaries {
+            let mut json_val = serde_json::to_value(resp).unwrap_or_default();
+            if let Some(obj) = json_val.as_object_mut() {
+                let nonce = get_boundary_nonce();
+                let origin = obj
+                    .get("data")
+                    .and_then(|d| d.get("origin"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                obj.insert(
+                    "_boundary".to_string(),
+                    serde_json::json!({
+                        "nonce": nonce,
+                        "origin": origin,
+                    }),
+                );
+            }
+            println!("{}", serde_json::to_string(&json_val).unwrap_or_default());
+        } else {
+            println!("{}", serde_json::to_string(resp).unwrap_or_default());
+        }
         return;
     }
 
@@ -27,9 +110,35 @@ pub fn print_response(resp: &Response, json_mode: bool, action: Option<&str>) {
             println!("{}", url);
             return;
         }
+        // Diff responses -- route by action to avoid fragile shape probing
+        if let Some(obj) = data.as_object() {
+            match action {
+                Some("diff_snapshot") => {
+                    print_snapshot_diff(obj);
+                    return;
+                }
+                Some("diff_screenshot") => {
+                    print_screenshot_diff(obj);
+                    return;
+                }
+                Some("diff_url") => {
+                    if let Some(snap_data) = obj.get("snapshot").and_then(|v| v.as_object()) {
+                        println!("{}", color::bold("Snapshot diff:"));
+                        print_snapshot_diff(snap_data);
+                    }
+                    if let Some(ss_data) = obj.get("screenshot").and_then(|v| v.as_object()) {
+                        println!("\n{}", color::bold("Screenshot diff:"));
+                        print_screenshot_diff(ss_data);
+                    }
+                    return;
+                }
+                _ => {}
+            }
+        }
+        let origin = data.get("origin").and_then(|v| v.as_str());
         // Snapshot
         if let Some(snapshot) = data.get("snapshot").and_then(|v| v.as_str()) {
-            println!("{}", snapshot);
+            print_with_boundaries(snapshot, origin, opts);
             return;
         }
         // Title
@@ -39,12 +148,12 @@ pub fn print_response(resp: &Response, json_mode: bool, action: Option<&str>) {
         }
         // Text
         if let Some(text) = data.get("text").and_then(|v| v.as_str()) {
-            println!("{}", text);
+            print_with_boundaries(text, origin, opts);
             return;
         }
         // HTML
         if let Some(html) = data.get("html").and_then(|v| v.as_str()) {
-            println!("{}", html);
+            print_with_boundaries(html, origin, opts);
             return;
         }
         // Value
@@ -72,10 +181,8 @@ pub fn print_response(resp: &Response, json_mode: bool, action: Option<&str>) {
         }
         // Eval result
         if let Some(result) = data.get("result") {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(result).unwrap_or_default()
-            );
+            let formatted = serde_json::to_string_pretty(result).unwrap_or_default();
+            print_with_boundaries(&formatted, origin, opts);
             return;
         }
         // iOS Devices
@@ -162,10 +269,27 @@ pub fn print_response(resp: &Response, json_mode: bool, action: Option<&str>) {
         }
         // Console logs
         if let Some(logs) = data.get("messages").and_then(|v| v.as_array()) {
-            for log in logs {
-                let level = log.get("type").and_then(|v| v.as_str()).unwrap_or("log");
-                let text = log.get("text").and_then(|v| v.as_str()).unwrap_or("");
-                println!("{} {}", color::console_level_prefix(level), text);
+            if opts.content_boundaries {
+                let mut console_output = String::new();
+                for log in logs {
+                    let level = log.get("type").and_then(|v| v.as_str()).unwrap_or("log");
+                    let text = log.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                    console_output.push_str(&format!(
+                        "{} {}\n",
+                        color::console_level_prefix(level),
+                        text
+                    ));
+                }
+                if console_output.ends_with('\n') {
+                    console_output.pop();
+                }
+                print_with_boundaries(&console_output, origin, opts);
+            } else {
+                for log in logs {
+                    let level = log.get("type").and_then(|v| v.as_str()).unwrap_or("log");
+                    let text = log.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                    println!("{} {}", color::console_level_prefix(level), text);
+                }
             }
             return;
         }
@@ -203,10 +327,14 @@ pub fn print_response(resp: &Response, json_mode: bool, action: Option<&str>) {
             }
             return;
         }
-        // Cleared requests
+        // Cleared (cookies or request log)
         if let Some(cleared) = data.get("cleared").and_then(|v| v.as_bool()) {
             if cleared {
-                println!("{} Request log cleared", color::success_indicator());
+                let label = match action {
+                    Some("cookies_clear") => "Cookies cleared",
+                    _ => "Request log cleared",
+                };
+                println!("{} {}", color::success_indicator(), label);
                 return;
             }
         }
@@ -267,9 +395,13 @@ pub fn print_response(resp: &Response, json_mode: bool, action: Option<&str>) {
             }
             return;
         }
-        // Closed
+        // Closed (browser or tab)
         if data.get("closed").is_some() {
-            println!("{} Browser closed", color::success_indicator());
+            let label = match action {
+                Some("tab_close") => "Tab closed",
+                _ => "Browser closed",
+            };
+            println!("{} {}", color::success_indicator(), label);
             return;
         }
         // Recording start (has "started" field)
@@ -281,11 +413,7 @@ pub fn print_response(resp: &Response, json_mode: bool, action: Option<&str>) {
                     }
                     _ => {
                         if let Some(path) = data.get("path").and_then(|v| v.as_str()) {
-                            println!(
-                                "{} Recording started: {}",
-                                color::success_indicator(),
-                                path
-                            );
+                            println!("{} Recording started: {}", color::success_indicator(), path);
                         } else {
                             println!("{} Recording started", color::success_indicator());
                         }
@@ -363,11 +491,37 @@ pub fn print_response(resp: &Response, json_mode: bool, action: Option<&str>) {
         // Path-based operations (screenshot/pdf/trace/har/download/state/video)
         if let Some(path) = data.get("path").and_then(|v| v.as_str()) {
             match action.unwrap_or("") {
-                "screenshot" => println!(
-                    "{} Screenshot saved to {}",
-                    color::success_indicator(),
-                    color::green(path)
-                ),
+                "screenshot" => {
+                    println!(
+                        "{} Screenshot saved to {}",
+                        color::success_indicator(),
+                        color::green(path)
+                    );
+                    if let Some(annotations) = data.get("annotations").and_then(|v| v.as_array()) {
+                        for ann in annotations {
+                            let num = ann.get("number").and_then(|n| n.as_u64()).unwrap_or(0);
+                            let ref_id = ann.get("ref").and_then(|r| r.as_str()).unwrap_or("");
+                            let role = ann.get("role").and_then(|r| r.as_str()).unwrap_or("");
+                            let name = ann.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                            if name.is_empty() {
+                                println!(
+                                    "   {} @{} {}",
+                                    color::dim(&format!("[{}]", num)),
+                                    ref_id,
+                                    role,
+                                );
+                            } else {
+                                println!(
+                                    "   {} @{} {} {:?}",
+                                    color::dim(&format!("[{}]", num)),
+                                    ref_id,
+                                    role,
+                                    name,
+                                );
+                            }
+                        }
+                    }
+                }
                 "pdf" => println!(
                     "{} PDF saved to {}",
                     color::success_indicator(),
@@ -442,7 +596,10 @@ pub fn print_response(resp: &Response, json_mode: bool, action: Option<&str>) {
                     let filename = file.get("filename").and_then(|v| v.as_str()).unwrap_or("");
                     let size = file.get("size").and_then(|v| v.as_i64()).unwrap_or(0);
                     let modified = file.get("modified").and_then(|v| v.as_str()).unwrap_or("");
-                    let encrypted = file.get("encrypted").and_then(|v| v.as_bool()).unwrap_or(false);
+                    let encrypted = file
+                        .get("encrypted")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
                     let size_str = if size > 1024 {
                         format!("{:.1}KB", size as f64 / 1024.0)
                     } else {
@@ -450,7 +607,11 @@ pub fn print_response(resp: &Response, json_mode: bool, action: Option<&str>) {
                     };
                     let date_str = modified.split('T').next().unwrap_or(modified);
                     let enc_str = if encrypted { " [encrypted]" } else { "" };
-                    println!("  {} {}", filename, color::dim(&format!("({}, {}){}", size_str, date_str, enc_str)));
+                    println!(
+                        "  {} {}",
+                        filename,
+                        color::dim(&format!("({}, {}){}", size_str, date_str, enc_str))
+                    );
                 }
             }
             return;
@@ -460,13 +621,22 @@ pub fn print_response(resp: &Response, json_mode: bool, action: Option<&str>) {
         if let Some(true) = data.get("renamed").and_then(|v| v.as_bool()) {
             let old_name = data.get("oldName").and_then(|v| v.as_str()).unwrap_or("");
             let new_name = data.get("newName").and_then(|v| v.as_str()).unwrap_or("");
-            println!("{} Renamed {} -> {}", color::success_indicator(), old_name, new_name);
+            println!(
+                "{} Renamed {} -> {}",
+                color::success_indicator(),
+                old_name,
+                new_name
+            );
             return;
         }
 
         // State clear
         if let Some(cleared) = data.get("cleared").and_then(|v| v.as_i64()) {
-            println!("{} Cleared {} state file(s)", color::success_indicator(), cleared);
+            println!(
+                "{} Cleared {} state file(s)",
+                color::success_indicator(),
+                cleared
+            );
             return;
         }
 
@@ -474,7 +644,10 @@ pub fn print_response(resp: &Response, json_mode: bool, action: Option<&str>) {
         if let Some(summary) = data.get("summary") {
             let cookies = summary.get("cookies").and_then(|v| v.as_i64()).unwrap_or(0);
             let origins = summary.get("origins").and_then(|v| v.as_i64()).unwrap_or(0);
-            let encrypted = data.get("encrypted").and_then(|v| v.as_bool()).unwrap_or(false);
+            let encrypted = data
+                .get("encrypted")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             let enc_str = if encrypted { " (encrypted)" } else { "" };
             println!("State file summary{}:", enc_str);
             println!("  Cookies: {}", cookies);
@@ -484,7 +657,11 @@ pub fn print_response(resp: &Response, json_mode: bool, action: Option<&str>) {
 
         // State clean
         if let Some(cleaned) = data.get("cleaned").and_then(|v| v.as_i64()) {
-            println!("{} Cleaned {} old state file(s)", color::success_indicator(), cleaned);
+            println!(
+                "{} Cleaned {} old state file(s)",
+                color::success_indicator(),
+                cleaned
+            );
             return;
         }
 
@@ -493,6 +670,145 @@ pub fn print_response(resp: &Response, json_mode: bool, action: Option<&str>) {
             println!("{}", note);
             return;
         }
+        // Auth list
+        if let Some(profiles) = data.get("profiles").and_then(|v| v.as_array()) {
+            if profiles.is_empty() {
+                println!("{}", color::dim("No auth profiles saved"));
+            } else {
+                println!("{}", color::bold("Auth profiles:"));
+                for p in profiles {
+                    let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                    let url = p.get("url").and_then(|v| v.as_str()).unwrap_or("");
+                    let user = p.get("username").and_then(|v| v.as_str()).unwrap_or("");
+                    println!(
+                        "  {} {} {}",
+                        color::green(name),
+                        color::dim(user),
+                        color::dim(url)
+                    );
+                }
+            }
+            return;
+        }
+
+        // Auth show
+        if let Some(profile) = data.get("profile").and_then(|v| v.as_object()) {
+            let name = profile.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let url = profile.get("url").and_then(|v| v.as_str()).unwrap_or("");
+            let user = profile
+                .get("username")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let created = profile
+                .get("createdAt")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let last_login = profile.get("lastLoginAt").and_then(|v| v.as_str());
+            println!("Name: {}", name);
+            println!("URL: {}", url);
+            println!("Username: {}", user);
+            println!("Created: {}", created);
+            if let Some(ll) = last_login {
+                println!("Last login: {}", ll);
+            }
+            return;
+        }
+
+        // Auth save/update/login/delete
+        if data.get("saved").and_then(|v| v.as_bool()).unwrap_or(false) {
+            let name = data.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            println!(
+                "{} Auth profile '{}' saved",
+                color::success_indicator(),
+                name
+            );
+            return;
+        }
+        if data
+            .get("updated")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+            && !data.get("saved").and_then(|v| v.as_bool()).unwrap_or(false)
+        {
+            let name = data.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            println!(
+                "{} Auth profile '{}' updated",
+                color::success_indicator(),
+                name
+            );
+            return;
+        }
+        if data
+            .get("loggedIn")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            let name = data.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            if let Some(title) = data.get("title").and_then(|v| v.as_str()) {
+                println!(
+                    "{} Logged in as '{}' - {}",
+                    color::success_indicator(),
+                    name,
+                    title
+                );
+            } else {
+                println!("{} Logged in as '{}'", color::success_indicator(), name);
+            }
+            return;
+        }
+        if data
+            .get("deleted")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            if let Some(name) = data.get("name").and_then(|v| v.as_str()) {
+                println!(
+                    "{} Auth profile '{}' deleted",
+                    color::success_indicator(),
+                    name
+                );
+                return;
+            }
+        }
+
+        // Confirmation required (for orchestrator use)
+        if data
+            .get("confirmation_required")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            let category = data.get("category").and_then(|v| v.as_str()).unwrap_or("");
+            let description = data
+                .get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let cid = data
+                .get("confirmation_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            println!("Confirmation required:");
+            println!("  {}: {}", category, description);
+            println!("  Run: agent-browser confirm {}", cid);
+            println!("  Or:  agent-browser deny {}", cid);
+            return;
+        }
+        if data
+            .get("confirmed")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            println!("{} Action confirmed", color::success_indicator());
+            return;
+        }
+        if data
+            .get("denied")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            println!("{} Action denied", color::success_indicator());
+            return;
+        }
+
         // Default success
         println!("{} Done", color::success_indicator());
     }
@@ -658,6 +974,11 @@ Global Options:
 Examples:
   agent-browser type "#search" "hello"
   agent-browser type @e2 "additional text"
+
+See Also:
+  For typing into contenteditable editors (Lexical, ProseMirror, etc.)
+  without a selector, use 'keyboard type' instead:
+    agent-browser keyboard type "# My Heading"
 "##
         }
         "hover" => {
@@ -871,19 +1192,58 @@ Examples:
   agent-browser keyup Control
 "##
         }
+        "keyboard" => {
+            r##"
+agent-browser keyboard - Raw keyboard input (no selector needed)
+
+Usage: agent-browser keyboard <subcommand> <text>
+
+Sends keyboard input to whatever element currently has focus.
+Unlike 'type' which requires a selector, 'keyboard' operates on
+the current focus — essential for contenteditable editors like
+Lexical, ProseMirror, CodeMirror, and Monaco.
+
+Subcommands:
+  type <text>          Type text character-by-character with real
+                       key events (keydown, keypress, keyup per char)
+  inserttext <text>    Insert text without key events (like paste)
+
+Note: For key combos (Enter, Control+a), use the 'press' command
+directly — it already operates on the current focus.
+
+Global Options:
+  --json               Output as JSON
+  --session <name>     Use specific session
+
+Examples:
+  agent-browser keyboard type "Hello, World!"
+  agent-browser keyboard type "# My Heading"
+  agent-browser keyboard inserttext "pasted content"
+
+Use Cases:
+  # Type into a Lexical/ProseMirror contenteditable editor:
+  agent-browser click "[contenteditable]"
+  agent-browser keyboard type "# My Heading"
+  agent-browser press Enter
+  agent-browser keyboard type "Some paragraph text"
+"##
+        }
 
         // === Scroll ===
         "scroll" => {
             r##"
 agent-browser scroll - Scroll the page
 
-Usage: agent-browser scroll [direction] [amount]
+Usage: agent-browser scroll [direction] [amount] [options]
 
-Scrolls the page in the specified direction.
+Scrolls the page or a specific element in the specified direction.
 
 Arguments:
   direction            up, down, left, right (default: down)
   amount               Pixels to scroll (default: 300)
+
+Options:
+  -s, --selector <sel> CSS selector for a scrollable container
 
 Global Options:
   --json               Output as JSON
@@ -894,6 +1254,7 @@ Examples:
   agent-browser scroll down 500
   agent-browser scroll up 200
   agent-browser scroll left 100
+  agent-browser scroll down 500 --selector "div.scroll-container"
 "##
         }
         "scrollintoview" | "scrollinto" => {
@@ -965,6 +1326,10 @@ saves to a temporary directory with a generated filename.
 
 Options:
   --full, -f           Capture full page (not just viewport)
+  --annotate           Overlay numbered labels on interactive elements.
+                       Each label [N] corresponds to ref @eN from snapshot.
+                       Prints a legend mapping labels to element roles/names.
+                       With --json, annotations are included in the response.
 
 Global Options:
   --json               Output as JSON
@@ -974,6 +1339,9 @@ Examples:
   agent-browser screenshot
   agent-browser screenshot ./screenshot.png
   agent-browser screenshot --full ./full-page.png
+  agent-browser screenshot --annotate              # Labeled screenshot + legend
+  agent-browser screenshot --annotate ./page.png   # Save annotated screenshot
+  agent-browser screenshot --annotate --json       # JSON output with annotations
 "##
         }
         "pdf" => {
@@ -1439,6 +1807,64 @@ Examples:
 "##
         }
 
+        // === Auth ===
+        "auth" => {
+            r##"
+agent-browser auth - Manage authentication profiles
+
+Usage: agent-browser auth <subcommand> [args]
+
+Subcommands:
+  save <name>              Save credentials for a login profile
+  login <name>             Login using saved credentials
+  list                     List saved profiles (names and URLs only)
+  show <name>              Show profile metadata (no passwords)
+  delete <name>            Delete a saved profile
+
+Save Options:
+  --url <url>              Login page URL (required)
+  --username <user>        Username (required)
+  --password <pass>        Password (required unless --password-stdin)
+  --password-stdin          Read password from stdin (recommended)
+  --username-selector <s>  Custom CSS selector for username field
+  --password-selector <s>  Custom CSS selector for password field
+  --submit-selector <s>    Custom CSS selector for submit button
+
+Global Options:
+  --json                   Output as JSON
+  --session <name>         Use specific session
+
+Examples:
+  echo "pass" | agent-browser auth save github --url https://github.com/login --username user --password-stdin
+  agent-browser auth save github --url https://github.com/login --username user --password pass
+  agent-browser auth login github
+  agent-browser auth list
+  agent-browser auth show github
+  agent-browser auth delete github
+"##
+        }
+
+        // === Confirm/Deny ===
+        "confirm" | "deny" => {
+            r##"
+agent-browser confirm/deny - Approve or deny pending actions
+
+Usage:
+  agent-browser confirm <confirmation-id>
+  agent-browser deny <confirmation-id>
+
+When --confirm-actions is set, certain action categories return a
+confirmation_required response with a confirmation ID. Use confirm/deny
+to approve or reject the action.
+
+Pending confirmations auto-deny after 60 seconds.
+
+Examples:
+  agent-browser confirm c_8f3a1234
+  agent-browser deny c_8f3a1234
+"##
+        }
+
         // === Dialog ===
         "dialog" => {
             r##"
@@ -1817,6 +2243,65 @@ Examples:
 "##
         }
 
+        "diff" => {
+            r##"
+agent-browser diff - Compare page states
+
+Subcommands:
+
+  diff snapshot                   Compare current snapshot to last snapshot in session
+  diff screenshot --baseline <f>  Visual pixel diff against a baseline image
+  diff url <url1> <url2>          Compare two pages
+
+Snapshot Diff:
+
+  Usage: agent-browser diff snapshot [options]
+
+  Options:
+    -b, --baseline <file>    Compare against a saved snapshot file
+    -s, --selector <sel>     Scope snapshot to a CSS selector or @ref
+    -c, --compact            Use compact snapshot format
+    -d, --depth <n>          Limit snapshot tree depth
+
+  Without --baseline, compares against the last snapshot taken in this session.
+
+Screenshot Diff:
+
+  Usage: agent-browser diff screenshot --baseline <file> [options]
+
+  Options:
+    -b, --baseline <file>    Baseline image to compare against (required)
+    -o, --output <file>      Path for the diff image (default: temp dir)
+    -t, --threshold <0-1>    Color distance threshold (default: 0.1)
+    -s, --selector <sel>     Scope screenshot to element
+        --full               Full page screenshot
+
+URL Diff:
+
+  Usage: agent-browser diff url <url1> <url2> [options]
+
+  Options:
+    --screenshot             Also compare screenshots (default: snapshot only)
+    --full                   Full page screenshots
+    --wait-until <strategy>  Navigation wait strategy: load, domcontentloaded, networkidle (default: load)
+    -s, --selector <sel>     Scope snapshots to a CSS selector or @ref
+    -c, --compact            Use compact snapshot format
+    -d, --depth <n>          Limit snapshot tree depth
+
+Global Options:
+  --json               Output as JSON
+  --session <name>     Use specific session
+
+Examples:
+  agent-browser diff snapshot
+  agent-browser diff snapshot --baseline before.txt
+  agent-browser diff screenshot --baseline before.png
+  agent-browser diff screenshot --baseline before.png --output diff.png --threshold 0.2
+  agent-browser diff url https://staging.example.com https://prod.example.com
+  agent-browser diff url https://v1.example.com https://v2.example.com --screenshot
+"##
+        }
+
         _ => return false,
     };
     println!("{}", help.trim());
@@ -1837,6 +2322,8 @@ Core Commands:
   type <sel> <text>          Type into element
   fill <sel> <text>          Clear and fill
   press <key>                Press key (Enter, Tab, Control+a)
+  keyboard type <text>       Type text with real keystrokes (no selector)
+  keyboard inserttext <text> Insert text without key events
   hover <sel>                Hover element
   focus <sel>                Focus element
   check <sel>                Check checkbox
@@ -1889,6 +2376,11 @@ Storage:
 Tabs:
   tab [new|list|close|<n>]   Manage tabs
 
+Diff:
+  diff snapshot              Compare current vs last snapshot
+  diff screenshot --baseline Compare current vs baseline image
+  diff url <u1> <u2>         Compare two pages
+
 Debug:
   trace start|stop [path]    Record Playwright trace
   profiler start|stop [path] Record Chrome DevTools profile
@@ -1897,6 +2389,17 @@ Debug:
   console [--clear]          View console logs
   errors [--clear]           View page errors
   highlight <sel>            Highlight element
+
+Auth Vault:
+  auth save <name> [opts]    Save auth profile (--url, --username, --password/--password-stdin)
+  auth login <name>          Login using saved credentials
+  auth list                  List saved auth profiles
+  auth show <name>           Show auth profile metadata
+  auth delete <name>         Delete auth profile
+
+Confirmation:
+  confirm <id>               Approve a pending action
+  deny <id>                  Deny a pending action
 
 Sessions:
   session                    Show current session name
@@ -1932,10 +2435,20 @@ Options:
   --device <name>            iOS device name (e.g., "iPhone 15 Pro")
   --json                     JSON output
   --full, -f                 Full page screenshot
+  --annotate                 Annotated screenshot with numbered labels and legend
   --headed                   Show browser window (not headless)
   --cdp <port>               Connect via CDP (Chrome DevTools Protocol)
   --auto-connect             Auto-discover and connect to running Chrome
+  --color-scheme <scheme>    Color scheme: dark, light, no-preference (or AGENT_BROWSER_COLOR_SCHEME)
+  --download-path <path>     Default download directory (or AGENT_BROWSER_DOWNLOAD_PATH)
   --session-name <name>      Auto-save/restore session state (cookies, localStorage)
+  --content-boundaries       Wrap page output in boundary markers (or AGENT_BROWSER_CONTENT_BOUNDARIES)
+  --max-output <chars>       Truncate page output to N chars (or AGENT_BROWSER_MAX_OUTPUT)
+  --allowed-domains <list>   Restrict navigation domains (or AGENT_BROWSER_ALLOWED_DOMAINS)
+  --action-policy <path>     Action policy JSON file (or AGENT_BROWSER_ACTION_POLICY)
+  --confirm-actions <list>   Categories requiring confirmation (or AGENT_BROWSER_CONFIRM_ACTIONS)
+  --confirm-interactive      Interactive confirmation prompts; auto-denies if stdin is not a TTY (or AGENT_BROWSER_CONFIRM_INTERACTIVE)
+  --native                   [Experimental] Use native Rust daemon instead of Node.js (or AGENT_BROWSER_NATIVE)
   --config <path>            Use a custom config file (or AGENT_BROWSER_CONFIG env)
   --debug                    Debug output
   --version, -V              Show version
@@ -1970,14 +2483,28 @@ Environment:
   AGENT_BROWSER_HEADED           Show browser window (not headless)
   AGENT_BROWSER_JSON             JSON output
   AGENT_BROWSER_FULL             Full page screenshot
+  AGENT_BROWSER_ANNOTATE         Annotated screenshot with numbered labels and legend
   AGENT_BROWSER_DEBUG            Debug output
   AGENT_BROWSER_IGNORE_HTTPS_ERRORS Ignore HTTPS certificate errors
   AGENT_BROWSER_PROVIDER         Browser provider (ios, browserbase, kernel, browseruse, browserless)
   AGENT_BROWSER_AUTO_CONNECT     Auto-discover and connect to running Chrome
   AGENT_BROWSER_ALLOW_FILE_ACCESS Allow file:// URLs to access local files
+  AGENT_BROWSER_COLOR_SCHEME     Color scheme preference (dark, light, no-preference)
+  AGENT_BROWSER_DOWNLOAD_PATH    Default download directory for browser downloads
+  AGENT_BROWSER_DEFAULT_TIMEOUT  Default Playwright timeout in ms (default: 25000)
+  AGENT_BROWSER_SESSION_NAME     Auto-save/load state persistence name
+  AGENT_BROWSER_STATE_EXPIRE_DAYS Auto-delete saved states older than N days (default: 30)
+  AGENT_BROWSER_ENCRYPTION_KEY   64-char hex key for AES-256-GCM session encryption
   AGENT_BROWSER_STREAM_PORT      Enable WebSocket streaming on port (e.g., 9223)
   AGENT_BROWSER_IOS_DEVICE       Default iOS device name
   AGENT_BROWSER_IOS_UDID         Default iOS device UDID
+  AGENT_BROWSER_CONTENT_BOUNDARIES Wrap page output in boundary markers
+  AGENT_BROWSER_MAX_OUTPUT       Max characters for page output
+  AGENT_BROWSER_ALLOWED_DOMAINS  Comma-separated allowed domain patterns
+  AGENT_BROWSER_ACTION_POLICY    Path to action policy JSON file
+  AGENT_BROWSER_CONFIRM_ACTIONS  Action categories requiring confirmation
+  AGENT_BROWSER_CONFIRM_INTERACTIVE Enable interactive confirmation prompts
+  AGENT_BROWSER_NATIVE           Use native Rust daemon (experimental, no Node.js/Playwright)
 
 Install (recommended, fastest - native Rust CLI):
   npm install -g agent-browser
@@ -1994,9 +2521,11 @@ Examples:
   agent-browser find role button click --name Submit
   agent-browser get text @e1
   agent-browser screenshot --full
+  agent-browser screenshot --annotate    # Labeled screenshot for vision models
   agent-browser wait --load networkidle  # Wait for slow pages to load
   agent-browser --cdp 9222 snapshot      # Connect via CDP port
   agent-browser --auto-connect snapshot  # Auto-discover running Chrome
+  agent-browser --color-scheme dark open example.com  # Dark mode
   agent-browser --profile ~/.myapp open example.com    # Persistent profile
   agent-browser --session-name myapp open example.com  # Auto-save/restore state
 
@@ -2014,6 +2543,82 @@ iOS Simulator (requires Xcode and Appium):
   agent-browser -p ios swipe up                            # Swipe gesture
   agent-browser -p ios tap @e1                             # Touch element
 "#
+    );
+}
+
+fn print_snapshot_diff(data: &serde_json::Map<String, serde_json::Value>) {
+    let changed = data
+        .get("changed")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if !changed {
+        println!("{} No changes detected", color::success_indicator());
+        return;
+    }
+    if let Some(diff) = data.get("diff").and_then(|v| v.as_str()) {
+        for line in diff.lines() {
+            if line.starts_with("+ ") {
+                println!("{}", color::green(line));
+            } else if line.starts_with("- ") {
+                println!("{}", color::red(line));
+            } else {
+                println!("{}", color::dim(line));
+            }
+        }
+        let additions = data.get("additions").and_then(|v| v.as_i64()).unwrap_or(0);
+        let removals = data.get("removals").and_then(|v| v.as_i64()).unwrap_or(0);
+        let unchanged = data.get("unchanged").and_then(|v| v.as_i64()).unwrap_or(0);
+        println!(
+            "\n{} additions, {} removals, {} unchanged",
+            color::green(&additions.to_string()),
+            color::red(&removals.to_string()),
+            unchanged
+        );
+    }
+}
+
+fn print_screenshot_diff(data: &serde_json::Map<String, serde_json::Value>) {
+    let mismatch = data
+        .get("mismatchPercentage")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
+    let is_match = data.get("match").and_then(|v| v.as_bool()).unwrap_or(false);
+    let dim_mismatch = data
+        .get("dimensionMismatch")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if dim_mismatch {
+        println!(
+            "{} Images have different dimensions",
+            color::error_indicator()
+        );
+    } else if is_match {
+        println!(
+            "{} Images match (0% difference)",
+            color::success_indicator()
+        );
+    } else {
+        println!(
+            "{} {:.2}% pixels differ",
+            color::error_indicator(),
+            mismatch
+        );
+    }
+    if let Some(diff_path) = data.get("diffPath").and_then(|v| v.as_str()) {
+        println!("  Diff image: {}", color::green(diff_path));
+    }
+    let total = data
+        .get("totalPixels")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let different = data
+        .get("differentPixels")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    println!(
+        "  {} different / {} total pixels",
+        color::red(&different.to_string()),
+        total
     );
 }
 

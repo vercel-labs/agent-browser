@@ -97,18 +97,10 @@ jobs:
           linker = "x86_64-w64-mingw32-gcc"
           EOF
 
-      - name: Cache Cargo dependencies
-        uses: actions/cache@v4
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            cli/target/
-          key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ hashFiles('cli/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-${{ matrix.target }}-
+          workspaces: cli
 
       - name: Build with zigbuild
         if: matrix.use_zigbuild

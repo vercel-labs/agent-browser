@@ -1,0 +1,1113 @@
+use serde_json::{json, Value};
+use std::collections::HashSet;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+
+use super::cdp::chrome::{
+    auto_connect_cdp, discover_cdp_url, launch_chrome, ChromeProcess, LaunchOptions,
+};
+use super::cdp::client::CdpClient;
+use super::cdp::types::*;
+
+// ---------------------------------------------------------------------------
+// Launch validation
+// ---------------------------------------------------------------------------
+
+/// Validates launch/connect options for incompatible combinations.
+/// Returns `Ok(())` if valid, or `Err(msg)` with a user-friendly error.
+pub fn validate_launch_options(
+    extensions: Option<&[String]>,
+    has_cdp: bool,
+    profile: Option<&str>,
+    storage_state: Option<&str>,
+    allow_file_access: bool,
+    executable_path: Option<&str>,
+) -> Result<(), String> {
+    let has_extensions = extensions.map(|e| !e.is_empty()).unwrap_or(false);
+
+    if has_extensions && has_cdp {
+        return Err(
+            "Cannot use extensions with cdp_url (extensions require local browser launch)"
+                .to_string(),
+        );
+    }
+    if profile.is_some() && has_cdp {
+        return Err(
+            "Cannot use profile with cdp_url (profile requires local browser launch)".to_string(),
+        );
+    }
+    if storage_state.is_some() && profile.is_some() {
+        return Err("Cannot use storage_state with profile".to_string());
+    }
+    if storage_state.is_some() && has_extensions {
+        return Err("Cannot use storage_state with extensions".to_string());
+    }
+    if allow_file_access {
+        if let Some(path) = executable_path {
+            let lower = path.to_lowercase();
+            if lower.contains("firefox") || lower.contains("webkit") || lower.contains("safari") {
+                return Err(
+                    "allow_file_access is not supported with non-Chromium browsers".to_string(),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Converts common error messages into AI-friendly, actionable descriptions.
+pub fn to_ai_friendly_error(error: &str) -> String {
+    let lower = error.to_lowercase();
+    if lower.contains("strict mode violation") {
+        return "Element matched multiple results. Use a more specific selector.".to_string();
+    }
+    if lower.contains("element is not visible") {
+        return "Element exists but is not visible. Wait for it to become visible or scroll it into view."
+            .to_string();
+    }
+    if lower.contains("intercept") {
+        return "Another element is covering the target element. Try scrolling or closing overlays."
+            .to_string();
+    }
+    if lower.contains("timeout") {
+        return "Operation timed out. The page may still be loading or the element may not exist."
+            .to_string();
+    }
+    if lower.contains("not found") || lower.contains("no element") {
+        return "Element not found. Verify the selector is correct and the element exists in the DOM."
+            .to_string();
+    }
+    error.to_string()
+}
+
+#[derive(Debug, Clone)]
+pub struct PageInfo {
+    pub target_id: String,
+    pub session_id: String,
+    pub url: String,
+    pub title: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum WaitUntil {
+    Load,
+    DomContentLoaded,
+    NetworkIdle,
+}
+
+impl WaitUntil {
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "domcontentloaded" => Self::DomContentLoaded,
+            "networkidle" => Self::NetworkIdle,
+            _ => Self::Load,
+        }
+    }
+}
+
+pub struct BrowserManager {
+    pub client: CdpClient,
+    chrome_process: Option<ChromeProcess>,
+    pages: Vec<PageInfo>,
+    active_page_index: usize,
+    default_timeout_ms: u64,
+}
+
+impl BrowserManager {
+    pub async fn launch(options: LaunchOptions) -> Result<Self, String> {
+        validate_launch_options(
+            options.extensions.as_deref(),
+            false,
+            options.profile.as_deref(),
+            options.storage_state.as_deref(),
+            options.allow_file_access,
+            options.executable_path.as_deref(),
+        )?;
+
+        let ignore_https_errors = options.ignore_https_errors;
+        let user_agent = options.user_agent.clone();
+        let color_scheme = options.color_scheme.clone();
+        let download_path = options.download_path.clone();
+
+        let chrome = launch_chrome(&options)?;
+        let ws_url = chrome.ws_url.clone();
+
+        let client = CdpClient::connect(&ws_url).await?;
+        let mut manager = Self {
+            client,
+            chrome_process: Some(chrome),
+            pages: Vec::new(),
+            active_page_index: 0,
+            default_timeout_ms: 25_000,
+        };
+
+        manager.discover_and_attach_targets().await?;
+
+        let session_id = manager.active_session_id()?.to_string();
+
+        if ignore_https_errors {
+            let _ = manager
+                .client
+                .send_command(
+                    "Security.setIgnoreCertificateErrors",
+                    Some(json!({ "ignore": true })),
+                    Some(&session_id),
+                )
+                .await;
+        }
+
+        if let Some(ref ua) = user_agent {
+            let _ = manager
+                .client
+                .send_command(
+                    "Emulation.setUserAgentOverride",
+                    Some(json!({ "userAgent": ua })),
+                    Some(&session_id),
+                )
+                .await;
+        }
+
+        if let Some(ref scheme) = color_scheme {
+            let _ = manager
+                .client
+                .send_command(
+                    "Emulation.setEmulatedMedia",
+                    Some(json!({ "features": [{ "name": "prefers-color-scheme", "value": scheme }] })),
+                    Some(&session_id),
+                )
+                .await;
+        }
+
+        if let Some(ref path) = download_path {
+            let _ = manager
+                .client
+                .send_command(
+                    "Browser.setDownloadBehavior",
+                    Some(json!({ "behavior": "allow", "downloadPath": path })),
+                    None,
+                )
+                .await;
+        }
+
+        Ok(manager)
+    }
+
+    pub async fn connect_cdp(url: &str) -> Result<Self, String> {
+        let ws_url = resolve_cdp_url(url).await?;
+        let client = CdpClient::connect(&ws_url).await?;
+        let mut manager = Self {
+            client,
+            chrome_process: None,
+            pages: Vec::new(),
+            active_page_index: 0,
+            default_timeout_ms: 10_000,
+        };
+
+        manager.discover_and_attach_targets().await?;
+        Ok(manager)
+    }
+
+    pub async fn connect_auto() -> Result<Self, String> {
+        let ws_url = auto_connect_cdp().await?;
+        Self::connect_cdp(&ws_url).await
+    }
+
+    async fn discover_and_attach_targets(&mut self) -> Result<(), String> {
+        self.client
+            .send_command_typed::<_, Value>(
+                "Target.setDiscoverTargets",
+                &SetDiscoverTargetsParams { discover: true },
+                None,
+            )
+            .await?;
+
+        let result: GetTargetsResult = self
+            .client
+            .send_command_typed("Target.getTargets", &json!({}), None)
+            .await?;
+
+        let page_targets: Vec<TargetInfo> = result
+            .target_infos
+            .into_iter()
+            .filter(|t| t.target_type == "page" && !t.url.is_empty())
+            .collect();
+
+        if page_targets.is_empty() {
+            // Create a new tab
+            let result: CreateTargetResult = self
+                .client
+                .send_command_typed(
+                    "Target.createTarget",
+                    &CreateTargetParams {
+                        url: "about:blank".to_string(),
+                    },
+                    None,
+                )
+                .await?;
+
+            let attach_result: AttachToTargetResult = self
+                .client
+                .send_command_typed(
+                    "Target.attachToTarget",
+                    &AttachToTargetParams {
+                        target_id: result.target_id.clone(),
+                        flatten: true,
+                    },
+                    None,
+                )
+                .await?;
+
+            self.pages.push(PageInfo {
+                target_id: result.target_id,
+                session_id: attach_result.session_id.clone(),
+                url: "about:blank".to_string(),
+                title: String::new(),
+            });
+            self.active_page_index = 0;
+            self.enable_domains(&attach_result.session_id).await?;
+        } else {
+            for target in &page_targets {
+                let attach_result: AttachToTargetResult = self
+                    .client
+                    .send_command_typed(
+                        "Target.attachToTarget",
+                        &AttachToTargetParams {
+                            target_id: target.target_id.clone(),
+                            flatten: true,
+                        },
+                        None,
+                    )
+                    .await?;
+
+                self.pages.push(PageInfo {
+                    target_id: target.target_id.clone(),
+                    session_id: attach_result.session_id.clone(),
+                    url: target.url.clone(),
+                    title: target.title.clone(),
+                });
+            }
+
+            self.active_page_index = 0;
+            let session_id = self.pages[0].session_id.clone();
+            self.enable_domains(&session_id).await?;
+        }
+
+        Ok(())
+    }
+
+    pub async fn enable_domains_pub(&self, session_id: &str) -> Result<(), String> {
+        self.enable_domains(session_id).await
+    }
+
+    async fn enable_domains(&self, session_id: &str) -> Result<(), String> {
+        self.client
+            .send_command_no_params("Page.enable", Some(session_id))
+            .await?;
+        self.client
+            .send_command_no_params("Runtime.enable", Some(session_id))
+            .await?;
+        self.client
+            .send_command_no_params("Network.enable", Some(session_id))
+            .await?;
+        Ok(())
+    }
+
+    pub fn active_session_id(&self) -> Result<&str, String> {
+        self.pages
+            .get(self.active_page_index)
+            .map(|p| p.session_id.as_str())
+            .ok_or_else(|| "No active page".to_string())
+    }
+
+    pub async fn navigate(&mut self, url: &str, wait_until: WaitUntil) -> Result<Value, String> {
+        let session_id = self.active_session_id()?.to_string();
+
+        let nav_result: PageNavigateResult = self
+            .client
+            .send_command_typed(
+                "Page.navigate",
+                &PageNavigateParams {
+                    url: url.to_string(),
+                    referrer: None,
+                },
+                Some(&session_id),
+            )
+            .await?;
+
+        if let Some(ref error_text) = nav_result.error_text {
+            return Err(format!("Navigation failed: {}", error_text));
+        }
+
+        self.wait_for_lifecycle(wait_until, &session_id).await?;
+
+        let page_url = self.get_url().await.unwrap_or_else(|_| url.to_string());
+        let title = self.get_title().await.unwrap_or_default();
+
+        if let Some(page) = self.pages.get_mut(self.active_page_index) {
+            page.url = page_url.clone();
+            page.title = title.clone();
+        }
+
+        Ok(json!({ "url": page_url, "title": title }))
+    }
+
+    async fn wait_for_lifecycle(
+        &self,
+        wait_until: WaitUntil,
+        session_id: &str,
+    ) -> Result<(), String> {
+        let event_name = match wait_until {
+            WaitUntil::Load => "Page.loadEventFired",
+            WaitUntil::DomContentLoaded => "Page.domContentEventFired",
+            WaitUntil::NetworkIdle => return self.wait_for_network_idle(session_id).await,
+        };
+
+        let mut rx = self.client.subscribe();
+        let timeout = tokio::time::Duration::from_millis(self.default_timeout_ms);
+
+        tokio::time::timeout(timeout, async {
+            while let Ok(event) = rx.recv().await {
+                if event.method == event_name && event.session_id.as_deref() == Some(session_id) {
+                    return Ok(());
+                }
+            }
+            Err("Event stream closed".to_string())
+        })
+        .await
+        .map_err(|_| format!("Timeout waiting for {}", event_name))?
+    }
+
+    async fn wait_for_network_idle(&self, session_id: &str) -> Result<(), String> {
+        let mut rx = self.client.subscribe();
+        let pending = Arc::new(Mutex::new(HashSet::<String>::new()));
+        let timeout = tokio::time::Duration::from_millis(self.default_timeout_ms);
+
+        tokio::time::timeout(timeout, async {
+            let mut idle_start: Option<tokio::time::Instant> = None;
+
+            loop {
+                let recv_result =
+                    tokio::time::timeout(tokio::time::Duration::from_millis(600), rx.recv()).await;
+
+                match recv_result {
+                    Ok(Ok(event)) if event.session_id.as_deref() == Some(session_id) => {
+                        let mut p = pending.lock().await;
+                        match event.method.as_str() {
+                            "Network.requestWillBeSent" => {
+                                if let Some(id) =
+                                    event.params.get("requestId").and_then(|v| v.as_str())
+                                {
+                                    p.insert(id.to_string());
+                                    idle_start = None;
+                                }
+                            }
+                            "Network.loadingFinished" | "Network.loadingFailed" => {
+                                if let Some(id) =
+                                    event.params.get("requestId").and_then(|v| v.as_str())
+                                {
+                                    p.remove(id);
+                                    if p.is_empty() {
+                                        idle_start = Some(tokio::time::Instant::now());
+                                    }
+                                }
+                            }
+                            "Page.loadEventFired" => {
+                                if p.is_empty() {
+                                    idle_start = Some(tokio::time::Instant::now());
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    Ok(Ok(_)) => {}
+                    Ok(Err(_)) => break,
+                    Err(_) => {
+                        // Timeout on recv -- check if idle long enough
+                        let p = pending.lock().await;
+                        if p.is_empty() {
+                            return Ok(());
+                        }
+                    }
+                }
+
+                if let Some(start) = idle_start {
+                    if start.elapsed() >= tokio::time::Duration::from_millis(500) {
+                        return Ok(());
+                    }
+                }
+            }
+
+            Ok(())
+        })
+        .await
+        .map_err(|_| "Timeout waiting for networkidle".to_string())?
+    }
+
+    pub async fn get_url(&self) -> Result<String, String> {
+        let result = self.evaluate_simple("location.href").await?;
+        Ok(result.as_str().unwrap_or("").to_string())
+    }
+
+    pub async fn get_title(&self) -> Result<String, String> {
+        let result = self.evaluate_simple("document.title").await?;
+        Ok(result.as_str().unwrap_or("").to_string())
+    }
+
+    pub async fn get_content(&self) -> Result<String, String> {
+        let result = self
+            .evaluate_simple("document.documentElement.outerHTML")
+            .await?;
+        Ok(result.as_str().unwrap_or("").to_string())
+    }
+
+    pub async fn evaluate(&self, script: &str, _args: Option<Value>) -> Result<Value, String> {
+        let session_id = self.active_session_id()?.to_string();
+
+        let result: EvaluateResult = self
+            .client
+            .send_command_typed(
+                "Runtime.evaluate",
+                &EvaluateParams {
+                    expression: script.to_string(),
+                    return_by_value: Some(true),
+                    await_promise: Some(true),
+                },
+                Some(&session_id),
+            )
+            .await?;
+
+        if let Some(ref details) = result.exception_details {
+            let msg = details
+                .exception
+                .as_ref()
+                .and_then(|e| e.description.as_deref())
+                .unwrap_or(&details.text);
+            return Err(format!("Evaluation error: {}", msg));
+        }
+
+        Ok(result.result.value.unwrap_or(Value::Null))
+    }
+
+    async fn evaluate_simple(&self, expression: &str) -> Result<Value, String> {
+        self.evaluate(expression, None).await
+    }
+
+    pub async fn wait_for_lifecycle_external(
+        &self,
+        wait_until: WaitUntil,
+        session_id: &str,
+    ) -> Result<(), String> {
+        self.wait_for_lifecycle(wait_until, session_id).await
+    }
+
+    pub async fn close(&mut self) -> Result<(), String> {
+        // Close the browser via CDP if possible
+        let _ = self
+            .client
+            .send_command_no_params("Browser.close", None)
+            .await;
+
+        // Kill Chrome process if we own it
+        if let Some(ref mut chrome) = self.chrome_process {
+            chrome.kill();
+        }
+
+        Ok(())
+    }
+
+    pub fn has_pages(&self) -> bool {
+        !self.pages.is_empty()
+    }
+
+    /// Checks if the CDP connection is alive by sending a simple command.
+    /// Returns false if the command times out or fails.
+    pub async fn is_connection_alive(&self) -> bool {
+        let timeout = tokio::time::Duration::from_secs(3);
+        let result = tokio::time::timeout(
+            timeout,
+            self.client
+                .send_command_no_params("Browser.getVersion", None),
+        )
+        .await;
+
+        match result {
+            Ok(Ok(_)) => true,
+            Ok(Err(_)) | Err(_) => false,
+        }
+    }
+
+    /// Returns true if this manager was connected via CDP (as opposed to local launch).
+    pub fn is_cdp_connection(&self) -> bool {
+        self.chrome_process.is_none()
+    }
+
+    /// Ensures the browser has at least one page. If `pages` is empty, creates a new
+    /// about:blank page and attaches to it.
+    pub async fn ensure_page(&mut self) -> Result<(), String> {
+        if !self.pages.is_empty() {
+            return Ok(());
+        }
+
+        let result: CreateTargetResult = self
+            .client
+            .send_command_typed(
+                "Target.createTarget",
+                &CreateTargetParams {
+                    url: "about:blank".to_string(),
+                },
+                None,
+            )
+            .await?;
+
+        let attach_result: AttachToTargetResult = self
+            .client
+            .send_command_typed(
+                "Target.attachToTarget",
+                &AttachToTargetParams {
+                    target_id: result.target_id.clone(),
+                    flatten: true,
+                },
+                None,
+            )
+            .await?;
+
+        self.pages.push(PageInfo {
+            target_id: result.target_id,
+            session_id: attach_result.session_id.clone(),
+            url: "about:blank".to_string(),
+            title: String::new(),
+        });
+        self.active_page_index = 0;
+        self.enable_domains(&attach_result.session_id).await?;
+
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Tab management
+    // -----------------------------------------------------------------------
+
+    /// Checks if `active_page_index` is still valid and adjusts it if not
+    /// (e.g., after a tab was closed).
+    pub fn update_active_page_if_needed(&mut self) {
+        if self.pages.is_empty() {
+            self.active_page_index = 0;
+            return;
+        }
+        if self.active_page_index >= self.pages.len() {
+            self.active_page_index = self.pages.len() - 1;
+        }
+    }
+
+    pub fn tab_list(&self) -> Vec<Value> {
+        self.pages
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                json!({
+                    "index": i,
+                    "title": p.title,
+                    "url": p.url,
+                    "active": i == self.active_page_index,
+                })
+            })
+            .collect()
+    }
+
+    pub async fn tab_new(&mut self, url: Option<&str>) -> Result<Value, String> {
+        let target_url = url.unwrap_or("about:blank");
+
+        let result: CreateTargetResult = self
+            .client
+            .send_command_typed(
+                "Target.createTarget",
+                &CreateTargetParams {
+                    url: target_url.to_string(),
+                },
+                None,
+            )
+            .await?;
+
+        let attach: AttachToTargetResult = self
+            .client
+            .send_command_typed(
+                "Target.attachToTarget",
+                &AttachToTargetParams {
+                    target_id: result.target_id.clone(),
+                    flatten: true,
+                },
+                None,
+            )
+            .await?;
+
+        self.enable_domains(&attach.session_id).await?;
+
+        let index = self.pages.len();
+        self.pages.push(PageInfo {
+            target_id: result.target_id,
+            session_id: attach.session_id,
+            url: target_url.to_string(),
+            title: String::new(),
+        });
+        self.active_page_index = index;
+
+        Ok(json!({ "index": index, "url": target_url }))
+    }
+
+    pub async fn tab_switch(&mut self, index: usize) -> Result<Value, String> {
+        if index >= self.pages.len() {
+            return Err(format!(
+                "Tab index {} out of range (0-{})",
+                index,
+                self.pages.len().saturating_sub(1)
+            ));
+        }
+
+        self.active_page_index = index;
+        let session_id = self.pages[index].session_id.clone();
+        self.enable_domains(&session_id).await?;
+
+        // Bring tab to front
+        let _ = self
+            .client
+            .send_command("Page.bringToFront", None, Some(&session_id))
+            .await;
+
+        let url = self.get_url().await.unwrap_or_default();
+        let title = self.get_title().await.unwrap_or_default();
+
+        if let Some(page) = self.pages.get_mut(index) {
+            page.url = url.clone();
+            page.title = title.clone();
+        }
+
+        Ok(json!({ "index": index, "url": url, "title": title }))
+    }
+
+    pub async fn tab_close(&mut self, index: Option<usize>) -> Result<Value, String> {
+        let target_index = index.unwrap_or(self.active_page_index);
+
+        if target_index >= self.pages.len() {
+            return Err(format!("Tab index {} out of range", target_index));
+        }
+
+        if self.pages.len() <= 1 {
+            return Err("Cannot close the last tab".to_string());
+        }
+
+        let page = self.pages.remove(target_index);
+        let _ = self
+            .client
+            .send_command_typed::<_, Value>(
+                "Target.closeTarget",
+                &CloseTargetParams {
+                    target_id: page.target_id,
+                },
+                None,
+            )
+            .await;
+
+        if self.active_page_index >= self.pages.len() {
+            self.active_page_index = self.pages.len() - 1;
+        }
+
+        let session_id = self.pages[self.active_page_index].session_id.clone();
+        self.enable_domains(&session_id).await?;
+
+        Ok(json!({ "closed": target_index, "activeIndex": self.active_page_index }))
+    }
+
+    // -----------------------------------------------------------------------
+    // Emulation
+    // -----------------------------------------------------------------------
+
+    pub async fn set_viewport(
+        &self,
+        width: i32,
+        height: i32,
+        device_scale_factor: f64,
+        mobile: bool,
+    ) -> Result<(), String> {
+        let session_id = self.active_session_id()?;
+        self.client
+            .send_command(
+                "Emulation.setDeviceMetricsOverride",
+                Some(json!({
+                    "width": width,
+                    "height": height,
+                    "deviceScaleFactor": device_scale_factor,
+                    "mobile": mobile,
+                })),
+                Some(session_id),
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn set_user_agent(&self, user_agent: &str) -> Result<(), String> {
+        let session_id = self.active_session_id()?;
+        self.client
+            .send_command(
+                "Emulation.setUserAgentOverride",
+                Some(json!({ "userAgent": user_agent })),
+                Some(session_id),
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn set_emulated_media(
+        &self,
+        media: Option<&str>,
+        features: Option<Vec<(String, String)>>,
+    ) -> Result<(), String> {
+        let session_id = self.active_session_id()?;
+        let mut params = json!({});
+        if let Some(m) = media {
+            params["media"] = Value::String(m.to_string());
+        }
+        if let Some(feats) = features {
+            let features_arr: Vec<Value> = feats
+                .iter()
+                .map(|(name, value)| json!({ "name": name, "value": value }))
+                .collect();
+            params["features"] = Value::Array(features_arr);
+        }
+        self.client
+            .send_command("Emulation.setEmulatedMedia", Some(params), Some(session_id))
+            .await?;
+        Ok(())
+    }
+
+    pub async fn bring_to_front(&self) -> Result<(), String> {
+        let session_id = self.active_session_id()?;
+        self.client
+            .send_command("Page.bringToFront", None, Some(session_id))
+            .await?;
+        Ok(())
+    }
+
+    pub async fn set_timezone(&self, timezone_id: &str) -> Result<(), String> {
+        let session_id = self.active_session_id()?;
+        self.client
+            .send_command(
+                "Emulation.setTimezoneOverride",
+                Some(json!({ "timezoneId": timezone_id })),
+                Some(session_id),
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn set_locale(&self, locale: &str) -> Result<(), String> {
+        let session_id = self.active_session_id()?;
+        self.client
+            .send_command(
+                "Emulation.setLocaleOverride",
+                Some(json!({ "locale": locale })),
+                Some(session_id),
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn set_geolocation(
+        &self,
+        latitude: f64,
+        longitude: f64,
+        accuracy: Option<f64>,
+    ) -> Result<(), String> {
+        let session_id = self.active_session_id()?;
+        self.client
+            .send_command(
+                "Emulation.setGeolocationOverride",
+                Some(json!({
+                    "latitude": latitude,
+                    "longitude": longitude,
+                    "accuracy": accuracy.unwrap_or(1.0),
+                })),
+                Some(session_id),
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn grant_permissions(&self, permissions: &[String]) -> Result<(), String> {
+        self.client
+            .send_command(
+                "Browser.grantPermissions",
+                Some(json!({ "permissions": permissions })),
+                None,
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn handle_dialog(
+        &self,
+        accept: bool,
+        prompt_text: Option<&str>,
+    ) -> Result<(), String> {
+        let session_id = self.active_session_id()?;
+        let mut params = json!({ "accept": accept });
+        if let Some(text) = prompt_text {
+            params["promptText"] = Value::String(text.to_string());
+        }
+        self.client
+            .send_command(
+                "Page.handleJavaScriptDialog",
+                Some(params),
+                Some(session_id),
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn upload_files(&self, selector: &str, files: &[String]) -> Result<(), String> {
+        let session_id = self.active_session_id()?;
+
+        let node_result = self
+            .client
+            .send_command(
+                "DOM.querySelector",
+                Some(json!({
+                    "nodeId": 1,
+                    "selector": selector,
+                })),
+                Some(session_id),
+            )
+            .await;
+
+        // Alternative: resolve via JS
+        let result: EvaluateResult = self
+            .client
+            .send_command_typed(
+                "Runtime.evaluate",
+                &EvaluateParams {
+                    expression: format!(
+                        "document.querySelector({})",
+                        serde_json::to_string(selector).unwrap_or_default()
+                    ),
+                    return_by_value: Some(false),
+                    await_promise: Some(false),
+                },
+                Some(session_id),
+            )
+            .await?;
+
+        let object_id = result
+            .result
+            .object_id
+            .ok_or("File input element not found")?;
+
+        // Get the DOM node from the remote object
+        let describe: Value = self
+            .client
+            .send_command(
+                "DOM.describeNode",
+                Some(json!({ "objectId": object_id })),
+                Some(session_id),
+            )
+            .await?;
+
+        let backend_node_id = describe
+            .get("node")
+            .and_then(|n| n.get("backendNodeId"))
+            .and_then(|v| v.as_i64())
+            .ok_or("Could not get backendNodeId for file input")?;
+
+        // Suppress unused variable warning
+        let _ = node_result;
+
+        self.client
+            .send_command(
+                "DOM.setFileInputFiles",
+                Some(json!({
+                    "files": files,
+                    "backendNodeId": backend_node_id,
+                })),
+                Some(session_id),
+            )
+            .await?;
+
+        Ok(())
+    }
+
+    pub async fn add_script_to_evaluate(&self, source: &str) -> Result<String, String> {
+        let session_id = self.active_session_id()?;
+        let result = self
+            .client
+            .send_command(
+                "Page.addScriptToEvaluateOnNewDocument",
+                Some(json!({ "source": source })),
+                Some(session_id),
+            )
+            .await?;
+        Ok(result
+            .get("identifier")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string())
+    }
+
+    pub fn add_page(&mut self, page: PageInfo) {
+        let index = self.pages.len();
+        self.pages.push(page);
+        self.active_page_index = index;
+    }
+
+    pub fn remove_page_by_target_id(&mut self, target_id: &str) {
+        if let Some(pos) = self.pages.iter().position(|p| p.target_id == target_id) {
+            self.pages.remove(pos);
+            self.update_active_page_if_needed();
+        }
+    }
+
+    pub fn has_target(&self, target_id: &str) -> bool {
+        self.pages.iter().any(|p| p.target_id == target_id)
+    }
+
+    pub fn page_count(&self) -> usize {
+        self.pages.len()
+    }
+
+    pub fn pages_list(&self) -> Vec<PageInfo> {
+        self.pages.clone()
+    }
+
+    pub async fn set_download_behavior(&self, download_path: &str) -> Result<(), String> {
+        let session_id = self.active_session_id()?;
+        self.client
+            .send_command(
+                "Browser.setDownloadBehavior",
+                Some(json!({
+                    "behavior": "allowAndName",
+                    "downloadPath": download_path,
+                    "eventsEnabled": true,
+                })),
+                Some(session_id),
+            )
+            .await?;
+        Ok(())
+    }
+}
+
+async fn resolve_cdp_url(input: &str) -> Result<String, String> {
+    if input.starts_with("ws://") || input.starts_with("wss://") {
+        return Ok(input.to_string());
+    }
+
+    if input.starts_with("http://") || input.starts_with("https://") {
+        // Parse out the port and discover
+        let parsed = url::Url::parse(input).map_err(|e| format!("Invalid CDP URL: {}", e))?;
+        let port = parsed.port().unwrap_or(9222);
+        return discover_cdp_url(port).await;
+    }
+
+    // Try as numeric port
+    if let Ok(port) = input.parse::<u16>() {
+        return discover_cdp_url(port).await;
+    }
+
+    Err(format!(
+        "Invalid CDP target: {}. Use ws://, http://, or a port number.",
+        input
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_launch_options_extensions_and_cdp() {
+        let ext = vec!["/path/to/ext".to_string()];
+        assert!(validate_launch_options(Some(&ext), true, None, None, false, None,).is_err());
+    }
+
+    #[test]
+    fn test_validate_launch_options_profile_and_cdp() {
+        assert!(validate_launch_options(None, true, Some("/path"), None, false, None,).is_err());
+    }
+
+    #[test]
+    fn test_validate_launch_options_storage_state_and_profile() {
+        assert!(validate_launch_options(
+            None,
+            false,
+            Some("/profile"),
+            Some("/state.json"),
+            false,
+            None,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn test_validate_launch_options_storage_state_and_extensions() {
+        let ext = vec!["/ext".to_string()];
+        assert!(
+            validate_launch_options(Some(&ext), false, None, Some("/state.json"), false, None,)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn test_validate_launch_options_allow_file_access_firefox() {
+        assert!(
+            validate_launch_options(None, false, None, None, true, Some("/usr/bin/firefox"),)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn test_validate_launch_options_valid() {
+        assert!(validate_launch_options(None, false, None, None, false, None,).is_ok());
+    }
+
+    #[test]
+    fn test_to_ai_friendly_error_strict_mode() {
+        assert_eq!(
+            to_ai_friendly_error("Strict mode violation: multiple elements"),
+            "Element matched multiple results. Use a more specific selector."
+        );
+    }
+
+    #[test]
+    fn test_to_ai_friendly_error_not_visible() {
+        assert_eq!(
+            to_ai_friendly_error("element is not visible"),
+            "Element exists but is not visible. Wait for it to become visible or scroll it into view."
+        );
+    }
+
+    #[test]
+    fn test_to_ai_friendly_error_intercept() {
+        assert_eq!(
+            to_ai_friendly_error("element intercepted by another element"),
+            "Another element is covering the target element. Try scrolling or closing overlays."
+        );
+    }
+
+    #[test]
+    fn test_to_ai_friendly_error_timeout() {
+        assert_eq!(
+            to_ai_friendly_error("Timeout waiting for element"),
+            "Operation timed out. The page may still be loading or the element may not exist."
+        );
+    }
+
+    #[test]
+    fn test_to_ai_friendly_error_not_found() {
+        assert_eq!(
+            to_ai_friendly_error("Element not found"),
+            "Element not found. Verify the selector is correct and the element exists in the DOM."
+        );
+    }
+
+    #[test]
+    fn test_to_ai_friendly_error_unknown() {
+        let msg = "Some custom error message";
+        assert_eq!(to_ai_friendly_error(msg), msg);
+    }
+}

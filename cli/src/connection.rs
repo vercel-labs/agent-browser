@@ -159,7 +159,13 @@ fn is_daemon_running(session: &str) -> bool {
     if let Ok(pid_str) = fs::read_to_string(&pid_path) {
         if let Ok(pid) = pid_str.trim().parse::<i32>() {
             unsafe {
-                return libc::kill(pid, 0) == 0;
+                if libc::kill(pid, 0) == 0 {
+                    return true;
+                }
+                // EPERM means the process exists but we lack permission to
+                // signal it (e.g. inside a macOS sandbox). Only ESRCH means
+                // the process is genuinely gone.
+                return std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH);
             }
         }
     }
@@ -203,24 +209,93 @@ pub struct DaemonResult {
     pub already_running: bool,
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn ensure_daemon(
-    session: &str,
-    headed: bool,
-    executable_path: Option<&str>,
-    extensions: &[String],
-    args: Option<&str>,
-    user_agent: Option<&str>,
-    proxy: Option<&str>,
-    proxy_bypass: Option<&str>,
-    ignore_https_errors: bool,
-    allow_file_access: bool,
-    profile: Option<&str>,
-    state: Option<&str>,
-    provider: Option<&str>,
-    device: Option<&str>,
-    session_name: Option<&str>,
-) -> Result<DaemonResult, String> {
+/// Options forwarded to the daemon process as environment variables.
+/// Note: `confirm_interactive` is intentionally absent -- it is a CLI-side
+/// UX concern (prompting the user on stdin) and not a daemon configuration.
+/// The daemon only needs `confirm_actions` to gate action categories.
+pub struct DaemonOptions<'a> {
+    pub headed: bool,
+    pub executable_path: Option<&'a str>,
+    pub extensions: &'a [String],
+    pub args: Option<&'a str>,
+    pub user_agent: Option<&'a str>,
+    pub proxy: Option<&'a str>,
+    pub proxy_bypass: Option<&'a str>,
+    pub ignore_https_errors: bool,
+    pub allow_file_access: bool,
+    pub profile: Option<&'a str>,
+    pub state: Option<&'a str>,
+    pub provider: Option<&'a str>,
+    pub device: Option<&'a str>,
+    pub session_name: Option<&'a str>,
+    pub download_path: Option<&'a str>,
+    pub allowed_domains: Option<&'a [String]>,
+    pub action_policy: Option<&'a str>,
+    pub confirm_actions: Option<&'a str>,
+    pub native: bool,
+}
+
+fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
+    cmd.env("AGENT_BROWSER_DAEMON", "1")
+        .env("AGENT_BROWSER_SESSION", session);
+
+    if opts.headed {
+        cmd.env("AGENT_BROWSER_HEADED", "1");
+    }
+    if let Some(path) = opts.executable_path {
+        cmd.env("AGENT_BROWSER_EXECUTABLE_PATH", path);
+    }
+    if !opts.extensions.is_empty() {
+        cmd.env("AGENT_BROWSER_EXTENSIONS", opts.extensions.join(","));
+    }
+    if let Some(a) = opts.args {
+        cmd.env("AGENT_BROWSER_ARGS", a);
+    }
+    if let Some(ua) = opts.user_agent {
+        cmd.env("AGENT_BROWSER_USER_AGENT", ua);
+    }
+    if let Some(p) = opts.proxy {
+        cmd.env("AGENT_BROWSER_PROXY", p);
+    }
+    if let Some(pb) = opts.proxy_bypass {
+        cmd.env("AGENT_BROWSER_PROXY_BYPASS", pb);
+    }
+    if opts.ignore_https_errors {
+        cmd.env("AGENT_BROWSER_IGNORE_HTTPS_ERRORS", "1");
+    }
+    if opts.allow_file_access {
+        cmd.env("AGENT_BROWSER_ALLOW_FILE_ACCESS", "1");
+    }
+    if let Some(prof) = opts.profile {
+        cmd.env("AGENT_BROWSER_PROFILE", prof);
+    }
+    if let Some(st) = opts.state {
+        cmd.env("AGENT_BROWSER_STATE", st);
+    }
+    if let Some(p) = opts.provider {
+        cmd.env("AGENT_BROWSER_PROVIDER", p);
+    }
+    if let Some(d) = opts.device {
+        cmd.env("AGENT_BROWSER_IOS_DEVICE", d);
+    }
+    if let Some(sn) = opts.session_name {
+        cmd.env("AGENT_BROWSER_SESSION_NAME", sn);
+    }
+    if let Some(dp) = opts.download_path {
+        cmd.env("AGENT_BROWSER_DOWNLOAD_PATH", dp);
+    }
+    if let Some(ad) = opts.allowed_domains {
+        cmd.env("AGENT_BROWSER_ALLOWED_DOMAINS", ad.join(","));
+    }
+    if let Some(ap) = opts.action_policy {
+        cmd.env("AGENT_BROWSER_ACTION_POLICY", ap);
+    }
+    if let Some(ca) = opts.confirm_actions {
+        cmd.env("AGENT_BROWSER_CONFIRM_ACTIONS", ca);
+    }
+}
+
+pub fn ensure_daemon(session: &str, opts: &DaemonOptions) -> Result<DaemonResult, String> {
     // Check if daemon is running AND responsive
     if is_daemon_running(session) && daemon_ready(session) {
         // Double-check it's actually responsive by waiting and checking again
@@ -278,185 +353,124 @@ pub fn ensure_daemon(
     let exe_path = env::current_exe().map_err(|e| e.to_string())?;
     // Canonicalize to resolve symlinks (e.g., npm global bin symlink -> actual binary)
     let exe_path = exe_path.canonicalize().unwrap_or(exe_path);
-    let exe_dir = exe_path.parent().unwrap();
-
-    let mut daemon_paths = vec![
-        exe_dir.join("daemon.js"),
-        exe_dir.join("../dist/daemon.js"),
-        PathBuf::from("dist/daemon.js"),
-    ];
-
-    // Check AGENT_BROWSER_HOME environment variable
-    if let Ok(home) = env::var("AGENT_BROWSER_HOME") {
-        let home_path = PathBuf::from(&home);
-        daemon_paths.insert(0, home_path.join("dist/daemon.js"));
-        daemon_paths.insert(1, home_path.join("daemon.js"));
-    }
-
-    let daemon_path = daemon_paths
-        .iter()
-        .find(|p| p.exists())
-        .ok_or("Daemon not found. Set AGENT_BROWSER_HOME environment variable or run from project directory.")?;
-
-    // Spawn daemon as a fully detached background process
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-
-        let mut cmd = Command::new("node");
-        cmd.arg(daemon_path)
-            .env("AGENT_BROWSER_DAEMON", "1")
-            .env("AGENT_BROWSER_SESSION", session);
-
-        if headed {
-            cmd.env("AGENT_BROWSER_HEADED", "1");
-        }
-
-        if let Some(path) = executable_path {
-            cmd.env("AGENT_BROWSER_EXECUTABLE_PATH", path);
-        }
-
-        if !extensions.is_empty() {
-            cmd.env("AGENT_BROWSER_EXTENSIONS", extensions.join(","));
-        }
-
-        if let Some(a) = args {
-            cmd.env("AGENT_BROWSER_ARGS", a);
-        }
-
-        if let Some(ua) = user_agent {
-            cmd.env("AGENT_BROWSER_USER_AGENT", ua);
-        }
-
-        if let Some(p) = proxy {
-            cmd.env("AGENT_BROWSER_PROXY", p);
-        }
-
-        if let Some(pb) = proxy_bypass {
-            cmd.env("AGENT_BROWSER_PROXY_BYPASS", pb);
-        }
-
-        if ignore_https_errors {
-            cmd.env("AGENT_BROWSER_IGNORE_HTTPS_ERRORS", "1");
-        }
-
-        if allow_file_access {
-            cmd.env("AGENT_BROWSER_ALLOW_FILE_ACCESS", "1");
-        }
-
-        if let Some(prof) = profile {
-            cmd.env("AGENT_BROWSER_PROFILE", prof);
-        }
-
-        if let Some(st) = state {
-            cmd.env("AGENT_BROWSER_STATE", st);
-        }
-
-        if let Some(p) = provider {
-            cmd.env("AGENT_BROWSER_PROVIDER", p);
-        }
-
-        if let Some(d) = device {
-            cmd.env("AGENT_BROWSER_IOS_DEVICE", d);
-        }
-
-        if let Some(sn) = session_name {
-            cmd.env("AGENT_BROWSER_SESSION_NAME", sn);
-        }
-
-        // Create new process group and session to fully detach
-        unsafe {
-            cmd.pre_exec(|| {
-                // Create new session (detach from terminal)
-                libc::setsid();
-                Ok(())
-            });
-        }
-
-        cmd.stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|e| format!("Failed to start daemon: {}", e))?;
-    }
-
+    // On Windows, canonicalize() returns \\?\ prefixed extended-length paths.
+    // Node.js cannot handle these, so strip the prefix.
     #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
+    let exe_path = {
+        let p = exe_path.to_string_lossy();
+        if let Some(stripped) = p.strip_prefix(r"\\?\") {
+            PathBuf::from(stripped)
+        } else {
+            exe_path
+        }
+    };
 
-        // On Windows, call node directly. Command::new handles PATH resolution (node.exe or node.cmd)
-        // and automatically quotes arguments containing spaces.
-        let mut cmd = Command::new("node");
-        cmd.arg(daemon_path)
-            .env("AGENT_BROWSER_DAEMON", "1")
-            .env("AGENT_BROWSER_SESSION", session);
+    if opts.native {
+        // Native mode: spawn self as daemon (Rust/CDP, no Node.js needed)
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
 
-        if headed {
-            cmd.env("AGENT_BROWSER_HEADED", "1");
+            let mut cmd = Command::new(&exe_path);
+            cmd.env("AGENT_BROWSER_DAEMON", "1");
+            apply_daemon_env(&mut cmd, session, opts);
+
+            unsafe {
+                cmd.pre_exec(|| {
+                    libc::setsid();
+                    Ok(())
+                });
+            }
+
+            cmd.stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .map_err(|e| format!("Failed to start native daemon: {}", e))?;
         }
 
-        if let Some(path) = executable_path {
-            cmd.env("AGENT_BROWSER_EXECUTABLE_PATH", path);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+
+            let mut cmd = Command::new(&exe_path);
+            cmd.env("AGENT_BROWSER_DAEMON", "1");
+            apply_daemon_env(&mut cmd, session, opts);
+
+            const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
+            const DETACHED_PROCESS: u32 = 0x00000008;
+
+            cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .map_err(|e| format!("Failed to start native daemon: {}", e))?;
+        }
+    } else {
+        // Default mode: spawn Node.js daemon (Playwright)
+        let exe_dir = exe_path.parent().unwrap();
+
+        let mut daemon_paths = vec![
+            exe_dir.join("daemon.js"),
+            exe_dir.join("../dist/daemon.js"),
+            PathBuf::from("dist/daemon.js"),
+        ];
+
+        if let Ok(home) = env::var("AGENT_BROWSER_HOME") {
+            let home_path = PathBuf::from(&home);
+            daemon_paths.insert(0, home_path.join("dist/daemon.js"));
+            daemon_paths.insert(1, home_path.join("daemon.js"));
         }
 
-        if !extensions.is_empty() {
-            cmd.env("AGENT_BROWSER_EXTENSIONS", extensions.join(","));
+        let daemon_path = daemon_paths
+            .iter()
+            .find(|p| p.exists())
+            .ok_or("Daemon not found. Set AGENT_BROWSER_HOME environment variable or run from project directory.")?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+
+            let mut cmd = Command::new("node");
+            cmd.arg(daemon_path);
+            apply_daemon_env(&mut cmd, session, opts);
+
+            unsafe {
+                cmd.pre_exec(|| {
+                    libc::setsid();
+                    Ok(())
+                });
+            }
+
+            cmd.stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .map_err(|e| format!("Failed to start daemon: {}", e))?;
         }
 
-        if let Some(a) = args {
-            cmd.env("AGENT_BROWSER_ARGS", a);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+
+            // Use node.exe explicitly to avoid Git Bash/MSYS2 shell wrapper resolution
+            let mut cmd = Command::new("node.exe");
+            cmd.arg(daemon_path)
+                .env("MSYS_NO_PATHCONV", "1")
+                .env("MSYS2_ARG_CONV_EXCL", "*");
+            apply_daemon_env(&mut cmd, session, opts);
+
+            const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
+            const DETACHED_PROCESS: u32 = 0x00000008;
+
+            cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .map_err(|e| format!("Failed to start daemon: {}", e))?;
         }
-
-        if let Some(ua) = user_agent {
-            cmd.env("AGENT_BROWSER_USER_AGENT", ua);
-        }
-
-        if let Some(p) = proxy {
-            cmd.env("AGENT_BROWSER_PROXY", p);
-        }
-
-        if let Some(pb) = proxy_bypass {
-            cmd.env("AGENT_BROWSER_PROXY_BYPASS", pb);
-        }
-
-        if ignore_https_errors {
-            cmd.env("AGENT_BROWSER_IGNORE_HTTPS_ERRORS", "1");
-        }
-
-        if allow_file_access {
-            cmd.env("AGENT_BROWSER_ALLOW_FILE_ACCESS", "1");
-        }
-
-        if let Some(prof) = profile {
-            cmd.env("AGENT_BROWSER_PROFILE", prof);
-        }
-
-        if let Some(st) = state {
-            cmd.env("AGENT_BROWSER_STATE", st);
-        }
-
-        if let Some(p) = provider {
-            cmd.env("AGENT_BROWSER_PROVIDER", p);
-        }
-
-        if let Some(d) = device {
-            cmd.env("AGENT_BROWSER_IOS_DEVICE", d);
-        }
-
-        if let Some(sn) = session_name {
-            cmd.env("AGENT_BROWSER_SESSION_NAME", sn);
-        }
-
-        // CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS
-        const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
-        const DETACHED_PROCESS: u32 = 0x00000008;
-
-        cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|e| format!("Failed to start daemon: {}", e))?;
     }
 
     for _ in 0..50 {
@@ -468,10 +482,20 @@ pub fn ensure_daemon(
         thread::sleep(Duration::from_millis(100));
     }
 
-    Err(format!(
-        "Daemon failed to start (socket: {})",
-        get_socket_dir().join(format!("{}.sock", session)).display()
-    ))
+    #[cfg(unix)]
+    let endpoint_info = format!(
+        "socket: {}",
+        get_socket_dir()
+            .join(format!("{}.sock", session))
+            .display()
+    );
+    #[cfg(windows)]
+    let endpoint_info = format!(
+        "port: 127.0.0.1:{}",
+        get_port_for_session(session)
+    );
+
+    Err(format!("Daemon failed to start ({})", endpoint_info))
 }
 
 fn connect(session: &str) -> Result<Connection, String> {

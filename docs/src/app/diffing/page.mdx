@@ -1,0 +1,179 @@
+import { pageMetadata } from "@/lib/page-metadata"
+
+export const metadata = pageMetadata("diffing")
+
+import { DiffDemo } from "@/components/diff-demo"
+
+# Diffing
+
+Compare page states to detect changes -- structurally via accessibility tree snapshots, visually via pixel comparison, or across two different URLs.
+
+<DiffDemo />
+
+## Commands
+
+<table>
+  <thead>
+    <tr><th>Command</th><th>Description</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>diff snapshot</code></td><td>Compare current snapshot to last snapshot in session</td></tr>
+    <tr><td><code>diff snapshot --baseline &lt;file&gt;</code></td><td>Compare current snapshot to a saved file</td></tr>
+    <tr><td><code>diff screenshot --baseline &lt;file&gt;</code></td><td>Visual pixel diff against a baseline image</td></tr>
+    <tr><td><code>diff url &lt;url1&gt; &lt;url2&gt;</code></td><td>Compare two pages (snapshot + optional screenshot)</td></tr>
+  </tbody>
+</table>
+
+## Snapshot diff
+
+Compares the accessibility tree between two points in time using a line-level text diff.
+
+```bash
+# Compare against the last snapshot taken in this session
+agent-browser diff snapshot
+
+# Compare against a saved baseline file
+agent-browser diff snapshot --baseline before.txt
+
+# Scope to a specific part of the page
+agent-browser diff snapshot --selector "#main" --compact
+```
+
+Without `--baseline`, the command automatically compares against the most recent snapshot taken in the current session. This is the primary use case for agents verifying that an action had the intended effect.
+
+### Options
+
+<table>
+  <thead>
+    <tr><th>Flag</th><th>Description</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>-b, --baseline &lt;file&gt;</code></td><td>Path to a saved snapshot file to compare against</td></tr>
+    <tr><td><code>-s, --selector &lt;sel&gt;</code></td><td>Scope the current snapshot to a CSS selector or @ref</td></tr>
+    <tr><td><code>-c, --compact</code></td><td>Use compact snapshot format</td></tr>
+    <tr><td><code>-d, --depth &lt;n&gt;</code></td><td>Limit snapshot tree depth</td></tr>
+  </tbody>
+</table>
+
+### Output
+
+The diff uses `+` for added lines and `-` for removed lines, similar to unified diff format. A summary line shows the count of additions, removals, and unchanged lines.
+
+```
+- button "Submit" [ref=e2]
++ button "Submit" [ref=e2] [disabled]
+  3 additions, 2 removals, 41 unchanged
+```
+
+## Screenshot diff
+
+Compares the current page screenshot against a baseline image at the pixel level. Produces a diff image with changed pixels highlighted in red.
+
+```bash
+# Basic visual diff
+agent-browser diff screenshot --baseline before.png
+
+# Save diff image to a specific path
+agent-browser diff screenshot --baseline before.png --output diff.png
+
+# Adjust threshold and scope to element
+agent-browser diff screenshot --baseline before.png --threshold 0.2 --selector "#hero"
+```
+
+### Options
+
+<table>
+  <thead>
+    <tr><th>Flag</th><th>Description</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>-b, --baseline &lt;file&gt;</code></td><td>Baseline PNG/JPEG image to compare against (required)</td></tr>
+    <tr><td><code>-o, --output &lt;file&gt;</code></td><td>Path for the generated diff image (default: temp dir)</td></tr>
+    <tr><td><code>-t, --threshold &lt;0-1&gt;</code></td><td>Color distance threshold (default: 0.1). Higher = more tolerant</td></tr>
+    <tr><td><code>-s, --selector &lt;sel&gt;</code></td><td>Scope the current screenshot to an element</td></tr>
+    <tr><td><code>--full</code></td><td>Take a full-page screenshot</td></tr>
+  </tbody>
+</table>
+
+### Output
+
+Reports the diff image path, number of different pixels, and mismatch percentage. The diff image shows unchanged pixels dimmed with changed pixels in red.
+
+If the baseline and current images have different dimensions, the command reports a dimension mismatch instead of attempting pixel comparison.
+
+## URL diff
+
+Compares two pages by navigating to each in sequence and diffing the results.
+
+```bash
+# Compare two URLs (snapshot diff)
+agent-browser diff url https://staging.example.com https://prod.example.com
+
+# Include visual comparison
+agent-browser diff url https://v1.example.com https://v2.example.com --screenshot
+
+# Full-page screenshot comparison
+agent-browser diff url https://v1.example.com https://v2.example.com --screenshot --full
+```
+
+The command navigates to the first URL, captures state, then navigates to the second URL and captures again. Snapshot diff is always included. Screenshot diff requires the `--screenshot` flag.
+
+After completion, the browser remains on the second URL.
+
+### Options
+
+<table>
+  <thead>
+    <tr><th>Flag</th><th>Description</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>--screenshot</code></td><td>Also perform visual screenshot comparison</td></tr>
+    <tr><td><code>--full</code></td><td>Use full-page screenshots</td></tr>
+    <tr><td><code>--wait-until &lt;strategy&gt;</code></td><td>Navigation wait strategy: <code>load</code>, <code>domcontentloaded</code>, <code>networkidle</code> (default: <code>load</code>)</td></tr>
+    <tr><td><code>-s, --selector &lt;sel&gt;</code></td><td>Scope snapshots to a CSS selector or @ref</td></tr>
+    <tr><td><code>-c, --compact</code></td><td>Use compact snapshot format</td></tr>
+    <tr><td><code>-d, --depth &lt;n&gt;</code></td><td>Limit snapshot tree depth</td></tr>
+  </tbody>
+</table>
+
+## Use cases
+
+### Verifying agent actions
+
+The most common use case: confirm that an action (click, fill, submit) changed the page as expected.
+
+```bash
+agent-browser snapshot -i          # Take interactive-only snapshot (baseline)
+agent-browser fill @e3 "test@example.com"
+agent-browser diff snapshot        # Compare current snapshot to the baseline
+```
+
+### Monitoring for changes
+
+Periodically compare a page against a saved baseline to detect updates.
+
+```bash
+# Save baseline
+agent-browser open https://example.com && agent-browser snapshot > baseline.txt
+
+# Later, check for changes
+agent-browser open https://example.com && agent-browser diff snapshot --baseline baseline.txt
+```
+
+### Visual regression testing
+
+Compare screenshots before and after a deploy to catch unintended visual changes.
+
+```bash
+agent-browser open https://staging.example.com && agent-browser screenshot baseline.png
+# ... deploy happens ...
+agent-browser open https://staging.example.com && agent-browser diff screenshot --baseline baseline.png
+```
+
+### Comparing environments
+
+Diff staging against production to verify parity.
+
+```bash
+agent-browser diff url https://staging.example.com https://prod.example.com --screenshot
+```

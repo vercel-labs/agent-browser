@@ -5,7 +5,7 @@ import * as os from 'os';
 import { BrowserManager } from './browser.js';
 import { IOSManager } from './ios-manager.js';
 import { parseCommand, serializeResponse, errorResponse } from './protocol.js';
-import { executeCommand } from './actions.js';
+import { executeCommand, initActionPolicy } from './actions.js';
 import { executeIOSCommand } from './ios-actions.js';
 import { StreamServer } from './stream-server.js';
 import {
@@ -20,6 +20,47 @@ import {
 
 // Manager type - either desktop browser or iOS
 type Manager = BrowserManager | IOSManager;
+
+/**
+ * Backpressure-aware socket write.
+ * If the kernel buffer is full (socket.write returns false),
+ * waits for the 'drain' event before resolving.
+ */
+export function safeWrite(socket: net.Socket, payload: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (socket.destroyed) {
+      resolve();
+      return;
+    }
+    const canContinue = socket.write(payload);
+    if (canContinue) {
+      resolve();
+    } else if (socket.destroyed) {
+      resolve();
+    } else {
+      const cleanup = () => {
+        socket.removeListener('drain', onDrain);
+        socket.removeListener('error', onError);
+        socket.removeListener('close', onClose);
+      };
+      const onDrain = () => {
+        cleanup();
+        resolve();
+      };
+      const onError = (err: Error) => {
+        cleanup();
+        reject(err);
+      };
+      const onClose = () => {
+        cleanup();
+        resolve();
+      };
+      socket.once('drain', onDrain);
+      socket.once('error', onError);
+      socket.once('close', onClose);
+    }
+  });
+}
 
 // Platform detection
 const isWindows = process.platform === 'win32';
@@ -221,7 +262,12 @@ export function isDaemonRunning(session?: string): boolean {
     // Check if process exists (works on both Unix and Windows)
     process.kill(pid, 0);
     return true;
-  } catch {
+  } catch (err: unknown) {
+    // EPERM means the process exists but we lack permission to signal it
+    // (e.g. caller is inside a macOS sandbox). Only ESRCH means it's gone.
+    if (err instanceof Error && (err as NodeJS.ErrnoException).code === 'EPERM') {
+      return true;
+    }
     // Process doesn't exist, clean up stale files
     cleanupSocket(session);
     return false;
@@ -292,6 +338,9 @@ export async function startDaemon(options?: {
   // Clean up expired state files on startup
   runCleanupExpiredStates();
 
+  // Initialize action policy enforcement
+  initActionPolicy();
+
   // Determine provider from options or environment
   const provider = options?.provider ?? process.env.AGENT_BROWSER_PROVIDER;
   const isIOS = provider === 'ios';
@@ -321,35 +370,25 @@ export async function startDaemon(options?: {
     let buffer = '';
     let httpChecked = false;
 
-    socket.on('data', async (data) => {
-      buffer += data.toString();
+    // Command serialization: queue incoming lines and process them one at a time.
+    // This prevents concurrent command execution which can cause socket.write
+    // buffer contention and EAGAIN errors on the Rust CLI side.
+    const commandQueue: string[] = [];
+    let processing = false;
 
-      // Security: Detect and reject HTTP requests to prevent cross-origin attacks.
-      // Browsers using fetch() must send HTTP headers (e.g., "POST / HTTP/1.1"),
-      // while legitimate clients send raw JSON starting with "{".
-      if (!httpChecked) {
-        httpChecked = true;
-        const trimmed = buffer.trimStart();
-        if (/^(GET|POST|PUT|DELETE|HEAD|OPTIONS|PATCH|CONNECT|TRACE)\s/i.test(trimmed)) {
-          socket.destroy();
-          return;
-        }
-      }
+    async function processQueue(): Promise<void> {
+      if (processing) return;
+      processing = true;
 
-      // Process complete lines
-      while (buffer.includes('\n')) {
-        const newlineIdx = buffer.indexOf('\n');
-        const line = buffer.substring(0, newlineIdx);
-        buffer = buffer.substring(newlineIdx + 1);
-
-        if (!line.trim()) continue;
+      while (commandQueue.length > 0) {
+        const line = commandQueue.shift()!;
 
         try {
           const parseResult = parseCommand(line);
 
           if (!parseResult.success) {
             const resp = errorResponse(parseResult.id ?? 'unknown', parseResult.error);
-            socket.write(serializeResponse(resp) + '\n');
+            await safeWrite(socket, serializeResponse(resp) + '\n');
             continue;
           }
 
@@ -363,21 +402,23 @@ export async function startDaemon(options?: {
                 success: true as const,
                 data: { devices },
               };
-              socket.write(serializeResponse(response) + '\n');
+              await safeWrite(socket, serializeResponse(response) + '\n');
             } catch (err) {
               const message = err instanceof Error ? err.message : String(err);
-              socket.write(
+              await safeWrite(
+                socket,
                 serializeResponse(errorResponse(parseResult.command.id, message)) + '\n'
               );
             }
             continue;
           }
 
-          // Auto-launch if not already launched and this isn't a launch/close command
+          // Auto-launch if not already launched and this isn't a launch/close/state_load command
           if (
             !manager.isLaunched() &&
             parseResult.command.action !== 'launch' &&
-            parseResult.command.action !== 'close'
+            parseResult.command.action !== 'close' &&
+            parseResult.command.action !== 'state_load'
           ) {
             if (isIOS && manager instanceof IOSManager) {
               // Auto-launch iOS Safari
@@ -417,6 +458,13 @@ export async function startDaemon(options?: {
 
               const ignoreHTTPSErrors = process.env.AGENT_BROWSER_IGNORE_HTTPS_ERRORS === '1';
               const allowFileAccess = process.env.AGENT_BROWSER_ALLOW_FILE_ACCESS === '1';
+              const colorSchemeEnv = process.env.AGENT_BROWSER_COLOR_SCHEME;
+              const colorScheme =
+                colorSchemeEnv === 'dark' ||
+                colorSchemeEnv === 'light' ||
+                colorSchemeEnv === 'no-preference'
+                  ? colorSchemeEnv
+                  : undefined;
               await manager.launch({
                 id: 'auto',
                 action: 'launch' as const,
@@ -430,6 +478,7 @@ export async function startDaemon(options?: {
                 proxy,
                 ignoreHTTPSErrors: ignoreHTTPSErrors,
                 allowFileAccess: allowFileAccess,
+                colorScheme,
                 autoStateFilePath: getSessionAutoStatePath(),
               });
             }
@@ -484,7 +533,7 @@ export async function startDaemon(options?: {
               isIOS && manager instanceof IOSManager
                 ? await executeIOSCommand(parseResult.command, manager)
                 : await executeCommand(parseResult.command, manager as BrowserManager);
-            socket.write(serializeResponse(response) + '\n');
+            await safeWrite(socket, serializeResponse(response) + '\n');
 
             if (!shuttingDown) {
               shuttingDown = true;
@@ -494,6 +543,9 @@ export async function startDaemon(options?: {
                 process.exit(0);
               }, 100);
             }
+
+            commandQueue.length = 0;
+            processing = false;
             return;
           }
 
@@ -511,12 +563,55 @@ export async function startDaemon(options?: {
             }
           }
 
-          socket.write(serializeResponse(response) + '\n');
+          await safeWrite(socket, serializeResponse(response) + '\n');
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
-          socket.write(serializeResponse(errorResponse('error', message)) + '\n');
+          await safeWrite(socket, serializeResponse(errorResponse('error', message)) + '\n').catch(
+            () => {}
+          ); // Socket may already be destroyed
         }
       }
+
+      processing = false;
+    }
+
+    socket.on('data', (data) => {
+      buffer += data.toString();
+
+      // Security: Detect and reject HTTP requests to prevent cross-origin attacks.
+      // Browsers using fetch() must send HTTP headers (e.g., "POST / HTTP/1.1"),
+      // while legitimate clients send raw JSON starting with "{".
+      if (!httpChecked) {
+        httpChecked = true;
+        const trimmed = buffer.trimStart();
+        if (/^(GET|POST|PUT|DELETE|HEAD|OPTIONS|PATCH|CONNECT|TRACE)\s/i.test(trimmed)) {
+          socket.destroy();
+          return;
+        }
+      }
+
+      // Extract complete lines and enqueue them for serial processing
+      while (buffer.includes('\n')) {
+        const newlineIdx = buffer.indexOf('\n');
+        const line = buffer.substring(0, newlineIdx);
+        buffer = buffer.substring(newlineIdx + 1);
+
+        if (!line.trim()) continue;
+        commandQueue.push(line);
+      }
+
+      processQueue().catch((err) => {
+        // Socket write failures during queue processing are non-fatal;
+        // the client has likely disconnected.
+        // Only log err.message to avoid leaking sensitive fields (e.g. passwords) from command objects.
+        console.warn('[warn] processQueue error:', err?.message ?? String(err));
+        if (process.env.AGENT_BROWSER_DEBUG === '1') {
+          console.error(
+            '[DEBUG] processQueue error stack:',
+            err?.stack ?? err?.message ?? String(err)
+          );
+        }
+      });
     });
 
     socket.on('error', () => {

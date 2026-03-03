@@ -1,4 +1,6 @@
-export const metadata = { title: "iOS Simulator" }
+import { pageMetadata } from "@/lib/page-metadata"
+
+export const metadata = pageMetadata("ios")
 
 # iOS Simulator
 
@@ -93,11 +95,16 @@ agent-browser snapshot -i
 agent-browser tap @e1
 ```
 
-| Variable | Description |
-| --- | --- |
-| `AGENT_BROWSER_PROVIDER` | Set to `ios` to enable iOS mode |
-| `AGENT_BROWSER_IOS_DEVICE` | Device name (e.g., "iPhone 16 Pro") |
-| `AGENT_BROWSER_IOS_UDID` | Device UDID (alternative to device name) |
+<table>
+  <thead>
+    <tr><th>Variable</th><th>Description</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>AGENT_BROWSER_PROVIDER</code></td><td>Set to <code>ios</code> to enable iOS mode</td></tr>
+    <tr><td><code>AGENT_BROWSER_IOS_DEVICE</code></td><td>Device name (e.g., "iPhone 16 Pro")</td></tr>
+    <tr><td><code>AGENT_BROWSER_IOS_UDID</code></td><td>Device UDID (alternative to device name)</td></tr>
+  </tbody>
+</table>
 
 ## Supported devices
 
@@ -168,13 +175,18 @@ agent-browser -p ios --device "John's iPhone" open https://example.com
 
 ## Differences from desktop
 
-| Feature | Desktop | iOS |
-| --- | --- | --- |
-| Browser | Chromium/Firefox/WebKit | Safari only |
-| Tabs | Supported | Single tab only |
-| PDF export | Supported | Not supported |
-| Screencast | Supported | Not supported |
-| Swipe gestures | Not native | Native support |
+<table>
+  <thead>
+    <tr><th>Feature</th><th>Desktop</th><th>iOS</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Browser</td><td>Chromium/Firefox/WebKit</td><td>Safari only</td></tr>
+    <tr><td>Tabs</td><td>Supported</td><td>Single tab only</td></tr>
+    <tr><td>PDF export</td><td>Supported</td><td>Not supported</td></tr>
+    <tr><td>Screencast</td><td>Supported</td><td>Not supported</td></tr>
+    <tr><td>Swipe gestures</td><td>Not native</td><td>Native support</td></tr>
+  </tbody>
+</table>
 
 ## Troubleshooting
 

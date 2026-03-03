@@ -1,5 +1,60 @@
 # agent-browser
 
+## 0.16.0
+
+### Minor Changes
+
+- 05018b3: Added experimental native Rust daemon (`--native` flag, `AGENT_BROWSER_NATIVE=1` env, or `"native": true` in config). The native daemon communicates with Chrome directly via CDP, eliminating Node.js and Playwright dependencies. Supports 150+ commands with full parity to the default Node.js daemon. Includes WebDriver backend for Safari/iOS, CDP protocol codegen, request tracking, frame context management, and comprehensive e2e and parity tests.
+
+## 0.15.3
+
+### Patch Changes
+
+- 62241b5: Fixed Windows compatibility issues including proper handling of extended-length path prefixes from canonicalize(), prevention of MSYS/Git Bash path translation that could mangle arguments, and improved daemon startup reliability. Also added ARM64 Windows support in postinstall shims and expanded CI testing with a full daemon lifecycle test on Windows.
+
+## 0.15.2
+
+### Patch Changes
+
+- 6aea316: Documentation site improvements and internal tooling updates including enhanced code blocks, mobile navigation, and docs chat components. CLI connection and output handling refinements. Skill creator reference documentation and scripts have been reorganized.
+
+## 0.15.1
+
+### Patch Changes
+
+- 7bd8ce9: Added support for chrome:// and chrome-extension:// URLs in navigation and recording commands. These special browser URLs are now preserved as-is instead of having https:// incorrectly prepended.
+
+## 0.15.0
+
+### Minor Changes
+
+- 2e38882: - Added security hardening: authentication vault, content boundary markers, domain allowlist, action policy, action confirmation, and output length limits.
+  - Added `--download-path` flag (and `AGENT_BROWSER_DOWNLOAD_PATH` env / `downloadPath` config key) to set a default download directory.
+  - Added `--selector` flag to `scroll` command for scrolling within specific container elements.
+
+## 0.14.0
+
+### Minor Changes
+
+- b7665e5: - Added `keyboard` command for raw keyboard input -- type with real keystrokes, insert text, and press shortcuts at the currently focused element without needing a selector.
+  - Added `--color-scheme` flag and `AGENT_BROWSER_COLOR_SCHEME` env var for persistent dark/light mode preference across browser sessions.
+  - Fixed IPC EAGAIN errors (os error 35/11) by adding backpressure-aware socket writes, command serialization, and lowering the default Playwright timeout to 25s (configurable via `AGENT_BROWSER_DEFAULT_TIMEOUT`).
+  - Fixed remote debugging (CDP) reconnection.
+  - Fixed state load failing when no browser is running.
+  - Fixed `--annotate` flag warning appearing when not explicitly passed via CLI.
+
+## 0.13.0
+
+### Minor Changes
+
+- ebd8717: Added new diff commands for comparing snapshots, screenshots, and URLs between page states. You can now run visual pixel diffs against baseline images, compare accessibility tree snapshots with customizable depth and selectors, and diff two URLs side-by-side with optional screenshot comparison.
+
+## 0.12.0
+
+### Minor Changes
+
+- 69ffad0: Add annotated screenshots with the new --annotate flag, which overlays numbered labels on interactive elements and prints a legend mapping each label to its element ref. This enables multimodal AI models to reason about visual layout while using the same @eN refs for subsequent interactions. The flag can also be set via the AGENT_BROWSER_ANNOTATE environment variable.
+
 ## 0.11.1
 
 ### Patch Changes

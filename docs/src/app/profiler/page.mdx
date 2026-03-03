@@ -1,4 +1,6 @@
-export const metadata = { title: "Profiler" }
+import { pageMetadata } from "@/lib/page-metadata"
+
+export const metadata = pageMetadata("profiler")
 
 # Profiler
 
@@ -25,11 +27,16 @@ tool that accepts Chrome Trace Event format.
 
 ## Commands
 
-| Command | Description |
-|---------|-------------|
-| `profiler start` | Start recording a performance profile |
-| `profiler start --categories <list>` | Start with custom trace categories |
-| `profiler stop [path]` | Stop profiling and save to file |
+<table>
+  <thead>
+    <tr><th>Command</th><th>Description</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>profiler start</code></td><td>Start recording a performance profile</td></tr>
+    <tr><td><code>profiler start --categories &lt;list&gt;</code></td><td>Start with custom trace categories</td></tr>
+    <tr><td><code>profiler stop [path]</code></td><td>Stop profiling and save to file</td></tr>
+  </tbody>
+</table>
 
 ## Trace categories
 
@@ -46,14 +53,19 @@ call stack analysis.
 
 ### Common categories
 
-| Category | What it captures |
-|----------|-----------------|
-| `devtools.timeline` | Standard DevTools performance events |
-| `v8.execute` | Time spent running JavaScript |
-| `blink` | Renderer events (layout, paint, style) |
-| `blink.user_timing` | `performance.mark()` and `performance.measure()` calls |
-| `latencyInfo` | Input-to-display latency |
-| `disabled-by-default-v8.cpu_profiler` | Sampling-based JS CPU profiling |
+<table>
+  <thead>
+    <tr><th>Category</th><th>What it captures</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>devtools.timeline</code></td><td>Standard DevTools performance events</td></tr>
+    <tr><td><code>v8.execute</code></td><td>Time spent running JavaScript</td></tr>
+    <tr><td><code>blink</code></td><td>Renderer events (layout, paint, style)</td></tr>
+    <tr><td><code>blink.user_timing</code></td><td><code>performance.mark()</code> and <code>performance.measure()</code> calls</td></tr>
+    <tr><td><code>latencyInfo</code></td><td>Input-to-display latency</td></tr>
+    <tr><td><code>disabled-by-default-v8.cpu_profiler</code></td><td>Sampling-based JS CPU profiling</td></tr>
+  </tbody>
+</table>
 
 ## Output format
 

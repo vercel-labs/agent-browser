@@ -16,17 +16,36 @@ import {
 } from 'playwright-core';
 import path from 'node:path';
 import os from 'node:os';
-import { existsSync, mkdirSync, rmSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, readFileSync, statSync } from 'node:fs';
 import { writeFile, mkdir } from 'node:fs/promises';
 import type { LaunchCommand, TraceEvent } from './types.js';
 import { type RefMap, type EnhancedSnapshot, getEnhancedSnapshot, parseRef } from './snapshot.js';
 import { safeHeaderMerge } from './state-utils.js';
+import { isDomainAllowed, installDomainFilter, parseDomainList } from './domain-filter.js';
 import {
   getEncryptionKey,
   isEncryptedPayload,
   decryptData,
   ENCRYPTION_KEY_ENV,
 } from './state-utils.js';
+
+/**
+ * Returns the default Playwright timeout in milliseconds for standard operations.
+ * Can be overridden via the AGENT_BROWSER_DEFAULT_TIMEOUT environment variable.
+ * Default is 25s, which is below the CLI's 30s IPC read timeout to ensure
+ * Playwright errors are returned before the CLI gives up with EAGAIN.
+ * CDP and recording contexts use a shorter fixed timeout (10s) and are not affected.
+ */
+export function getDefaultTimeout(): number {
+  const envValue = process.env.AGENT_BROWSER_DEFAULT_TIMEOUT;
+  if (envValue) {
+    const parsed = parseInt(envValue, 10);
+    if (!isNaN(parsed) && parsed >= 1000) {
+      return parsed;
+    }
+  }
+  return 25000;
+}
 
 // Screencast frame data from CDP
 export interface ScreencastFrame {
@@ -99,6 +118,17 @@ export class BrowserManager {
   private refMap: RefMap = {};
   private lastSnapshot: string = '';
   private scopedHeaderRoutes: Map<string, (route: Route) => Promise<void>> = new Map();
+  private colorScheme: 'light' | 'dark' | 'no-preference' | null = null;
+  private downloadPath: string | null = null;
+  private allowedDomains: string[] = [];
+
+  /**
+   * Set the persistent color scheme preference.
+   * Applied automatically to all new pages and contexts.
+   */
+  setColorScheme(scheme: 'light' | 'dark' | 'no-preference' | null): void {
+    this.colorScheme = scheme;
+  }
 
   // CDP session for screencast and input injection
   private cdpSession: CDPSession | null = null;
@@ -182,6 +212,20 @@ export class BrowserManager {
   }
 
   /**
+   * Get the last snapshot tree text (empty string if no snapshot has been taken)
+   */
+  getLastSnapshot(): string {
+    return this.lastSnapshot;
+  }
+
+  /**
+   * Update the stored snapshot (used by diff to keep the baseline current)
+   */
+  setLastSnapshot(snapshot: string): void {
+    this.lastSnapshot = snapshot;
+  }
+
+  /**
    * Get the cached ref map from last snapshot
    */
   getRefMap(): RefMap {
@@ -209,12 +253,10 @@ export class BrowserManager {
     }
 
     // Build locator with exact: true to avoid substring matches
-    let locator: Locator;
-    if (refData.name) {
-      locator = page.getByRole(refData.role as any, { name: refData.name, exact: true });
-    } else {
-      locator = page.getByRole(refData.role as any);
-    }
+    let locator: Locator = page.getByRole(refData.role as any, {
+      name: refData.name,
+      exact: true,
+    });
 
     // If an nth index is stored (for disambiguation), use it
     if (refData.nth !== undefined) {
@@ -229,6 +271,61 @@ export class BrowserManager {
    */
   isRef(selector: string): boolean {
     return parseRef(selector) !== null;
+  }
+
+  /**
+   * Install the domain filter on a context if an allowlist is configured.
+   * Should be called before any pages navigate on the context.
+   */
+  private async ensureDomainFilter(context: BrowserContext): Promise<void> {
+    if (this.allowedDomains.length > 0) {
+      await installDomainFilter(context, this.allowedDomains);
+    }
+  }
+
+  /**
+   * After installing the domain filter, verify existing pages are on allowed
+   * domains. Pages that pre-date the filter (e.g. CDP/cloud connect) may have
+   * already navigated to disallowed domains. Navigate them to about:blank.
+   */
+  private async sanitizeExistingPages(pages: Page[]): Promise<void> {
+    if (this.allowedDomains.length === 0) return;
+    for (const page of pages) {
+      const url = page.url();
+      if (!url || url === 'about:blank') continue;
+      try {
+        const hostname = new URL(url).hostname.toLowerCase();
+        if (!isDomainAllowed(hostname, this.allowedDomains)) {
+          await page.goto('about:blank');
+        }
+      } catch {
+        await page.goto('about:blank').catch(() => {});
+      }
+    }
+  }
+
+  /**
+   * Check if a URL is allowed by the domain allowlist.
+   * Throws if the URL's domain is blocked. No-op if no allowlist is set.
+   * Blocks non-http(s) schemes and unparseable URLs by default.
+   */
+  checkDomainAllowed(url: string): void {
+    if (this.allowedDomains.length === 0) return;
+
+    if (!url.startsWith('http://') && !url.startsWith('https://')) {
+      throw new Error(`Navigation blocked: non-http(s) scheme in URL "${url}"`);
+    }
+
+    let hostname: string;
+    try {
+      hostname = new URL(url).hostname.toLowerCase();
+    } catch {
+      throw new Error(`Navigation blocked: unable to parse URL "${url}"`);
+    }
+
+    if (!isDomainAllowed(hostname, this.allowedDomains)) {
+      throw new Error(`Navigation blocked: ${hostname} is not in the allowed domains list`);
+    }
   }
 
   /**
@@ -265,10 +362,13 @@ export class BrowserManager {
     if (this.contexts.length > 0) {
       context = this.contexts[this.contexts.length - 1];
     } else if (this.browser) {
-      context = await this.browser.newContext();
-      context.setDefaultTimeout(60000);
+      context = await this.browser.newContext({
+        ...(this.colorScheme && { colorScheme: this.colorScheme }),
+      });
+      context.setDefaultTimeout(getDefaultTimeout());
       this.contexts.push(context);
       this.setupContextTracking(context);
+      await this.ensureDomainFilter(context);
     } else {
       return;
     }
@@ -895,6 +995,8 @@ export class BrowserManager {
       context.setDefaultTimeout(10000);
       this.contexts.push(context);
       this.setupContextTracking(context);
+      await this.ensureDomainFilter(context);
+      await this.sanitizeExistingPages([page]);
       this.pages.push(page);
       this.activePageIndex = 0;
       this.setupPageTracking(page);
@@ -1033,12 +1135,14 @@ export class BrowserManager {
       this.kernelSessionId = session.session_id;
       this.kernelApiKey = kernelApiKey;
       this.browser = browser;
-      context.setDefaultTimeout(60000);
+      context.setDefaultTimeout(getDefaultTimeout());
       this.contexts.push(context);
+      this.setupContextTracking(context);
+      await this.ensureDomainFilter(context);
+      await this.sanitizeExistingPages([page]);
       this.pages.push(page);
       this.activePageIndex = 0;
       this.setupPageTracking(page);
-      this.setupContextTracking(context);
     } catch (error) {
       await this.closeKernelSession(session.session_id, kernelApiKey).catch((sessionError) => {
         console.error('Failed to close Kernel session during cleanup:', sessionError);
@@ -1106,12 +1210,14 @@ export class BrowserManager {
       this.browserUseSessionId = session.id;
       this.browserUseApiKey = browserUseApiKey;
       this.browser = browser;
-      context.setDefaultTimeout(60000);
+      context.setDefaultTimeout(getDefaultTimeout());
       this.contexts.push(context);
+      this.setupContextTracking(context);
+      await this.ensureDomainFilter(context);
+      await this.sanitizeExistingPages([page]);
       this.pages.push(page);
       this.activePageIndex = 0;
       this.setupPageTracking(page);
-      this.setupContextTracking(context);
     } catch (error) {
       await this.closeBrowserUseSession(session.id, browserUseApiKey).catch((sessionError) => {
         console.error('Failed to close Browser Use session during cleanup:', sessionError);
@@ -1257,6 +1363,30 @@ export class BrowserManager {
       }
     }
 
+    if (options.colorScheme) {
+      this.colorScheme = options.colorScheme;
+    }
+
+    if (options.downloadPath) {
+      this.downloadPath = options.downloadPath;
+    }
+
+    if (options.allowedDomains && options.allowedDomains.length > 0) {
+      this.allowedDomains = options.allowedDomains.map((d: string) => d.toLowerCase());
+    } else {
+      const envDomains = process.env.AGENT_BROWSER_ALLOWED_DOMAINS;
+      if (envDomains) {
+        this.allowedDomains = parseDomainList(envDomains);
+      }
+    }
+
+    if (this.downloadPath && (cdpEndpoint || options.autoConnect)) {
+      const warning =
+        "--download-path is ignored when connecting via CDP or auto-connect (downloads use the remote browser's configuration)";
+      this.launchWarnings.push(warning);
+      console.error(`[WARN] ${warning}`);
+    }
+
     if (cdpEndpoint) {
       await this.connectViaCDP(cdpEndpoint);
       return;
@@ -1270,6 +1400,12 @@ export class BrowserManager {
     // Cloud browser providers require explicit opt-in via -p flag or AGENT_BROWSER_PROVIDER env var
     // -p flag takes precedence over env var
     const provider = options.provider ?? process.env.AGENT_BROWSER_PROVIDER;
+    if (this.downloadPath && provider) {
+      const warning =
+        "--download-path is ignored when using a cloud provider (downloads use the remote browser's configuration)";
+      this.launchWarnings.push(warning);
+      console.error(`[WARN] ${warning}`);
+    }
     if (provider === 'browserbase') {
       await this.connectToBrowserbase();
       return;
@@ -1287,6 +1423,23 @@ export class BrowserManager {
     if (provider === 'browserless') {
       await this.connectToBrowserless();
       return;
+    }
+
+    if (this.downloadPath) {
+      const resolved = path.resolve(this.downloadPath);
+      const stat = statSync(resolved, { throwIfNoEntry: false });
+      if (stat && !stat.isDirectory()) {
+        throw new Error(`Download path is not a directory: ${resolved}`);
+      }
+      if (!stat) {
+        try {
+          mkdirSync(resolved, { recursive: true });
+        } catch (e: unknown) {
+          const msg = e instanceof Error ? e.message : String(e);
+          throw new Error(`Cannot create download directory '${resolved}': ${msg}`);
+        }
+      }
+      this.downloadPath = resolved;
     }
 
     const browserType = options.browser ?? 'chromium';
@@ -1345,6 +1498,8 @@ export class BrowserManager {
           userAgent: options.userAgent,
           ...(options.proxy && { proxy: options.proxy }),
           ignoreHTTPSErrors: options.ignoreHTTPSErrors ?? false,
+          ...(this.colorScheme && { colorScheme: this.colorScheme }),
+          ...(this.downloadPath && { downloadsPath: this.downloadPath }),
         }
       );
       this.isPersistentContext = true;
@@ -1361,6 +1516,8 @@ export class BrowserManager {
         userAgent: options.userAgent,
         ...(options.proxy && { proxy: options.proxy }),
         ignoreHTTPSErrors: options.ignoreHTTPSErrors ?? false,
+        ...(this.colorScheme && { colorScheme: this.colorScheme }),
+        ...(this.downloadPath && { downloadsPath: this.downloadPath }),
       });
       this.isPersistentContext = true;
     } else {
@@ -1369,6 +1526,7 @@ export class BrowserManager {
         headless: options.headless ?? true,
         executablePath: options.executablePath,
         args: baseArgs,
+        ...(this.downloadPath && { downloadsPath: this.downloadPath }),
       });
       this.cdpEndpoint = null;
 
@@ -1446,14 +1604,17 @@ export class BrowserManager {
         storageState,
         ...(options.proxy && { proxy: options.proxy }),
         ignoreHTTPSErrors: options.ignoreHTTPSErrors ?? false,
+        ...(this.colorScheme && { colorScheme: this.colorScheme }),
       });
     }
 
-    context.setDefaultTimeout(60000);
+    context.setDefaultTimeout(getDefaultTimeout());
     this.contexts.push(context);
     this.setupContextTracking(context);
+    await this.ensureDomainFilter(context);
 
     const page = context.pages()[0] ?? (await context.newPage());
+    await this.sanitizeExistingPages([page]);
     // Only add if not already tracked (setupContextTracking may have already added it via 'page' event)
     if (!this.pages.includes(page)) {
       this.pages.push(page);
@@ -1466,7 +1627,10 @@ export class BrowserManager {
    * Connect to a running browser via CDP (Chrome DevTools Protocol)
    * @param cdpEndpoint Either a port number (as string) or a full WebSocket URL (ws:// or wss://)
    */
-  private async connectViaCDP(cdpEndpoint: string | undefined): Promise<void> {
+  private async connectViaCDP(
+    cdpEndpoint: string | undefined,
+    options?: { timeout?: number }
+  ): Promise<void> {
     if (!cdpEndpoint) {
       throw new Error('CDP endpoint is required for CDP connection');
     }
@@ -1491,14 +1655,16 @@ export class BrowserManager {
       cdpUrl = `http://localhost:${cdpEndpoint}`;
     }
 
-    const browser = await chromium.connectOverCDP(cdpUrl).catch(() => {
-      throw new Error(
-        `Failed to connect via CDP to ${cdpUrl}. ` +
-          (cdpUrl.includes('localhost')
-            ? `Make sure the app is running with --remote-debugging-port=${cdpEndpoint}`
-            : 'Make sure the remote browser is accessible and the URL is correct.')
-      );
-    });
+    const browser = await chromium
+      .connectOverCDP(cdpUrl, { timeout: options?.timeout })
+      .catch(() => {
+        throw new Error(
+          `Failed to connect via CDP to ${cdpUrl}. ` +
+            (cdpUrl.includes('localhost')
+              ? `Make sure the app is running with --remote-debugging-port=${cdpEndpoint}`
+              : 'Make sure the remote browser is accessible and the URL is correct.')
+        );
+      });
 
     // Validate and set up state, cleaning up browser connection if anything fails
     try {
@@ -1522,7 +1688,10 @@ export class BrowserManager {
         context.setDefaultTimeout(10000);
         this.contexts.push(context);
         this.setupContextTracking(context);
+        await this.ensureDomainFilter(context);
       }
+
+      await this.sanitizeExistingPages(allPages);
 
       for (const page of allPages) {
         this.pages.push(page);
@@ -1624,20 +1793,27 @@ export class BrowserManager {
     for (const dir of userDataDirs) {
       const activePort = this.readDevToolsActivePort(dir);
       if (activePort) {
-        // Verify the port is actually responding
+        // Try HTTP discovery first (works with --remote-debugging-port mode)
         const wsUrl = await this.probeDebugPort(activePort.port);
         if (wsUrl) {
-          // Connect using the discovered WebSocket URL
           await this.connectViaCDP(wsUrl);
           return;
         }
-        // Port from file exists but not responding; try HTTP endpoint directly
-        const httpUrl = `http://127.0.0.1:${activePort.port}`;
+        // HTTP probe failed -- Chrome M144+ chrome://inspect remote debugging uses a
+        // WebSocket-only server with no HTTP endpoints. Connect using the WebSocket
+        // path read directly from DevToolsActivePort.
+        const directWsUrl = `ws://127.0.0.1:${activePort.port}${activePort.wsPath}`;
         try {
-          await this.connectViaCDP(httpUrl);
+          if (process.env.AGENT_BROWSER_DEBUG === '1') {
+            console.error(
+              `[DEBUG] HTTP probe failed on port ${activePort.port}, ` +
+                `attempting direct WebSocket connection to ${directWsUrl}`
+            );
+          }
+          await this.connectViaCDP(directWsUrl, { timeout: 60_000 });
           return;
         } catch {
-          // Port listed but not connectable, try next directory
+          // Direct WebSocket also failed, try next directory
         }
       }
     }
@@ -1676,6 +1852,10 @@ export class BrowserManager {
    * Set up console, error, and close tracking for a page
    */
   private setupPageTracking(page: Page): void {
+    if (this.colorScheme) {
+      page.emulateMedia({ colorScheme: this.colorScheme }).catch(() => {});
+    }
+
     page.on('console', (msg) => {
       this.consoleMessages.push({
         type: msg.type(),
@@ -1763,10 +1943,12 @@ export class BrowserManager {
 
     const context = await this.browser.newContext({
       viewport: viewport === undefined ? { width: 1280, height: 720 } : viewport,
+      ...(this.colorScheme && { colorScheme: this.colorScheme }),
     });
-    context.setDefaultTimeout(60000);
+    context.setDefaultTimeout(getDefaultTimeout());
     this.contexts.push(context);
     this.setupContextTracking(context);
+    await this.ensureDomainFilter(context);
 
     const page = await context.newPage();
     // Only add if not already tracked (setupContextTracking may have already added it via 'page' event)
@@ -2509,6 +2691,7 @@ export class BrowserManager {
     this.browserlessApiToken = null;
     this.isPersistentContext = false;
     this.activePageIndex = 0;
+    this.colorScheme = null;
     this.refMap = {};
     this.lastSnapshot = '';
     this.frameCallback = null;

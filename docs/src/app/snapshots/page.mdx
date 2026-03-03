@@ -1,4 +1,6 @@
-export const metadata = { title: "Snapshots" }
+import { pageMetadata } from "@/lib/page-metadata"
+
+export const metadata = pageMetadata("snapshots")
 
 # Snapshots
 
@@ -18,13 +20,18 @@ agent-browser snapshot -s "#main"         # Scope to CSS selector
 agent-browser snapshot -i -c -d 5         # Combine options
 ```
 
-| Option | Description |
-| --- | --- |
-| `-i, --interactive` | Only interactive elements (buttons, links, inputs) |
-| `-C, --cursor` | Include cursor-interactive elements (cursor:pointer, onclick, tabindex) |
-| `-c, --compact` | Remove empty structural elements |
-| `-d, --depth` | Limit tree depth |
-| `-s, --selector` | Scope to CSS selector |
+<table>
+  <thead>
+    <tr><th>Option</th><th>Description</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>-i, --interactive</code></td><td>Only interactive elements (buttons, links, inputs)</td></tr>
+    <tr><td><code>-C, --cursor</code></td><td>Include cursor-interactive elements (cursor:pointer, onclick, tabindex)</td></tr>
+    <tr><td><code>-c, --compact</code></td><td>Remove empty structural elements</td></tr>
+    <tr><td><code>-d, --depth</code></td><td>Limit tree depth</td></tr>
+    <tr><td><code>-s, --selector</code></td><td>Scope to CSS selector</td></tr>
+  </tbody>
+</table>
 
 ## Cursor-interactive elements
 
@@ -78,12 +85,28 @@ agent-browser snapshot -i    # Get fresh refs
 agent-browser click @e1      # Use new refs
 ```
 
+## Annotated screenshots
+
+For visual context alongside text snapshots, use `screenshot --annotate` to overlay numbered labels on interactive elements. Each label `[N]` maps to ref `@eN`:
+
+```bash
+agent-browser screenshot --annotate ./page.png
+# -> Screenshot saved to ./page.png
+#    [1] @e1 button "Submit"
+#    [2] @e2 link "Home"
+#    [3] @e3 textbox "Email"
+agent-browser click @e2
+```
+
+Annotated screenshots also cache refs, so you can interact with elements immediately. This is useful when the text snapshot is insufficient -- unlabeled icons, canvas content, or visual layout verification.
+
 ## Best practices
 
 1. Use `-i` to reduce output to actionable elements
 2. Re-snapshot after page changes to get updated refs
 3. Scope with `-s` for specific page sections
 4. Use `-d` to limit depth on complex pages
+5. Use `screenshot --annotate` when visual context is needed alongside refs
 
 ## JSON output
 

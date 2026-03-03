@@ -78,24 +78,13 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Cache Cargo dependencies
-        uses: actions/cache@v4
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            cli/target/
-          key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ hashFiles('cli/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-${{ matrix.target }}-
-
-      - name: Build release binary
-        run: cargo build --release --manifest-path cli/Cargo.toml --target ${{ matrix.target }}
+          workspaces: cli
 
       - name: Run Rust tests
-        run: cargo test --manifest-path cli/Cargo.toml --target ${{ matrix.target }}
+        run: cargo test --profile ci --manifest-path cli/Cargo.toml --target ${{ matrix.target }}
 
   windows-integration:
     name: Windows Integration Test
@@ -122,18 +111,10 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
 
-      - name: Cache Cargo dependencies
-        uses: actions/cache@v4
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            cli/target/
-          key: windows-cargo-x86_64-pc-windows-msvc-${{ hashFiles('cli/Cargo.lock') }}
-          restore-keys: |
-            windows-cargo-x86_64-pc-windows-msvc-
+          workspaces: cli
 
       - name: Build Rust CLI
         run: cargo build --release --manifest-path cli/Cargo.toml --target x86_64-pc-windows-msvc
@@ -172,6 +153,23 @@ jobs:
             exit 1
           }
         shell: pwsh
+
+      - name: Test daemon lifecycle (open, snapshot, close)
+        run: |
+          $env:PATH = "$pwd\bin;$env:PATH"
+          Write-Host "--- Opening page ---"
+          bin/agent-browser-win32-x64.exe open https://example.com
+          if ($LASTEXITCODE -ne 0) { Write-Error "open failed"; exit 1 }
+          Write-Host "--- Taking snapshot ---"
+          $snapshot = bin/agent-browser-win32-x64.exe snapshot
+          if ($LASTEXITCODE -ne 0) { Write-Error "snapshot failed"; exit 1 }
+          Write-Host $snapshot
+          Write-Host "--- Closing browser ---"
+          bin/agent-browser-win32-x64.exe close
+          if ($LASTEXITCODE -ne 0) { Write-Error "close failed"; exit 1 }
+          Write-Host "--- Windows daemon lifecycle test passed ---"
+        shell: pwsh
+        timeout-minutes: 5
 
   serverless-chromium:
     name: Serverless Chromium (@sparticuz/chromium)
@@ -241,18 +239,10 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Cache Cargo dependencies
-        uses: actions/cache@v4
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            cli/target/
-          key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ hashFiles('cli/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-${{ matrix.target }}-
+          workspaces: cli
 
       - name: Build Rust CLI
         run: cargo build --release --manifest-path cli/Cargo.toml --target ${{ matrix.target }}

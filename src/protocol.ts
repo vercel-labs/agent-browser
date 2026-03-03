@@ -49,8 +49,13 @@ const launchSchema = baseCommandSchema.extend({
   provider: z.string().optional(),
   ignoreHTTPSErrors: z.boolean().optional(),
   allowFileAccess: z.boolean().optional(),
+  colorScheme: z.enum(['light', 'dark', 'no-preference']).optional(),
+  downloadPath: z.string().optional(),
   profile: z.string().optional(),
   storageState: z.string().optional(),
+  allowedDomains: z.array(z.string()).optional(),
+  actionPolicy: z.string().optional(),
+  confirmActions: z.array(z.string()).optional(),
 });
 
 const navigateSchema = baseCommandSchema.extend({
@@ -441,7 +446,10 @@ const errorsSchema = baseCommandSchema.extend({
 
 const keyboardSchema = baseCommandSchema.extend({
   action: z.literal('keyboard'),
-  keys: z.string().min(1),
+  subaction: z.enum(['type', 'press', 'insertText']).optional(),
+  keys: z.string().min(1).optional(),
+  text: z.string().min(1).optional(),
+  delay: z.number().optional(),
 });
 
 const wheelSchema = baseCommandSchema.extend({
@@ -740,6 +748,36 @@ const deviceListSchema = baseCommandSchema.extend({
   action: z.literal('device_list'),
 });
 
+// Diff schemas
+const diffSnapshotSchema = baseCommandSchema.extend({
+  action: z.literal('diff_snapshot'),
+  baseline: z.string().optional(),
+  selector: z.string().optional(),
+  compact: z.boolean().optional(),
+  maxDepth: z.number().nonnegative().optional(),
+});
+
+const diffScreenshotSchema = baseCommandSchema.extend({
+  action: z.literal('diff_screenshot'),
+  baseline: z.string().min(1),
+  output: z.string().optional(),
+  threshold: z.number().min(0).max(1).optional(),
+  selector: z.string().min(1).optional(),
+  fullPage: z.boolean().optional(),
+});
+
+const diffUrlSchema = baseCommandSchema.extend({
+  action: z.literal('diff_url'),
+  url1: z.string().min(1),
+  url2: z.string().min(1),
+  screenshot: z.boolean().optional(),
+  fullPage: z.boolean().optional(),
+  waitUntil: z.enum(['load', 'domcontentloaded', 'networkidle']).optional(),
+  selector: z.string().optional(),
+  compact: z.boolean().optional(),
+  maxDepth: z.number().nonnegative().optional(),
+});
+
 const pressSchema = baseCommandSchema.extend({
   action: z.literal('press'),
   key: z.string().min(1),
@@ -753,6 +791,7 @@ const screenshotSchema = baseCommandSchema.extend({
   selector: z.string().min(1).nullish(),
   format: z.enum(['png', 'jpeg']).optional(),
   quality: z.number().min(0).max(100).optional(),
+  annotate: z.boolean().optional(),
 });
 
 const snapshotSchema = baseCommandSchema.extend({
@@ -835,6 +874,53 @@ const windowNewSchema = baseCommandSchema.extend({
     })
     .nullable()
     .optional(),
+});
+
+const authProfileName = z
+  .string()
+  .min(1)
+  .regex(/^[a-zA-Z0-9_-]+$/, {
+    message: 'Profile name must contain only alphanumeric characters, hyphens, and underscores',
+  });
+
+const authSaveSchema = baseCommandSchema.extend({
+  action: z.literal('auth_save'),
+  name: authProfileName,
+  url: z.string().min(1),
+  username: z.string().min(1),
+  password: z.string().min(1),
+  usernameSelector: z.string().optional(),
+  passwordSelector: z.string().optional(),
+  submitSelector: z.string().optional(),
+});
+
+const authLoginSchema = baseCommandSchema.extend({
+  action: z.literal('auth_login'),
+  name: authProfileName,
+});
+
+const authListSchema = baseCommandSchema.extend({
+  action: z.literal('auth_list'),
+});
+
+const authDeleteSchema = baseCommandSchema.extend({
+  action: z.literal('auth_delete'),
+  name: authProfileName,
+});
+
+const authShowSchema = baseCommandSchema.extend({
+  action: z.literal('auth_show'),
+  name: authProfileName,
+});
+
+const confirmSchema = baseCommandSchema.extend({
+  action: z.literal('confirm'),
+  confirmationId: z.string().min(1),
+});
+
+const denySchema = baseCommandSchema.extend({
+  action: z.literal('deny'),
+  confirmationId: z.string().min(1),
 });
 
 // Union schema for all commands
@@ -971,6 +1057,16 @@ const commandSchema = z.discriminatedUnion('action', [
   inputTouchSchema,
   swipeSchema,
   deviceListSchema,
+  diffSnapshotSchema,
+  diffScreenshotSchema,
+  diffUrlSchema,
+  confirmSchema,
+  denySchema,
+  authSaveSchema,
+  authLoginSchema,
+  authListSchema,
+  authDeleteSchema,
+  authShowSchema,
 ]);
 
 // Parse result type
@@ -1021,6 +1117,16 @@ export function parseCommand(input: string): ParseResult {
       error: 'frame command requires at least one of: selector, name, or url',
       id,
     };
+  }
+
+  if (command.action === 'keyboard') {
+    const sub = command.subaction ?? 'press';
+    if ((sub === 'type' || sub === 'insertText') && !command.text) {
+      return { success: false, error: `keyboard ${sub} requires text`, id };
+    }
+    if (sub === 'press' && !command.keys) {
+      return { success: false, error: 'keyboard press requires keys', id };
+    }
   }
 
   return { success: true, command };

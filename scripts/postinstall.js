@@ -187,46 +187,42 @@ async function fixUnixSymlink() {
  * We overwrite them to invoke the native .exe directly.
  */
 async function fixWindowsShims() {
-  // Check if this is a global install by looking for npm's global prefix
   let npmBinDir;
   try {
     npmBinDir = execSync('npm prefix -g', { encoding: 'utf8' }).trim();
   } catch {
-    return; // Not a global install or npm not available
+    return;
   }
 
-  // The shims are in the npm prefix directory (not prefix/bin on Windows)
   const cmdShim = join(npmBinDir, 'agent-browser.cmd');
   const ps1Shim = join(npmBinDir, 'agent-browser.ps1');
 
-  // Only fix if shims exist (indicates global install)
+  // Shims may not exist yet during postinstall (npm creates them after
+  // lifecycle scripts). If missing, fall back: the JS wrapper at
+  // bin/agent-browser.js handles Windows correctly via child_process.spawn.
   if (!existsSync(cmdShim)) {
     return;
   }
 
-  // Path to native binary relative to npm prefix
-  const relativeBinaryPath = 'node_modules\\agent-browser\\bin\\agent-browser-win32-x64.exe';
+  // Detect architecture so ARM64 Windows is handled correctly
+  const cpuArch = arch() === 'arm64' ? 'arm64' : 'x64';
+  const relativeBinaryPath = `node_modules\\agent-browser\\bin\\agent-browser-win32-${cpuArch}.exe`;
+  const absoluteBinaryPath = join(npmBinDir, relativeBinaryPath);
+
+  // Only rewrite shims if the native binary actually exists
+  if (!existsSync(absoluteBinaryPath)) {
+    return;
+  }
 
   try {
-    // Overwrite .cmd shim
     const cmdContent = `@ECHO off\r\n"%~dp0${relativeBinaryPath}" %*\r\n`;
     writeFileSync(cmdShim, cmdContent);
 
-    // Overwrite .ps1 shim
-    const ps1Content = `#!/usr/bin/env pwsh
-$basedir = Split-Path $MyInvocation.MyCommand.Definition -Parent
-$exe = ""
-if ($PSVersionTable.PSVersion -lt "6.0" -or $IsWindows) {
-  $exe = ".exe"
-}
-& "$basedir/${relativeBinaryPath.replace(/\\/g, '/')}" $args
-exit $LASTEXITCODE
-`;
+    const ps1Content = `#!/usr/bin/env pwsh\r\n$basedir = Split-Path $MyInvocation.MyCommand.Definition -Parent\r\n& "$basedir\\${relativeBinaryPath}" $args\r\nexit $LASTEXITCODE\r\n`;
     writeFileSync(ps1Shim, ps1Content);
 
     console.log('✓ Optimized: shims point to native binary (zero overhead)');
   } catch (err) {
-    // Permission error or other issue - not critical, JS wrapper still works
     console.log(`⚠ Could not optimize shims: ${err.message}`);
     console.log('  CLI will work via Node.js wrapper (slightly slower startup)');
   }

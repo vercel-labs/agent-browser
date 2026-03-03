@@ -1,0 +1,85 @@
+import { pageMetadata } from "@/lib/page-metadata"
+
+export const metadata = pageMetadata("native-mode")
+
+# Native Mode (Experimental)
+
+agent-browser includes an experimental native Rust daemon that communicates with Chrome directly via the Chrome DevTools Protocol (CDP), eliminating the Node.js and Playwright dependencies entirely.
+
+## Enabling Native Mode
+
+Native mode is opt-in. Enable it with the `--native` flag or the `AGENT_BROWSER_NATIVE` environment variable.
+
+### CLI Flag
+
+```bash
+agent-browser --native open example.com
+agent-browser --native snapshot
+agent-browser --native close
+```
+
+### Environment Variable
+
+Set `AGENT_BROWSER_NATIVE=1` to avoid passing the flag on every command:
+
+```bash
+export AGENT_BROWSER_NATIVE=1
+agent-browser open example.com
+agent-browser snapshot
+agent-browser close
+```
+
+### Config File
+
+Add `"native": true` to your `agent-browser.json`:
+
+```json
+{"native": true}
+```
+
+## Architecture Comparison
+
+<table>
+  <thead>
+    <tr><th></th><th>Default (Node.js)</th><th>Native (<code>--native</code>)</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><strong>Runtime</strong></td><td>Node.js + Playwright</td><td>Pure Rust binary</td></tr>
+    <tr><td><strong>Protocol</strong></td><td>Playwright protocol</td><td>Direct CDP / WebDriver</td></tr>
+    <tr><td><strong>Install size</strong></td><td>Larger (Node.js + npm deps)</td><td>Smaller (single binary)</td></tr>
+    <tr><td><strong>Browser support</strong></td><td>Chromium, Firefox, WebKit</td><td>Chromium, Safari (via WebDriver)</td></tr>
+    <tr><td><strong>Stability</strong></td><td>Stable</td><td>Experimental</td></tr>
+  </tbody>
+</table>
+
+## What Works
+
+All core commands are supported in native mode:
+
+- Navigation: `open`, `back`, `forward`, `reload`
+- Interaction: `click`, `fill`, `type`, `press`, `hover`, `select`, `check`, `uncheck`, `scroll`, `focus`, `clear`, `upload`, `drag`
+- Observation: `snapshot`, `screenshot`, `eval`, `get text/html/value/attr/count/box/styles`, `is visible/enabled/checked`
+- State: `cookies get/set/clear`, `storage local/session`, `state save/load/list`
+- Tabs: `tab new/list/close`, tab switching
+- Emulation: `set viewport`, `set device`, `set geo`, user agent, timezone, locale
+- Streaming: WebSocket screencast and remote input
+- Diffing: `diff snapshot`, `diff url`
+- Recording: `record start/stop`
+- Profiling: `profiler start/stop`, `trace start/stop`
+
+## Known Limitations
+
+- **Firefox and WebKit** are not yet supported (Chromium and Safari only)
+- **Playwright trace format** is not available (native tracing uses Chrome's built-in tracing)
+- **HAR export** is not available
+- **Network route interception** uses CDP Fetch domain instead of Playwright's route API
+
+## Switching Between Modes
+
+The native daemon and Node.js daemon share the same session socket. You cannot run both simultaneously for the same session. Close the current daemon before switching:
+
+```bash
+agent-browser close
+export AGENT_BROWSER_NATIVE=1
+agent-browser open example.com
+```
