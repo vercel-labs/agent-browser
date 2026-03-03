@@ -1312,6 +1312,7 @@ export class BrowserManager {
       await this.closeBrowserlessSession(session.stop).catch((sessionError) => {
         console.error('Failed to close Browserless session during cleanup:', sessionError);
       });
+      this.browserlessStopUrl = null;
       throw error;
     }
   }
