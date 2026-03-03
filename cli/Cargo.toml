@@ -12,12 +12,12 @@ dirs = "5.0"
 base64 = "0.22"
 getrandom = "0.2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "signal"] }
-tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 futures-util = "0.3"
 url = "2"
 uuid = { version = "1", features = ["v4"] }
 image = "0.25"
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-webpki-roots"] }
 sha2 = "0.10"
 aes-gcm = "0.10"
 async-trait = "0.1"
