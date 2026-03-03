@@ -1,0 +1,196 @@
+import { pageMetadata } from "@/lib/page-metadata"
+
+export const metadata = pageMetadata("sessions")
+
+# Sessions
+
+Run multiple isolated browser instances:
+
+```bash
+# Different sessions
+agent-browser --session agent1 open site-a.com
+agent-browser --session agent2 open site-b.com
+
+# Or via environment variable
+AGENT_BROWSER_SESSION=agent1 agent-browser click "#btn"
+
+# List active sessions
+agent-browser session list
+# Output:
+# Active sessions:
+# -> default
+#    agent1
+
+# Show current session
+agent-browser session
+```
+
+## Session isolation
+
+Each session has its own:
+
+- Browser instance
+- Cookies and storage
+- Navigation history
+- Authentication state
+
+## Persistent profiles
+
+By default, browser state is lost when the browser closes. Use `--profile` to persist state across restarts:
+
+```bash
+# Use a persistent profile directory
+agent-browser --profile ~/.myapp-profile open myapp.com
+
+# Login once, then reuse the authenticated session
+agent-browser --profile ~/.myapp-profile open myapp.com/dashboard
+
+# Or via environment variable
+AGENT_BROWSER_PROFILE=~/.myapp-profile agent-browser open myapp.com
+```
+
+The profile directory stores:
+
+- Cookies and localStorage
+- IndexedDB data
+- Service workers
+- Browser cache
+- Login sessions
+
+## Session persistence
+
+Use `--session-name` to automatically save and restore cookies and localStorage across browser restarts:
+
+```bash
+# Auto-save/load state for "twitter" session
+agent-browser --session-name twitter open twitter.com
+
+# Login once, then state persists automatically
+agent-browser --session-name twitter click "#login"
+
+# Or via environment variable
+export AGENT_BROWSER_SESSION_NAME=twitter
+agent-browser open twitter.com
+```
+
+State files are stored in `~/.agent-browser/sessions/` and automatically loaded on daemon start.
+
+### Session name rules
+
+Session names must contain only alphanumeric characters, hyphens, and underscores:
+
+```bash
+# Valid session names
+agent-browser --session-name my-project open example.com
+agent-browser --session-name test_session_v2 open example.com
+
+# Invalid (will be rejected)
+agent-browser --session-name "../bad" open example.com    # path traversal
+agent-browser --session-name "my session" open example.com # spaces
+agent-browser --session-name "foo/bar" open example.com    # slashes
+```
+
+## State encryption
+
+Encrypt saved state files (cookies, localStorage) using AES-256-GCM:
+
+```bash
+# Generate a 256-bit key (64 hex characters)
+openssl rand -hex 32
+
+# Set the encryption key
+export AGENT_BROWSER_ENCRYPTION_KEY=<your-64-char-hex-key>
+
+# State files are now encrypted automatically
+agent-browser --session-name secure-session open example.com
+
+# List states shows encryption status
+agent-browser state list
+```
+
+## State auto-expiration
+
+Automatically delete old state files to prevent accumulation:
+
+```bash
+# Set expiration (default: 30 days)
+export AGENT_BROWSER_STATE_EXPIRE_DAYS=7
+
+# Manually clean old states
+agent-browser state clean --older-than 7
+```
+
+## State management commands
+
+```bash
+# List all saved states
+agent-browser state list
+
+# Show state summary (cookies, origins, domains)
+agent-browser state show my-session-default.json
+
+# Rename a state file
+agent-browser state rename old-name new-name
+
+# Clear states for a specific session name
+agent-browser state clear my-session
+
+# Clear all saved states
+agent-browser state clear --all
+
+# Manual save/load (for custom paths)
+agent-browser state save ./backup.json
+agent-browser state load ./backup.json
+```
+
+## Authenticated sessions
+
+Use `--headers` to set HTTP headers for a specific origin:
+
+```bash
+# Headers scoped to api.example.com only
+agent-browser open api.example.com --headers '{"Authorization": "Bearer <token>"}'
+
+# Requests to api.example.com include the auth header
+agent-browser snapshot -i --json
+agent-browser click @e2
+
+# Navigate to another domain - headers NOT sent
+agent-browser open other-site.com
+```
+
+Useful for:
+
+- **Skipping login flows** - Authenticate via headers
+- **Switching users** - Different auth tokens per session
+- **API testing** - Access protected endpoints
+- **Security** - Headers scoped to origin, not leaked
+
+## Multiple origins
+
+```bash
+agent-browser open api.example.com --headers '{"Authorization": "Bearer token1"}'
+agent-browser open api.acme.com --headers '{"Authorization": "Bearer token2"}'
+```
+
+## Global headers
+
+For headers on all domains:
+
+```bash
+agent-browser set headers '{"X-Custom-Header": "value"}'
+```
+
+## Environment variables
+
+<table>
+  <thead>
+    <tr><th>Variable</th><th>Description</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>AGENT_BROWSER_SESSION</code></td><td>Browser session ID (default: "default")</td></tr>
+    <tr><td><code>AGENT_BROWSER_SESSION_NAME</code></td><td>Auto-save/load state persistence name</td></tr>
+    <tr><td><code>AGENT_BROWSER_ENCRYPTION_KEY</code></td><td>64-char hex key for AES-256-GCM encryption</td></tr>
+    <tr><td><code>AGENT_BROWSER_STATE_EXPIRE_DAYS</code></td><td>Auto-delete states older than N days (default: 30)</td></tr>
+  </tbody>
+</table>

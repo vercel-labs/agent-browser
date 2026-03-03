@@ -1,0 +1,68 @@
+import { pageMetadata } from "@/lib/page-metadata"
+
+export const metadata = pageMetadata("")
+
+# agent-browser
+
+Browser automation CLI designed for AI agents. Compact text output minimizes context usage. Fast Rust CLI with Node.js fallback.
+
+```bash
+npm install -g agent-browser      # all platforms (fastest, native Rust CLI)
+brew install agent-browser        # macOS
+
+# or try without installing
+npx agent-browser open example.com
+```
+
+## Features
+
+- **Agent-first** - Compact text output uses fewer tokens than JSON, designed for AI context efficiency
+- **Ref-based** - Snapshot returns accessibility tree with refs for deterministic element selection
+- **Fast** - Native Rust CLI for instant command parsing
+- **Complete** - 50+ commands for navigation, forms, screenshots, network, storage
+- **Sessions** - Multiple isolated browser instances with separate auth
+- **Cross-platform** - macOS, Linux, Windows with native binaries
+
+## Works with
+
+Claude Code, Cursor, GitHub Copilot, OpenAI Codex, Google Gemini, opencode, and any agent that can run shell commands.
+
+## Example
+
+```bash
+# Navigate and get snapshot
+agent-browser open example.com
+agent-browser snapshot -i
+
+# Output:
+# - heading "Example Domain" [ref=e1]
+# - link "More information..." [ref=e2]
+
+# Interact using refs
+agent-browser click @e2
+agent-browser screenshot page.png
+agent-browser close
+```
+
+## Why refs?
+
+The `snapshot` command returns a compact accessibility tree where each element
+has a unique ref like `@e1`, `@e2`. This provides:
+
+- **Context-efficient** - Text output uses ~200-400 tokens vs ~3000-5000 for full DOM
+- **Deterministic** - Ref points to exact element from snapshot
+- **Fast** - No DOM re-query needed
+- **AI-friendly** - LLMs parse text output naturally
+
+## Architecture
+
+Client-daemon architecture for optimal performance:
+
+1. **Rust CLI** - Parses commands, communicates with daemon
+2. **Node.js Daemon** - Manages Playwright browser instance
+
+Daemon starts automatically and persists between commands.
+
+## Platforms
+
+Native Rust binaries for macOS (ARM64, x64), Linux (ARM64, x64), and Windows (x64).

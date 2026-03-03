@@ -100,7 +100,10 @@ pub fn run_install(with_deps: bool) {
                     ],
                 )
             } else {
-                eprintln!("{} No supported package manager found (apt-get, dnf, or yum)", color::error_indicator());
+                eprintln!(
+                    "{} No supported package manager found (apt-get, dnf, or yum)",
+                    color::error_indicator()
+                );
                 exit(1);
             };
 
@@ -128,7 +131,10 @@ pub fn run_install(with_deps: bool) {
                 Err(e) => eprintln!("{} Could not run install command: {}", color::warning_indicator(), e),
             }
         } else {
-            println!("{} Linux detected. If browser fails to launch, run:", color::warning_indicator());
+            println!(
+                "{} Linux detected. If browser fails to launch, run:",
+                color::warning_indicator()
+            );
             println!("  agent-browser install --with-deps");
             println!("  or: npx playwright install-deps chromium");
             println!();
@@ -136,7 +142,7 @@ pub fn run_install(with_deps: bool) {
     }
 
     println!("{}", color::cyan("Installing Chromium browser..."));
-    
+
     // On Windows, we need to use cmd.exe to run npx because npx is actually npx.cmd
     // and Command::new() doesn't resolve .cmd files the way the shell does.
     // Pass the entire command as a single string to /c to handle paths with spaces.
@@ -144,7 +150,7 @@ pub fn run_install(with_deps: bool) {
     let status = Command::new("cmd")
         .args(["/c", "npx playwright install chromium"])
         .status();
-    
+
     #[cfg(not(windows))]
     let status = Command::new("npx")
         .args(["playwright", "install", "chromium"])
@@ -152,17 +158,26 @@ pub fn run_install(with_deps: bool) {
 
     match status {
         Ok(s) if s.success() => {
-            println!("{} Chromium installed successfully", color::success_indicator());
+            println!(
+                "{} Chromium installed successfully",
+                color::success_indicator()
+            );
             if is_linux && !with_deps {
                 println!();
-                println!("{} If you see \"shared library\" errors when running, use:", color::yellow("Note:"));
+                println!(
+                    "{} If you see \"shared library\" errors when running, use:",
+                    color::yellow("Note:")
+                );
                 println!("  agent-browser install --with-deps");
             }
         }
         Ok(_) => {
             eprintln!("{} Failed to install browser", color::error_indicator());
             if is_linux {
-                println!("{} Try installing system dependencies first:", color::yellow("Tip:"));
+                println!(
+                    "{} Try installing system dependencies first:",
+                    color::yellow("Tip:")
+                );
                 println!("  agent-browser install --with-deps");
             }
             exit(1);

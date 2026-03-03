@@ -1,0 +1,211 @@
+import { pageMetadata } from "@/lib/page-metadata"
+
+export const metadata = pageMetadata("ios")
+
+# iOS Simulator
+
+Control real Mobile Safari in the iOS Simulator for authentic mobile
+web testing. Uses Appium with XCUITest for native automation.
+
+## Requirements
+
+- macOS with Xcode installed
+- iOS Simulator runtimes (download via Xcode)
+- Appium with XCUITest driver
+
+## Setup
+
+```bash
+# Install Appium globally
+npm install -g appium
+
+# Install the XCUITest driver for iOS
+appium driver install xcuitest
+```
+
+## List available devices
+
+See all iOS simulators available on your system:
+
+```bash
+agent-browser device list
+
+# Output:
+# Available iOS Simulators:
+#
+#   ○ iPhone 16 Pro (iOS 18.0)
+#     F21EEC0D-7618-419F-811B-33AF27A8B2FD
+#   ○ iPhone 16 Pro Max (iOS 18.0)
+#     50402807-C9B8-4D37-9F13-2E00E782C744
+#   ○ iPad Pro 13-inch (M4) (iOS 18.0)
+#     3A6C6436-B909-4593-866D-91D1062BB070
+#   ...
+```
+
+## Basic usage
+
+Use the `-p ios` flag to enable iOS mode. The workflow is
+identical to desktop:
+
+```bash
+# Launch Safari on iPhone 16 Pro
+agent-browser -p ios --device "iPhone 16 Pro" open https://example.com
+
+# Get snapshot with refs (same as desktop)
+agent-browser -p ios snapshot -i
+
+# Interact using refs
+agent-browser -p ios tap @e1
+agent-browser -p ios fill @e2 "text"
+
+# Take screenshot
+agent-browser -p ios screenshot mobile.png
+
+# Close session (shuts down simulator)
+agent-browser -p ios close
+```
+
+## Mobile-specific commands
+
+```bash
+# Swipe gestures
+agent-browser -p ios swipe up
+agent-browser -p ios swipe down
+agent-browser -p ios swipe left
+agent-browser -p ios swipe right
+
+# Swipe with distance (pixels)
+agent-browser -p ios swipe up 500
+
+# Tap (alias for click, semantically clearer for touch)
+agent-browser -p ios tap @e1
+```
+
+## Environment variables
+
+Configure iOS mode via environment variables:
+
+```bash
+export AGENT_BROWSER_PROVIDER=ios
+export AGENT_BROWSER_IOS_DEVICE="iPhone 16 Pro"
+
+# Now all commands use iOS
+agent-browser open https://example.com
+agent-browser snapshot -i
+agent-browser tap @e1
+```
+
+<table>
+  <thead>
+    <tr><th>Variable</th><th>Description</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>AGENT_BROWSER_PROVIDER</code></td><td>Set to <code>ios</code> to enable iOS mode</td></tr>
+    <tr><td><code>AGENT_BROWSER_IOS_DEVICE</code></td><td>Device name (e.g., "iPhone 16 Pro")</td></tr>
+    <tr><td><code>AGENT_BROWSER_IOS_UDID</code></td><td>Device UDID (alternative to device name)</td></tr>
+  </tbody>
+</table>
+
+## Supported devices
+
+All iOS Simulators available in Xcode are supported, including:
+
+- All iPhone models (iPhone 15, 16, 17, SE, etc.)
+- All iPad models (iPad Pro, iPad Air, iPad mini, etc.)
+- Multiple iOS versions (17.x, 18.x, etc.)
+
+**Real devices** are also supported via USB connection (see below).
+
+## Real device support
+
+Appium can control Safari on real iOS devices connected via USB. This
+requires additional one-time setup.
+
+### 1. Get your device UDID
+
+```bash
+# List connected devices
+xcrun xctrace list devices
+
+# Or via system profiler
+system_profiler SPUSBDataType | grep -A 5 "iPhone\|iPad"
+```
+
+### 2. Sign WebDriverAgent (one-time)
+
+WebDriverAgent needs to be signed with your Apple Developer
+certificate to run on real devices.
+
+```bash
+# Open the WebDriverAgent Xcode project
+cd ~/.appium/node_modules/appium-xcuitest-driver/node_modules/appium-webdriveragent
+open WebDriverAgent.xcodeproj
+```
+
+In Xcode:
+
+1. Select the `WebDriverAgentRunner` target
+2. Go to Signing & Capabilities
+3. Select your Team (requires Apple Developer account, free tier works)
+4. Let Xcode manage signing automatically
+
+### 3. Use with agent-browser
+
+```bash
+# Connect device via USB, then use the UDID
+agent-browser -p ios --device "<DEVICE_UDID>" open https://example.com
+
+# Or use the device name if unique
+agent-browser -p ios --device "John's iPhone" open https://example.com
+```
+
+### Real device notes
+
+- First run installs WebDriverAgent to the device (may require Trust prompt on device)
+- Device must be unlocked and connected via USB
+- Slightly slower initial connection than simulator
+- Tests against real Safari performance and behavior
+- On first install, go to Settings → General → VPN & Device Management to trust the developer certificate
+
+## Performance notes
+
+- **First launch:** Takes 30-60 seconds to boot the simulator and start Appium
+- **Subsequent commands:** Fast (simulator stays running)
+- **Close command:** Shuts down simulator and Appium server
+
+## Differences from desktop
+
+<table>
+  <thead>
+    <tr><th>Feature</th><th>Desktop</th><th>iOS</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Browser</td><td>Chromium/Firefox/WebKit</td><td>Safari only</td></tr>
+    <tr><td>Tabs</td><td>Supported</td><td>Single tab only</td></tr>
+    <tr><td>PDF export</td><td>Supported</td><td>Not supported</td></tr>
+    <tr><td>Screencast</td><td>Supported</td><td>Not supported</td></tr>
+    <tr><td>Swipe gestures</td><td>Not native</td><td>Native support</td></tr>
+  </tbody>
+</table>
+
+## Troubleshooting
+
+### Appium not found
+
+```bash
+# Make sure Appium is installed globally
+npm install -g appium
+appium driver install xcuitest
+
+# Verify installation
+appium --version
+```
+
+### No simulators available
+
+Open Xcode and download iOS Simulator runtimes from **Settings → Platforms**.
+
+### Simulator won't boot
+
+Try booting the simulator manually from Xcode or the Simulator app to
+ensure it works, then retry with agent-browser.

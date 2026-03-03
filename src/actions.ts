@@ -1,5 +1,28 @@
+import * as fs from 'fs';
+import * as path from 'path';
 import type { Page, Frame } from 'playwright-core';
+import { mkdirSync } from 'node:fs';
 import type { BrowserManager, ScreencastFrame } from './browser.js';
+import { getAppDir } from './daemon.js';
+import {
+  type ActionPolicy,
+  checkPolicy,
+  describeAction,
+  getActionCategory,
+  loadPolicyFile,
+  initPolicyReloader,
+  reloadPolicyIfChanged,
+} from './action-policy.js';
+import { requestConfirmation, getAndRemovePending } from './confirmation.js';
+import { getAuthProfile, updateLastLogin } from './auth-vault.js';
+import {
+  getSessionsDir,
+  readStateFile,
+  isValidSessionName,
+  isEncryptedPayload,
+  listStateFiles,
+  cleanupExpiredStates,
+} from './state-utils.js';
 import type {
   Command,
   Response,
@@ -53,8 +76,15 @@ import type {
   StylesCommand,
   TraceStartCommand,
   TraceStopCommand,
+  ProfilerStartCommand,
+  ProfilerStopCommand,
   HarStopCommand,
   StorageStateSaveCommand,
+  StateListCommand,
+  StateClearCommand,
+  StateShowCommand,
+  StateCleanCommand,
+  StateRenameCommand,
   ConsoleCommand,
   ErrorsCommand,
   KeyboardCommand,
@@ -104,9 +134,19 @@ import type {
   RecordingStartCommand,
   RecordingStopCommand,
   RecordingRestartCommand,
+  DiffSnapshotCommand,
+  DiffScreenshotCommand,
+  DiffUrlCommand,
+  AuthLoginCommand,
+  ConfirmCommand,
+  DenyCommand,
+  Annotation,
   NavigateData,
   ScreenshotData,
   EvaluateData,
+  DiffSnapshotData,
+  DiffScreenshotData,
+  DiffUrlData,
   ContentData,
   TabListData,
   TabNewData,
@@ -120,7 +160,9 @@ import type {
   InputEventData,
   StylesData,
 } from './types.js';
-import { successResponse, errorResponse } from './protocol.js';
+import { successResponse, errorResponse, parseCommand } from './protocol.js';
+import { diffSnapshots, diffScreenshots } from './diff.js';
+import { getEnhancedSnapshot } from './snapshot.js';
 
 // Callback for screencast frames - will be set by the daemon when streaming is active
 let screencastFrameCallback: ((frame: ScreencastFrame) => void) | null = null;
@@ -177,6 +219,14 @@ export function toAIFriendlyError(error: unknown, selector: string): Error {
     );
   }
 
+  // Handle general timeout (element exists but action couldn't complete)
+  if (message.includes('Timeout') && message.includes('exceeded')) {
+    return new Error(
+      `Action on "${selector}" timed out. The element may be blocked, still loading, or not interactable. ` +
+        `Run 'snapshot' to check the current page state.`
+    );
+  }
+
   // Handle element not found (timeout waiting for element)
   if (
     message.includes('waiting for') &&
@@ -192,267 +242,362 @@ export function toAIFriendlyError(error: unknown, selector: string): Error {
   return error instanceof Error ? error : new Error(message);
 }
 
+let actionPolicy: ActionPolicy | null = null;
+let confirmCategories = new Set<string>();
+
+export function initActionPolicy(): void {
+  const policyPath = process.env.AGENT_BROWSER_ACTION_POLICY;
+  if (policyPath) {
+    try {
+      actionPolicy = loadPolicyFile(policyPath);
+      initPolicyReloader(policyPath, actionPolicy);
+    } catch (err) {
+      console.error(
+        `[ERROR] Failed to load action policy from ${policyPath}: ${err instanceof Error ? err.message : err}`
+      );
+      process.exit(1);
+    }
+  }
+
+  const confirmActionsEnv = process.env.AGENT_BROWSER_CONFIRM_ACTIONS;
+  if (confirmActionsEnv) {
+    confirmCategories = new Set(
+      confirmActionsEnv
+        .split(',')
+        .map((c) => c.trim().toLowerCase())
+        .filter((c) => c.length > 0)
+    );
+  }
+}
+
 /**
  * Execute a command and return a response
  */
 export async function executeCommand(command: Command, browser: BrowserManager): Promise<Response> {
   try {
-    switch (command.action) {
-      case 'launch':
-        return await handleLaunch(command, browser);
-      case 'navigate':
-        return await handleNavigate(command, browser);
-      case 'click':
-        return await handleClick(command, browser);
-      case 'type':
-        return await handleType(command, browser);
-      case 'fill':
-        return await handleFill(command, browser);
-      case 'check':
-        return await handleCheck(command, browser);
-      case 'uncheck':
-        return await handleUncheck(command, browser);
-      case 'upload':
-        return await handleUpload(command, browser);
-      case 'dblclick':
-        return await handleDoubleClick(command, browser);
-      case 'focus':
-        return await handleFocus(command, browser);
-      case 'drag':
-        return await handleDrag(command, browser);
-      case 'frame':
-        return await handleFrame(command, browser);
-      case 'mainframe':
-        return await handleMainFrame(command, browser);
-      case 'getbyrole':
-        return await handleGetByRole(command, browser);
-      case 'getbytext':
-        return await handleGetByText(command, browser);
-      case 'getbylabel':
-        return await handleGetByLabel(command, browser);
-      case 'getbyplaceholder':
-        return await handleGetByPlaceholder(command, browser);
-      case 'press':
-        return await handlePress(command, browser);
-      case 'screenshot':
-        return await handleScreenshot(command, browser);
-      case 'snapshot':
-        return await handleSnapshot(command, browser);
-      case 'evaluate':
-        return await handleEvaluate(command, browser);
-      case 'wait':
-        return await handleWait(command, browser);
-      case 'scroll':
-        return await handleScroll(command, browser);
-      case 'select':
-        return await handleSelect(command, browser);
-      case 'hover':
-        return await handleHover(command, browser);
-      case 'content':
-        return await handleContent(command, browser);
-      case 'close':
-        return await handleClose(command, browser);
-      case 'tab_new':
-        return await handleTabNew(command, browser);
-      case 'tab_list':
-        return await handleTabList(command, browser);
-      case 'tab_switch':
-        return await handleTabSwitch(command, browser);
-      case 'tab_close':
-        return await handleTabClose(command, browser);
-      case 'window_new':
-        return await handleWindowNew(command, browser);
-      case 'cookies_get':
-        return await handleCookiesGet(command, browser);
-      case 'cookies_set':
-        return await handleCookiesSet(command, browser);
-      case 'cookies_clear':
-        return await handleCookiesClear(command, browser);
-      case 'storage_get':
-        return await handleStorageGet(command, browser);
-      case 'storage_set':
-        return await handleStorageSet(command, browser);
-      case 'storage_clear':
-        return await handleStorageClear(command, browser);
-      case 'dialog':
-        return await handleDialog(command, browser);
-      case 'pdf':
-        return await handlePdf(command, browser);
-      case 'route':
-        return await handleRoute(command, browser);
-      case 'unroute':
-        return await handleUnroute(command, browser);
-      case 'requests':
-        return await handleRequests(command, browser);
-      case 'download':
-        return await handleDownload(command, browser);
-      case 'geolocation':
-        return await handleGeolocation(command, browser);
-      case 'permissions':
-        return await handlePermissions(command, browser);
-      case 'viewport':
-        return await handleViewport(command, browser);
-      case 'useragent':
-        return await handleUserAgent(command, browser);
-      case 'device':
-        return await handleDevice(command, browser);
-      case 'back':
-        return await handleBack(command, browser);
-      case 'forward':
-        return await handleForward(command, browser);
-      case 'reload':
-        return await handleReload(command, browser);
-      case 'url':
-        return await handleUrl(command, browser);
-      case 'title':
-        return await handleTitle(command, browser);
-      case 'getattribute':
-        return await handleGetAttribute(command, browser);
-      case 'gettext':
-        return await handleGetText(command, browser);
-      case 'isvisible':
-        return await handleIsVisible(command, browser);
-      case 'isenabled':
-        return await handleIsEnabled(command, browser);
-      case 'ischecked':
-        return await handleIsChecked(command, browser);
-      case 'count':
-        return await handleCount(command, browser);
-      case 'boundingbox':
-        return await handleBoundingBox(command, browser);
-      case 'styles':
-        return await handleStyles(command, browser);
-      case 'video_start':
-        return await handleVideoStart(command, browser);
-      case 'video_stop':
-        return await handleVideoStop(command, browser);
-      case 'trace_start':
-        return await handleTraceStart(command, browser);
-      case 'trace_stop':
-        return await handleTraceStop(command, browser);
-      case 'har_start':
-        return await handleHarStart(command, browser);
-      case 'har_stop':
-        return await handleHarStop(command, browser);
-      case 'state_save':
-        return await handleStateSave(command, browser);
-      case 'state_load':
-        return await handleStateLoad(command, browser);
-      case 'console':
-        return await handleConsole(command, browser);
-      case 'errors':
-        return await handleErrors(command, browser);
-      case 'keyboard':
-        return await handleKeyboard(command, browser);
-      case 'wheel':
-        return await handleWheel(command, browser);
-      case 'tap':
-        return await handleTap(command, browser);
-      case 'clipboard':
-        return await handleClipboard(command, browser);
-      case 'highlight':
-        return await handleHighlight(command, browser);
-      case 'clear':
-        return await handleClear(command, browser);
-      case 'selectall':
-        return await handleSelectAll(command, browser);
-      case 'innertext':
-        return await handleInnerText(command, browser);
-      case 'innerhtml':
-        return await handleInnerHtml(command, browser);
-      case 'inputvalue':
-        return await handleInputValue(command, browser);
-      case 'setvalue':
-        return await handleSetValue(command, browser);
-      case 'dispatch':
-        return await handleDispatch(command, browser);
-      case 'evalhandle':
-        return await handleEvalHandle(command, browser);
-      case 'expose':
-        return await handleExpose(command, browser);
-      case 'addscript':
-        return await handleAddScript(command, browser);
-      case 'addstyle':
-        return await handleAddStyle(command, browser);
-      case 'emulatemedia':
-        return await handleEmulateMedia(command, browser);
-      case 'offline':
-        return await handleOffline(command, browser);
-      case 'headers':
-        return await handleHeaders(command, browser);
-      case 'pause':
-        return await handlePause(command, browser);
-      case 'getbyalttext':
-        return await handleGetByAltText(command, browser);
-      case 'getbytitle':
-        return await handleGetByTitle(command, browser);
-      case 'getbytestid':
-        return await handleGetByTestId(command, browser);
-      case 'nth':
-        return await handleNth(command, browser);
-      case 'waitforurl':
-        return await handleWaitForUrl(command, browser);
-      case 'waitforloadstate':
-        return await handleWaitForLoadState(command, browser);
-      case 'setcontent':
-        return await handleSetContent(command, browser);
-      case 'timezone':
-        return await handleTimezone(command, browser);
-      case 'locale':
-        return await handleLocale(command, browser);
-      case 'credentials':
-        return await handleCredentials(command, browser);
-      case 'mousemove':
-        return await handleMouseMove(command, browser);
-      case 'mousedown':
-        return await handleMouseDown(command, browser);
-      case 'mouseup':
-        return await handleMouseUp(command, browser);
-      case 'bringtofront':
-        return await handleBringToFront(command, browser);
-      case 'waitforfunction':
-        return await handleWaitForFunction(command, browser);
-      case 'scrollintoview':
-        return await handleScrollIntoView(command, browser);
-      case 'addinitscript':
-        return await handleAddInitScript(command, browser);
-      case 'keydown':
-        return await handleKeyDown(command, browser);
-      case 'keyup':
-        return await handleKeyUp(command, browser);
-      case 'inserttext':
-        return await handleInsertText(command, browser);
-      case 'multiselect':
-        return await handleMultiSelect(command, browser);
-      case 'waitfordownload':
-        return await handleWaitForDownload(command, browser);
-      case 'responsebody':
-        return await handleResponseBody(command, browser);
-      case 'screencast_start':
-        return await handleScreencastStart(command, browser);
-      case 'screencast_stop':
-        return await handleScreencastStop(command, browser);
-      case 'input_mouse':
-        return await handleInputMouse(command, browser);
-      case 'input_keyboard':
-        return await handleInputKeyboard(command, browser);
-      case 'input_touch':
-        return await handleInputTouch(command, browser);
-      case 'recording_start':
-        return await handleRecordingStart(command, browser);
-      case 'recording_stop':
-        return await handleRecordingStop(command, browser);
-      case 'recording_restart':
-        return await handleRecordingRestart(command, browser);
-      default: {
-        // TypeScript narrows to never here, but we handle it for safety
-        const unknownCommand = command as { id: string; action: string };
-        return errorResponse(unknownCommand.id, `Unknown action: ${unknownCommand.action}`);
-      }
+    // Handle confirm/deny actions (bypass policy check)
+    if (command.action === 'confirm') {
+      return await handleConfirm(command, browser);
     }
+    if (command.action === 'deny') {
+      return handleDeny(command);
+    }
+
+    // Hot-reload policy file if it changed on disk
+    actionPolicy = reloadPolicyIfChanged();
+
+    // Policy enforcement
+    const decision = checkPolicy(command.action, actionPolicy, confirmCategories);
+    if (decision === 'deny') {
+      const category = getActionCategory(command.action);
+      return errorResponse(command.id, `Action denied by policy: '${category}' is not allowed`);
+    }
+    if (decision === 'confirm') {
+      const category = getActionCategory(command.action);
+      const description = describeAction(
+        command.action,
+        command as unknown as Record<string, unknown>
+      );
+      const { confirmationId } = requestConfirmation(
+        command.action,
+        category,
+        description,
+        command as unknown as Record<string, unknown>
+      );
+      return successResponse(command.id, {
+        confirmation_required: true,
+        action: command.action,
+        category,
+        description,
+        confirmation_id: confirmationId,
+      });
+    }
+
+    return await dispatchAction(command, browser);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return errorResponse(command.id, message);
+  }
+}
+
+/**
+ * Dispatch a command to its handler after policy checks have passed.
+ */
+async function dispatchAction(command: Command, browser: BrowserManager): Promise<Response> {
+  switch (command.action) {
+    case 'launch':
+      return await handleLaunch(command, browser);
+    case 'navigate':
+      return await handleNavigate(command, browser);
+    case 'click':
+      return await handleClick(command, browser);
+    case 'type':
+      return await handleType(command, browser);
+    case 'fill':
+      return await handleFill(command, browser);
+    case 'check':
+      return await handleCheck(command, browser);
+    case 'uncheck':
+      return await handleUncheck(command, browser);
+    case 'upload':
+      return await handleUpload(command, browser);
+    case 'dblclick':
+      return await handleDoubleClick(command, browser);
+    case 'focus':
+      return await handleFocus(command, browser);
+    case 'drag':
+      return await handleDrag(command, browser);
+    case 'frame':
+      return await handleFrame(command, browser);
+    case 'mainframe':
+      return await handleMainFrame(command, browser);
+    case 'getbyrole':
+      return await handleGetByRole(command, browser);
+    case 'getbytext':
+      return await handleGetByText(command, browser);
+    case 'getbylabel':
+      return await handleGetByLabel(command, browser);
+    case 'getbyplaceholder':
+      return await handleGetByPlaceholder(command, browser);
+    case 'press':
+      return await handlePress(command, browser);
+    case 'screenshot':
+      return await handleScreenshot(command, browser);
+    case 'snapshot':
+      return await handleSnapshot(command, browser);
+    case 'evaluate':
+      return await handleEvaluate(command, browser);
+    case 'wait':
+      return await handleWait(command, browser);
+    case 'scroll':
+      return await handleScroll(command, browser);
+    case 'select':
+      return await handleSelect(command, browser);
+    case 'hover':
+      return await handleHover(command, browser);
+    case 'content':
+      return await handleContent(command, browser);
+    case 'close':
+      return await handleClose(command, browser);
+    case 'tab_new':
+      return await handleTabNew(command, browser);
+    case 'tab_list':
+      return await handleTabList(command, browser);
+    case 'tab_switch':
+      return await handleTabSwitch(command, browser);
+    case 'tab_close':
+      return await handleTabClose(command, browser);
+    case 'window_new':
+      return await handleWindowNew(command, browser);
+    case 'cookies_get':
+      return await handleCookiesGet(command, browser);
+    case 'cookies_set':
+      return await handleCookiesSet(command, browser);
+    case 'cookies_clear':
+      return await handleCookiesClear(command, browser);
+    case 'storage_get':
+      return await handleStorageGet(command, browser);
+    case 'storage_set':
+      return await handleStorageSet(command, browser);
+    case 'storage_clear':
+      return await handleStorageClear(command, browser);
+    case 'dialog':
+      return await handleDialog(command, browser);
+    case 'pdf':
+      return await handlePdf(command, browser);
+    case 'route':
+      return await handleRoute(command, browser);
+    case 'unroute':
+      return await handleUnroute(command, browser);
+    case 'requests':
+      return await handleRequests(command, browser);
+    case 'download':
+      return await handleDownload(command, browser);
+    case 'geolocation':
+      return await handleGeolocation(command, browser);
+    case 'permissions':
+      return await handlePermissions(command, browser);
+    case 'viewport':
+      return await handleViewport(command, browser);
+    case 'useragent':
+      return await handleUserAgent(command, browser);
+    case 'device':
+      return await handleDevice(command, browser);
+    case 'back':
+      return await handleBack(command, browser);
+    case 'forward':
+      return await handleForward(command, browser);
+    case 'reload':
+      return await handleReload(command, browser);
+    case 'url':
+      return await handleUrl(command, browser);
+    case 'title':
+      return await handleTitle(command, browser);
+    case 'getattribute':
+      return await handleGetAttribute(command, browser);
+    case 'gettext':
+      return await handleGetText(command, browser);
+    case 'isvisible':
+      return await handleIsVisible(command, browser);
+    case 'isenabled':
+      return await handleIsEnabled(command, browser);
+    case 'ischecked':
+      return await handleIsChecked(command, browser);
+    case 'count':
+      return await handleCount(command, browser);
+    case 'boundingbox':
+      return await handleBoundingBox(command, browser);
+    case 'styles':
+      return await handleStyles(command, browser);
+    case 'video_start':
+      return await handleVideoStart(command, browser);
+    case 'video_stop':
+      return await handleVideoStop(command, browser);
+    case 'trace_start':
+      return await handleTraceStart(command, browser);
+    case 'trace_stop':
+      return await handleTraceStop(command, browser);
+    case 'profiler_start':
+      return await handleProfilerStart(command, browser);
+    case 'profiler_stop':
+      return await handleProfilerStop(command, browser);
+    case 'har_start':
+      return await handleHarStart(command, browser);
+    case 'har_stop':
+      return await handleHarStop(command, browser);
+    case 'state_save':
+      return await handleStateSave(command, browser);
+    case 'state_load':
+      return await handleStateLoad(command, browser);
+    case 'state_list':
+      return await handleStateList(command);
+    case 'state_clear':
+      return await handleStateClear(command);
+    case 'state_show':
+      return await handleStateShow(command);
+    case 'state_clean':
+      return await handleStateClean(command);
+    case 'state_rename':
+      return await handleStateRename(command);
+    case 'console':
+      return await handleConsole(command, browser);
+    case 'errors':
+      return await handleErrors(command, browser);
+    case 'keyboard':
+      return await handleKeyboard(command, browser);
+    case 'wheel':
+      return await handleWheel(command, browser);
+    case 'tap':
+      return await handleTap(command, browser);
+    case 'clipboard':
+      return await handleClipboard(command, browser);
+    case 'highlight':
+      return await handleHighlight(command, browser);
+    case 'clear':
+      return await handleClear(command, browser);
+    case 'selectall':
+      return await handleSelectAll(command, browser);
+    case 'innertext':
+      return await handleInnerText(command, browser);
+    case 'innerhtml':
+      return await handleInnerHtml(command, browser);
+    case 'inputvalue':
+      return await handleInputValue(command, browser);
+    case 'setvalue':
+      return await handleSetValue(command, browser);
+    case 'dispatch':
+      return await handleDispatch(command, browser);
+    case 'evalhandle':
+      return await handleEvalHandle(command, browser);
+    case 'expose':
+      return await handleExpose(command, browser);
+    case 'addscript':
+      return await handleAddScript(command, browser);
+    case 'addstyle':
+      return await handleAddStyle(command, browser);
+    case 'emulatemedia':
+      return await handleEmulateMedia(command, browser);
+    case 'offline':
+      return await handleOffline(command, browser);
+    case 'headers':
+      return await handleHeaders(command, browser);
+    case 'pause':
+      return await handlePause(command, browser);
+    case 'getbyalttext':
+      return await handleGetByAltText(command, browser);
+    case 'getbytitle':
+      return await handleGetByTitle(command, browser);
+    case 'getbytestid':
+      return await handleGetByTestId(command, browser);
+    case 'nth':
+      return await handleNth(command, browser);
+    case 'waitforurl':
+      return await handleWaitForUrl(command, browser);
+    case 'waitforloadstate':
+      return await handleWaitForLoadState(command, browser);
+    case 'setcontent':
+      return await handleSetContent(command, browser);
+    case 'timezone':
+      return await handleTimezone(command, browser);
+    case 'locale':
+      return await handleLocale(command, browser);
+    case 'credentials':
+      return await handleCredentials(command, browser);
+    case 'mousemove':
+      return await handleMouseMove(command, browser);
+    case 'mousedown':
+      return await handleMouseDown(command, browser);
+    case 'mouseup':
+      return await handleMouseUp(command, browser);
+    case 'bringtofront':
+      return await handleBringToFront(command, browser);
+    case 'waitforfunction':
+      return await handleWaitForFunction(command, browser);
+    case 'scrollintoview':
+      return await handleScrollIntoView(command, browser);
+    case 'addinitscript':
+      return await handleAddInitScript(command, browser);
+    case 'keydown':
+      return await handleKeyDown(command, browser);
+    case 'keyup':
+      return await handleKeyUp(command, browser);
+    case 'inserttext':
+      return await handleInsertText(command, browser);
+    case 'multiselect':
+      return await handleMultiSelect(command, browser);
+    case 'waitfordownload':
+      return await handleWaitForDownload(command, browser);
+    case 'responsebody':
+      return await handleResponseBody(command, browser);
+    case 'screencast_start':
+      return await handleScreencastStart(command, browser);
+    case 'screencast_stop':
+      return await handleScreencastStop(command, browser);
+    case 'input_mouse':
+      return await handleInputMouse(command, browser);
+    case 'input_keyboard':
+      return await handleInputKeyboard(command, browser);
+    case 'input_touch':
+      return await handleInputTouch(command, browser);
+    case 'recording_start':
+      return await handleRecordingStart(command, browser);
+    case 'recording_stop':
+      return await handleRecordingStop(command, browser);
+    case 'recording_restart':
+      return await handleRecordingRestart(command, browser);
+    case 'diff_snapshot':
+      return await handleDiffSnapshot(command, browser);
+    case 'diff_screenshot':
+      return await handleDiffScreenshot(command, browser);
+    case 'diff_url':
+      return await handleDiffUrl(command, browser);
+    case 'auth_login':
+      return await handleAuthLogin(command, browser);
+    default: {
+      // TypeScript narrows to never here, but we handle it for safety
+      const unknownCommand = command as { id: string; action: string };
+      return errorResponse(unknownCommand.id, `Unknown action: ${unknownCommand.action}`);
+    }
   }
 }
 
@@ -468,6 +613,8 @@ async function handleNavigate(
   command: NavigateCommand,
   browser: BrowserManager
 ): Promise<Response<NavigateData>> {
+  browser.checkDomainAllowed(command.url);
+
   const page = browser.getPage();
 
   // If headers are provided, set up scoped headers for this origin
@@ -490,6 +637,32 @@ async function handleClick(command: ClickCommand, browser: BrowserManager): Prom
   const locator = browser.getLocator(command.selector);
 
   try {
+    // If --new-tab flag is set, get the href and open in a new tab
+    if (command.newTab) {
+      const fullUrl = await locator.evaluate((el) => {
+        const href = el.getAttribute('href');
+        // URL and document.baseURI are available in the browser context
+        return href
+          ? new (globalThis as any).URL(href, (globalThis as any).document.baseURI).toString()
+          : '';
+      });
+      if (!fullUrl) {
+        throw new Error(
+          `Element '${command.selector}' does not have an href attribute. --new-tab only works on links.`
+        );
+      }
+
+      await browser.newTab();
+      const newPage = browser.getPage();
+      await newPage.goto(fullUrl);
+
+      return successResponse(command.id, {
+        clicked: true,
+        newTab: true,
+        url: fullUrl,
+      });
+    }
+
     await locator.click({
       button: command.button,
       clickCount: command.clickCount,
@@ -532,6 +705,16 @@ async function handlePress(command: PressCommand, browser: BrowserManager): Prom
   return successResponse(command.id, { pressed: true });
 }
 
+const ANNOTATION_OVERLAY_ID = '__agent_browser_annotations__';
+
+async function removeAnnotationOverlay(page: Page): Promise<void> {
+  await page
+    .evaluate(
+      `(() => { const el = document.getElementById(${JSON.stringify(ANNOTATION_OVERLAY_ID)}); if (el) el.remove(); })()`
+    )
+    .catch(() => {});
+}
+
 async function handleScreenshot(
   command: ScreenshotCommand,
   browser: BrowserManager
@@ -549,15 +732,179 @@ async function handleScreenshot(
 
   let target: Page | ReturnType<Page['locator']> = page;
   if (command.selector) {
-    target = page.locator(command.selector);
+    target = browser.getLocator(command.selector);
   }
 
-  if (command.path) {
-    await target.screenshot({ ...options, path: command.path });
-    return successResponse(command.id, { path: command.path });
-  } else {
-    const buffer = await target.screenshot(options);
-    return successResponse(command.id, { base64: buffer.toString('base64') });
+  let overlayInjected = false;
+
+  try {
+    let savePath = command.path;
+    if (!savePath) {
+      const ext = command.format === 'jpeg' ? 'jpg' : 'png';
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const random = Math.random().toString(36).substring(2, 8);
+      const filename = `screenshot-${timestamp}-${random}.${ext}`;
+      const screenshotDir = path.join(getAppDir(), 'tmp', 'screenshots');
+      mkdirSync(screenshotDir, { recursive: true });
+      savePath = path.join(screenshotDir, filename);
+    }
+
+    let annotations: Annotation[] | undefined;
+
+    if (command.annotate) {
+      const { refs } = await browser.getSnapshot({ interactive: true });
+
+      const entries = Object.entries(refs);
+      const results = await Promise.all(
+        entries.map(async ([ref, data]): Promise<Annotation | null> => {
+          try {
+            const locator = browser.getLocatorFromRef(ref);
+            if (!locator) return null;
+            const box = await locator.boundingBox();
+            if (!box || box.width === 0 || box.height === 0) return null;
+            const num = parseInt(ref.replace('e', ''), 10);
+            return {
+              ref,
+              number: num,
+              role: data.role,
+              name: data.name || undefined,
+              box: {
+                x: Math.round(box.x),
+                y: Math.round(box.y),
+                width: Math.round(box.width),
+                height: Math.round(box.height),
+              },
+            };
+          } catch {
+            return null;
+          }
+        })
+      );
+
+      // When a selector is provided the screenshot is cropped to that element,
+      // so filter to annotations that overlap the target and shift coordinates.
+      let targetBox: { x: number; y: number; width: number; height: number } | null = null;
+      if (command.selector) {
+        const raw = await browser.getLocator(command.selector).boundingBox();
+        if (raw) {
+          targetBox = {
+            x: Math.round(raw.x),
+            y: Math.round(raw.y),
+            width: Math.round(raw.width),
+            height: Math.round(raw.height),
+          };
+        }
+      }
+
+      const filtered = results.filter((a): a is Annotation => a !== null);
+
+      // Filter by selector overlap if needed, but keep viewport-relative coords
+      // for overlay positioning. Coordinate shifting happens later for metadata only.
+      let overlayItems: Annotation[];
+      if (targetBox) {
+        const tb = targetBox;
+        overlayItems = filtered
+          .filter((a) => {
+            const ax2 = a.box.x + a.box.width;
+            const ay2 = a.box.y + a.box.height;
+            const bx2 = tb.x + tb.width;
+            const by2 = tb.y + tb.height;
+            return a.box.x < bx2 && ax2 > tb.x && a.box.y < by2 && ay2 > tb.y;
+          })
+          .sort((a, b) => a.number - b.number);
+      } else {
+        overlayItems = filtered.sort((a, b) => a.number - b.number);
+      }
+
+      if (overlayItems.length > 0) {
+        const overlayData = overlayItems.map((a) => ({
+          number: a.number,
+          x: a.box.x,
+          y: a.box.y,
+          width: a.box.width,
+          height: a.box.height,
+        }));
+
+        // Uses position:absolute with document-relative coords so labels render
+        // correctly for both viewport and fullPage screenshots, and when the
+        // screenshot is scoped to a selector element.
+        await page.evaluate(`(() => {
+          var items = ${JSON.stringify(overlayData)};
+          var id = ${JSON.stringify(ANNOTATION_OVERLAY_ID)};
+          var sx = window.scrollX || 0;
+          var sy = window.scrollY || 0;
+          var c = document.createElement('div');
+          c.id = id;
+          c.style.cssText = 'position:absolute;top:0;left:0;width:0;height:0;pointer-events:none;z-index:2147483647;';
+          for (var i = 0; i < items.length; i++) {
+            var it = items[i];
+            var dx = it.x + sx;
+            var dy = it.y + sy;
+            var b = document.createElement('div');
+            b.style.cssText = 'position:absolute;left:' + dx + 'px;top:' + dy + 'px;width:' + it.width + 'px;height:' + it.height + 'px;border:2px solid rgba(255,0,0,0.8);box-sizing:border-box;pointer-events:none;';
+            var l = document.createElement('div');
+            l.textContent = String(it.number);
+            var labelTop = dy < 14 ? '2px' : '-14px';
+            l.style.cssText = 'position:absolute;top:' + labelTop + ';left:-2px;background:rgba(255,0,0,0.9);color:#fff;font:bold 11px/14px monospace;padding:0 4px;border-radius:2px;white-space:nowrap;';
+            b.appendChild(l);
+            c.appendChild(b);
+          }
+          document.documentElement.appendChild(c);
+        })()`);
+        overlayInjected = true;
+      }
+
+      // Build returned annotation metadata with image-relative coordinates.
+      // Selector: shift to target-element-relative.
+      // fullPage: convert to document-relative (matching fullPage image origin).
+      // Default: viewport-relative (unchanged).
+      if (targetBox) {
+        const tb = targetBox;
+        annotations = overlayItems.map((a) => ({
+          ...a,
+          box: {
+            x: a.box.x - tb.x,
+            y: a.box.y - tb.y,
+            width: a.box.width,
+            height: a.box.height,
+          },
+        }));
+      } else if (command.fullPage) {
+        const scroll = (await page.evaluate(
+          `({x: window.scrollX || 0, y: window.scrollY || 0})`
+        )) as { x: number; y: number };
+        annotations = overlayItems.map((a) => ({
+          ...a,
+          box: {
+            x: a.box.x + scroll.x,
+            y: a.box.y + scroll.y,
+            width: a.box.width,
+            height: a.box.height,
+          },
+        }));
+      } else {
+        annotations = overlayItems;
+      }
+    }
+
+    await target.screenshot({ ...options, path: savePath });
+
+    if (overlayInjected) {
+      await removeAnnotationOverlay(page);
+    }
+
+    return successResponse(command.id, {
+      path: savePath,
+      ...(annotations && annotations.length > 0 ? { annotations } : {}),
+    });
+  } catch (error) {
+    if (overlayInjected) {
+      await removeAnnotationOverlay(page);
+    }
+    if (command.selector) {
+      throw toAIFriendlyError(error, command.selector);
+    }
+    throw error;
   }
 }
 
@@ -565,6 +912,7 @@ async function handleSnapshot(
   command: Command & {
     action: 'snapshot';
     interactive?: boolean;
+    cursor?: boolean;
     maxDepth?: number;
     compact?: boolean;
     selector?: string;
@@ -574,20 +922,23 @@ async function handleSnapshot(
   // Use enhanced snapshot with refs and optional filtering
   const { tree, refs } = await browser.getSnapshot({
     interactive: command.interactive,
+    cursor: command.cursor,
     maxDepth: command.maxDepth,
     compact: command.compact,
     selector: command.selector,
   });
 
   // Simplify refs for output (just role and name)
-  const simpleRefs: Record<string, { role: string; name?: string }> = {};
+  const simpleRefs: Record<string, { role: string; name: string }> = {};
   for (const [ref, data] of Object.entries(refs)) {
     simpleRefs[ref] = { role: data.role, name: data.name };
   }
 
+  const page = browser.getPage();
   return successResponse(command.id, {
     snapshot: tree || 'Empty page',
     refs: Object.keys(simpleRefs).length > 0 ? simpleRefs : undefined,
+    origin: page.url(),
   });
 }
 
@@ -600,7 +951,7 @@ async function handleEvaluate(
   // Evaluate the script directly as a string expression
   const result = await page.evaluate(command.script);
 
-  return successResponse(command.id, { result });
+  return successResponse(command.id, { result, origin: page.url() });
 }
 
 async function handleWait(command: WaitCommand, browser: BrowserManager): Promise<Response> {
@@ -624,41 +975,41 @@ async function handleWait(command: WaitCommand, browser: BrowserManager): Promis
 async function handleScroll(command: ScrollCommand, browser: BrowserManager): Promise<Response> {
   const page = browser.getPage();
 
+  let deltaX = command.x ?? 0;
+  let deltaY = command.y ?? 0;
+  const hasExplicitDelta = command.x !== undefined || command.y !== undefined;
+
+  if (command.direction) {
+    const amount = command.amount ?? 100;
+    switch (command.direction) {
+      case 'up':
+        deltaY = -amount;
+        break;
+      case 'down':
+        deltaY = amount;
+        break;
+      case 'left':
+        deltaX = -amount;
+        break;
+      case 'right':
+        deltaX = amount;
+        break;
+    }
+  }
+
   if (command.selector) {
-    const element = page.locator(command.selector);
+    const element = browser.getLocator(command.selector);
     await element.scrollIntoViewIfNeeded();
 
-    if (command.x !== undefined || command.y !== undefined) {
+    if (hasExplicitDelta || deltaX !== 0 || deltaY !== 0) {
       await element.evaluate(
         (el, { x, y }) => {
-          el.scrollBy(x ?? 0, y ?? 0);
+          el.scrollBy(x, y);
         },
-        { x: command.x, y: command.y }
+        { x: deltaX, y: deltaY }
       );
     }
   } else {
-    // Scroll the page
-    let deltaX = command.x ?? 0;
-    let deltaY = command.y ?? 0;
-
-    if (command.direction) {
-      const amount = command.amount ?? 100;
-      switch (command.direction) {
-        case 'up':
-          deltaY = -amount;
-          break;
-        case 'down':
-          deltaY = amount;
-          break;
-        case 'left':
-          deltaX = -amount;
-          break;
-        case 'right':
-          deltaX = amount;
-          break;
-      }
-    }
-
     await page.evaluate(`window.scrollBy(${deltaX}, ${deltaY})`);
   }
 
@@ -702,7 +1053,7 @@ async function handleContent(
     html = await page.content();
   }
 
-  return successResponse(command.id, { html });
+  return successResponse(command.id, { html, origin: page.url() });
 }
 
 async function handleClose(
@@ -861,7 +1212,7 @@ async function handleGetByRole(
   browser: BrowserManager
 ): Promise<Response> {
   const page = browser.getPage();
-  const locator = page.getByRole(command.role as any, { name: command.name });
+  const locator = page.getByRole(command.role as any, { name: command.name, exact: command.exact });
 
   switch (command.subaction) {
     case 'click':
@@ -901,7 +1252,7 @@ async function handleGetByLabel(
   browser: BrowserManager
 ): Promise<Response> {
   const page = browser.getPage();
-  const locator = page.getByLabel(command.label);
+  const locator = page.getByLabel(command.label, { exact: command.exact });
 
   switch (command.subaction) {
     case 'click':
@@ -921,7 +1272,7 @@ async function handleGetByPlaceholder(
   browser: BrowserManager
 ): Promise<Response> {
   const page = browser.getPage();
-  const locator = page.getByPlaceholder(command.placeholder);
+  const locator = page.getByPlaceholder(command.placeholder, { exact: command.exact });
 
   switch (command.subaction) {
     case 'click':
@@ -1074,11 +1425,9 @@ async function handleDownload(
   browser: BrowserManager
 ): Promise<Response> {
   const page = browser.getPage();
+  const locator = browser.getLocator(command.selector);
 
-  const [download] = await Promise.all([
-    page.waitForEvent('download'),
-    page.click(command.selector),
-  ]);
+  const [download] = await Promise.all([page.waitForEvent('download'), locator.click()]);
 
   await download.saveAs(command.path);
   return successResponse(command.id, {
@@ -1141,6 +1490,24 @@ async function handleDevice(command: DeviceCommand, browser: BrowserManager): Pr
 
   await browser.setDevice(command.device);
 
+  // Apply or clear device scale factor
+  if (device.deviceScaleFactor && device.deviceScaleFactor !== 1) {
+    // Apply device scale factor for HiDPI/retina displays
+    await browser.setDeviceScaleFactor(
+      device.deviceScaleFactor,
+      device.viewport.width,
+      device.viewport.height,
+      device.isMobile ?? false
+    );
+  } else {
+    // Clear device scale factor override to restore default (1x)
+    try {
+      await browser.clearDeviceMetricsOverride();
+    } catch {
+      // Ignore error if override was never set
+    }
+  }
+
   return successResponse(command.id, {
     device: command.device,
     viewport: device.viewport,
@@ -1199,15 +1566,17 @@ async function handleGetAttribute(
   command: GetAttributeCommand,
   browser: BrowserManager
 ): Promise<Response> {
+  const page = browser.getPage();
   const locator = browser.getLocator(command.selector);
   const value = await locator.getAttribute(command.attribute);
-  return successResponse(command.id, { attribute: command.attribute, value });
+  return successResponse(command.id, { attribute: command.attribute, value, origin: page.url() });
 }
 
 async function handleGetText(command: GetTextCommand, browser: BrowserManager): Promise<Response> {
+  const page = browser.getPage();
   const locator = browser.getLocator(command.selector);
   const text = await locator.textContent();
-  return successResponse(command.id, { text });
+  return successResponse(command.id, { text, origin: page.url() });
 }
 
 async function handleIsVisible(
@@ -1351,7 +1720,35 @@ async function handleTraceStop(
   browser: BrowserManager
 ): Promise<Response> {
   await browser.stopTracing(command.path);
-  return successResponse(command.id, { path: command.path });
+  return successResponse(
+    command.id,
+    command.path ? { path: command.path } : { traceStopped: true }
+  );
+}
+
+async function handleProfilerStart(
+  command: ProfilerStartCommand,
+  browser: BrowserManager
+): Promise<Response> {
+  await browser.startProfiling({ categories: command.categories });
+  return successResponse(command.id, { started: true });
+}
+
+async function handleProfilerStop(
+  command: ProfilerStopCommand,
+  browser: BrowserManager
+): Promise<Response> {
+  let outputPath = command.path;
+  if (!outputPath) {
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const random = Math.random().toString(36).substring(2, 8);
+    const filename = `profile-${timestamp}-${random}.json`;
+    const profileDir = path.join(getAppDir(), 'tmp', 'profiles');
+    mkdirSync(profileDir, { recursive: true });
+    outputPath = path.join(profileDir, filename);
+  }
+  const result = await browser.stopProfiling(outputPath);
+  return successResponse(command.id, result);
 }
 
 async function handleHarStart(
@@ -1385,10 +1782,186 @@ async function handleStateLoad(
   command: Command & { action: 'state_load'; path: string },
   browser: BrowserManager
 ): Promise<Response> {
-  // Storage state is loaded at context creation
+  if (browser.isLaunched()) {
+    return errorResponse(
+      command.id,
+      'Cannot load state while browser is running. Close browser first, then relaunch with loaded state.'
+    );
+  }
+
+  if (!fs.existsSync(command.path)) {
+    return errorResponse(command.id, `State file not found: ${command.path}`);
+  }
+
+  await browser.launch({
+    id: command.id,
+    action: 'launch',
+    headless: true,
+    autoStateFilePath: command.path,
+  });
+
   return successResponse(command.id, {
-    note: 'Storage state must be loaded at browser launch. Use --state flag.',
+    loaded: true,
     path: command.path,
+  });
+}
+
+async function handleStateList(command: StateListCommand): Promise<Response> {
+  const sessionsDir = getSessionsDir();
+  const files = listStateFiles();
+
+  if (files.length === 0) {
+    return successResponse(command.id, { files: [], directory: sessionsDir });
+  }
+
+  const stateFiles = files
+    .map((filename) => {
+      const filepath = path.join(sessionsDir, filename);
+      const stats = fs.statSync(filepath);
+
+      let encrypted = false;
+      try {
+        const content = fs.readFileSync(filepath, 'utf-8');
+        const parsed = JSON.parse(content);
+        encrypted = isEncryptedPayload(parsed);
+      } catch {
+        // Ignore parse errors
+      }
+
+      return {
+        filename,
+        path: filepath,
+        size: stats.size,
+        modified: stats.mtime.toISOString(),
+        encrypted,
+      };
+    })
+    .sort((a, b) => new Date(b.modified).getTime() - new Date(a.modified).getTime());
+
+  return successResponse(command.id, { files: stateFiles, directory: sessionsDir });
+}
+
+async function handleStateClear(command: StateClearCommand): Promise<Response> {
+  const sessionsDir = getSessionsDir();
+
+  if (command.sessionName && !isValidSessionName(command.sessionName)) {
+    return errorResponse(
+      command.id,
+      'Invalid session name. Use only letters, numbers, dashes, and underscores.'
+    );
+  }
+
+  const files = listStateFiles();
+  if (files.length === 0) {
+    return successResponse(command.id, { cleared: 0, deleted: [] });
+  }
+
+  const deleted: string[] = [];
+
+  if (command.all) {
+    for (const file of files) {
+      fs.unlinkSync(path.join(sessionsDir, file));
+      deleted.push(file);
+    }
+  } else if (command.sessionName) {
+    for (const file of files) {
+      if (file.startsWith(`${command.sessionName}-`)) {
+        fs.unlinkSync(path.join(sessionsDir, file));
+        deleted.push(file);
+      }
+    }
+  }
+
+  return successResponse(command.id, { cleared: deleted.length, deleted });
+}
+
+async function handleStateShow(command: StateShowCommand): Promise<Response> {
+  const sessionsDir = getSessionsDir();
+
+  const baseName = command.filename.replace(/\.json$/, '');
+  if (!command.filename.endsWith('.json') || !isValidSessionName(baseName)) {
+    return errorResponse(
+      command.id,
+      'Invalid filename. Use only letters, numbers, dashes, and underscores (with .json extension).'
+    );
+  }
+
+  const filepath = path.join(sessionsDir, command.filename);
+
+  if (!fs.existsSync(filepath)) {
+    return errorResponse(command.id, `State file not found: ${command.filename}`);
+  }
+
+  try {
+    const { data: state, wasEncrypted } = readStateFile(filepath);
+    const stats = fs.statSync(filepath);
+
+    const stateObj = state as {
+      cookies?: Array<{ domain: string }>;
+      origins?: unknown[];
+    };
+    const cookies = stateObj.cookies?.length || 0;
+    const origins = stateObj.origins?.length || 0;
+    const domains = [...new Set((stateObj.cookies || []).map((c) => c.domain))];
+
+    return successResponse(command.id, {
+      filename: command.filename,
+      path: filepath,
+      size: stats.size,
+      modified: stats.mtime.toISOString(),
+      encrypted: wasEncrypted,
+      summary: {
+        cookies,
+        origins,
+        domains,
+      },
+      state,
+    });
+  } catch (e) {
+    return errorResponse(command.id, `Failed to parse state file: ${(e as Error).message}`);
+  }
+}
+
+async function handleStateClean(command: StateCleanCommand): Promise<Response> {
+  const deleted = cleanupExpiredStates(command.days);
+  const keptCount = listStateFiles().length;
+
+  return successResponse(command.id, {
+    cleaned: deleted.length,
+    deleted,
+    keptCount,
+    days: command.days,
+  });
+}
+
+async function handleStateRename(command: StateRenameCommand): Promise<Response> {
+  const sessionsDir = getSessionsDir();
+
+  if (!isValidSessionName(command.oldName) || !isValidSessionName(command.newName)) {
+    return errorResponse(
+      command.id,
+      'Invalid name. Use only letters, numbers, dashes, and underscores.'
+    );
+  }
+
+  const oldPath = path.join(sessionsDir, `${command.oldName}.json`);
+  const newPath = path.join(sessionsDir, `${command.newName}.json`);
+
+  if (!fs.existsSync(oldPath)) {
+    return errorResponse(command.id, `State file not found: ${command.oldName}.json`);
+  }
+
+  if (fs.existsSync(newPath)) {
+    return errorResponse(command.id, `Destination already exists: ${command.newName}.json`);
+  }
+
+  fs.renameSync(oldPath, newPath);
+
+  return successResponse(command.id, {
+    renamed: true,
+    oldName: `${command.oldName}.json`,
+    newName: `${command.newName}.json`,
+    path: newPath,
   });
 }
 
@@ -1398,8 +1971,9 @@ async function handleConsole(command: ConsoleCommand, browser: BrowserManager): 
     return successResponse(command.id, { cleared: true });
   }
 
+  const page = browser.getPage();
   const messages = browser.getConsoleMessages();
-  return successResponse(command.id, { messages });
+  return successResponse(command.id, { messages, origin: page.url() });
 }
 
 async function handleErrors(command: ErrorsCommand, browser: BrowserManager): Promise<Response> {
@@ -1417,8 +1991,21 @@ async function handleKeyboard(
   browser: BrowserManager
 ): Promise<Response> {
   const page = browser.getPage();
-  await page.keyboard.press(command.keys);
-  return successResponse(command.id, { pressed: command.keys });
+  const sub = command.subaction ?? 'press';
+
+  switch (sub) {
+    case 'type':
+      await page.keyboard.type(command.text ?? '', { delay: command.delay });
+      return successResponse(command.id, { typed: true, text: command.text });
+    case 'press':
+      await page.keyboard.press(command.keys ?? '');
+      return successResponse(command.id, { pressed: command.keys });
+    case 'insertText':
+      await page.keyboard.insertText(command.text ?? '');
+      return successResponse(command.id, { inserted: true, text: command.text });
+    default:
+      return errorResponse(command.id, `Unknown keyboard subaction: ${sub}`);
+  }
 }
 
 async function handleWheel(command: WheelCommand, browser: BrowserManager): Promise<Response> {
@@ -1499,16 +2086,17 @@ async function handleInnerHtml(
 ): Promise<Response> {
   const page = browser.getPage();
   const html = await page.locator(command.selector).innerHTML();
-  return successResponse(command.id, { html });
+  return successResponse(command.id, { html, origin: page.url() });
 }
 
 async function handleInputValue(
   command: InputValueCommand,
   browser: BrowserManager
 ): Promise<Response> {
+  const page = browser.getPage();
   const locator = browser.getLocator(command.selector);
   const value = await locator.inputValue();
-  return successResponse(command.id, { value });
+  return successResponse(command.id, { value, origin: page.url() });
 }
 
 async function handleSetValue(
@@ -1592,6 +2180,9 @@ async function handleEmulateMedia(
     reducedMotion: command.reducedMotion,
     forcedColors: command.forcedColors,
   });
+  if (command.colorScheme) {
+    browser.setColorScheme(command.colorScheme);
+  }
   return successResponse(command.id, { emulated: true });
 }
 
@@ -1802,8 +2393,7 @@ async function handleScrollIntoView(
   command: ScrollIntoViewCommand,
   browser: BrowserManager
 ): Promise<Response> {
-  const page = browser.getPage();
-  await page.locator(command.selector).scrollIntoViewIfNeeded();
+  await browser.getLocator(command.selector).scrollIntoViewIfNeeded();
   return successResponse(command.id, { scrolled: true });
 }
 
@@ -2001,4 +2591,243 @@ async function handleRecordingRestart(
     previousPath: result.previousPath,
     stopped: result.stopped,
   });
+}
+
+// Diff handlers
+
+async function handleDiffSnapshot(
+  command: DiffSnapshotCommand,
+  browser: BrowserManager
+): Promise<Response> {
+  let before: string;
+
+  if (command.baseline) {
+    try {
+      before = fs.readFileSync(command.baseline, 'utf-8');
+    } catch {
+      return errorResponse(command.id, `Cannot read baseline file: ${command.baseline}`);
+    }
+  } else {
+    before = browser.getLastSnapshot();
+    if (!before) {
+      return errorResponse(
+        command.id,
+        'No previous snapshot in this session. Take a snapshot first, or use --baseline <file>.'
+      );
+    }
+  }
+
+  const page = browser.getPage();
+  const { tree } = await getEnhancedSnapshot(page, {
+    selector: command.selector,
+    compact: command.compact,
+    maxDepth: command.maxDepth,
+  });
+
+  const after = tree || 'Empty page';
+  const result = diffSnapshots(before, after);
+  browser.setLastSnapshot(after);
+  return successResponse(command.id, result);
+}
+
+async function handleDiffScreenshot(
+  command: DiffScreenshotCommand,
+  browser: BrowserManager
+): Promise<Response> {
+  if (!fs.existsSync(command.baseline)) {
+    return errorResponse(command.id, `Baseline file not found: ${command.baseline}`);
+  }
+
+  const page = browser.getPage();
+  let screenshotBuffer: Buffer;
+  if (command.selector) {
+    const locator = browser.getLocatorFromRef(command.selector) || page.locator(command.selector);
+    screenshotBuffer = await locator.screenshot({ type: 'png' });
+  } else {
+    screenshotBuffer = await page.screenshot({ fullPage: command.fullPage, type: 'png' });
+  }
+
+  const baselineBuffer = fs.readFileSync(command.baseline);
+  const ext = path.extname(command.baseline).toLowerCase();
+  const baselineMime = ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg' : 'image/png';
+
+  const result = await diffScreenshots(page.context(), baselineBuffer, screenshotBuffer, {
+    threshold: command.threshold,
+    outputPath: command.output,
+    baselineMime,
+  });
+
+  return successResponse(command.id, result);
+}
+
+async function handleDiffUrl(command: DiffUrlCommand, browser: BrowserManager): Promise<Response> {
+  const page = browser.getPage();
+
+  const waitUntil = command.waitUntil ?? 'load';
+  const snapshotOpts = {
+    selector: command.selector,
+    compact: command.compact,
+    maxDepth: command.maxDepth,
+  };
+
+  // Capture state of url1
+  await page.goto(command.url1, { waitUntil });
+  const { tree: tree1 } = await getEnhancedSnapshot(page, snapshotOpts);
+  const snapshot1 = tree1 || 'Empty page';
+  let screenshot1: Buffer | undefined;
+  if (command.screenshot) {
+    screenshot1 = await page.screenshot({ fullPage: command.fullPage, type: 'png' });
+  }
+
+  // Capture state of url2
+  await page.goto(command.url2, { waitUntil });
+  const { tree: tree2 } = await getEnhancedSnapshot(page, snapshotOpts);
+  const snapshot2 = tree2 || 'Empty page';
+
+  const snapshotDiff = diffSnapshots(snapshot1, snapshot2);
+
+  const result: DiffUrlData = { snapshot: snapshotDiff };
+
+  if (command.screenshot && screenshot1) {
+    const screenshot2 = await page.screenshot({ fullPage: command.fullPage, type: 'png' });
+    result.screenshot = await diffScreenshots(page.context(), screenshot1, screenshot2, {});
+  }
+
+  return successResponse(command.id, result);
+}
+
+async function handleAuthLogin(
+  command: AuthLoginCommand,
+  browser: BrowserManager
+): Promise<Response> {
+  const profile = getAuthProfile(command.name);
+  if (!profile) {
+    return errorResponse(command.id, `Auth profile '${command.name}' not found`);
+  }
+
+  browser.checkDomainAllowed(profile.url);
+
+  const page = browser.getPage();
+  await page.goto(profile.url, { waitUntil: 'load' });
+
+  const usingAutoDetect =
+    !profile.usernameSelector && !profile.passwordSelector && !profile.submitSelector;
+  if (usingAutoDetect) {
+    console.error(
+      `[agent-browser] Auth login '${command.name}': using auto-detected form selectors. ` +
+        `If login fails, specify --username-selector/--password-selector/--submit-selector with auth save.`
+    );
+  }
+
+  const passSel = profile.passwordSelector || 'input[type="password"]:visible';
+
+  // Auto-detect selectors ordered from most specific to broadest.
+  // Locale-dependent text matchers (e.g. "Sign in") are intentionally
+  // excluded -- they break on non-English pages.
+  const AUTO_USER_SELECTORS = [
+    'input[autocomplete="username"]:visible',
+    'input[type="email"]:visible',
+    'input[name="username"]:visible',
+    'input[name="email"]:visible',
+  ];
+  const AUTO_SUBMIT_SELECTORS = ['button[type="submit"]:visible', 'input[type="submit"]:visible'];
+
+  try {
+    // Resolve username field: custom selector or sequential auto-detect
+    let userLocator;
+    if (profile.usernameSelector) {
+      userLocator = page.locator(profile.usernameSelector).first();
+    } else {
+      userLocator = null;
+      for (const sel of AUTO_USER_SELECTORS) {
+        const loc = page.locator(sel).first();
+        if (await loc.isVisible({ timeout: 1000 }).catch(() => false)) {
+          userLocator = loc;
+          break;
+        }
+      }
+      if (!userLocator) {
+        return errorResponse(
+          command.id,
+          `Auth login failed for '${command.name}': could not find username field. ` +
+            `Specify --username-selector with auth save.`
+        );
+      }
+    }
+
+    // Resolve submit button: custom selector or sequential auto-detect
+    let submitLocator;
+    if (profile.submitSelector) {
+      submitLocator = page.locator(profile.submitSelector).first();
+    } else {
+      submitLocator = null;
+      for (const sel of AUTO_SUBMIT_SELECTORS) {
+        const loc = page.locator(sel).first();
+        if (await loc.isVisible({ timeout: 1000 }).catch(() => false)) {
+          submitLocator = loc;
+          break;
+        }
+      }
+      if (!submitLocator) {
+        return errorResponse(
+          command.id,
+          `Auth login failed for '${command.name}': could not find submit button. ` +
+            `Specify --submit-selector with auth save.`
+        );
+      }
+    }
+
+    await userLocator.fill(profile.username);
+    await page.locator(passSel).first().fill(profile.password);
+    await submitLocator.click();
+    await page.waitForLoadState('load');
+  } catch (err) {
+    return errorResponse(
+      command.id,
+      `Auth login failed for '${command.name}': ${err instanceof Error ? err.message : err}. ` +
+        `Try specifying custom selectors with auth save --username-selector/--password-selector/--submit-selector`
+    );
+  }
+
+  updateLastLogin(command.name);
+
+  return successResponse(command.id, {
+    loggedIn: true,
+    name: command.name,
+    url: page.url(),
+    title: await page.title(),
+  });
+}
+
+async function handleConfirm(command: ConfirmCommand, browser: BrowserManager): Promise<Response> {
+  const entry = getAndRemovePending(command.confirmationId);
+  if (!entry) {
+    return errorResponse(command.id, `No pending confirmation with id '${command.confirmationId}'`);
+  }
+
+  // Re-validate the stored command through the schema to guard against
+  // shape drift between when the confirmation was issued and now.
+  const parseResult = parseCommand(JSON.stringify(entry.command));
+  if (!parseResult.success) {
+    return errorResponse(command.id, `Stored command is no longer valid: ${parseResult.error}`);
+  }
+  const originalCommand = parseResult.command;
+
+  // Re-check deny list in case policy was updated since the confirmation was issued
+  actionPolicy = reloadPolicyIfChanged();
+  const decision = checkPolicy(originalCommand.action, actionPolicy, new Set());
+  if (decision === 'deny') {
+    const category = getActionCategory(originalCommand.action);
+    return errorResponse(command.id, `Action denied by policy: '${category}' is not allowed`);
+  }
+
+  return await dispatchAction(originalCommand, browser);
+}
+
+function handleDeny(command: DenyCommand): Response {
+  const entry = getAndRemovePending(command.confirmationId);
+  if (!entry) {
+    return errorResponse(command.id, `No pending confirmation with id '${command.confirmationId}'`);
+  }
+  return successResponse(command.id, { denied: true });
 }

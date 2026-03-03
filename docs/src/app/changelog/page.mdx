@@ -1,0 +1,516 @@
+import { pageMetadata } from "@/lib/page-metadata"
+
+export const metadata = pageMetadata("changelog")
+
+# Changelog
+
+## v0.15.0
+
+<p className="text-[#888] text-sm">February 2026</p>
+
+### New Features
+
+- **Authentication vault** -- Store credentials locally (always AES-256-GCM encrypted) and reference them by name. The LLM never sees passwords. Commands: `auth save`, `auth login`, `auth list`, `auth show`, `auth delete`. Passwords can be piped via stdin (`--password-stdin`) to avoid shell history exposure.
+- **Content boundary markers** -- `--content-boundaries` wraps page-sourced output in structural delimiters with a per-process CSPRNG nonce, so LLMs can distinguish trusted tool output from untrusted page content. In `--json` mode, a `_boundary` object is injected with `nonce` and `origin` fields.
+- **Domain allowlist** -- `--allowed-domains` restricts navigation, sub-resource requests, WebSocket connections, and EventSource streams to trusted domains. Supports exact match and wildcard prefix patterns (e.g., `*.example.com`).
+- **Action policy** -- `--action-policy` gates actions using a static JSON policy file with `allow`/`deny` lists across 13 action categories. Auth vault operations bypass policy enforcement.
+- **Action confirmation** -- `--confirm-actions` requires explicit approval for sensitive action categories. New `confirm` and `deny` commands for orchestrator use. `--confirm-interactive` enables human-in-the-loop terminal prompts (auto-denies if stdin is not a TTY). Pending confirmations auto-deny after 60 seconds.
+- **Output length limits** -- `--max-output` truncates large page outputs to prevent LLM context flooding.
+- **`--download-path` option** -- Set a default download directory via flag, `AGENT_BROWSER_DOWNLOAD_PATH` env var, or `downloadPath` config key. Without it, downloads go to a temporary directory deleted when the browser closes.
+- **`--selector` flag for scroll** -- Scroll within a specific container element instead of the page: `agent-browser scroll down 500 --selector "div.scroll-container"`
+
+```bash
+# Auth vault
+echo "pass" | agent-browser auth save github --url https://github.com/login --username user --password-stdin
+agent-browser auth login github
+
+# Security flags
+agent-browser --content-boundaries --allowed-domains "example.com,*.example.com" --max-output 50000 open https://example.com
+
+# Download path
+agent-browser --download-path ./downloads open https://example.com
+
+# Scroll within container
+agent-browser scroll down 500 --selector "div.content"
+```
+
+### Environment Variables
+
+Six new environment variables for security configuration: `AGENT_BROWSER_CONTENT_BOUNDARIES`, `AGENT_BROWSER_MAX_OUTPUT`, `AGENT_BROWSER_ALLOWED_DOMAINS`, `AGENT_BROWSER_ACTION_POLICY`, `AGENT_BROWSER_CONFIRM_ACTIONS`, `AGENT_BROWSER_CONFIRM_INTERACTIVE`.
+
+---
+
+## v0.14.0
+
+<p className="text-[#888] text-sm">February 2026</p>
+
+### New Features
+
+- **`keyboard` command** -- Type with real keystrokes, insert text, and press shortcuts at the currently focused element without needing a selector (`keyboard type`, `keyboard inserttext`).
+- **`--color-scheme` flag** -- Persistent dark/light mode preference across browser sessions via flag or `AGENT_BROWSER_COLOR_SCHEME` env var.
+
+```bash
+agent-browser keyboard type "Hello world"
+agent-browser keyboard inserttext "pasted text"
+agent-browser --color-scheme dark open https://example.com
+```
+
+### Bug Fixes
+
+- Fixed IPC EAGAIN errors (os error 35/11) with backpressure-aware socket writes, command serialization, and lowered default Playwright timeout to 25s (configurable via `AGENT_BROWSER_DEFAULT_TIMEOUT`).
+- Fixed remote debugging (CDP) reconnection.
+- Fixed state load failing when no browser is running.
+- Fixed `--annotate` flag warning appearing when not explicitly passed via CLI.
+
+---
+
+## v0.13.0
+
+<p className="text-[#888] text-sm">February 2026</p>
+
+### New Features
+
+- **Diff commands** -- Compare snapshots, screenshots, and URLs between page states. Run visual pixel diffs against baseline images, compare accessibility tree snapshots with customizable depth and selectors, and diff two URLs side-by-side with optional screenshot comparison.
+
+```bash
+agent-browser diff snapshot
+agent-browser diff screenshot --baseline before.png
+agent-browser diff url https://staging.example.com https://prod.example.com
+```
+
+---
+
+## v0.12.0
+
+<p className="text-[#888] text-sm">February 2026</p>
+
+### New Features
+
+- **Annotated screenshots** -- `--annotate` flag overlays numbered labels on interactive elements and prints a legend mapping each label to its element ref. Enables multimodal AI models to reason about visual layout while using the same `@eN` refs for subsequent interactions. Also settable via `AGENT_BROWSER_ANNOTATE` env var.
+
+```bash
+agent-browser screenshot --annotate
+```
+
+---
+
+## v0.11.1
+
+<p className="text-[#888] text-sm">February 2026</p>
+
+### Documentation
+
+- Added documentation for command chaining with `&&` across README, CLI help output, docs, and skill files.
+
+---
+
+## v0.11.0
+
+<p className="text-[#888] text-sm">February 2026</p>
+
+### New Features
+
+- **Configuration file support** -- Automatic loading from user (`~/.agent-browser/config.json`) and project (`./agent-browser.json`) directories with priority-based merging.
+- **Profiler commands** -- Chrome DevTools profiling with `profiler start` and `profiler stop`.
+- **Browser extension loading** -- `--extension` flag to load browser extensions.
+- **Storage state management** -- `state save` and `state load` commands for auth state persistence.
+- **iOS device emulation** -- `--device` flag for device emulation.
+- **Enhanced click** -- `--new-tab` option for click commands.
+- **Enhanced find** -- Additional actions and filtering options.
+- **CDP WebSocket URLs** -- `--cdp` now accepts WebSocket URLs in addition to ports.
+
+---
+
+## v0.10.0
+
+<p className="text-[#888] text-sm">February 2026</p>
+
+### New Features
+
+- **Session persistence** - Automatic save/restore of cookies and localStorage across browser restarts using `--session-name` flag
+- **Encrypted state** - Optional AES-256-GCM encryption for saved session state data
+- **State management commands** - New commands for listing, showing, renaming, clearing, and cleaning up session state files
+- **New tab on click** - Added `--new-tab` option for click commands to open links in new tabs
+
+```bash
+# Persist session state
+agent-browser --session-name myapp open https://example.com
+
+# Manage saved states
+agent-browser state list
+agent-browser state show myapp
+agent-browser state clear myapp
+```
+
+---
+
+## v0.9.4
+
+<p className="text-[#888] text-sm">February 2026</p>
+
+### Bug Fixes
+
+- Fixed all Clippy lint warnings in the Rust CLI
+
+---
+
+## v0.9.3
+
+<p className="text-[#888] text-sm">February 2026</p>
+
+### Improvements
+
+- Added support for custom executable path in CLI browser launch options
+- Documentation site UI improvements including a new chat component with sheet-based interface
+
+---
+
+## v0.9.2
+
+<p className="text-[#888] text-sm">February 2026</p>
+
+### Improvements
+
+- Migrated documentation site to MDX for improved content authoring
+- Added AI-powered docs chat feature
+- Updated README with Homebrew installation instructions for macOS users
+
+---
+
+## v0.9.1
+
+<p className="text-[#888] text-sm">February 2026</p>
+
+### New Features
+
+- **`--allow-file-access` flag** - Enable opening and interacting with local `file://` URLs (PDFs, HTML files) by passing Chromium flags that allow JavaScript access to local files
+- **`-C`/`--cursor` flag for snapshots** - Include cursor-interactive elements like divs with onclick handlers or `cursor:pointer` styles
+
+```bash
+agent-browser --allow-file-access open file:///path/to/document.pdf
+agent-browser snapshot -C
+```
+
+---
+
+## v0.9.0
+
+<p className="text-[#888] text-sm">February 2026</p>
+
+### New Features
+
+- **iOS Simulator support** - Mobile Safari testing via Appium with real device and simulator support
+
+```bash
+# List available iOS simulators
+agent-browser device list
+
+# Launch on iOS device
+agent-browser -p ios --device "iPhone 16 Pro" open https://example.com
+
+# Touch interactions
+agent-browser tap @e1
+agent-browser swipe up
+```
+
+---
+
+## v0.8.10
+
+<p className="text-[#888] text-sm">January 2026</p>
+
+### Improvements
+
+- Added `--stdin` flag for eval command to read JavaScript from stdin, enabling heredoc usage for multiline scripts
+- Fixed binary permission issues on macOS/Linux when postinstall scripts don't run
+
+---
+
+## v0.8.9
+
+<p className="text-[#888] text-sm">January 2026</p>
+
+### Improvements
+
+- Added `--stdin` flag for eval command to read JavaScript from stdin
+
+---
+
+## v0.8.8
+
+<p className="text-[#888] text-sm">January 2026</p>
+
+### Improvements
+
+- Added base64 encoding support for the eval command with `-b`/`--base64` flag to avoid shell escaping issues
+- Updated documentation with AI agent setup instructions
+
+---
+
+## v0.8.7
+
+<p className="text-[#888] text-sm">January 2026</p>
+
+### Bug Fixes
+
+- Fixed browser launch options not being passed correctly when using persistent profiles
+- Added pre-flight checks for socket path length limits and directory write permissions
+- Improved error handling to properly exit with failure status when browser launch fails
+
+---
+
+## v0.8.6
+
+<p className="text-[#888] text-sm">January 2026</p>
+
+### Bug Fixes
+
+- Improved daemon connection reliability with automatic retry logic for transient errors
+- CLI now cleans up stale socket and PID files before starting a new daemon
+
+---
+
+## v0.8.5
+
+<p className="text-[#888] text-sm">January 2026</p>
+
+### Bug Fixes
+
+- Fixed version synchronization to automatically update Cargo.lock alongside Cargo.toml during releases
+- Made the CLI binary executable in the npm package
+
+---
+
+## v0.8.4
+
+<p className="text-[#888] text-sm">January 2026</p>
+
+### Bug Fixes
+
+- Fixed "Daemon not found" error when running through AI agents by resolving symlinks in the executable path
+
+---
+
+## v0.8.3
+
+<p className="text-[#888] text-sm">January 2026</p>
+
+### Improvements
+
+- Replaced shell-based CLI wrappers with a cross-platform Node.js wrapper to enable npx support on Windows
+- Added postinstall logic to patch npm bin entry on global installs for zero-overhead native binary invocation
+- Added CI tests to verify global installation across all platforms
+
+---
+
+## v0.8.2
+
+<p className="text-[#888] text-sm">January 2026</p>
+
+### Bug Fixes
+
+- Fixed the Windows CMD wrapper to use the native binary directly instead of routing through Node.js
+- Added retry logic to CI install command for transient browser installation failures
+
+---
+
+## v0.8.1
+
+<p className="text-[#888] text-sm">January 2026</p>
+
+### Improvements
+
+- Improved release workflow to validate binary file sizes and ensure binaries are executable after npm install
+- Updated documentation site with a new mobile navigation system
+
+---
+
+## v0.8.0
+
+<p className="text-[#888] text-sm">January 2026</p>
+
+### New Features
+
+- **Kernel cloud browser provider** - Connect to Kernel (kernel.sh) for remote browser infrastructure with stealth mode and persistent profiles
+
+```bash
+# Via -p flag
+agent-browser -p kernel open https://example.com
+
+# Via environment variable
+export AGENT_BROWSER_PROVIDER=kernel
+export KERNEL_API_KEY=your-api-key
+agent-browser open https://example.com
+
+# With persistent profile
+export KERNEL_PROFILE_NAME=my-profile
+agent-browser open https://example.com
+```
+
+- **Ignore HTTPS certificate errors** - New flag for working with self-signed certificates and development environments
+
+```bash
+agent-browser --ignore-https-errors open https://localhost:3000
+```
+
+- **Enhanced cookie management** - Extended `cookies set` command with additional flags for setting cookies before page load
+
+```bash
+agent-browser cookies set session_id "abc123" --url https://app.example.com --httpOnly --secure
+agent-browser cookies set token "xyz" --domain .example.com --path /api --expires 1735689600
+```
+
+### Bug Fixes
+
+- Fixed tab list command not recognizing new pages opened via clicks or `target="_blank"` links
+- Fixed `check` command hanging indefinitely
+- Fixed `set device` not applying deviceScaleFactor - HiDPI screenshots now work correctly
+- Fixed state load and profile persistence not working in v0.7.6
+- Screenshots now save to temp directory when no path is provided
+
+### Security
+
+- Daemon and stream server now reject cross-origin connections
+
+---
+
+## v0.7.1
+
+<p className="text-[#888] text-sm">January 2026</p>
+
+### Bug Fixes
+
+- **Fix native binary distribution** - Native binaries for all platforms (Linux x64/arm64, macOS x64/arm64, Windows x64) are now included in the npm package. Previously, the release workflow published to npm before building binaries, causing "No binary found" errors on installation.
+
+---
+
+## v0.7.0
+
+<p className="text-[#888] text-sm">January 2026</p>
+
+### New Features
+
+- **Cloud browser providers** - Connect to Browserbase or Browser Use for remote browser infrastructure
+
+```bash
+# Via -p flag (recommended)
+agent-browser -p browserbase open https://example.com
+agent-browser -p browseruse open https://example.com
+
+# Via environment variable
+export AGENT_BROWSER_PROVIDER=browserbase
+agent-browser open https://example.com
+```
+
+- **Persistent browser profiles** - Store cookies, localStorage, and login sessions across browser restarts
+
+```bash
+agent-browser --profile ~/.myapp-profile open myapp.com
+# Login persists across restarts
+```
+
+- **Remote CDP WebSocket URLs** - Connect to remote browser services via WebSocket
+
+```bash
+agent-browser --cdp "wss://browser-service.com/cdp?token=..." snapshot
+```
+
+- **`download` command** - Trigger downloads and wait for completion
+
+```bash
+agent-browser download @e1 ./file.pdf
+agent-browser wait --download ./output.zip --timeout 30000
+```
+
+- **Browser launch configuration** - Fine-grained control over browser startup
+
+```bash
+agent-browser --args "--disable-gpu,--no-sandbox" open example.com
+agent-browser --user-agent "Custom UA" open example.com
+agent-browser --proxy-bypass "localhost,*.internal" open example.com
+```
+
+- **Enhanced skills** - Hierarchical structure with references and templates for Claude Code
+
+### Bug Fixes
+
+- Screenshot command now supports refs and has improved error messages
+- WebSocket URLs work in `connect` command
+- Fixed socket file location (uses `~/.agent-browser` instead of TMPDIR)
+- Windows binary path fix (.exe extension)
+- State load and path-based actions now show correct output messages
+
+### Documentation
+
+- Added Claude Code marketplace plugin installation instructions
+- Updated skill documentation with references and templates
+- Improved error documentation
+
+---
+
+## v0.6.0
+
+<p className="text-[#888] text-sm">January 2026</p>
+
+### New Features
+
+- **Video recording** - Record browser sessions to WebM using Playwright's native recording
+
+```bash
+agent-browser record start ./demo.webm
+agent-browser click @e1
+agent-browser record stop
+```
+
+- **`connect` command** - Connect to a browser via CDP and persist the connection for subsequent commands
+
+```bash
+agent-browser connect 9222
+agent-browser snapshot  # No --cdp needed after connect
+```
+
+- **`--proxy` flag** - Configure browser proxy with optional authentication
+
+```bash
+agent-browser --proxy http://user:pass@proxy.com:8080 open example.com
+```
+
+- **`get styles` command** - Extract computed styles from elements
+
+```bash
+agent-browser get styles "button"
+```
+
+- **Claude marketplace plugin** - Added `.claude-plugin/marketplace.json` for Claude Code integration
+- **Enhanced network output** - `network requests` now shows method, URL, and resource type
+- **`--version` flag** - Display CLI version
+
+### Bug Fixes
+
+- Fix Windows daemon startup and port calculation
+- Support `libasound2t64` on newer Ubuntu versions (24.04+)
+- Prevent CDP timeout on empty URL tabs
+- Output screenshot as base64 when no path provided
+- Resolve refs in `get value` command
+- Support URL parameter in `tab new` command
+- Allow `about:`, `data:`, and `file:` URL schemes
+- Detect stale unix socket by attempting connection
+- Respect `AGENT_BROWSER_HEADED` environment variable
+- Handle SIGPIPE to prevent panic when piping to `head`/`tail`
+- Fix null path validation in screenshot command
+
+### Protocol Alignment
+
+These changes align the CLI with the daemon protocol for consistency:
+
+- `select` command now uses `values` field (supports multiple selections)
+- `frame main` uses `mainframe` action
+- `mouse wheel` uses `wheel` action
+- `set media` uses `emulatemedia` action
+- Console output uses `messages` field
+
+### Documentation
+
+- Expanded SKILL.md with comprehensive command reference
+- Updated README with new commands and options
+- Updated CDP mode documentation with `connect` workflow

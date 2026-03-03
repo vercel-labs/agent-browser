@@ -12,7 +12,8 @@ import { platform, arch } from 'os';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = join(__dirname, '..');
 
-const sourcePath = join(projectRoot, 'cli/target/release/agent-browser');
+const sourceExt = platform() === 'win32' ? '.exe' : '';
+const sourcePath = join(projectRoot, `cli/target/release/agent-browser${sourceExt}`);
 const binDir = join(projectRoot, 'bin');
 
 // Determine platform suffix

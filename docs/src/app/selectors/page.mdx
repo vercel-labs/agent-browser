@@ -1,0 +1,58 @@
+import { pageMetadata } from "@/lib/page-metadata"
+
+export const metadata = pageMetadata("selectors")
+
+# Selectors
+
+## Refs (recommended)
+
+Refs provide deterministic element selection from snapshots. Best for AI agents.
+
+```bash
+# 1. Get snapshot with refs
+agent-browser snapshot
+# Output:
+# - heading "Example Domain" [ref=e1] [level=1]
+# - button "Submit" [ref=e2]
+# - textbox "Email" [ref=e3]
+# - link "Learn more" [ref=e4]
+
+# 2. Use refs to interact
+agent-browser click @e2                   # Click the button
+agent-browser fill @e3 "test@example.com" # Fill the textbox
+agent-browser get text @e1                # Get heading text
+agent-browser hover @e4                   # Hover the link
+```
+
+### Why refs?
+
+- **Deterministic** - Ref points to exact element from snapshot
+- **Fast** - No DOM re-query needed
+- **AI-friendly** - LLMs can reliably parse and use refs
+
+## CSS selectors
+
+```bash
+agent-browser click "#id"
+agent-browser click ".class"
+agent-browser click "div > button"
+agent-browser click "[data-testid='submit']"
+```
+
+## Text & XPath
+
+```bash
+agent-browser click "text=Submit"
+agent-browser click "xpath=//button[@type='submit']"
+```
+
+## Semantic locators
+
+Find elements by role, label, or other semantic properties:
+
+```bash
+agent-browser find role button click --name "Submit"
+agent-browser find label "Email" fill "test@test.com"
+agent-browser find placeholder "Search..." fill "query"
+agent-browser find testid "submit-btn" click
+```

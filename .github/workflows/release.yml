@@ -1,0 +1,276 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency: ${{ github.workflow }}-${{ github.ref }}
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  # Build native binaries for all platforms first
+  build-binaries:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            binary: agent-browser-linux-x64
+            use_zigbuild: true
+          - name: Linux ARM64
+            os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            binary: agent-browser-linux-arm64
+            use_zigbuild: true
+          - name: Windows x64
+            os: ubuntu-latest
+            target: x86_64-pc-windows-gnu
+            binary: agent-browser-win32-x64.exe
+            use_zigbuild: false
+          - name: macOS x64
+            os: macos-latest
+            target: x86_64-apple-darwin
+            binary: agent-browser-darwin-x64
+            use_zigbuild: false
+          - name: macOS ARM64
+            os: macos-latest
+            target: aarch64-apple-darwin
+            binary: agent-browser-darwin-arm64
+            use_zigbuild: false
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+
+      - name: Install npm dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Sync version
+        run: pnpm run version:sync
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross-compilation tools (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu gcc-x86-64-linux-gnu mingw-w64
+
+      - name: Install cargo-zigbuild
+        if: matrix.use_zigbuild
+        run: |
+          pip3 install ziglang
+          cargo install cargo-zigbuild
+
+      - name: Configure Rust linkers
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p ~/.cargo
+          cat >> ~/.cargo/config.toml << 'EOF'
+          [target.aarch64-unknown-linux-gnu]
+          linker = "aarch64-linux-gnu-gcc"
+
+          [target.x86_64-pc-windows-gnu]
+          linker = "x86_64-w64-mingw32-gcc"
+          EOF
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            cli/target/
+          key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ hashFiles('cli/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ matrix.target }}-
+
+      - name: Build with zigbuild
+        if: matrix.use_zigbuild
+        run: cargo zigbuild --release --manifest-path cli/Cargo.toml --target ${{ matrix.target }}
+
+      - name: Build with cargo
+        if: '!matrix.use_zigbuild'
+        run: cargo build --release --manifest-path cli/Cargo.toml --target ${{ matrix.target }}
+
+      - name: Copy binary
+        run: |
+          mkdir -p artifacts
+          if [[ "${{ matrix.target }}" == *"windows"* ]]; then
+            cp cli/target/${{ matrix.target }}/release/agent-browser.exe artifacts/${{ matrix.binary }}
+          else
+            cp cli/target/${{ matrix.target }}/release/agent-browser artifacts/${{ matrix.binary }}
+            chmod +x artifacts/${{ matrix.binary }}
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.binary }}
+          path: artifacts/${{ matrix.binary }}
+          retention-days: 7
+
+  # Create release PR or publish to npm (with binaries)
+  release:
+    name: Release
+    needs: build-binaries
+    runs-on: ubuntu-latest
+    outputs:
+      published: ${{ steps.changesets.outputs.published }}
+      publishedPackages: ${{ steps.changesets.outputs.publishedPackages }}
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install Dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Download all binary artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Move binaries to bin directory
+        run: |
+          mkdir -p bin
+          find artifacts -type f -name 'agent-browser-*' -exec mv {} bin/ \;
+          rm -rf artifacts
+          chmod +x bin/agent-browser-* 2>/dev/null || true
+          echo "Binaries in bin/:"
+          ls -la bin/
+
+      - name: Verify all binaries exist
+        run: |
+          EXPECTED_BINARIES=(
+            "agent-browser-linux-x64"
+            "agent-browser-linux-arm64"
+            "agent-browser-win32-x64.exe"
+            "agent-browser-darwin-x64"
+            "agent-browser-darwin-arm64"
+          )
+          MIN_SIZE=100000  # Binaries should be at least 100KB
+          ERRORS=0
+          for binary in "${EXPECTED_BINARIES[@]}"; do
+            if [ ! -f "bin/$binary" ]; then
+              echo "ERROR: Missing bin/$binary"
+              ERRORS=$((ERRORS + 1))
+            else
+              SIZE=$(stat -c%s "bin/$binary" 2>/dev/null || stat -f%z "bin/$binary")
+              if [ "$SIZE" -lt "$MIN_SIZE" ]; then
+                echo "ERROR: bin/$binary is too small ($SIZE bytes, expected >= $MIN_SIZE)"
+                ERRORS=$((ERRORS + 1))
+              else
+                echo "OK: bin/$binary ($SIZE bytes)"
+              fi
+            fi
+          done
+          if [ "$ERRORS" -gt 0 ]; then
+            echo "Error: $ERRORS binary issues found"
+            exit 1
+          fi
+          echo "All 5 platform binaries present and valid"
+
+      - name: Create Release Pull Request or Publish to npm
+        id: changesets
+        uses: changesets/action@v1
+        with:
+          version: pnpm ci:version
+          publish: pnpm ci:publish
+          title: 'chore: version packages'
+          commit: 'chore: version packages'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_VERCEL_TOKEN_ELEVATED }}
+
+  # Create GitHub release with binaries after npm publish
+  github-release:
+    name: Create GitHub Release
+    needs: release
+    if: needs.release.outputs.published == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Move binaries to bin directory
+        run: |
+          mkdir -p bin
+          find artifacts -type f -name 'agent-browser-*' -exec mv {} bin/ \;
+          rm -rf artifacts
+          chmod +x bin/agent-browser-* 2>/dev/null || true
+          ls -la bin/
+
+      - name: Verify binaries exist
+        run: |
+          BINARY_COUNT=$(ls bin/agent-browser-* 2>/dev/null | wc -l)
+          if [ "$BINARY_COUNT" -lt 5 ]; then
+            echo "Error: Expected 5 binaries, found $BINARY_COUNT"
+            ls -la bin/
+            exit 1
+          fi
+          echo "Found $BINARY_COUNT binaries"
+
+      - name: Create GitHub Release
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          TAG="v$VERSION"
+          
+          # Check if release already exists
+          if gh release view "$TAG" &>/dev/null; then
+            echo "Release $TAG already exists, uploading binaries..."
+            gh release upload "$TAG" bin/agent-browser-* --clobber
+          else
+            echo "Creating release $TAG..."
+            gh release create "$TAG" \
+              --title "$TAG" \
+              --generate-notes \
+              bin/agent-browser-*
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

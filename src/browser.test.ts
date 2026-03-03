@@ -1,5 +1,6 @@
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
-import { BrowserManager } from './browser.js';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
+import { BrowserManager, getDefaultTimeout } from './browser.js';
+import { executeCommand } from './actions.js';
 import { chromium } from 'playwright-core';
 
 describe('BrowserManager', () => {
@@ -54,6 +55,216 @@ describe('BrowserManager', () => {
     });
   });
 
+  describe('stale session recovery (all pages closed)', () => {
+    it('should recover when all pages are closed externally', async () => {
+      const testBrowser = new BrowserManager();
+      await testBrowser.launch({ headless: true });
+
+      // Verify initial state
+      expect(testBrowser.isLaunched()).toBe(true);
+      expect(testBrowser.getPage()).toBeDefined();
+
+      // Close all pages externally (simulates stale daemon state)
+      const pages = testBrowser.getPages();
+      for (const page of [...pages]) {
+        await page.close();
+      }
+
+      // Wait for close events to propagate
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      // isLaunched() is true but pages array is empty -- this is the stale state
+      expect(testBrowser.isLaunched()).toBe(true);
+      expect(testBrowser.getPages().length).toBe(0);
+
+      // ensurePage() should recover by creating a new page
+      await testBrowser.ensurePage();
+      expect(testBrowser.getPages().length).toBe(1);
+      expect(testBrowser.getPage()).toBeDefined();
+
+      await testBrowser.close();
+    });
+
+    it('should be a no-op when pages already exist', async () => {
+      const testBrowser = new BrowserManager();
+      await testBrowser.launch({ headless: true });
+
+      const pageBefore = testBrowser.getPage();
+      await testBrowser.ensurePage();
+      const pageAfter = testBrowser.getPage();
+
+      // Should be the same page -- no-op
+      expect(pageAfter).toBe(pageBefore);
+      expect(testBrowser.getPages().length).toBe(1);
+
+      await testBrowser.close();
+    });
+  });
+
+  describe('scrollintoview with refs', () => {
+    it('should resolve refs in scrollintoview command', async () => {
+      const page = browser.getPage();
+      await page.setContent(`
+        <html>
+          <body style="height: 3000px;">
+            <div style="height: 2000px;"></div>
+            <button id="far-button">Far Away Button</button>
+          </body>
+        </html>
+      `);
+
+      // Get snapshot to populate refs
+      const { refs } = await browser.getSnapshot({ interactive: true });
+
+      // Find the ref for our button
+      const buttonRef = Object.keys(refs).find((k) => refs[k].name === 'Far Away Button');
+      expect(buttonRef).toBeDefined();
+
+      // scrollintoview with a ref should work, not throw a CSS selector error
+      const result = await executeCommand(
+        { id: 'test-1', action: 'scrollintoview', selector: `@${buttonRef}` },
+        browser
+      );
+      expect(result.success).toBe(true);
+    });
+
+    it('should resolve refs in scroll command with selector', async () => {
+      const page = browser.getPage();
+      await page.setContent(`
+        <html>
+          <body style="height: 3000px;">
+            <div id="scroll-container" style="height: 200px; overflow: auto;">
+              <div style="height: 1000px;">Scrollable content</div>
+            </div>
+            <button id="target-btn">Target Button</button>
+          </body>
+        </html>
+      `);
+
+      const { refs } = await browser.getSnapshot({ interactive: true });
+      const buttonRef = Object.keys(refs).find((k) => refs[k].name === 'Target Button');
+      expect(buttonRef).toBeDefined();
+
+      // scroll with a ref selector should work
+      const result = await executeCommand(
+        { id: 'test-2', action: 'scroll', selector: `@${buttonRef}`, y: 100 },
+        browser
+      );
+      expect(result.success).toBe(true);
+    });
+  });
+
+  describe('unnamed-button ref uniqueness', () => {
+    it('should click the correct unnamed button among named buttons', async () => {
+      const page = browser.getPage();
+      // 1 unnamed button among 2 named buttons
+      await page.setContent(`
+        <html><body>
+          <button>OK</button>
+          <button onclick="document.title='unnamed'"></button>
+          <button>Cancel</button>
+        </body></html>
+      `);
+
+      const snapshot = await browser.getSnapshot();
+      const refs = snapshot.refs;
+      const unnamedRefs = Object.entries(refs).filter(([, v]) => v.role === 'button' && !v.name);
+      expect(unnamedRefs.length).toBe(1);
+
+      const [refId] = unnamedRefs[0];
+      await executeCommand({ id: 'test', action: 'click', selector: `@${refId}` }, browser);
+      const title = await page.title();
+      expect(title).toBe('unnamed');
+    });
+  });
+
+  describe('cursor-ref selector uniqueness', () => {
+    it('should produce unique selectors for repeated DOM structures', async () => {
+      const page = browser.getPage();
+      // Build deeply nested identical structures where the distinguishing
+      // ancestor (div.branch) is at level 4 from the target element --
+      // beyond the previous 3-level path cutoff.
+      await page.setContent(`
+        <html>
+          <body>
+            <div class="root">
+              <div class="branch">
+                <div class="level1">
+                  <div class="level2">
+                    <div class="target" style="cursor: pointer; width: 100px; height: 30px;" onclick="void(0)">Item Alpha</div>
+                  </div>
+                </div>
+              </div>
+              <div class="branch">
+                <div class="level1">
+                  <div class="level2">
+                    <div class="target" style="cursor: pointer; width: 100px; height: 30px;" onclick="void(0)">Item Beta</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </body>
+        </html>
+      `);
+
+      const { refs } = await browser.getSnapshot({ interactive: true, cursor: true });
+
+      // Find the cursor-interactive refs
+      const cursorRefs = Object.entries(refs).filter(([, r]) => r.role === 'clickable');
+      expect(cursorRefs.length).toBe(2);
+
+      // Each ref's selector must be unique -- clicking it should not
+      // trigger a strict mode violation.
+      for (const [refKey] of cursorRefs) {
+        const locator = browser.getLocator(`@${refKey}`);
+        const count = await locator.count();
+        expect(count).toBe(1);
+      }
+    });
+
+    it('should click the correct element when refs have repeated structure', async () => {
+      const page = browser.getPage();
+      await page.setContent(`
+        <html>
+          <body>
+            <div class="root">
+              <div class="branch">
+                <div class="level1">
+                  <div class="level2">
+                    <div class="target" style="cursor: pointer; width: 100px; height: 30px;"
+                         onclick="document.getElementById('result').textContent = 'alpha'">Item Alpha</div>
+                  </div>
+                </div>
+              </div>
+              <div class="branch">
+                <div class="level1">
+                  <div class="level2">
+                    <div class="target" style="cursor: pointer; width: 100px; height: 30px;"
+                         onclick="document.getElementById('result').textContent = 'beta'">Item Beta</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div id="result">none</div>
+          </body>
+        </html>
+      `);
+
+      const { refs } = await browser.getSnapshot({ interactive: true, cursor: true });
+
+      // Find the ref for "Item Beta"
+      const betaRef = Object.keys(refs).find((k) => refs[k].name === 'Item Beta');
+      expect(betaRef).toBeDefined();
+
+      // Click it -- should not throw strict mode violation
+      const locator = browser.getLocator(`@${betaRef}`);
+      await locator.click();
+
+      const result = await page.locator('#result').textContent();
+      expect(result).toBe('beta');
+    });
+  });
+
   describe('navigation', () => {
     it('should navigate to URL', async () => {
       const page = browser.getPage();
@@ -97,6 +308,133 @@ describe('BrowserManager', () => {
     });
   });
 
+  describe('annotated screenshots', () => {
+    afterAll(async () => {
+      await browser.getPage().goto('https://example.com');
+    });
+
+    it('should return annotations with correct shape', async () => {
+      const page = browser.getPage();
+      await page.setContent(`
+        <html><body>
+          <button>Submit</button>
+          <a href="#">Home</a>
+          <input type="text" placeholder="Email" />
+        </body></html>
+      `);
+
+      const result = await executeCommand(
+        { id: 'ann-1', action: 'screenshot', annotate: true },
+        browser
+      );
+
+      expect(result.success).toBe(true);
+      const data = result.data as { path?: string; annotations?: unknown[] };
+      expect(data.path).toBeDefined();
+      expect(data.annotations).toBeDefined();
+      expect(data.annotations!.length).toBeGreaterThan(0);
+
+      for (const ann of data.annotations! as Array<{
+        ref: string;
+        number: number;
+        role: string;
+        name?: string;
+        box: { x: number; y: number; width: number; height: number };
+      }>) {
+        expect(ann.ref).toMatch(/^e\d+$/);
+        expect(typeof ann.number).toBe('number');
+        expect(typeof ann.role).toBe('string');
+        expect(typeof ann.box.x).toBe('number');
+        expect(typeof ann.box.y).toBe('number');
+        expect(typeof ann.box.width).toBe('number');
+        expect(typeof ann.box.height).toBe('number');
+      }
+    });
+
+    it('should clean up overlay from DOM after screenshot', async () => {
+      const page = browser.getPage();
+      await page.setContent(`
+        <html><body>
+          <button>Click me</button>
+        </body></html>
+      `);
+
+      await executeCommand({ id: 'ann-2', action: 'screenshot', annotate: true }, browser);
+
+      const overlay = await page.$('#__agent_browser_annotations__');
+      expect(overlay).toBeNull();
+    });
+
+    it('should scope annotations to selector element', async () => {
+      const page = browser.getPage();
+      await page.setContent(`
+        <html><body>
+          <button id="outside">Outside</button>
+          <div id="container" style="padding:20px;">
+            <button id="inside">Inside</button>
+          </div>
+        </body></html>
+      `);
+
+      const result = await executeCommand(
+        { id: 'ann-3', action: 'screenshot', annotate: true, selector: '#container' },
+        browser
+      );
+
+      expect(result.success).toBe(true);
+      const data = result.data as { annotations?: Array<{ name?: string }> };
+      expect(data.annotations).toBeDefined();
+
+      const names = data.annotations!.map((a) => a.name).filter(Boolean);
+      expect(names).toContain('Inside');
+      expect(names).not.toContain('Outside');
+    });
+
+    it('should succeed with no annotations on static page', async () => {
+      const page = browser.getPage();
+      await page.setContent(`
+        <html><body>
+          <p>Just some text, no interactive elements.</p>
+        </body></html>
+      `);
+
+      const result = await executeCommand(
+        { id: 'ann-4', action: 'screenshot', annotate: true },
+        browser
+      );
+
+      expect(result.success).toBe(true);
+      const data = result.data as { path?: string; annotations?: unknown[] };
+      expect(data.path).toBeDefined();
+      expect(data.annotations).toBeUndefined();
+    });
+
+    it('should return document-relative coords for fullPage screenshots', async () => {
+      const page = browser.getPage();
+      await page.setContent(`
+        <html><body style="margin:0;">
+          <div style="height:2000px;"></div>
+          <button id="below-fold" style="margin:0;">Bottom</button>
+        </body></html>
+      `);
+
+      const result = await executeCommand(
+        { id: 'ann-5', action: 'screenshot', annotate: true, fullPage: true },
+        browser
+      );
+
+      expect(result.success).toBe(true);
+      const data = result.data as {
+        annotations?: Array<{ name?: string; box: { y: number } }>;
+      };
+      expect(data.annotations).toBeDefined();
+
+      const bottom = data.annotations!.find((a) => a.name === 'Bottom');
+      expect(bottom).toBeDefined();
+      expect(bottom!.box.y).toBeGreaterThanOrEqual(2000);
+    });
+  });
+
   describe('evaluate', () => {
     it('should evaluate JavaScript', async () => {
       const page = browser.getPage();
@@ -131,6 +469,33 @@ describe('BrowserManager', () => {
         const result = await browser.closeTab(1);
         expect(result.remaining).toBe(1);
       }
+    });
+
+    it('should auto-switch to externally opened tab (window.open)', async () => {
+      // Ensure we start on tab 0
+      const initialIndex = browser.getActiveIndex();
+      expect(initialIndex).toBe(0);
+
+      const page = browser.getPage();
+
+      // Use window.open to create a new tab externally (as a user/script would)
+      await page.evaluate(() => {
+        window.open('about:blank', '_blank');
+      });
+
+      // Wait for the new page event to be processed
+      await new Promise((resolve) => setTimeout(resolve, 500));
+
+      // Active tab should now be the newly opened tab
+      const newIndex = browser.getActiveIndex();
+      expect(newIndex).toBe(1);
+
+      const tabs = await browser.listTabs();
+      expect(tabs.length).toBe(2);
+      expect(tabs[1].active).toBe(true);
+
+      // Clean up: close the new tab
+      await browser.closeTab(1);
     });
   });
 
@@ -270,6 +635,42 @@ describe('BrowserManager', () => {
       expect(size?.width).toBe(1920);
       expect(size?.height).toBe(1080);
     });
+
+    it('should disable viewport when --start-maximized is in args', async () => {
+      const testBrowser = new BrowserManager();
+      await testBrowser.launch({ headless: true, args: ['--start-maximized'] });
+      const page = testBrowser.getPage();
+      expect(page.viewportSize()).toBeNull();
+      await testBrowser.close();
+    });
+
+    it('should disable viewport when --window-size is in args', async () => {
+      const testBrowser = new BrowserManager();
+      await testBrowser.launch({ headless: true, args: ['--window-size=800,600'] });
+      const page = testBrowser.getPage();
+      expect(page.viewportSize()).toBeNull();
+      await testBrowser.close();
+    });
+
+    it('should use default viewport when no window size args', async () => {
+      const testBrowser = new BrowserManager();
+      await testBrowser.launch({ headless: true });
+      const page = testBrowser.getPage();
+      expect(page.viewportSize()).toEqual({ width: 1280, height: 720 });
+      await testBrowser.close();
+    });
+
+    it('should use explicit viewport even with --start-maximized', async () => {
+      const testBrowser = new BrowserManager();
+      await testBrowser.launch({
+        headless: true,
+        args: ['--start-maximized'],
+        viewport: { width: 800, height: 600 },
+      });
+      const page = testBrowser.getPage();
+      expect(page.viewportSize()).toEqual({ width: 800, height: 600 });
+      await testBrowser.close();
+    });
   });
 
   describe('snapshot', () => {
@@ -303,6 +704,86 @@ describe('BrowserManager', () => {
       const { tree: compactSnapshot } = await browser.getSnapshot({ compact: true });
       // Compact should be equal or shorter
       expect(compactSnapshot.length).toBeLessThanOrEqual(fullSnapshot.length);
+    });
+
+    it('should not capture cursor-interactive elements without cursor flag', async () => {
+      const page = browser.getPage();
+      await page.setContent(`
+        <html>
+          <body>
+            <button id="standard-btn">Standard Button</button>
+            <div id="clickable-div" style="cursor: pointer;" onclick="void(0)">Clickable Div</div>
+          </body>
+        </html>
+      `);
+
+      const { tree, refs } = await browser.getSnapshot({ interactive: true });
+
+      // Standard button should be captured via ARIA
+      expect(tree).toContain('button "Standard Button"');
+
+      // Cursor-interactive elements should NOT be captured without cursor flag
+      expect(tree).not.toContain('Cursor-interactive elements');
+      expect(tree).not.toContain('clickable "Clickable Div"');
+
+      // Should only have refs for ARIA interactive elements
+      const refValues = Object.values(refs);
+      expect(refValues.some((r) => r.role === 'button')).toBe(true);
+      expect(refValues.some((r) => r.role === 'clickable')).toBe(false);
+    });
+
+    it('should capture cursor-interactive elements with cursor flag', async () => {
+      const page = browser.getPage();
+      await page.setContent(`
+        <html>
+          <body>
+            <button id="standard-btn">Standard Button</button>
+            <div id="clickable-div" style="cursor: pointer;" onclick="void(0)">Clickable Div</div>
+            <span onclick="void(0)">Onclick Span</span>
+          </body>
+        </html>
+      `);
+
+      const { tree, refs } = await browser.getSnapshot({ interactive: true, cursor: true });
+
+      // Standard button should be captured via ARIA
+      expect(tree).toContain('button "Standard Button"');
+
+      // Cursor-interactive elements should be captured with cursor flag
+      expect(tree).toContain('Cursor-interactive elements');
+      expect(tree).toContain('clickable "Clickable Div"');
+      expect(tree).toContain('clickable "Onclick Span"');
+
+      // Should have refs for all interactive elements
+      const refValues = Object.values(refs);
+      expect(refValues.some((r) => r.role === 'button')).toBe(true);
+      expect(refValues.some((r) => r.role === 'clickable')).toBe(true);
+    });
+
+    it('should click cursor-interactive elements via refs', async () => {
+      const page = browser.getPage();
+      await page.setContent(`
+        <html>
+          <body>
+            <div id="clickable" style="cursor: pointer;" onclick="document.getElementById('result').textContent = 'clicked'">Click Me</div>
+            <div id="result">not clicked</div>
+          </body>
+        </html>
+      `);
+
+      const { refs } = await browser.getSnapshot({ cursor: true });
+
+      // Find the ref for the clickable element
+      const clickableRef = Object.keys(refs).find((k) => refs[k].name === 'Click Me');
+      expect(clickableRef).toBeDefined();
+
+      // Click using the ref
+      const locator = browser.getLocator(`@${clickableRef}`);
+      await locator.click();
+
+      // Verify click worked
+      const result = await page.locator('#result').textContent();
+      expect(result).toBe('clicked');
     });
   });
 
@@ -402,6 +883,7 @@ describe('BrowserManager', () => {
               { url: () => 'http://anothersite.com', on: vi.fn() },
             ],
             on: vi.fn(),
+            setDefaultTimeout: vi.fn(),
           },
         ],
         close: vi.fn(),
@@ -535,6 +1017,83 @@ describe('BrowserManager', () => {
     });
   });
 
+  describe('profiling (CDP tracing)', () => {
+    const fs = require('node:fs/promises');
+    const path = require('node:path');
+    const testOutputDir = '/tmp/agent-browser-test';
+
+    beforeAll(async () => {
+      // Ensure test output directory exists
+      await fs.mkdir(testOutputDir, { recursive: true }).catch(() => {});
+    });
+
+    afterEach(async () => {
+      // Stop profiling if still active
+      if (browser.isProfilingActive()) {
+        const tempPath = path.join(testOutputDir, 'cleanup.json');
+        await browser.stopProfiling(tempPath).catch(() => {});
+      }
+    });
+
+    it('should report profiling state correctly', () => {
+      expect(browser.isProfilingActive()).toBe(false);
+    });
+
+    it('should start profiling', async () => {
+      await browser.startProfiling();
+      expect(browser.isProfilingActive()).toBe(true);
+    });
+
+    it('should throw when starting profiling twice', async () => {
+      await browser.startProfiling();
+      await expect(browser.startProfiling()).rejects.toThrow('Profiling already active');
+    });
+
+    it('should stop profiling and write file', async () => {
+      await browser.startProfiling();
+
+      const outputPath = path.join(testOutputDir, 'test-profile.json');
+      const result = await browser.stopProfiling(outputPath);
+
+      expect(result.path).toBe(outputPath);
+      expect(typeof result.eventCount).toBe('number');
+      expect(browser.isProfilingActive()).toBe(false);
+
+      // Verify file was written
+      const fileExists = await fs
+        .access(outputPath)
+        .then(() => true)
+        .catch(() => false);
+      expect(fileExists).toBe(true);
+
+      // Verify file content is valid JSON with traceEvents
+      const content = await fs.readFile(outputPath, 'utf-8');
+      const data = JSON.parse(content);
+      expect(data).toHaveProperty('traceEvents');
+      expect(Array.isArray(data.traceEvents)).toBe(true);
+
+      // Cleanup
+      await fs.unlink(outputPath).catch(() => {});
+    });
+
+    it('should throw when stopping without start', async () => {
+      expect(browser.isProfilingActive()).toBe(false);
+      await expect(browser.stopProfiling('/tmp/should-not-exist.json')).rejects.toThrow(
+        'No profiling session active'
+      );
+    });
+
+    it('should start profiling with custom categories', async () => {
+      await browser.startProfiling({ categories: ['devtools.timeline', 'v8.execute'] });
+      expect(browser.isProfilingActive()).toBe(true);
+
+      // Stop and cleanup
+      const outputPath = path.join(testOutputDir, 'custom-categories.json');
+      await browser.stopProfiling(outputPath);
+      await fs.unlink(outputPath).catch(() => {});
+    });
+  });
+
   describe('input injection', () => {
     it('should inject mouse move event', async () => {
       await expect(
@@ -659,5 +1218,58 @@ describe('BrowserManager', () => {
         })
       ).resolves.not.toThrow();
     });
+  });
+});
+
+describe('getDefaultTimeout', () => {
+  const originalEnv = { ...process.env };
+
+  afterEach(() => {
+    process.env = { ...originalEnv };
+  });
+
+  it('should return 25000 when env var is not set', () => {
+    delete process.env.AGENT_BROWSER_DEFAULT_TIMEOUT;
+    expect(getDefaultTimeout()).toBe(25000);
+  });
+
+  it('should return parsed value when env var is a valid positive integer', () => {
+    process.env.AGENT_BROWSER_DEFAULT_TIMEOUT = '10000';
+    expect(getDefaultTimeout()).toBe(10000);
+  });
+
+  it('should return 25000 for negative values', () => {
+    process.env.AGENT_BROWSER_DEFAULT_TIMEOUT = '-1';
+    expect(getDefaultTimeout()).toBe(25000);
+  });
+
+  it('should return 25000 for zero', () => {
+    process.env.AGENT_BROWSER_DEFAULT_TIMEOUT = '0';
+    expect(getDefaultTimeout()).toBe(25000);
+  });
+
+  it('should return 25000 for values below 1000ms floor', () => {
+    process.env.AGENT_BROWSER_DEFAULT_TIMEOUT = '500';
+    expect(getDefaultTimeout()).toBe(25000);
+  });
+
+  it('should accept exactly 1000ms as the minimum', () => {
+    process.env.AGENT_BROWSER_DEFAULT_TIMEOUT = '1000';
+    expect(getDefaultTimeout()).toBe(1000);
+  });
+
+  it('should return 25000 for non-numeric strings', () => {
+    process.env.AGENT_BROWSER_DEFAULT_TIMEOUT = 'abc';
+    expect(getDefaultTimeout()).toBe(25000);
+  });
+
+  it('should return 25000 for empty string', () => {
+    process.env.AGENT_BROWSER_DEFAULT_TIMEOUT = '';
+    expect(getDefaultTimeout()).toBe(25000);
+  });
+
+  it('should allow overriding above 25s for users who need longer timeouts', () => {
+    process.env.AGENT_BROWSER_DEFAULT_TIMEOUT = '60000';
+    expect(getDefaultTimeout()).toBe(60000);
   });
 });

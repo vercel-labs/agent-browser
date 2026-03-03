@@ -1,6 +1,6 @@
 {
   "name": "agent-browser",
-  "version": "0.6.0",
+  "version": "0.15.2",
   "description": "Headless browser automation CLI for AI agents",
   "type": "module",
   "main": "dist/daemon.js",
@@ -11,7 +11,7 @@
     "skills"
   ],
   "bin": {
-    "agent-browser": "./bin/agent-browser"
+    "agent-browser": "./bin/agent-browser.js"
   },
   "scripts": {
     "prepare": "husky",
@@ -32,7 +32,11 @@
     "format:check": "prettier --check 'src/**/*.ts'",
     "test": "vitest run",
     "test:watch": "vitest",
-    "postinstall": "node scripts/postinstall.js"
+    "test:e2e:dogfood": "vitest run test/e2e/dogfood.eval.ts",
+    "postinstall": "node scripts/postinstall.js",
+    "changeset": "changeset",
+    "ci:version": "changeset version && pnpm run version:sync && pnpm install --no-frozen-lockfile",
+    "ci:publish": "pnpm run version:sync && pnpm run build && changeset publish"
   },
   "keywords": [
     "browser",
@@ -52,11 +56,15 @@
   },
   "homepage": "https://github.com/vercel-labs/agent-browser#readme",
   "dependencies": {
+    "node-simctl": "^7.4.0",
     "playwright-core": "^1.57.0",
+    "webdriverio": "^9.15.0",
     "ws": "^8.19.0",
     "zod": "^3.22.4"
   },
   "devDependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.52",
+    "@changesets/cli": "^2.29.8",
     "@types/node": "^20.10.0",
     "@types/ws": "^8.18.1",
     "husky": "^9.1.7",

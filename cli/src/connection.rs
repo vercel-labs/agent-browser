@@ -81,21 +81,62 @@ impl Connection {
     }
 }
 
+/// Get the base directory for socket/pid files.
+/// Priority: AGENT_BROWSER_SOCKET_DIR > XDG_RUNTIME_DIR > ~/.agent-browser > tmpdir
+pub fn get_socket_dir() -> PathBuf {
+    // 1. Explicit override (ignore empty string)
+    if let Ok(dir) = env::var("AGENT_BROWSER_SOCKET_DIR") {
+        if !dir.is_empty() {
+            return PathBuf::from(dir);
+        }
+    }
+
+    // 2. XDG_RUNTIME_DIR (Linux standard, ignore empty string)
+    if let Ok(runtime_dir) = env::var("XDG_RUNTIME_DIR") {
+        if !runtime_dir.is_empty() {
+            return PathBuf::from(runtime_dir).join("agent-browser");
+        }
+    }
+
+    // 3. Home directory fallback (like Docker Desktop's ~/.docker/run/)
+    if let Some(home) = dirs::home_dir() {
+        return home.join(".agent-browser");
+    }
+
+    // 4. Last resort: temp dir
+    env::temp_dir().join("agent-browser")
+}
+
 #[cfg(unix)]
 fn get_socket_path(session: &str) -> PathBuf {
-    let tmp = env::temp_dir();
-    tmp.join(format!("agent-browser-{}.sock", session))
+    get_socket_dir().join(format!("{}.sock", session))
 }
 
 fn get_pid_path(session: &str) -> PathBuf {
-    let tmp = env::temp_dir();
-    tmp.join(format!("agent-browser-{}.pid", session))
+    get_socket_dir().join(format!("{}.pid", session))
+}
+
+/// Clean up stale socket and PID files for a session
+fn cleanup_stale_files(session: &str) {
+    let pid_path = get_pid_path(session);
+    let _ = fs::remove_file(&pid_path);
+
+    #[cfg(unix)]
+    {
+        let socket_path = get_socket_path(session);
+        let _ = fs::remove_file(&socket_path);
+    }
+
+    #[cfg(windows)]
+    {
+        let port_path = get_port_path(session);
+        let _ = fs::remove_file(&port_path);
+    }
 }
 
 #[cfg(windows)]
 fn get_port_path(session: &str) -> PathBuf {
-    let tmp = env::temp_dir();
-    tmp.join(format!("agent-browser-{}.port", session))
+    get_socket_dir().join(format!("{}.port", session))
 }
 
 #[cfg(windows)]
@@ -118,7 +159,13 @@ fn is_daemon_running(session: &str) -> bool {
     if let Ok(pid_str) = fs::read_to_string(&pid_path) {
         if let Ok(pid) = pid_str.trim().parse::<i32>() {
             unsafe {
-                return libc::kill(pid, 0) == 0;
+                if libc::kill(pid, 0) == 0 {
+                    return true;
+                }
+                // EPERM means the process exists but we lack permission to
+                // signal it (e.g. inside a macOS sandbox). Only ESRCH means
+                // the process is genuinely gone.
+                return std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH);
             }
         }
     }
@@ -162,19 +209,152 @@ pub struct DaemonResult {
     pub already_running: bool,
 }
 
+/// Options forwarded to the daemon process as environment variables.
+/// Note: `confirm_interactive` is intentionally absent -- it is a CLI-side
+/// UX concern (prompting the user on stdin) and not a daemon configuration.
+/// The daemon only needs `confirm_actions` to gate action categories.
+pub struct DaemonOptions<'a> {
+    pub headed: bool,
+    pub executable_path: Option<&'a str>,
+    pub extensions: &'a [String],
+    pub args: Option<&'a str>,
+    pub user_agent: Option<&'a str>,
+    pub proxy: Option<&'a str>,
+    pub proxy_bypass: Option<&'a str>,
+    pub ignore_https_errors: bool,
+    pub allow_file_access: bool,
+    pub profile: Option<&'a str>,
+    pub state: Option<&'a str>,
+    pub provider: Option<&'a str>,
+    pub device: Option<&'a str>,
+    pub session_name: Option<&'a str>,
+    pub download_path: Option<&'a str>,
+    pub allowed_domains: Option<&'a [String]>,
+    pub action_policy: Option<&'a str>,
+    pub confirm_actions: Option<&'a str>,
+}
+
+fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
+    cmd.env("AGENT_BROWSER_DAEMON", "1")
+        .env("AGENT_BROWSER_SESSION", session);
+
+    if opts.headed {
+        cmd.env("AGENT_BROWSER_HEADED", "1");
+    }
+    if let Some(path) = opts.executable_path {
+        cmd.env("AGENT_BROWSER_EXECUTABLE_PATH", path);
+    }
+    if !opts.extensions.is_empty() {
+        cmd.env("AGENT_BROWSER_EXTENSIONS", opts.extensions.join(","));
+    }
+    if let Some(a) = opts.args {
+        cmd.env("AGENT_BROWSER_ARGS", a);
+    }
+    if let Some(ua) = opts.user_agent {
+        cmd.env("AGENT_BROWSER_USER_AGENT", ua);
+    }
+    if let Some(p) = opts.proxy {
+        cmd.env("AGENT_BROWSER_PROXY", p);
+    }
+    if let Some(pb) = opts.proxy_bypass {
+        cmd.env("AGENT_BROWSER_PROXY_BYPASS", pb);
+    }
+    if opts.ignore_https_errors {
+        cmd.env("AGENT_BROWSER_IGNORE_HTTPS_ERRORS", "1");
+    }
+    if opts.allow_file_access {
+        cmd.env("AGENT_BROWSER_ALLOW_FILE_ACCESS", "1");
+    }
+    if let Some(prof) = opts.profile {
+        cmd.env("AGENT_BROWSER_PROFILE", prof);
+    }
+    if let Some(st) = opts.state {
+        cmd.env("AGENT_BROWSER_STATE", st);
+    }
+    if let Some(p) = opts.provider {
+        cmd.env("AGENT_BROWSER_PROVIDER", p);
+    }
+    if let Some(d) = opts.device {
+        cmd.env("AGENT_BROWSER_IOS_DEVICE", d);
+    }
+    if let Some(sn) = opts.session_name {
+        cmd.env("AGENT_BROWSER_SESSION_NAME", sn);
+    }
+    if let Some(dp) = opts.download_path {
+        cmd.env("AGENT_BROWSER_DOWNLOAD_PATH", dp);
+    }
+    if let Some(ad) = opts.allowed_domains {
+        cmd.env("AGENT_BROWSER_ALLOWED_DOMAINS", ad.join(","));
+    }
+    if let Some(ap) = opts.action_policy {
+        cmd.env("AGENT_BROWSER_ACTION_POLICY", ap);
+    }
+    if let Some(ca) = opts.confirm_actions {
+        cmd.env("AGENT_BROWSER_CONFIRM_ACTIONS", ca);
+    }
+}
+
 pub fn ensure_daemon(
     session: &str,
-    headed: bool,
-    executable_path: Option<&str>,
-    extensions: &[String],
+    opts: &DaemonOptions,
 ) -> Result<DaemonResult, String> {
+    // Check if daemon is running AND responsive
     if is_daemon_running(session) && daemon_ready(session) {
-        return Ok(DaemonResult {
-            already_running: true,
-        });
+        // Double-check it's actually responsive by waiting and checking again
+        // This handles the race condition where daemon is shutting down
+        // (daemon has a 100ms shutdown delay, so we wait longer)
+        thread::sleep(Duration::from_millis(150));
+        if daemon_ready(session) {
+            return Ok(DaemonResult {
+                already_running: true,
+            });
+        }
+    }
+
+    // Clean up any stale socket/pid files before starting fresh
+    cleanup_stale_files(session);
+
+    // Ensure socket directory exists
+    let socket_dir = get_socket_dir();
+    if !socket_dir.exists() {
+        fs::create_dir_all(&socket_dir)
+            .map_err(|e| format!("Failed to create socket directory: {}", e))?;
+    }
+
+    // Pre-flight check: Validate socket path length (Unix limit is 104 bytes including null terminator)
+    #[cfg(unix)]
+    {
+        let socket_path = get_socket_path(session);
+        let path_len = socket_path.as_os_str().len();
+        if path_len > 103 {
+            return Err(format!(
+                "Session name '{}' is too long. Socket path would be {} bytes (max 103).\n\
+                 Use a shorter session name or set AGENT_BROWSER_SOCKET_DIR to a shorter path.",
+                session, path_len
+            ));
+        }
+    }
+
+    // Pre-flight check: Verify socket directory is writable
+    {
+        let test_file = socket_dir.join(".write_test");
+        match fs::write(&test_file, b"") {
+            Ok(_) => {
+                let _ = fs::remove_file(&test_file);
+            }
+            Err(e) => {
+                return Err(format!(
+                    "Socket directory '{}' is not writable: {}",
+                    socket_dir.display(),
+                    e
+                ));
+            }
+        }
     }
 
     let exe_path = env::current_exe().map_err(|e| e.to_string())?;
+    // Canonicalize to resolve symlinks (e.g., npm global bin symlink -> actual binary)
+    let exe_path = exe_path.canonicalize().unwrap_or(exe_path);
     let exe_dir = exe_path.parent().unwrap();
 
     let mut daemon_paths = vec![
@@ -199,23 +379,10 @@ pub fn ensure_daemon(
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        
+
         let mut cmd = Command::new("node");
-        cmd.arg(daemon_path)
-            .env("AGENT_BROWSER_DAEMON", "1")
-            .env("AGENT_BROWSER_SESSION", session);
-
-        if headed {
-            cmd.env("AGENT_BROWSER_HEADED", "1");
-        }
-
-        if let Some(path) = executable_path {
-            cmd.env("AGENT_BROWSER_EXECUTABLE_PATH", path);
-        }
-
-        if !extensions.is_empty() {
-            cmd.env("AGENT_BROWSER_EXTENSIONS", extensions.join(","));
-        }
+        cmd.arg(daemon_path);
+        apply_daemon_env(&mut cmd, session, opts);
 
         // Create new process group and session to fully detach
         unsafe {
@@ -236,30 +403,17 @@ pub fn ensure_daemon(
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        
+
         // On Windows, call node directly. Command::new handles PATH resolution (node.exe or node.cmd)
         // and automatically quotes arguments containing spaces.
         let mut cmd = Command::new("node");
-        cmd.arg(daemon_path)
-            .env("AGENT_BROWSER_DAEMON", "1")
-            .env("AGENT_BROWSER_SESSION", session);
-
-        if headed {
-            cmd.env("AGENT_BROWSER_HEADED", "1");
-        }
-
-        if let Some(path) = executable_path {
-            cmd.env("AGENT_BROWSER_EXECUTABLE_PATH", path);
-        }
-
-        if !extensions.is_empty() {
-            cmd.env("AGENT_BROWSER_EXTENSIONS", extensions.join(","));
-        }
+        cmd.arg(daemon_path);
+        apply_daemon_env(&mut cmd, session, opts);
 
         // CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS
         const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
         const DETACHED_PROCESS: u32 = 0x00000008;
-        
+
         cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -270,12 +424,17 @@ pub fn ensure_daemon(
 
     for _ in 0..50 {
         if daemon_ready(session) {
-            return Ok(DaemonResult { already_running: false });
+            return Ok(DaemonResult {
+                already_running: false,
+            });
         }
         thread::sleep(Duration::from_millis(100));
     }
 
-    Err("Daemon failed to start".to_string())
+    Err(format!(
+        "Daemon failed to start (socket: {})",
+        get_socket_dir().join(format!("{}.sock", session)).display()
+    ))
 }
 
 fn connect(session: &str) -> Result<Connection, String> {
@@ -296,12 +455,65 @@ fn connect(session: &str) -> Result<Connection, String> {
 }
 
 pub fn send_command(cmd: Value, session: &str) -> Result<Response, String> {
+    // Retry logic for transient errors (EAGAIN/EWOULDBLOCK/connection issues)
+    const MAX_RETRIES: u32 = 5;
+    const RETRY_DELAY_MS: u64 = 200;
+
+    let mut last_error = String::new();
+
+    for attempt in 0..MAX_RETRIES {
+        if attempt > 0 {
+            thread::sleep(Duration::from_millis(RETRY_DELAY_MS * (attempt as u64)));
+        }
+
+        match send_command_once(&cmd, session) {
+            Ok(response) => return Ok(response),
+            Err(e) => {
+                if is_transient_error(&e) {
+                    last_error = e;
+                    continue;
+                }
+                // Non-transient error, fail immediately
+                return Err(e);
+            }
+        }
+    }
+
+    Err(format!(
+        "{} (after {} retries - daemon may be busy or unresponsive)",
+        last_error, MAX_RETRIES
+    ))
+}
+
+/// Check if an error is transient and worth retrying.
+/// Transient errors include:
+/// - EAGAIN/EWOULDBLOCK (os error 35 on macOS, 11 on Linux)
+/// - EOF errors (daemon closed connection before responding)
+/// - Connection reset/broken pipe (daemon crashed or restarting)
+/// - Connection refused/socket not found (daemon still starting)
+fn is_transient_error(error: &str) -> bool {
+    error.contains("os error 35") // EAGAIN on macOS
+        || error.contains("os error 11") // EAGAIN on Linux
+        || error.contains("WouldBlock")
+        || error.contains("Resource temporarily unavailable")
+        || error.contains("EOF")
+        || error.contains("line 1 column 0") // Empty JSON response
+        || error.contains("Connection reset")
+        || error.contains("Broken pipe")
+        || error.contains("os error 54") // Connection reset by peer (macOS)
+        || error.contains("os error 104") // Connection reset by peer (Linux)
+        || error.contains("os error 2") // No such file or directory (socket gone)
+        || error.contains("os error 61") // Connection refused (macOS)
+        || error.contains("os error 111") // Connection refused (Linux)
+}
+
+fn send_command_once(cmd: &Value, session: &str) -> Result<Response, String> {
     let mut stream = connect(session)?;
 
     stream.set_read_timeout(Some(Duration::from_secs(30))).ok();
     stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
 
-    let mut json_str = serde_json::to_string(&cmd).map_err(|e| e.to_string())?;
+    let mut json_str = serde_json::to_string(cmd).map_err(|e| e.to_string())?;
     json_str.push('\n');
 
     stream
@@ -315,4 +527,196 @@ pub fn send_command(cmd: Value, session: &str) -> Result<Response, String> {
         .map_err(|e| format!("Failed to read: {}", e))?;
 
     serde_json::from_str(&response_line).map_err(|e| format!("Invalid response: {}", e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Mutex, MutexGuard};
+
+    // Mutex to prevent parallel tests from interfering with env vars
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    /// RAII guard that locks env mutex and restores env vars on drop
+    struct EnvGuard<'a> {
+        _lock: MutexGuard<'a, ()>,
+        vars: Vec<(String, Option<String>)>,
+    }
+
+    impl<'a> EnvGuard<'a> {
+        fn new(var_names: &[&str]) -> Self {
+            let lock = ENV_MUTEX.lock().unwrap();
+            let vars = var_names
+                .iter()
+                .map(|&name| (name.to_string(), env::var(name).ok()))
+                .collect();
+            Self { _lock: lock, vars }
+        }
+    }
+
+    impl Drop for EnvGuard<'_> {
+        fn drop(&mut self) {
+            for (name, value) in &self.vars {
+                match value {
+                    Some(v) => env::set_var(name, v),
+                    None => env::remove_var(name),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_get_socket_dir_explicit_override() {
+        let _guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
+
+        env::set_var("AGENT_BROWSER_SOCKET_DIR", "/custom/socket/path");
+        env::remove_var("XDG_RUNTIME_DIR");
+
+        assert_eq!(get_socket_dir(), PathBuf::from("/custom/socket/path"));
+    }
+
+    #[test]
+    fn test_get_socket_dir_ignores_empty_socket_dir() {
+        let _guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
+
+        env::set_var("AGENT_BROWSER_SOCKET_DIR", "");
+        env::remove_var("XDG_RUNTIME_DIR");
+
+        assert!(get_socket_dir()
+            .to_string_lossy()
+            .ends_with(".agent-browser"));
+    }
+
+    #[test]
+    fn test_get_socket_dir_xdg_runtime() {
+        let _guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
+
+        env::remove_var("AGENT_BROWSER_SOCKET_DIR");
+        env::set_var("XDG_RUNTIME_DIR", "/run/user/1000");
+
+        assert_eq!(
+            get_socket_dir(),
+            PathBuf::from("/run/user/1000/agent-browser")
+        );
+    }
+
+    #[test]
+    fn test_get_socket_dir_ignores_empty_xdg_runtime() {
+        let _guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
+
+        env::set_var("AGENT_BROWSER_SOCKET_DIR", "");
+        env::set_var("XDG_RUNTIME_DIR", "");
+
+        assert!(get_socket_dir()
+            .to_string_lossy()
+            .ends_with(".agent-browser"));
+    }
+
+    #[test]
+    fn test_get_socket_dir_home_fallback() {
+        let _guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
+
+        env::remove_var("AGENT_BROWSER_SOCKET_DIR");
+        env::remove_var("XDG_RUNTIME_DIR");
+
+        let result = get_socket_dir();
+        assert!(result.to_string_lossy().ends_with(".agent-browser"));
+        assert!(
+            result.to_string_lossy().contains("home") || result.to_string_lossy().contains("Users")
+        );
+    }
+
+    // === Transient Error Detection Tests ===
+
+    #[test]
+    fn test_is_transient_error_eagain_macos() {
+        assert!(is_transient_error(
+            "Failed to read: Resource temporarily unavailable (os error 35)"
+        ));
+    }
+
+    #[test]
+    fn test_is_transient_error_eagain_linux() {
+        assert!(is_transient_error(
+            "Failed to read: Resource temporarily unavailable (os error 11)"
+        ));
+    }
+
+    #[test]
+    fn test_is_transient_error_would_block() {
+        assert!(is_transient_error("operation WouldBlock"));
+    }
+
+    #[test]
+    fn test_is_transient_error_resource_unavailable() {
+        assert!(is_transient_error("Resource temporarily unavailable"));
+    }
+
+    #[test]
+    fn test_is_transient_error_eof() {
+        assert!(is_transient_error(
+            "Invalid response: EOF while parsing a value at line 1 column 0"
+        ));
+    }
+
+    #[test]
+    fn test_is_transient_error_empty_json() {
+        assert!(is_transient_error(
+            "Invalid response: expected value at line 1 column 0"
+        ));
+    }
+
+    #[test]
+    fn test_is_transient_error_connection_reset() {
+        assert!(is_transient_error("Connection reset by peer"));
+    }
+
+    #[test]
+    fn test_is_transient_error_broken_pipe() {
+        assert!(is_transient_error("Broken pipe"));
+    }
+
+    #[test]
+    fn test_is_transient_error_connection_reset_macos() {
+        assert!(is_transient_error(
+            "Failed to send: Connection reset by peer (os error 54)"
+        ));
+    }
+
+    #[test]
+    fn test_is_transient_error_connection_reset_linux() {
+        assert!(is_transient_error(
+            "Failed to send: Connection reset by peer (os error 104)"
+        ));
+    }
+
+    #[test]
+    fn test_is_transient_error_socket_not_found() {
+        assert!(is_transient_error(
+            "Failed to connect: No such file or directory (os error 2)"
+        ));
+    }
+
+    #[test]
+    fn test_is_transient_error_connection_refused_macos() {
+        assert!(is_transient_error(
+            "Failed to connect: Connection refused (os error 61)"
+        ));
+    }
+
+    #[test]
+    fn test_is_transient_error_connection_refused_linux() {
+        assert!(is_transient_error(
+            "Failed to connect: Connection refused (os error 111)"
+        ));
+    }
+
+    #[test]
+    fn test_is_transient_error_non_transient() {
+        // These should NOT be considered transient
+        assert!(!is_transient_error("Unknown command: foo"));
+        assert!(!is_transient_error("Invalid JSON syntax"));
+        assert!(!is_transient_error("Permission denied"));
+        assert!(!is_transient_error("Daemon not found"));
+    }
 }
