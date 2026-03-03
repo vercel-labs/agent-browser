@@ -47,6 +47,31 @@ export function getDefaultTimeout(): number {
   return 25000;
 }
 
+/**
+ * Handles boolean env vars and parsing (e.g., "true", "1", "false", "0"),
+ * with a default value if not set or invalid
+ */
+export function parseBooleanEnvVar(name: string, defaultValue: boolean): boolean {
+  const truthyVals = ['1', 'true'];
+  const falsyVals = ['0', 'false'];
+
+  if (!Object.hasOwn(process.env, name)) {
+    return defaultValue;
+  }
+
+  const param = process.env[name]!.toLowerCase();
+
+  if (truthyVals.includes(param)) {
+    return true;
+  }
+
+  if (falsyVals.includes(param)) {
+    return false;
+  }
+
+  return defaultValue;
+}
+
 // Screencast frame data from CDP
 export interface ScreencastFrame {
   data: string; // base64 encoded image
@@ -167,31 +192,6 @@ export class BrowserManager {
    */
   isLaunched(): boolean {
     return this.browser !== null || this.isPersistentContext;
-  }
-
-  /**
-   * Handles boolean env vars and parsing (e.g., "true", "1", "false", "0"),
-   * with a default value if not set or invalid
-   */
-  parseBooleanEnvVar(name: string, defaultValue: boolean): boolean {
-    const truthyVals = ['1', 'true'];
-    const falsyVals = ['0', 'false'];
-
-    if (!Object.hasOwn(process.env, name)) {
-      return defaultValue;
-    }
-
-    const param = process.env[name]!.toLowerCase();
-
-    if (truthyVals.includes(param)) {
-      return true;
-    }
-
-    if (falsyVals.includes(param)) {
-      return false;
-    }
-
-    return defaultValue;
   }
 
   /**
@@ -1240,7 +1240,7 @@ export class BrowserManager {
     const apiUrl = process.env.BROWSERLESS_API_URL || 'https://production-sfo.browserless.io';
     const browserType = process.env.BROWSERLESS_BROWSER_TYPE || 'chromium';
     const ttl = parseInt(process.env.BROWSERLESS_TTL || '300000', 10);
-    const stealth = this.parseBooleanEnvVar('BROWSERLESS_STEALTH', true);
+    const stealth = parseBooleanEnvVar('BROWSERLESS_STEALTH', true);
 
     if (!supportedBrowsers.includes(browserType)) {
       throw new Error(
@@ -1300,15 +1300,15 @@ export class BrowserManager {
         page = pages[0] ?? (await context.newPage());
       }
 
-      this.browserlessStopUrl = session.stop;
-      this.browserlessApiToken = browserlessToken;
       this.browser = browser;
-      context.setDefaultTimeout(60000);
+      context.setDefaultTimeout(getDefaultTimeout());
       this.contexts.push(context);
+      this.setupContextTracking(context);
+      await this.ensureDomainFilter(context);
+      await this.sanitizeExistingPages([page]);
       this.pages.push(page);
       this.activePageIndex = 0;
       this.setupPageTracking(page);
-      this.setupContextTracking(context);
     } catch (error) {
       await this.closeBrowserlessSession(session.stop).catch((sessionError) => {
         console.error('Failed to close Browserless session during cleanup:', sessionError);
