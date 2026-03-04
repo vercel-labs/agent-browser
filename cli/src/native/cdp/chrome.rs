@@ -144,12 +144,8 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
         .iter()
         .any(|a| a.starts_with("--start-maximized") || a.starts_with("--window-size="));
 
-    if !has_window_size {
-        if options.headless {
-            args.push("--window-size=1280,720".to_string());
-        } else {
-            args.push("--window-size=1280,800".to_string());
-        }
+    if !has_window_size && options.headless {
+        args.push("--window-size=1280,720".to_string());
     }
 
     args.extend(options.args.iter().cloned());
@@ -177,21 +173,41 @@ pub fn launch_chrome(options: &LaunchOptions) -> Result<ChromeProcess, String> {
         temp_user_data_dir,
     } = build_chrome_args(options)?;
 
+    let cleanup_temp_dir = |dir: &Option<PathBuf>| {
+        if let Some(ref d) = dir {
+            let _ = std::fs::remove_dir_all(d);
+        }
+    };
+
     let mut child = Command::new(&chrome_path)
         .args(&args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("Failed to launch Chrome at {:?}: {}", chrome_path, e))?;
+        .map_err(|e| {
+            cleanup_temp_dir(&temp_user_data_dir);
+            format!("Failed to launch Chrome at {:?}: {}", chrome_path, e)
+        })?;
 
     let stderr = child
         .stderr
         .take()
-        .ok_or("Failed to capture Chrome stderr")?;
+        .ok_or_else(|| {
+            let _ = child.kill();
+            cleanup_temp_dir(&temp_user_data_dir);
+            "Failed to capture Chrome stderr".to_string()
+        })?;
     let reader = BufReader::new(stderr);
 
-    let ws_url = wait_for_ws_url(reader)?;
+    let ws_url = match wait_for_ws_url(reader) {
+        Ok(url) => url,
+        Err(e) => {
+            let _ = child.kill();
+            cleanup_temp_dir(&temp_user_data_dir);
+            return Err(e);
+        }
+    };
 
     Ok(ChromeProcess {
         child,
@@ -678,7 +694,7 @@ mod tests {
     #[test]
     fn test_find_playwright_chromium_nonexistent() {
         let _guard = EnvGuard::new(&["PLAYWRIGHT_BROWSERS_PATH"]);
-        std::env::set_var("PLAYWRIGHT_BROWSERS_PATH", "/nonexistent/path");
+        _guard.set("PLAYWRIGHT_BROWSERS_PATH", "/nonexistent/path");
         let result = find_playwright_chromium();
         assert!(result.is_none());
     }
@@ -710,10 +726,7 @@ mod tests {
         };
         let result = build_chrome_args(&opts).unwrap();
         assert!(!result.args.iter().any(|a| a.contains("--headless")));
-        assert!(result
-            .args
-            .iter()
-            .any(|a| a == "--window-size=1280,800"));
+        assert!(!result.args.iter().any(|a| a.starts_with("--window-size=")));
         // Temp dir created when no profile
         assert!(result.temp_user_data_dir.is_some());
         let dir = result.temp_user_data_dir.unwrap();
@@ -751,7 +764,7 @@ mod tests {
     #[test]
     fn test_build_args_custom_window_size_not_overridden() {
         let opts = LaunchOptions {
-            headless: false,
+            headless: true,
             args: vec!["--window-size=1920,1080".to_string()],
             ..Default::default()
         };
@@ -759,7 +772,7 @@ mod tests {
         assert!(!result
             .args
             .iter()
-            .any(|a| a == "--window-size=1280,800"));
+            .any(|a| a == "--window-size=1280,720"));
         assert!(result
             .args
             .iter()

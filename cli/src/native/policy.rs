@@ -207,7 +207,7 @@ mod tests {
     #[test]
     fn test_confirm_actions_from_env() {
         let _guard = EnvGuard::new(&["AGENT_BROWSER_CONFIRM_ACTIONS"]);
-        env::set_var("AGENT_BROWSER_CONFIRM_ACTIONS", "navigate,click,fill");
+        _guard.set("AGENT_BROWSER_CONFIRM_ACTIONS", "navigate,click,fill");
         let ca = ConfirmActions::from_env().unwrap();
         assert!(ca.requires_confirmation("navigate"));
         assert!(ca.requires_confirmation("click"));

@@ -5167,7 +5167,7 @@ mod tests {
     #[test]
     fn test_launch_options_from_env_headed_flag() {
         let _guard = EnvGuard::new(&["AGENT_BROWSER_HEADED"]);
-        env::set_var("AGENT_BROWSER_HEADED", "1");
+        _guard.set("AGENT_BROWSER_HEADED", "1");
         let opts = launch_options_from_env();
         assert!(!opts.headless, "AGENT_BROWSER_HEADED=1 should set headless=false");
     }

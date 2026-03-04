@@ -19,6 +19,14 @@ impl<'a> EnvGuard<'a> {
             .collect();
         Self { _lock: lock, vars }
     }
+
+    pub fn set(&self, name: &str, value: &str) {
+        std::env::set_var(name, value);
+    }
+
+    pub fn remove(&self, name: &str) {
+        std::env::remove_var(name);
+    }
 }
 
 impl Drop for EnvGuard<'_> {
