@@ -233,6 +233,8 @@ export interface RequestsCommand extends BaseCommand {
   action: 'requests';
   filter?: string; // URL pattern to filter
   clear?: boolean;
+  body?: boolean; // Include request body in output
+  queryParams?: boolean; // Include query params in output
 }
 
 // Download handling

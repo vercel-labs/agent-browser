@@ -1996,11 +1996,19 @@ fn parse_network(rest: &[&str], id: &str) -> Result<Value, ParseError> {
         }
         Some("requests") => {
             let clear = rest.contains(&"--clear");
+            let with_body = rest.contains(&"--body");
+            let with_query_params = rest.contains(&"--query-params");
             let filter_idx = rest.iter().position(|&s| s == "--filter");
             let filter = filter_idx.and_then(|i| rest.get(i + 1).copied());
             let mut cmd = json!({ "id": id, "action": "requests", "clear": clear });
             if let Some(f) = filter {
                 cmd["filter"] = json!(f);
+            }
+            if with_body {
+                cmd["body"] = json!(true);
+            }
+            if with_query_params {
+                cmd["queryParams"] = json!(true);
             }
             Ok(cmd)
         }
@@ -3035,6 +3043,19 @@ mod tests {
         assert_eq!(cmd["action"], "emulatemedia");
         assert_eq!(cmd["colorScheme"], "light");
         assert_eq!(cmd["reducedMotion"], "reduce");
+    }
+
+    #[test]
+    fn test_network_requests_with_body_and_query_params() {
+        let cmd = parse_command(
+            &args("network requests --body --query-params --filter api"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "requests");
+        assert_eq!(cmd["body"], true);
+        assert_eq!(cmd["queryParams"], true);
+        assert_eq!(cmd["filter"], "api");
     }
 
     #[test]

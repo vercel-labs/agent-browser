@@ -1416,7 +1416,11 @@ async function handleRequests(
   // Start tracking if not already
   browser.startRequestTracking();
 
-  const requests = browser.getRequests(command.filter);
+  const requests = browser.getRequests(
+    command.filter,
+    command.body ?? false,
+    command.queryParams ?? false
+  );
   return successResponse(command.id, { requests });
 }
 

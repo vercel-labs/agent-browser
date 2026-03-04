@@ -62,6 +62,40 @@ pub struct TrackedRequest {
     pub timestamp: u64,
     #[serde(rename = "resourceType")]
     pub resource_type: String,
+    #[serde(rename = "queryParams", skip_serializing_if = "Option::is_none")]
+    pub query_params: Option<Value>,
+    #[serde(rename = "body", skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+}
+
+fn extract_query_params(url: &str) -> Option<Value> {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return None;
+    };
+
+    let mut query = serde_json::Map::new();
+    for (key, value) in parsed.query_pairs() {
+        let key = key.into_owned();
+        let value = Value::String(value.into_owned());
+
+        if let Some(existing) = query.get_mut(&key) {
+            match existing {
+                Value::Array(arr) => arr.push(value),
+                _ => {
+                    let first = existing.take();
+                    *existing = Value::Array(vec![first, value]);
+                }
+            }
+        } else {
+            query.insert(key, value);
+        }
+    }
+
+    if query.is_empty() {
+        None
+    } else {
+        Some(Value::Object(query))
+    }
 }
 
 pub struct FetchPausedRequest {
@@ -285,12 +319,19 @@ impl DaemonState {
                                         .duration_since(std::time::UNIX_EPOCH)
                                         .map(|d| d.as_millis() as u64)
                                         .unwrap_or(0);
+                                    let query_params = extract_query_params(&url);
+                                    let body = request
+                                        .get("postData")
+                                        .and_then(|v| v.as_str())
+                                        .map(String::from);
                                     self.tracked_requests.push(TrackedRequest {
                                         url,
                                         method,
                                         headers,
                                         timestamp,
                                         resource_type,
+                                        query_params,
+                                        body,
                                     });
                                 }
                             }
@@ -4539,15 +4580,36 @@ async fn handle_requests(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     }
 
     let filter = cmd.get("filter").and_then(|v| v.as_str());
-    let requests: Vec<&TrackedRequest> = if let Some(f) = filter {
+    let with_body = cmd
+        .get("body")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let with_query_params = cmd
+        .get("queryParams")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let mut requests: Vec<TrackedRequest> = if let Some(f) = filter {
         state
             .tracked_requests
             .iter()
             .filter(|r| r.url.contains(f))
+            .cloned()
             .collect()
     } else {
-        state.tracked_requests.iter().collect()
+        state.tracked_requests.clone()
     };
+
+    if !with_body || !with_query_params {
+        for req in &mut requests {
+            if !with_body {
+                req.body = None;
+            }
+            if !with_query_params {
+                req.query_params = None;
+            }
+        }
+    }
 
     Ok(json!({ "requests": requests }))
 }
