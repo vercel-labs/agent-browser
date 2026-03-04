@@ -193,7 +193,7 @@ describe('state-utils', () => {
     });
 
     it('should filter out __proto__ from base', () => {
-      const base = { 'Content-Type': 'text/plain', __proto__: 'evil' } as Record<string, string>;
+      const base = { 'Content-Type': 'text/plain', __proto__: {} } as Record<string, string>;
       const override = { Accept: 'text/html' };
 
       const result = safeHeaderMerge(base, override);
@@ -216,7 +216,7 @@ describe('state-utils', () => {
     });
 
     it('should filter out constructor key', () => {
-      const base = { constructor: 'evil' } as Record<string, string>;
+      const base = { constructor: {} } as Record<string, string>;
       const override = { Accept: 'text/html' };
 
       const result = safeHeaderMerge(base, override);
@@ -226,7 +226,7 @@ describe('state-utils', () => {
     });
 
     it('should filter out prototype key', () => {
-      const base = { prototype: 'evil' } as Record<string, string>;
+      const base = { prototype: {} } as Record<string, string>;
       const override = { Accept: 'text/html' };
 
       const result = safeHeaderMerge(base, override);
