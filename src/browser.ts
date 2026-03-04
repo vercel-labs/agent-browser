@@ -567,6 +567,7 @@ export class BrowserManager {
   async setViewport(width: number, height: number): Promise<void> {
     const page = this.getPage();
     await page.setViewportSize({ width, height });
+    this.contextOptions.viewport = { width, height };
   }
 
   /**
@@ -1466,8 +1467,11 @@ export class BrowserManager {
 
       // Store context options so startRecording() can create a matching
       // context. Defined here so any option added is automatically carried over.
+      // Preserve viewport from setViewport() across re-launches (record start
+      // triggers additional launch() calls that would otherwise reset it).
+      const prevViewport = this.contextOptions.viewport;
       this.contextOptions = {
-        viewport,
+        viewport: viewport ?? prevViewport,
         storageState,
         extraHTTPHeaders: options.headers,
         userAgent: options.userAgent,

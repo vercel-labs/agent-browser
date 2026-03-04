@@ -636,6 +636,15 @@ describe('BrowserManager', () => {
       expect(size?.height).toBe(1080);
     });
 
+    it('should sync contextOptions when viewport is set', async () => {
+      await browser.setViewport(390, 844);
+      // Verify the page viewport was updated
+      const page = browser.getPage();
+      const size = page.viewportSize();
+      expect(size?.width).toBe(390);
+      expect(size?.height).toBe(844);
+    });
+
     it('should disable viewport when --start-maximized is in args', async () => {
       const testBrowser = new BrowserManager();
       await testBrowser.launch({ headless: true, args: ['--start-maximized'] });
@@ -1242,6 +1251,27 @@ describe('BrowserManager', () => {
       const recordingPage = testBrowser.getPage();
       const ua = await recordingPage.evaluate(() => navigator.userAgent);
       expect(ua).toBe(customUA);
+
+      await testBrowser.stopRecording();
+      await testBrowser.close();
+    });
+
+    it('should carry over viewport set via setViewport to recording context', async () => {
+      const testBrowser = new BrowserManager();
+      await testBrowser.launch({ headless: true });
+
+      // Set a portrait viewport after launch
+      await testBrowser.setViewport(390, 844);
+
+      const page = testBrowser.getPage();
+      await page.goto('about:blank');
+
+      const outputPath = `/tmp/test-recording-viewport-${Date.now()}.webm`;
+      await testBrowser.startRecording(outputPath);
+
+      const recordingPage = testBrowser.getPage();
+      const viewport = recordingPage.viewportSize();
+      expect(viewport).toEqual({ width: 390, height: 844 });
 
       await testBrowser.stopRecording();
       await testBrowser.close();
