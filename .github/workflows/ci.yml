@@ -64,11 +64,16 @@ jobs:
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
 
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: cli
+
+      - name: Format check
+        run: cargo fmt --manifest-path cli/Cargo.toml -- --check
 
       - name: Run Rust tests
         run: cargo test --profile ci --manifest-path cli/Cargo.toml
