@@ -970,6 +970,8 @@ async function handleSnapshot(
     const dir = path.dirname(resolvedPath);
     await fs.promises.mkdir(dir, { recursive: true });
     await fs.promises.writeFile(resolvedPath, content, 'utf-8');
+    return successResponse(command.id, {
+      snapshot: content,
       refs: refsPayload,
       origin,
     });
