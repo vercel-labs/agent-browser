@@ -755,6 +755,13 @@ fn launch_options_from_env() -> LaunchOptions {
         .map(|v| v == "1" || v == "true")
         .unwrap_or(false);
 
+    let extensions: Option<Vec<String>> = env::var("AGENT_BROWSER_EXTENSIONS").ok().map(|v| {
+        v.split([',', '\n'])
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    });
+
     LaunchOptions {
         headless: !headed,
         executable_path: env::var("AGENT_BROWSER_EXECUTABLE_PATH").ok(),
@@ -772,12 +779,7 @@ fn launch_options_from_env() -> LaunchOptions {
                     .collect()
             })
             .unwrap_or_default(),
-        extensions: env::var("AGENT_BROWSER_EXTENSIONS").ok().map(|v| {
-            v.split([',', '\n'])
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect()
-        }),
+        extensions,
         storage_state: env::var("AGENT_BROWSER_STATE").ok(),
         user_agent: env::var("AGENT_BROWSER_USER_AGENT").ok(),
         ignore_https_errors: env::var("AGENT_BROWSER_IGNORE_HTTPS_ERRORS")
@@ -866,6 +868,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
                 .filter_map(|v| v.as_str().map(String::from))
                 .collect()
         });
+
     let profile = cmd.get("profile").and_then(|v| v.as_str());
     let storage_state = cmd.get("storageState").and_then(|v| v.as_str());
     let allow_file_access = cmd
@@ -5124,6 +5127,7 @@ fn error_response(id: &str, error: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::EnvGuard;
 
     #[test]
     fn test_success_response_structure() {
@@ -5158,6 +5162,14 @@ mod tests {
         assert!(opts.headless);
         assert!(opts.args.is_empty());
         assert!(!opts.allow_file_access);
+    }
+
+    #[test]
+    fn test_launch_options_from_env_headed_flag() {
+        let _guard = EnvGuard::new(&["AGENT_BROWSER_HEADED"]);
+        _guard.set("AGENT_BROWSER_HEADED", "1");
+        let opts = launch_options_from_env();
+        assert!(!opts.headless, "AGENT_BROWSER_HEADED=1 should set headless=false");
     }
 
     #[tokio::test]

@@ -5,6 +5,8 @@ mod flags;
 mod install;
 mod native;
 mod output;
+#[cfg(test)]
+mod test_utils;
 mod validation;
 
 use serde_json::json;
@@ -257,6 +259,12 @@ fn main() {
 
     // Native daemon mode: when AGENT_BROWSER_DAEMON is set, run as the daemon process
     if env::var("AGENT_BROWSER_DAEMON").is_ok() {
+        // Ignore SIGPIPE so the daemon isn't killed when the parent drops
+        // the piped stderr handle after confirming the daemon is ready.
+        #[cfg(unix)]
+        unsafe {
+            libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+        }
         let session = env::var("AGENT_BROWSER_SESSION").unwrap_or_else(|_| "default".to_string());
         let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
         rt.block_on(native::daemon::run_daemon(&session));
@@ -386,6 +394,7 @@ fn main() {
 
     let daemon_opts = DaemonOptions {
         headed: flags.headed,
+        debug: flags.debug,
         executable_path: flags.executable_path.as_deref(),
         extensions: &flags.extensions,
         args: flags.args.as_deref(),
@@ -461,7 +470,7 @@ fn main() {
             flags.ignore_https_errors.then_some("--ignore-https-errors"),
             flags.cli_allow_file_access.then_some("--allow-file-access"),
             flags.cli_download_path.then_some("--download-path"),
-            flags.native.then_some("--native"),
+            flags.cli_native.then_some("--native"),
         ]
         .into_iter()
         .flatten()

@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 jobs:
   version-sync:
@@ -55,18 +56,35 @@ jobs:
         run: pnpm test
 
   rust:
+    name: Rust
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: cli
+
+      - name: Run Rust tests
+        run: cargo test --profile ci --manifest-path cli/Cargo.toml
+
+  rust-cross:
     name: Rust (${{ matrix.os }} - ${{ matrix.target }})
+    if: github.event_name != 'pull_request'
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
         include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
           - os: macos-latest
             target: aarch64-apple-darwin
           - os: macos-latest
             target: x86_64-apple-darwin
-          - os: windows-latest
+          - os: windows-latest-8-cores
             target: x86_64-pc-windows-msvc
 
     steps:
@@ -88,8 +106,9 @@ jobs:
 
   windows-integration:
     name: Windows Integration Test
-    runs-on: windows-latest
-    needs: rust
+    if: github.event_name != 'pull_request'
+    runs-on: windows-latest-8-cores
+    needs: rust-cross
 
     steps:
       - name: Checkout repository
@@ -204,8 +223,9 @@ jobs:
 
   global-install:
     name: Global Install (${{ matrix.os }})
+    if: github.event_name != 'pull_request'
     runs-on: ${{ matrix.os }}
-    needs: rust
+    needs: rust-cross
     strategy:
       matrix:
         include:
@@ -215,7 +235,7 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
             binary: agent-browser-darwin-arm64
-          - os: windows-latest
+          - os: windows-latest-8-cores
             target: x86_64-pc-windows-msvc
             binary: agent-browser-win32-x64.exe
 

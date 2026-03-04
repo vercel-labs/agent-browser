@@ -467,40 +467,40 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 
 ## Options
 
-| Option                     | Description                                                                                                      |
-| -------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| `--session <name>`         | Use isolated session (or `AGENT_BROWSER_SESSION` env)                                                            |
-| `--session-name <name>`    | Auto-save/restore session state (or `AGENT_BROWSER_SESSION_NAME` env)                                            |
-| `--profile <path>`         | Persistent browser profile directory (or `AGENT_BROWSER_PROFILE` env)                                            |
-| `--state <path>`           | Load storage state from JSON file (or `AGENT_BROWSER_STATE` env)                                                 |
-| `--headers <json>`         | Set HTTP headers scoped to the URL's origin                                                                      |
-| `--executable-path <path>` | Custom browser executable (or `AGENT_BROWSER_EXECUTABLE_PATH` env)                                               |
-| `--extension <path>`       | Load browser extension (repeatable; or `AGENT_BROWSER_EXTENSIONS` env)                                           |
-| `--args <args>`            | Browser launch args, comma or newline separated (or `AGENT_BROWSER_ARGS` env)                                    |
-| `--user-agent <ua>`        | Custom User-Agent string (or `AGENT_BROWSER_USER_AGENT` env)                                                     |
-| `--proxy <url>`            | Proxy server URL with optional auth (or `AGENT_BROWSER_PROXY` env)                                               |
-| `--proxy-bypass <hosts>`   | Hosts to bypass proxy (or `AGENT_BROWSER_PROXY_BYPASS` env)                                                      |
-| `--ignore-https-errors`    | Ignore HTTPS certificate errors (useful for self-signed certs)                                                   |
-| `--allow-file-access`      | Allow file:// URLs to access local files (Chromium only)                                                         |
-| `-p, --provider <name>`    | Cloud browser provider (or `AGENT_BROWSER_PROVIDER` env)                                                         |
-| `--device <name>`          | iOS device name, e.g. "iPhone 15 Pro" (or `AGENT_BROWSER_IOS_DEVICE` env)                                        |
-| `--json`                   | JSON output (for agents)                                                                                         |
-| `--full, -f`               | Full page screenshot                                                                                             |
-| `--annotate`               | Annotated screenshot with numbered element labels (or `AGENT_BROWSER_ANNOTATE` env)                              |
-| `--headed`                 | Show browser window (not headless)                                                                               |
-| `--cdp <port\|url>`        | Connect via Chrome DevTools Protocol (port or WebSocket URL)                                                     |
-| `--auto-connect`           | Auto-discover and connect to running Chrome (or `AGENT_BROWSER_AUTO_CONNECT` env)                                |
-| `--color-scheme <scheme>`  | Color scheme: `dark`, `light`, `no-preference` (or `AGENT_BROWSER_COLOR_SCHEME` env)                             |
-| `--download-path <path>`   | Default download directory (or `AGENT_BROWSER_DOWNLOAD_PATH` env)                                                |
-| `--content-boundaries`     | Wrap page output in boundary markers for LLM safety (or `AGENT_BROWSER_CONTENT_BOUNDARIES` env)                  |
-| `--max-output <chars>`     | Truncate page output to N characters (or `AGENT_BROWSER_MAX_OUTPUT` env)                                         |
-| `--allowed-domains <list>` | Comma-separated allowed domain patterns (or `AGENT_BROWSER_ALLOWED_DOMAINS` env)                                 |
-| `--action-policy <path>`   | Path to action policy JSON file (or `AGENT_BROWSER_ACTION_POLICY` env)                                           |
-| `--confirm-actions <list>` | Action categories requiring confirmation (or `AGENT_BROWSER_CONFIRM_ACTIONS` env)                                |
-| `--confirm-interactive`    | Interactive confirmation prompts; auto-denies if stdin is not a TTY (or `AGENT_BROWSER_CONFIRM_INTERACTIVE` env) |
-| `--native`                 | [Experimental] Use native Rust daemon instead of Node.js (or `AGENT_BROWSER_NATIVE` env)                         |
-| `--config <path>`          | Use a custom config file (or `AGENT_BROWSER_CONFIG` env)                                                         |
-| `--debug`                  | Debug output                                                                                                     |
+| Option | Description |
+|--------|-------------|
+| `--session <name>` | Use isolated session (or `AGENT_BROWSER_SESSION` env) |
+| `--session-name <name>` | Auto-save/restore session state (or `AGENT_BROWSER_SESSION_NAME` env) |
+| `--profile <path>` | Persistent browser profile directory (or `AGENT_BROWSER_PROFILE` env) |
+| `--state <path>` | Load storage state from JSON file (or `AGENT_BROWSER_STATE` env) |
+| `--headers <json>` | Set HTTP headers scoped to the URL's origin |
+| `--executable-path <path>` | Custom browser executable (or `AGENT_BROWSER_EXECUTABLE_PATH` env) |
+| `--extension <path>` | Load browser extension (repeatable; or `AGENT_BROWSER_EXTENSIONS` env) |
+| `--args <args>` | Browser launch args, comma or newline separated (or `AGENT_BROWSER_ARGS` env) |
+| `--user-agent <ua>` | Custom User-Agent string (or `AGENT_BROWSER_USER_AGENT` env) |
+| `--proxy <url>` | Proxy server URL with optional auth (or `AGENT_BROWSER_PROXY` env) |
+| `--proxy-bypass <hosts>` | Hosts to bypass proxy (or `AGENT_BROWSER_PROXY_BYPASS` env) |
+| `--ignore-https-errors` | Ignore HTTPS certificate errors (useful for self-signed certs) |
+| `--allow-file-access` | Allow file:// URLs to access local files (Chromium only) |
+| `-p, --provider <name>` | Cloud browser provider (or `AGENT_BROWSER_PROVIDER` env) |
+| `--device <name>` | iOS device name, e.g. "iPhone 15 Pro" (or `AGENT_BROWSER_IOS_DEVICE` env) |
+| `--json` | JSON output (for agents) |
+| `--full, -f` | Full page screenshot |
+| `--annotate` | Annotated screenshot with numbered element labels (or `AGENT_BROWSER_ANNOTATE` env) |
+| `--headed` | Show browser window (not headless) (or `AGENT_BROWSER_HEADED` env) |
+| `--cdp <port\|url>` | Connect via Chrome DevTools Protocol (port or WebSocket URL) |
+| `--auto-connect` | Auto-discover and connect to running Chrome (or `AGENT_BROWSER_AUTO_CONNECT` env) |
+| `--color-scheme <scheme>` | Color scheme: `dark`, `light`, `no-preference` (or `AGENT_BROWSER_COLOR_SCHEME` env) |
+| `--download-path <path>` | Default download directory (or `AGENT_BROWSER_DOWNLOAD_PATH` env) |
+| `--content-boundaries` | Wrap page output in boundary markers for LLM safety (or `AGENT_BROWSER_CONTENT_BOUNDARIES` env) |
+| `--max-output <chars>` | Truncate page output to N characters (or `AGENT_BROWSER_MAX_OUTPUT` env) |
+| `--allowed-domains <list>` | Comma-separated allowed domain patterns (or `AGENT_BROWSER_ALLOWED_DOMAINS` env) |
+| `--action-policy <path>` | Path to action policy JSON file (or `AGENT_BROWSER_ACTION_POLICY` env) |
+| `--confirm-actions <list>` | Action categories requiring confirmation (or `AGENT_BROWSER_CONFIRM_ACTIONS` env) |
+| `--confirm-interactive` | Interactive confirmation prompts; auto-denies if stdin is not a TTY (or `AGENT_BROWSER_CONFIRM_INTERACTIVE` env) |
+| `--native` | [Experimental] Use native Rust daemon instead of Node.js (or `AGENT_BROWSER_NATIVE` env) |
+| `--config <path>` | Use a custom config file (or `AGENT_BROWSER_CONFIG` env) |
+| `--debug` | Debug output |
 
 ## Configuration
 
@@ -661,6 +661,8 @@ agent-browser open example.com --headed
 ```
 
 This opens a visible browser window instead of running headless.
+
+> **Note:** Browser extensions work in both headed and headless mode (Chrome's `--headless=new`).
 
 ## Authenticated Sessions
 

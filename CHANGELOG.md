@@ -1,5 +1,23 @@
 # agent-browser
 
+## 0.16.3
+
+### Patch Changes
+
+- 7d2c895: Fixed an issue where the --native flag was being passed to child processes even when not explicitly specified on the command line. The flag is now only forwarded when the user explicitly provides it, consistent with how other CLI flags like --allow-file-access and --download-path are handled.
+
+## 0.16.2
+
+### Patch Changes
+
+- 01ac557: Added AGENT_BROWSER_HEADED environment variable support for running the browser in headed mode, and improved temporary profile cleanup when launching Chrome directly. Also includes documentation clarification that browser extensions work in both headed and headless modes.
+
+## 0.16.1
+
+### Patch Changes
+
+- c4180c8: Improved Chrome launch reliability by automatically detecting containerized environments (Docker, Podman, Kubernetes) and enabling --no-sandbox when needed. Added support for discovering Playwright-installed Chromium browsers and enhanced error messages with helpful diagnostics when Chrome fails to launch.
+
 ## 0.16.0
 
 ### Minor Changes

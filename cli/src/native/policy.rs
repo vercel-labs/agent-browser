@@ -135,6 +135,7 @@ impl ActionPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::EnvGuard;
 
     #[test]
     fn test_policy_allow_whitelist() {
@@ -205,12 +206,12 @@ mod tests {
 
     #[test]
     fn test_confirm_actions_from_env() {
-        env::set_var("AGENT_BROWSER_CONFIRM_ACTIONS", "navigate,click,fill");
+        let _guard = EnvGuard::new(&["AGENT_BROWSER_CONFIRM_ACTIONS"]);
+        _guard.set("AGENT_BROWSER_CONFIRM_ACTIONS", "navigate,click,fill");
         let ca = ConfirmActions::from_env().unwrap();
         assert!(ca.requires_confirmation("navigate"));
         assert!(ca.requires_confirmation("click"));
         assert!(ca.requires_confirmation("fill"));
         assert!(!ca.requires_confirmation("screenshot"));
-        env::remove_var("AGENT_BROWSER_CONFIRM_ACTIONS");
     }
 }

@@ -2100,6 +2100,7 @@ mod tests {
             cli_allow_file_access: false,
             cli_annotate: false,
             cli_download_path: false,
+            cli_native: false,
             annotate: false,
             color_scheme: None,
             download_path: None,

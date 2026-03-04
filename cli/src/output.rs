@@ -2436,7 +2436,7 @@ Options:
   --json                     JSON output
   --full, -f                 Full page screenshot
   --annotate                 Annotated screenshot with numbered labels and legend
-  --headed                   Show browser window (not headless)
+  --headed                   Show browser window (not headless) (or AGENT_BROWSER_HEADED env)
   --cdp <port>               Connect via CDP (Chrome DevTools Protocol)
   --auto-connect             Auto-discover and connect to running Chrome
   --color-scheme <scheme>    Color scheme: dark, light, no-preference (or AGENT_BROWSER_COLOR_SCHEME)
