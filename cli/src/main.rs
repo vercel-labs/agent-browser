@@ -463,7 +463,7 @@ fn main() {
             flags.ignore_https_errors.then_some("--ignore-https-errors"),
             flags.cli_allow_file_access.then_some("--allow-file-access"),
             flags.cli_download_path.then_some("--download-path"),
-            flags.native.then_some("--native"),
+            flags.cli_native.then_some("--native"),
         ]
         .into_iter()
         .flatten()
