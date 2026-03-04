@@ -460,7 +460,11 @@ export async function startDaemon(options?: {
               const allowFileAccess = process.env.AGENT_BROWSER_ALLOW_FILE_ACCESS === '1';
               const browserEnv = process.env.AGENT_BROWSER_BROWSER;
               let browserType: 'chromium' | 'firefox' | 'webkit' | undefined;
-              if (browserEnv === 'chromium' || browserEnv === 'firefox' || browserEnv === 'webkit') {
+              if (
+                browserEnv === 'chromium' ||
+                browserEnv === 'firefox' ||
+                browserEnv === 'webkit'
+              ) {
                 browserType = browserEnv;
               } else {
                 if (browserEnv) {
