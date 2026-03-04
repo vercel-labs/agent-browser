@@ -118,8 +118,8 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
         args.push(format!("--user-data-dir={}", expanded));
         None
     } else {
-        let dir = std::env::temp_dir()
-            .join(format!("agent-browser-chrome-{}", uuid::Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("agent-browser-chrome-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir)
             .map_err(|e| format!("Failed to create temp profile dir: {}", e))?;
         args.push(format!("--user-data-dir={}", dir.display()));
@@ -168,6 +168,31 @@ pub fn launch_chrome(options: &LaunchOptions) -> Result<ChromeProcess, String> {
         }
     };
 
+    const MAX_RETRIES: u32 = 2;
+    let mut last_error = String::new();
+
+    for attempt in 0..=MAX_RETRIES {
+        if attempt > 0 {
+            std::thread::sleep(Duration::from_millis(500 * attempt as u64));
+        }
+
+        match try_launch_chrome(&chrome_path, options) {
+            Ok(process) => return Ok(process),
+            Err(e) => {
+                let is_race_condition = e.contains("Chrome exited before providing DevTools URL")
+                    || e.contains("Timeout waiting for Chrome DevTools URL");
+                last_error = e;
+                if !is_race_condition || attempt == MAX_RETRIES {
+                    return Err(last_error);
+                }
+            }
+        }
+    }
+
+    Err(last_error)
+}
+
+fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<ChromeProcess, String> {
     let ChromeArgs {
         args,
         temp_user_data_dir,
@@ -179,7 +204,7 @@ pub fn launch_chrome(options: &LaunchOptions) -> Result<ChromeProcess, String> {
         }
     };
 
-    let mut child = Command::new(&chrome_path)
+    let mut child = Command::new(chrome_path)
         .args(&args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -190,22 +215,30 @@ pub fn launch_chrome(options: &LaunchOptions) -> Result<ChromeProcess, String> {
             format!("Failed to launch Chrome at {:?}: {}", chrome_path, e)
         })?;
 
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| {
-            let _ = child.kill();
-            cleanup_temp_dir(&temp_user_data_dir);
-            "Failed to capture Chrome stderr".to_string()
-        })?;
+    let stderr = child.stderr.take().ok_or_else(|| {
+        let _ = child.kill();
+        cleanup_temp_dir(&temp_user_data_dir);
+        "Failed to capture Chrome stderr".to_string()
+    })?;
     let reader = BufReader::new(stderr);
 
     let ws_url = match wait_for_ws_url(reader) {
         Ok(url) => url,
         Err(e) => {
-            let _ = child.kill();
-            cleanup_temp_dir(&temp_user_data_dir);
-            return Err(e);
+            // Fallback: try reading DevToolsActivePort file from the user data dir.
+            // Chrome writes this file before printing to stderr in some configurations.
+            let fallback_url = temp_user_data_dir
+                .as_deref()
+                .and_then(|dir| read_devtools_active_port(dir))
+                .map(|(port, ws_path)| format!("ws://127.0.0.1:{}{}", port, ws_path));
+
+            if let Some(url) = fallback_url {
+                url
+            } else {
+                let _ = child.kill();
+                cleanup_temp_dir(&temp_user_data_dir);
+                return Err(e);
+            }
         }
     };
 
@@ -275,11 +308,21 @@ fn chrome_launch_error(message: &str, stderr_lines: &[String]) -> String {
         );
     }
 
-    let hint = if relevant.iter().any(|l| {
+    let has_sandbox_err = relevant.iter().any(|l| {
         let lower = l.to_lowercase();
         lower.contains("sandbox") || lower.contains("namespace")
-    }) {
+    });
+    let has_gpu_err = relevant.iter().any(|l| l.to_lowercase().contains("gpu"));
+
+    let hint = if has_sandbox_err {
         "\nHint: try --args \"--no-sandbox\" (required in containers, VMs, and some Linux setups)"
+    } else if has_gpu_err {
+        "\nHint: try --args \"--disable-gpu\" if running in a headless environment without GPU"
+    } else if message.contains("exited before") {
+        "\nHint: Chrome crashed during startup. Common causes:\n  \
+         - Running in a container without --no-sandbox\n  \
+         - Missing shared libraries (run `ldd chrome` to check)\n  \
+         - Insufficient /dev/shm size (try --args \"--disable-dev-shm-usage\")"
     } else {
         ""
     };
@@ -536,10 +579,7 @@ fn should_disable_sandbox(existing_args: &[String]) -> bool {
 
         // Generic container detection: cgroup contains docker/kubepods/lxc
         if let Ok(cgroup) = std::fs::read_to_string("/proc/1/cgroup") {
-            if cgroup.contains("docker")
-                || cgroup.contains("kubepods")
-                || cgroup.contains("lxc")
-            {
+            if cgroup.contains("docker") || cgroup.contains("kubepods") || cgroup.contains("lxc") {
                 return true;
             }
         }
@@ -683,10 +723,7 @@ mod tests {
 
     #[test]
     fn test_chrome_launch_error_generic() {
-        let lines = vec![
-            "info line".to_string(),
-            "another info line".to_string(),
-        ];
+        let lines = vec!["info line".to_string(), "another info line".to_string()];
         let msg = chrome_launch_error("Chrome exited", &lines);
         assert!(msg.contains("last 2 lines"));
     }
@@ -707,10 +744,7 @@ mod tests {
         };
         let result = build_chrome_args(&opts).unwrap();
         assert!(result.args.iter().any(|a| a == "--headless=new"));
-        assert!(result
-            .args
-            .iter()
-            .any(|a| a == "--window-size=1280,720"));
+        assert!(result.args.iter().any(|a| a == "--window-size=1280,720"));
         // Temp dir created when no profile
         assert!(result.temp_user_data_dir.is_some());
         let dir = result.temp_user_data_dir.unwrap();
@@ -769,14 +803,8 @@ mod tests {
             ..Default::default()
         };
         let result = build_chrome_args(&opts).unwrap();
-        assert!(!result
-            .args
-            .iter()
-            .any(|a| a == "--window-size=1280,720"));
-        assert!(result
-            .args
-            .iter()
-            .any(|a| a == "--window-size=1920,1080"));
+        assert!(!result.args.iter().any(|a| a == "--window-size=1280,720"));
+        assert!(result.args.iter().any(|a| a == "--window-size=1920,1080"));
         if let Some(ref dir) = result.temp_user_data_dir {
             let _ = std::fs::remove_dir_all(dir);
         }

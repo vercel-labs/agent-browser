@@ -141,12 +141,23 @@ fn get_port_path(session: &str) -> PathBuf {
 
 #[cfg(windows)]
 fn get_port_for_session(session: &str) -> u16 {
+    // Prefer reading the .port file written by the daemon (contains the actual port).
+    // Fall back to a deterministic hash for the brief window during daemon startup
+    // before the file is written.
+    if let Ok(contents) = fs::read_to_string(get_port_path(session)) {
+        if let Ok(port) = contents.trim().parse::<u16>() {
+            return port;
+        }
+    }
+    hash_port_for_session(session)
+}
+
+#[cfg(windows)]
+fn hash_port_for_session(session: &str) -> u16 {
     let mut hash: i32 = 0;
     for c in session.chars() {
         hash = ((hash << 5).wrapping_sub(hash)).wrapping_add(c as i32);
     }
-    // Correct logic: first take absolute modulo, then cast to u16
-    // Using unsigned_abs() to safely handle i32::MIN
     49152 + ((hash.unsigned_abs() as u32 % 16383) as u16)
 }
 
@@ -529,15 +540,10 @@ pub fn ensure_daemon(session: &str, opts: &DaemonOptions) -> Result<DaemonResult
     #[cfg(unix)]
     let endpoint_info = format!(
         "socket: {}",
-        get_socket_dir()
-            .join(format!("{}.sock", session))
-            .display()
+        get_socket_dir().join(format!("{}.sock", session)).display()
     );
     #[cfg(windows)]
-    let endpoint_info = format!(
-        "port: 127.0.0.1:{}",
-        get_port_for_session(session)
-    );
+    let endpoint_info = format!("port: 127.0.0.1:{}", get_port_for_session(session));
 
     Err(format!("Daemon failed to start ({})", endpoint_info))
 }

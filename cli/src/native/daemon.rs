@@ -7,7 +7,7 @@ use std::process;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::signal;
 
-use super::actions::{execute_command, DaemonState};
+use super::actions::{execute_command, pre_command_setup, DaemonState};
 use super::state;
 
 pub async fn run_daemon(session: &str) {
@@ -167,7 +167,16 @@ where
 
                 let is_close = cmd.get("action").and_then(|v| v.as_str()) == Some("close");
 
-                let response = {
+                // Split lock into two phases so other connections can
+                // make progress between pre-command setup and execution.
+                let early_response = {
+                    let mut s = state.lock().await;
+                    pre_command_setup(&cmd, &mut s).await
+                };
+
+                let response = if let Some(resp) = early_response {
+                    resp
+                } else {
                     let mut s = state.lock().await;
                     execute_command(&cmd, &mut s).await
                 };
@@ -258,9 +267,10 @@ fn get_daemon_socket_dir() -> PathBuf {
 
 #[cfg(windows)]
 fn get_port_for_session(session: &str) -> u16 {
-    let mut hash: i64 = 0;
-    for b in session.bytes() {
-        hash = hash.wrapping_mul(31).wrapping_add(b as i64);
+    // Must match the hash algorithm in connection.rs and daemon.ts
+    let mut hash: i32 = 0;
+    for c in session.chars() {
+        hash = ((hash << 5).wrapping_sub(hash)).wrapping_add(c as i32);
     }
-    49152 + (hash.unsigned_abs() % 16383) as u16
+    49152 + ((hash.unsigned_abs() as u32 % 16383) as u16)
 }
