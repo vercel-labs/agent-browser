@@ -919,10 +919,30 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
             }
             _ => {
                 let (ws_url, provider_session) = providers::connect_provider(provider).await?;
-                match BrowserManager::connect_cdp(&ws_url).await {
+
+                // For AgentCore, use signed WebSocket headers
+                let headers = if provider.eq_ignore_ascii_case("agentcore") {
+                    providers::take_agentcore_ws_headers()
+                } else {
+                    None
+                };
+
+                match BrowserManager::connect_cdp_with_headers(&ws_url, headers).await {
                     Ok(mgr) => {
                         state.browser = Some(mgr);
                         state.subscribe_to_browser_events();
+
+                        // Include AgentCore session info in response
+                        #[cfg(feature = "agentcore")]
+                        if let Some(info) = providers::get_agentcore_info() {
+                            return Ok(json!({
+                                "launched": true,
+                                "provider": provider,
+                                "agentCoreSessionId": info.session_id,
+                                "agentCoreLiveViewUrl": info.live_view_url
+                            }));
+                        }
+
                         return Ok(json!({ "launched": true, "provider": provider }));
                     }
                     Err(e) => {

@@ -21,8 +21,9 @@ pub async fn connect_provider(
         "browserbase" => connect_browserbase().await,
         "browser-use" | "browseruse" => connect_browser_use().await,
         "kernel" => connect_kernel().await,
+        "agentcore" => connect_agentcore().await,
         _ => Err(format!(
-            "Unknown provider '{}'. Supported: browserbase, browser-use, kernel",
+            "Unknown provider '{}'. Supported: browserbase, browser-use, kernel, agentcore",
             provider_name
         )),
     }
@@ -72,6 +73,10 @@ pub async fn close_provider_session(session: &ProviderSession) {
                     .send()
                     .await;
             }
+        }
+        "agentcore" => {
+            // AgentCore session cleanup is handled via signed DELETE request
+            let _ = close_agentcore_session(&session.session_id).await;
         }
         _ => {}
     }
@@ -272,3 +277,259 @@ async fn connect_kernel() -> Result<(String, Option<ProviderSession>), String> {
         }),
     ))
 }
+
+// ============================================================================
+// AgentCore Provider (AWS Bedrock AgentCore Browser)
+// Requires: cargo build --features agentcore
+// ============================================================================
+
+#[cfg(feature = "agentcore")]
+mod agentcore {
+    use super::*;
+    use aws_config::BehaviorVersion;
+    use aws_sigv4::http_request::{sign, SignableBody, SignableRequest, SigningSettings};
+    use std::time::SystemTime;
+
+    /// AgentCore-specific session info for Live View URL
+    pub struct AgentCoreSessionInfo {
+        pub session_id: String,
+        pub browser_identifier: String,
+        pub region: String,
+        pub live_view_url: String,
+    }
+
+    thread_local! {
+        static AGENTCORE_INFO: std::cell::RefCell<Option<AgentCoreSessionInfo>> = const { std::cell::RefCell::new(None) };
+        static AGENTCORE_WS_HEADERS: std::cell::RefCell<Option<Vec<(String, String)>>> = const { std::cell::RefCell::new(None) };
+    }
+
+    pub fn set_agentcore_info(info: AgentCoreSessionInfo) {
+        AGENTCORE_INFO.with(|cell| *cell.borrow_mut() = Some(info));
+    }
+
+    pub fn get_agentcore_info() -> Option<AgentCoreSessionInfo> {
+        AGENTCORE_INFO.with(|cell| cell.borrow().as_ref().map(|i| AgentCoreSessionInfo {
+            session_id: i.session_id.clone(),
+            browser_identifier: i.browser_identifier.clone(),
+            region: i.region.clone(),
+            live_view_url: i.live_view_url.clone(),
+        }))
+    }
+
+    pub fn set_agentcore_ws_headers(headers: Vec<(String, String)>) {
+        AGENTCORE_WS_HEADERS.with(|cell| *cell.borrow_mut() = Some(headers));
+    }
+
+    pub fn take_agentcore_ws_headers() -> Option<Vec<(String, String)>> {
+        AGENTCORE_WS_HEADERS.with(|cell| cell.borrow_mut().take())
+    }
+
+    pub async fn connect() -> Result<(String, Option<ProviderSession>), String> {
+        let region = env::var("AGENTCORE_REGION")
+            .or_else(|_| env::var("AWS_REGION"))
+            .unwrap_or_else(|_| "us-east-1".to_string());
+        let browser_id = env::var("AGENTCORE_BROWSER_ID")
+            .unwrap_or_else(|_| "aws.browser.v1".to_string());
+        let timeout_secs: u64 = env::var("AGENTCORE_SESSION_TIMEOUT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(3600);
+
+        let host = format!("agentcore.{}.amazonaws.com", region);
+        let path = format!("/browser-sessions/{}/sessions", browser_id);
+        let url = format!("https://{}{}", host, path);
+
+        let mut body_json = json!({ "timeoutSeconds": timeout_secs });
+        if let Ok(profile_id) = env::var("AGENTCORE_PROFILE_ID") {
+            if !profile_id.is_empty() {
+                body_json.as_object_mut().unwrap().insert("profileId".to_string(), json!(profile_id));
+            }
+        }
+        let body = serde_json::to_string(&body_json)
+            .map_err(|e| format!("Failed to serialize request body: {}", e))?;
+
+        let signed_headers = sign_request("POST", &url, &region, Some(&body)).await?;
+
+        let client = reqwest::Client::new();
+        let mut req = client.post(&url).body(body.clone());
+        for (key, value) in &signed_headers {
+            req = req.header(key.as_str(), value.as_str());
+        }
+
+        let response = req.send().await
+            .map_err(|e| format!("AgentCore request failed: {}", e))?;
+
+        let status = response.status();
+        let resp_body = response.text().await
+            .map_err(|e| format!("Failed to read AgentCore response: {}", e))?;
+
+        if !status.is_success() {
+            return Err(format!("AgentCore API error ({}): {}", status.as_u16(), resp_body));
+        }
+
+        let json: Value = serde_json::from_str(&resp_body)
+            .map_err(|e| format!("Invalid AgentCore response: {}", e))?;
+
+        let session_id = json.get("sessionId")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "AgentCore response missing sessionId".to_string())?
+            .to_string();
+
+        let browser_identifier = json.get("browserIdentifier")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&browser_id)
+            .to_string();
+
+        let live_view_url = format!(
+            "https://{}.console.aws.amazon.com/bedrock-agentcore/browser/{}/session/{}#",
+            region, browser_identifier, session_id
+        );
+
+        set_agentcore_info(AgentCoreSessionInfo {
+            session_id: session_id.clone(),
+            browser_identifier: browser_identifier.clone(),
+            region: region.clone(),
+            live_view_url: live_view_url.clone(),
+        });
+
+        eprintln!("Session: {}", session_id);
+        eprintln!("Live View: {}", live_view_url);
+
+        let ws_path = format!("/browser-streams/{}/sessions/{}/automation", browser_identifier, session_id);
+        let ws_url = format!("wss://{}{}", host, ws_path);
+
+        let ws_headers = sign_request("GET", &format!("https://{}{}", host, ws_path), &region, None).await?;
+        set_agentcore_ws_headers(ws_headers);
+
+        Ok((
+            ws_url,
+            Some(ProviderSession {
+                provider: "agentcore".to_string(),
+                session_id,
+            }),
+        ))
+    }
+
+    async fn sign_request(
+        method: &str,
+        url: &str,
+        region: &str,
+        body: Option<&str>,
+    ) -> Result<Vec<(String, String)>, String> {
+        use aws_credential_types::provider::ProvideCredentials;
+
+        let config = aws_config::defaults(BehaviorVersion::latest())
+            .region(aws_config::Region::new(region.to_string()))
+            .load()
+            .await;
+
+        let creds_provider = config.credentials_provider()
+            .ok_or_else(|| "No AWS credentials found. Configure via AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY or AWS_PROFILE".to_string())?;
+
+        let credentials = creds_provider
+            .provide_credentials()
+            .await
+            .map_err(|e| format!("Failed to load AWS credentials: {}", e))?;
+
+        let identity = aws_credential_types::Credentials::from(credentials).into();
+
+        let signing_params = aws_sigv4::sign::v4::SigningParams::builder()
+            .identity(&identity)
+            .region(region)
+            .name("bedrock-agentcore")
+            .time(SystemTime::now())
+            .settings(SigningSettings::default())
+            .build()
+            .map_err(|e| format!("Failed to build signing params: {}", e))?;
+
+        let parsed_url = url::Url::parse(url)
+            .map_err(|e| format!("Invalid URL: {}", e))?;
+
+        let signable_body = match body {
+            Some(b) => SignableBody::Bytes(b.as_bytes()),
+            None => SignableBody::empty(),
+        };
+
+        let signable_request = SignableRequest::new(
+            method,
+            parsed_url.as_str(),
+            std::iter::once(("host", parsed_url.host_str().unwrap_or(""))),
+            signable_body,
+        ).map_err(|e| format!("Failed to create signable request: {}", e))?;
+
+        let (signing_output, _) = sign(signable_request, &signing_params.into())
+            .map_err(|e| format!("Failed to sign request: {}", e))?
+            .into_parts();
+
+        let mut headers: Vec<(String, String)> = vec![
+            ("host".to_string(), parsed_url.host_str().unwrap_or("").to_string()),
+            ("content-type".to_string(), "application/json".to_string()),
+        ];
+
+        for (name, value) in signing_output.headers() {
+            headers.push((name.to_string(), value.to_string()));
+        }
+
+        Ok(headers)
+    }
+
+    pub async fn close_session(session_id: &str) -> Result<(), String> {
+        let info = get_agentcore_info();
+        let (region, browser_id) = match &info {
+            Some(i) => (i.region.clone(), i.browser_identifier.clone()),
+            None => {
+                let region = env::var("AGENTCORE_REGION")
+                    .or_else(|_| env::var("AWS_REGION"))
+                    .unwrap_or_else(|_| "us-east-1".to_string());
+                let browser_id = env::var("AGENTCORE_BROWSER_ID")
+                    .unwrap_or_else(|_| "aws.browser.v1".to_string());
+                (region, browser_id)
+            }
+        };
+
+        let host = format!("agentcore.{}.amazonaws.com", region);
+        let path = format!("/browser-sessions/{}/sessions/{}", browser_id, session_id);
+        let url = format!("https://{}{}", host, path);
+
+        let signed_headers = sign_request("DELETE", &url, &region, None).await?;
+
+        let client = reqwest::Client::new();
+        let mut req = client.delete(&url);
+        for (key, value) in &signed_headers {
+            req = req.header(key.as_str(), value.as_str());
+        }
+
+        let _ = req.send().await;
+        Ok(())
+    }
+}
+
+#[cfg(feature = "agentcore")]
+pub use agentcore::{get_agentcore_info, take_agentcore_ws_headers};
+
+#[cfg(feature = "agentcore")]
+async fn connect_agentcore() -> Result<(String, Option<ProviderSession>), String> {
+    agentcore::connect().await
+}
+
+#[cfg(not(feature = "agentcore"))]
+async fn connect_agentcore() -> Result<(String, Option<ProviderSession>), String> {
+    Err("AgentCore provider requires the 'agentcore' feature. Rebuild with: cargo build --features agentcore".to_string())
+}
+
+#[cfg(feature = "agentcore")]
+async fn close_agentcore_session(session_id: &str) -> Result<(), String> {
+    agentcore::close_session(session_id).await
+}
+
+#[cfg(not(feature = "agentcore"))]
+async fn close_agentcore_session(_session_id: &str) -> Result<(), String> {
+    Ok(())
+}
+
+// Stub functions when agentcore feature is disabled
+#[cfg(not(feature = "agentcore"))]
+pub fn get_agentcore_info() -> Option<()> { None }
+
+#[cfg(not(feature = "agentcore"))]
+pub fn take_agentcore_ws_headers() -> Option<Vec<(String, String)>> { None }
