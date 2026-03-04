@@ -325,6 +325,7 @@ mod agentcore {
     pub async fn connect() -> Result<(String, Option<ProviderSession>), String> {
         let region = env::var("AGENTCORE_REGION")
             .or_else(|_| env::var("AWS_REGION"))
+            .or_else(|_| env::var("AWS_DEFAULT_REGION"))
             .unwrap_or_else(|_| "us-east-1".to_string());
         let browser_id = env::var("AGENTCORE_BROWSER_ID")
             .unwrap_or_else(|_| "aws.browser.v1".to_string());
@@ -333,11 +334,17 @@ mod agentcore {
             .and_then(|v| v.parse().ok())
             .unwrap_or(3600);
 
-        let host = format!("agentcore.{}.amazonaws.com", region);
-        let path = format!("/browser-sessions/{}/sessions", browser_id);
+        let host = format!("bedrock-agentcore.{}.amazonaws.com", region);
+        let path = format!("/browsers/{}/sessions/start", urlencoding::encode(&browser_id));
         let url = format!("https://{}{}", host, path);
 
-        let mut body_json = json!({ "timeoutSeconds": timeout_secs });
+        // Generate a unique session name
+        let session_name = format!("agent-browser-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+
+        let mut body_json = json!({
+            "name": session_name,
+            "sessionTimeoutSeconds": timeout_secs
+        });
         if let Ok(profile_id) = env::var("AGENTCORE_PROFILE_ID") {
             if !profile_id.is_empty() {
                 body_json.as_object_mut().unwrap().insert("profileId".to_string(), json!(profile_id));
@@ -346,10 +353,10 @@ mod agentcore {
         let body = serde_json::to_string(&body_json)
             .map_err(|e| format!("Failed to serialize request body: {}", e))?;
 
-        let signed_headers = sign_request("POST", &url, &region, Some(&body)).await?;
+        let signed_headers = sign_request("PUT", &url, &region, Some(&body)).await?;
 
         let client = reqwest::Client::new();
-        let mut req = client.post(&url).body(body.clone());
+        let mut req = client.put(&url).body(body.clone());
         for (key, value) in &signed_headers {
             req = req.header(key.as_str(), value.as_str());
         }
@@ -540,6 +547,7 @@ mod agentcore {
             None => {
                 let region = env::var("AGENTCORE_REGION")
                     .or_else(|_| env::var("AWS_REGION"))
+                    .or_else(|_| env::var("AWS_DEFAULT_REGION"))
                     .unwrap_or_else(|_| "us-east-1".to_string());
                 let browser_id = env::var("AGENTCORE_BROWSER_ID")
                     .unwrap_or_else(|_| "aws.browser.v1".to_string());
@@ -547,14 +555,17 @@ mod agentcore {
             }
         };
 
-        let host = format!("agentcore.{}.amazonaws.com", region);
-        let path = format!("/browser-sessions/{}/sessions/{}", browser_id, session_id);
+        let host = format!("bedrock-agentcore.{}.amazonaws.com", region);
+        let path = format!("/browsers/{}/sessions/stop", urlencoding::encode(&browser_id));
         let url = format!("https://{}{}", host, path);
 
-        let signed_headers = sign_request("DELETE", &url, &region, None).await?;
+        let body = serde_json::to_string(&json!({ "sessionId": session_id }))
+            .map_err(|e| format!("Failed to serialize close request: {}", e))?;
+
+        let signed_headers = sign_request("PUT", &url, &region, Some(&body)).await?;
 
         let client = reqwest::Client::new();
-        let mut req = client.delete(&url);
+        let mut req = client.put(&url).body(body);
         for (key, value) in &signed_headers {
             req = req.header(key.as_str(), value.as_str());
         }
