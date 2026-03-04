@@ -259,19 +259,19 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
             let mut mime: Option<&str> = None;
             let mut i = 2;
             while i < rest.len() {
-                match rest[i].as_str() {
+                match rest[i] {
                     "--name" => {
-                        name = Some(rest.get(i + 1).ok_or_else(|| ParseError::MissingArguments {
+                        name = Some(*rest.get(i + 1).ok_or_else(|| ParseError::MissingArguments {
                             context: "--name flag".to_string(),
                             usage: "dropfile <selector> <file-path> [--name <name>] [--mime <type>]",
-                        })?.as_str());
+                        })?);
                         i += 2;
                     }
                     "--mime" => {
-                        mime = Some(rest.get(i + 1).ok_or_else(|| ParseError::MissingArguments {
+                        mime = Some(*rest.get(i + 1).ok_or_else(|| ParseError::MissingArguments {
                             context: "--mime flag".to_string(),
                             usage: "dropfile <selector> <file-path> [--name <name>] [--mime <type>]",
-                        })?.as_str());
+                        })?);
                         i += 2;
                     }
                     _ => { i += 1; }
