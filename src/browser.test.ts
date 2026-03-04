@@ -1306,6 +1306,31 @@ describe('BrowserManager', () => {
       await testBrowser.stopRecording();
       await testBrowser.close();
     });
+
+    it('should not leak context options across close/relaunch cycles', async () => {
+      const testBrowser = new BrowserManager();
+
+      // First session: launch with custom userAgent
+      await testBrowser.launch({ headless: true, userAgent: 'StaleAgent/1.0' });
+      await testBrowser.close();
+
+      // Second session: launch without custom userAgent
+      await testBrowser.launch({ headless: true });
+      const page = testBrowser.getPage();
+      await page.goto('about:blank');
+
+      const outputPath = `/tmp/test-recording-stale-${Date.now()}.webm`;
+      await testBrowser.startRecording(outputPath);
+
+      // Recording should use default UA, not the stale one from the first session
+      const recordingPage = testBrowser.getPage();
+      const ua = await recordingPage.evaluate(() => navigator.userAgent);
+      expect(ua).not.toContain('StaleAgent');
+      expect(ua).toContain('HeadlessChrome');
+
+      await testBrowser.stopRecording();
+      await testBrowser.close();
+    });
   });
 });
 

@@ -2565,5 +2565,6 @@ export class BrowserManager {
     this.refMap = {};
     this.lastSnapshot = '';
     this.frameCallback = null;
+    this.contextOptions = {};
   }
 }
