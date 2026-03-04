@@ -418,6 +418,54 @@ mod agentcore {
         ))
     }
 
+    /// Get AWS credentials from environment variables or AWS CLI
+    fn get_aws_credentials() -> Result<(String, String, Option<String>), String> {
+        // First try environment variables
+        if let (Ok(access_key), Ok(secret_key)) = (
+            env::var("AWS_ACCESS_KEY_ID"),
+            env::var("AWS_SECRET_ACCESS_KEY"),
+        ) {
+            return Ok((access_key, secret_key, env::var("AWS_SESSION_TOKEN").ok()));
+        }
+
+        // Fall back to AWS CLI
+        let mut cmd = std::process::Command::new("aws");
+        cmd.args(["configure", "export-credentials", "--format", "env"]);
+        
+        // Honor AWS_PROFILE
+        if let Ok(profile) = env::var("AWS_PROFILE") {
+            cmd.args(["--profile", &profile]);
+        }
+
+        let output = cmd.output()
+            .map_err(|e| format!("Failed to run aws CLI: {}. Install AWS CLI or set AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY", e))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("AWS CLI failed: {}. Run 'aws sso login' or set credentials", stderr.trim()));
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut access_key = None;
+        let mut secret_key = None;
+        let mut session_token = None;
+
+        for line in stdout.lines() {
+            if let Some(val) = line.strip_prefix("export AWS_ACCESS_KEY_ID=") {
+                access_key = Some(val.to_string());
+            } else if let Some(val) = line.strip_prefix("export AWS_SECRET_ACCESS_KEY=") {
+                secret_key = Some(val.to_string());
+            } else if let Some(val) = line.strip_prefix("export AWS_SESSION_TOKEN=") {
+                session_token = Some(val.to_string());
+            }
+        }
+
+        match (access_key, secret_key) {
+            (Some(ak), Some(sk)) => Ok((ak, sk, session_token)),
+            _ => Err("Failed to parse credentials from AWS CLI output".to_string()),
+        }
+    }
+
     async fn sign_request(
         method: &str,
         url: &str,
@@ -427,12 +475,8 @@ mod agentcore {
         use hmac::{Hmac, Mac};
         use sha2::{Sha256, Digest};
 
-        // Get credentials from environment
-        let access_key = env::var("AWS_ACCESS_KEY_ID")
-            .map_err(|_| "AWS_ACCESS_KEY_ID not set")?;
-        let secret_key = env::var("AWS_SECRET_ACCESS_KEY")
-            .map_err(|_| "AWS_SECRET_ACCESS_KEY not set")?;
-        let session_token = env::var("AWS_SESSION_TOKEN").ok();
+        // Get credentials from environment or AWS CLI
+        let (access_key, secret_key, session_token) = get_aws_credentials()?;
 
         let parsed_url = url::Url::parse(url)
             .map_err(|e| format!("Invalid URL: {}", e))?;
