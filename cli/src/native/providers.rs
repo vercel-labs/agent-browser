@@ -347,7 +347,10 @@ mod agentcore {
         });
         if let Ok(profile_id) = env::var("AGENTCORE_PROFILE_ID") {
             if !profile_id.is_empty() {
-                body_json.as_object_mut().unwrap().insert("profileId".to_string(), json!(profile_id));
+                body_json.as_object_mut().unwrap().insert(
+                    "profileConfiguration".to_string(),
+                    json!({ "profileIdentifier": profile_id })
+                );
             }
         }
         let body = serde_json::to_string(&body_json)
