@@ -1471,7 +1471,7 @@ export class BrowserManager {
       // triggers additional launch() calls that would otherwise reset it).
       const prevViewport = this.contextOptions.viewport;
       this.contextOptions = {
-        viewport: viewport ?? prevViewport,
+        viewport: viewport !== undefined ? viewport : prevViewport,
         storageState,
         extraHTTPHeaders: options.headers,
         userAgent: options.userAgent,
