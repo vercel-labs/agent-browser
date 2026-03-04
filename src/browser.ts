@@ -5,6 +5,7 @@ import {
   devices,
   type Browser,
   type BrowserContext,
+  type BrowserContextOptions,
   type Page,
   type Frame,
   type Dialog,
@@ -140,6 +141,7 @@ export class BrowserManager {
   private recordingPage: Page | null = null;
   private recordingOutputPath: string = '';
   private recordingTempDir: string = '';
+  private contextOptions: Omit<BrowserContextOptions, 'recordVideo'> = {};
   private launchWarnings: string[] = [];
 
   /**
@@ -1462,15 +1464,19 @@ export class BrowserManager {
         }
       }
 
-      context = await this.browser.newContext({
+      // Store context options so startRecording() can create a matching
+      // context. Defined here so any option added is automatically carried over.
+      this.contextOptions = {
         viewport,
+        storageState,
         extraHTTPHeaders: options.headers,
         userAgent: options.userAgent,
-        storageState,
         ...(options.proxy && { proxy: options.proxy }),
         ignoreHTTPSErrors: options.ignoreHTTPSErrors ?? false,
         ...(this.colorScheme && { colorScheme: this.colorScheme }),
-      });
+      };
+
+      context = await this.browser.newContext(this.contextOptions);
     }
 
     context.setDefaultTimeout(getDefaultTimeout());
@@ -2324,15 +2330,17 @@ export class BrowserManager {
 
     this.recordingOutputPath = outputPath;
 
-    // Create a new context with video recording enabled and restored state
-    const viewport = { width: 1280, height: 720 };
+    // Create a new context with video recording enabled and restored state.
+    // contextOptions is built from the same options passed to newContext() in
+    // launch(), so any option added there is automatically carried over here.
+    const recordingViewport = this.contextOptions.viewport ?? { width: 1280, height: 720 };
     this.recordingContext = await this.browser.newContext({
-      viewport,
+      ...this.contextOptions,
+      storageState,
       recordVideo: {
         dir: this.recordingTempDir,
-        size: viewport,
+        size: recordingViewport,
       },
-      storageState,
     });
     this.recordingContext.setDefaultTimeout(10000);
 
