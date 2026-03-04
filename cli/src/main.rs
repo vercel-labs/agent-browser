@@ -247,7 +247,7 @@ fn main() {
     // Ignore SIGPIPE to prevent panic when piping to head/tail
     #[cfg(unix)]
     unsafe {
-        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
     }
 
     // Prevent MSYS/Git Bash path translation from mangling arguments
@@ -348,7 +348,7 @@ fn main() {
             .unwrap_or(false)
         {
             let mut pass = String::new();
-            if std::io::stdin().read_line(&mut pass).is_err() || pass.is_empty() {
+            if std::io::stdin().read_line(&mut pass).is_err() {
                 eprintln!(
                     "{} Failed to read password from stdin",
                     color::error_indicator()
@@ -841,6 +841,7 @@ fn main() {
                         eprintln!("[agent-browser] Action requires confirmation:");
                         eprintln!("  {}: {}", category, desc);
                         eprint!("  Allow? [y/N]: ");
+                        std::io::Write::flush(&mut std::io::stderr()).ok();
 
                         let mut input = String::new();
                         let approved = if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
