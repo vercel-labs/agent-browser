@@ -2877,7 +2877,12 @@ async fn handle_permissions(cmd: &Value, state: &DaemonState) -> Result<Value, S
 
 async fn handle_dialog(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let accept = cmd.get("accept").and_then(|v| v.as_bool()).unwrap_or(true);
+    let accept = cmd
+        .get("response")
+        .and_then(|v| v.as_str())
+        .map(|r| r == "accept")
+        .or_else(|| cmd.get("accept").and_then(|v| v.as_bool()))
+        .unwrap_or(true);
     let prompt_text = cmd.get("promptText").and_then(|v| v.as_str());
 
     mgr.handle_dialog(accept, prompt_text).await?;
