@@ -7,6 +7,7 @@ use serde_json::{json, Value};
 use std::env;
 
 /// Provider session info for cleanup on failure.
+#[derive(Debug)]
 pub struct ProviderSession {
     pub provider: String,
     pub session_id: String,
@@ -533,3 +534,84 @@ pub fn get_agentcore_info() -> Option<()> { None }
 
 #[cfg(not(feature = "agentcore"))]
 pub fn take_agentcore_ws_headers() -> Option<Vec<(String, String)>> { None }
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_connect_provider_unknown() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(connect_provider("unknown-provider"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Unknown provider"));
+    }
+
+    #[test]
+    fn test_connect_provider_agentcore_without_feature() {
+        // Without agentcore feature, should return helpful error
+        #[cfg(not(feature = "agentcore"))]
+        {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            let result = rt.block_on(connect_provider("agentcore"));
+            assert!(result.is_err());
+            assert!(result.unwrap_err().contains("agentcore"));
+        }
+    }
+
+    #[cfg(feature = "agentcore")]
+    #[test]
+    fn test_agentcore_env_defaults() {
+        // Test that default values are used when env vars not set
+        std::env::remove_var("AGENTCORE_REGION");
+        std::env::remove_var("AGENTCORE_BROWSER_ID");
+        std::env::remove_var("AGENTCORE_SESSION_TIMEOUT");
+
+        // These would be used in connect() - just verify they don't panic
+        let region = std::env::var("AGENTCORE_REGION")
+            .or_else(|_| std::env::var("AWS_REGION"))
+            .unwrap_or_else(|_| "us-east-1".to_string());
+        assert_eq!(region, "us-east-1");
+
+        let browser_id = std::env::var("AGENTCORE_BROWSER_ID")
+            .unwrap_or_else(|_| "aws.browser.v1".to_string());
+        assert_eq!(browser_id, "aws.browser.v1");
+    }
+
+    #[cfg(feature = "agentcore")]
+    #[test]
+    fn test_agentcore_session_info_storage() {
+        let info = agentcore::AgentCoreSessionInfo {
+            session_id: "test-session".to_string(),
+            browser_identifier: "aws.browser.v1".to_string(),
+            region: "us-east-1".to_string(),
+            live_view_url: "https://example.com".to_string(),
+        };
+
+        agentcore::set_agentcore_info(info);
+        let retrieved = get_agentcore_info();
+        assert!(retrieved.is_some());
+        let retrieved = retrieved.unwrap();
+        assert_eq!(retrieved.session_id, "test-session");
+        assert_eq!(retrieved.region, "us-east-1");
+    }
+
+    #[cfg(feature = "agentcore")]
+    #[test]
+    fn test_agentcore_ws_headers_storage() {
+        let headers = vec![
+            ("Authorization".to_string(), "AWS4-HMAC-SHA256...".to_string()),
+            ("X-Amz-Date".to_string(), "20260304T180000Z".to_string()),
+        ];
+
+        agentcore::set_agentcore_ws_headers(headers);
+        let taken = take_agentcore_ws_headers();
+        assert!(taken.is_some());
+        assert_eq!(taken.unwrap().len(), 2);
+
+        // Should be None after take
+        let taken_again = take_agentcore_ws_headers();
+        assert!(taken_again.is_none());
+    }
+}
