@@ -570,7 +570,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
             "--native" => {
                 let (val, consumed) = parse_bool_arg(args, i);
                 flags.native = val;
-                flags.cli_native = val;
+                flags.cli_native = true;
                 if consumed {
                     i += 1;
                 }
