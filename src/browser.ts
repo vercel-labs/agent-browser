@@ -906,15 +906,14 @@ export class BrowserManager {
 
   /**
    * Connect to Browserbase remote browser via CDP.
-   * Requires BROWSERBASE_API_KEY and BROWSERBASE_PROJECT_ID environment variables.
+   * Requires BROWSERBASE_API_KEY environment variable.
    */
   private async connectToBrowserbase(): Promise<void> {
     const browserbaseApiKey = process.env.BROWSERBASE_API_KEY;
-    const browserbaseProjectId = process.env.BROWSERBASE_PROJECT_ID;
 
-    if (!browserbaseApiKey || !browserbaseProjectId) {
+    if (!browserbaseApiKey) {
       throw new Error(
-        'BROWSERBASE_API_KEY and BROWSERBASE_PROJECT_ID are required when using browserbase as a provider'
+        'BROWSERBASE_API_KEY is required when using browserbase as a provider'
       );
     }
 
@@ -924,9 +923,6 @@ export class BrowserManager {
         'Content-Type': 'application/json',
         'X-BB-API-Key': browserbaseApiKey,
       },
-      body: JSON.stringify({
-        projectId: browserbaseProjectId,
-      }),
     });
 
     if (!response.ok) {
