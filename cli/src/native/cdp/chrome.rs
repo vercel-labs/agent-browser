@@ -381,55 +381,8 @@ pub async fn discover_cdp_url(port: u16) -> Result<String, String> {
 }
 
 async fn reqwest_get_string(url: &str) -> Result<String, String> {
-    let client = tokio::net::TcpStream::connect(
-        url.strip_prefix("http://")
-            .unwrap_or(url)
-            .split('/')
-            .next()
-            .unwrap_or("127.0.0.1:9222"),
-    )
-    .await
-    .map_err(|e| e.to_string())?;
-
-    let path = url
-        .find('/')
-        .and_then(|i| url[i..].find('/').map(|j| &url[i + j..]))
-        .unwrap_or("/json/version");
-
-    let host = url
-        .strip_prefix("http://")
-        .unwrap_or(url)
-        .split('/')
-        .next()
-        .unwrap_or("127.0.0.1");
-
-    let request = format!(
-        "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
-        path, host
-    );
-
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    let mut client = client;
-    client
-        .write_all(request.as_bytes())
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let mut response = Vec::new();
-    client
-        .read_to_end(&mut response)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let response_str = String::from_utf8_lossy(&response);
-    let body = response_str
-        .split("\r\n\r\n")
-        .nth(1)
-        .unwrap_or("")
-        .to_string();
-
-    Ok(body)
+    let resp = reqwest::get(url).await.map_err(|e| e.to_string())?;
+    resp.text().await.map_err(|e| e.to_string())
 }
 
 pub fn read_devtools_active_port(user_data_dir: &Path) -> Option<(u16, String)> {
