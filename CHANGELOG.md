@@ -1,5 +1,11 @@
 # agent-browser
 
+## 0.16.2
+
+### Patch Changes
+
+- 01ac557: Added AGENT_BROWSER_HEADED environment variable support for running the browser in headed mode, and improved temporary profile cleanup when launching Chrome directly. Also includes documentation clarification that browser extensions work in both headed and headless modes.
+
 ## 0.16.1
 
 ### Patch Changes
