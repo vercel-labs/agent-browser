@@ -7,7 +7,7 @@ license = "Apache-2.0"
 
 [features]
 default = []
-agentcore = ["aws-sigv4", "aws-credential-types", "aws-config", "chrono"]
+agentcore = ["hmac", "hex", "chrono"]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
@@ -27,10 +27,9 @@ aes-gcm = "0.10"
 async-trait = "0.1"
 similar = "2"
 
-# AgentCore provider (optional - adds ~30s compile time)
-aws-sigv4 = { version = "1", optional = true }
-aws-credential-types = { version = "1", features = ["hardcoded-credentials"], optional = true }
-aws-config = { version = "1", default-features = false, features = ["rustls"], optional = true }
+# AgentCore provider (optional - lightweight SigV4 signing)
+hmac = { version = "0.12", optional = true }
+hex = { version = "0.4", optional = true }
 chrono = { version = "0.4", optional = true }
 
 [target.'cfg(unix)'.dependencies]

@@ -287,9 +287,6 @@ async fn connect_kernel() -> Result<(String, Option<ProviderSession>), String> {
 #[cfg(feature = "agentcore")]
 mod agentcore {
     use super::*;
-    use aws_config::BehaviorVersion;
-    use aws_sigv4::http_request::{sign, SignableBody, SignableRequest, SigningSettings};
-    use std::time::SystemTime;
 
     /// AgentCore-specific session info for Live View URL
     pub struct AgentCoreSessionInfo {
@@ -417,58 +414,120 @@ mod agentcore {
         region: &str,
         body: Option<&str>,
     ) -> Result<Vec<(String, String)>, String> {
-        use aws_credential_types::provider::ProvideCredentials;
+        use hmac::{Hmac, Mac};
+        use sha2::{Sha256, Digest};
 
-        let config = aws_config::defaults(BehaviorVersion::latest())
-            .region(aws_config::Region::new(region.to_string()))
-            .load()
-            .await;
-
-        let creds_provider = config.credentials_provider()
-            .ok_or_else(|| "No AWS credentials found. Configure via AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY or AWS_PROFILE".to_string())?;
-
-        let credentials = creds_provider
-            .provide_credentials()
-            .await
-            .map_err(|e| format!("Failed to load AWS credentials: {}", e))?;
-
-        let identity = aws_credential_types::Credentials::from(credentials).into();
-
-        let signing_params = aws_sigv4::sign::v4::SigningParams::builder()
-            .identity(&identity)
-            .region(region)
-            .name("bedrock-agentcore")
-            .time(SystemTime::now())
-            .settings(SigningSettings::default())
-            .build()
-            .map_err(|e| format!("Failed to build signing params: {}", e))?;
+        // Get credentials from environment
+        let access_key = env::var("AWS_ACCESS_KEY_ID")
+            .map_err(|_| "AWS_ACCESS_KEY_ID not set")?;
+        let secret_key = env::var("AWS_SECRET_ACCESS_KEY")
+            .map_err(|_| "AWS_SECRET_ACCESS_KEY not set")?;
+        let session_token = env::var("AWS_SESSION_TOKEN").ok();
 
         let parsed_url = url::Url::parse(url)
             .map_err(|e| format!("Invalid URL: {}", e))?;
+        let host = parsed_url.host_str().unwrap_or("");
 
-        let signable_body = match body {
-            Some(b) => SignableBody::Bytes(b.as_bytes()),
-            None => SignableBody::empty(),
+        // Get current time
+        let now = chrono::Utc::now();
+        let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
+        let date_stamp = now.format("%Y%m%d").to_string();
+
+        // Create canonical request
+        let payload_hash = if let Some(b) = body {
+            let mut hasher = Sha256::new();
+            hasher.update(b.as_bytes());
+            hex::encode(hasher.finalize())
+        } else {
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string() // empty string hash
         };
 
-        let signable_request = SignableRequest::new(
-            method,
-            parsed_url.as_str(),
-            std::iter::once(("host", parsed_url.host_str().unwrap_or(""))),
-            signable_body,
-        ).map_err(|e| format!("Failed to create signable request: {}", e))?;
+        let canonical_uri = parsed_url.path();
+        let canonical_querystring = parsed_url.query().unwrap_or("");
 
-        let (signing_output, _) = sign(signable_request, &signing_params.into())
-            .map_err(|e| format!("Failed to sign request: {}", e))?
-            .into_parts();
+        let mut signed_headers = "content-type;host;x-amz-date".to_string();
+        let mut canonical_headers = format!(
+            "content-type:application/json\nhost:{}\nx-amz-date:{}\n",
+            host, amz_date
+        );
 
-        let mut headers: Vec<(String, String)> = vec![
-            ("host".to_string(), parsed_url.host_str().unwrap_or("").to_string()),
+        if session_token.is_some() {
+            signed_headers = "content-type;host;x-amz-date;x-amz-security-token".to_string();
+            canonical_headers = format!(
+                "content-type:application/json\nhost:{}\nx-amz-date:{}\nx-amz-security-token:{}\n",
+                host, amz_date, session_token.as_ref().unwrap()
+            );
+        }
+
+        let canonical_request = format!(
+            "{}\n{}\n{}\n{}\n{}\n{}",
+            method, canonical_uri, canonical_querystring,
+            canonical_headers, signed_headers, payload_hash
+        );
+
+        // Create string to sign
+        let algorithm = "AWS4-HMAC-SHA256";
+        let credential_scope = format!("{}/{}/bedrock-agentcore/aws4_request", date_stamp, region);
+
+        let mut hasher = Sha256::new();
+        hasher.update(canonical_request.as_bytes());
+        let canonical_request_hash = hex::encode(hasher.finalize());
+
+        let string_to_sign = format!(
+            "{}\n{}\n{}\n{}",
+            algorithm, amz_date, credential_scope, canonical_request_hash
+        );
+
+        // Calculate signature
+        type HmacSha256 = Hmac<Sha256>;
+
+        let k_date = HmacSha256::new_from_slice(format!("AWS4{}", secret_key).as_bytes())
+            .unwrap()
+            .chain_update(date_stamp.as_bytes())
+            .finalize()
+            .into_bytes();
+
+        let k_region = HmacSha256::new_from_slice(&k_date)
+            .unwrap()
+            .chain_update(region.as_bytes())
+            .finalize()
+            .into_bytes();
+
+        let k_service = HmacSha256::new_from_slice(&k_region)
+            .unwrap()
+            .chain_update(b"bedrock-agentcore")
+            .finalize()
+            .into_bytes();
+
+        let k_signing = HmacSha256::new_from_slice(&k_service)
+            .unwrap()
+            .chain_update(b"aws4_request")
+            .finalize()
+            .into_bytes();
+
+        let signature = hex::encode(
+            HmacSha256::new_from_slice(&k_signing)
+                .unwrap()
+                .chain_update(string_to_sign.as_bytes())
+                .finalize()
+                .into_bytes()
+        );
+
+        // Build authorization header
+        let authorization = format!(
+            "{} Credential={}/{}, SignedHeaders={}, Signature={}",
+            algorithm, access_key, credential_scope, signed_headers, signature
+        );
+
+        let mut headers = vec![
+            ("host".to_string(), host.to_string()),
             ("content-type".to_string(), "application/json".to_string()),
+            ("x-amz-date".to_string(), amz_date),
+            ("authorization".to_string(), authorization),
         ];
 
-        for (name, value) in signing_output.headers() {
-            headers.push((name.to_string(), value.to_string()));
+        if let Some(token) = session_token {
+            headers.push(("x-amz-security-token".to_string(), token));
         }
 
         Ok(headers)
