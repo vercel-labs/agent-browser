@@ -946,12 +946,12 @@ async function handleEvaluate(
   command: EvaluateCommand,
   browser: BrowserManager
 ): Promise<Response<EvaluateData>> {
-  const page = browser.getPage();
+  const frame = browser.getFrame();
 
   // Evaluate the script directly as a string expression
-  const result = await page.evaluate(command.script);
+  const result = await frame.evaluate(command.script);
 
-  return successResponse(command.id, { result, origin: page.url() });
+  return successResponse(command.id, { result, origin: frame.url() });
 }
 
 async function handleWait(command: WaitCommand, browser: BrowserManager): Promise<Response> {
@@ -963,17 +963,17 @@ async function handleWait(command: WaitCommand, browser: BrowserManager): Promis
       timeout: command.timeout,
     });
   } else if (command.timeout) {
-    await page.waitForTimeout(command.timeout);
+    await frame.waitForTimeout(command.timeout);
   } else {
     // Default: wait for load state
-    await page.waitForLoadState('load');
+    await frame.waitForLoadState('load');
   }
 
   return successResponse(command.id, { waited: true });
 }
 
 async function handleScroll(command: ScrollCommand, browser: BrowserManager): Promise<Response> {
-  const page = browser.getPage();
+  const frame = browser.getFrame();
 
   let deltaX = command.x ?? 0;
   let deltaY = command.y ?? 0;
@@ -1010,7 +1010,12 @@ async function handleScroll(command: ScrollCommand, browser: BrowserManager): Pr
       );
     }
   } else {
-    await page.evaluate(`window.scrollBy(${deltaX}, ${deltaY})`);
+    await frame.evaluate(
+      ([x, y]) => {
+        window.scrollBy(x, y);
+      },
+      [deltaX, deltaY]
+    );
   }
 
   return successResponse(command.id, { scrolled: true });
@@ -1044,17 +1049,16 @@ async function handleContent(
   command: ContentCommand,
   browser: BrowserManager
 ): Promise<Response<ContentData>> {
-  const page = browser.getPage();
   const frame = browser.getFrame();
 
   let html: string;
   if (command.selector) {
     html = await frame.locator(command.selector).innerHTML();
   } else {
-    html = await page.content();
+    html = await frame.content();
   }
 
-  return successResponse(command.id, { html, origin: page.url() });
+  return successResponse(command.id, { html, origin: frame.url() });
 }
 
 async function handleClose(
