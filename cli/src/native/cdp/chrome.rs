@@ -783,6 +783,21 @@ mod tests {
     }
 
     #[test]
+    fn test_build_args_start_maximized_suppresses_default_window_size() {
+        let opts = LaunchOptions {
+            headless: true,
+            args: vec!["--start-maximized".to_string()],
+            ..Default::default()
+        };
+        let result = build_chrome_args(&opts).unwrap();
+        assert!(!result.args.iter().any(|a| a == "--window-size=1280,720"));
+        assert!(result.args.iter().any(|a| a == "--start-maximized"));
+        if let Some(ref dir) = result.temp_user_data_dir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
     fn test_chrome_process_drop_cleans_temp_dir() {
         let dir = std::env::temp_dir().join(format!(
             "agent-browser-chrome-drop-test-{}",

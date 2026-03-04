@@ -21,10 +21,18 @@ impl<'a> EnvGuard<'a> {
     }
 
     pub fn set(&self, name: &str, value: &str) {
+        debug_assert!(
+            self.vars.iter().any(|(n, _)| n == name),
+            "EnvGuard::set called with unregistered var: {name}"
+        );
         std::env::set_var(name, value);
     }
 
     pub fn remove(&self, name: &str) {
+        debug_assert!(
+            self.vars.iter().any(|(n, _)| n == name),
+            "EnvGuard::remove called with unregistered var: {name}"
+        );
         std::env::remove_var(name);
     }
 }
