@@ -920,7 +920,6 @@ export class BrowserManager {
     const response = await fetch('https://api.browserbase.com/v1/sessions', {
       method: 'POST',
       headers: {
-        'Content-Type': 'application/json',
         'X-BB-API-Key': browserbaseApiKey,
       },
     });

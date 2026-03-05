@@ -84,7 +84,6 @@ async fn connect_browserbase() -> Result<(String, Option<ProviderSession>), Stri
     let client = reqwest::Client::new();
     let response = client
         .post("https://api.browserbase.com/v1/sessions")
-        .header("Content-Type", "application/json")
         .header("X-BB-API-Key", &api_key)
         .send()
         .await
