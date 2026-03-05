@@ -361,13 +361,19 @@ export async function startDaemon(options?: {
     // Read optional screencast resolution/quality overrides from env
     const screencastOptions: StreamScreencastOptions = {};
     if (process.env.AGENT_BROWSER_STREAM_MAX_WIDTH) {
-      screencastOptions.maxWidth = parseInt(process.env.AGENT_BROWSER_STREAM_MAX_WIDTH, 10);
+      const parsed = parseInt(process.env.AGENT_BROWSER_STREAM_MAX_WIDTH, 10);
+      if (!Number.isNaN(parsed))
+        screencastOptions.maxWidth = parsed;
     }
     if (process.env.AGENT_BROWSER_STREAM_MAX_HEIGHT) {
-      screencastOptions.maxHeight = parseInt(process.env.AGENT_BROWSER_STREAM_MAX_HEIGHT, 10);
+      const parsed = parseInt(process.env.AGENT_BROWSER_STREAM_MAX_HEIGHT, 10);
+      if (!Number.isNaN(parsed))
+        screencastOptions.maxHeight = parsed;
     }
     if (process.env.AGENT_BROWSER_STREAM_QUALITY) {
-      screencastOptions.quality = parseInt(process.env.AGENT_BROWSER_STREAM_QUALITY, 10);
+      const parsed = parseInt(process.env.AGENT_BROWSER_STREAM_QUALITY, 10);
+      if (!Number.isNaN(parsed))
+        screencastOptions.quality = parsed;
     }
     if (process.env.AGENT_BROWSER_STREAM_FORMAT) {
       const fmt = process.env.AGENT_BROWSER_STREAM_FORMAT;
