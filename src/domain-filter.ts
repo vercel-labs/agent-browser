@@ -51,7 +51,6 @@ export function buildWebSocketFilterScript(allowedDomains: string[]): string {
   }
   function _checkUrl(url) {
     try {
-      // Use location.href as base to support relative URLs (e.g. "/path" or "//host/path")
       var parsed = new URL(url, location.href);
       return _isDomainAllowed(parsed.hostname);
     } catch(e) {
