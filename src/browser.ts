@@ -1538,8 +1538,9 @@ export class BrowserManager {
         throw new Error('No browser context found. Make sure the app has an open window.');
       }
 
-      // Filter out pages with empty URLs, which can cause Playwright to hang
-      const allPages = contexts.flatMap((context) => context.pages()).filter((page) => page.url());
+      // Get all pages from all contexts - don't filter by URL as Electron apps
+      // may have pages with empty URLs during initialization
+      const allPages = contexts.flatMap((context) => context.pages());
 
       if (allPages.length === 0) {
         throw new Error('No page found. Make sure the app has loaded content.');
