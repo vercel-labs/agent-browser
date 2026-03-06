@@ -102,6 +102,31 @@ agent-browser tab 2
 agent-browser tab --url "*settings*"
 ```
 
+## Webview Support
+
+Electron `<webview>` elements are automatically discovered and can be controlled like regular pages. When using `--native` mode, webviews appear as separate targets in the tab list with `type: "webview"`:
+
+```bash
+# Connect in native mode
+agent-browser --native connect 9222
+
+# List targets -- webviews appear alongside pages
+agent-browser tab
+# Example output:
+#   0: [page]    Slack - Main Window     https://app.slack.com/
+#   1: [webview] Embedded Content        https://example.com/widget
+
+# Switch to a webview
+agent-browser tab 1
+
+# Interact with the webview normally
+agent-browser snapshot -i
+agent-browser click @e3
+agent-browser screenshot webview.png
+```
+
+**Note:** Webview support requires `--native` mode (raw CDP). The Playwright-based mode does not support webview targets.
+
 ## Common Patterns
 
 ### Inspect and Navigate an App

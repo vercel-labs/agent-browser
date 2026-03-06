@@ -167,13 +167,14 @@ impl DaemonState {
                             if let Ok(te) =
                                 serde_json::from_value::<TargetCreatedEvent>(event.params.clone())
                             {
-                                if te.target_info.target_type == "page"
+                                if (te.target_info.target_type == "page"
+                                    || te.target_info.target_type == "webview")
                                     && !te.target_info.url.is_empty()
                                 {
                                     let already_tracked = self
                                         .browser
                                         .as_ref()
-                                        .is_none_or(|b| b.has_target(&te.target_info.target_id));
+                                        .map_or(true, |b| b.has_target(&te.target_info.target_id));
                                     if !already_tracked {
                                         new_targets.push(te);
                                     }
@@ -443,6 +444,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
                     session_id: attach.session_id,
                     url: te.target_info.url.clone(),
                     title: te.target_info.title.clone(),
+                    target_type: te.target_info.target_type.clone(),
                 });
             }
         }
@@ -549,16 +551,16 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
     }
 
     // WebDriver backend: reject unsupported CDP-only actions
-    if matches!(state.backend_type, BackendType::WebDriver)
-        && WEBDRIVER_UNSUPPORTED_ACTIONS.contains(&action)
-    {
-        return error_response(
-            &id,
-            &format!(
-                "Action '{}' is not supported on the WebDriver backend",
-                action
-            ),
-        );
+    if matches!(state.backend_type, BackendType::WebDriver) {
+        if WEBDRIVER_UNSUPPORTED_ACTIONS.contains(&action) {
+            return error_response(
+                &id,
+                &format!(
+                    "Action '{}' is not supported on the WebDriver backend",
+                    action
+                ),
+            );
+        }
     }
 
     let result = match action {
@@ -841,7 +843,15 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     let needs_relaunch = if let Some(ref mgr) = state.browser {
         let has_cdp_arg = cdp_url.is_some() || cdp_port.is_some();
         let was_cdp = mgr.is_cdp_connection();
-        has_cdp_arg != was_cdp || !mgr.is_connection_alive().await
+        if has_cdp_arg != was_cdp {
+            true
+        } else if has_cdp_arg && !mgr.is_connection_alive().await {
+            true
+        } else if auto_connect && !mgr.is_connection_alive().await {
+            true
+        } else {
+            !mgr.is_connection_alive().await
+        }
     } else {
         true
     };
@@ -2468,6 +2478,7 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
         session_id: new_session_id.clone(),
         url: nav_url.clone(),
         title: String::new(),
+        target_type: "page".to_string(),
     });
 
     // Navigate to URL
@@ -3224,7 +3235,12 @@ async fn handle_frame(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         .send_command_no_params("Page.getFrameTree", Some(&session_id))
         .await?;
 
-    fn find_frame(tree: &Value, name: Option<&str>, url: Option<&str>) -> Option<String> {
+    fn find_frame(
+        tree: &Value,
+        selector: Option<&str>,
+        name: Option<&str>,
+        url: Option<&str>,
+    ) -> Option<String> {
         let frame = tree.get("frame")?;
         let frame_name = frame.get("name").and_then(|v| v.as_str()).unwrap_or("");
         let frame_url = frame.get("url").and_then(|v| v.as_str()).unwrap_or("");
@@ -3243,7 +3259,7 @@ async fn handle_frame(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
 
         if let Some(children) = tree.get("childFrames").and_then(|v| v.as_array()) {
             for child in children {
-                if let Some(id) = find_frame(child, name, url) {
+                if let Some(id) = find_frame(child, selector, name, url) {
                     return Some(id);
                 }
             }
@@ -3268,13 +3284,13 @@ async fn handle_frame(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         );
         let result = mgr.evaluate(&js, None).await?;
         let frame_name = result.as_str().ok_or("Could not find frame for selector")?;
-        if let Some(frame_id) = find_frame(frame_tree, Some(frame_name), None) {
+        if let Some(frame_id) = find_frame(frame_tree, None, Some(frame_name), None) {
             state.active_frame_id = Some(frame_id);
             return Ok(json!({ "frame": frame_name }));
         }
     }
 
-    if let Some(frame_id) = find_frame(frame_tree, name, url) {
+    if let Some(frame_id) = find_frame(frame_tree, selector, name, url) {
         let label = name.or(url).unwrap_or("frame");
         state.active_frame_id = Some(frame_id);
         return Ok(json!({ "frame": label }));
@@ -4002,13 +4018,14 @@ async fn handle_waitfordownload(cmd: &Value, state: &DaemonState) -> Result<Valu
             Ok(Ok(event)) => {
                 if event.method == "Page.downloadProgress"
                     && event.session_id.as_deref() == Some(&session_id)
-                    && event.params.get("state").and_then(|v| v.as_str()) == Some("completed")
                 {
-                    let path = cmd
-                        .get("path")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("download");
-                    return Ok(json!({ "path": path }));
+                    if event.params.get("state").and_then(|v| v.as_str()) == Some("completed") {
+                        let path = cmd
+                            .get("path")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("download");
+                        return Ok(json!({ "path": path }));
+                    }
                 }
             }
             Ok(Err(_)) => return Err("Event stream closed".to_string()),
@@ -4057,6 +4074,7 @@ async fn handle_window_new(cmd: &Value, state: &mut DaemonState) -> Result<Value
         session_id: attach.session_id,
         url: "about:blank".to_string(),
         title: String::new(),
+        target_type: "page".to_string(),
     });
 
     if let Some(viewport) = cmd.get("viewport") {
