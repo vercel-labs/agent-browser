@@ -1307,18 +1307,31 @@ export class BrowserManager {
       this.downloadPath = resolved;
     }
 
-    const browserType = options.browser ?? 'chromium';
-    if (hasExtensions && browserType !== 'chromium') {
+    let effectiveBrowser = options.browser ?? 'chromium';
+    // Auto-fallback to Firefox on ARM64 Linux where the bundled Chromium is unavailable.
+    // If the user has provided an explicit executablePath for Chromium, honor that choice.
+    if (
+      effectiveBrowser === 'chromium' &&
+      process.arch === 'arm64' &&
+      process.platform === 'linux' &&
+      !options.executablePath
+    ) {
+      effectiveBrowser = 'firefox';
+      const warning = 'Chromium unavailable on ARM64 Linux; using Firefox instead';
+      this.launchWarnings.push(warning);
+      console.error(`[WARN] ${warning}`);
+    }
+    if (hasExtensions && effectiveBrowser !== 'chromium') {
       throw new Error('Extensions are only supported in Chromium');
     }
 
     // allowFileAccess is only supported in Chromium
-    if (options.allowFileAccess && browserType !== 'chromium') {
+    if (options.allowFileAccess && effectiveBrowser !== 'chromium') {
       throw new Error('allowFileAccess is only supported in Chromium');
     }
 
     const launcher =
-      browserType === 'firefox' ? firefox : browserType === 'webkit' ? webkit : chromium;
+      effectiveBrowser === 'firefox' ? firefox : effectiveBrowser === 'webkit' ? webkit : chromium;
 
     // Build base args array with file access flags if enabled
     // --allow-file-access-from-files: allows file:// URLs to read other file:// URLs via XHR/fetch

@@ -152,6 +152,7 @@ fn extract_config_path(args: &[String]) -> Option<Option<String>> {
         "--provider",
         "--device",
         "--session-name",
+        "--browser",
         "--color-scheme",
         "--download-path",
         "--max-output",
@@ -236,6 +237,8 @@ pub struct Flags {
     pub confirm_actions: Option<String>,
     pub confirm_interactive: bool,
     pub native: bool,
+    pub browser: Option<String>,
+    pub cli_browser: bool,
 
     // Track which launch-time options were explicitly passed via CLI
     // (as opposed to being set only via environment variables)
@@ -342,6 +345,8 @@ pub fn parse_flags(args: &[String]) -> Flags {
         confirm_interactive: env_var_is_truthy("AGENT_BROWSER_CONFIRM_INTERACTIVE")
             || config.confirm_interactive.unwrap_or(false),
         native: env_var_is_truthy("AGENT_BROWSER_NATIVE") || config.native.unwrap_or(false),
+        browser: env::var("AGENT_BROWSER_BROWSER").ok(),
+        cli_browser: false,
         cli_executable_path: false,
         cli_extensions: false,
         cli_profile: false,
@@ -575,6 +580,13 @@ pub fn parse_flags(args: &[String]) -> Flags {
                     i += 1;
                 }
             }
+            "--browser" => {
+                if let Some(s) = args.get(i + 1) {
+                    flags.browser = Some(s.clone());
+                    flags.cli_browser = true;
+                    i += 1;
+                }
+            }
             "--config" => {
                 // Already handled by load_config(); skip the value
                 i += 1;
@@ -621,6 +633,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--provider",
         "--device",
         "--session-name",
+        "--browser",
         "--color-scheme",
         "--download-path",
         "--max-output",

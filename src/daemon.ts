@@ -458,6 +458,22 @@ export async function startDaemon(options?: {
 
               const ignoreHTTPSErrors = process.env.AGENT_BROWSER_IGNORE_HTTPS_ERRORS === '1';
               const allowFileAccess = process.env.AGENT_BROWSER_ALLOW_FILE_ACCESS === '1';
+              const browserEnv = process.env.AGENT_BROWSER_BROWSER;
+              let browserType: 'chromium' | 'firefox' | 'webkit' | undefined;
+              if (
+                browserEnv === 'chromium' ||
+                browserEnv === 'firefox' ||
+                browserEnv === 'webkit'
+              ) {
+                browserType = browserEnv;
+              } else {
+                if (browserEnv) {
+                  console.warn(
+                    `Invalid AGENT_BROWSER_BROWSER value "${browserEnv}". Expected one of "chromium", "firefox", or "webkit"; falling back to default.`
+                  );
+                }
+                browserType = undefined;
+              }
               const colorSchemeEnv = process.env.AGENT_BROWSER_COLOR_SCHEME;
               const colorScheme =
                 colorSchemeEnv === 'dark' ||
@@ -480,6 +496,7 @@ export async function startDaemon(options?: {
                 proxy,
                 ignoreHTTPSErrors: ignoreHTTPSErrors,
                 allowFileAccess: allowFileAccess,
+                browser: browserType,
                 colorScheme,
                 autoStateFilePath: getSessionAutoStatePath(),
               });
