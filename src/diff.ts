@@ -1,4 +1,4 @@
-import type { BrowserContext } from 'playwright-core';
+import type { BrowserContext } from 'patchright';
 import type { DiffSnapshotData, DiffScreenshotData } from './types.js';
 import { writeFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';

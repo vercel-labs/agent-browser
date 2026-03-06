@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import { BrowserManager, getDefaultTimeout } from './browser.js';
 import { executeCommand } from './actions.js';
-import { chromium } from 'playwright-core';
+import { chromium } from 'patchright';
 
 describe('BrowserManager', () => {
   let browser: BrowserManager;

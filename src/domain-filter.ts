@@ -1,4 +1,4 @@
-import type { BrowserContext, Route } from 'playwright-core';
+import type { BrowserContext, Route } from 'patchright';
 
 /**
  * Checks whether a hostname matches one of the allowed domain patterns.

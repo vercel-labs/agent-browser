@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { diffSnapshots, diffScreenshots } from './diff.js';
-import { chromium, type Browser, type BrowserContext, type Page } from 'playwright-core';
+import { chromium, type Browser, type BrowserContext, type Page } from 'patchright';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
