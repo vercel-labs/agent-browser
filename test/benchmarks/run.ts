@@ -552,9 +552,11 @@ function printEngineResults(
   console.log("-".repeat(nameW + colW * 2 + 10));
 
   if (comparableCount > 0 && totalLightpandaUs > 0) {
-    const overallSpeedup = totalChromeUs / totalLightpandaUs;
-    const winner = overallSpeedup >= 1.0 ? "lightpanda is faster" : "chrome is faster";
-    console.log(`Overall average speedup: ${overallSpeedup.toFixed(1)}x (${winner})`);
+    const ratio = totalChromeUs / totalLightpandaUs;
+    const winner = ratio >= 1.0
+      ? `lightpanda ${ratio.toFixed(1)}x faster`
+      : `chrome ${(1 / ratio).toFixed(1)}x faster`;
+    console.log(`Overall: ${winner}`);
   }
 
   console.log("");

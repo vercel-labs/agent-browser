@@ -75,6 +75,12 @@ fn validate_lightpanda_options(options: &LaunchOptions) -> Result<(), String> {
     if options.allow_file_access {
         return Err("File access is not supported with Lightpanda".to_string());
     }
+    if !options.headless {
+        return Err("Headed mode is not supported with Lightpanda (headless only)".to_string());
+    }
+    if !options.args.is_empty() {
+        return Err("Custom Chrome arguments (--args) are not supported with Lightpanda".to_string());
+    }
     Ok(())
 }
 

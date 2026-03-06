@@ -7,6 +7,7 @@ use std::time::Duration;
 pub struct LightpandaProcess {
     child: Child,
     pub ws_url: String,
+    _stderr_drain: Option<std::thread::JoinHandle<()>>,
 }
 
 impl LightpandaProcess {
@@ -98,12 +99,13 @@ pub fn launch_lightpanda(
         )?,
     };
 
-    let port = options.port.unwrap_or_else(|| {
-        TcpListener::bind("127.0.0.1:0")
+    let port = match options.port {
+        Some(p) => p,
+        None => TcpListener::bind("127.0.0.1:0")
             .and_then(|l| l.local_addr())
             .map(|a| a.port())
-            .unwrap_or(9222)
-    });
+            .map_err(|e| format!("Failed to find an available port for Lightpanda: {}", e))?,
+    };
     let port_str = port.to_string();
 
     let mut args = vec![
@@ -138,8 +140,8 @@ pub fn launch_lightpanda(
     })?;
     let reader = BufReader::new(stderr);
 
-    let address = match wait_for_address(reader) {
-        Ok(addr) => addr,
+    let (address, reader) = match wait_for_address(reader) {
+        Ok(result) => result,
         Err(e) => {
             let _ = child.kill();
             return Err(e);
@@ -148,36 +150,64 @@ pub fn launch_lightpanda(
 
     let ws_url = format!("ws://{}", address);
 
-    Ok(LightpandaProcess { child, ws_url })
+    let drain = std::thread::spawn(move || {
+        let mut reader = reader;
+        let mut buf = String::new();
+        loop {
+            buf.clear();
+            match reader.read_line(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+        }
+    });
+
+    Ok(LightpandaProcess {
+        child,
+        ws_url,
+        _stderr_drain: Some(drain),
+    })
 }
 
 /// Parse Lightpanda's stderr for the server address.
 /// Lightpanda outputs lines like:
 ///   INFO  app : server running . . . address = 127.0.0.1:9222
+///
+/// Returns the address and the reader so the caller can keep the pipe alive.
 fn wait_for_address(
-    reader: BufReader<std::process::ChildStderr>,
-) -> Result<String, String> {
+    mut reader: BufReader<std::process::ChildStderr>,
+) -> Result<(String, BufReader<std::process::ChildStderr>), String> {
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     let mut stderr_lines: Vec<String> = Vec::new();
+    let mut buf = String::new();
 
-    for line in reader.lines() {
+    loop {
         if std::time::Instant::now() > deadline {
             return Err(lightpanda_launch_error(
                 "Timeout waiting for Lightpanda server address",
                 &stderr_lines,
             ));
         }
-        let line = line.map_err(|e| format!("Failed to read Lightpanda stderr: {}", e))?;
-        if let Some(address) = extract_address(&line) {
-            return Ok(address);
+        buf.clear();
+        match reader.read_line(&mut buf) {
+            Ok(0) => {
+                return Err(lightpanda_launch_error(
+                    "Lightpanda exited before providing server address",
+                    &stderr_lines,
+                ));
+            }
+            Ok(_) => {
+                let line = buf.trim_end().to_string();
+                if let Some(address) = extract_address(&line) {
+                    return Ok((address, reader));
+                }
+                stderr_lines.push(line);
+            }
+            Err(e) => {
+                return Err(format!("Failed to read Lightpanda stderr: {}", e));
+            }
         }
-        stderr_lines.push(line);
     }
-
-    Err(lightpanda_launch_error(
-        "Lightpanda exited before providing server address",
-        &stderr_lines,
-    ))
 }
 
 fn extract_address(line: &str) -> Option<String> {
