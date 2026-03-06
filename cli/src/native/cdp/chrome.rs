@@ -123,7 +123,7 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
     let has_extensions = options
         .extensions
         .as_ref()
-        .map_or(false, |exts| !exts.is_empty());
+        .is_some_and(|exts| !exts.is_empty());
 
     // Extensions require headed mode in native Chrome (content scripts are not
     // injected in headless mode).  Skip --headless when extensions are loaded.

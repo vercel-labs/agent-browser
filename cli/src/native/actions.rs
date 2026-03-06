@@ -173,7 +173,7 @@ impl DaemonState {
                                     let already_tracked = self
                                         .browser
                                         .as_ref()
-                                        .map_or(true, |b| b.has_target(&te.target_info.target_id));
+                                        .is_none_or(|b| b.has_target(&te.target_info.target_id));
                                     if !already_tracked {
                                         new_targets.push(te);
                                     }
@@ -549,16 +549,16 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
     }
 
     // WebDriver backend: reject unsupported CDP-only actions
-    if matches!(state.backend_type, BackendType::WebDriver) {
-        if WEBDRIVER_UNSUPPORTED_ACTIONS.contains(&action) {
-            return error_response(
-                &id,
-                &format!(
-                    "Action '{}' is not supported on the WebDriver backend",
-                    action
-                ),
-            );
-        }
+    if matches!(state.backend_type, BackendType::WebDriver)
+        && WEBDRIVER_UNSUPPORTED_ACTIONS.contains(&action)
+    {
+        return error_response(
+            &id,
+            &format!(
+                "Action '{}' is not supported on the WebDriver backend",
+                action
+            ),
+        );
     }
 
     let result = match action {
@@ -841,15 +841,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     let needs_relaunch = if let Some(ref mgr) = state.browser {
         let has_cdp_arg = cdp_url.is_some() || cdp_port.is_some();
         let was_cdp = mgr.is_cdp_connection();
-        if has_cdp_arg != was_cdp {
-            true
-        } else if has_cdp_arg && !mgr.is_connection_alive().await {
-            true
-        } else if auto_connect && !mgr.is_connection_alive().await {
-            true
-        } else {
-            !mgr.is_connection_alive().await
-        }
+        has_cdp_arg != was_cdp || !mgr.is_connection_alive().await
     } else {
         true
     };
@@ -3234,7 +3226,7 @@ async fn handle_frame(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
 
     fn find_frame(
         tree: &Value,
-        selector: Option<&str>,
+        _selector: Option<&str>,
         name: Option<&str>,
         url: Option<&str>,
     ) -> Option<String> {
@@ -3256,7 +3248,7 @@ async fn handle_frame(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
 
         if let Some(children) = tree.get("childFrames").and_then(|v| v.as_array()) {
             for child in children {
-                if let Some(id) = find_frame(child, selector, name, url) {
+                if let Some(id) = find_frame(child, _selector, name, url) {
                     return Some(id);
                 }
             }
@@ -4015,14 +4007,13 @@ async fn handle_waitfordownload(cmd: &Value, state: &DaemonState) -> Result<Valu
             Ok(Ok(event)) => {
                 if event.method == "Page.downloadProgress"
                     && event.session_id.as_deref() == Some(&session_id)
+                    && event.params.get("state").and_then(|v| v.as_str()) == Some("completed")
                 {
-                    if event.params.get("state").and_then(|v| v.as_str()) == Some("completed") {
-                        let path = cmd
-                            .get("path")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("download");
-                        return Ok(json!({ "path": path }));
-                    }
+                    let path = cmd
+                        .get("path")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("download");
+                    return Ok(json!({ "path": path }));
                 }
             }
             Ok(Err(_)) => return Err("Event stream closed".to_string()),
