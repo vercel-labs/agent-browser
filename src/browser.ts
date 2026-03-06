@@ -1337,10 +1337,11 @@ export class BrowserManager {
     const hasWindowSizeArgs = baseArgs?.some(
       (arg) => arg === '--start-maximized' || arg.startsWith('--window-size=')
     );
+    const isHeaded = hasExtensions || options.headless === false;
     const viewport =
       options.viewport !== undefined
         ? options.viewport
-        : hasWindowSizeArgs
+        : hasWindowSizeArgs || isHeaded
           ? null
           : { width: 1280, height: 720 };
 
