@@ -1352,9 +1352,13 @@ export class BrowserManager {
       // Combine extension args with custom args and file access args
       const extArgs = [`--disable-extensions-except=${extPaths}`, `--load-extension=${extPaths}`];
       const allArgs = baseArgs ? [...extArgs, ...baseArgs] : extArgs;
+      // Chrome extensions require channel to be set for content script injection
+      // See: https://playwright.dev/docs/chrome-extensions
+      const extensionChannel = options.channel || 'chromium';
       context = await launcher.launchPersistentContext(
         path.join(os.tmpdir(), `agent-browser-ext-${session}`),
         {
+          channel: extensionChannel,
           headless: options.headless ?? true,
           executablePath: options.executablePath,
           args: allArgs,
