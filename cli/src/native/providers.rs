@@ -80,15 +80,11 @@ pub async fn close_provider_session(session: &ProviderSession) {
 async fn connect_browserbase() -> Result<(String, Option<ProviderSession>), String> {
     let api_key = env::var("BROWSERBASE_API_KEY")
         .map_err(|_| "BROWSERBASE_API_KEY environment variable is not set")?;
-    let project_id = env::var("BROWSERBASE_PROJECT_ID")
-        .map_err(|_| "BROWSERBASE_PROJECT_ID environment variable is not set")?;
 
     let client = reqwest::Client::new();
     let response = client
         .post("https://api.browserbase.com/v1/sessions")
-        .header("Content-Type", "application/json")
         .header("X-BB-API-Key", &api_key)
-        .json(&json!({ "projectId": project_id }))
         .send()
         .await
         .map_err(|e| format!("Browserbase request failed: {}", e))?;

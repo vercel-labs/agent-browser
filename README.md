@@ -1119,7 +1119,6 @@ To enable Browserbase, use the `-p` flag:
 
 ```bash
 export BROWSERBASE_API_KEY="your-api-key"
-export BROWSERBASE_PROJECT_ID="your-project-id"
 agent-browser -p browserbase open https://example.com
 ```
 
@@ -1128,13 +1127,12 @@ Or use environment variables for CI/scripts:
 ```bash
 export AGENT_BROWSER_PROVIDER=browserbase
 export BROWSERBASE_API_KEY="your-api-key"
-export BROWSERBASE_PROJECT_ID="your-project-id"
 agent-browser open https://example.com
 ```
 
 When enabled, agent-browser connects to a Browserbase session instead of launching a local browser. All commands work identically.
 
-Get your API key and project ID from the [Browserbase Dashboard](https://browserbase.com/overview).
+Get your API key from the [Browserbase Dashboard](https://browserbase.com/overview).
 
 ### Browser Use
 
