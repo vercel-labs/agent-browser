@@ -1,10 +1,25 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::{json, Value};
 use std::io::{self, BufRead};
+use std::path::Path;
 
 use crate::color;
 use crate::flags::Flags;
 use crate::validation::{is_valid_session_name, session_name_error};
+
+/// Resolve a path to an absolute path relative to the CLI's current working directory.
+/// This is necessary because the daemon runs in a different directory than the CLI,
+/// so relative paths would resolve incorrectly on the daemon side.
+fn resolve_path(path: &str) -> String {
+    let p = Path::new(path);
+    if p.is_absolute() {
+        path.to_string()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(p).to_string_lossy().to_string())
+            .unwrap_or_else(|_| path.to_string())
+    }
+}
 
 /// Error type for command parsing with contextual information
 #[derive(Debug)]
@@ -232,7 +247,8 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                 context: "upload".to_string(),
                 usage: "upload <selector> <files...>",
             })?;
-            Ok(json!({ "id": id, "action": "upload", "selector": sel, "files": &rest[1..] }))
+            let files: Vec<String> = rest[1..].iter().map(|f| resolve_path(f)).collect();
+            Ok(json!({ "id": id, "action": "upload", "selector": sel, "files": files }))
         }
         "download" => {
             let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
@@ -243,7 +259,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                 context: "download".to_string(),
                 usage: "download <selector> <path>",
             })?;
-            Ok(json!({ "id": id, "action": "download", "selector": sel, "path": path }))
+            Ok(json!({ "id": id, "action": "download", "selector": sel, "path": resolve_path(path) }))
         }
 
         // === Keyboard ===
@@ -475,7 +491,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                 _ => (None, None),
             };
             Ok(
-                json!({ "id": id, "action": "screenshot", "path": path, "selector": selector, "fullPage": flags.full, "annotate": flags.annotate }),
+                json!({ "id": id, "action": "screenshot", "path": path.map(|p| resolve_path(p)), "selector": selector, "fullPage": flags.full, "annotate": flags.annotate }),
             )
         }
         "pdf" => {
@@ -483,7 +499,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                 context: "pdf".to_string(),
                 usage: "pdf <path>",
             })?;
-            Ok(json!({ "id": id, "action": "pdf", "path": path }))
+            Ok(json!({ "id": id, "action": "pdf", "path": resolve_path(path) }))
         }
 
         // === Snapshot ===
@@ -985,7 +1001,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                 Some("stop") => {
                     let mut cmd = json!({ "id": id, "action": "trace_stop" });
                     if let Some(path) = rest.get(1) {
-                        cmd["path"] = json!(path);
+                        cmd["path"] = json!(resolve_path(path));
                     }
                     Ok(cmd)
                 }
@@ -1048,7 +1064,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                     })?;
                     // Optional URL parameter
                     let url = rest.get(2);
-                    let mut cmd = json!({ "id": id, "action": "recording_start", "path": path });
+                    let mut cmd = json!({ "id": id, "action": "recording_start", "path": resolve_path(path) });
                     if let Some(u) = url {
                         // Add https:// prefix if needed (preserve special schemes)
                         let url_str = if u.starts_with("http") || u.contains("://") {
@@ -1068,7 +1084,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                     })?;
                     // Optional URL parameter
                     let url = rest.get(2);
-                    let mut cmd = json!({ "id": id, "action": "recording_restart", "path": path });
+                    let mut cmd = json!({ "id": id, "action": "recording_restart", "path": resolve_path(path) });
                     if let Some(u) = url {
                         // Add https:// prefix if needed (preserve special schemes)
                         let url_str = if u.starts_with("http") || u.contains("://") {
@@ -1115,14 +1131,14 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                         context: "state save".to_string(),
                         usage: "state save <path>",
                     })?;
-                    Ok(json!({ "id": id, "action": "state_save", "path": path }))
+                    Ok(json!({ "id": id, "action": "state_save", "path": resolve_path(path) }))
                 }
                 Some("load") => {
                     let path = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
                         context: "state load".to_string(),
                         usage: "state load <path>",
                     })?;
-                    Ok(json!({ "id": id, "action": "state_load", "path": path }))
+                    Ok(json!({ "id": id, "action": "state_load", "path": resolve_path(path) }))
                 }
                 Some("list") => Ok(json!({ "id": id, "action": "state_list" })),
                 Some("clear") => {
@@ -2588,7 +2604,10 @@ mod tests {
     fn test_screenshot_path() {
         let cmd = parse_command(&args("screenshot out.png"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "screenshot");
-        assert_eq!(cmd["path"], "out.png");
+        // Relative paths are resolved to absolute (relative to CWD)
+        let path = cmd["path"].as_str().unwrap();
+        assert!(path.ends_with("/out.png"), "path should end with /out.png, got: {}", path);
+        assert!(Path::new(path).is_absolute(), "path should be absolute, got: {}", path);
     }
 
     #[test]
@@ -2629,7 +2648,9 @@ mod tests {
         let cmd = parse_command(&args("screenshot ./output.png"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "screenshot");
         assert_eq!(cmd["selector"], serde_json::Value::Null);
-        assert_eq!(cmd["path"], "./output.png");
+        let path = cmd["path"].as_str().unwrap();
+        assert!(path.ends_with("/output.png"), "path should end with /output.png, got: {}", path);
+        assert!(Path::new(path).is_absolute(), "path should be absolute, got: {}", path);
     }
 
     #[test]
@@ -2637,7 +2658,33 @@ mod tests {
         let cmd = parse_command(&args("screenshot .btn ./button.png"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "screenshot");
         assert_eq!(cmd["selector"], ".btn");
-        assert_eq!(cmd["path"], "./button.png");
+        let path = cmd["path"].as_str().unwrap();
+        assert!(path.ends_with("/button.png"), "path should end with /button.png, got: {}", path);
+        assert!(Path::new(path).is_absolute(), "path should be absolute, got: {}", path);
+    }
+
+    #[test]
+    fn test_absolute_path_unchanged() {
+        let cmd = parse_command(&args("screenshot /tmp/out.png"), &default_flags()).unwrap();
+        assert_eq!(cmd["path"], "/tmp/out.png");
+    }
+
+    #[test]
+    fn test_pdf_path_resolved() {
+        let cmd = parse_command(&args("pdf page.pdf"), &default_flags()).unwrap();
+        let path = cmd["path"].as_str().unwrap();
+        assert!(path.ends_with("/page.pdf"), "path should end with /page.pdf, got: {}", path);
+        assert!(Path::new(path).is_absolute(), "path should be absolute, got: {}", path);
+    }
+
+    #[test]
+    fn test_upload_paths_resolved() {
+        let cmd = parse_command(&args("upload #file doc.pdf img.png"), &default_flags()).unwrap();
+        let files = cmd["files"].as_array().unwrap();
+        for f in files {
+            let p = f.as_str().unwrap();
+            assert!(Path::new(p).is_absolute(), "upload file path should be absolute, got: {}", p);
+        }
     }
 
     // === Snapshot ===
