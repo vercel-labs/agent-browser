@@ -14,7 +14,7 @@ export interface LaunchCommand extends BaseCommand {
   browser?: 'chromium' | 'firefox' | 'webkit';
   headers?: Record<string, string>;
   executablePath?: string;
-  cdpPort?: number;
+  cdpPort?: number | string; // Support both numeric ports and numeric string ports (e.g. "9222")
   cdpUrl?: string;
   autoConnect?: boolean; // Auto-discover and connect to running Chrome via DevToolsActivePort
   extensions?: string[];
