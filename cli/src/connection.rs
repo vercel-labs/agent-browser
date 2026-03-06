@@ -529,15 +529,10 @@ pub fn ensure_daemon(session: &str, opts: &DaemonOptions) -> Result<DaemonResult
     #[cfg(unix)]
     let endpoint_info = format!(
         "socket: {}",
-        get_socket_dir()
-            .join(format!("{}.sock", session))
-            .display()
+        get_socket_dir().join(format!("{}.sock", session)).display()
     );
     #[cfg(windows)]
-    let endpoint_info = format!(
-        "port: 127.0.0.1:{}",
-        get_port_for_session(session)
-    );
+    let endpoint_info = format!("port: 127.0.0.1:{}", get_port_for_session(session));
 
     Err(format!("Daemon failed to start ({})", endpoint_info))
 }

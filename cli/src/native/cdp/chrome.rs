@@ -118,8 +118,8 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
         args.push(format!("--user-data-dir={}", expanded));
         None
     } else {
-        let dir = std::env::temp_dir()
-            .join(format!("agent-browser-chrome-{}", uuid::Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("agent-browser-chrome-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir)
             .map_err(|e| format!("Failed to create temp profile dir: {}", e))?;
         args.push(format!("--user-data-dir={}", dir.display()));
@@ -190,14 +190,11 @@ pub fn launch_chrome(options: &LaunchOptions) -> Result<ChromeProcess, String> {
             format!("Failed to launch Chrome at {:?}: {}", chrome_path, e)
         })?;
 
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| {
-            let _ = child.kill();
-            cleanup_temp_dir(&temp_user_data_dir);
-            "Failed to capture Chrome stderr".to_string()
-        })?;
+    let stderr = child.stderr.take().ok_or_else(|| {
+        let _ = child.kill();
+        cleanup_temp_dir(&temp_user_data_dir);
+        "Failed to capture Chrome stderr".to_string()
+    })?;
     let reader = BufReader::new(stderr);
 
     let ws_url = match wait_for_ws_url(reader) {
@@ -489,10 +486,7 @@ fn should_disable_sandbox(existing_args: &[String]) -> bool {
 
         // Generic container detection: cgroup contains docker/kubepods/lxc
         if let Ok(cgroup) = std::fs::read_to_string("/proc/1/cgroup") {
-            if cgroup.contains("docker")
-                || cgroup.contains("kubepods")
-                || cgroup.contains("lxc")
-            {
+            if cgroup.contains("docker") || cgroup.contains("kubepods") || cgroup.contains("lxc") {
                 return true;
             }
         }
@@ -636,10 +630,7 @@ mod tests {
 
     #[test]
     fn test_chrome_launch_error_generic() {
-        let lines = vec![
-            "info line".to_string(),
-            "another info line".to_string(),
-        ];
+        let lines = vec!["info line".to_string(), "another info line".to_string()];
         let msg = chrome_launch_error("Chrome exited", &lines);
         assert!(msg.contains("last 2 lines"));
     }
@@ -660,10 +651,7 @@ mod tests {
         };
         let result = build_chrome_args(&opts).unwrap();
         assert!(result.args.iter().any(|a| a == "--headless=new"));
-        assert!(result
-            .args
-            .iter()
-            .any(|a| a == "--window-size=1280,720"));
+        assert!(result.args.iter().any(|a| a == "--window-size=1280,720"));
         // Temp dir created when no profile
         assert!(result.temp_user_data_dir.is_some());
         let dir = result.temp_user_data_dir.unwrap();
@@ -722,14 +710,8 @@ mod tests {
             ..Default::default()
         };
         let result = build_chrome_args(&opts).unwrap();
-        assert!(!result
-            .args
-            .iter()
-            .any(|a| a == "--window-size=1280,720"));
-        assert!(result
-            .args
-            .iter()
-            .any(|a| a == "--window-size=1920,1080"));
+        assert!(!result.args.iter().any(|a| a == "--window-size=1280,720"));
+        assert!(result.args.iter().any(|a| a == "--window-size=1920,1080"));
         if let Some(ref dir) = result.temp_user_data_dir {
             let _ = std::fs::remove_dir_all(dir);
         }

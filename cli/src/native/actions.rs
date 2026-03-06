@@ -5174,7 +5174,10 @@ mod tests {
         let _guard = EnvGuard::new(&["AGENT_BROWSER_HEADED"]);
         _guard.set("AGENT_BROWSER_HEADED", "1");
         let opts = launch_options_from_env();
-        assert!(!opts.headless, "AGENT_BROWSER_HEADED=1 should set headless=false");
+        assert!(
+            !opts.headless,
+            "AGENT_BROWSER_HEADED=1 should set headless=false"
+        );
     }
 
     #[tokio::test]
