@@ -2442,8 +2442,7 @@ async function handleWaitForDownload(
   command: WaitForDownloadCommand,
   browser: BrowserManager
 ): Promise<Response> {
-  const page = browser.getPage();
-  const download = await page.waitForEvent('download', { timeout: command.timeout });
+  const download = await browser.waitForDownload(command.timeout);
 
   let filePath: string;
   if (command.path) {
