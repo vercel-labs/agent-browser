@@ -13,11 +13,11 @@ npm install -g agent-browser
 agent-browser install  # Download Chromium
 ```
 
-This is the fastest option -- commands run through the native Rust CLI directly with sub-millisecond parsing overhead.
+This is the fastest option—commands run through the native Rust CLI directly with sub-millisecond parsing overhead.
 
 ### Quick Start (no install)
 
-Run directly with `npx` if you want to try it without installing globally:
+Run directly with `npx` if you want to try it without installing globally (the browser install step is still required once):
 
 ```bash
 npx agent-browser install   # Download Chromium (first time only)
