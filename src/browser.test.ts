@@ -806,6 +806,94 @@ describe('BrowserManager', () => {
     });
   });
 
+  describe('frame command context', () => {
+    it('should execute fill and click inside selected frame', async () => {
+      const page = browser.getPage();
+      await page.setContent(`
+        <html>
+          <body>
+            <input id="shared" value="outer">
+            <button id="shared-btn" onclick="document.body.dataset.clicked = 2">Outer</button>
+            <iframe id="test-frame" name="test-frame" srcdoc='
+              <html>
+                <body>
+                  <input id="shared" value="inner">
+                  <button id="shared-btn" onclick="document.body.dataset.clicked = 1">Inner</button>
+                </body>
+              </html>
+            '></iframe>
+          </body>
+        </html>
+      `);
+
+      const frameResult = await executeCommand(
+        { id: 'frame-1', action: 'frame', selector: '#test-frame' },
+        browser
+      );
+      expect(frameResult.success).toBe(true);
+
+      const fillResult = await executeCommand(
+        { id: 'fill-1', action: 'fill', selector: '#shared', value: 'updated' },
+        browser
+      );
+      expect(fillResult.success).toBe(true);
+
+      const clickResult = await executeCommand(
+        { id: 'click-1', action: 'click', selector: '#shared-btn' },
+        browser
+      );
+      expect(clickResult.success).toBe(true);
+
+      const frame = page.frame({ name: 'test-frame' });
+      expect(frame).not.toBeNull();
+      const frameInputValue = await frame!.locator('#shared').first().inputValue();
+      const frameClicked = await frame!.evaluate(() => document.body.dataset.clicked);
+      const outerInputValue = await page.locator('#shared').first().inputValue();
+      const outerClicked = await page.evaluate(() => document.body.dataset.clicked);
+
+      expect(frameInputValue).toBe('updated');
+      expect(frameClicked).toBe('1');
+      expect(outerInputValue).toBe('outer');
+      expect(outerClicked).toBeUndefined();
+    });
+
+    it('should use frame context for snapshot and return to mainframe', async () => {
+      const page = browser.getPage();
+      await page.setContent(`
+        <html>
+          <body>
+            <button id="main">Main Button</button>
+            <iframe id="test-frame-2" name="test-frame-2" srcdoc='
+              <html><body><button>Inner Snapshot</button></body></html>
+            '></iframe>
+          </body>
+        </html>
+      `);
+
+      await executeCommand({ id: 'frame-2', action: 'frame', selector: '#test-frame-2' }, browser);
+      const snapshotResult = await executeCommand(
+        { id: 'snapshot-1', action: 'snapshot', interactive: true },
+        browser
+      );
+      expect(snapshotResult.success).toBe(true);
+
+      const snapshotData = snapshotResult.data as { snapshot: string };
+      expect(snapshotData.snapshot).toContain('button "Inner Snapshot"');
+      expect(snapshotData.snapshot).not.toContain('button "Main Button"');
+
+      await executeCommand({ id: 'mainframe-1', action: 'mainframe' }, browser);
+
+      const mainSnapshotResult = await executeCommand(
+        { id: 'snapshot-2', action: 'snapshot', interactive: true },
+        browser
+      );
+      expect(mainSnapshotResult.success).toBe(true);
+
+      const mainSnapshotData = mainSnapshotResult.data as { snapshot: string };
+      expect(mainSnapshotData.snapshot).toContain('button "Main Button"');
+    });
+  });
+
   describe('scoped headers', () => {
     it('should register route for scoped headers', async () => {
       // Test that setScopedHeaders doesn't throw and completes successfully

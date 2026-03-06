@@ -17,7 +17,7 @@
  *   agent-browser click @e2             # Click element by ref
  */
 
-import type { Page, Locator } from 'playwright-core';
+import type { Frame, Locator, Page } from 'playwright-core';
 
 export interface RefMap {
   [ref: string]: {
@@ -140,7 +140,7 @@ function buildSelector(role: string, name: string): string {
  * This finds elements with cursor: pointer or onclick handlers.
  */
 async function findCursorInteractiveElements(
-  page: Page,
+  pageOrFrame: Page | Frame,
   selector?: string
 ): Promise<
   Array<{
@@ -257,21 +257,23 @@ async function findCursorInteractiveElements(
 
   // eslint-disable-next-line @typescript-eslint/no-implied-eval
   const fn = new Function('return ' + scriptBody)();
-  return page.evaluate(fn, rootSelector);
+  return pageOrFrame.evaluate(fn, rootSelector);
 }
 
 /**
  * Get enhanced snapshot with refs and optional filtering
  */
 export async function getEnhancedSnapshot(
-  page: Page,
+  pageOrFrame: Page | Frame,
   options: SnapshotOptions = {}
 ): Promise<EnhancedSnapshot> {
   resetRefs();
   const refs: RefMap = {};
 
   // Get ARIA snapshot from Playwright
-  const locator = options.selector ? page.locator(options.selector) : page.locator(':root');
+  const locator = options.selector
+    ? pageOrFrame.locator(options.selector)
+    : pageOrFrame.locator(':root');
   const ariaTree = await locator.ariaSnapshot();
 
   if (!ariaTree) {
@@ -287,7 +289,7 @@ export async function getEnhancedSnapshot(
   // When cursor flag is set, also find cursor-interactive elements
   // that may not have proper ARIA roles
   if (options.cursor) {
-    const cursorElements = await findCursorInteractiveElements(page, options.selector);
+    const cursorElements = await findCursorInteractiveElements(pageOrFrame, options.selector);
 
     // Filter out elements whose text is already captured in the snapshot
     const existingTexts = new Set(Object.values(refs).map((r) => r.name.toLowerCase()));
