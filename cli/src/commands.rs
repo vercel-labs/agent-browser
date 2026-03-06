@@ -1037,6 +1037,31 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
             }
         }
 
+        // === React Profiling (component-level render data) ===
+        "react_profile" => {
+            const VALID: &[&str] = &["start", "stop"];
+            match rest.first().copied() {
+                Some("start") => {
+                    Ok(json!({ "id": id, "action": "react_profile_start" }))
+                }
+                Some("stop") => {
+                    let mut cmd = json!({ "id": id, "action": "react_profile_stop" });
+                    if let Some(path) = rest.get(1) {
+                        cmd["path"] = json!(path);
+                    }
+                    Ok(cmd)
+                }
+                Some(sub) => Err(ParseError::UnknownSubcommand {
+                    subcommand: sub.to_string(),
+                    valid_options: VALID,
+                }),
+                None => Err(ParseError::MissingArguments {
+                    context: "react_profile".to_string(),
+                    usage: "react_profile <start|stop> [path]",
+                }),
+            }
+        }
+
         // === Recording (Playwright native video recording) ===
         "record" => {
             const VALID: &[&str] = &["start", "stop", "restart"];
@@ -2912,6 +2937,49 @@ mod tests {
     #[test]
     fn test_profiler_missing_subcommand() {
         let result = parse_command(&args("profiler"), &default_flags());
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::MissingArguments { .. }
+        ));
+    }
+
+    // === React Profile Tests ===
+
+    #[test]
+    fn test_react_profile_start() {
+        let cmd = parse_command(&args("react_profile start"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "react_profile_start");
+    }
+
+    #[test]
+    fn test_react_profile_stop_no_path() {
+        let cmd = parse_command(&args("react_profile stop"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "react_profile_stop");
+        assert!(cmd.get("path").is_none());
+    }
+
+    #[test]
+    fn test_react_profile_stop_with_path() {
+        let cmd =
+            parse_command(&args("react_profile stop react.json"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "react_profile_stop");
+        assert_eq!(cmd["path"], "react.json");
+    }
+
+    #[test]
+    fn test_react_profile_invalid_subcommand() {
+        let result = parse_command(&args("react_profile foo"), &default_flags());
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::UnknownSubcommand { .. }
+        ));
+    }
+
+    #[test]
+    fn test_react_profile_missing_subcommand() {
+        let result = parse_command(&args("react_profile"), &default_flags());
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),

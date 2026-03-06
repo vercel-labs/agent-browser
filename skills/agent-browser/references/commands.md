@@ -249,6 +249,9 @@ agent-browser trace start                 # Start recording trace
 agent-browser trace stop trace.zip        # Stop and save trace
 agent-browser profiler start              # Start Chrome DevTools profiling
 agent-browser profiler stop trace.json    # Stop and save profile
+agent-browser react_profile start         # Start React component profiling
+agent-browser react_profile stop          # Stop and return React profile data
+agent-browser react_profile stop out.json # Stop and save React profile to file
 ```
 
 ## Environment Variables

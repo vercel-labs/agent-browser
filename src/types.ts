@@ -612,6 +612,16 @@ export interface ProfilerStopCommand extends BaseCommand {
   path?: string;
 }
 
+// React profiling
+export interface ReactProfileStartCommand extends BaseCommand {
+  action: 'react_profile_start';
+}
+
+export interface ReactProfileStopCommand extends BaseCommand {
+  action: 'react_profile_stop';
+  path?: string;
+}
+
 // HAR recording
 export interface HarStartCommand extends BaseCommand {
   action: 'har_start';
@@ -963,6 +973,8 @@ export type Command =
   | TraceStopCommand
   | ProfilerStartCommand
   | ProfilerStopCommand
+  | ReactProfileStartCommand
+  | ReactProfileStopCommand
   | HarStartCommand
   | HarStopCommand
   | StorageStateSaveCommand
@@ -1149,6 +1161,39 @@ export interface SnapshotData {
 export interface EvaluateData {
   result: unknown;
   origin?: string;
+}
+
+// React profiling data
+export interface ReactProfileRender {
+  id: string;
+  phase: 'mount' | 'update';
+  componentName: string;
+  actualDuration: number;
+  baseDuration: number;
+  startTime: number;
+  commitTime: number;
+}
+
+export interface ReactProfileComponent {
+  name: string;
+  renderCount: number;
+  totalActualDuration: number;
+  averageActualDuration: number;
+  reasons: string[];
+}
+
+export interface ReactProfileData {
+  reactDetected: boolean;
+  reactVersion?: string;
+  renders: ReactProfileRender[];
+  components: ReactProfileComponent[];
+  summary: {
+    totalRenders: number;
+    totalComponents: number;
+    slowestComponents: Array<{ name: string; avgDuration: number }>;
+    totalDuration: number;
+  };
+  path?: string;
 }
 
 export interface ContentData {

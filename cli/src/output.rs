@@ -411,6 +411,23 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
                     Some("profiler_start") => {
                         println!("{} Profiling started", color::success_indicator());
                     }
+                    Some("react_profile_start") => {
+                        let detected = data
+                            .get("reactDetected")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+                        if detected {
+                            println!(
+                                "{} React profiling started (React detected)",
+                                color::success_indicator()
+                            );
+                        } else {
+                            println!(
+                                "{} React profiling started (React not yet detected)",
+                                color::success_indicator()
+                            );
+                        }
+                    }
                     _ => {
                         if let Some(path) = data.get("path").and_then(|v| v.as_str()) {
                             println!("{} Recording started: {}", color::success_indicator(), path);
@@ -488,6 +505,37 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
             println!("{} Trace stopped", color::success_indicator());
             return;
         }
+        // React profile stop without path (inline data)
+        if action == Some("react_profile_stop") && data.get("path").is_none() {
+            let detected = data
+                .get("reactDetected")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let total_renders = data
+                .get("summary")
+                .and_then(|s| s.get("totalRenders"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let total_components = data
+                .get("summary")
+                .and_then(|s| s.get("totalComponents"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            if detected {
+                println!(
+                    "{} React profile collected ({} renders, {} components)",
+                    color::success_indicator(),
+                    total_renders,
+                    total_components
+                );
+            } else {
+                println!(
+                    "{} React profile collected (React not detected on page)",
+                    color::success_indicator()
+                );
+            }
+            return;
+        }
         // Path-based operations (screenshot/pdf/trace/har/download/state/video)
         if let Some(path) = data.get("path").and_then(|v| v.as_str()) {
             match action.unwrap_or("") {
@@ -538,6 +586,25 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
                     color::green(path),
                     data.get("eventCount").and_then(|c| c.as_u64()).unwrap_or(0)
                 ),
+                "react_profile_stop" => {
+                    let total_renders = data
+                        .get("summary")
+                        .and_then(|s| s.get("totalRenders"))
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let total_components = data
+                        .get("summary")
+                        .and_then(|s| s.get("totalComponents"))
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    println!(
+                        "{} React profile saved to {} ({} renders, {} components)",
+                        color::success_indicator(),
+                        color::green(path),
+                        total_renders,
+                        total_components
+                    );
+                }
                 "har_stop" => println!(
                     "{} HAR saved to {}",
                     color::success_indicator(),
@@ -1954,6 +2021,45 @@ The output file can be viewed in:
 "##
         }
 
+        // === React Profile ===
+        "react_profile" => {
+            r##"
+agent-browser react_profile - Profile React component renders
+
+Usage: agent-browser react_profile <operation> [path]
+
+Capture React-specific component render data by injecting a hook into
+__REACT_DEVTOOLS_GLOBAL_HOOK__. Works fully headless, no extension needed.
+Can run simultaneously with the CDP profiler.
+
+Requirement: The target React app must use a development or profiling build.
+Production builds strip the fiber timing data.
+
+Operations:
+  start                Start React profiling
+  stop [path]          Stop profiling and return/save data
+
+Global Options:
+  --json               Output as JSON
+  --session <name>     Use specific session
+
+Examples:
+  agent-browser react_profile start
+  agent-browser click "#button"
+  agent-browser react_profile stop
+
+  # Save to file
+  agent-browser react_profile stop ./react-profile.json
+
+  # Combine with CDP profiler
+  agent-browser profiler start
+  agent-browser react_profile start
+  agent-browser click "#heavy-component"
+  agent-browser react_profile stop ./react.json
+  agent-browser profiler stop ./trace.json
+"##
+        }
+
         // === Record (video) ===
         "record" => {
             r##"
@@ -2384,6 +2490,7 @@ Diff:
 Debug:
   trace start|stop [path]    Record Playwright trace
   profiler start|stop [path] Record Chrome DevTools profile
+  react_profile start|stop   React component profiling
   record start <path> [url]  Start video recording (WebM)
   record stop                Stop and save video
   console [--clear]          View console logs

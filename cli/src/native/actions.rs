@@ -100,6 +100,8 @@ pub struct DaemonState {
     pub tracked_requests: Vec<TrackedRequest>,
     pub request_tracking: bool,
     pub active_frame_id: Option<String>,
+    pub react_profiling_active: bool,
+    pub react_profile_init_script_installed: bool,
 }
 
 impl DaemonState {
@@ -131,6 +133,8 @@ impl DaemonState {
             tracked_requests: Vec::new(),
             request_tracking: false,
             active_frame_id: None,
+            react_profiling_active: false,
+            react_profile_init_script_installed: false,
         }
     }
 
@@ -612,6 +616,8 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         "trace_stop" => handle_trace_stop(cmd, state).await,
         "profiler_start" => handle_profiler_start(cmd, state).await,
         "profiler_stop" => handle_profiler_stop(cmd, state).await,
+        "react_profile_start" => handle_react_profile_start(state).await,
+        "react_profile_stop" => handle_react_profile_stop(cmd, state).await,
         "recording_start" => handle_recording_start(cmd, state).await,
         "recording_stop" => handle_recording_stop(state).await,
         "recording_restart" => handle_recording_restart(cmd, state).await,
@@ -2386,6 +2392,365 @@ async fn handle_profiler_stop(cmd: &Value, state: &mut DaemonState) -> Result<Va
     let session_id = mgr.active_session_id()?.to_string();
     let path = cmd.get("path").and_then(|v| v.as_str());
     native_tracing::profiler_stop(&mgr.client, &session_id, &mut state.tracing_state, path).await
+}
+
+const REACT_INJECTION_SCRIPT: &str = r#"
+(() => {
+  if (window.__AGENT_REACT_PROFILER__) {
+    window.__AGENT_REACT_PROFILER__.renders = [];
+    window.__AGENT_REACT_PROFILER__.active = true;
+    return { reactDetected: window.__AGENT_REACT_PROFILER__.reactDetected };
+  }
+
+  const profiler = {
+    active: true,
+    reactDetected: false,
+    reactVersion: null,
+    renders: [],
+    maxRenders: 50000,
+    _fiberRoots: null,
+    _observer: null,
+    _rafPending: false,
+  };
+  window.__AGENT_REACT_PROFILER__ = profiler;
+
+  function getComponentName(fiber) {
+    if (!fiber || !fiber.type) return null;
+    if (typeof fiber.type === 'string') return null;
+    return fiber.type.displayName || fiber.type.name || 'Anonymous';
+  }
+
+  function collectRenderData(fiberRoot, rendererID, requireDuration) {
+    const current = fiberRoot.current;
+    if (!current) return;
+    const now = performance.now();
+
+    function walkFiber(fiber) {
+      if (!fiber) return;
+      const isComponent = fiber.tag === 0 || fiber.tag === 1 || fiber.tag === 11 || fiber.tag === 15;
+      if (isComponent) {
+        const hasDuration = fiber.actualDuration !== undefined && fiber.actualDuration > 0;
+        const isUpdated = fiber.alternate !== null;
+        if ((requireDuration ? hasDuration : isUpdated)) {
+          const name = getComponentName(fiber);
+          if (name && profiler.renders.length < profiler.maxRenders) {
+            profiler.renders.push({
+              id: String(rendererID),
+              phase: fiber.alternate === null ? 'mount' : 'update',
+              componentName: name,
+              actualDuration: hasDuration ? fiber.actualDuration : 0,
+              baseDuration: fiber.selfBaseDuration || fiber.baseDuration || 0,
+              startTime: fiber.actualStartTime || now,
+              commitTime: now,
+            });
+          }
+        }
+      }
+      walkFiber(fiber.child);
+      walkFiber(fiber.sibling);
+    }
+
+    walkFiber(current);
+  }
+
+  function patchHook(hook) {
+    if (!hook || hook.__agentPatched) return;
+    hook.__agentPatched = true;
+
+    const originalOnCommitFiberRoot = hook.onCommitFiberRoot;
+    hook.onCommitFiberRoot = function(rendererID, fiberRoot, priorityLevel) {
+      if (profiler.active) {
+        try {
+          profiler.reactDetected = true;
+          collectRenderData(fiberRoot, rendererID, true);
+        } catch (e) {}
+      }
+      if (originalOnCommitFiberRoot) {
+        return originalOnCommitFiberRoot.call(this, rendererID, fiberRoot, priorityLevel);
+      }
+    };
+
+    const originalInject = hook.inject;
+    hook.inject = function(renderer) {
+      if (renderer && renderer.version) {
+        profiler.reactVersion = renderer.version;
+      }
+      if (originalInject) {
+        return originalInject.call(this, renderer);
+      }
+      return 0;
+    };
+  }
+
+  function installFreshHook() {
+    const hook = {
+      renderers: new Map(),
+      supportsFiber: true,
+      inject: function(renderer) {
+        profiler.reactDetected = true;
+        if (renderer && renderer.version) {
+          profiler.reactVersion = renderer.version;
+        }
+        const id = hook.renderers.size + 1;
+        hook.renderers.set(id, renderer);
+        return id;
+      },
+      onScheduleFiberRoot: function() {},
+      onCommitFiberRoot: function(rendererID, fiberRoot) {
+        if (profiler.active) {
+          try { collectRenderData(fiberRoot, rendererID, true); } catch (e) {}
+        }
+      },
+      onCommitFiberUnmount: function() {},
+    };
+    hook.__agentPatched = true;
+    window.__REACT_DEVTOOLS_GLOBAL_HOOK__ = hook;
+    return hook;
+  }
+
+  function findFiberRoots() {
+    const roots = [];
+    const candidates = document.querySelectorAll('[id]');
+    candidates.forEach(function(el) {
+      const keys = Object.keys(el);
+      for (let i = 0; i < keys.length; i++) {
+        if (keys[i].startsWith('__reactContainer') || keys[i].startsWith('__reactFiber')) {
+          const fiber = el[keys[i]];
+          if (fiber) {
+            let node = fiber;
+            while (node.return) { node = node.return; }
+            if (node.stateNode && node.stateNode.current) {
+              roots.push(node.stateNode);
+            }
+          }
+          break;
+        }
+      }
+    });
+    return roots;
+  }
+
+  const existingHook = window.__REACT_DEVTOOLS_GLOBAL_HOOK__;
+  if (existingHook) {
+    patchHook(existingHook);
+    if (existingHook.renderers && existingHook.renderers.size > 0) {
+      profiler.reactDetected = true;
+    }
+  } else {
+    const hook = installFreshHook();
+    const fiberRoots = [...new Set(findFiberRoots())];
+    if (fiberRoots.length > 0) {
+      profiler.reactDetected = true;
+      profiler._fiberRoots = fiberRoots;
+      let rafPending = false;
+      const observer = new MutationObserver(function() {
+        if (!profiler.active || rafPending) return;
+        rafPending = true;
+        requestAnimationFrame(function() {
+          rafPending = false;
+          if (!profiler.active) return;
+          for (let i = 0; i < profiler._fiberRoots.length; i++) {
+            try {
+              collectRenderData(profiler._fiberRoots[i], 1, false);
+            } catch (e) {}
+          }
+        });
+      });
+      fiberRoots.forEach(function(root) {
+        if (root.containerInfo) {
+          observer.observe(root.containerInfo, { childList: true, subtree: true, characterData: true });
+        }
+      });
+      profiler._observer = observer;
+    }
+  }
+
+  return { reactDetected: profiler.reactDetected };
+})();
+"#;
+
+const REACT_COLLECTION_SCRIPT: &str = r#"
+(() => {
+  const profiler = window.__AGENT_REACT_PROFILER__;
+  if (!profiler) {
+    return { reactDetected: false, reactVersion: null, renders: [] };
+  }
+  profiler.active = false;
+  if (profiler._observer) {
+    profiler._observer.disconnect();
+    profiler._observer = null;
+  }
+  const data = {
+    reactDetected: profiler.reactDetected,
+    reactVersion: profiler.reactVersion,
+    renders: profiler.renders,
+  };
+  profiler.renders = [];
+  return data;
+})();
+"#;
+
+async fn handle_react_profile_start(state: &mut DaemonState) -> Result<Value, String> {
+    if state.react_profiling_active {
+        return Err("React profiling already active".to_string());
+    }
+
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+
+    let result = mgr.evaluate(REACT_INJECTION_SCRIPT, None).await?;
+    let react_detected = result
+        .get("reactDetected")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    if !state.react_profile_init_script_installed {
+        let _ = mgr.add_script_to_evaluate(REACT_INJECTION_SCRIPT).await;
+        state.react_profile_init_script_installed = true;
+    }
+
+    state.react_profiling_active = true;
+    Ok(json!({ "started": true, "reactDetected": react_detected }))
+}
+
+async fn handle_react_profile_stop(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    if !state.react_profiling_active {
+        return Err("No React profiling session active".to_string());
+    }
+
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+
+    let raw_data = mgr.evaluate(REACT_COLLECTION_SCRIPT, None).await?;
+
+    state.react_profiling_active = false;
+
+    let react_detected = raw_data
+        .get("reactDetected")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let react_version = raw_data
+        .get("reactVersion")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let renders = raw_data
+        .get("renders")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    // Aggregate per-component stats
+    let mut component_map: std::collections::HashMap<
+        String,
+        (usize, f64, std::collections::HashSet<String>),
+    > = std::collections::HashMap::new();
+    let mut total_duration: f64 = 0.0;
+
+    for render in &renders {
+        let component_name = render
+            .get("componentName")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Unknown")
+            .to_string();
+        let actual_duration = render
+            .get("actualDuration")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let phase = render
+            .get("phase")
+            .and_then(|v| v.as_str())
+            .unwrap_or("update")
+            .to_string();
+
+        total_duration += actual_duration;
+
+        let entry = component_map
+            .entry(component_name)
+            .or_insert_with(|| (0, 0.0, std::collections::HashSet::new()));
+        entry.0 += 1;
+        entry.1 += actual_duration;
+        entry.2.insert(phase);
+    }
+
+    let mut components: Vec<Value> = component_map
+        .iter()
+        .map(|(name, (count, total_actual, reasons))| {
+            let avg = if *count > 0 {
+                total_actual / *count as f64
+            } else {
+                0.0
+            };
+            json!({
+                "name": name,
+                "renderCount": count,
+                "totalActualDuration": total_actual,
+                "averageActualDuration": avg,
+                "reasons": reasons.iter().collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+
+    // Sort by average duration descending for slowestComponents
+    let mut sorted_by_avg = components.clone();
+    sorted_by_avg.sort_by(|a, b| {
+        let avg_b = b.get("averageActualDuration").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let avg_a = a.get("averageActualDuration").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        avg_b.partial_cmp(&avg_a).unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let slowest: Vec<Value> = sorted_by_avg
+        .iter()
+        .take(10)
+        .map(|c| {
+            json!({
+                "name": c.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+                "avgDuration": c.get("averageActualDuration").and_then(|v| v.as_f64()).unwrap_or(0.0),
+            })
+        })
+        .collect();
+
+    // Sort components alphabetically for consistent output
+    components.sort_by(|a, b| {
+        let na = a.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        let nb = b.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        na.cmp(nb)
+    });
+
+    let mut result = json!({
+        "reactDetected": react_detected,
+        "renders": renders,
+        "components": components,
+        "summary": {
+            "totalRenders": renders.len(),
+            "totalComponents": components.len(),
+            "slowestComponents": slowest,
+            "totalDuration": total_duration,
+        },
+    });
+
+    if let Some(version) = react_version {
+        result
+            .as_object_mut()
+            .unwrap()
+            .insert("reactVersion".to_string(), Value::String(version));
+    }
+
+    // Optionally save to file
+    let output_path = cmd.get("path").and_then(|v| v.as_str());
+    if let Some(path) = output_path {
+        let dir = std::path::Path::new(path).parent();
+        if let Some(dir) = dir {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let json_str = serde_json::to_string_pretty(&result)
+            .map_err(|e| format!("Failed to serialize: {}", e))?;
+        std::fs::write(path, json_str)
+            .map_err(|e| format!("Failed to write to {}: {}", path, e))?;
+        result
+            .as_object_mut()
+            .unwrap()
+            .insert("path".to_string(), Value::String(path.to_string()));
+    }
+
+    Ok(result)
 }
 
 async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -5181,10 +5546,7 @@ mod tests {
         let _guard = EnvGuard::new(&["AGENT_BROWSER_HEADED"]);
         _guard.set("AGENT_BROWSER_HEADED", "1");
         let opts = launch_options_from_env();
-        assert!(
-            !opts.headless,
-            "AGENT_BROWSER_HEADED=1 should set headless=false"
-        );
+        assert!(!opts.headless, "AGENT_BROWSER_HEADED=1 should set headless=false");
     }
 
     #[tokio::test]

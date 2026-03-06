@@ -78,6 +78,8 @@ import type {
   TraceStopCommand,
   ProfilerStartCommand,
   ProfilerStopCommand,
+  ReactProfileStartCommand,
+  ReactProfileStopCommand,
   HarStopCommand,
   StorageStateSaveCommand,
   StateListCommand,
@@ -159,6 +161,7 @@ import type {
   RecordingRestartData,
   InputEventData,
   StylesData,
+  ReactProfileData,
 } from './types.js';
 import { successResponse, errorResponse, parseCommand } from './protocol.js';
 import { diffSnapshots, diffScreenshots } from './diff.js';
@@ -461,6 +464,10 @@ async function dispatchAction(command: Command, browser: BrowserManager): Promis
       return await handleProfilerStart(command, browser);
     case 'profiler_stop':
       return await handleProfilerStop(command, browser);
+    case 'react_profile_start':
+      return await handleReactProfileStart(command, browser);
+    case 'react_profile_stop':
+      return await handleReactProfileStop(command, browser);
     case 'har_start':
       return await handleHarStart(command, browser);
     case 'har_stop':
@@ -1750,6 +1757,22 @@ async function handleProfilerStop(
     outputPath = path.join(profileDir, filename);
   }
   const result = await browser.stopProfiling(outputPath);
+  return successResponse(command.id, result);
+}
+
+async function handleReactProfileStart(
+  command: ReactProfileStartCommand,
+  browser: BrowserManager
+): Promise<Response> {
+  const result = await browser.startReactProfiling();
+  return successResponse(command.id, { started: true, reactDetected: result.reactDetected });
+}
+
+async function handleReactProfileStop(
+  command: ReactProfileStopCommand,
+  browser: BrowserManager
+): Promise<Response<ReactProfileData>> {
+  const result = await browser.stopReactProfiling(command.path);
   return successResponse(command.id, result);
 }
 

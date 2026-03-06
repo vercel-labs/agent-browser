@@ -18,7 +18,13 @@ import path from 'node:path';
 import os from 'node:os';
 import { existsSync, mkdirSync, rmSync, readFileSync, statSync } from 'node:fs';
 import { writeFile, mkdir } from 'node:fs/promises';
-import type { LaunchCommand, TraceEvent } from './types.js';
+import type {
+  LaunchCommand,
+  TraceEvent,
+  ReactProfileData,
+  ReactProfileRender,
+  ReactProfileComponent,
+} from './types.js';
 import { type RefMap, type EnhancedSnapshot, getEnhancedSnapshot, parseRef } from './snapshot.js';
 import { safeHeaderMerge } from './state-utils.js';
 import { isDomainAllowed, installDomainFilter, parseDomainList } from './domain-filter.js';
@@ -159,6 +165,11 @@ export class BrowserManager {
   private profileCompleteResolver: (() => void) | null = null;
   private profileDataHandler: ((params: { value?: TraceEvent[] }) => void) | null = null;
   private profileCompleteHandler: (() => void) | null = null;
+
+  // React profiling state
+  private static readonly MAX_REACT_PROFILE_RENDERS = 50_000;
+  private reactProfilingActive: boolean = false;
+  private reactProfileInitScriptInstalled: boolean = false;
 
   /**
    * Check if browser is launched
@@ -2158,6 +2169,322 @@ export class BrowserManager {
     const eventCount = chunks.length;
 
     return { path: outputPath, eventCount };
+  }
+
+  /**
+   * Check if React profiling is currently active
+   */
+  isReactProfilingActive(): boolean {
+    return this.reactProfilingActive;
+  }
+
+  /**
+   * Start React profiling by injecting a hook into the page.
+   * Patches __REACT_DEVTOOLS_GLOBAL_HOOK__ to capture component render data.
+   */
+  async startReactProfiling(): Promise<{ reactDetected: boolean }> {
+    if (this.reactProfilingActive) {
+      throw new Error('React profiling already active');
+    }
+
+    const page = this.getPage();
+    const maxRenders = BrowserManager.MAX_REACT_PROFILE_RENDERS;
+
+    const injectionScript = `
+      (() => {
+        if (window.__AGENT_REACT_PROFILER__) {
+          window.__AGENT_REACT_PROFILER__.renders = [];
+          window.__AGENT_REACT_PROFILER__.active = true;
+          return { reactDetected: window.__AGENT_REACT_PROFILER__.reactDetected };
+        }
+
+        const profiler = {
+          active: true,
+          reactDetected: false,
+          reactVersion: null,
+          renders: [],
+          maxRenders: ${maxRenders},
+          _fiberRoots: null,
+          _observer: null,
+          _rafPending: false,
+        };
+        window.__AGENT_REACT_PROFILER__ = profiler;
+
+        function getComponentName(fiber) {
+          if (!fiber || !fiber.type) return null;
+          if (typeof fiber.type === 'string') return null;
+          return fiber.type.displayName || fiber.type.name || 'Anonymous';
+        }
+
+        // Shared fiber tree walker used by both hook and MutationObserver paths.
+        // requireDuration=true filters to fibers with actualDuration > 0 (hook path).
+        // requireDuration=false records all updated components (MutationObserver path).
+        function collectRenderData(fiberRoot, rendererID, requireDuration) {
+          const current = fiberRoot.current;
+          if (!current) return;
+          const now = performance.now();
+
+          function walkFiber(fiber) {
+            if (!fiber) return;
+            const isComponent = fiber.tag === 0 || fiber.tag === 1 || fiber.tag === 11 || fiber.tag === 15;
+            if (isComponent) {
+              const hasDuration = fiber.actualDuration !== undefined && fiber.actualDuration > 0;
+              const isUpdated = fiber.alternate !== null;
+              if ((requireDuration ? hasDuration : isUpdated)) {
+                const name = getComponentName(fiber);
+                if (name && profiler.renders.length < profiler.maxRenders) {
+                  profiler.renders.push({
+                    id: String(rendererID),
+                    phase: fiber.alternate === null ? 'mount' : 'update',
+                    componentName: name,
+                    actualDuration: hasDuration ? fiber.actualDuration : 0,
+                    baseDuration: fiber.selfBaseDuration || fiber.baseDuration || 0,
+                    startTime: fiber.actualStartTime || now,
+                    commitTime: now,
+                  });
+                }
+              }
+            }
+            walkFiber(fiber.child);
+            walkFiber(fiber.sibling);
+          }
+
+          walkFiber(current);
+        }
+
+        function patchHook(hook) {
+          if (!hook || hook.__agentPatched) return;
+          hook.__agentPatched = true;
+
+          const originalOnCommitFiberRoot = hook.onCommitFiberRoot;
+          hook.onCommitFiberRoot = function(rendererID, fiberRoot, priorityLevel) {
+            if (profiler.active) {
+              try {
+                profiler.reactDetected = true;
+                collectRenderData(fiberRoot, rendererID, true);
+              } catch (e) {}
+            }
+            if (originalOnCommitFiberRoot) {
+              return originalOnCommitFiberRoot.call(this, rendererID, fiberRoot, priorityLevel);
+            }
+          };
+
+          const originalInject = hook.inject;
+          hook.inject = function(renderer) {
+            if (renderer && renderer.version) {
+              profiler.reactVersion = renderer.version;
+            }
+            if (originalInject) {
+              return originalInject.call(this, renderer);
+            }
+            return 0;
+          };
+        }
+
+        function installFreshHook() {
+          const hook = {
+            renderers: new Map(),
+            supportsFiber: true,
+            inject: function(renderer) {
+              profiler.reactDetected = true;
+              if (renderer && renderer.version) {
+                profiler.reactVersion = renderer.version;
+              }
+              const id = hook.renderers.size + 1;
+              hook.renderers.set(id, renderer);
+              return id;
+            },
+            onScheduleFiberRoot: function() {},
+            onCommitFiberRoot: function(rendererID, fiberRoot) {
+              if (profiler.active) {
+                try { collectRenderData(fiberRoot, rendererID, true); } catch (e) {}
+              }
+            },
+            onCommitFiberUnmount: function() {},
+          };
+          hook.__agentPatched = true;
+          window.__REACT_DEVTOOLS_GLOBAL_HOOK__ = hook;
+          return hook;
+        }
+
+        // Find existing React fiber roots in the DOM (post-load detection).
+        // Only checks elements with id attributes since React roots are
+        // conventionally mounted on #root, #app, #__next, etc.
+        function findFiberRoots() {
+          const roots = [];
+          const candidates = document.querySelectorAll('[id]');
+          candidates.forEach(function(el) {
+            const keys = Object.keys(el);
+            for (let i = 0; i < keys.length; i++) {
+              if (keys[i].startsWith('__reactContainer') || keys[i].startsWith('__reactFiber')) {
+                const fiber = el[keys[i]];
+                if (fiber) {
+                  let node = fiber;
+                  while (node.return) { node = node.return; }
+                  if (node.stateNode && node.stateNode.current) {
+                    roots.push(node.stateNode);
+                  }
+                }
+                break;
+              }
+            }
+          });
+          return roots;
+        }
+
+        const existingHook = window.__REACT_DEVTOOLS_GLOBAL_HOOK__;
+        if (existingHook) {
+          patchHook(existingHook);
+          if (existingHook.renderers && existingHook.renderers.size > 0) {
+            profiler.reactDetected = true;
+          }
+        } else {
+          const hook = installFreshHook();
+
+          // Check if React already loaded without a hook (post-load scenario)
+          const fiberRoots = [...new Set(findFiberRoots())];
+          if (fiberRoots.length > 0) {
+            profiler.reactDetected = true;
+            // React doesn't call our hook for future commits since it initialized
+            // without one. Use a MutationObserver to detect DOM changes and
+            // walk the fiber tree for component names. actualDuration will be 0
+            // in this mode since React clears it after commit.
+            profiler._fiberRoots = fiberRoots;
+            let rafPending = false;
+            const observer = new MutationObserver(function() {
+              if (!profiler.active || rafPending) return;
+              rafPending = true;
+              requestAnimationFrame(function() {
+                rafPending = false;
+                if (!profiler.active) return;
+                for (let i = 0; i < profiler._fiberRoots.length; i++) {
+                  try {
+                    collectRenderData(profiler._fiberRoots[i], 1, false);
+                  } catch (e) {}
+                }
+              });
+            });
+            fiberRoots.forEach(function(root) {
+              if (root.containerInfo) {
+                observer.observe(root.containerInfo, { childList: true, subtree: true, characterData: true });
+              }
+            });
+            profiler._observer = observer;
+          }
+        }
+
+        return { reactDetected: profiler.reactDetected };
+      })();
+    `;
+
+    const result = (await page.evaluate(injectionScript)) as { reactDetected: boolean };
+
+    if (!this.reactProfileInitScriptInstalled) {
+      const context = page.context();
+      await context.addInitScript(injectionScript);
+      this.reactProfileInitScriptInstalled = true;
+    }
+
+    this.reactProfilingActive = true;
+    return { reactDetected: result.reactDetected };
+  }
+
+  /**
+   * Stop React profiling and collect the results.
+   */
+  async stopReactProfiling(outputPath?: string): Promise<ReactProfileData> {
+    if (!this.reactProfilingActive) {
+      throw new Error('No React profiling session active');
+    }
+
+    const page = this.getPage();
+
+    const rawData = (await page.evaluate(`
+      (() => {
+        const profiler = window.__AGENT_REACT_PROFILER__;
+        if (!profiler) {
+          return { reactDetected: false, reactVersion: null, renders: [] };
+        }
+        profiler.active = false;
+        if (profiler._observer) {
+          profiler._observer.disconnect();
+          profiler._observer = null;
+        }
+        const data = {
+          reactDetected: profiler.reactDetected,
+          reactVersion: profiler.reactVersion,
+          renders: profiler.renders,
+        };
+        profiler.renders = [];
+        return data;
+      })();
+    `)) as {
+      reactDetected: boolean;
+      reactVersion: string | null;
+      renders: ReactProfileRender[];
+    };
+
+    this.reactProfilingActive = false;
+
+    const componentMap = new Map<
+      string,
+      { name: string; renderCount: number; totalActualDuration: number; reasons: Set<string> }
+    >();
+    let totalDuration = 0;
+
+    for (const render of rawData.renders) {
+      totalDuration += render.actualDuration;
+      const existing = componentMap.get(render.componentName);
+      if (existing) {
+        existing.renderCount++;
+        existing.totalActualDuration += render.actualDuration;
+        existing.reasons.add(render.phase);
+      } else {
+        componentMap.set(render.componentName, {
+          name: render.componentName,
+          renderCount: 1,
+          totalActualDuration: render.actualDuration,
+          reasons: new Set([render.phase]),
+        });
+      }
+    }
+
+    const components: ReactProfileComponent[] = Array.from(componentMap.values()).map((c) => ({
+      name: c.name,
+      renderCount: c.renderCount,
+      totalActualDuration: c.totalActualDuration,
+      averageActualDuration: c.totalActualDuration / c.renderCount,
+      reasons: Array.from(c.reasons),
+    }));
+
+    const sortedByAvg = [...components].sort(
+      (a, b) => b.averageActualDuration - a.averageActualDuration
+    );
+
+    const result: ReactProfileData = {
+      reactDetected: rawData.reactDetected,
+      ...(rawData.reactVersion && { reactVersion: rawData.reactVersion }),
+      renders: rawData.renders,
+      components,
+      summary: {
+        totalRenders: rawData.renders.length,
+        totalComponents: components.length,
+        slowestComponents: sortedByAvg.slice(0, 10).map((c) => ({
+          name: c.name,
+          avgDuration: c.averageActualDuration,
+        })),
+        totalDuration,
+      },
+    };
+
+    if (outputPath) {
+      const dir = path.dirname(outputPath);
+      await mkdir(dir, { recursive: true });
+      await writeFile(outputPath, JSON.stringify(result, null, 2));
+      result.path = outputPath;
+    }
+
+    return result;
   }
 
   /**

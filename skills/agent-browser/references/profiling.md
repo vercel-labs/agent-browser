@@ -113,8 +113,93 @@ Load the output JSON file in any of these tools:
 - **Perfetto UI**: https://ui.perfetto.dev/ -- drag and drop the JSON file
 - **Trace Viewer**: `chrome://tracing` in any Chromium browser
 
+## React Profiling
+
+Capture React-specific component render data without the React DevTools extension. Works fully headless by injecting a lightweight hook into `__REACT_DEVTOOLS_GLOBAL_HOOK__`.
+
+**Requirement**: The target React app must use a development build or a profiling build (`react-dom/profiling`). Standard production builds strip the fiber timing data that makes this work.
+
+### React Profiler Commands
+
+```bash
+# Start React profiling (injects hook into page)
+agent-browser react_profile start
+
+# Perform interactions that trigger React renders
+agent-browser click "#add-item"
+agent-browser fill "#search" "query"
+agent-browser wait 2000
+
+# Stop and get results inline
+agent-browser react_profile stop
+
+# Stop and save to file
+agent-browser react_profile stop ./react-profile.json
+```
+
+### Combining with CDP Profiling
+
+Both profilers can run simultaneously. The CDP profiler captures browser-level trace events (JS execution, layout, paint), while the React profiler captures component-level data (render durations, mount/update phases).
+
+```bash
+agent-browser profiler start
+agent-browser react_profile start
+agent-browser click "#heavy-component"
+agent-browser wait 2000
+agent-browser react_profile stop ./react-profile.json
+agent-browser profiler stop ./chrome-trace.json
+```
+
+### React Profile Output Format
+
+```json
+{
+  "reactDetected": true,
+  "reactVersion": "18.2.0",
+  "renders": [
+    {
+      "id": "1",
+      "phase": "update",
+      "componentName": "TodoList",
+      "actualDuration": 12.5,
+      "baseDuration": 8.3,
+      "startTime": 1500.2,
+      "commitTime": 1512.7
+    }
+  ],
+  "components": [
+    {
+      "name": "TodoList",
+      "renderCount": 5,
+      "totalActualDuration": 62.5,
+      "averageActualDuration": 12.5,
+      "reasons": ["mount", "update"]
+    }
+  ],
+  "summary": {
+    "totalRenders": 42,
+    "totalComponents": 8,
+    "slowestComponents": [
+      { "name": "TodoList", "avgDuration": 12.5 },
+      { "name": "SearchResults", "avgDuration": 8.1 }
+    ],
+    "totalDuration": 156.3
+  }
+}
+```
+
+### Key Fields
+
+- **`actualDuration`** -- time spent rendering the component in this commit (ms)
+- **`baseDuration`** -- estimated time for a full re-render of the subtree (ms)
+- **`phase`** -- `mount` (first render) or `update` (re-render)
+- **`slowestComponents`** -- top 10 components by average render duration
+- **`reactDetected`** -- `false` if no React app was found on the page (graceful degradation, no error)
+
 ## Limitations
 
 - Only works with Chromium-based browsers (Chrome, Edge). Not supported on Firefox or WebKit.
 - Trace data accumulates in memory while profiling is active (capped at 5 million events). Stop profiling promptly after the area of interest.
 - Data collection on stop has a 30-second timeout. If the browser is unresponsive, the stop command may fail.
+- React profiling requires a React development or profiling build. Production builds zero out `actualDuration` and related fields.
+- React render data is capped at 50,000 entries per session to prevent unbounded memory growth.
