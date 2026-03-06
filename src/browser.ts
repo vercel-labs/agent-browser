@@ -1531,6 +1531,10 @@ export class BrowserManager {
         );
       });
 
+    // Ensure close() only drops the WebSocket connection instead of sending
+    // the CDP Browser.close command which kills the external browser process.
+    (browser as any)._shouldCloseConnectionOnClose = true;
+
     // Validate and set up state, cleaning up browser connection if anything fails
     try {
       const contexts = browser.contexts();
