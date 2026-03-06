@@ -1365,6 +1365,7 @@ export class BrowserManager {
           ignoreHTTPSErrors: options.ignoreHTTPSErrors ?? false,
           ...(this.colorScheme && { colorScheme: this.colorScheme }),
           ...(this.downloadPath && { downloadsPath: this.downloadPath }),
+          env: process.env,
         }
       );
       this.isPersistentContext = true;
@@ -1383,6 +1384,7 @@ export class BrowserManager {
         ignoreHTTPSErrors: options.ignoreHTTPSErrors ?? false,
         ...(this.colorScheme && { colorScheme: this.colorScheme }),
         ...(this.downloadPath && { downloadsPath: this.downloadPath }),
+        env: process.env,
       });
       this.isPersistentContext = true;
     } else {
@@ -1392,6 +1394,7 @@ export class BrowserManager {
         executablePath: options.executablePath,
         args: baseArgs,
         ...(this.downloadPath && { downloadsPath: this.downloadPath }),
+        env: process.env,
       });
       this.cdpEndpoint = null;
 
