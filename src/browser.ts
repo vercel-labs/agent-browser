@@ -1489,6 +1489,20 @@ export class BrowserManager {
   }
 
   /**
+   * Safely disconnect from a CDP session without closing the external browser process.
+   * Playwright's browser.close() sends Browser.close command which kills the process.
+   * Accessing the underlying connection allows us to just close the WebSocket.
+   */
+  private async safelyDisconnectCdp(browser: Browser): Promise<void> {
+    const b = browser as any;
+    if (b._connection && typeof b._connection.close === 'function') {
+      b._connection.close();
+    } else {
+      await browser.close().catch(() => {});
+    }
+  }
+
+  /**
    * Connect to a running browser via CDP (Chrome DevTools Protocol)
    * @param cdpEndpoint Either a port number (as string) or a full WebSocket URL (ws:// or wss://)
    */
@@ -1566,7 +1580,7 @@ export class BrowserManager {
       this.activePageIndex = 0;
     } catch (error) {
       // Clean up browser connection if validation or setup failed
-      await browser.close().catch(() => {});
+      await this.safelyDisconnectCdp(browser);
       throw error;
     }
   }
@@ -2521,7 +2535,7 @@ export class BrowserManager {
     } else if (this.cdpEndpoint !== null) {
       // CDP: only disconnect, don't close external app's pages
       if (this.browser) {
-        await this.browser.close().catch(() => {});
+        await this.safelyDisconnectCdp(this.browser);
         this.browser = null;
       }
     } else {
