@@ -496,7 +496,11 @@ function processLine(
   if (!match) {
     // Metadata lines (like /url:) or text content
     if (options.interactive) {
-      // In interactive mode, only keep metadata under interactive elements
+      // In interactive mode, keep /url: metadata (hrefs) but skip other content
+      const trimmed = line.trim();
+      if (trimmed.startsWith('- /url:') || trimmed.startsWith('/url:')) {
+        return line;
+      }
       return null;
     }
     return line;
