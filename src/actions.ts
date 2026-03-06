@@ -1491,8 +1491,7 @@ async function handleDevice(command: DeviceCommand, browser: BrowserManager): Pr
     throw new Error(`Unknown device: ${command.device}. Available: ${available}...`);
   }
 
-  // Apply device viewport
-  await browser.setViewport(device.viewport.width, device.viewport.height);
+  await browser.setDevice(command.device);
 
   // Apply or clear device scale factor
   if (device.deviceScaleFactor && device.deviceScaleFactor !== 1) {
@@ -1517,6 +1516,8 @@ async function handleDevice(command: DeviceCommand, browser: BrowserManager): Pr
     viewport: device.viewport,
     userAgent: device.userAgent,
     deviceScaleFactor: device.deviceScaleFactor,
+    isMobile: device.isMobile,
+    hasTouch: device.hasTouch,
   });
 }
 
