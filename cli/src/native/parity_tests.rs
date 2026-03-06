@@ -510,12 +510,16 @@ async fn test_tracked_request_struct() {
         headers: json!({"Accept": "text/html"}),
         timestamp: 12345,
         resource_type: "Document".to_string(),
+        query_params: Some(json!({"q": "1"})),
+        body: None,
     };
     let serialized = serde_json::to_value(&tr).unwrap();
     assert_eq!(serialized["url"], "https://example.com/api");
     assert_eq!(serialized["method"], "GET");
     assert_eq!(serialized["resourceType"], "Document");
     assert_eq!(serialized["timestamp"], 12345);
+    assert_eq!(serialized["queryParams"]["q"], "1");
+    assert!(serialized.get("body").is_none());
 }
 
 #[tokio::test]
@@ -530,6 +534,8 @@ async fn test_request_tracking_state() {
         headers: json!({}),
         timestamp: 1,
         resource_type: "Document".to_string(),
+        query_params: None,
+        body: None,
     });
     state.tracked_requests.push(super::actions::TrackedRequest {
         url: "https://other.com".to_string(),
@@ -537,6 +543,8 @@ async fn test_request_tracking_state() {
         headers: json!({}),
         timestamp: 2,
         resource_type: "XHR".to_string(),
+        query_params: None,
+        body: Some("{\"k\":\"v\"}".to_string()),
     });
     assert_eq!(state.tracked_requests.len(), 2);
 

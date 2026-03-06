@@ -163,6 +163,8 @@ agent-browser network unroute [url]            # Remove routes
 agent-browser network requests                 # View tracked requests
 agent-browser network requests --clear         # Clear request log
 agent-browser network requests --filter <pat>  # Filter by URL pattern
+agent-browser network requests --query-params --filter <pat>  # Include URL query params
+agent-browser network requests --body --query-params --filter <pat>  # Include request body + query params
 ```
 
 ## Tabs & frames

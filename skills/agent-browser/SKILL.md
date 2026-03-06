@@ -73,6 +73,8 @@ agent-browser scroll down 500 --selector "div.content"  # Scroll within a specif
 agent-browser get text @e1            # Get element text
 agent-browser get url                 # Get current URL
 agent-browser get title               # Get page title
+agent-browser network requests --query-params --json # Include URL query params
+agent-browser network requests --body --json # Include request body
 
 # Wait
 agent-browser wait @e1                # Wait for element

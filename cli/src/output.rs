@@ -323,6 +323,25 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
                         .and_then(|v| v.as_str())
                         .unwrap_or("");
                     println!("{} {} ({})", method, url, resource_type);
+
+                  if let Some(query_params) = req.get("queryParams") {
+                    let has_query = query_params
+                      .as_object()
+                      .map(|obj| !obj.is_empty())
+                      .unwrap_or(false);
+                    if has_query {
+                      println!(
+                        "  query: {}",
+                        serde_json::to_string(query_params).unwrap_or_default()
+                      );
+                    }
+                  }
+
+                  if let Some(body) = req.get("body").and_then(|v| v.as_str()) {
+                    if !body.is_empty() {
+                      println!("  body: {}", body);
+                    }
+                  }
                 }
             }
             return;
@@ -1632,6 +1651,8 @@ Subcommands:
   requests [options]         List captured requests
     --clear                  Clear request log
     --filter <pattern>       Filter by URL pattern
+    --body                   Include request body
+    --query-params           Include URL query params
 
 Global Options:
   --json               Output as JSON
@@ -1643,6 +1664,8 @@ Examples:
   agent-browser network unroute
   agent-browser network requests
   agent-browser network requests --filter "api"
+  agent-browser network requests --query-params --filter "api"
+  agent-browser network requests --body --query-params --filter "api"
   agent-browser network requests --clear
 "##
         }

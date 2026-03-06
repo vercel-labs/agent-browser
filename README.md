@@ -230,6 +230,8 @@ agent-browser network route <url> --body <json>  # Mock response
 agent-browser network unroute [url]            # Remove routes
 agent-browser network requests                 # View tracked requests
 agent-browser network requests --filter api    # Filter requests
+agent-browser network requests --query-params --filter api  # Include URL query params
+agent-browser network requests --body --query-params --filter api  # Include request body and params
 ```
 
 ### Tabs & Windows

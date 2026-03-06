@@ -77,6 +77,8 @@ interface TrackedRequest {
   headers: Record<string, string>;
   timestamp: number;
   resourceType: string;
+  queryParams?: Record<string, string | string[]>;
+  body?: string;
 }
 
 interface ConsoleMessage {
@@ -457,18 +459,56 @@ export class BrowserManager {
         headers: request.headers(),
         timestamp: Date.now(),
         resourceType: request.resourceType(),
+        queryParams: this.parseQueryParams(request.url()),
+        body: request.postData() ?? undefined,
       });
     });
+  }
+
+  private parseQueryParams(url: string): Record<string, string | string[]> | undefined {
+    let parsed: URL;
+    try {
+      parsed = new URL(url);
+    } catch {
+      return undefined;
+    }
+
+    const queryParams: Record<string, string | string[]> = {};
+    for (const [key, value] of parsed.searchParams.entries()) {
+      const existing = queryParams[key];
+      if (existing === undefined) {
+        queryParams[key] = value;
+      } else if (Array.isArray(existing)) {
+        existing.push(value);
+      } else {
+        queryParams[key] = [existing, value];
+      }
+    }
+
+    return Object.keys(queryParams).length > 0 ? queryParams : undefined;
   }
 
   /**
    * Get tracked requests
    */
-  getRequests(filter?: string): TrackedRequest[] {
-    if (filter) {
-      return this.trackedRequests.filter((r) => r.url.includes(filter));
+  getRequests(
+    filter?: string,
+    withBody: boolean = false,
+    withQueryParams: boolean = false
+  ): TrackedRequest[] {
+    const requests = filter
+      ? this.trackedRequests.filter((r) => r.url.includes(filter))
+      : this.trackedRequests;
+
+    if (withBody && withQueryParams) {
+      return requests;
     }
-    return this.trackedRequests;
+
+    return requests.map((r) => ({
+      ...r,
+      body: withBody ? r.body : undefined,
+      queryParams: withQueryParams ? r.queryParams : undefined,
+    }));
   }
 
   /**
