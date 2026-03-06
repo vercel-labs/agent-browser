@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use futures_util::{SinkExt, StreamExt};
@@ -26,6 +26,7 @@ pub struct CdpClient {
     next_id: AtomicU64,
     pending: PendingMap,
     event_tx: broadcast::Sender<CdpEvent>,
+    ws_alive: Arc<AtomicBool>,
     _reader_handle: tokio::task::JoinHandle<()>,
 }
 
@@ -40,39 +41,76 @@ impl CdpClient {
 
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
         let (event_tx, _) = broadcast::channel(256);
+        let ws_alive = Arc::new(AtomicBool::new(true));
 
         let pending_clone = pending.clone();
         let event_tx_clone = event_tx.clone();
+        let ws_alive_clone = ws_alive.clone();
 
         let reader_handle = tokio::spawn(async move {
-            while let Some(msg) = ws_rx.next().await {
-                let msg = match msg {
-                    Ok(Message::Text(text)) => text,
-                    Ok(Message::Close(_)) => break,
-                    Ok(_) => continue,
-                    Err(_) => break,
-                };
+            let close_reason;
+            loop {
+                match ws_rx.next().await {
+                    Some(Ok(Message::Text(text))) => {
+                        let parsed: CdpMessage = match serde_json::from_str(&text) {
+                            Ok(m) => m,
+                            Err(_) => continue,
+                        };
 
-                let parsed: CdpMessage = match serde_json::from_str(&msg) {
-                    Ok(m) => m,
-                    Err(_) => continue,
-                };
-
-                if let Some(id) = parsed.id {
-                    // Response to a command
-                    let mut pending = pending_clone.lock().await;
-                    if let Some(tx) = pending.remove(&id) {
-                        let _ = tx.send(parsed);
+                        if let Some(id) = parsed.id {
+                            // Response to a command
+                            let mut pending = pending_clone.lock().await;
+                            if let Some(tx) = pending.remove(&id) {
+                                let _ = tx.send(parsed);
+                            }
+                        } else if let Some(ref method) = parsed.method {
+                            // Event
+                            let event = CdpEvent {
+                                method: method.clone(),
+                                params: parsed.params.clone().unwrap_or(Value::Null),
+                                session_id: parsed.session_id.clone(),
+                            };
+                            let _ = event_tx_clone.send(event);
+                        }
                     }
-                } else if let Some(ref method) = parsed.method {
-                    // Event
-                    let event = CdpEvent {
-                        method: method.clone(),
-                        params: parsed.params.clone().unwrap_or(Value::Null),
-                        session_id: parsed.session_id.clone(),
-                    };
-                    let _ = event_tx_clone.send(event);
+                    Some(Ok(Message::Close(frame))) => {
+                        close_reason = match frame {
+                            Some(f) => {
+                                format!("WebSocket closed by browser: {} {}", f.code, f.reason)
+                            }
+                            None => "WebSocket closed by browser".to_string(),
+                        };
+                        break;
+                    }
+                    Some(Ok(_)) => continue,
+                    Some(Err(e)) => {
+                        close_reason = format!("WebSocket error: {}", e);
+                        break;
+                    }
+                    None => {
+                        close_reason = "WebSocket stream ended".to_string();
+                        break;
+                    }
                 }
+            }
+
+            // Mark connection as dead and fail all pending commands immediately
+            ws_alive_clone.store(false, Ordering::SeqCst);
+            let mut pending = pending_clone.lock().await;
+            for (_id, tx) in pending.drain() {
+                let error_msg = CdpMessage {
+                    id: None,
+                    result: None,
+                    error: Some(super::types::CdpError {
+                        code: Some(-1),
+                        message: close_reason.clone(),
+                        data: None,
+                    }),
+                    method: None,
+                    params: None,
+                    session_id: None,
+                };
+                let _ = tx.send(error_msg);
             }
         });
 
@@ -81,6 +119,7 @@ impl CdpClient {
             next_id: AtomicU64::new(1),
             pending,
             event_tx,
+            ws_alive,
             _reader_handle: reader_handle,
         })
     }
@@ -91,6 +130,13 @@ impl CdpClient {
         params: Option<Value>,
         session_id: Option<&str>,
     ) -> Result<Value, String> {
+        if !self.ws_alive.load(Ordering::SeqCst) {
+            return Err(format!(
+                "CDP connection is closed, cannot send {}",
+                method
+            ));
+        }
+
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
 
         let cmd = CdpCommand {
@@ -120,10 +166,15 @@ impl CdpClient {
 
         let response = match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
             Ok(Ok(resp)) => resp,
-            Ok(Err(_)) => return Err("CDP response channel closed".to_string()),
+            Ok(Err(_)) => {
+                return Err(format!(
+                    "CDP connection lost while waiting for response to {}",
+                    method
+                ))
+            }
             Err(_) => {
                 self.pending.lock().await.remove(&id);
-                return Err(format!("CDP command timed out: {}", method));
+                return Err(format!("CDP command timed out after 30s: {}", method));
             }
         };
 
