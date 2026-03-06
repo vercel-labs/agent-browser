@@ -119,6 +119,7 @@ export class BrowserManager {
   private colorScheme: 'light' | 'dark' | 'no-preference' | null = null;
   private downloadPath: string | null = null;
   private allowedDomains: string[] = [];
+  private launchedWithoutExtensions: boolean = false;
 
   /**
    * Set the persistent color scheme preference.
@@ -1230,7 +1231,9 @@ export class BrowserManager {
       const needsRelaunch =
         (!cdpEndpoint && !options.autoConnect && this.cdpEndpoint !== null) ||
         (!!cdpEndpoint && this.needsCdpReconnect(cdpEndpoint)) ||
-        (!!options.autoConnect && !this.isCdpConnectionAlive());
+        (!!options.autoConnect && !this.isCdpConnectionAlive()) ||
+        // Relaunch if extensions are being added/changed
+        (hasExtensions && this.launchedWithoutExtensions);
       if (needsRelaunch) {
         await this.close();
       } else if (options.autoConnect && this.isCdpConnectionAlive()) {
@@ -1381,6 +1384,7 @@ export class BrowserManager {
         }
       );
       this.isPersistentContext = true;
+      this.launchedWithoutExtensions = false;
     } else if (hasProfile) {
       // Profile uses persistent context for durable cookies/storage
       // Expand ~ to home directory since it won't be shell-expanded
@@ -1398,6 +1402,7 @@ export class BrowserManager {
         ...(this.downloadPath && { downloadsPath: this.downloadPath }),
       });
       this.isPersistentContext = true;
+      this.launchedWithoutExtensions = false;
     } else {
       // Regular ephemeral browser
       this.browser = await launcher.launch({
@@ -1407,6 +1412,7 @@ export class BrowserManager {
         ...(this.downloadPath && { downloadsPath: this.downloadPath }),
       });
       this.cdpEndpoint = null;
+      this.launchedWithoutExtensions = true;
 
       // Check for auto-load state file (supports encrypted files)
       let storageState:
@@ -2568,5 +2574,6 @@ export class BrowserManager {
     this.refMap = {};
     this.lastSnapshot = '';
     this.frameCallback = null;
+    this.launchedWithoutExtensions = false;
   }
 }
