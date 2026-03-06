@@ -33,6 +33,8 @@ import type {
   CheckCommand,
   UncheckCommand,
   UploadCommand,
+  SaveFileCommand,
+  DropFileCommand,
   DoubleClickCommand,
   FocusCommand,
   DragCommand,
@@ -341,6 +343,10 @@ async function dispatchAction(command: Command, browser: BrowserManager): Promis
       return await handleUncheck(command, browser);
     case 'upload':
       return await handleUpload(command, browser);
+    case 'savefile':
+      return await handleSaveFile(command, browser);
+    case 'dropfile':
+      return await handleDropFile(command, browser);
     case 'dblclick':
       return await handleDoubleClick(command, browser);
     case 'focus':
@@ -1159,6 +1165,84 @@ async function handleUpload(command: UploadCommand, browser: BrowserManager): Pr
     throw toAIFriendlyError(error, command.selector);
   }
   return successResponse(command.id, { uploaded: files });
+}
+
+async function handleSaveFile(
+  command: SaveFileCommand,
+  browser: BrowserManager
+): Promise<Response> {
+  const page = browser.getPage();
+  let url: string;
+
+  if (command.selector) {
+    const locator = browser.getLocator(command.selector);
+    url = (await locator.getAttribute('src')) || (await locator.getAttribute('href')) || '';
+    if (!url) throw new Error('Element has no src or href attribute');
+    url = new URL(url, page.url()).href;
+  } else {
+    url = page.url();
+  }
+
+  // Fetch from Node.js context to avoid cross-origin restrictions
+  const cookies = await page.context().cookies([url]);
+  const cookieHeader = cookies.map((c) => `${c.name}=${c.value}`).join('; ');
+  const resp = await fetch(url, {
+    headers: cookieHeader ? { Cookie: cookieHeader } : {},
+  });
+  if (!resp.ok) throw new Error(`Fetch failed: ${resp.status} ${resp.statusText}`);
+  const buffer = Buffer.from(await resp.arrayBuffer());
+
+  const outputDir = path.dirname(command.outputPath);
+  mkdirSync(outputDir, { recursive: true });
+  fs.writeFileSync(command.outputPath, buffer);
+
+  return successResponse(command.id, {
+    path: command.outputPath,
+    url,
+    size: buffer.length,
+  });
+}
+
+async function handleDropFile(
+  command: DropFileCommand,
+  browser: BrowserManager
+): Promise<Response> {
+  const page = browser.getPage();
+  const fileContent = fs.readFileSync(command.filePath);
+  if (fileContent.length > 10 * 1024 * 1024) {
+    throw new Error('File too large for dropfile (max 10MB). Use upload command for large files.');
+  }
+  const base64Content = fileContent.toString('base64');
+  const fileName = command.fileName || path.basename(command.filePath);
+  const mimeType = command.mimeType || 'application/octet-stream';
+
+  // Resolve selector through the ref system, then dispatch drag events
+  const locator = browser.getLocator(command.selector);
+  const elementHandle = await locator.elementHandle();
+  if (!elementHandle) throw new Error('Element not found: ' + command.selector);
+
+  await elementHandle.evaluate(
+    `(el, args) => {
+      const [b64, fName, fMime] = args;
+      const binary = atob(b64);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+
+      const file = new File([bytes], fName, { type: fMime });
+      const dt = new DataTransfer();
+      dt.items.add(file);
+
+      el.dispatchEvent(new DragEvent('dragenter', { dataTransfer: dt, bubbles: true }));
+      el.dispatchEvent(new DragEvent('dragover', { dataTransfer: dt, bubbles: true }));
+      el.dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true }));
+    }`,
+    [base64Content, fileName, mimeType]
+  );
+
+  return successResponse(command.id, {
+    selector: command.selector,
+    file: fileName,
+  });
 }
 
 async function handleDoubleClick(
