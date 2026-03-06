@@ -23,20 +23,11 @@ impl Drop for LightpandaProcess {
     }
 }
 
+#[derive(Default)]
 pub struct LightpandaLaunchOptions {
     pub executable_path: Option<String>,
     pub proxy: Option<String>,
     pub port: Option<u16>,
-}
-
-impl Default for LightpandaLaunchOptions {
-    fn default() -> Self {
-        Self {
-            executable_path: None,
-            proxy: None,
-            port: None,
-        }
-    }
 }
 
 pub fn find_lightpanda() -> Option<PathBuf> {

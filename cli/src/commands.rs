@@ -137,7 +137,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
 
         // === Core Actions ===
         "click" => {
-            let new_tab = rest.iter().any(|arg| *arg == "--new-tab");
+            let new_tab = rest.contains(&"--new-tab");
             let sel = rest
                 .iter()
                 .find(|arg| **arg != "--new-tab")
@@ -588,7 +588,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
 
                     let mut j = 2;
                     while j < rest.len() {
-                        match rest[j].as_ref() {
+                        match rest[j] {
                             "--url" => {
                                 url = rest.get(j + 1).cloned();
                                 j += 1;
