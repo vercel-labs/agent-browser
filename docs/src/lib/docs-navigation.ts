@@ -41,6 +41,13 @@ export const navigation: NavSection[] = [
     ],
   },
   {
+    title: "Engines",
+    items: [
+      { name: "Chrome", href: "/engines/chrome" },
+      { name: "Lightpanda", href: "/engines/lightpanda" },
+    ],
+  },
+  {
     title: null,
     items: [{ name: "Changelog", href: "/changelog" }],
   },
