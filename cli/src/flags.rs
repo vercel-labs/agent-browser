@@ -240,6 +240,7 @@ pub struct Flags {
     pub confirm_interactive: bool,
     pub native: bool,
     pub engine: Option<String>,
+    pub wait_until: Option<String>,
 
     // Track which launch-time options were explicitly passed via CLI
     // (as opposed to being set only via environment variables)
@@ -347,6 +348,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
             || config.confirm_interactive.unwrap_or(false),
         native: env_var_is_truthy("AGENT_BROWSER_NATIVE") || config.native.unwrap_or(false),
         engine: env::var("AGENT_BROWSER_ENGINE").ok().or(config.engine),
+        wait_until: env::var("AGENT_BROWSER_WAIT_UNTIL").ok(),
         cli_executable_path: false,
         cli_extensions: false,
         cli_profile: false,
@@ -421,6 +423,12 @@ pub fn parse_flags(args: &[String]) -> Flags {
             "--cdp" => {
                 if let Some(s) = args.get(i + 1) {
                     flags.cdp = Some(s.clone());
+                    i += 1;
+                }
+            }
+            "--wait-until" => {
+                if let Some(s) = args.get(i + 1) {
+                    flags.wait_until = Some(s.clone());
                     i += 1;
                 }
             }
@@ -640,6 +648,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--confirm-actions",
         "--config",
         "--engine",
+        "--wait-until",
     ];
 
     let mut i = 0;

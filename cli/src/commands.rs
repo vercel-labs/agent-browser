@@ -129,6 +129,9 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                     nav_cmd["iosDevice"] = json!(device);
                 }
             }
+            if let Some(ref wait_until) = flags.wait_until {
+                nav_cmd["waitUntil"] = json!(wait_until);
+            }
             Ok(nav_cmd)
         }
         "back" => Ok(json!({ "id": id, "action": "back" })),
