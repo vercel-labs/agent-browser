@@ -885,9 +885,10 @@ mod tests {
 
         // Should return an error when file doesn't exist
         assert!(result.is_err());
+        let err_msg = result.unwrap_err();
         assert!(
-            result.unwrap_err().contains("not found")
-                || result.unwrap_err().contains("No such file")
+            err_msg.contains("not found")
+                || err_msg.contains("No such file")
         );
 
         // Cleanup
