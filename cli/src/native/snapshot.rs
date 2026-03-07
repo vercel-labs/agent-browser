@@ -721,4 +721,36 @@ mod tests {
         assert!(dups.contains_key("button:Submit"));
         assert!(!dups.contains_key("button:Cancel"));
     }
+
+    #[test]
+    fn test_render_tree_keeps_button_value_text_in_interactive_mode() {
+        let nodes = vec![TreeNode {
+            role: "button".to_string(),
+            name: "Agree and close: Agree to our data processing and close".to_string(),
+            level: None,
+            checked: None,
+            expanded: None,
+            selected: None,
+            disabled: None,
+            required: None,
+            value_text: Some("Agree and close".to_string()),
+            backend_node_id: None,
+            children: Vec::new(),
+            has_ref: true,
+            ref_id: Some("e1".to_string()),
+            depth: 0,
+        }];
+        let options = SnapshotOptions {
+            interactive: true,
+            ..SnapshotOptions::default()
+        };
+        let mut output = String::new();
+
+        render_tree(&nodes, 0, 0, &mut output, &options);
+
+        assert_eq!(
+            output.trim(),
+            "- button \"Agree and close: Agree to our data processing and close\" [ref=e1]: Agree and close"
+        );
+    }
 }

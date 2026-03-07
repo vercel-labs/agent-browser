@@ -47,6 +47,13 @@ export interface SnapshotOptions {
   selector?: string;
 }
 
+interface ParsedAriaLine {
+  prefix: string;
+  role: string;
+  name?: string;
+  suffix: string;
+}
+
 // Counter for generating refs
 let refCounter = 0;
 
@@ -62,6 +69,46 @@ export function resetRefs(): void {
  */
 function nextRef(): string {
   return `e${++refCounter}`;
+}
+
+function parseAriaNodeKey(key: string): Omit<ParsedAriaLine, 'prefix'> | null {
+  const match = key.match(/^(\w+)(?:\s+"([^"]*)")?(.*)$/);
+  if (!match) return null;
+
+  const [, role, name, suffix] = match;
+  return {
+    role,
+    name,
+    suffix: suffix ?? '',
+  };
+}
+
+function parseAriaLine(line: string): ParsedAriaLine | null {
+  const standardMatch = line.match(/^(\s*-\s*)(\w+)(?:\s+"([^"]*)")?(.*)$/);
+  if (standardMatch) {
+    const [, prefix, role, name, suffix] = standardMatch;
+    return {
+      prefix,
+      role,
+      name,
+      suffix: suffix ?? '',
+    };
+  }
+
+  const quotedMatch = line.match(/^(\s*-\s*)'((?:[^']|'')+)'(?::\s*(.*))?$/);
+  if (!quotedMatch) return null;
+
+  const [, prefix, rawKey, value] = quotedMatch;
+  const key = rawKey.replace(/''/g, "'");
+  const parsedKey = parseAriaNodeKey(key);
+  if (!parsedKey) return null;
+
+  return {
+    prefix,
+    role: parsedKey.role,
+    name: parsedKey.name,
+    suffix: `${parsedKey.suffix}${value ? `: ${value}` : ''}`,
+  };
 }
 
 /**
@@ -393,10 +440,10 @@ function processAriaTree(ariaTree: string, refs: RefMap, options: SnapshotOption
   // For interactive-only mode, we collect just interactive elements
   if (options.interactive) {
     for (const line of lines) {
-      const match = line.match(/^(\s*-\s*)(\w+)(?:\s+"([^"]*)")?(.*)$/);
-      if (!match) continue;
+      const parsed = parseAriaLine(line);
+      if (!parsed) continue;
 
-      const [, , role, name, suffix] = match;
+      const { role, name, suffix } = parsed;
       const roleLower = role.toLowerCase();
 
       if (INTERACTIVE_ROLES.has(roleLower)) {
@@ -416,7 +463,7 @@ function processAriaTree(ariaTree: string, refs: RefMap, options: SnapshotOption
         enhanced += ` [ref=${ref}]`;
         // Only show nth in output if it's > 0 (for readability)
         if (nth > 0) enhanced += ` [nth=${nth}]`;
-        if (suffix && suffix.includes('[')) enhanced += suffix;
+        if (suffix) enhanced += suffix;
 
         result.push(enhanced);
       }
@@ -491,9 +538,9 @@ function processLine(
   //   - button "Submit"
   //   - heading "Title" [level=1]
   //   - link "Click me":
-  const match = line.match(/^(\s*-\s*)(\w+)(?:\s+"([^"]*)")?(.*)$/);
+  const parsed = parseAriaLine(line);
 
-  if (!match) {
+  if (!parsed) {
     // Metadata lines (like /url:) or text content
     if (options.interactive) {
       // In interactive mode, only keep metadata under interactive elements
@@ -502,7 +549,7 @@ function processLine(
     return line;
   }
 
-  const [, prefix, role, name, suffix] = match;
+  const { prefix, role, name, suffix } = parsed;
   const roleLower = role.toLowerCase();
 
   // Skip metadata lines (like /url:)
