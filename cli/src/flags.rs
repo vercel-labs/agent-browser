@@ -1120,6 +1120,7 @@ mod tests {
     fn test_ignore_https_errors_false() {
         let flags = parse_flags(&args("--ignore-https-errors false open"));
         assert!(!flags.ignore_https_errors);
+        assert!(flags.cli_ignore_https_errors);
     }
 
     #[test]
