@@ -1707,8 +1707,33 @@ fn parse_find(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                 },
             })?;
             let subaction = rest.get(2).unwrap_or(&"click");
+
+            // Filter out --name, --exact flags and their values from fill_value
             let fill_value = if rest.len() > 3 {
-                Some(rest[3..].join(" "))
+                let mut filtered = Vec::new();
+                let mut skip_next = false;
+
+                for &arg in rest[3..].iter() {
+                    if skip_next {
+                        skip_next = false;
+                        continue;
+                    }
+                    if arg == "--name" || arg == "--exact" {
+                        // Skip the flag
+                        if arg == "--name" {
+                            // Also skip the next argument (the value for --name)
+                            skip_next = true;
+                        }
+                        continue;
+                    }
+                    filtered.push(arg);
+                }
+
+                if filtered.is_empty() {
+                    None
+                } else {
+                    Some(filtered.join(" "))
+                }
             } else {
                 None
             };
@@ -3067,6 +3092,76 @@ mod tests {
         assert_eq!(cmd["action"], "nth");
         assert_eq!(cmd["index"], 2);
         assert!(cmd.get("value").is_none());
+    }
+
+    // === Find Role Tests ===
+
+    #[test]
+    fn test_find_role_fill_with_name_flag() {
+        let cmd = parse_command(
+            &args("find role combobox fill hello --name Recipient"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "getbyrole");
+        assert_eq!(cmd["role"], "combobox");
+        assert_eq!(cmd["subaction"], "fill");
+        assert_eq!(cmd["value"], "hello");
+        assert_eq!(cmd["name"], "Recipient");
+    }
+
+    #[test]
+    fn test_find_role_fill_multiword_with_name_flag() {
+        let cmd = parse_command(
+            &args("find role textbox fill hello world --name MessageBox"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "getbyrole");
+        assert_eq!(cmd["role"], "textbox");
+        assert_eq!(cmd["subaction"], "fill");
+        assert_eq!(cmd["value"], "hello world");
+        assert_eq!(cmd["name"], "MessageBox");
+    }
+
+    #[test]
+    fn test_find_role_fill_with_exact_and_name_flags() {
+        let cmd = parse_command(
+            &args("find role textbox fill test value --name Email --exact"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "getbyrole");
+        assert_eq!(cmd["role"], "textbox");
+        assert_eq!(cmd["subaction"], "fill");
+        assert_eq!(cmd["value"], "test value");
+        assert_eq!(cmd["name"], "Email");
+        assert_eq!(cmd["exact"], true);
+    }
+
+    #[test]
+    fn test_find_role_click_with_name_flag() {
+        let cmd = parse_command(
+            &args("find role button click --name Submit"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "getbyrole");
+        assert_eq!(cmd["role"], "button");
+        assert_eq!(cmd["subaction"], "click");
+        assert!(cmd.get("value").is_none());
+        assert_eq!(cmd["name"], "Submit");
+    }
+
+    #[test]
+    fn test_find_role_fill_without_name_flag() {
+        let cmd =
+            parse_command(&args("find role textbox fill plain text"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "getbyrole");
+        assert_eq!(cmd["role"], "textbox");
+        assert_eq!(cmd["subaction"], "fill");
+        assert_eq!(cmd["value"], "plain text");
+        assert!(cmd.get("name").is_none() || cmd["name"].is_null());
     }
 
     // === Download Tests ===
