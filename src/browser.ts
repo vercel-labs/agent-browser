@@ -673,9 +673,9 @@ export class BrowserManager {
     let context: BrowserContext;
     if (hasExtensions) {
       const extPaths = options.extensions!.join(',');
-      const session = process.env.AGENT_BROWSER_SESSION || 'default';
+      const session = process.env.BROWSERFLEET_SESSION || 'default';
       context = await launcher.launchPersistentContext(
-        path.join(os.tmpdir(), `agent-browser-ext-${session}`),
+        path.join(os.tmpdir(), `browserfleet-ext-${session}`),
         {
           headless: false,
           executablePath: options.executablePath,

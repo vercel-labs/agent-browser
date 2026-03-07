@@ -1,4 +1,4 @@
-# Docker Compose for building agent-browser
+# Docker Compose for building browserfleet
 # Usage: docker compose -f docker/docker-compose.yml run build-linux
 #        docker compose -f docker/docker-compose.yml run build-windows
 #
@@ -19,10 +19,10 @@ services:
         echo "Building for Linux platforms (parallel)..."
         
         # Build both targets in parallel
-        (echo "→ Linux x64" && cargo zigbuild --release --target x86_64-unknown-linux-gnu && cp /build/target/x86_64-unknown-linux-gnu/release/agent-browser /output/agent-browser-linux-x64 && chmod +x /output/agent-browser-linux-x64 && echo "✓ Linux x64 done") &
+        (echo "→ Linux x64" && cargo zigbuild --release --target x86_64-unknown-linux-gnu && cp /build/target/x86_64-unknown-linux-gnu/release/browserfleet /output/browserfleet-linux-x64 && chmod +x /output/browserfleet-linux-x64 && echo "✓ Linux x64 done") &
         PID1=$!
         
-        (echo "→ Linux ARM64" && cargo zigbuild --release --target aarch64-unknown-linux-gnu && cp /build/target/aarch64-unknown-linux-gnu/release/agent-browser /output/agent-browser-linux-arm64 && chmod +x /output/agent-browser-linux-arm64 && echo "✓ Linux ARM64 done") &
+        (echo "→ Linux ARM64" && cargo zigbuild --release --target aarch64-unknown-linux-gnu && cp /build/target/aarch64-unknown-linux-gnu/release/browserfleet /output/browserfleet-linux-arm64 && chmod +x /output/browserfleet-linux-arm64 && echo "✓ Linux ARM64 done") &
         PID2=$!
         
         # Wait for both to complete
@@ -30,7 +30,7 @@ services:
         
         echo ""
         echo "✓ Linux platforms built successfully!"
-        ls -la /output/agent-browser-linux-*
+        ls -la /output/browserfleet-linux-*
       '
 
   # Build for Windows
@@ -47,11 +47,11 @@ services:
         echo "Building for Windows x64..."
         
         cargo build --release --target x86_64-pc-windows-gnu
-        cp /build/target/x86_64-pc-windows-gnu/release/agent-browser.exe /output/agent-browser-win32-x64.exe
+        cp /build/target/x86_64-pc-windows-gnu/release/browserfleet.exe /output/browserfleet-win32-x64.exe
         
         echo ""
         echo "✓ Windows build completed!"
-        ls -la /output/agent-browser-win32-*
+        ls -la /output/browserfleet-win32-*
       '
 
   # Build for a single target (override with TARGET env var)
@@ -64,11 +64,11 @@ services:
       - ../bin:/output
     environment:
       - TARGET=${TARGET:-x86_64-unknown-linux-gnu}
-      - OUTPUT_NAME=${OUTPUT_NAME:-agent-browser-linux-x64}
+      - OUTPUT_NAME=${OUTPUT_NAME:-browserfleet-linux-x64}
     command: |
       -c '
         cargo zigbuild --release --target $TARGET
-        cp /build/target/$TARGET/release/agent-browser* /output/$OUTPUT_NAME
+        cp /build/target/$TARGET/release/browserfleet* /output/$OUTPUT_NAME
         chmod +x /output/$OUTPUT_NAME 2>/dev/null || true
         echo "✓ Built $OUTPUT_NAME"
       '

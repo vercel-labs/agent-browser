@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Postinstall script for agent-browser
+ * Postinstall script for browserfleet
  * 
  * Downloads the platform-specific native binary if not present.
  */
@@ -20,7 +20,7 @@ const binDir = join(projectRoot, 'bin');
 // Platform detection
 const platformKey = `${platform()}-${arch()}`;
 const ext = platform() === 'win32' ? '.exe' : '';
-const binaryName = `agent-browser-${platformKey}${ext}`;
+const binaryName = `browserfleet-${platformKey}${ext}`;
 const binaryPath = join(binDir, binaryName);
 
 // Package info
@@ -30,7 +30,7 @@ const packageJson = JSON.parse(
 const version = packageJson.version;
 
 // GitHub release URL
-const GITHUB_REPO = 'anthropics/agent-browser'; // Update this to your actual repo
+const GITHUB_REPO = 'anthropics/browserfleet'; // Update this to your actual repo
 const DOWNLOAD_URL = `https://github.com/${GITHUB_REPO}/releases/download/v${version}/${binaryName}`;
 
 async function downloadFile(url, dest) {

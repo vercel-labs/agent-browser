@@ -136,12 +136,12 @@ jobs:
 
       - name: Copy CLI binary to bin directory
         run: |
-          Copy-Item cli/target/x86_64-pc-windows-msvc/release/agent-browser.exe bin/agent-browser-win32-x64.exe
+          Copy-Item cli/target/x86_64-pc-windows-msvc/release/browserfleet.exe bin/browserfleet-win32-x64.exe
 
-      - name: Test agent-browser install command
+      - name: Test browserfleet install command
         run: |
           $env:PATH = "$pwd\bin;$env:PATH"
-          bin/agent-browser-win32-x64.exe install
+          bin/browserfleet-win32-x64.exe install
         shell: pwsh
 
       - name: Verify Chromium was installed

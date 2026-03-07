@@ -11,10 +11,10 @@
  *   - textbox "Email" [ref=e3]
  *
  * Usage:
- *   agent-browser snapshot              # Full snapshot
- *   agent-browser snapshot -i           # Interactive elements only
- *   agent-browser snapshot --depth 3    # Limit depth
- *   agent-browser click @e2             # Click element by ref
+ *   browserfleet snapshot              # Full snapshot
+ *   browserfleet snapshot -i           # Interactive elements only
+ *   browserfleet snapshot --depth 3    # Limit depth
+ *   browserfleet click @e2             # Click element by ref
  */
 
 import type { Page, Locator } from 'playwright-core';

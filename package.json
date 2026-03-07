@@ -1,5 +1,5 @@
 {
-  "name": "agent-browser",
+  "name": "browserfleet",
   "version": "0.4.4",
   "description": "Headless browser automation CLI for AI agents",
   "type": "module",
@@ -11,7 +11,7 @@
     "skills"
   ],
   "bin": {
-    "agent-browser": "./bin/agent-browser"
+    "browserfleet": "./bin/browserfleet"
   },
   "scripts": {
     "prepare": "husky",
@@ -20,10 +20,10 @@
     "build": "tsc",
     "build:native": "npm run version:sync && cargo build --release --manifest-path cli/Cargo.toml && node scripts/copy-native.js",
     "build:linux": "npm run version:sync && docker compose -f docker/docker-compose.yml run --rm build-linux",
-    "build:macos": "npm run version:sync && (cargo build --release --manifest-path cli/Cargo.toml --target aarch64-apple-darwin & cargo build --release --manifest-path cli/Cargo.toml --target x86_64-apple-darwin & wait) && cp cli/target/aarch64-apple-darwin/release/agent-browser bin/agent-browser-darwin-arm64 && cp cli/target/x86_64-apple-darwin/release/agent-browser bin/agent-browser-darwin-x64",
+    "build:macos": "npm run version:sync && (cargo build --release --manifest-path cli/Cargo.toml --target aarch64-apple-darwin & cargo build --release --manifest-path cli/Cargo.toml --target x86_64-apple-darwin & wait) && cp cli/target/aarch64-apple-darwin/release/browserfleet bin/browserfleet-darwin-arm64 && cp cli/target/x86_64-apple-darwin/release/browserfleet bin/browserfleet-darwin-x64",
     "build:windows": "npm run version:sync && docker compose -f docker/docker-compose.yml run --rm build-windows",
     "build:all-platforms": "npm run version:sync && (npm run build:linux & npm run build:windows & wait) && npm run build:macos",
-    "build:docker": "docker build -t agent-browser-builder -f docker/Dockerfile.build .",
+    "build:docker": "docker build -t browserfleet-builder -f docker/Dockerfile.build .",
     "release": "npm run version:sync && npm run build && npm run build:all-platforms && npm publish",
     "start": "node dist/daemon.js",
     "dev": "tsx src/daemon.ts",
@@ -45,12 +45,12 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/vercel-labs/agent-browser.git"
+    "url": "git+https://github.com/nmwcode/browserfleet.git"
   },
   "bugs": {
-    "url": "https://github.com/vercel-labs/agent-browser/issues"
+    "url": "https://github.com/nmwcode/browserfleet/issues"
   },
-  "homepage": "https://github.com/vercel-labs/agent-browser#readme",
+  "homepage": "https://github.com/nmwcode/browserfleet#readme",
   "dependencies": {
     "playwright-core": "^1.57.0",
     "ws": "^8.19.0",

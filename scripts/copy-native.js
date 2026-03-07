@@ -12,13 +12,13 @@ import { platform, arch } from 'os';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = join(__dirname, '..');
 
-const sourcePath = join(projectRoot, 'cli/target/release/agent-browser');
+const sourcePath = join(projectRoot, 'cli/target/release/browserfleet');
 const binDir = join(projectRoot, 'bin');
 
 // Determine platform suffix
 const platformKey = `${platform()}-${arch()}`;
 const ext = platform() === 'win32' ? '.exe' : '';
-const targetName = `agent-browser-${platformKey}${ext}`;
+const targetName = `browserfleet-${platformKey}${ext}`;
 const targetPath = join(binDir, targetName);
 
 if (!existsSync(sourcePath)) {

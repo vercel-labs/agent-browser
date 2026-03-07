@@ -11,12 +11,12 @@ import { StreamServer } from './stream-server.js';
 const isWindows = process.platform === 'win32';
 
 // Session support - each session gets its own socket/pid
-let currentSession = process.env.AGENT_BROWSER_SESSION || 'default';
+let currentSession = process.env.BROWSERFLEET_SESSION || 'default';
 
 // Stream server for browser preview
 let streamServer: StreamServer | null = null;
 
-// Default stream port (can be overridden with AGENT_BROWSER_STREAM_PORT)
+// Default stream port (can be overridden with BROWSERFLEET_STREAM_PORT)
 const DEFAULT_STREAM_PORT = 9223;
 
 /**
@@ -55,7 +55,7 @@ export function getSocketPath(session?: string): string {
   if (isWindows) {
     return String(getPortForSession(sess));
   }
-  return path.join(os.tmpdir(), `agent-browser-${sess}.sock`);
+  return path.join(os.tmpdir(), `browserfleet-${sess}.sock`);
 }
 
 /**
@@ -63,7 +63,7 @@ export function getSocketPath(session?: string): string {
  */
 export function getPortFile(session?: string): string {
   const sess = session ?? currentSession;
-  return path.join(os.tmpdir(), `agent-browser-${sess}.port`);
+  return path.join(os.tmpdir(), `browserfleet-${sess}.port`);
 }
 
 /**
@@ -71,7 +71,7 @@ export function getPortFile(session?: string): string {
  */
 export function getPidFile(session?: string): string {
   const sess = session ?? currentSession;
-  return path.join(os.tmpdir(), `agent-browser-${sess}.pid`);
+  return path.join(os.tmpdir(), `browserfleet-${sess}.pid`);
 }
 
 /**
@@ -104,7 +104,7 @@ export function getConnectionInfo(
   if (isWindows) {
     return { type: 'tcp', port: getPortForSession(sess) };
   }
-  return { type: 'unix', path: path.join(os.tmpdir(), `agent-browser-${sess}.sock`) };
+  return { type: 'unix', path: path.join(os.tmpdir(), `browserfleet-${sess}.sock`) };
 }
 
 /**
@@ -133,7 +133,7 @@ export function cleanupSocket(session?: string): void {
  */
 export function getStreamPortFile(session?: string): string {
   const sess = session ?? currentSession;
-  return path.join(os.tmpdir(), `agent-browser-${sess}.stream`);
+  return path.join(os.tmpdir(), `browserfleet-${sess}.stream`);
 }
 
 /**
@@ -150,8 +150,8 @@ export async function startDaemon(options?: { streamPort?: number }): Promise<vo
   // Start stream server if port is specified (or use default if env var is set)
   const streamPort =
     options?.streamPort ??
-    (process.env.AGENT_BROWSER_STREAM_PORT
-      ? parseInt(process.env.AGENT_BROWSER_STREAM_PORT, 10)
+    (process.env.BROWSERFLEET_STREAM_PORT
+      ? parseInt(process.env.BROWSERFLEET_STREAM_PORT, 10)
       : 0);
 
   if (streamPort > 0) {
@@ -192,8 +192,8 @@ export async function startDaemon(options?: { streamPort?: number }): Promise<vo
             parseResult.command.action !== 'launch' &&
             parseResult.command.action !== 'close'
           ) {
-            const extensions = process.env.AGENT_BROWSER_EXTENSIONS
-              ? process.env.AGENT_BROWSER_EXTENSIONS.split(',')
+            const extensions = process.env.BROWSERFLEET_EXTENSIONS
+              ? process.env.BROWSERFLEET_EXTENSIONS.split(',')
                   .map((p) => p.trim())
                   .filter(Boolean)
               : undefined;
@@ -201,7 +201,7 @@ export async function startDaemon(options?: { streamPort?: number }): Promise<vo
               id: 'auto',
               action: 'launch',
               headless: true,
-              executablePath: process.env.AGENT_BROWSER_EXECUTABLE_PATH,
+              executablePath: process.env.BROWSERFLEET_EXECUTABLE_PATH,
               extensions: extensions,
             });
           }
@@ -314,7 +314,7 @@ export async function startDaemon(options?: { streamPort?: number }): Promise<vo
 }
 
 // Run daemon if this is the entry point
-if (process.argv[1]?.endsWith('daemon.js') || process.env.AGENT_BROWSER_DAEMON === '1') {
+if (process.argv[1]?.endsWith('daemon.js') || process.env.BROWSERFLEET_DAEMON === '1') {
   startDaemon().catch((err) => {
     console.error('Daemon error:', err);
     cleanupSocket();
