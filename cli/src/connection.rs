@@ -150,6 +150,40 @@ fn get_port_for_session(session: &str) -> u16 {
     49152 + ((hash.unsigned_abs() as u32 % 16383) as u16)
 }
 
+/// On Windows, reads the port number from the .port file written by the daemon.
+/// This is more reliable than calculating the port, as it reads the actual port
+/// the daemon is listening on.
+#[cfg(windows)]
+fn get_port_from_file(session: &str) -> Result<u16, String> {
+    let port_path = get_port_path(session);
+    let content = fs::read_to_string(&port_path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            format!(
+                "Port file not found at {}. The daemon may not be running.",
+                port_path.display()
+            )
+        } else {
+            format!("Failed to read port file {}: {}", port_path.display(), e)
+        }
+    })?;
+    let port_str = content.trim();
+    let port: u32 = port_str.parse().map_err(|_| {
+        format!(
+            "Invalid port value in {}: '{}'",
+            port_path.display(),
+            port_str
+        )
+    })?;
+    if port == 0 || port > 65535 {
+        return Err(format!(
+            "Port value {} in {} is out of valid range (1-65535)",
+            port,
+            port_path.display()
+        ));
+    }
+    Ok(port as u16)
+}
+
 #[cfg(unix)]
 fn is_daemon_running(session: &str) -> bool {
     let pid_path = get_pid_path(session);
@@ -178,7 +212,11 @@ fn is_daemon_running(session: &str) -> bool {
     if !pid_path.exists() {
         return false;
     }
-    let port = get_port_for_session(session);
+    // Read port from .port file instead of calculating
+    let port = match get_port_from_file(session) {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
     TcpStream::connect_timeout(
         &format!("127.0.0.1:{}", port).parse().unwrap(),
         Duration::from_millis(100),
@@ -194,7 +232,11 @@ fn daemon_ready(session: &str) -> bool {
     }
     #[cfg(windows)]
     {
-        let port = get_port_for_session(session);
+        // Read port from .port file instead of calculating
+        let port = match get_port_from_file(session) {
+            Ok(p) => p,
+            Err(_) => return false,
+        };
         TcpStream::connect_timeout(
             &format!("127.0.0.1:{}", port).parse().unwrap(),
             Duration::from_millis(50),
@@ -536,7 +578,10 @@ pub fn ensure_daemon(session: &str, opts: &DaemonOptions) -> Result<DaemonResult
         get_socket_dir().join(format!("{}.sock", session)).display()
     );
     #[cfg(windows)]
-    let endpoint_info = format!("port: 127.0.0.1:{}", get_port_for_session(session));
+    let endpoint_info = format!(
+        "port: 127.0.0.1:{}",
+        get_port_from_file(session).unwrap_or_else(|_| get_port_for_session(session))
+    );
 
     Err(format!("Daemon failed to start ({})", endpoint_info))
 }
@@ -551,7 +596,8 @@ fn connect(session: &str) -> Result<Connection, String> {
     }
     #[cfg(windows)]
     {
-        let port = get_port_for_session(session);
+        // Read port from .port file instead of calculating
+        let port = get_port_from_file(session).map_err(|e| format!("Failed to get port: {}", e))?;
         TcpStream::connect(format!("127.0.0.1:{}", port))
             .map(Connection::Tcp)
             .map_err(|e| format!("Failed to connect: {}", e))
@@ -791,5 +837,111 @@ mod tests {
         assert!(!is_transient_error("Invalid JSON syntax"));
         assert!(!is_transient_error("Permission denied"));
         assert!(!is_transient_error("Daemon not found"));
+    }
+
+    // === Windows Port File Tests ===
+
+    #[test]
+    #[cfg(windows)]
+    fn test_get_port_from_file_reads_port_file() {
+        use std::io::Write;
+        let _guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR"]);
+
+        // Create a temp directory for testing
+        let temp_dir = std::env::temp_dir().join("agent-browser-test-port");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+        _guard.set("AGENT_BROWSER_SOCKET_DIR", temp_dir.to_str().unwrap());
+
+        let session = "test-session";
+        let expected_port = 55555u16;
+        let port_path = get_port_path(session);
+
+        // Write the port file with a specific port (different from calculated)
+        let mut file = fs::File::create(&port_path).unwrap();
+        writeln!(file, "{}", expected_port).unwrap();
+
+        // The function should read from the file, not calculate
+        let result = get_port_from_file(session);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), expected_port);
+
+        // Cleanup
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_get_port_from_file_missing_file() {
+        let _guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR"]);
+
+        let temp_dir = std::env::temp_dir().join("agent-browser-test-port2");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+        _guard.set("AGENT_BROWSER_SOCKET_DIR", temp_dir.to_str().unwrap());
+
+        let session = "nonexistent-session";
+        let result = get_port_from_file(session);
+
+        // Should return an error when file doesn't exist
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err();
+        assert!(
+            err_msg.contains("not found")
+                || err_msg.contains("No such file")
+        );
+
+        // Cleanup
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_get_port_from_file_invalid_content() {
+        use std::io::Write;
+        let _guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR"]);
+
+        let temp_dir = std::env::temp_dir().join("agent-browser-test-port3");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+        _guard.set("AGENT_BROWSER_SOCKET_DIR", temp_dir.to_str().unwrap());
+
+        let session = "test-session";
+        let port_path = get_port_path(session);
+
+        // Write invalid content
+        let mut file = fs::File::create(&port_path).unwrap();
+        writeln!(file, "not-a-port").unwrap();
+
+        let result = get_port_from_file(session);
+        assert!(result.is_err());
+
+        // Cleanup
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_get_port_from_file_out_of_range() {
+        use std::io::Write;
+        let _guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR"]);
+
+        let temp_dir = std::env::temp_dir().join("agent-browser-test-port4");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+        _guard.set("AGENT_BROWSER_SOCKET_DIR", temp_dir.to_str().unwrap());
+
+        let session = "test-session";
+        let port_path = get_port_path(session);
+
+        // Write out-of-range port
+        let mut file = fs::File::create(&port_path).unwrap();
+        writeln!(file, "99999").unwrap();
+
+        let result = get_port_from_file(session);
+        assert!(result.is_err());
+
+        // Cleanup
+        let _ = fs::remove_dir_all(&temp_dir);
     }
 }
