@@ -1201,10 +1201,6 @@ export class BrowserManager {
       throw new Error('Extensions cannot be used with CDP connection');
     }
 
-    if (hasProfile && cdpEndpoint) {
-      throw new Error('Profile cannot be used with CDP connection');
-    }
-
     if (hasStorageState && hasProfile) {
       throw new Error(
         'Storage state cannot be used with profile (profile is already persistent storage)'
@@ -1372,6 +1368,21 @@ export class BrowserManager {
       // Profile uses persistent context for durable cookies/storage
       // Expand ~ to home directory since it won't be shell-expanded
       const profilePath = options.profile!.replace(/^~\//, os.homedir() + '/');
+
+      // Warn about known Chromium bug on Windows where headless mode
+      // silently discards cookies from persistent contexts
+      if (
+        browserType === 'chromium' &&
+        process.platform === 'win32' &&
+        (options.headless ?? true)
+      ) {
+        const warningMessage =
+          '[agent-browser] Warning: Headless mode on Windows may not persist cookies. ' +
+          'Use --headed or set AGENT_BROWSER_HEADED=1 for reliable cookie persistence.';
+        console.warn(warningMessage);
+        this.launchWarnings?.push(warningMessage);
+      }
+
       context = await launcher.launchPersistentContext(profilePath, {
         headless: options.headless ?? true,
         executablePath: options.executablePath,
