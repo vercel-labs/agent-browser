@@ -96,6 +96,11 @@ describe('domain-filter', () => {
       expect(script).toContain('[]');
     });
 
+    it('should use location.href as base URL for relative URL support', () => {
+      const script = buildWebSocketFilterScript(['a.com']);
+      expect(script).toContain('new URL(url, location.href)');
+    });
+
     it('should include domain matching logic consistent with isDomainAllowed', () => {
       const script = buildWebSocketFilterScript(['*.example.com']);
       expect(script).toContain('_isDomainAllowed');

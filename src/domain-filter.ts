@@ -51,9 +51,10 @@ export function buildWebSocketFilterScript(allowedDomains: string[]): string {
   }
   function _checkUrl(url) {
     try {
-      var parsed = new URL(url);
+      var parsed = new URL(url, location.href);
       return _isDomainAllowed(parsed.hostname);
     } catch(e) {
+      console.warn('domain-filter: failed to parse URL "' + url + '": ' + e.message);
       return false;
     }
   }
