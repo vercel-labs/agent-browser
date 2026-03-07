@@ -303,6 +303,52 @@ fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
     }
 }
 
+/// Send a close command to the daemon and wait for it to shut down
+fn close_daemon(session: &str) -> bool {
+    if !daemon_ready(session) {
+        return true; // Already not running
+    }
+
+    // Send close command
+    let close_cmd = serde_json::json!({"id": "_close", "action": "close"});
+    let socket_path = get_socket_path(session);
+
+    #[cfg(unix)]
+    {
+        if let Ok(mut stream) = UnixStream::connect(&socket_path) {
+            let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
+            let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+            let _ = stream.write_all(format!("{}\n", close_cmd).as_bytes());
+            let _ = stream.flush();
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        if let Ok(mut stream) = TcpStream::connect_timeout(
+            &format!("127.0.0.1:{}", get_port_for_session(session)).parse().unwrap(),
+            Duration::from_millis(500),
+        ) {
+            let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
+            let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+            let _ = stream.write_all(format!("{}\n", close_cmd).as_bytes());
+            let _ = stream.flush();
+        }
+    }
+
+    // Wait for daemon to shut down (it has a 100ms delay)
+    for _ in 0..20 {
+        thread::sleep(Duration::from_millis(100));
+        if !daemon_ready(session) {
+            // Give it a bit more time to fully exit
+            thread::sleep(Duration::from_millis(200));
+            return true;
+        }
+    }
+
+    false
+}
+
 pub fn ensure_daemon(session: &str, opts: &DaemonOptions) -> Result<DaemonResult, String> {
     // Check if daemon is running AND responsive
     if is_daemon_running(session) && daemon_ready(session) {
@@ -311,9 +357,17 @@ pub fn ensure_daemon(session: &str, opts: &DaemonOptions) -> Result<DaemonResult
         // (daemon has a 100ms shutdown delay, so we wait longer)
         thread::sleep(Duration::from_millis(150));
         if daemon_ready(session) {
-            return Ok(DaemonResult {
-                already_running: true,
-            });
+            // If extensions are specified, we need to restart the daemon
+            // because extensions are passed as environment variables at startup
+            if !opts.extensions.is_empty() {
+                // Close the existing daemon and continue to start a new one
+                close_daemon(session);
+                // Fall through to start new daemon with extensions
+            } else {
+                return Ok(DaemonResult {
+                    already_running: true,
+                });
+            }
         }
     }
 

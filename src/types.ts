@@ -12,6 +12,7 @@ export interface LaunchCommand extends BaseCommand {
   headless?: boolean;
   viewport?: { width: number; height: number } | null;
   browser?: 'chromium' | 'firefox' | 'webkit';
+  channel?: 'chrome' | 'chrome-beta' | 'chrome-dev' | 'chrome-canary' | 'chromium'; // Chrome channel for extensions support
   headers?: Record<string, string>;
   executablePath?: string;
   cdpPort?: number;
