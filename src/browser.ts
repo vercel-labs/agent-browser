@@ -1367,6 +1367,7 @@ export class BrowserManager {
           ...(this.downloadPath && { downloadsPath: this.downloadPath }),
         }
       );
+      this.browser = context.browser();
       this.isPersistentContext = true;
     } else if (hasProfile) {
       // Profile uses persistent context for durable cookies/storage
@@ -1384,6 +1385,7 @@ export class BrowserManager {
         ...(this.colorScheme && { colorScheme: this.colorScheme }),
         ...(this.downloadPath && { downloadsPath: this.downloadPath }),
       });
+      this.browser = context.browser();
       this.isPersistentContext = true;
     } else {
       // Regular ephemeral browser
