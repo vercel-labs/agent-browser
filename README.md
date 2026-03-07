@@ -816,6 +816,25 @@ AGENT_BROWSER_STREAM_PORT=9223 agent-browser open example.com
 
 This starts a WebSocket server on the specified port that streams the browser viewport and accepts input events.
 
+### Stream Resolution & Quality
+
+By default, screencast frames are capped at 1280×720. For HiDPI displays or portrait mobile viewports, increase the limits:
+
+```bash
+# Stream at up to 1920×2560 (enough for 3x mobile Retina)
+AGENT_BROWSER_STREAM_PORT=9223 \
+AGENT_BROWSER_STREAM_MAX_WIDTH=1920 \
+AGENT_BROWSER_STREAM_MAX_HEIGHT=2560 \
+agent-browser open example.com
+```
+
+| Environment Variable | Default | Description |
+|---|---|---|
+| `AGENT_BROWSER_STREAM_MAX_WIDTH` | `1280` | Maximum screencast frame width in pixels |
+| `AGENT_BROWSER_STREAM_MAX_HEIGHT` | `720` | Maximum screencast frame height in pixels |
+| `AGENT_BROWSER_STREAM_QUALITY` | `80` | JPEG quality (0-100, only applies to jpeg format) |
+| `AGENT_BROWSER_STREAM_FORMAT` | `jpeg` | Frame format: `jpeg` or `png` |
+
 ### WebSocket Protocol
 
 Connect to `ws://localhost:9223` to receive frames and send input:

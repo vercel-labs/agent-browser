@@ -94,6 +94,23 @@ export type StreamMessage =
   | ErrorMessage;
 
 /**
+ * Options for configuring the screencast stream resolution and quality.
+ * These map directly to CDP's Page.startScreencast parameters.
+ *
+ * Configure via environment variables:
+ *   AGENT_BROWSER_STREAM_MAX_WIDTH   (default: 1280)
+ *   AGENT_BROWSER_STREAM_MAX_HEIGHT  (default: 720)
+ *   AGENT_BROWSER_STREAM_QUALITY     (default: 80, range 0-100, jpeg only)
+ *   AGENT_BROWSER_STREAM_FORMAT      (default: "jpeg", also "png")
+ */
+export interface StreamScreencastOptions {
+  maxWidth?: number;
+  maxHeight?: number;
+  quality?: number;
+  format?: 'jpeg' | 'png';
+}
+
+/**
  * WebSocket server for streaming browser viewport and receiving input
  */
 export class StreamServer {
@@ -101,11 +118,13 @@ export class StreamServer {
   private clients: Set<WebSocket> = new Set();
   private browser: BrowserManager;
   private port: number;
+  private screencastOptions: StreamScreencastOptions;
   private isScreencasting: boolean = false;
 
-  constructor(browser: BrowserManager, port: number = 9223) {
+  constructor(browser: BrowserManager, port: number = 9223, screencastOptions?: StreamScreencastOptions) {
     this.browser = browser;
     this.port = port;
+    this.screencastOptions = screencastOptions ?? {};
   }
 
   /**
@@ -362,10 +381,10 @@ export class StreamServer {
       }
 
       await this.browser.startScreencast((frame) => this.broadcastFrame(frame), {
-        format: 'jpeg',
-        quality: 80,
-        maxWidth: 1280,
-        maxHeight: 720,
+        format: this.screencastOptions.format ?? 'jpeg',
+        quality: this.screencastOptions.quality ?? 80,
+        maxWidth: this.screencastOptions.maxWidth ?? 1280,
+        maxHeight: this.screencastOptions.maxHeight ?? 720,
         everyNthFrame: 1,
       });
 

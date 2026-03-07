@@ -7,7 +7,7 @@ import { IOSManager } from './ios-manager.js';
 import { parseCommand, serializeResponse, errorResponse } from './protocol.js';
 import { executeCommand, initActionPolicy } from './actions.js';
 import { executeIOSCommand } from './ios-actions.js';
-import { StreamServer } from './stream-server.js';
+import { StreamServer, type StreamScreencastOptions } from './stream-server.js';
 import {
   getSessionsDir,
   ensureSessionsDir,
@@ -358,7 +358,31 @@ export async function startDaemon(options?: {
       : 0);
 
   if (streamPort > 0 && !isIOS && manager instanceof BrowserManager) {
-    streamServer = new StreamServer(manager, streamPort);
+    // Read optional screencast resolution/quality overrides from env
+    const screencastOptions: StreamScreencastOptions = {};
+    if (process.env.AGENT_BROWSER_STREAM_MAX_WIDTH) {
+      const parsed = parseInt(process.env.AGENT_BROWSER_STREAM_MAX_WIDTH, 10);
+      if (!Number.isNaN(parsed))
+        screencastOptions.maxWidth = parsed;
+    }
+    if (process.env.AGENT_BROWSER_STREAM_MAX_HEIGHT) {
+      const parsed = parseInt(process.env.AGENT_BROWSER_STREAM_MAX_HEIGHT, 10);
+      if (!Number.isNaN(parsed))
+        screencastOptions.maxHeight = parsed;
+    }
+    if (process.env.AGENT_BROWSER_STREAM_QUALITY) {
+      const parsed = parseInt(process.env.AGENT_BROWSER_STREAM_QUALITY, 10);
+      if (!Number.isNaN(parsed))
+        screencastOptions.quality = parsed;
+    }
+    if (process.env.AGENT_BROWSER_STREAM_FORMAT) {
+      const fmt = process.env.AGENT_BROWSER_STREAM_FORMAT;
+      if (fmt === 'jpeg' || fmt === 'png') {
+        screencastOptions.format = fmt;
+      }
+    }
+
+    streamServer = new StreamServer(manager, streamPort, screencastOptions);
     await streamServer.start();
 
     // Write stream port to file for clients to discover
