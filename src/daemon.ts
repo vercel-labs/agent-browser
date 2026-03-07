@@ -431,6 +431,19 @@ export async function startDaemon(options?: {
               });
             } else if (manager instanceof BrowserManager) {
               // Auto-launch desktop browser
+              // Check for CDP connection via environment variable (mirrors native daemon behavior)
+              const cdpEnv = process.env.AGENT_BROWSER_CDP;
+              if (cdpEnv) {
+                const cdpPort = /^\d+$/.test(cdpEnv) ? parseInt(cdpEnv, 10) : undefined;
+                const cdpUrl = cdpPort === undefined ? cdpEnv : undefined;
+                await manager.launch({
+                  id: 'auto',
+                  action: 'launch' as const,
+                  cdpPort,
+                  cdpUrl,
+                  autoStateFilePath: getSessionAutoStatePath(),
+                });
+              } else {
               const extensions = process.env.AGENT_BROWSER_EXTENSIONS
                 ? process.env.AGENT_BROWSER_EXTENSIONS.split(/[,\n]/)
                     .map((p) => p.trim())
@@ -483,6 +496,7 @@ export async function startDaemon(options?: {
                 colorScheme,
                 autoStateFilePath: getSessionAutoStatePath(),
               });
+              }
             }
           }
 
