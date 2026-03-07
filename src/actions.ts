@@ -1136,9 +1136,15 @@ async function handleFill(command: FillCommand, browser: BrowserManager): Promis
 async function handleCheck(command: CheckCommand, browser: BrowserManager): Promise<Response> {
   const locator = browser.getLocator(command.selector);
   try {
-    await locator.check();
-  } catch (error) {
-    throw toAIFriendlyError(error, command.selector);
+    await locator.check({ timeout: 5000 });
+  } catch {
+    // Retry with force for hidden checkboxes (common in UI frameworks like
+    // Element UI, Ant Design, Vuetify that hide native inputs with opacity:0)
+    try {
+      await locator.check({ force: true });
+    } catch (error) {
+      throw toAIFriendlyError(error, command.selector);
+    }
   }
   return successResponse(command.id, { checked: true });
 }
@@ -1146,9 +1152,14 @@ async function handleCheck(command: CheckCommand, browser: BrowserManager): Prom
 async function handleUncheck(command: UncheckCommand, browser: BrowserManager): Promise<Response> {
   const locator = browser.getLocator(command.selector);
   try {
-    await locator.uncheck();
-  } catch (error) {
-    throw toAIFriendlyError(error, command.selector);
+    await locator.uncheck({ timeout: 5000 });
+  } catch {
+    // Retry with force for hidden checkboxes
+    try {
+      await locator.uncheck({ force: true });
+    } catch (error) {
+      throw toAIFriendlyError(error, command.selector);
+    }
   }
   return successResponse(command.id, { unchecked: true });
 }
