@@ -465,6 +465,10 @@ export async function startDaemon(options?: {
                 colorSchemeEnv === 'no-preference'
                   ? colorSchemeEnv
                   : undefined;
+
+              // Check for CDP endpoint from environment (like Rust daemon does)
+              const cdpEndpoint = process.env.AGENT_BROWSER_CDP;
+
               await manager.launch({
                 id: 'auto',
                 action: 'launch' as const,
@@ -482,6 +486,7 @@ export async function startDaemon(options?: {
                 allowFileAccess: allowFileAccess,
                 colorScheme,
                 autoStateFilePath: getSessionAutoStatePath(),
+                ...(cdpEndpoint && { cdpUrl: cdpEndpoint }),
               });
             }
           }
