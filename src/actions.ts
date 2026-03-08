@@ -1186,14 +1186,12 @@ async function handleSaveFile(
     url = page.url();
   }
 
-  // Fetch from Node.js context to avoid cross-origin restrictions
-  const cookies = await page.context().cookies([url]);
-  const cookieHeader = cookies.map((c) => `${c.name}=${c.value}`).join('; ');
-  const resp = await fetch(url, {
-    headers: cookieHeader ? { Cookie: cookieHeader } : {},
-  });
-  if (!resp.ok) throw new Error(`Fetch failed: ${resp.status} ${resp.statusText}`);
-  const buffer = Buffer.from(await resp.arrayBuffer());
+  // Use Playwright's request context to avoid CORS and carry all cookies/auth automatically
+  const response = await page.request.get(url);
+  if (!response.ok()) {
+    throw new Error(`Fetch failed: ${response.status()} ${response.statusText()}`);
+  }
+  const buffer = await response.body();
 
   const outputDir = path.dirname(command.outputPath);
   mkdirSync(outputDir, { recursive: true });
