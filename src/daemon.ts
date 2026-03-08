@@ -76,6 +76,11 @@ const DEFAULT_STREAM_PORT = 9223;
 
 /**
  * Save state to file with optional encryption.
+ *
+ * Note: On macOS, Playwright's storageState() can return empty data when called
+ * without a path argument. We work around this by using a temporary file and
+ * letting Playwright write directly to it, then reading the file content.
+ * This ensures the storage state is properly flushed before capture.
  */
 async function saveStateToFile(
   browser: BrowserManager,
@@ -86,18 +91,45 @@ async function saveStateToFile(
     throw new Error('No browser context available');
   }
 
-  const state = await context.storageState();
-  const jsonData = JSON.stringify(state, null, 2);
+  // Use a temporary file to ensure proper storage flushing on macOS
+  // Playwright's storageState({ path }) is more reliable than storageState()
+  const tempDir = os.tmpdir();
+  const tempFile = path.join(tempDir, `agent-browser-state-${Date.now()}.json`);
 
-  const key = getEncryptionKey();
-  if (key) {
-    const encrypted = encryptData(jsonData, key);
-    fs.writeFileSync(filepath, JSON.stringify(encrypted, null, 2));
-    return { encrypted: true };
+  try {
+    // Let Playwright write directly to a temp file - this ensures proper flushing
+    await context.storageState({ path: tempFile });
+
+    // Read the temp file content
+    const jsonData = fs.readFileSync(tempFile, 'utf8');
+
+    // Clean up temp file
+    try {
+      fs.unlinkSync(tempFile);
+    } catch {
+      // Ignore cleanup errors
+    }
+
+    const key = getEncryptionKey();
+    if (key) {
+      const encrypted = encryptData(jsonData, key);
+      fs.writeFileSync(filepath, JSON.stringify(encrypted, null, 2));
+      return { encrypted: true };
+    }
+
+    fs.writeFileSync(filepath, jsonData);
+    return { encrypted: false };
+  } catch (error) {
+    // Clean up temp file on error
+    try {
+      if (fs.existsSync(tempFile)) {
+        fs.unlinkSync(tempFile);
+      }
+    } catch {
+      // Ignore cleanup errors
+    }
+    throw error;
   }
-
-  fs.writeFileSync(filepath, jsonData);
-  return { encrypted: false };
 }
 
 const AUTO_EXPIRE_ENV = 'AGENT_BROWSER_STATE_EXPIRE_DAYS';
