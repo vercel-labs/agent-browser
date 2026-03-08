@@ -194,6 +194,31 @@ pub fn launch_chrome(options: &LaunchOptions) -> Result<ChromeProcess, String> {
         }
     };
 
+    const MAX_RETRIES: u32 = 2;
+    let mut last_error = String::new();
+
+    for attempt in 0..=MAX_RETRIES {
+        if attempt > 0 {
+            std::thread::sleep(Duration::from_millis(500 * attempt as u64));
+        }
+
+        match try_launch_chrome(&chrome_path, options) {
+            Ok(process) => return Ok(process),
+            Err(e) => {
+                let is_race_condition = e.contains("Chrome exited before providing DevTools URL")
+                    || e.contains("Timeout waiting for Chrome DevTools URL");
+                last_error = e;
+                if !is_race_condition || attempt == MAX_RETRIES {
+                    return Err(last_error);
+                }
+            }
+        }
+    }
+
+    Err(last_error)
+}
+
+fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<ChromeProcess, String> {
     let ChromeArgs {
         args,
         temp_user_data_dir,
@@ -205,7 +230,7 @@ pub fn launch_chrome(options: &LaunchOptions) -> Result<ChromeProcess, String> {
         }
     };
 
-    let mut child = Command::new(&chrome_path)
+    let mut child = Command::new(chrome_path)
         .args(&args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -226,9 +251,25 @@ pub fn launch_chrome(options: &LaunchOptions) -> Result<ChromeProcess, String> {
     let ws_url = match wait_for_ws_url(reader) {
         Ok(url) => url,
         Err(e) => {
-            let _ = child.kill();
-            cleanup_temp_dir(&temp_user_data_dir);
-            return Err(e);
+            // Fallback: try reading DevToolsActivePort file from the user data dir.
+            // Chrome writes this file before printing to stderr in some configurations.
+            let fallback_url = temp_user_data_dir
+                .as_deref()
+                .and_then(|dir| read_devtools_active_port(dir))
+                .map(|(port, ws_path)| format!("ws://127.0.0.1:{}{}", port, ws_path));
+
+            if let Some(url) = fallback_url {
+                if let Ok(Some(_)) = child.try_wait() {
+                    let _ = child.kill();
+                    cleanup_temp_dir(&temp_user_data_dir);
+                    return Err(e);
+                }
+                url
+            } else {
+                let _ = child.kill();
+                cleanup_temp_dir(&temp_user_data_dir);
+                return Err(e);
+            }
         }
     };
 
@@ -298,11 +339,21 @@ fn chrome_launch_error(message: &str, stderr_lines: &[String]) -> String {
         );
     }
 
-    let hint = if relevant.iter().any(|l| {
+    let has_sandbox_err = relevant.iter().any(|l| {
         let lower = l.to_lowercase();
         lower.contains("sandbox") || lower.contains("namespace")
-    }) {
+    });
+    let has_gpu_err = relevant.iter().any(|l| l.to_lowercase().contains("gpu"));
+
+    let hint = if has_sandbox_err {
         "\nHint: try --args \"--no-sandbox\" (required in containers, VMs, and some Linux setups)"
+    } else if has_gpu_err {
+        "\nHint: try --args \"--disable-gpu\" if running in a headless environment without GPU"
+    } else if message.contains("exited before") {
+        "\nHint: Chrome crashed during startup. Common causes:\n  \
+         - Running in a container without --no-sandbox\n  \
+         - Missing shared libraries (run `ldd chrome` to check)\n  \
+         - Insufficient /dev/shm size (try --args \"--disable-dev-shm-usage\")"
     } else {
         ""
     };

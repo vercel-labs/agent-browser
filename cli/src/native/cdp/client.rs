@@ -12,21 +12,69 @@ use super::types::{CdpCommand, CdpEvent, CdpMessage};
 
 type PendingMap = Arc<Mutex<HashMap<u64, oneshot::Sender<CdpMessage>>>>;
 
-pub struct CdpClient {
-    ws_tx: Arc<
-        Mutex<
-            futures_util::stream::SplitSink<
-                tokio_tungstenite::WebSocketStream<
-                    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-                >,
-                Message,
+type WsSink = Arc<
+    Mutex<
+        futures_util::stream::SplitSink<
+            tokio_tungstenite::WebSocketStream<
+                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
             >,
+            Message,
         >,
     >,
-    next_id: AtomicU64,
+>;
+
+pub struct CdpClient {
+    ws_tx: WsSink,
+    next_id: Arc<AtomicU64>,
     pending: PendingMap,
     event_tx: broadcast::Sender<CdpEvent>,
     _reader_handle: tokio::task::JoinHandle<()>,
+}
+
+/// Lightweight, `Send`-safe handle for checking whether a CDP connection is
+/// alive without holding the `DaemonState` lock. Shares the underlying
+/// WebSocket and pending-response map with the owning `CdpClient`.
+pub struct CdpPingHandle {
+    ws_tx: WsSink,
+    next_id: Arc<AtomicU64>,
+    pending: PendingMap,
+}
+
+impl CdpPingHandle {
+    /// Sends `Browser.getVersion` with a 3-second timeout.
+    pub async fn is_alive(&self) -> bool {
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let cmd = CdpCommand {
+            id,
+            method: "Browser.getVersion".to_string(),
+            params: None,
+            session_id: None,
+        };
+        let json = match serde_json::to_string(&cmd) {
+            Ok(j) => j,
+            Err(_) => return false,
+        };
+
+        let (tx, rx) = oneshot::channel();
+        self.pending.lock().await.insert(id, tx);
+
+        let send_ok = {
+            let mut ws = self.ws_tx.lock().await;
+            ws.send(Message::Text(json)).await.is_ok()
+        };
+        if !send_ok {
+            self.pending.lock().await.remove(&id);
+            return false;
+        }
+
+        match tokio::time::timeout(std::time::Duration::from_secs(3), rx).await {
+            Ok(Ok(resp)) => resp.error.is_none(),
+            _ => {
+                self.pending.lock().await.remove(&id);
+                false
+            }
+        }
+    }
 }
 
 impl CdpClient {
@@ -78,7 +126,7 @@ impl CdpClient {
 
         Ok(Self {
             ws_tx,
-            next_id: AtomicU64::new(1),
+            next_id: Arc::new(AtomicU64::new(1)),
             pending,
             event_tx,
             _reader_handle: reader_handle,
@@ -136,6 +184,16 @@ impl CdpClient {
 
     pub fn subscribe(&self) -> broadcast::Receiver<CdpEvent> {
         self.event_tx.subscribe()
+    }
+
+    /// Returns a lightweight handle that can check connection liveness
+    /// without borrowing the full `CdpClient`.
+    pub fn ping_handle(&self) -> CdpPingHandle {
+        CdpPingHandle {
+            ws_tx: self.ws_tx.clone(),
+            next_id: self.next_id.clone(),
+            pending: self.pending.clone(),
+        }
     }
 
     pub async fn send_command_typed<P: serde::Serialize, R: serde::de::DeserializeOwned>(

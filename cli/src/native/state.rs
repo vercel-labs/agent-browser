@@ -189,7 +189,7 @@ pub async fn load_state(client: &CdpClient, session_id: &str, path: &str) -> Res
             .await?;
 
         // Brief wait for navigation
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
 
         for entry in &origin.local_storage {
             let js = format!(
