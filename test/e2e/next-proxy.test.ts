@@ -252,7 +252,7 @@ describe("Next.js proxy -> daemon pipeline", () => {
     expect(status).toBe(200);
     expect(data.success).toBe(true);
     const inner = data.data as Record<string, unknown>;
-    expect(inner.base64).toBeTruthy();
+    expect(inner.path).toBeTruthy();
   });
 
   it("POST /api/command returns snapshot text", async () => {
