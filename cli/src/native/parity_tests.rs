@@ -173,6 +173,8 @@ const DOCUMENTED_ACTIONS: &[&str] = &[
     "unroute",
     "requests",
     "credentials",
+    "webauthn_enable",
+    "webauthn_add_virtual_authenticator",
     "auth_save",
     "auth_login",
     "auth_list",

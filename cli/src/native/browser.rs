@@ -852,6 +852,35 @@ impl BrowserManager {
         Ok(())
     }
 
+    pub async fn enable_webauthn(&self) -> Result<(), String> {
+        let session_id = self.active_session_id()?;
+        self.client
+            .send_command_no_params("WebAuthn.enable", Some(session_id))
+            .await?;
+        Ok(())
+    }
+
+    pub async fn add_virtual_authenticator(&self) -> Result<(), String> {
+        let session_id = self.active_session_id()?;
+        self.client
+            .send_command(
+                "WebAuthn.addVirtualAuthenticator",
+                Some(json!({
+                    "options": {
+                        "protocol": "ctap2",
+                        "transport": "internal",
+                        "hasResidentKey": true,
+                        "hasUserVerification": true,
+                        "isUserVerified": true,
+                    }
+                })),
+                Some(session_id),
+            )
+            .await?;
+        Ok(())
+    }
+
+
     pub async fn set_emulated_media(
         &self,
         media: Option<&str>,

@@ -620,6 +620,14 @@ const credentialsSchema = baseCommandSchema.extend({
   password: z.string(),
 });
 
+const webAuthnEnableSchema = baseCommandSchema.extend({
+  action: z.literal('webauthn_enable'),
+});
+
+const webAuthnAddVirtualAuthenticatorSchema = baseCommandSchema.extend({
+  action: z.literal('webauthn_add_virtual_authenticator'),
+});
+
 const mouseMoveSchema = baseCommandSchema.extend({
   action: z.literal('mousemove'),
   x: z.number(),
@@ -1038,6 +1046,8 @@ const commandSchema = z.discriminatedUnion('action', [
   timezoneSchema,
   localeSchema,
   credentialsSchema,
+  webAuthnEnableSchema,
+  webAuthnAddVirtualAuthenticatorSchema,
   mouseMoveSchema,
   mouseDownSchema,
   mouseUpSchema,

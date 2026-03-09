@@ -35,6 +35,8 @@ describe('action-policy', () => {
       expect(getActionCategory('session')).toBe('_internal');
       expect(getActionCategory('auth_save')).toBe('_internal');
       expect(getActionCategory('confirm')).toBe('_internal');
+      expect(getActionCategory('webauthn_enable')).toBe('_internal');
+      expect(getActionCategory('webauthn_add_virtual_authenticator')).toBe('_internal');
     });
 
     it('should return eval for security-sensitive actions', () => {

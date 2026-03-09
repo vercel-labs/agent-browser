@@ -601,6 +601,24 @@ export class BrowserManager {
     await cdp.send('Emulation.clearDeviceMetricsOverride');
   }
 
+  async enableWebAuthn(): Promise<void> {
+    const cdp = await this.getCDPSession();
+    await cdp.send('WebAuthn.enable');
+  }
+
+  async addVirtualAuthenticator(): Promise<void> {
+    const cdp = await this.getCDPSession();
+    await cdp.send('WebAuthn.addVirtualAuthenticator', {
+      options: {
+        protocol: 'ctap2',
+        transport: 'internal',
+        hasResidentKey: true,
+        hasUserVerification: true,
+        isUserVerified: true,
+      },
+    });
+  }
+
   /**
    * Get device descriptor
    */

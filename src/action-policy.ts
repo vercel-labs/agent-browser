@@ -154,6 +154,8 @@ const ACTION_CATEGORIES: Record<string, string> = {
   input_mouse: '_internal',
   input_keyboard: '_internal',
   input_touch: '_internal',
+  webauthn_enable: '_internal',
+  webauthn_add_virtual_authenticator: '_internal',
 
   auth_save: '_internal',
   auth_login: '_internal',

@@ -413,6 +413,14 @@ export interface HttpCredentialsCommand extends BaseCommand {
   password: string;
 }
 
+export interface WebAuthnEnableCommand extends BaseCommand {
+  action: 'webauthn_enable';
+}
+
+export interface WebAuthnAddVirtualAuthenticatorCommand extends BaseCommand {
+  action: 'webauthn_add_virtual_authenticator';
+}
+
 // Fine-grained mouse control
 export interface MouseMoveCommand extends BaseCommand {
   action: 'mousemove';
@@ -1004,6 +1012,8 @@ export type Command =
   | TimezoneCommand
   | LocaleCommand
   | HttpCredentialsCommand
+  | WebAuthnEnableCommand
+  | WebAuthnAddVirtualAuthenticatorCommand
   | MouseMoveCommand
   | MouseDownCommand
   | MouseUpCommand
