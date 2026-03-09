@@ -14,7 +14,7 @@ Run agent-browser + headless Chrome inside ephemeral Vercel Sandbox microVMs. A 
 | Binary size limit | None | 50MB compressed |
 | Session persistence | Yes, within a sandbox lifetime | No, fresh browser per request |
 | Multi-step workflows | Yes, run sequences of commands | Single request only |
-| Startup time | ~30s cold, sub-second with snapshot | ~2-3s |
+| Startup time | ~30s cold, sub-second with sandbox snapshot | ~2-3s |
 | Framework support | Any (Next.js, SvelteKit, Nuxt, etc.) | Next.js (or any Node.js serverless) |
 
 Use Sandbox when you need full Chrome, multi-step workflows, or longer execution times. Use serverless when you need fast single-request screenshots/snapshots.
@@ -25,7 +25,7 @@ Use Sandbox when you need full Chrome, multi-step workflows, or longer execution
 pnpm add @vercel/sandbox
 ```
 
-The sandbox VM installs agent-browser and Chrome on first run. Use snapshots (below) to skip this step.
+The sandbox VM installs agent-browser and Chrome on first run. Use sandbox snapshots (below) to skip this step.
 
 ## Core Pattern
 
@@ -139,9 +139,15 @@ export async function fillAndSubmitForm(url: string, data: Record<string, string
 }
 ```
 
-## Snapshots (Fast Startup)
+## Sandbox Snapshots (Fast Startup)
 
-Without a snapshot, the first sandbox run installs agent-browser + Chromium (~30s). Create a snapshot to make startup sub-second:
+A **sandbox snapshot** is a saved VM image of a Vercel Sandbox with agent-browser + Chromium already installed. Think of it like a Docker image -- instead of installing dependencies from scratch every time, the sandbox boots from the pre-built image.
+
+This is unrelated to agent-browser's *accessibility snapshot* feature (`agent-browser snapshot`), which dumps a page's accessibility tree. A sandbox snapshot is a Vercel infrastructure concept for fast VM startup.
+
+Without a sandbox snapshot, each run installs agent-browser + Chromium (~30s). With one, startup is sub-second.
+
+### Creating a sandbox snapshot
 
 ```ts
 import { Sandbox } from "@vercel/sandbox";
@@ -172,6 +178,8 @@ A helper script is available in the demo app:
 npx tsx examples/demo/scripts/create-snapshot.ts
 ```
 
+Recommended for any production deployment using the Sandbox pattern.
+
 ## Scheduled Workflows (Cron)
 
 Combine with Vercel Cron Jobs for recurring browser tasks:
@@ -200,7 +208,7 @@ export async function GET() {
 
 | Variable | Required | Description |
 |---|---|---|
-| `AGENT_BROWSER_SNAPSHOT_ID` | No (but recommended) | Pre-built snapshot ID for sub-second startup |
+| `AGENT_BROWSER_SNAPSHOT_ID` | No (but recommended) | Pre-built sandbox snapshot ID for sub-second startup (see above) |
 
 The Vercel Sandbox SDK handles OIDC authentication automatically when deployed on Vercel. For local development, run `vercel link` and `vercel env pull` to get the required tokens.
 
@@ -218,4 +226,4 @@ The pattern works identically across frameworks. The only difference is where yo
 
 ## Example
 
-See `examples/demo/` in the agent-browser repo for a working app with the Vercel Sandbox pattern, including a snapshot creation script and demo UI.
+See `examples/demo/` in the agent-browser repo for a working app with the Vercel Sandbox pattern, including a sandbox snapshot creation script and demo UI.

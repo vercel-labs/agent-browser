@@ -21,14 +21,20 @@ Runs headless Chrome directly in the serverless function. On Vercel, `@sparticuz
 
 ## Vercel Sandbox
 
-Spins up a Linux microVM on demand, installs agent-browser + Chrome, runs the commands, and shuts down. No binary size limits. Create a snapshot to make startup sub-second:
+Spins up a Linux microVM on demand, installs agent-browser + Chrome, runs the commands, and shuts down. No binary size limits.
+
+### Sandbox snapshots
+
+Without optimization, each Sandbox run installs agent-browser + Chromium from scratch (~30s). A **sandbox snapshot** is a saved VM image with everything pre-installed -- the sandbox boots from the image instead of installing, bringing startup down to sub-second. (This is unrelated to agent-browser's *accessibility snapshot* feature, which dumps a page's accessibility tree.)
+
+Create a sandbox snapshot by running the helper script once:
 
 ```bash
 npx tsx scripts/create-snapshot.ts
 # Output: AGENT_BROWSER_SNAPSHOT_ID=snap_xxxxxxxxxxxx
 ```
 
-Add the snapshot ID to your Vercel environment variables or `.env.local`.
+Add the ID to your Vercel project environment variables or `.env.local`. Recommended for production.
 
 ## Vercel Configuration
 
@@ -51,7 +57,7 @@ This project uses pnpm. The `.npmrc` includes `public-hoist-pattern[]=@sparticuz
 | Variable | Environment | Description |
 |---|---|---|
 | `CHROMIUM_PATH` | Serverless | Path to local Chrome/Chromium binary (auto-detected on Vercel) |
-| `AGENT_BROWSER_SNAPSHOT_ID` | Sandbox | Pre-built snapshot ID for fast startup |
+| `AGENT_BROWSER_SNAPSHOT_ID` | Sandbox | Sandbox snapshot ID for sub-second startup (see above) |
 
 ## Project Structure
 

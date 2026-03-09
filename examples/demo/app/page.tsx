@@ -324,13 +324,22 @@ export default function Home() {
               clearResults();
             }}
             title="Vercel Sandbox"
-            description="Ephemeral microVM with agent-browser + Chrome. No binary size limits."
+            description={
+              envStatus?.sandbox.hasSnapshot
+                ? "Ephemeral microVM with agent-browser + Chrome pre-installed via sandbox snapshot."
+                : "Ephemeral microVM with agent-browser + Chrome. No binary size limits."
+            }
             badges={
               envStatus && (
                 <EnvBadge
-                  label="AGENT_BROWSER_SNAPSHOT_ID"
+                  label="Sandbox snapshot"
                   status={
                     envStatus.sandbox.hasSnapshot ? "ok" : "warn"
+                  }
+                  value={
+                    envStatus.sandbox.hasSnapshot
+                      ? "sub-second startup"
+                      : "~30s cold start"
                   }
                 />
               )

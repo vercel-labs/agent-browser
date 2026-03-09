@@ -152,17 +152,34 @@ export async function screenshotUrl(url: string) {
 }
 ```
 
-### Optimize with snapshots
+### Optimize with sandbox snapshots
 
-Installing agent-browser + Chromium takes ~30 seconds. Create a
-snapshot to make sandbox creation sub-second:
+Without optimization, each Sandbox run installs agent-browser + Chromium
+from scratch (~30 seconds). A **sandbox snapshot** is a saved VM image
+with everything pre-installed -- like a Docker image for Vercel Sandbox.
+When `AGENT_BROWSER_SNAPSHOT_ID` is set, the sandbox boots from that
+image instead of installing, bringing startup down to sub-second.
+
+This is different from an agent-browser *accessibility snapshot* (which
+dumps a page's accessibility tree). A sandbox snapshot is a Vercel
+infrastructure concept.
+
+Create a sandbox snapshot by running the helper script once:
 
 ```bash
 npx tsx scripts/create-snapshot.ts
-# Output: AGENT_BROWSER_SNAPSHOT_ID=snap_xxxxxxxxxxxx
 ```
 
-Add the snapshot ID to your Vercel environment variables or `.env.local`.
+The script spins up a fresh sandbox, installs agent-browser + Chromium,
+saves the VM state, and prints the snapshot ID:
+
+```
+AGENT_BROWSER_SNAPSHOT_ID=snap_xxxxxxxxxxxx
+```
+
+Add this to your Vercel project environment variables (or `.env.local`
+for local development). Recommended for any production deployment using
+the Sandbox pattern.
 
 ## Scheduled workflows (cron)
 
@@ -204,7 +221,7 @@ export async function GET() {
   </thead>
   <tbody>
     <tr><td>Infrastructure</td><td>None (runs in-function)</td><td>None (Vercel manages VMs)</td></tr>
-    <tr><td>Startup time</td><td>~2-3 seconds</td><td>Sub-second with snapshot</td></tr>
+    <tr><td>Startup time</td><td>~2-3 seconds</td><td>Sub-second with sandbox snapshot</td></tr>
     <tr><td>Binary size limit</td><td>50MB compressed</td><td>None</td></tr>
     <tr><td>Multi-step workflows</td><td>Single request only</td><td>Yes (persistent session)</td></tr>
     <tr><td>Task duration</td><td>Up to 300s (Pro)</td><td>Up to ~2 minutes</td></tr>
@@ -220,7 +237,7 @@ export async function GET() {
   </thead>
   <tbody>
     <tr><td><code>CHROMIUM_PATH</code></td><td>Serverless</td><td>Path to local Chrome/Chromium (auto-detected on Vercel)</td></tr>
-    <tr><td><code>AGENT_BROWSER_SNAPSHOT_ID</code></td><td>Sandbox</td><td>Pre-built snapshot for fast startup</td></tr>
+    <tr><td><code>AGENT_BROWSER_SNAPSHOT_ID</code></td><td>Sandbox</td><td>Pre-built sandbox snapshot ID for sub-second startup (see above)</td></tr>
   </tbody>
 </table>
 
