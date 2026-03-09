@@ -1,5 +1,11 @@
 # agent-browser
 
+## 0.17.1
+
+### Patch Changes
+
+- 94cd888: Added support for device scale factor (retina display) in the viewport command via an optional scale parameter. Also added webview target type support for better Electron application compatibility, and the pages list now includes target type information.
+
 ## 0.17.0
 
 ### Minor Changes
