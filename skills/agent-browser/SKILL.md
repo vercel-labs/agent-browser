@@ -85,6 +85,11 @@ agent-browser download @e1 ./file.pdf          # Click element to trigger downlo
 agent-browser wait --download ./output.zip     # Wait for any download to complete
 agent-browser --download-path ./downloads open <url>  # Set default download directory
 
+# Viewport & Device Emulation
+agent-browser set viewport 1920 1080          # Set viewport size (default: 1280x720)
+agent-browser set viewport 1920 1080 2        # 2x retina (same CSS size, higher res screenshots)
+agent-browser set device "iPhone 14"          # Emulate device (viewport + user agent)
+
 # Capture
 agent-browser screenshot              # Screenshot to temp dir
 agent-browser screenshot --full       # Full page screenshot
@@ -218,6 +223,29 @@ AGENT_BROWSER_COLOR_SCHEME=dark agent-browser open https://example.com
 # Or set during session (persists for subsequent commands)
 agent-browser set media dark
 ```
+
+### Viewport & Responsive Testing
+
+```bash
+# Set a custom viewport size (default is 1280x720)
+agent-browser set viewport 1920 1080
+agent-browser screenshot desktop.png
+
+# Test mobile-width layout
+agent-browser set viewport 375 812
+agent-browser screenshot mobile.png
+
+# Retina/HiDPI: same CSS layout at 2x pixel density
+# Screenshots stay at logical viewport size, but content renders at higher DPI
+agent-browser set viewport 1920 1080 2
+agent-browser screenshot retina.png
+
+# Device emulation (sets viewport + user agent in one step)
+agent-browser set device "iPhone 14"
+agent-browser screenshot device.png
+```
+
+The `scale` parameter (3rd argument) sets `window.devicePixelRatio` without changing CSS layout. Use it when testing retina rendering or capturing higher-resolution screenshots.
 
 ### Visual Browser (Debugging)
 
