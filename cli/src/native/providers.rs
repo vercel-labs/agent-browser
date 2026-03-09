@@ -185,8 +185,7 @@ async fn connect_browser_use() -> Result<(String, Option<ProviderSession>), Stri
 }
 
 async fn connect_kernel() -> Result<(String, Option<ProviderSession>), String> {
-    let api_key =
-        env::var("KERNEL_API_KEY").map_err(|_| "KERNEL_API_KEY environment variable is not set")?;
+    let api_key = env::var("KERNEL_API_KEY").ok();
     let endpoint =
         env::var("KERNEL_ENDPOINT").unwrap_or_else(|_| "https://api.onkernel.com".to_string());
 
@@ -218,10 +217,13 @@ async fn connect_kernel() -> Result<(String, Option<ProviderSession>), String> {
     }
 
     let client = reqwest::Client::new();
-    let response = client
+    let mut request = client
         .post(&url)
-        .header("Content-Type", "application/json")
-        .header("Authorization", format!("Bearer {}", api_key))
+        .header("Content-Type", "application/json");
+    if let Some(ref key) = api_key {
+        request = request.header("Authorization", format!("Bearer {}", key));
+    }
+    let response = request
         .json(&body)
         .send()
         .await
