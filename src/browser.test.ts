@@ -636,6 +636,15 @@ describe('BrowserManager', () => {
       expect(size?.height).toBe(1080);
     });
 
+    it('should sync contextOptions when viewport is set', async () => {
+      await browser.setViewport(390, 844);
+      // Verify the page viewport was updated
+      const page = browser.getPage();
+      const size = page.viewportSize();
+      expect(size?.width).toBe(390);
+      expect(size?.height).toBe(844);
+    });
+
     it('should disable viewport when --start-maximized is in args', async () => {
       const testBrowser = new BrowserManager();
       await testBrowser.launch({ headless: true, args: ['--start-maximized'] });
@@ -1217,6 +1226,110 @@ describe('BrowserManager', () => {
           touchPoints: [],
         })
       ).resolves.not.toThrow();
+    });
+  });
+
+  describe('recording context options', () => {
+    it('should carry over launch options to recording context', async () => {
+      const customUA = 'TestAgent/1.0 recording-context-test';
+      const testBrowser = new BrowserManager();
+      await testBrowser.launch({
+        headless: true,
+        userAgent: customUA,
+        ignoreHTTPSErrors: true,
+      });
+
+      const page = testBrowser.getPage();
+      await page.goto('about:blank');
+
+      const outputPath = `/tmp/test-recording-opts-${Date.now()}.webm`;
+      await testBrowser.startRecording(outputPath);
+
+      expect(testBrowser.isRecording()).toBe(true);
+
+      // userAgent should be carried over to the recording context
+      const recordingPage = testBrowser.getPage();
+      const ua = await recordingPage.evaluate(() => navigator.userAgent);
+      expect(ua).toBe(customUA);
+
+      await testBrowser.stopRecording();
+      await testBrowser.close();
+    });
+
+    it('should carry over viewport set via setViewport to recording context', async () => {
+      const testBrowser = new BrowserManager();
+      await testBrowser.launch({ headless: true });
+
+      // Set a portrait viewport after launch
+      await testBrowser.setViewport(390, 844);
+
+      const page = testBrowser.getPage();
+      await page.goto('about:blank');
+
+      const outputPath = `/tmp/test-recording-viewport-${Date.now()}.webm`;
+      await testBrowser.startRecording(outputPath);
+
+      const recordingPage = testBrowser.getPage();
+      const viewport = recordingPage.viewportSize();
+      expect(viewport).toEqual({ width: 390, height: 844 });
+
+      await testBrowser.stopRecording();
+      await testBrowser.close();
+    });
+
+    it('should use browser defaults when no options are set', async () => {
+      const testBrowser = new BrowserManager();
+      await testBrowser.launch({ headless: true });
+
+      const page = testBrowser.getPage();
+      await page.goto('about:blank');
+
+      const outputPath = `/tmp/test-recording-defaults-${Date.now()}.webm`;
+      await testBrowser.startRecording(outputPath);
+
+      const recordingPage = testBrowser.getPage();
+
+      // userAgent should be the default Chromium one
+      const ua = await recordingPage.evaluate(() => navigator.userAgent);
+      expect(ua).toContain('HeadlessChrome');
+
+      // color scheme should default to light
+      const prefersDark = await recordingPage.evaluate(
+        () => window.matchMedia('(prefers-color-scheme: dark)').matches
+      );
+      expect(prefersDark).toBe(false);
+
+      // viewport should be the recording default (1280x720)
+      const viewport = recordingPage.viewportSize();
+      expect(viewport).toEqual({ width: 1280, height: 720 });
+
+      await testBrowser.stopRecording();
+      await testBrowser.close();
+    });
+
+    it('should not leak context options across close/relaunch cycles', async () => {
+      const testBrowser = new BrowserManager();
+
+      // First session: launch with custom userAgent
+      await testBrowser.launch({ headless: true, userAgent: 'StaleAgent/1.0' });
+      await testBrowser.close();
+
+      // Second session: launch without custom userAgent
+      await testBrowser.launch({ headless: true });
+      const page = testBrowser.getPage();
+      await page.goto('about:blank');
+
+      const outputPath = `/tmp/test-recording-stale-${Date.now()}.webm`;
+      await testBrowser.startRecording(outputPath);
+
+      // Recording should use default UA, not the stale one from the first session
+      const recordingPage = testBrowser.getPage();
+      const ua = await recordingPage.evaluate(() => navigator.userAgent);
+      expect(ua).not.toContain('StaleAgent');
+      expect(ua).toContain('HeadlessChrome');
+
+      await testBrowser.stopRecording();
+      await testBrowser.close();
     });
   });
 });
