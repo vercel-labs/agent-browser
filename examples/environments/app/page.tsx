@@ -1,12 +1,8 @@
 "use client";
 
-import { useState, useEffect, useSyncExternalStore } from "react";
-import { takeScreenshot, takeSnapshot, getEnvStatus } from "./actions/browse";
-import type {
-  ScreenshotResult,
-  SnapshotResult,
-  EnvStatus,
-} from "./actions/browse";
+import { useState, useEffect, useRef, useSyncExternalStore } from "react";
+import { getEnvStatus } from "./actions/browse";
+import type { EnvStatus } from "./actions/browse";
 import {
   ResizablePanelGroup,
   ResizablePanel,
@@ -24,7 +20,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Loader2, Monitor, CircleX, Sun, Moon } from "lucide-react";
+import { Loader2, Monitor, CircleX, Sun, Moon, Check } from "lucide-react";
 
 const MOBILE_QUERY = "(max-width: 767px)";
 const subscribe = (cb: () => void) => {
@@ -64,6 +60,20 @@ function useTheme() {
 }
 
 type Action = "screenshot" | "snapshot";
+
+type StepInfo = {
+  step: string;
+  status: "running" | "done" | "error";
+  elapsed?: number;
+};
+
+type BrowseResult = {
+  ok: boolean;
+  screenshot?: string;
+  snapshot?: string;
+  title?: string;
+  error?: string;
+};
 
 function formatError(raw: string): string {
   let cleaned = raw.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
@@ -105,6 +115,38 @@ function SegmentedControl<T extends string>({
   );
 }
 
+function StepIndicator({ step }: { step: StepInfo }) {
+  return (
+    <div className="flex items-center gap-2.5 py-1">
+      <div className="size-4 flex items-center justify-center shrink-0">
+        {step.status === "running" ? (
+          <Loader2 className="size-3.5 animate-spin text-muted-foreground" />
+        ) : step.status === "done" ? (
+          <Check className="size-3.5 text-emerald-500" />
+        ) : (
+          <CircleX className="size-3.5 text-destructive" />
+        )}
+      </div>
+      <span
+        className={`text-[13px] ${
+          step.status === "running"
+            ? "text-foreground"
+            : step.status === "done"
+              ? "text-muted-foreground"
+              : "text-destructive"
+        }`}
+      >
+        {step.step}
+      </span>
+      {step.elapsed != null && step.status !== "running" && (
+        <span className="text-[11px] text-muted-foreground/60 tabular-nums ml-auto">
+          {(step.elapsed / 1000).toFixed(1)}s
+        </span>
+      )}
+    </div>
+  );
+}
+
 function ErrorDisplay({ error }: { error: string }) {
   const isHtml = /<[a-z][\s\S]*>/i.test(error);
   const message = isHtml ? formatError(error) : error;
@@ -131,54 +173,111 @@ function ErrorDisplay({ error }: { error: string }) {
   );
 }
 
+async function streamBrowse(
+  url: string,
+  action: Action,
+  onStep: (step: StepInfo) => void,
+): Promise<BrowseResult> {
+  const res = await fetch("/api/browse", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ url, action }),
+  });
+
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    return { ok: false, error: body?.error || `HTTP ${res.status}` };
+  }
+
+  const reader = res.body?.getReader();
+  if (!reader) {
+    return { ok: false, error: "No response stream" };
+  }
+
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let result: BrowseResult = { ok: false, error: "No result received" };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+
+    const parts = buffer.split("\n\n");
+    buffer = parts.pop() || "";
+
+    for (const part of parts) {
+      const eventMatch = part.match(/^event: (\w+)\ndata: ([\s\S]+)$/);
+      if (!eventMatch) continue;
+
+      const [, event, data] = eventMatch;
+      try {
+        const parsed = JSON.parse(data);
+        if (event === "step") {
+          onStep(parsed as StepInfo);
+        } else if (event === "result") {
+          result = parsed as BrowseResult;
+        }
+      } catch {
+        // skip malformed events
+      }
+    }
+  }
+
+  return result;
+}
+
 export default function Home() {
   const isMobile = useIsMobile();
   const { theme, toggle: toggleTheme } = useTheme();
   const [url, setUrl] = useState<string>(ALLOWED_URLS[0]);
   const [loading, setLoading] = useState(false);
   const [action, setAction] = useState<Action>("screenshot");
-  const [screenshotResult, setScreenshotResult] =
-    useState<ScreenshotResult | null>(null);
-  const [snapshotResult, setSnapshotResult] =
-    useState<SnapshotResult | null>(null);
+  const [result, setResult] = useState<BrowseResult | null>(null);
+  const [steps, setSteps] = useState<StepInfo[]>([]);
   const [envStatus, setEnvStatus] = useState<EnvStatus | null>(null);
+  const stepsEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     getEnvStatus().then(setEnvStatus);
   }, []);
 
   function clearResults() {
-    setScreenshotResult(null);
-    setSnapshotResult(null);
+    setResult(null);
+    setSteps([]);
   }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setLoading(true);
-    setScreenshotResult(null);
-    setSnapshotResult(null);
+    setResult(null);
+    setSteps([]);
 
     try {
-      if (action === "screenshot") {
-        const result = await takeScreenshot(url);
-        setScreenshotResult(result);
-      } else {
-        const result = await takeSnapshot(url);
-        setSnapshotResult(result);
-      }
+      const browseResult = await streamBrowse(url, action, (step) => {
+        setSteps((prev) => {
+          const existing = prev.findIndex((s) => s.step === step.step);
+          if (existing >= 0) {
+            const updated = [...prev];
+            updated[existing] = step;
+            return updated;
+          }
+          return [...prev, step];
+        });
+      });
+      setResult(browseResult);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      if (action === "screenshot") {
-        setScreenshotResult({ ok: false, error: message });
-      } else {
-        setSnapshotResult({ ok: false, error: message });
-      }
+      setResult({ ok: false, error: message });
     } finally {
       setLoading(false);
     }
   }
 
-  const hasResult = screenshotResult || snapshotResult;
+  useEffect(() => {
+    stepsEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [steps]);
 
   const controlsForm = (
     <form onSubmit={handleSubmit} className="p-5 space-y-5">
@@ -233,7 +332,9 @@ export default function Home() {
 
       {envStatus && !envStatus.sandbox.hasSnapshot && (
         <Alert>
-          <AlertTitle className="text-[12px]">Sandbox snapshot not configured</AlertTitle>
+          <AlertTitle className="text-[12px]">
+            Sandbox snapshot not configured
+          </AlertTitle>
           <AlertDescription className="text-[11px]">
             Without a sandbox snapshot, the VM installs agent-browser +
             Chromium on every request (~30s). Create one with{" "}
@@ -249,70 +350,103 @@ export default function Home() {
         </Alert>
       )}
 
-      <Button
-        type="submit"
-        disabled={loading}
-        className="w-full"
-        size="lg"
-      >
+      <Button type="submit" disabled={loading} className="w-full" size="lg">
         {loading && <Loader2 className="size-4 animate-spin" />}
         {loading ? "Running..." : "Run"}
       </Button>
     </form>
   );
 
-  const resultContent = loading ? (
-    <div className="min-h-[300px] md:h-full flex flex-col items-center justify-center gap-3 text-muted-foreground">
-      <Loader2 className="size-6 animate-spin" />
-      <p className="text-sm">Taking {action}...</p>
+  const showSteps = loading || (steps.length > 0 && !result);
+  const hasResult = result && !loading;
+
+  const resultContent = showSteps ? (
+    <div className="p-6 lg:p-10">
+      <div className="max-w-xl mx-auto">
+        <div className="space-y-0.5">
+          {steps.map((s, i) => (
+            <StepIndicator key={`${s.step}-${i}`} step={s} />
+          ))}
+          <div ref={stepsEndRef} />
+        </div>
+      </div>
     </div>
   ) : hasResult ? (
     <div className="flex flex-col items-center p-6 lg:p-10">
-      {screenshotResult &&
-        (screenshotResult.ok ? (
-          <div className="w-full max-w-3xl">
-            <div className="flex items-center justify-between mb-4">
-              <h2 className="text-sm font-semibold truncate mr-3">
-                {screenshotResult.title}
-              </h2>
-              <Badge variant="outline" className="font-mono text-[11px] shrink-0">
-                screenshot
-              </Badge>
-            </div>
-            <div className="rounded-xl border border-border overflow-hidden shadow-sm">
-              <img
-                src={`data:image/png;base64,${screenshotResult.screenshot}`}
-                alt={screenshotResult.title}
-                className="w-full block"
-              />
-            </div>
+      {result.ok && result.screenshot && (
+        <div className="w-full max-w-3xl">
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-sm font-semibold truncate mr-3">
+              {result.title}
+            </h2>
+            <Badge
+              variant="outline"
+              className="font-mono text-[11px] shrink-0"
+            >
+              screenshot
+            </Badge>
           </div>
-        ) : (
-          <ErrorDisplay
-            error={screenshotResult.error ?? "Unknown error"}
-          />
-        ))}
+          <div className="rounded-xl border border-border overflow-hidden shadow-sm">
+            <img
+              src={`data:image/png;base64,${result.screenshot}`}
+              alt={result.title}
+              className="w-full block"
+            />
+          </div>
+          <details className="mt-4">
+            <summary className="text-[11px] text-muted-foreground cursor-pointer hover:text-foreground transition-colors">
+              Show steps ({steps.length})
+            </summary>
+            <div className="mt-2 space-y-0.5">
+              {steps.map((s, i) => (
+                <StepIndicator key={`${s.step}-${i}`} step={s} />
+              ))}
+            </div>
+          </details>
+        </div>
+      )}
 
-      {snapshotResult &&
-        (snapshotResult.ok ? (
-          <div className="w-full max-w-3xl">
-            <div className="flex items-center justify-between mb-4">
-              <h2 className="text-sm font-semibold truncate mr-3">
-                {snapshotResult.title}
-              </h2>
-              <Badge variant="outline" className="font-mono text-[11px] shrink-0">
-                snapshot
-              </Badge>
-            </div>
-            <pre className="bg-card rounded-xl border border-border p-5 overflow-auto text-[13px] leading-relaxed font-mono max-h-[calc(100vh-12rem)]">
-              {snapshotResult.snapshot}
-            </pre>
+      {result.ok && result.snapshot && (
+        <div className="w-full max-w-3xl">
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-sm font-semibold truncate mr-3">
+              {result.title}
+            </h2>
+            <Badge
+              variant="outline"
+              className="font-mono text-[11px] shrink-0"
+            >
+              snapshot
+            </Badge>
           </div>
-        ) : (
-          <ErrorDisplay
-            error={snapshotResult.error ?? "Unknown error"}
-          />
-        ))}
+          <pre className="bg-card rounded-xl border border-border p-5 overflow-auto text-[13px] leading-relaxed font-mono max-h-[calc(100vh-12rem)]">
+            {result.snapshot}
+          </pre>
+          <details className="mt-4">
+            <summary className="text-[11px] text-muted-foreground cursor-pointer hover:text-foreground transition-colors">
+              Show steps ({steps.length})
+            </summary>
+            <div className="mt-2 space-y-0.5">
+              {steps.map((s, i) => (
+                <StepIndicator key={`${s.step}-${i}`} step={s} />
+              ))}
+            </div>
+          </details>
+        </div>
+      )}
+
+      {!result.ok && (
+        <div className="w-full max-w-2xl space-y-4">
+          <ErrorDisplay error={result.error ?? "Unknown error"} />
+          {steps.length > 0 && (
+            <div className="space-y-0.5">
+              {steps.map((s, i) => (
+                <StepIndicator key={`${s.step}-${i}`} step={s} />
+              ))}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   ) : (
     <div className="min-h-[300px] md:h-full flex flex-col items-center justify-center text-muted-foreground">

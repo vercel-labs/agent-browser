@@ -16,7 +16,43 @@ export type SandboxResult = {
   stderr: string;
 };
 
+export type StepEvent = {
+  step: string;
+  status: "running" | "done" | "error";
+  elapsed?: number;
+};
+
+export type OnStep = (event: StepEvent) => void;
+
 const SNAPSHOT_ID = process.env.AGENT_BROWSER_SNAPSHOT_ID;
+
+const CHROMIUM_SYSTEM_DEPS = [
+  "nss",
+  "nspr",
+  "libxkbcommon",
+  "atk",
+  "at-spi2-atk",
+  "at-spi2-core",
+  "libXcomposite",
+  "libXdamage",
+  "libXrandr",
+  "libXfixes",
+  "libXcursor",
+  "libXi",
+  "libXtst",
+  "libXScrnSaver",
+  "libXext",
+  "mesa-libgbm",
+  "libdrm",
+  "mesa-libGL",
+  "mesa-libEGL",
+  "cups-libs",
+  "alsa-lib",
+  "pango",
+  "cairo",
+  "gtk3",
+  "dbus-libs",
+];
 
 /**
  * Returns credentials to spread into Sandbox.create() calls.
@@ -40,40 +76,94 @@ export function getSandboxCredentials():
   return {};
 }
 
-async function createSandbox(): Promise<InstanceType<typeof Sandbox>> {
+async function runStep<T>(
+  step: string,
+  fn: () => Promise<T>,
+  onStep?: OnStep,
+): Promise<T> {
+  const start = Date.now();
+  onStep?.({ step, status: "running" });
+  try {
+    const result = await fn();
+    onStep?.({ step, status: "done", elapsed: Date.now() - start });
+    return result;
+  } catch (err) {
+    onStep?.({ step, status: "error", elapsed: Date.now() - start });
+    throw err;
+  }
+}
+
+/**
+ * Install system dependencies + agent-browser + Chromium into a fresh sandbox.
+ * The sandbox base image is Amazon Linux (dnf).
+ */
+async function bootstrapSandbox(
+  sandbox: InstanceType<typeof Sandbox>,
+  onStep?: OnStep,
+): Promise<void> {
+  await runStep("Installing system dependencies", async () => {
+    await sandbox.runCommand("sh", [
+      "-c",
+      `sudo dnf clean all 2>&1 && sudo dnf install -y --skip-broken ${CHROMIUM_SYSTEM_DEPS.join(" ")} 2>&1 && sudo ldconfig 2>&1`,
+    ]);
+  }, onStep);
+
+  await runStep("Installing agent-browser", async () => {
+    await sandbox.runCommand("npm", ["install", "-g", "agent-browser"]);
+    await sandbox.runCommand("npx", ["agent-browser", "install"]);
+  }, onStep);
+}
+
+async function createSandbox(
+  onStep?: OnStep,
+): Promise<InstanceType<typeof Sandbox>> {
   const credentials = getSandboxCredentials();
 
-  if (SNAPSHOT_ID) {
-    return Sandbox.create({
-      ...credentials,
-      source: { type: "snapshot", snapshotId: SNAPSHOT_ID },
-      timeout: 120_000,
-    });
-  }
+  return runStep(
+    SNAPSHOT_ID ? "Booting sandbox from snapshot" : "Creating sandbox",
+    async () => {
+      if (SNAPSHOT_ID) {
+        return Sandbox.create({
+          ...credentials,
+          source: { type: "snapshot", snapshotId: SNAPSHOT_ID },
+          timeout: 120_000,
+        });
+      }
 
-  const sandbox = await Sandbox.create({
-    ...credentials,
-    runtime: "node24",
-    timeout: 120_000,
-  });
-
-  await sandbox.runCommand("npm", ["install", "-g", "agent-browser"]);
-  await sandbox.runCommand("npx", ["agent-browser", "install"]);
-
-  return sandbox;
+      const sb = await Sandbox.create({
+        ...credentials,
+        runtime: "node24",
+        timeout: 120_000,
+      });
+      await bootstrapSandbox(sb, onStep);
+      return sb;
+    },
+    onStep,
+  );
 }
 
 async function exec(
   sandbox: InstanceType<typeof Sandbox>,
   cmd: string,
   args: string[],
+  onStep?: OnStep,
+  stepLabel?: string,
 ): Promise<SandboxResult> {
-  const result = await sandbox.runCommand(cmd, args);
-  return {
-    exitCode: result.exitCode,
-    stdout: await result.stdout(),
-    stderr: await result.stderr(),
-  };
+  const label = stepLabel || `${cmd} ${args.join(" ")}`;
+
+  return runStep(label, async () => {
+    const result = await sandbox.runCommand(cmd, args);
+    const stdout = await result.stdout();
+    const stderr = await result.stderr();
+
+    if (result.exitCode !== 0) {
+      throw new Error(
+        `Command "${cmd} ${args.join(" ")}" failed (exit ${result.exitCode}): ${stderr || stdout}`,
+      );
+    }
+
+    return { exitCode: result.exitCode, stdout, stderr };
+  }, onStep);
 }
 
 /**
@@ -82,30 +172,60 @@ async function exec(
  */
 export async function screenshotUrl(
   url: string,
-  opts: { fullPage?: boolean } = {},
+  opts: { fullPage?: boolean; onStep?: OnStep } = {},
 ): Promise<{ screenshot: string; title: string }> {
-  const sandbox = await createSandbox();
+  const { onStep } = opts;
+  const sandbox = await createSandbox(onStep);
 
   try {
-    await exec(sandbox, "agent-browser", ["open", url]);
+    await exec(sandbox, "agent-browser", ["open", "about:blank"], onStep, "Starting browser");
+    await exec(sandbox, "agent-browser", ["open", url], onStep, `Navigating to ${url}`);
 
-    const titleResult = await exec(sandbox, "agent-browser", [
-      "get",
-      "title",
-      "--json",
-    ]);
+    const titleResult = await exec(
+      sandbox,
+      "agent-browser",
+      ["get", "title", "--json"],
+      onStep,
+      "Getting page title",
+    );
     const title = tryParseJson(titleResult.stdout)?.data?.title || url;
 
     const screenshotArgs = ["screenshot", "--json"];
     if (opts.fullPage) screenshotArgs.push("--full");
-    const ssResult = await exec(sandbox, "agent-browser", screenshotArgs);
-    const screenshot = tryParseJson(ssResult.stdout)?.data?.base64 || "";
+    const ssResult = await exec(
+      sandbox,
+      "agent-browser",
+      screenshotArgs,
+      onStep,
+      "Taking screenshot",
+    );
+    const ssData = tryParseJson(ssResult.stdout)?.data;
+    const screenshotPath = ssData?.path;
 
-    await exec(sandbox, "agent-browser", ["close"]);
+    if (!screenshotPath) {
+      throw new Error(
+        `Screenshot returned no file path. Raw output: ${ssResult.stdout.slice(0, 500)}`,
+      );
+    }
+
+    const b64Result = await exec(
+      sandbox,
+      "base64",
+      ["-w", "0", screenshotPath],
+      onStep,
+      "Encoding screenshot",
+    );
+    const screenshot = b64Result.stdout.trim();
+
+    if (!screenshot) {
+      throw new Error("Failed to read screenshot file from sandbox");
+    }
+
+    await exec(sandbox, "agent-browser", ["close"], onStep, "Closing browser");
 
     return { screenshot, title };
   } finally {
-    await sandbox.stop();
+    await runStep("Stopping sandbox", () => sandbox.stop(), onStep);
   }
 }
 
@@ -114,30 +234,44 @@ export async function screenshotUrl(
  */
 export async function snapshotUrl(
   url: string,
-  opts: { interactive?: boolean; compact?: boolean } = {},
+  opts: { interactive?: boolean; compact?: boolean; onStep?: OnStep } = {},
 ): Promise<{ snapshot: string; title: string }> {
-  const sandbox = await createSandbox();
+  const { onStep } = opts;
+  const sandbox = await createSandbox(onStep);
 
   try {
-    await exec(sandbox, "agent-browser", ["open", url]);
+    await exec(sandbox, "agent-browser", ["open", "about:blank"], onStep, "Starting browser");
+    await exec(sandbox, "agent-browser", ["open", url], onStep, `Navigating to ${url}`);
 
-    const titleResult = await exec(sandbox, "agent-browser", [
-      "get",
-      "title",
-      "--json",
-    ]);
+    const titleResult = await exec(
+      sandbox,
+      "agent-browser",
+      ["get", "title", "--json"],
+      onStep,
+      "Getting page title",
+    );
     const title = tryParseJson(titleResult.stdout)?.data?.title || url;
 
     const snapshotArgs = ["snapshot"];
     if (opts.interactive) snapshotArgs.push("-i");
     if (opts.compact) snapshotArgs.push("-c");
-    const snapResult = await exec(sandbox, "agent-browser", snapshotArgs);
+    const snapResult = await exec(
+      sandbox,
+      "agent-browser",
+      snapshotArgs,
+      onStep,
+      "Taking accessibility snapshot",
+    );
 
-    await exec(sandbox, "agent-browser", ["close"]);
+    if (!snapResult.stdout.trim()) {
+      throw new Error("Snapshot returned empty data");
+    }
+
+    await exec(sandbox, "agent-browser", ["close"], onStep, "Closing browser");
 
     return { snapshot: snapResult.stdout, title };
   } finally {
-    await sandbox.stop();
+    await runStep("Stopping sandbox", () => sandbox.stop(), onStep);
   }
 }
 
@@ -155,7 +289,6 @@ export async function runCommands(
     for (const args of commands) {
       const result = await exec(sandbox, "agent-browser", args);
       results.push(result);
-      if (result.exitCode !== 0) break;
     }
     return results;
   } finally {
@@ -174,8 +307,7 @@ export async function createSnapshot(): Promise<string> {
     timeout: 300_000,
   });
 
-  await sandbox.runCommand("npm", ["install", "-g", "agent-browser"]);
-  await sandbox.runCommand("npx", ["agent-browser", "install"]);
+  await bootstrapSandbox(sandbox);
 
   const snapshot = await sandbox.snapshot();
   return snapshot.snapshotId;
