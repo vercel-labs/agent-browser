@@ -244,6 +244,8 @@ agent-browser set offline [on|off]    # Toggle offline mode
 agent-browser set headers <json>      # Extra HTTP headers
 agent-browser set credentials <u> <p> # HTTP basic auth
 agent-browser set media [dark|light]  # Emulate color scheme
+agent-browser set webauthn enable     # Enable WebAuthn
+agent-browser set webauthn add-virtual-authenticator # Add virtual authenticator
 ```
 
 ### Cookies & Storage

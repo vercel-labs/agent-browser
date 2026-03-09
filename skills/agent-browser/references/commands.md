@@ -138,6 +138,8 @@ agent-browser set headers '{"X-Key":"v"}'     # Extra HTTP headers
 agent-browser set credentials user pass       # HTTP basic auth (alias: auth)
 agent-browser set media dark                  # Emulate color scheme
 agent-browser set media light reduced-motion  # Light mode + reduced motion
+agent-browser set webauthn enable            # Enable WebAuthn
+agent-browser set webauthn add-virtual-authenticator # Add virtual authenticator
 ```
 
 ## Cookies and Storage

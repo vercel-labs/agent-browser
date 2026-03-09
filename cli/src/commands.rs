@@ -1952,6 +1952,7 @@ fn parse_set(rest: &[&str], id: &str) -> Result<Value, ParseError> {
         "credentials",
         "auth",
         "media",
+        "webauthn",
     ];
 
     match rest.first().copied() {
@@ -2066,13 +2067,27 @@ fn parse_set(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                 json!({ "id": id, "action": "emulatemedia", "colorScheme": color, "reducedMotion": reduced }),
             )
         }
+        Some("webauthn") => match rest.get(1).copied() {
+            Some("enable") => Ok(json!({ "id": id, "action": "webauthn_enable" })),
+            Some("add-virtual-authenticator") => {
+                Ok(json!({ "id": id, "action": "webauthn_add_virtual_authenticator" }))
+            }
+            Some(sub) => Err(ParseError::UnknownSubcommand {
+                subcommand: sub.to_string(),
+                valid_options: &["enable", "add-virtual-authenticator"],
+            }),
+            None => Err(ParseError::MissingArguments {
+                context: "set webauthn".to_string(),
+                usage: "set webauthn <enable|add-virtual-authenticator>",
+            }),
+        },
         Some(sub) => Err(ParseError::UnknownSubcommand {
             subcommand: sub.to_string(),
             valid_options: VALID,
         }),
         None => Err(ParseError::MissingArguments {
             context: "set".to_string(),
-            usage: "set <viewport|device|geo|offline|headers|credentials|media> [args...]",
+            usage: "set <viewport|device|geo|offline|headers|credentials|media|webauthn> [args...]",
         }),
     }
 }
@@ -3397,6 +3412,22 @@ mod tests {
     fn test_set_viewport_invalid_scale() {
         let result = parse_command(&args("set viewport 1920 1080 abc"), &default_flags());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_set_webauthn_enable() {
+        let cmd = parse_command(&args("set webauthn enable"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "webauthn_enable");
+    }
+
+    #[test]
+    fn test_set_webauthn_add_virtual_authenticator() {
+        let cmd = parse_command(
+            &args("set webauthn add-virtual-authenticator"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "webauthn_add_virtual_authenticator");
     }
 
     #[test]
