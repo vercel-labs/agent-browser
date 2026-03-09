@@ -415,7 +415,7 @@ agent-browser includes security features for safe AI agent deployments. All feat
 | `AGENT_BROWSER_CONFIRM_ACTIONS` | Action categories requiring confirmation |
 | `AGENT_BROWSER_CONFIRM_INTERACTIVE` | Enable interactive confirmation prompts |
 
-See [Security documentation](https://agent-browser.vercel.app/security) for details.
+See [Security documentation](https://agent-browser.dev/security) for details.
 
 ## Snapshot Options
 
