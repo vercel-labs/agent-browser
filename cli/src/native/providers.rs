@@ -217,9 +217,7 @@ async fn connect_kernel() -> Result<(String, Option<ProviderSession>), String> {
     }
 
     let client = reqwest::Client::new();
-    let mut request = client
-        .post(&url)
-        .header("Content-Type", "application/json");
+    let mut request = client.post(&url).header("Content-Type", "application/json");
     if let Some(ref key) = api_key {
         request = request.header("Authorization", format!("Bearer {}", key));
     }

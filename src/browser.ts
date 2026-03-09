@@ -891,12 +891,14 @@ export class BrowserManager {
   /**
    * Close a Kernel session via API
    */
-  private async closeKernelSession(sessionId: string, apiKey: string): Promise<void> {
+  private async closeKernelSession(sessionId: string, apiKey: string | undefined): Promise<void> {
+    const headers: Record<string, string> = {};
+    if (apiKey) {
+      headers['Authorization'] = `Bearer ${apiKey}`;
+    }
     const response = await fetch(`https://api.onkernel.com/browsers/${sessionId}`, {
       method: 'DELETE',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-      },
+      headers,
     });
 
     if (!response.ok) {
@@ -1100,7 +1102,7 @@ export class BrowserManager {
       }
 
       this.kernelSessionId = session.session_id;
-      this.kernelApiKey = kernelApiKey;
+      this.kernelApiKey = kernelApiKey ?? null;
       this.browser = browser;
       context.setDefaultTimeout(getDefaultTimeout());
       this.contexts.push(context);
@@ -2520,8 +2522,8 @@ export class BrowserManager {
         }
       );
       this.browser = null;
-    } else if (this.kernelSessionId && this.kernelApiKey) {
-      await this.closeKernelSession(this.kernelSessionId, this.kernelApiKey).catch((error) => {
+    } else if (this.kernelSessionId) {
+      await this.closeKernelSession(this.kernelSessionId, this.kernelApiKey ?? undefined).catch((error) => {
         console.error('Failed to close Kernel session:', error);
       });
       this.browser = null;
