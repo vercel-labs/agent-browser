@@ -1204,6 +1204,13 @@ async function handleSaveFile(
   });
 }
 
+/**
+ * Drop a file onto a page element by simulating drag-and-drop events.
+ *
+ * Selector resolution: uses Playwright's locator API via browser.getLocator(),
+ * which supports CSS selectors, text selectors (text=...), and XPath (//...).
+ * XPath selectors must start with "//" to be recognized by Playwright.
+ */
 async function handleDropFile(
   command: DropFileCommand,
   browser: BrowserManager
@@ -1217,10 +1224,16 @@ async function handleDropFile(
   const fileName = command.fileName || path.basename(command.filePath);
   const mimeType = command.mimeType || 'application/octet-stream';
 
-  // Resolve selector through the ref system, then dispatch drag events
+  // Resolve selector through the ref system, then dispatch drag events.
+  // Supports CSS selectors and XPath (prefix with "//") via Playwright locators.
   const locator = browser.getLocator(command.selector);
   const elementHandle = await locator.elementHandle();
-  if (!elementHandle) throw new Error('Element not found: ' + command.selector);
+  if (!elementHandle) {
+    const hint = command.selector.startsWith('/')
+      ? ' (XPath selectors must start with "//" to be recognized)'
+      : '';
+    throw new Error(`Element not found: ${command.selector}${hint}`);
+  }
 
   await elementHandle.evaluate(
     `(el, args) => {

@@ -93,4 +93,30 @@ describe('dropfile command validation', () => {
     );
     expect(result.success).toBe(false);
   });
+
+  it('rejects dropfile with empty fileName', () => {
+    const result = parseCommand(
+      JSON.stringify({
+        id: '1',
+        action: 'dropfile',
+        selector: '.drop-zone',
+        filePath: '/tmp/file.pdf',
+        fileName: '',
+      })
+    );
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects dropfile with empty mimeType', () => {
+    const result = parseCommand(
+      JSON.stringify({
+        id: '1',
+        action: 'dropfile',
+        selector: '.drop-zone',
+        filePath: '/tmp/file.pdf',
+        mimeType: '',
+      })
+    );
+    expect(result.success).toBe(false);
+  });
 });

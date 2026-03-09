@@ -263,17 +263,31 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
             while i < rest.len() {
                 match rest[i] {
                     "--name" => {
-                        name = Some(*rest.get(i + 1).ok_or_else(|| ParseError::MissingArguments {
+                        let val = *rest.get(i + 1).ok_or_else(|| ParseError::MissingArguments {
                             context: "--name flag".to_string(),
                             usage: "dropfile <selector> <file-path> [--name <name>] [--mime <type>]",
-                        })?);
+                        })?;
+                        if val.is_empty() || val.starts_with("--") {
+                            return Err(ParseError::InvalidValue {
+                                message: format!("--name requires a non-empty value, got {:?}", val),
+                                usage: "dropfile <selector> <file-path> [--name <name>] [--mime <type>]",
+                            });
+                        }
+                        name = Some(val);
                         i += 2;
                     }
                     "--mime" => {
-                        mime = Some(*rest.get(i + 1).ok_or_else(|| ParseError::MissingArguments {
+                        let val = *rest.get(i + 1).ok_or_else(|| ParseError::MissingArguments {
                             context: "--mime flag".to_string(),
                             usage: "dropfile <selector> <file-path> [--name <name>] [--mime <type>]",
-                        })?);
+                        })?;
+                        if val.is_empty() || val.starts_with("--") {
+                            return Err(ParseError::InvalidValue {
+                                message: format!("--mime requires a non-empty value, got {:?}", val),
+                                usage: "dropfile <selector> <file-path> [--name <name>] [--mime <type>]",
+                            });
+                        }
+                        mime = Some(val);
                         i += 2;
                     }
                     _ => { i += 1; }
