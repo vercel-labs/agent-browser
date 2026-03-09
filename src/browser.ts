@@ -1376,11 +1376,11 @@ export class BrowserManager {
         process.platform === 'win32' &&
         (options.headless ?? true)
       ) {
-        const warningMessage =
-          '[agent-browser] Warning: Headless mode on Windows may not persist cookies. ' +
+        const warning =
+          'Headless mode on Windows may not persist cookies. ' +
           'Use --headed or set AGENT_BROWSER_HEADED=1 for reliable cookie persistence.';
-        console.warn(warningMessage);
-        this.launchWarnings?.push(warningMessage);
+        this.launchWarnings.push(warning);
+        console.error(`[WARN] ${warning}`);
       }
 
       context = await launcher.launchPersistentContext(profilePath, {
