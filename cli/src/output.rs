@@ -1598,6 +1598,9 @@ Settings:
   credentials <user> <pass>  Set HTTP authentication
   media [dark|light]         Set color scheme preference
         [reduced-motion]     Enable reduced motion
+  webauthn enable            Enable WebAuthn
+  webauthn add-virtual-authenticator
+                              Add a virtual authenticator for passkeys
 
 Global Options:
   --json               Output as JSON
@@ -1612,6 +1615,8 @@ Examples:
   agent-browser set credentials admin secret123
   agent-browser set media dark
   agent-browser set media light reduced-motion
+  agent-browser set webauthn enable
+  agent-browser set webauthn add-virtual-authenticator
 "##
         }
 

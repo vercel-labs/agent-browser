@@ -704,6 +704,16 @@ describe('parseCommand', () => {
       const result = parseCommand(cmd({ id: '1', action: 'offline', offline: true }));
       expect(result.success).toBe(true);
     });
+
+    it('should parse webauthn_enable', () => {
+      const result = parseCommand(cmd({ id: '1', action: 'webauthn_enable' }));
+      expect(result.success).toBe(true);
+    });
+
+    it('should parse webauthn_add_virtual_authenticator', () => {
+      const result = parseCommand(cmd({ id: '1', action: 'webauthn_add_virtual_authenticator' }));
+      expect(result.success).toBe(true);
+    });
   });
 
   describe('trace', () => {

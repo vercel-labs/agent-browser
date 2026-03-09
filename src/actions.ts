@@ -114,6 +114,8 @@ import type {
   TimezoneCommand,
   LocaleCommand,
   HttpCredentialsCommand,
+  WebAuthnEnableCommand,
+  WebAuthnAddVirtualAuthenticatorCommand,
   MouseMoveCommand,
   MouseDownCommand,
   MouseUpCommand,
@@ -543,6 +545,10 @@ async function dispatchAction(command: Command, browser: BrowserManager): Promis
       return await handleLocale(command, browser);
     case 'credentials':
       return await handleCredentials(command, browser);
+    case 'webauthn_enable':
+      return await handleWebAuthnEnable(command, browser);
+    case 'webauthn_add_virtual_authenticator':
+      return await handleWebAuthnAddVirtualAuthenticator(command, browser);
     case 'mousemove':
       return await handleMouseMove(command, browser);
     case 'mousedown':
@@ -2347,6 +2353,22 @@ async function handleCredentials(
     password: command.password,
   });
   return successResponse(command.id, { set: true });
+}
+
+async function handleWebAuthnEnable(
+  command: WebAuthnEnableCommand,
+  browser: BrowserManager
+): Promise<Response> {
+  await browser.enableWebAuthn();
+  return successResponse(command.id, { enabled: true });
+}
+
+async function handleWebAuthnAddVirtualAuthenticator(
+  command: WebAuthnAddVirtualAuthenticatorCommand,
+  browser: BrowserManager
+): Promise<Response> {
+  await browser.addVirtualAuthenticator();
+  return successResponse(command.id, { added: true });
 }
 
 async function handleMouseMove(
