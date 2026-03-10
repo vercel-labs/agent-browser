@@ -35,11 +35,13 @@ pub async fn close_provider_session(session: &ProviderSession) {
         "browserbase" => {
             if let Ok(api_key) = env::var("BROWSERBASE_API_KEY") {
                 let _ = client
-                    .delete(format!(
+                    .post(format!(
                         "https://api.browserbase.com/v1/sessions/{}",
                         session.session_id
                     ))
+                    .header("Content-Type", "application/json")
                     .header("X-BB-API-Key", &api_key)
+                    .json(&serde_json::json!({ "status": "REQUEST_RELEASE" }))
                     .send()
                     .await;
             }

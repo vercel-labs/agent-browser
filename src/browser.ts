@@ -862,12 +862,18 @@ export class BrowserManager {
    * Close a Browserbase session via API
    */
   private async closeBrowserbaseSession(sessionId: string, apiKey: string): Promise<void> {
-    await fetch(`https://api.browserbase.com/v1/sessions/${sessionId}`, {
-      method: 'DELETE',
+    const response = await fetch(`https://api.browserbase.com/v1/sessions/${sessionId}`, {
+      method: 'POST',
       headers: {
+        'Content-Type': 'application/json',
         'X-BB-API-Key': apiKey,
       },
+      body: JSON.stringify({ status: 'REQUEST_RELEASE' }),
     });
+
+    if (!response.ok) {
+      throw new Error(`Failed to close Browserbase session: ${response.statusText}`);
+    }
   }
 
   /**
