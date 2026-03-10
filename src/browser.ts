@@ -34,7 +34,7 @@ import {
  * Can be overridden via the AGENT_BROWSER_DEFAULT_TIMEOUT environment variable.
  * Default is 25s, which is below the CLI's 30s IPC read timeout to ensure
  * Playwright errors are returned before the CLI gives up with EAGAIN.
- * CDP and recording contexts use a shorter fixed timeout (10s) and are not affected.
+ * Recording contexts use a shorter fixed timeout (10s) and are not affected.
  */
 export function getDefaultTimeout(): number {
   const envValue = process.env.AGENT_BROWSER_DEFAULT_TIMEOUT;
@@ -954,7 +954,7 @@ export class BrowserManager {
       this.browserbaseSessionId = session.id;
       this.browserbaseApiKey = browserbaseApiKey;
       this.browser = browser;
-      context.setDefaultTimeout(10000);
+      context.setDefaultTimeout(getDefaultTimeout());
       this.contexts.push(context);
       this.setupContextTracking(context);
       await this.ensureDomainFilter(context);
@@ -1559,7 +1559,7 @@ export class BrowserManager {
       this.cdpEndpoint = cdpEndpoint;
 
       for (const context of contexts) {
-        context.setDefaultTimeout(10000);
+        context.setDefaultTimeout(getDefaultTimeout());
         this.contexts.push(context);
         this.setupContextTracking(context);
         await this.ensureDomainFilter(context);
