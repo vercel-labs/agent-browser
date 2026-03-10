@@ -197,6 +197,74 @@ async fn e2e_screenshot() {
     assert!(std::path::Path::new(&tmp_path).exists());
     let _ = std::fs::remove_file(&tmp_path);
 
+    let resp = execute_command(
+        &json!({
+            "id": "5",
+            "action": "setcontent",
+            "html": r##"
+                <html><body>
+                  <button onclick="document.getElementById('result').textContent = 'clicked'">Submit</button>
+                  <a href="#">Home</a>
+                  <div id="result"></div>
+                </body></html>
+            "##,
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "screenshot", "annotate": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let annotations = get_data(&resp)["annotations"]
+        .as_array()
+        .expect("Annotated screenshot should return annotations");
+    assert!(
+        !annotations.is_empty(),
+        "Annotated screenshot should have at least one annotation"
+    );
+
+    let submit_ref = annotations
+        .iter()
+        .find(|ann| ann.get("name").and_then(|v| v.as_str()) == Some("Submit"))
+        .and_then(|ann| ann.get("ref").and_then(|v| v.as_str()))
+        .expect("Expected a Submit annotation");
+
+    let resp = execute_command(
+        &json!({
+            "id": "7",
+            "action": "evaluate",
+            "script": "document.getElementById('__agent_browser_annotations__') === null"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], true);
+
+    let resp = execute_command(
+        &json!({ "id": "8", "action": "click", "selector": format!("@{}", submit_ref) }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "9",
+            "action": "evaluate",
+            "script": "document.getElementById('result').textContent"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], "clicked");
+
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     assert_success(&resp);
 }

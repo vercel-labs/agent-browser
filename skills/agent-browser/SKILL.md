@@ -433,6 +433,8 @@ agent-browser click @e1              # Use new refs
 
 Use `--annotate` to take a screenshot with numbered labels overlaid on interactive elements. Each label `[N]` maps to ref `@eN`. This also caches refs, so you can interact with elements immediately without a separate snapshot.
 
+In native mode, this currently works on the CDP-backed browser path (Chromium/Lightpanda). The Safari/WebDriver backend does not yet support `--annotate`.
+
 ```bash
 agent-browser screenshot --annotate
 # Output includes the image path and a legend:

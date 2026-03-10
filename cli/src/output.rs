@@ -1330,6 +1330,8 @@ Options:
                        Each label [N] corresponds to ref @eN from snapshot.
                        Prints a legend mapping labels to element roles/names.
                        With --json, annotations are included in the response.
+                       In native mode, this is currently supported on the
+                       CDP-backed browser path (Chromium/Lightpanda).
 
 Global Options:
   --json               Output as JSON

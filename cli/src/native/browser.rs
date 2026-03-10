@@ -1,7 +1,7 @@
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{broadcast, Mutex};
 
 use super::cdp::chrome::{
     auto_connect_cdp, discover_cdp_url, launch_chrome, ChromeProcess, LaunchOptions,
@@ -412,6 +412,7 @@ impl BrowserManager {
 
     pub async fn navigate(&mut self, url: &str, wait_until: WaitUntil) -> Result<Value, String> {
         let session_id = self.active_session_id()?.to_string();
+        let mut lifecycle_rx = self.client.subscribe();
 
         let nav_result: PageNavigateResult = self
             .client
@@ -429,7 +430,8 @@ impl BrowserManager {
             return Err(format!("Navigation failed: {}", error_text));
         }
 
-        self.wait_for_lifecycle(wait_until, &session_id).await?;
+        self.wait_for_lifecycle(wait_until, &session_id, &mut lifecycle_rx)
+            .await?;
 
         let page_url = self.get_url().await.unwrap_or_else(|_| url.to_string());
         let title = self.get_title().await.unwrap_or_default();
@@ -446,14 +448,14 @@ impl BrowserManager {
         &self,
         wait_until: WaitUntil,
         session_id: &str,
+        rx: &mut broadcast::Receiver<CdpEvent>,
     ) -> Result<(), String> {
         let event_name = match wait_until {
             WaitUntil::Load => "Page.loadEventFired",
             WaitUntil::DomContentLoaded => "Page.domContentEventFired",
-            WaitUntil::NetworkIdle => return self.wait_for_network_idle(session_id).await,
+            WaitUntil::NetworkIdle => return self.wait_for_network_idle(session_id, rx).await,
         };
 
-        let mut rx = self.client.subscribe();
         let timeout = tokio::time::Duration::from_millis(self.default_timeout_ms);
 
         tokio::time::timeout(timeout, async {
@@ -468,8 +470,11 @@ impl BrowserManager {
         .map_err(|_| format!("Timeout waiting for {}", event_name))?
     }
 
-    async fn wait_for_network_idle(&self, session_id: &str) -> Result<(), String> {
-        let mut rx = self.client.subscribe();
+    async fn wait_for_network_idle(
+        &self,
+        session_id: &str,
+        rx: &mut broadcast::Receiver<CdpEvent>,
+    ) -> Result<(), String> {
         let pending = Arc::new(Mutex::new(HashSet::<String>::new()));
         let timeout = tokio::time::Duration::from_millis(self.default_timeout_ms);
 
@@ -588,7 +593,9 @@ impl BrowserManager {
         wait_until: WaitUntil,
         session_id: &str,
     ) -> Result<(), String> {
-        self.wait_for_lifecycle(wait_until, session_id).await
+        let mut rx = self.client.subscribe();
+        self.wait_for_lifecycle(wait_until, session_id, &mut rx)
+            .await
     }
 
     pub async fn close(&mut self) -> Result<(), String> {

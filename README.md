@@ -445,6 +445,8 @@ The `-C` flag is useful for modern web apps that use custom clickable elements (
 
 The `--annotate` flag overlays numbered labels on interactive elements in the screenshot. Each label `[N]` corresponds to ref `@eN`, so the same refs work for both visual and text-based workflows.
 
+In native mode, annotated screenshots are supported on the CDP-backed browser path (`--native` with Chromium/Lightpanda). The Safari/WebDriver backend does not yet support `--annotate`.
+
 ```bash
 agent-browser screenshot --annotate
 # -> Screenshot saved to /tmp/screenshot-2026-02-17T12-00-00-abc123.png

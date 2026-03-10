@@ -1295,8 +1295,20 @@ async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
 }
 
 async fn handle_screenshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let annotate = cmd
+        .get("annotate")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
     if let Some(ref wb) = state.webdriver_backend {
         if state.browser.is_none() {
+            if annotate {
+                return Err(
+                    "Annotated screenshots are not yet implemented on the WebDriver backend"
+                        .to_string(),
+                );
+            }
+
             let base64_data = wb.screenshot().await?;
             let path = cmd.get("path").and_then(|v| v.as_str());
             if let Some(p) = path {
@@ -1349,12 +1361,33 @@ async fn handle_screenshot(cmd: &Value, state: &mut DaemonState) -> Result<Value
             .get("quality")
             .and_then(|v| v.as_i64())
             .map(|q| q as i32),
+        annotate,
     };
 
-    let (path, _base64) =
+    if annotate {
+        state.ref_map.clear();
+        let _ = snapshot::take_snapshot(
+            &mgr.client,
+            &session_id,
+            &SnapshotOptions {
+                interactive: true,
+                ..SnapshotOptions::default()
+            },
+            &mut state.ref_map,
+        )
+        .await?;
+    }
+
+    let result =
         screenshot::take_screenshot(&mgr.client, &session_id, &state.ref_map, &options).await?;
 
-    Ok(json!({ "path": path }))
+    let mut response = json!({ "path": result.path });
+    if !result.annotations.is_empty() {
+        response["annotations"] = serde_json::to_value(&result.annotations)
+            .map_err(|e| format!("Failed to serialize annotations: {}", e))?;
+    }
+
+    Ok(response)
 }
 
 async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -4103,13 +4136,14 @@ async fn handle_diff_screenshot(cmd: &Value, state: &DaemonState) -> Result<Valu
             .unwrap_or(false),
         format: "png".to_string(),
         quality: None,
+        annotate: false,
     };
 
-    let (_path, base64_data) =
+    let result =
         screenshot::take_screenshot(&mgr.client, &session_id, &state.ref_map, &options).await?;
 
     let current_bytes =
-        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &base64_data)
+        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &result.base64)
             .map_err(|e| format!("Failed to decode screenshot: {}", e))?;
 
     let baseline_bytes =

@@ -30,6 +30,31 @@ use output::{
 use std::path::PathBuf;
 use std::process::Command as ProcessCommand;
 
+fn serialize_json_value(value: &serde_json::Value) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| {
+        r#"{"success":false,"error":"Failed to serialize JSON response"}"#.to_string()
+    })
+}
+
+fn print_json_value(value: serde_json::Value) {
+    println!("{}", serialize_json_value(&value));
+}
+
+fn print_json_error(message: impl AsRef<str>) {
+    print_json_value(json!({
+        "success": false,
+        "error": message.as_ref(),
+    }));
+}
+
+fn print_json_error_with_type(message: impl AsRef<str>, error_type: &str) {
+    print_json_value(json!({
+        "success": false,
+        "error": message.as_ref(),
+        "type": error_type,
+    }));
+}
+
 /// Run a local auth command (auth_save/list/show/delete) via node auth-cli.js.
 /// These commands don't need a browser, so we handle them directly to avoid
 /// sending passwords through the daemon's Unix socket channel.
@@ -63,7 +88,7 @@ fn run_auth_cli(cmd: &serde_json::Value, json_mode: bool) -> ! {
         Some(p) => p.clone(),
         None => {
             if json_mode {
-                println!(r#"{{"success":false,"error":"auth-cli.js not found"}}"#);
+                print_json_error("auth-cli.js not found");
             } else {
                 eprintln!(
                     "{} auth-cli.js not found. Set AGENT_BROWSER_HOME or run from project directory.",
@@ -92,7 +117,7 @@ fn run_auth_cli(cmd: &serde_json::Value, json_mode: bool) -> ! {
 
             if stdout.is_empty() {
                 if json_mode {
-                    println!(r#"{{"success":false,"error":"No response from auth-cli"}}"#);
+                    print_json_error("No response from auth-cli");
                 } else {
                     eprintln!("{} No response from auth-cli", color::error_indicator());
                 }
@@ -125,10 +150,7 @@ fn run_auth_cli(cmd: &serde_json::Value, json_mode: bool) -> ! {
         }
         Err(e) => {
             if json_mode {
-                println!(
-                    r#"{{"success":false,"error":"Failed to run auth-cli: {}"}}"#,
-                    e
-                );
+                print_json_error(format!("Failed to run auth-cli: {}", e));
             } else {
                 eprintln!("{} Failed to run auth-cli: {}", color::error_indicator(), e);
             }
@@ -235,7 +257,12 @@ fn run_session(args: &[String], session: &str, json_mode: bool) {
         None | Some(_) => {
             // Just show current session
             if json_mode {
-                println!(r#"{{"success":true,"data":{{"session":"{}"}}}}"#, session);
+                print_json_value(json!({
+                    "success": true,
+                    "data": {
+                        "session": session,
+                    },
+                }));
             } else {
                 println!("{}", session);
             }
@@ -326,11 +353,7 @@ fn main() {
                     ParseError::InvalidValue { .. } => "invalid_value",
                     ParseError::InvalidSessionName { .. } => "invalid_session_name",
                 };
-                println!(
-                    r#"{{"success":false,"error":"{}","type":"{}"}}"#,
-                    e.format().replace('\n', " "),
-                    error_type
-                );
+                print_json_error_with_type(e.format(), error_type);
             } else {
                 eprintln!("{}", color::red(&e.format()));
             }
@@ -385,10 +408,7 @@ fn main() {
         if !validation::is_valid_session_name(name) {
             let msg = validation::session_name_error(name);
             if flags.json {
-                println!(
-                    r#"{{"success":false,"error":"{}","type":"invalid_session_name"}}"#,
-                    msg.replace('"', "\\\"")
-                );
+                print_json_error_with_type(msg, "invalid_session_name");
             } else {
                 eprintln!("{} {}", color::error_indicator(), msg);
             }
@@ -423,7 +443,7 @@ fn main() {
         Ok(result) => result,
         Err(e) => {
             if flags.json {
-                println!(r#"{{"success":false,"error":"{}"}}"#, e);
+                print_json_error(e);
             } else {
                 eprintln!("{} {}", color::error_indicator(), e);
             }
@@ -494,7 +514,7 @@ fn main() {
     if flags.cdp.is_some() && flags.provider.is_some() {
         let msg = "Cannot use --cdp and -p/--provider together";
         if flags.json {
-            println!(r#"{{"success":false,"error":"{}"}}"#, msg);
+            print_json_error(msg);
         } else {
             eprintln!("{} {}", color::error_indicator(), msg);
         }
@@ -504,7 +524,7 @@ fn main() {
     if flags.auto_connect && flags.cdp.is_some() {
         let msg = "Cannot use --auto-connect and --cdp together";
         if flags.json {
-            println!(r#"{{"success":false,"error":"{}"}}"#, msg);
+            print_json_error(msg);
         } else {
             eprintln!("{} {}", color::error_indicator(), msg);
         }
@@ -514,7 +534,7 @@ fn main() {
     if flags.auto_connect && flags.provider.is_some() {
         let msg = "Cannot use --auto-connect and -p/--provider together";
         if flags.json {
-            println!(r#"{{"success":false,"error":"{}"}}"#, msg);
+            print_json_error(msg);
         } else {
             eprintln!("{} {}", color::error_indicator(), msg);
         }
@@ -524,7 +544,7 @@ fn main() {
     if flags.provider.is_some() && !flags.extensions.is_empty() {
         let msg = "Cannot use --extension with -p/--provider (extensions require local browser)";
         if flags.json {
-            println!(r#"{{"success":false,"error":"{}"}}"#, msg);
+            print_json_error(msg);
         } else {
             eprintln!("{} {}", color::error_indicator(), msg);
         }
@@ -534,7 +554,7 @@ fn main() {
     if flags.cdp.is_some() && !flags.extensions.is_empty() {
         let msg = "Cannot use --extension with --cdp (extensions require local browser)";
         if flags.json {
-            println!(r#"{{"success":false,"error":"{}"}}"#, msg);
+            print_json_error(msg);
         } else {
             eprintln!("{} {}", color::error_indicator(), msg);
         }
@@ -572,7 +592,7 @@ fn main() {
 
         if let Some(msg) = err {
             if flags.json {
-                println!(r#"{{"success":false,"error":"{}"}}"#, msg);
+                print_json_error(msg);
             } else {
                 eprintln!("{} {}", color::error_indicator(), msg);
             }
@@ -600,7 +620,7 @@ fn main() {
                 Ok(0) => {
                     let msg = "Invalid CDP port: port must be greater than 0".to_string();
                     if flags.json {
-                        println!(r#"{{"success":false,"error":"{}"}}"#, msg);
+                        print_json_error(&msg);
                     } else {
                         eprintln!("{} {}", color::error_indicator(), msg);
                     }
@@ -612,7 +632,7 @@ fn main() {
                         p
                     );
                     if flags.json {
-                        println!(r#"{{"success":false,"error":"{}"}}"#, msg);
+                        print_json_error(&msg);
                     } else {
                         eprintln!("{} {}", color::error_indicator(), msg);
                     }
@@ -625,7 +645,7 @@ fn main() {
                         cdp_value
                     );
                     if flags.json {
-                        println!(r#"{{"success":false,"error":"{}"}}"#, msg);
+                        print_json_error(&msg);
                     } else {
                         eprintln!("{} {}", color::error_indicator(), msg);
                     }
@@ -662,7 +682,7 @@ fn main() {
 
         if let Some(msg) = err {
             if flags.json {
-                println!(r#"{{"success":false,"error":"{}"}}"#, msg);
+                print_json_error(msg);
             } else {
                 eprintln!("{} {}", color::error_indicator(), msg);
             }
@@ -693,7 +713,7 @@ fn main() {
 
         if let Some(msg) = err {
             if flags.json {
-                println!(r#"{{"success":false,"error":"{}"}}"#, msg);
+                print_json_error(msg);
             } else {
                 eprintln!("{} {}", color::error_indicator(), msg);
             }
@@ -797,7 +817,7 @@ fn main() {
                     .error
                     .unwrap_or_else(|| "Browser launch failed".to_string());
                 if flags.json {
-                    println!(r#"{{"success":false,"error":"{}"}}"#, error_msg);
+                    print_json_error(error_msg);
                 } else {
                     eprintln!("{} {}", color::error_indicator(), error_msg);
                 }
@@ -805,7 +825,7 @@ fn main() {
             }
             Err(e) => {
                 if flags.json {
-                    println!(r#"{{"success":false,"error":"{}"}}"#, e);
+                    print_json_error(e);
                 } else {
                     eprintln!(
                         "{} Could not configure browser: {}",
@@ -892,7 +912,7 @@ fn main() {
         }
         Err(e) => {
             if flags.json {
-                println!(r#"{{"success":false,"error":"{}"}}"#, e);
+                print_json_error(e);
             } else {
                 eprintln!("{} {}", color::error_indicator(), e);
             }
@@ -957,5 +977,20 @@ mod tests {
         assert_eq!(result["server"], "http://proxy.com:8080");
         assert_eq!(result["username"], "user");
         assert_eq!(result["password"], "p@ss:w0rd");
+    }
+
+    #[test]
+    fn test_serialize_json_value_escapes_control_characters() {
+        let payload = serialize_json_value(&json!({
+            "success": false,
+            "error": "Daemon process exited during startup:\nline \"quoted\"\u{001b}[2mansi\u{001b}[22m",
+        }));
+
+        let parsed: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(parsed["success"], false);
+        assert_eq!(
+            parsed["error"],
+            "Daemon process exited during startup:\nline \"quoted\"\u{001b}[2mansi\u{001b}[22m"
+        );
     }
 }
