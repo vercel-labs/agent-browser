@@ -176,6 +176,7 @@ pub struct BrowserManager {
     #[cfg(test)]
     pub ws_url: String,
     browser_process: Option<BrowserProcess>,
+    background_new_windows: bool,
     pages: Vec<PageInfo>,
     active_page_index: usize,
     default_timeout_ms: u64,
@@ -184,6 +185,7 @@ pub struct BrowserManager {
 impl BrowserManager {
     pub async fn launch(options: LaunchOptions, engine: Option<&str>) -> Result<Self, String> {
         let engine = engine.unwrap_or("chrome");
+        let background_new_windows = options.no_activate && !options.headless;
 
         match engine {
             "chrome" => {
@@ -240,6 +242,7 @@ impl BrowserManager {
             #[cfg(test)]
             ws_url,
             browser_process: Some(process),
+            background_new_windows,
             pages: Vec::new(),
             active_page_index: 0,
             default_timeout_ms: 25_000,
@@ -304,6 +307,7 @@ impl BrowserManager {
             #[cfg(test)]
             ws_url,
             browser_process: None,
+            background_new_windows: false,
             pages: Vec::new(),
             active_page_index: 0,
             default_timeout_ms: 10_000,
@@ -349,6 +353,8 @@ impl BrowserManager {
                     &CreateTargetParams {
                         url: "about:blank".to_string(),
                         new_window: None,
+                        background: None,
+                        focus: None,
                         browser_context_id: None,
                     },
                     None,
@@ -433,6 +439,10 @@ impl BrowserManager {
             .get(self.active_page_index)
             .map(|p| p.session_id.as_str())
             .ok_or_else(|| "No active page".to_string())
+    }
+
+    pub fn prefers_background_windows(&self) -> bool {
+        self.background_new_windows
     }
 
     pub async fn navigate(&mut self, url: &str, wait_until: WaitUntil) -> Result<Value, String> {
@@ -677,6 +687,8 @@ impl BrowserManager {
                 &CreateTargetParams {
                     url: "about:blank".to_string(),
                     new_window: None,
+                    background: None,
+                    focus: None,
                     browser_context_id: None,
                 },
                 None,
@@ -752,6 +764,8 @@ impl BrowserManager {
                 &CreateTargetParams {
                     url: target_url.to_string(),
                     new_window: None,
+                    background: None,
+                    focus: None,
                     browser_context_id: None,
                 },
                 None,

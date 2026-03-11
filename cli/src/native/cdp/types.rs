@@ -99,6 +99,10 @@ pub struct CreateTargetParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub new_window: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub background: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub focus: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub browser_context_id: Option<String>,
 }
 

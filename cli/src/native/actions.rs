@@ -4038,6 +4038,7 @@ async fn handle_waitfordownload(cmd: &Value, state: &DaemonState) -> Result<Valu
 
 async fn handle_window_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
+    let background_window = mgr.prefers_background_windows();
 
     // Create a new browser context
     let context_result = mgr
@@ -4057,6 +4058,8 @@ async fn handle_window_new(cmd: &Value, state: &mut DaemonState) -> Result<Value
             &super::cdp::types::CreateTargetParams {
                 url: "about:blank".to_string(),
                 new_window: Some(true),
+                background: background_window.then_some(true),
+                focus: background_window.then_some(false),
                 browser_context_id: Some(context_id.clone()),
             },
             None,
