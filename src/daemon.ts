@@ -497,15 +497,24 @@ export async function startDaemon(options?: {
             await manager.ensurePage();
           }
 
-          // Handle explicit launch with auto-load state
-          if (
-            parseResult.command.action === 'launch' &&
-            manager instanceof BrowserManager &&
-            !parseResult.command.autoStateFilePath
-          ) {
-            const autoStatePath = getSessionAutoStatePath();
-            if (autoStatePath) {
-              parseResult.command.autoStateFilePath = autoStatePath;
+          // Handle explicit launch with auto-load state and extensions from environment
+          if (parseResult.command.action === 'launch' && manager instanceof BrowserManager) {
+            // Add auto-state file path if not already set
+            if (!parseResult.command.autoStateFilePath) {
+              const autoStatePath = getSessionAutoStatePath();
+              if (autoStatePath) {
+                parseResult.command.autoStateFilePath = autoStatePath;
+              }
+            }
+
+            // Add extensions from environment if not already set in command
+            if (!parseResult.command.extensions && process.env.AGENT_BROWSER_EXTENSIONS) {
+              const extensions = process.env.AGENT_BROWSER_EXTENSIONS.split(/[,\n]/)
+                .map((p) => p.trim())
+                .filter(Boolean);
+              if (extensions.length > 0) {
+                (parseResult.command as any).extensions = extensions;
+              }
             }
           }
 
