@@ -326,7 +326,9 @@ fn close_daemon(session: &str) -> bool {
     #[cfg(windows)]
     {
         if let Ok(mut stream) = TcpStream::connect_timeout(
-            &format!("127.0.0.1:{}", get_port_for_session(session)).parse().unwrap(),
+            &format!("127.0.0.1:{}", get_port_for_session(session))
+                .parse()
+                .unwrap(),
             Duration::from_millis(500),
         ) {
             let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
