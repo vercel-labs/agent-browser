@@ -47,17 +47,6 @@ export interface SnapshotOptions {
   selector?: string;
 }
 
-/**
- * Replace lone Unicode surrogates with U+FFFD (replacement character).
- * Playwright's ariaSnapshot() may return text containing lone surrogates
- * which cause serde_json parsing errors on the Rust side.
- */
-export function sanitizeSurrogates(str: string): string {
-  return str
-    .replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/g, '\uFFFD')
-    .replace(/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '\uFFFD');
-}
-
 // Counter for generating refs
 let refCounter = 0;
 
@@ -283,7 +272,7 @@ export async function getEnhancedSnapshot(
 
   // Get ARIA snapshot from Playwright
   const locator = options.selector ? page.locator(options.selector) : page.locator(':root');
-  const ariaTree = sanitizeSurrogates(await locator.ariaSnapshot());
+  const ariaTree = await locator.ariaSnapshot();
 
   if (!ariaTree) {
     return {
