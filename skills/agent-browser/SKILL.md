@@ -113,7 +113,7 @@ agent-browser diff url <url1> <url2> --selector "#main"  # Scope to element
 agent-browser open https://example.com/signup
 agent-browser snapshot -i
 agent-browser fill @e1 "Jane Doe"
-agent-browser fill @e2 "jane@example.com"
+agent-browser fill @e2 "jane@example.com"Control+f
 agent-browser select @e3 "California"
 agent-browser check @e4
 agent-browser click @e5
@@ -482,7 +482,7 @@ EVALEOF
 agent-browser eval -b "$(echo -n 'Array.from(document.querySelectorAll("a")).map(a => a.href)' | base64)"
 ```
 
-**Why this matters:** When the shell processes your command, inner double quotes, `!` characters (history expansion), backticks, and `$()` can all corrupt the JavaScript before it reaches agent-browser. The `--stdin` and `-b` flags bypass shell interpretation entirely.
+**Why this matters:** When the shell processes your command, inner double quotes, `&#33;` characters (history expansion), backticks, and `$()` can all corrupt the JavaScript before it reaches agent-browser. The `--stdin` and `-b` flags bypass shell interpretation entirely.
 
 **Rules of thumb:**
 - Single-line, no nested quotes -> regular `eval 'expression'` with single quotes is fine
