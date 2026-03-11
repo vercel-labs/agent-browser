@@ -113,7 +113,7 @@ agent-browser diff url <url1> <url2> --selector "#main"  # Scope to element
 agent-browser open https://example.com/signup
 agent-browser snapshot -i
 agent-browser fill @e1 "Jane Doe"
-agent-browser fill @e2 "jane@example.com"Control+f
+agent-browser fill @e2 "jane@example.com"
 agent-browser select @e3 "California"
 agent-browser check @e4
 agent-browser click @e5
