@@ -215,6 +215,7 @@ pub struct DaemonResult {
 /// The daemon only needs `confirm_actions` to gate action categories.
 pub struct DaemonOptions<'a> {
     pub headed: bool,
+    pub no_activate: bool,
     pub debug: bool,
     pub executable_path: Option<&'a str>,
     pub extensions: &'a [String],
@@ -243,6 +244,9 @@ fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
 
     if opts.headed {
         cmd.env("AGENT_BROWSER_HEADED", "1");
+    }
+    if opts.no_activate {
+        cmd.env("AGENT_BROWSER_NO_ACTIVATE", "1");
     }
     if opts.debug {
         cmd.env("AGENT_BROWSER_DEBUG", "1");

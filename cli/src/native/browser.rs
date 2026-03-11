@@ -83,6 +83,9 @@ fn validate_lightpanda_options(options: &LaunchOptions) -> Result<(), String> {
             "Custom Chrome arguments (--args) are not supported with Lightpanda".to_string(),
         );
     }
+    if options.no_activate {
+        return Err("--no-activate is only supported with native Chrome on macOS".to_string());
+    }
     Ok(())
 }
 
@@ -143,6 +146,14 @@ pub enum BrowserProcess {
 }
 
 impl BrowserProcess {
+    #[cfg(test)]
+    pub fn pid(&self) -> Option<u32> {
+        match self {
+            BrowserProcess::Chrome(p) => p.pid(),
+            BrowserProcess::Lightpanda(_) => None,
+        }
+    }
+
     pub fn kill(&mut self) {
         match self {
             BrowserProcess::Chrome(p) => p.kill(),
@@ -160,6 +171,8 @@ impl BrowserProcess {
 
 pub struct BrowserManager {
     pub client: CdpClient,
+    #[cfg(test)]
+    pub ws_url: String,
     browser_process: Option<BrowserProcess>,
     pages: Vec<PageInfo>,
     active_page_index: usize,
@@ -222,6 +235,8 @@ impl BrowserManager {
         let client = CdpClient::connect(&ws_url).await?;
         let mut manager = Self {
             client,
+            #[cfg(test)]
+            ws_url,
             browser_process: Some(process),
             pages: Vec::new(),
             active_page_index: 0,
@@ -284,6 +299,8 @@ impl BrowserManager {
         let client = CdpClient::connect(&ws_url).await?;
         let mut manager = Self {
             client,
+            #[cfg(test)]
+            ws_url,
             browser_process: None,
             pages: Vec::new(),
             active_page_index: 0,
@@ -608,6 +625,10 @@ impl BrowserManager {
         Ok(())
     }
 
+    #[cfg(test)]
+    pub fn browser_pid(&self) -> Option<u32> {
+        self.browser_process.as_ref().and_then(|process| process.pid())
+    }
     pub fn has_pages(&self) -> bool {
         !self.pages.is_empty()
     }

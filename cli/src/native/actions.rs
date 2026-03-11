@@ -767,6 +767,9 @@ fn launch_options_from_env() -> LaunchOptions {
 
     LaunchOptions {
         headless: !headed,
+        no_activate: env::var("AGENT_BROWSER_NO_ACTIVATE")
+            .map(|v| v == "1" || v == "true")
+            .unwrap_or(false),
         executable_path: env::var("AGENT_BROWSER_EXECUTABLE_PATH").ok(),
         proxy: env::var("AGENT_BROWSER_PROXY").ok(),
         proxy_bypass: env::var("AGENT_BROWSER_PROXY_BYPASS").ok(),
@@ -939,6 +942,15 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
 
     let options = LaunchOptions {
         headless,
+        no_activate: cmd
+            .get("noActivate")
+            .and_then(|v| v.as_bool())
+            .or_else(|| {
+                env::var("AGENT_BROWSER_NO_ACTIVATE")
+                    .ok()
+                    .map(|v| v == "1" || v == "true")
+            })
+            .unwrap_or(false),
         executable_path: cmd
             .get("executablePath")
             .and_then(|v| v.as_str())

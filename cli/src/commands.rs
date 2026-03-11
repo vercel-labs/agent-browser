@@ -2089,6 +2089,7 @@ mod tests {
             json: false,
             full: false,
             headed: false,
+            no_activate: false,
             debug: false,
             headers: None,
             executable_path: None,
