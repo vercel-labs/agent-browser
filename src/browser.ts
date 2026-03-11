@@ -2333,8 +2333,8 @@ export class BrowserManager {
 
     this.recordingOutputPath = outputPath;
 
-    // Create a new context with video recording enabled and restored state
-    const viewport = { width: 1280, height: 720 };
+    // Reuse the active page viewport when available so recording matches the current layout.
+    const viewport = currentPage?.viewportSize() ?? { width: 1280, height: 720 };
     this.recordingContext = await this.browser.newContext({
       viewport,
       recordVideo: {

@@ -2,6 +2,9 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } 
 import { BrowserManager, getDefaultTimeout } from './browser.js';
 import { executeCommand } from './actions.js';
 import { chromium } from 'playwright-core';
+import os from 'node:os';
+import path from 'node:path';
+import { existsSync, rmSync } from 'node:fs';
 
 describe('BrowserManager', () => {
   let browser: BrowserManager;
@@ -634,6 +637,25 @@ describe('BrowserManager', () => {
       const size = page.viewportSize();
       expect(size?.width).toBe(1920);
       expect(size?.height).toBe(1080);
+    });
+
+    it('should inherit the current viewport when starting a recording', async () => {
+      const recordingPath = path.join(os.tmpdir(), `agent-browser-recording-${Date.now()}.webm`);
+
+      await browser.setViewport(440, 956);
+
+      try {
+        await browser.startRecording(recordingPath);
+        const recordingPage = (browser as any).recordingPage;
+        expect(recordingPage.viewportSize()).toEqual({ width: 440, height: 956 });
+      } finally {
+        if (browser.isRecording()) {
+          await browser.stopRecording();
+        }
+        if (existsSync(recordingPath)) {
+          rmSync(recordingPath, { force: true });
+        }
+      }
     });
 
     it('should disable viewport when --start-maximized is in args', async () => {
