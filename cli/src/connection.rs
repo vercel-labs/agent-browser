@@ -311,10 +311,10 @@ fn close_daemon(session: &str) -> bool {
 
     // Send close command
     let close_cmd = serde_json::json!({"id": "_close", "action": "close"});
-    let socket_path = get_socket_path(session);
 
     #[cfg(unix)]
     {
+        let socket_path = get_socket_path(session);
         if let Ok(mut stream) = UnixStream::connect(&socket_path) {
             let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
             let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
