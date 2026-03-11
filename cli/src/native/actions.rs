@@ -445,6 +445,8 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
                     url: te.target_info.url.clone(),
                     title: te.target_info.title.clone(),
                     target_type: te.target_info.target_type.clone(),
+                    browser_context_id: te.target_info.browser_context_id.clone(),
+                    window_id: None,
                 });
             }
         }
@@ -2483,6 +2485,8 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
         url: nav_url.clone(),
         title: String::new(),
         target_type: "page".to_string(),
+        browser_context_id: Some(context_id),
+        window_id: None,
     });
 
     // Navigate to URL
@@ -4050,7 +4054,11 @@ async fn handle_window_new(cmd: &Value, state: &mut DaemonState) -> Result<Value
         .client
         .send_command_typed(
             "Target.createTarget",
-            &json!({ "url": "about:blank", "browserContextId": context_id }),
+            &super::cdp::types::CreateTargetParams {
+                url: "about:blank".to_string(),
+                new_window: Some(true),
+                browser_context_id: Some(context_id.clone()),
+            },
             None,
         )
         .await?;
@@ -4073,6 +4081,8 @@ async fn handle_window_new(cmd: &Value, state: &mut DaemonState) -> Result<Value
         url: "about:blank".to_string(),
         title: String::new(),
         target_type: "page".to_string(),
+        browser_context_id: Some(context_id),
+        window_id: None,
     });
 
     if let Some(viewport) = cmd.get("viewport") {

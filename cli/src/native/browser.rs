@@ -121,6 +121,8 @@ pub struct PageInfo {
     pub url: String,
     pub title: String,
     pub target_type: String, // "page" or "webview"
+    pub browser_context_id: Option<String>,
+    pub window_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -346,6 +348,8 @@ impl BrowserManager {
                     "Target.createTarget",
                     &CreateTargetParams {
                         url: "about:blank".to_string(),
+                        new_window: None,
+                        browser_context_id: None,
                     },
                     None,
                 )
@@ -369,6 +373,8 @@ impl BrowserManager {
                 url: "about:blank".to_string(),
                 title: String::new(),
                 target_type: "page".to_string(),
+                browser_context_id: None,
+                window_id: None,
             });
             self.active_page_index = 0;
             self.enable_domains(&attach_result.session_id).await?;
@@ -392,6 +398,8 @@ impl BrowserManager {
                     url: target.url.clone(),
                     title: target.title.clone(),
                     target_type: target.target_type.clone(),
+                    browser_context_id: target.browser_context_id.clone(),
+                    window_id: None,
                 });
             }
 
@@ -668,6 +676,8 @@ impl BrowserManager {
                 "Target.createTarget",
                 &CreateTargetParams {
                     url: "about:blank".to_string(),
+                    new_window: None,
+                    browser_context_id: None,
                 },
                 None,
             )
@@ -691,6 +701,8 @@ impl BrowserManager {
             url: "about:blank".to_string(),
             title: String::new(),
             target_type: "page".to_string(),
+            browser_context_id: None,
+            window_id: None,
         });
         self.active_page_index = 0;
         self.enable_domains(&attach_result.session_id).await?;
@@ -739,6 +751,8 @@ impl BrowserManager {
                 "Target.createTarget",
                 &CreateTargetParams {
                     url: target_url.to_string(),
+                    new_window: None,
+                    browser_context_id: None,
                 },
                 None,
             )
@@ -765,6 +779,8 @@ impl BrowserManager {
             url: target_url.to_string(),
             title: String::new(),
             target_type: "page".to_string(),
+            browser_context_id: None,
+            window_id: None,
         });
         self.active_page_index = index;
 

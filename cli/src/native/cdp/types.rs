@@ -96,6 +96,10 @@ pub struct SetDiscoverTargetsParams {
 #[serde(rename_all = "camelCase")]
 pub struct CreateTargetParams {
     pub url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub new_window: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub browser_context_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
