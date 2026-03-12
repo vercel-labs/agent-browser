@@ -180,6 +180,10 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
         args.push("--no-sandbox".to_string());
     }
 
+    if !args.iter().any(|a| a == "--disable-dev-shm-usage") {
+        args.push("--disable-dev-shm-usage".to_string());
+    }
+
     Ok(ChromeArgs {
         args,
         temp_user_data_dir,
