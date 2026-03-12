@@ -1243,6 +1243,32 @@ describe('BrowserManager', () => {
   });
 });
 
+describe('BrowserManager (persistent context / --profile mode)', () => {
+  let profileBrowser: BrowserManager;
+  let tmpProfileDir: string;
+
+  beforeAll(async () => {
+    tmpProfileDir = path.join(os.tmpdir(), `agent-browser-test-profile-${Date.now()}`);
+    profileBrowser = new BrowserManager();
+    await profileBrowser.launch({ headless: true, profile: tmpProfileDir });
+  });
+
+  afterAll(async () => {
+    await profileBrowser.close();
+    rmSync(tmpProfileDir, { recursive: true, force: true });
+  });
+
+  it('should report as launched in persistent context mode', () => {
+    expect(profileBrowser.isLaunched()).toBe(true);
+  });
+
+  it('should create new tab in persistent context mode without throwing', async () => {
+    const result = await profileBrowser.newTab();
+    expect(result.index).toBe(1);
+    expect(result.total).toBe(2);
+  });
+});
+
 describe('getDefaultTimeout', () => {
   const originalEnv = { ...process.env };
 

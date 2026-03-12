@@ -1784,7 +1784,7 @@ export class BrowserManager {
    * Create a new tab in the current context
    */
   async newTab(): Promise<{ index: number; total: number }> {
-    if (!this.browser || this.contexts.length === 0) {
+    if (!this.isLaunched() || this.contexts.length === 0) {
       throw new Error('Browser not launched');
     }
 
@@ -1811,7 +1811,11 @@ export class BrowserManager {
     total: number;
   }> {
     if (!this.browser) {
-      throw new Error('Browser not launched');
+      throw new Error(
+        this.isPersistentContext
+          ? 'newWindow is not supported in extension (persistent context) mode'
+          : 'Browser not launched'
+      );
     }
 
     const context = await this.browser.newContext({
