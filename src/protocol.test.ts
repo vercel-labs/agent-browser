@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseCommand } from './protocol.js';
+import { parseCommand, serializeResponse, successResponse } from './protocol.js';
 
 // Helper to create command JSON string
 const cmd = (obj: object) => JSON.stringify(obj);
@@ -1409,6 +1409,28 @@ describe('parseCommand', () => {
         })
       );
       expect(result.success).toBe(false);
+    });
+  });
+
+  describe('serializeResponse - lone surrogate handling', () => {
+    it('should serialize response with lone surrogate to valid JSON', () => {
+      const response = successResponse('1', {
+        snapshot: 'button "test \uD800 click"',
+      });
+      const json = serializeResponse(response);
+      expect(() => JSON.parse(json)).not.toThrow();
+      const parsed = JSON.parse(json);
+      expect(parsed.data.snapshot).toContain('\uFFFD');
+      expect(parsed.data.snapshot).not.toMatch(/[\uD800-\uDFFF]/);
+    });
+
+    it('should preserve valid emoji characters', () => {
+      const response = successResponse('1', {
+        snapshot: 'button "😀 Click"',
+      });
+      const json = serializeResponse(response);
+      const parsed = JSON.parse(json);
+      expect(parsed.data.snapshot).toContain('😀');
     });
   });
 

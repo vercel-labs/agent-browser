@@ -112,6 +112,25 @@ pub fn recording_stop(state: &mut RecordingState) -> Result<Value, String> {
     }
 }
 
+pub fn recording_restart(state: &mut RecordingState, path: &str) -> Result<Value, String> {
+    let previous = if state.active {
+        let stop_result = recording_stop(state);
+        stop_result
+            .ok()
+            .and_then(|v| v.get("path").and_then(|p| p.as_str()).map(String::from))
+    } else {
+        None
+    };
+
+    recording_start(state, path)?;
+
+    Ok(json!({
+        "restarted": true,
+        "previousPath": previous,
+        "path": path,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -181,23 +200,4 @@ mod tests {
         assert_eq!(state.frame_count, 2);
         let _ = std::fs::remove_dir_all(&state.temp_dir);
     }
-}
-
-pub fn recording_restart(state: &mut RecordingState, path: &str) -> Result<Value, String> {
-    let previous = if state.active {
-        let stop_result = recording_stop(state);
-        stop_result
-            .ok()
-            .and_then(|v| v.get("path").and_then(|p| p.as_str()).map(String::from))
-    } else {
-        None
-    };
-
-    recording_start(state, path)?;
-
-    Ok(json!({
-        "restarted": true,
-        "previousPath": previous,
-        "path": path,
-    }))
 }

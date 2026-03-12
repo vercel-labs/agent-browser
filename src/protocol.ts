@@ -56,6 +56,7 @@ const launchSchema = baseCommandSchema.extend({
   allowedDomains: z.array(z.string()).optional(),
   actionPolicy: z.string().optional(),
   confirmActions: z.array(z.string()).optional(),
+  engine: z.enum(['chrome', 'lightpanda']).optional(),
 });
 
 const navigateSchema = baseCommandSchema.extend({
@@ -269,6 +270,7 @@ const viewportSchema = baseCommandSchema.extend({
   action: z.literal('viewport'),
   width: z.number().positive(),
   height: z.number().positive(),
+  deviceScaleFactor: z.number().positive().optional(),
 });
 
 const userAgentSchema = baseCommandSchema.extend({
@@ -1147,8 +1149,12 @@ export function errorResponse(id: string, error: string): Response {
 }
 
 /**
- * Serialize a response to JSON string
+ * Serialize a response to JSON string.
+ * Replaces lone Unicode surrogates with U+FFFD to prevent
+ * serde_json parsing errors on the Rust side.
  */
 export function serializeResponse(response: Response): string {
-  return JSON.stringify(response);
+  return JSON.stringify(response, (_key, value) =>
+    typeof value === 'string' && !value.isWellFormed() ? value.toWellFormed() : value
+  );
 }

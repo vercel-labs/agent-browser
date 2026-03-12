@@ -3,7 +3,7 @@ import * as os from 'os';
 import * as path from 'path';
 import * as net from 'net';
 import { EventEmitter } from 'events';
-import { getSocketDir, safeWrite } from './daemon.js';
+import { getSocketDir, safeWrite, getPortForSession } from './daemon.js';
 
 /**
  * HTTP request detection pattern used in daemon.ts to prevent cross-origin attacks.
@@ -157,5 +157,28 @@ describe('safeWrite', () => {
     expect(socket.listenerCount('drain')).toBe(0);
     expect(socket.listenerCount('error')).toBe(0);
     expect(socket.listenerCount('close')).toBe(0);
+  });
+});
+
+describe('getPortForSession', () => {
+  it('returns consistent port for "default"', () => {
+    expect(getPortForSession('default')).toBe(50838);
+  });
+
+  it('returns consistent port for named sessions', () => {
+    expect(getPortForSession('my-session')).toBe(63105);
+    expect(getPortForSession('work')).toBe(51184);
+  });
+
+  it('returns base port for empty session', () => {
+    expect(getPortForSession('')).toBe(49152);
+  });
+
+  it('returns port within dynamic range (49152-65535)', () => {
+    for (const name of ['default', 'my-session', 'work', 'test', 'a']) {
+      const port = getPortForSession(name);
+      expect(port).toBeGreaterThanOrEqual(49152);
+      expect(port).toBeLessThanOrEqual(65535);
+    }
   });
 });

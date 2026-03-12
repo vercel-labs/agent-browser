@@ -42,6 +42,7 @@ pub struct Config {
     pub confirm_actions: Option<String>,
     pub confirm_interactive: Option<bool>,
     pub native: Option<bool>,
+    pub engine: Option<String>,
 }
 
 impl Config {
@@ -84,6 +85,7 @@ impl Config {
             confirm_actions: other.confirm_actions.or(self.confirm_actions),
             confirm_interactive: other.confirm_interactive.or(self.confirm_interactive),
             native: other.native.or(self.native),
+            engine: other.engine.or(self.engine),
         }
     }
 }
@@ -158,6 +160,7 @@ fn extract_config_path(args: &[String]) -> Option<Option<String>> {
         "--allowed-domains",
         "--action-policy",
         "--confirm-actions",
+        "--engine",
     ];
     let mut i = 0;
     while i < args.len() {
@@ -236,6 +239,7 @@ pub struct Flags {
     pub confirm_actions: Option<String>,
     pub confirm_interactive: bool,
     pub native: bool,
+    pub engine: Option<String>,
 
     // Track which launch-time options were explicitly passed via CLI
     // (as opposed to being set only via environment variables)
@@ -342,6 +346,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
         confirm_interactive: env_var_is_truthy("AGENT_BROWSER_CONFIRM_INTERACTIVE")
             || config.confirm_interactive.unwrap_or(false),
         native: env_var_is_truthy("AGENT_BROWSER_NATIVE") || config.native.unwrap_or(false),
+        engine: env::var("AGENT_BROWSER_ENGINE").ok().or(config.engine),
         cli_executable_path: false,
         cli_extensions: false,
         cli_profile: false,
@@ -567,6 +572,12 @@ pub fn parse_flags(args: &[String]) -> Flags {
                     i += 1;
                 }
             }
+            "--engine" => {
+                if let Some(s) = args.get(i + 1) {
+                    flags.engine = Some(s.clone());
+                    i += 1;
+                }
+            }
             "--native" => {
                 let (val, consumed) = parse_bool_arg(args, i);
                 flags.native = val;
@@ -628,6 +639,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--action-policy",
         "--confirm-actions",
         "--config",
+        "--engine",
     ];
 
     let mut i = 0;

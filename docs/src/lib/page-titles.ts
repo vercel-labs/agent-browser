@@ -14,6 +14,9 @@ export const PAGE_TITLES: Record<string, string> = {
   profiler: "Profiler",
   ios: "iOS Simulator",
   security: "Security",
+  "engines/chrome": "Chrome",
+  "engines/lightpanda": "Lightpanda",
+  next: "Next.js + Vercel",
   "native-mode": "Native Mode (Experimental)",
   changelog: "Changelog",
 };

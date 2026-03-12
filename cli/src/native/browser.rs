@@ -1,12 +1,13 @@
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{broadcast, Mutex};
 
 use super::cdp::chrome::{
     auto_connect_cdp, discover_cdp_url, launch_chrome, ChromeProcess, LaunchOptions,
 };
 use super::cdp::client::CdpClient;
+use super::cdp::lightpanda::{launch_lightpanda, LightpandaLaunchOptions, LightpandaProcess};
 use super::cdp::types::*;
 
 // ---------------------------------------------------------------------------
@@ -55,6 +56,36 @@ pub fn validate_launch_options(
     Ok(())
 }
 
+/// Validates that Chrome-only options are not used with Lightpanda.
+fn validate_lightpanda_options(options: &LaunchOptions) -> Result<(), String> {
+    if options
+        .extensions
+        .as_ref()
+        .map(|e| !e.is_empty())
+        .unwrap_or(false)
+    {
+        return Err("Extensions are not supported with Lightpanda".to_string());
+    }
+    if options.profile.is_some() {
+        return Err("Profiles are not supported with Lightpanda".to_string());
+    }
+    if options.storage_state.is_some() {
+        return Err("Storage state is not supported with Lightpanda".to_string());
+    }
+    if options.allow_file_access {
+        return Err("File access is not supported with Lightpanda".to_string());
+    }
+    if !options.headless {
+        return Err("Headed mode is not supported with Lightpanda (headless only)".to_string());
+    }
+    if !options.args.is_empty() {
+        return Err(
+            "Custom Chrome arguments (--args) are not supported with Lightpanda".to_string(),
+        );
+    }
+    Ok(())
+}
+
 /// Converts common error messages into AI-friendly, actionable descriptions.
 pub fn to_ai_friendly_error(error: &str) -> String {
     let lower = error.to_lowercase();
@@ -86,6 +117,7 @@ pub struct PageInfo {
     pub session_id: String,
     pub url: String,
     pub title: String,
+    pub target_type: String, // "page" or "webview"
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -105,37 +137,94 @@ impl WaitUntil {
     }
 }
 
+pub enum BrowserProcess {
+    Chrome(ChromeProcess),
+    Lightpanda(LightpandaProcess),
+}
+
+impl BrowserProcess {
+    pub fn kill(&mut self) {
+        match self {
+            BrowserProcess::Chrome(p) => p.kill(),
+            BrowserProcess::Lightpanda(p) => p.kill(),
+        }
+    }
+
+    pub fn wait_or_kill(&mut self, timeout: std::time::Duration) {
+        match self {
+            BrowserProcess::Chrome(p) => p.wait_or_kill(timeout),
+            BrowserProcess::Lightpanda(p) => p.kill(),
+        }
+    }
+}
+
 pub struct BrowserManager {
     pub client: CdpClient,
-    chrome_process: Option<ChromeProcess>,
+    browser_process: Option<BrowserProcess>,
+    ws_url: String,
     pages: Vec<PageInfo>,
     active_page_index: usize,
     default_timeout_ms: u64,
 }
 
 impl BrowserManager {
-    pub async fn launch(options: LaunchOptions) -> Result<Self, String> {
-        validate_launch_options(
-            options.extensions.as_deref(),
-            false,
-            options.profile.as_deref(),
-            options.storage_state.as_deref(),
-            options.allow_file_access,
-            options.executable_path.as_deref(),
-        )?;
+    pub async fn launch(options: LaunchOptions, engine: Option<&str>) -> Result<Self, String> {
+        let engine = engine.unwrap_or("chrome");
+
+        match engine {
+            "chrome" => {
+                validate_launch_options(
+                    options.extensions.as_deref(),
+                    false,
+                    options.profile.as_deref(),
+                    options.storage_state.as_deref(),
+                    options.allow_file_access,
+                    options.executable_path.as_deref(),
+                )?;
+            }
+            "lightpanda" => {
+                validate_lightpanda_options(&options)?;
+            }
+            _ => {
+                return Err(format!(
+                    "Unknown engine '{}'. Supported engines: chrome, lightpanda",
+                    engine
+                ));
+            }
+        }
 
         let ignore_https_errors = options.ignore_https_errors;
         let user_agent = options.user_agent.clone();
         let color_scheme = options.color_scheme.clone();
         let download_path = options.download_path.clone();
 
-        let chrome = launch_chrome(&options)?;
-        let ws_url = chrome.ws_url.clone();
+        let (ws_url, process) = match engine {
+            "lightpanda" => {
+                let lp_options = LightpandaLaunchOptions {
+                    executable_path: options.executable_path.clone(),
+                    proxy: options.proxy.clone(),
+                    port: None,
+                };
+                let lp = tokio::task::spawn_blocking(move || launch_lightpanda(&lp_options))
+                    .await
+                    .map_err(|e| format!("Lightpanda launch task failed: {}", e))??;
+                let url = lp.ws_url.clone();
+                (url, BrowserProcess::Lightpanda(lp))
+            }
+            _ => {
+                let chrome = tokio::task::spawn_blocking(move || launch_chrome(&options))
+                    .await
+                    .map_err(|e| format!("Chrome launch task failed: {}", e))??;
+                let url = chrome.ws_url.clone();
+                (url, BrowserProcess::Chrome(chrome))
+            }
+        };
 
         let client = CdpClient::connect(&ws_url).await?;
         let mut manager = Self {
             client,
-            chrome_process: Some(chrome),
+            browser_process: Some(process),
+            ws_url,
             pages: Vec::new(),
             active_page_index: 0,
             default_timeout_ms: 25_000,
@@ -197,7 +286,8 @@ impl BrowserManager {
         let client = CdpClient::connect(&ws_url).await?;
         let mut manager = Self {
             client,
-            chrome_process: None,
+            browser_process: None,
+            ws_url,
             pages: Vec::new(),
             active_page_index: 0,
             default_timeout_ms: 10_000,
@@ -229,7 +319,9 @@ impl BrowserManager {
         let page_targets: Vec<TargetInfo> = result
             .target_infos
             .into_iter()
-            .filter(|t| t.target_type == "page" && !t.url.is_empty())
+            .filter(|t| {
+                (t.target_type == "page" || t.target_type == "webview") && !t.url.is_empty()
+            })
             .collect();
 
         if page_targets.is_empty() {
@@ -262,6 +354,7 @@ impl BrowserManager {
                 session_id: attach_result.session_id.clone(),
                 url: "about:blank".to_string(),
                 title: String::new(),
+                target_type: "page".to_string(),
             });
             self.active_page_index = 0;
             self.enable_domains(&attach_result.session_id).await?;
@@ -284,6 +377,7 @@ impl BrowserManager {
                     session_id: attach_result.session_id.clone(),
                     url: target.url.clone(),
                     title: target.title.clone(),
+                    target_type: target.target_type.clone(),
                 });
             }
 
@@ -321,6 +415,7 @@ impl BrowserManager {
 
     pub async fn navigate(&mut self, url: &str, wait_until: WaitUntil) -> Result<Value, String> {
         let session_id = self.active_session_id()?.to_string();
+        let mut lifecycle_rx = self.client.subscribe();
 
         let nav_result: PageNavigateResult = self
             .client
@@ -338,7 +433,8 @@ impl BrowserManager {
             return Err(format!("Navigation failed: {}", error_text));
         }
 
-        self.wait_for_lifecycle(wait_until, &session_id).await?;
+        self.wait_for_lifecycle(wait_until, &session_id, &mut lifecycle_rx)
+            .await?;
 
         let page_url = self.get_url().await.unwrap_or_else(|_| url.to_string());
         let title = self.get_title().await.unwrap_or_default();
@@ -355,14 +451,14 @@ impl BrowserManager {
         &self,
         wait_until: WaitUntil,
         session_id: &str,
+        rx: &mut broadcast::Receiver<CdpEvent>,
     ) -> Result<(), String> {
         let event_name = match wait_until {
             WaitUntil::Load => "Page.loadEventFired",
             WaitUntil::DomContentLoaded => "Page.domContentEventFired",
-            WaitUntil::NetworkIdle => return self.wait_for_network_idle(session_id).await,
+            WaitUntil::NetworkIdle => return self.wait_for_network_idle(session_id, rx).await,
         };
 
-        let mut rx = self.client.subscribe();
         let timeout = tokio::time::Duration::from_millis(self.default_timeout_ms);
 
         tokio::time::timeout(timeout, async {
@@ -377,8 +473,11 @@ impl BrowserManager {
         .map_err(|_| format!("Timeout waiting for {}", event_name))?
     }
 
-    async fn wait_for_network_idle(&self, session_id: &str) -> Result<(), String> {
-        let mut rx = self.client.subscribe();
+    async fn wait_for_network_idle(
+        &self,
+        session_id: &str,
+        rx: &mut broadcast::Receiver<CdpEvent>,
+    ) -> Result<(), String> {
         let pending = Arc::new(Mutex::new(HashSet::<String>::new()));
         let timeout = tokio::time::Duration::from_millis(self.default_timeout_ms);
 
@@ -497,19 +596,23 @@ impl BrowserManager {
         wait_until: WaitUntil,
         session_id: &str,
     ) -> Result<(), String> {
-        self.wait_for_lifecycle(wait_until, session_id).await
+        let mut rx = self.client.subscribe();
+        self.wait_for_lifecycle(wait_until, session_id, &mut rx)
+            .await
     }
 
     pub async fn close(&mut self) -> Result<(), String> {
-        // Close the browser via CDP if possible
         let _ = self
             .client
             .send_command_no_params("Browser.close", None)
             .await;
 
-        // Kill Chrome process if we own it
-        if let Some(ref mut chrome) = self.chrome_process {
-            chrome.kill();
+        if let Some(mut process) = self.browser_process.take() {
+            let timeout = std::time::Duration::from_secs(5);
+            let _ = tokio::task::spawn_blocking(move || {
+                process.wait_or_kill(timeout);
+            })
+            .await;
         }
 
         Ok(())
@@ -536,9 +639,30 @@ impl BrowserManager {
         }
     }
 
+    pub fn get_cdp_url(&self) -> &str {
+        &self.ws_url
+    }
+
+    /// Returns the Chrome debug server address as "host:port".
+    pub fn chrome_host_port(&self) -> &str {
+        let stripped = self
+            .ws_url
+            .strip_prefix("ws://")
+            .or_else(|| self.ws_url.strip_prefix("wss://"))
+            .unwrap_or(&self.ws_url);
+        stripped.split('/').next().unwrap_or(stripped)
+    }
+
+    pub fn active_target_id(&self) -> Result<&str, String> {
+        self.pages
+            .get(self.active_page_index)
+            .map(|p| p.target_id.as_str())
+            .ok_or_else(|| "No active page".to_string())
+    }
+
     /// Returns true if this manager was connected via CDP (as opposed to local launch).
     pub fn is_cdp_connection(&self) -> bool {
-        self.chrome_process.is_none()
+        self.browser_process.is_none()
     }
 
     /// Ensures the browser has at least one page. If `pages` is empty, creates a new
@@ -576,6 +700,7 @@ impl BrowserManager {
             session_id: attach_result.session_id.clone(),
             url: "about:blank".to_string(),
             title: String::new(),
+            target_type: "page".to_string(),
         });
         self.active_page_index = 0;
         self.enable_domains(&attach_result.session_id).await?;
@@ -608,6 +733,7 @@ impl BrowserManager {
                     "index": i,
                     "title": p.title,
                     "url": p.url,
+                    "type": p.target_type,
                     "active": i == self.active_page_index,
                 })
             })
@@ -648,6 +774,7 @@ impl BrowserManager {
             session_id: attach.session_id,
             url: target_url.to_string(),
             title: String::new(),
+            target_type: "page".to_string(),
         });
         self.active_page_index = index;
 

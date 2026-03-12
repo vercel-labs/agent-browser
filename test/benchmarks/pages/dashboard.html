@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Operations Dashboard</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f1f5f9; color: #0f172a; }
+.header { background: #0f172a; color: #fff; padding: 12px 24px; display: flex; justify-content: space-between; align-items: center; }
+.header h1 { font-size: 18px; }
+.header-actions { display: flex; gap: 12px; align-items: center; }
+.header input { padding: 6px 12px; border: 1px solid #334155; background: #1e293b; color: #fff; border-radius: 6px; font-size: 13px; width: 200px; }
+.header button { padding: 6px 16px; background: #6366f1; color: #fff; border: none; border-radius: 6px; cursor: pointer; font-size: 13px; }
+.grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; padding: 24px; }
+.card { background: #fff; padding: 20px; border-radius: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
+.card-label { font-size: 13px; color: #64748b; text-transform: uppercase; letter-spacing: 0.05em; }
+.card-value { font-size: 32px; font-weight: 700; margin: 8px 0 4px; }
+.card-trend { font-size: 14px; font-weight: 500; }
+.card-trend.up { color: #16a34a; }
+.card-trend.down { color: #dc2626; }
+.card-sparkline { height: 40px; display: flex; align-items: flex-end; gap: 2px; margin-top: 8px; }
+.card-sparkline .bar { flex: 1; background: #e0e7ff; border-radius: 2px; min-width: 3px; transition: background 0.2s; }
+.card-sparkline .bar:last-child { background: #6366f1; }
+.section { margin: 0 24px 24px; background: #fff; border-radius: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); overflow: hidden; }
+.section-header { padding: 16px 20px; border-bottom: 1px solid #f1f5f9; display: flex; justify-content: space-between; align-items: center; }
+.section-header h2 { font-size: 16px; }
+.tabs { display: flex; gap: 0; }
+.tab { padding: 6px 16px; font-size: 13px; border: 1px solid #e2e8f0; background: #fff; cursor: pointer; }
+.tab:first-child { border-radius: 6px 0 0 6px; }
+.tab:last-child { border-radius: 0 6px 6px 0; }
+.tab.active { background: #6366f1; color: #fff; border-color: #6366f1; }
+.chart { padding: 20px; height: 240px; display: flex; align-items: flex-end; gap: 4px; }
+.chart .bar { flex: 1; background: #6366f1; border-radius: 4px 4px 0 0; position: relative; min-width: 6px; transition: opacity 0.2s; }
+.chart .bar:hover { opacity: 0.8; }
+.chart .bar-label { position: absolute; bottom: -20px; left: 50%; transform: translateX(-50%); font-size: 10px; color: #94a3b8; white-space: nowrap; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+thead th { background: #f8fafc; padding: 10px 16px; text-align: left; font-weight: 600; color: #475569; border-bottom: 1px solid #e2e8f0; position: sticky; top: 0; }
+tbody td { padding: 8px 16px; border-bottom: 1px solid #f1f5f9; }
+tbody tr:hover { background: #f8fafc; }
+.badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+.badge-info { background: #dbeafe; color: #1d4ed8; }
+.badge-warn { background: #fef3c7; color: #b45309; }
+.badge-error { background: #fee2e2; color: #dc2626; }
+.badge-debug { background: #f1f5f9; color: #475569; }
+.badge-active { background: #dcfce7; color: #166534; }
+.badge-inactive { background: #f1f5f9; color: #64748b; }
+.badge-pending { background: #fef3c7; color: #b45309; }
+.pagination { display: flex; justify-content: center; gap: 4px; padding: 16px; }
+.pagination button { width: 32px; height: 32px; border: 1px solid #e2e8f0; background: #fff; border-radius: 6px; cursor: pointer; font-size: 13px; }
+.pagination button.active { background: #6366f1; color: #fff; border-color: #6366f1; }
+.two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; padding: 0 24px 24px; }
+@media (max-width: 1024px) { .grid { grid-template-columns: repeat(2, 1fr); } .two-col { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+
+<div class="header">
+<h1>Operations Dashboard</h1>
+<div class="header-actions">
+<input id="search" type="text" placeholder="Search...">
+<button id="refresh">Refresh</button>
+<button style="background:#334155">Export</button>
+</div>
+</div>
+
+<div class="grid" id="metrics-grid"></div>
+
+<div class="section">
+<div class="section-header">
+<h2>Request Volume</h2>
+<div class="tabs">
+<div class="tab active">Hourly</div>
+<div class="tab">Daily</div>
+<div class="tab">Weekly</div>
+</div>
+</div>
+<div class="chart" id="chart"></div>
+</div>
+
+<div class="two-col">
+<div class="section" style="margin:0">
+<div class="section-header"><h2>Top Endpoints</h2></div>
+<table>
+<thead><tr><th>Endpoint</th><th>Requests</th><th>Avg Latency</th><th>Error Rate</th></tr></thead>
+<tbody id="endpoints-table"></tbody>
+</table>
+</div>
+<div class="section" style="margin:0">
+<div class="section-header"><h2>Active Alerts</h2></div>
+<table>
+<thead><tr><th>Alert</th><th>Severity</th><th>Service</th><th>Since</th></tr></thead>
+<tbody id="alerts-table"></tbody>
+</table>
+</div>
+</div>
+
+<div class="section">
+<div class="section-header">
+<h2>Recent Logs</h2>
+<div class="tabs">
+<div class="tab active">All</div>
+<div class="tab">Errors</div>
+<div class="tab">Warnings</div>
+</div>
+</div>
+<table>
+<thead><tr><th>Timestamp</th><th>Level</th><th>Service</th><th>Message</th><th>Duration</th></tr></thead>
+<tbody id="logs-table"></tbody>
+</table>
+<div class="pagination" id="pagination"></div>
+</div>
+
+<div class="section">
+<div class="section-header"><h2>Service Status</h2></div>
+<table>
+<thead><tr><th>Service</th><th>Status</th><th>Uptime</th><th>CPU</th><th>Memory</th><th>Requests/min</th><th>Error Rate</th><th>Last Deploy</th></tr></thead>
+<tbody id="services-table"></tbody>
+</table>
+</div>
+
+<script>
+(function() {
+  // Metric cards
+  var metrics = [
+    { label: 'Total Requests', value: '1,284,392', trend: '+12.5%', up: true },
+    { label: 'Avg Response Time', value: '142ms', trend: '-8.3%', up: true },
+    { label: 'Error Rate', value: '0.42%', trend: '+0.12%', up: false },
+    { label: 'Active Users', value: '3,847', trend: '+5.1%', up: true },
+    { label: 'Throughput', value: '892/s', trend: '+3.7%', up: true },
+    { label: 'P99 Latency', value: '487ms', trend: '+15ms', up: false },
+    { label: 'CPU Usage', value: '67%', trend: '-2.4%', up: true },
+    { label: 'Memory Usage', value: '4.2GB', trend: '+180MB', up: false },
+    { label: 'Cache Hit Rate', value: '94.7%', trend: '+1.2%', up: true },
+    { label: 'Queue Depth', value: '234', trend: '-45', up: true },
+    { label: 'Open Connections', value: '12,483', trend: '+892', up: false },
+    { label: 'Deployments Today', value: '7', trend: '+2', up: true },
+  ];
+  var grid = document.getElementById('metrics-grid');
+  metrics.forEach(function(m) {
+    var sparkBars = '';
+    for (var s = 0; s < 12; s++) {
+      var h = 20 + Math.floor(Math.random() * 80);
+      sparkBars += '<div class="bar" style="height:' + h + '%"></div>';
+    }
+    grid.innerHTML += '<div class="card"><div class="card-label">' + m.label +
+      '</div><div class="card-value">' + m.value +
+      '</div><div class="card-trend ' + (m.up ? 'up' : 'down') + '">' +
+      (m.up ? '+' : '') + m.trend +
+      '</div><div class="card-sparkline">' + sparkBars + '</div></div>';
+  });
+
+  // Chart bars
+  var chart = document.getElementById('chart');
+  for (var h = 0; h < 24; h++) {
+    var height = 15 + ((h * 17 + 7) % 85);
+    var bar = document.createElement('div');
+    bar.className = 'bar';
+    bar.style.height = height + '%';
+    bar.innerHTML = '<span class="bar-label">' + String(h).padStart(2, '0') + ':00</span>';
+    chart.appendChild(bar);
+  }
+
+  // Endpoints table
+  var endpoints = document.getElementById('endpoints-table');
+  var paths = ['/api/users', '/api/auth', '/api/products', '/api/orders', '/api/search',
+    '/api/analytics', '/api/notifications', '/api/payments', '/api/inventory', '/api/reports',
+    '/api/settings', '/api/uploads', '/api/webhooks', '/api/health', '/api/metrics'];
+  paths.forEach(function(p, i) {
+    endpoints.innerHTML += '<tr><td><code>' + p + '</code></td><td>' +
+      (50000 - i * 3000) + '</td><td>' + (45 + i * 12) + 'ms</td><td>' +
+      (0.1 + i * 0.08).toFixed(2) + '%</td></tr>';
+  });
+
+  // Alerts table
+  var alerts = document.getElementById('alerts-table');
+  var alertData = [
+    ['High error rate on /api/payments', 'error', 'payments'],
+    ['Memory usage above 85%', 'warn', 'api-gateway'],
+    ['Slow queries detected', 'warn', 'database'],
+    ['SSL certificate expiring in 7 days', 'info', 'infrastructure'],
+    ['Disk usage above 80%', 'warn', 'storage'],
+    ['Connection pool exhaustion', 'error', 'database'],
+    ['Rate limit threshold reached', 'warn', 'api-gateway'],
+    ['Deployment rollback detected', 'info', 'ci-cd'],
+  ];
+  alertData.forEach(function(a, i) {
+    var badge = a[1] === 'error' ? 'badge-error' : a[1] === 'warn' ? 'badge-warn' : 'badge-info';
+    alerts.innerHTML += '<tr><td>' + a[0] + '</td><td><span class="badge ' + badge + '">' +
+      a[1].toUpperCase() + '</span></td><td>' + a[2] + '</td><td>' + (i * 15 + 5) + 'm ago</td></tr>';
+  });
+
+  // Logs table
+  var logs = document.getElementById('logs-table');
+  var services = ['auth', 'api-gateway', 'worker', 'cache', 'database', 'payments', 'search', 'notifications'];
+  var levels = ['INFO', 'WARN', 'ERROR', 'DEBUG'];
+  var messages = [
+    'Request processed successfully',
+    'Connection pool running low',
+    'Failed to connect to upstream service',
+    'Cache miss for key session:',
+    'Query execution exceeded threshold',
+    'Payment webhook received',
+    'Search index rebuild started',
+    'Rate limit applied to client',
+    'Health check passed',
+    'Background job completed',
+  ];
+  for (var i = 0; i < 200; i++) {
+    var level = levels[i % 4];
+    var badge = level === 'ERROR' ? 'badge-error' : level === 'WARN' ? 'badge-warn' :
+      level === 'DEBUG' ? 'badge-debug' : 'badge-info';
+    var ts = new Date(2025, 2, 15, 23 - Math.floor(i / 8), 59 - (i % 60));
+    logs.innerHTML += '<tr><td style="white-space:nowrap">' + ts.toISOString().replace('T', ' ').substring(0, 19) +
+      '</td><td><span class="badge ' + badge + '">' + level +
+      '</span></td><td>' + services[i % 8] +
+      '</td><td>' + messages[i % 10] + ' #' + (i + 1) +
+      '</td><td>' + (Math.floor(Math.random() * 500) + 10) + 'ms</td></tr>';
+  }
+
+  // Pagination
+  var pag = document.getElementById('pagination');
+  for (var p = 1; p <= 10; p++) {
+    pag.innerHTML += '<button class="' + (p === 1 ? 'active' : '') + '">' + p + '</button>';
+  }
+
+  // Services table
+  var svcTable = document.getElementById('services-table');
+  var svcNames = ['api-gateway', 'auth-service', 'payment-processor', 'search-engine',
+    'notification-hub', 'analytics-pipeline', 'cache-layer', 'worker-pool',
+    'storage-service', 'cdn-origin', 'queue-processor', 'ml-inference'];
+  svcNames.forEach(function(name, i) {
+    var status = i < 9 ? 'active' : i === 9 ? 'pending' : 'inactive';
+    var badge = status === 'active' ? 'badge-active' : status === 'pending' ? 'badge-pending' : 'badge-inactive';
+    svcTable.innerHTML += '<tr><td><strong>' + name + '</strong></td>' +
+      '<td><span class="badge ' + badge + '">' + status + '</span></td>' +
+      '<td>' + (99.9 - i * 0.05).toFixed(2) + '%</td>' +
+      '<td>' + (30 + i * 5) + '%</td>' +
+      '<td>' + (512 + i * 128) + 'MB</td>' +
+      '<td>' + (2000 - i * 150) + '</td>' +
+      '<td>' + (0.1 + i * 0.04).toFixed(2) + '%</td>' +
+      '<td>' + (i + 1) + 'h ago</td></tr>';
+  });
+})();
+</script>
+
+</body>
+</html>

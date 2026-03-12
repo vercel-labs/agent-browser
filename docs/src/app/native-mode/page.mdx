@@ -70,6 +70,7 @@ All core commands are supported in native mode:
 ## Known Limitations
 
 - **Firefox and WebKit** are not yet supported (Chromium and Safari only)
+- **Annotated screenshots** (`screenshot --annotate`) currently work on the CDP-backed browser path. The Safari/WebDriver backend does not yet support them.
 - **Playwright trace format** is not available (native tracing uses Chrome's built-in tracing)
 - **HAR export** is not available
 - **Network route interception** uses CDP Fetch domain instead of Playwright's route API

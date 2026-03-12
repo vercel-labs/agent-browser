@@ -467,7 +467,7 @@ pub fn find_auto_state_file(session_name: &str) -> Option<String> {
                 .ok()
                 .and_then(|m| m.modified().ok())
                 .unwrap_or(std::time::UNIX_EPOCH);
-            if best_path.as_ref().map_or(true, |(_, t)| modified > *t) {
+            if best_path.as_ref().is_none_or(|(_, t)| modified > *t) {
                 best_path = Some((path.to_string_lossy().to_string(), modified));
             }
         }

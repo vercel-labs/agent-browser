@@ -36,6 +36,7 @@ export interface LaunchCommand extends BaseCommand {
   allowedDomains?: string[];
   actionPolicy?: string;
   confirmActions?: string[];
+  engine?: 'chrome' | 'lightpanda';
   // Auto-load state file for session persistence
   autoStateFilePath?: string;
 }
@@ -262,6 +263,7 @@ export interface ViewportCommand extends BaseCommand {
   action: 'viewport';
   width: number;
   height: number;
+  deviceScaleFactor?: number;
 }
 
 // User agent
@@ -292,6 +294,14 @@ export interface ReloadCommand extends BaseCommand {
 // Get URL/Title
 export interface UrlCommand extends BaseCommand {
   action: 'url';
+}
+
+export interface CdpUrlCommand extends BaseCommand {
+  action: 'cdp_url';
+}
+
+export interface InspectCommand extends BaseCommand {
+  action: 'inspect';
 }
 
 export interface TitleCommand extends BaseCommand {
@@ -944,6 +954,8 @@ export type Command =
   | ForwardCommand
   | ReloadCommand
   | UrlCommand
+  | CdpUrlCommand
+  | InspectCommand
   | TitleCommand
   | GetAttributeCommand
   | GetTextCommand

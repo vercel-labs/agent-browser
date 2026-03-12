@@ -65,24 +65,13 @@ const STRUCTURAL_ROLES: &[&str] = &[
     "RootWebArea",
 ];
 
+#[derive(Default)]
 pub struct SnapshotOptions {
     pub selector: Option<String>,
     pub interactive: bool,
     pub compact: bool,
     pub depth: Option<usize>,
     pub cursor: bool,
-}
-
-impl Default for SnapshotOptions {
-    fn default() -> Self {
-        Self {
-            selector: None,
-            interactive: false,
-            compact: false,
-            depth: None,
-            cursor: false,
-        }
-    }
 }
 
 struct TreeNode {
@@ -364,8 +353,7 @@ async fn find_cursor_interactive_elements(
         let escaped = text
             .replace('\\', "\\\\")
             .replace('"', "\\\"")
-            .replace('\n', " ")
-            .replace('\r', " ");
+            .replace(['\n', '\r'], " ");
         lines.push(format!("[ref={}] ({}) \"{}\"", ref_id, kind, escaped));
     }
 

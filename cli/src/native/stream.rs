@@ -155,6 +155,7 @@ async fn accept_loop(
     }
 }
 
+#[allow(clippy::result_large_err)]
 async fn handle_ws_client(
     stream: tokio::net::TcpStream,
     _addr: SocketAddr,

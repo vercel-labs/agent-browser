@@ -234,6 +234,7 @@ pub struct DaemonOptions<'a> {
     pub action_policy: Option<&'a str>,
     pub confirm_actions: Option<&'a str>,
     pub native: bool,
+    pub engine: Option<&'a str>,
 }
 
 fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
@@ -296,6 +297,9 @@ fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
     }
     if let Some(ca) = opts.confirm_actions {
         cmd.env("AGENT_BROWSER_CONFIRM_ACTIONS", ca);
+    }
+    if let Some(engine) = opts.engine {
+        cmd.env("AGENT_BROWSER_ENGINE", engine);
     }
 }
 
@@ -529,15 +533,10 @@ pub fn ensure_daemon(session: &str, opts: &DaemonOptions) -> Result<DaemonResult
     #[cfg(unix)]
     let endpoint_info = format!(
         "socket: {}",
-        get_socket_dir()
-            .join(format!("{}.sock", session))
-            .display()
+        get_socket_dir().join(format!("{}.sock", session)).display()
     );
     #[cfg(windows)]
-    let endpoint_info = format!(
-        "port: 127.0.0.1:{}",
-        get_port_for_session(session)
-    );
+    let endpoint_info = format!("port: 127.0.0.1:{}", get_port_for_session(session));
 
     Err(format!("Daemon failed to start ({})", endpoint_info))
 }
@@ -792,5 +791,14 @@ mod tests {
         assert!(!is_transient_error("Invalid JSON syntax"));
         assert!(!is_transient_error("Permission denied"));
         assert!(!is_transient_error("Daemon not found"));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_get_port_for_session() {
+        assert_eq!(get_port_for_session("default"), 50838);
+        assert_eq!(get_port_for_session("my-session"), 63105);
+        assert_eq!(get_port_for_session("work"), 51184);
+        assert_eq!(get_port_for_session(""), 49152);
     }
 }

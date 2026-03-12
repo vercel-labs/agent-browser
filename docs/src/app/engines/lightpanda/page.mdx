@@ -1,0 +1,97 @@
+import { pageMetadata } from "@/lib/page-metadata"
+
+export const metadata = pageMetadata("engines/lightpanda")
+
+# Lightpanda
+
+[Lightpanda](https://lightpanda.io/) is a headless browser engine built from scratch in Zig for machines. It starts instantly, uses 10x less memory than Chrome, and executes 10x faster.
+
+agent-browser manages Lightpanda the same way it manages Chrome -- spawning the process, connecting via CDP, and shutting it down. All downstream commands (snapshot, click, fill, screenshot, etc.) work through the same CDP protocol path.
+
+## Installation
+
+Install the Lightpanda binary before using it with agent-browser:
+
+<table>
+  <thead>
+    <tr><th>Platform</th><th>Command</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>macOS (Apple Silicon)</td>
+      <td><code>curl -L -o lightpanda https://github.com/lightpanda-io/browser/releases/download/nightly/lightpanda-aarch64-macos && chmod a+x ./lightpanda</code></td>
+    </tr>
+    <tr>
+      <td>Linux (x86_64)</td>
+      <td><code>curl -L -o lightpanda https://github.com/lightpanda-io/browser/releases/download/nightly/lightpanda-x86_64-linux && chmod a+x ./lightpanda</code></td>
+    </tr>
+  </tbody>
+</table>
+
+Move the binary somewhere in your `PATH` (e.g. `/usr/local/bin/lightpanda` or `~/.local/bin/lightpanda`).
+
+See the [Lightpanda installation docs](https://lightpanda.io/docs/open-source/installation) for more options.
+
+## Usage
+
+Use the `--engine` flag to select Lightpanda:
+
+```bash
+agent-browser --engine lightpanda open example.com
+agent-browser --engine lightpanda snapshot
+agent-browser --engine lightpanda screenshot
+```
+
+Or set it as the default via environment variable:
+
+```bash
+export AGENT_BROWSER_ENGINE=lightpanda
+agent-browser open example.com
+```
+
+Or in your `agent-browser.json` config:
+
+```json
+{
+  "engine": "lightpanda"
+}
+```
+
+## Custom Binary Path
+
+If the `lightpanda` binary is not in your `PATH`, use `--executable-path`:
+
+```bash
+agent-browser --engine lightpanda --executable-path /path/to/lightpanda open example.com
+```
+
+## Differences from Chrome
+
+Lightpanda is a purpose-built headless engine. Some Chrome-specific features are not available:
+
+<table>
+  <thead>
+    <tr><th>Feature</th><th>Status</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Extensions (<code>--extension</code>)</td><td>Not supported</td></tr>
+    <tr><td>Persistent profiles (<code>--profile</code>)</td><td>Not supported</td></tr>
+    <tr><td>Storage state (<code>--state</code>)</td><td>Not supported</td></tr>
+    <tr><td>File access (<code>--allow-file-access</code>)</td><td>Not supported</td></tr>
+    <tr><td>Headed mode (<code>--headed</code>)</td><td>Not applicable (headless only)</td></tr>
+    <tr><td>Screenshots</td><td>Depends on Lightpanda CDP support</td></tr>
+  </tbody>
+</table>
+
+agent-browser returns a clear error if you combine `--engine lightpanda` with unsupported flags.
+
+## When to Use Lightpanda
+
+Lightpanda is a good fit for:
+
+- Fast web scraping and data extraction
+- AI agent workflows where speed and low memory matter
+- CI/CD environments with constrained resources
+- High-volume parallel automation
+
+Use Chrome when you need full browser fidelity, extensions, or persistent profiles.

@@ -16,6 +16,24 @@ impl ChromeProcess {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+
+    /// Wait for Chrome to exit on its own (after Browser.close CDP command),
+    /// falling back to kill() if it doesn't exit within the timeout.
+    /// This allows Chrome to flush cookies and other state to the user-data-dir.
+    pub fn wait_or_kill(&mut self, timeout: Duration) {
+        let start = std::time::Instant::now();
+        let poll_interval = Duration::from_millis(50);
+
+        while start.elapsed() < timeout {
+            match self.child.try_wait() {
+                Ok(Some(_)) => return,
+                Ok(None) => std::thread::sleep(poll_interval),
+                Err(_) => break,
+            }
+        }
+
+        self.kill();
+    }
 }
 
 impl Drop for ChromeProcess {
@@ -95,13 +113,21 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
         "--disable-popup-blocking".to_string(),
         "--disable-prompt-on-repost".to_string(),
         "--disable-sync".to_string(),
+        "--disable-features=Translate".to_string(),
         "--enable-features=NetworkService,NetworkServiceInProcess".to_string(),
         "--metrics-recording-only".to_string(),
         "--password-store=basic".to_string(),
         "--use-mock-keychain".to_string(),
     ];
 
-    if options.headless {
+    let has_extensions = options
+        .extensions
+        .as_ref()
+        .is_some_and(|exts| !exts.is_empty());
+
+    // Extensions require headed mode in native Chrome (content scripts are not
+    // injected in headless mode).  Skip --headless when extensions are loaded.
+    if options.headless && !has_extensions {
         args.push("--headless=new".to_string());
     }
 
@@ -118,8 +144,8 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
         args.push(format!("--user-data-dir={}", expanded));
         None
     } else {
-        let dir = std::env::temp_dir()
-            .join(format!("agent-browser-chrome-{}", uuid::Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("agent-browser-chrome-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir)
             .map_err(|e| format!("Failed to create temp profile dir: {}", e))?;
         args.push(format!("--user-data-dir={}", dir.display()));
@@ -144,7 +170,7 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
         .iter()
         .any(|a| a.starts_with("--start-maximized") || a.starts_with("--window-size="));
 
-    if !has_window_size && options.headless {
+    if !has_window_size && options.headless && !has_extensions {
         args.push("--window-size=1280,720".to_string());
     }
 
@@ -190,14 +216,11 @@ pub fn launch_chrome(options: &LaunchOptions) -> Result<ChromeProcess, String> {
             format!("Failed to launch Chrome at {:?}: {}", chrome_path, e)
         })?;
 
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| {
-            let _ = child.kill();
-            cleanup_temp_dir(&temp_user_data_dir);
-            "Failed to capture Chrome stderr".to_string()
-        })?;
+    let stderr = child.stderr.take().ok_or_else(|| {
+        let _ = child.kill();
+        cleanup_temp_dir(&temp_user_data_dir);
+        "Failed to capture Chrome stderr".to_string()
+    })?;
     let reader = BufReader::new(stderr);
 
     let ws_url = match wait_for_ws_url(reader) {
@@ -381,55 +404,8 @@ pub async fn discover_cdp_url(port: u16) -> Result<String, String> {
 }
 
 async fn reqwest_get_string(url: &str) -> Result<String, String> {
-    let client = tokio::net::TcpStream::connect(
-        url.strip_prefix("http://")
-            .unwrap_or(url)
-            .split('/')
-            .next()
-            .unwrap_or("127.0.0.1:9222"),
-    )
-    .await
-    .map_err(|e| e.to_string())?;
-
-    let path = url
-        .find('/')
-        .and_then(|i| url[i..].find('/').map(|j| &url[i + j..]))
-        .unwrap_or("/json/version");
-
-    let host = url
-        .strip_prefix("http://")
-        .unwrap_or(url)
-        .split('/')
-        .next()
-        .unwrap_or("127.0.0.1");
-
-    let request = format!(
-        "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
-        path, host
-    );
-
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    let mut client = client;
-    client
-        .write_all(request.as_bytes())
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let mut response = Vec::new();
-    client
-        .read_to_end(&mut response)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let response_str = String::from_utf8_lossy(&response);
-    let body = response_str
-        .split("\r\n\r\n")
-        .nth(1)
-        .unwrap_or("")
-        .to_string();
-
-    Ok(body)
+    let resp = reqwest::get(url).await.map_err(|e| e.to_string())?;
+    resp.text().await.map_err(|e| e.to_string())
 }
 
 pub fn read_devtools_active_port(user_data_dir: &Path) -> Option<(u16, String)> {
@@ -536,10 +512,7 @@ fn should_disable_sandbox(existing_args: &[String]) -> bool {
 
         // Generic container detection: cgroup contains docker/kubepods/lxc
         if let Ok(cgroup) = std::fs::read_to_string("/proc/1/cgroup") {
-            if cgroup.contains("docker")
-                || cgroup.contains("kubepods")
-                || cgroup.contains("lxc")
-            {
+            if cgroup.contains("docker") || cgroup.contains("kubepods") || cgroup.contains("lxc") {
                 return true;
             }
         }
@@ -683,10 +656,7 @@ mod tests {
 
     #[test]
     fn test_chrome_launch_error_generic() {
-        let lines = vec![
-            "info line".to_string(),
-            "another info line".to_string(),
-        ];
+        let lines = vec!["info line".to_string(), "another info line".to_string()];
         let msg = chrome_launch_error("Chrome exited", &lines);
         assert!(msg.contains("last 2 lines"));
     }
@@ -707,10 +677,7 @@ mod tests {
         };
         let result = build_chrome_args(&opts).unwrap();
         assert!(result.args.iter().any(|a| a == "--headless=new"));
-        assert!(result
-            .args
-            .iter()
-            .any(|a| a == "--window-size=1280,720"));
+        assert!(result.args.iter().any(|a| a == "--window-size=1280,720"));
         // Temp dir created when no profile
         assert!(result.temp_user_data_dir.is_some());
         let dir = result.temp_user_data_dir.unwrap();
@@ -769,14 +736,8 @@ mod tests {
             ..Default::default()
         };
         let result = build_chrome_args(&opts).unwrap();
-        assert!(!result
-            .args
-            .iter()
-            .any(|a| a == "--window-size=1280,720"));
-        assert!(result
-            .args
-            .iter()
-            .any(|a| a == "--window-size=1920,1080"));
+        assert!(!result.args.iter().any(|a| a == "--window-size=1280,720"));
+        assert!(result.args.iter().any(|a| a == "--window-size=1920,1080"));
         if let Some(ref dir) = result.temp_user_data_dir {
             let _ = std::fs::remove_dir_all(dir);
         }
@@ -792,6 +753,65 @@ mod tests {
         let result = build_chrome_args(&opts).unwrap();
         assert!(!result.args.iter().any(|a| a == "--window-size=1280,720"));
         assert!(result.args.iter().any(|a| a == "--start-maximized"));
+        if let Some(ref dir) = result.temp_user_data_dir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn test_build_args_disables_translate() {
+        let opts = LaunchOptions::default();
+        let result = build_chrome_args(&opts).unwrap();
+        assert!(result
+            .args
+            .iter()
+            .any(|a| a.contains("--disable-features") && a.contains("Translate")));
+        if let Some(ref dir) = result.temp_user_data_dir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn test_build_args_headless_with_extensions_skips_headless_flag() {
+        let opts = LaunchOptions {
+            headless: true,
+            extensions: Some(vec!["/tmp/my-ext".to_string()]),
+            ..Default::default()
+        };
+        let result = build_chrome_args(&opts).unwrap();
+        assert!(
+            !result.args.iter().any(|a| a.contains("--headless")),
+            "headless flag should be omitted when extensions are present"
+        );
+        assert!(
+            !result.args.iter().any(|a| a.contains("--window-size")),
+            "window-size should be omitted when extensions force headed mode"
+        );
+        assert!(result
+            .args
+            .iter()
+            .any(|a| a.starts_with("--load-extension=")));
+        if let Some(ref dir) = result.temp_user_data_dir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn test_build_args_headed_with_extensions_no_headless_flag() {
+        let opts = LaunchOptions {
+            headless: false,
+            extensions: Some(vec!["/tmp/my-ext".to_string()]),
+            ..Default::default()
+        };
+        let result = build_chrome_args(&opts).unwrap();
+        assert!(
+            !result.args.iter().any(|a| a.contains("--headless")),
+            "headless flag should not be present in headed mode"
+        );
+        assert!(result
+            .args
+            .iter()
+            .any(|a| a.starts_with("--load-extension=")));
         if let Some(ref dir) = result.temp_user_data_dir {
             let _ = std::fs::remove_dir_all(dir);
         }

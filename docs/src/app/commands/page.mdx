@@ -44,6 +44,7 @@ agent-browser get value <sel>         # Get input value
 agent-browser get attr <sel> <attr>   # Get attribute
 agent-browser get title               # Get page title
 agent-browser get url                 # Get current URL
+agent-browser get cdp-url             # Get CDP WebSocket URL
 agent-browser get count <sel>         # Count matching elements
 agent-browser get box <sel>           # Get bounding box
 agent-browser get styles <sel>        # Get computed styles
@@ -123,7 +124,7 @@ agent-browser mouse wheel <dy> [dx]   # Scroll wheel
 ## Settings
 
 ```bash
-agent-browser set viewport <w> <h>    # Set viewport size
+agent-browser set viewport <w> <h> [scale]  # Set viewport size (scale for retina, e.g. 2)
 agent-browser set device <name>       # Emulate device ("iPhone 14")
 agent-browser set geo <lat> <lng>     # Set geolocation
 agent-browser set offline [on|off]    # Toggle offline mode
@@ -199,6 +200,7 @@ agent-browser console --clear         # Clear console log
 agent-browser errors                  # View page errors
 agent-browser errors --clear          # Clear error log
 agent-browser highlight <sel>         # Highlight element
+agent-browser inspect                 # Open Chrome DevTools for the active page
 ```
 
 ## Auth vault

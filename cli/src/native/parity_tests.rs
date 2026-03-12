@@ -9,6 +9,38 @@ use serde_json::{json, Value};
 
 use super::actions::{execute_command, DaemonState};
 
+const ENCRYPTION_KEY_ENV: &str = "AGENT_BROWSER_ENCRYPTION_KEY";
+
+struct TestKeyGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    original: Option<String>,
+}
+
+impl TestKeyGuard {
+    fn new() -> Self {
+        let lock = super::auth::AUTH_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let original = std::env::var(ENCRYPTION_KEY_ENV).ok();
+        // SAFETY: AUTH_TEST_MUTEX serializes all test access so no concurrent mutation.
+        unsafe { std::env::set_var(ENCRYPTION_KEY_ENV, "a".repeat(64)) };
+        Self {
+            _lock: lock,
+            original,
+        }
+    }
+}
+
+impl Drop for TestKeyGuard {
+    fn drop(&mut self) {
+        // SAFETY: AUTH_TEST_MUTEX is held via _lock.
+        match &self.original {
+            Some(val) => unsafe { std::env::set_var(ENCRYPTION_KEY_ENV, val) },
+            None => unsafe { std::env::remove_var(ENCRYPTION_KEY_ENV) },
+        }
+    }
+}
+
 /// All documented action names that should be implemented.
 const DOCUMENTED_ACTIONS: &[&str] = &[
     "launch",
@@ -424,6 +456,7 @@ async fn test_credentials_list_without_browser() {
 #[tokio::test]
 async fn test_auth_profile_name_validation() {
     use super::auth;
+    let _key_guard = TestKeyGuard::new();
     let valid = auth::credentials_set("valid-name_123", "u", "p", None);
     assert!(valid.is_ok());
     let invalid = auth::credentials_set("invalid/name", "u", "p", None);
@@ -439,6 +472,7 @@ async fn test_auth_profile_name_validation() {
 #[tokio::test]
 async fn test_auth_save_and_show() {
     use super::auth;
+    let _key_guard = TestKeyGuard::new();
     let result = auth::auth_save(
         "parity-roundtrip",
         "https://example.com",

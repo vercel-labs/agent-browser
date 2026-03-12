@@ -137,7 +137,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
 
         // === Core Actions ===
         "click" => {
-            let new_tab = rest.iter().any(|arg| *arg == "--new-tab");
+            let new_tab = rest.contains(&"--new-tab");
             let sel = rest
                 .iter()
                 .find(|arg| **arg != "--new-tab")
@@ -568,6 +568,9 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
         // === Close ===
         "close" | "quit" | "exit" => Ok(json!({ "id": id, "action": "close" })),
 
+        // === Inspect ===
+        "inspect" => Ok(json!({ "id": id, "action": "inspect" })),
+
         // === Authentication Vault ===
         "auth" => {
             let sub = rest.first().map(|s| s.as_ref());
@@ -588,7 +591,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
 
                     let mut j = 2;
                     while j < rest.len() {
-                        match rest[j].as_ref() {
+                        match rest[j] {
                             "--url" => {
                                 url = rest.get(j + 1).cloned();
                                 j += 1;
@@ -954,6 +957,13 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
             match rest.first().copied() {
                 Some("accept") => {
                     let mut cmd = json!({ "id": id, "action": "dialog", "response": "accept" });
+                    if let Some(prompt_text) = rest.get(1) {
+                        cmd["promptText"] = json!(prompt_text);
+                    }
+                    Ok(cmd)
+                }
+                Some("dismiss") => {
+                    let mut cmd = json!({ "id": id, "action": "dialog", "response": "dismiss" });
                     if let Some(prompt_text) = rest.get(1) {
                         cmd["promptText"] = json!(prompt_text);
                     }
@@ -1552,7 +1562,7 @@ fn parse_diff(rest: &[&str], id: &str, flags: &Flags) -> Result<Value, ParseErro
 
 fn parse_get(rest: &[&str], id: &str) -> Result<Value, ParseError> {
     const VALID: &[&str] = &[
-        "text", "html", "value", "attr", "url", "title", "count", "box", "styles",
+        "text", "html", "value", "attr", "url", "title", "count", "box", "styles", "cdp-url",
     ];
 
     match rest.first().copied() {
@@ -1589,6 +1599,7 @@ fn parse_get(rest: &[&str], id: &str) -> Result<Value, ParseError> {
             Ok(json!({ "id": id, "action": "getattribute", "selector": sel, "attribute": attr }))
         }
         Some("url") => Ok(json!({ "id": id, "action": "url" })),
+        Some("cdp-url") => Ok(json!({ "id": id, "action": "cdp_url" })),
         Some("title") => Ok(json!({ "id": id, "action": "title" })),
         Some("count") => {
             let sel = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
@@ -1617,7 +1628,7 @@ fn parse_get(rest: &[&str], id: &str) -> Result<Value, ParseError> {
         }),
         None => Err(ParseError::MissingArguments {
             context: "get".to_string(),
-            usage: "get <text|html|value|attr|url|title|count|box|styles> [args...]",
+            usage: "get <text|html|value|attr|url|title|count|box|styles|cdp-url> [args...]",
         }),
     }
 }
@@ -1864,25 +1875,35 @@ fn parse_set(rest: &[&str], id: &str) -> Result<Value, ParseError> {
         Some("viewport") => {
             let w_str = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
                 context: "set viewport".to_string(),
-                usage: "set viewport <width> <height>",
+                usage: "set viewport <width> <height> [scale]",
             })?;
             let h_str = rest.get(2).ok_or_else(|| ParseError::MissingArguments {
                 context: "set viewport".to_string(),
-                usage: "set viewport <width> <height>",
+                usage: "set viewport <width> <height> [scale]",
             })?;
             let w = w_str
                 .parse::<i32>()
                 .map_err(|_| ParseError::MissingArguments {
                     context: "set viewport".to_string(),
-                    usage: "set viewport <width> <height>",
+                    usage: "set viewport <width> <height> [scale]",
                 })?;
             let h = h_str
                 .parse::<i32>()
                 .map_err(|_| ParseError::MissingArguments {
                     context: "set viewport".to_string(),
-                    usage: "set viewport <width> <height>",
+                    usage: "set viewport <width> <height> [scale]",
                 })?;
-            Ok(json!({ "id": id, "action": "viewport", "width": w, "height": h }))
+            let mut cmd = json!({ "id": id, "action": "viewport", "width": w, "height": h });
+            if let Some(scale_str) = rest.get(3) {
+                let scale = scale_str
+                    .parse::<f64>()
+                    .map_err(|_| ParseError::MissingArguments {
+                        context: "set viewport".to_string(),
+                        usage: "set viewport <width> <height> [scale]",
+                    })?;
+                cmd["deviceScaleFactor"] = json!(scale);
+            }
+            Ok(cmd)
         }
         Some("device") => {
             let dev = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
@@ -2111,6 +2132,7 @@ mod tests {
             confirm_actions: None,
             confirm_interactive: false,
             native: false,
+            engine: None,
         }
     }
 
@@ -3038,6 +3060,45 @@ mod tests {
     }
 
     #[test]
+    fn test_set_viewport() {
+        let cmd = parse_command(&args("set viewport 1920 1080"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "viewport");
+        assert_eq!(cmd["width"], 1920);
+        assert_eq!(cmd["height"], 1080);
+        assert!(cmd.get("deviceScaleFactor").is_none());
+    }
+
+    #[test]
+    fn test_set_viewport_with_scale() {
+        let cmd = parse_command(&args("set viewport 1920 1080 2"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "viewport");
+        assert_eq!(cmd["width"], 1920);
+        assert_eq!(cmd["height"], 1080);
+        assert_eq!(cmd["deviceScaleFactor"], 2.0);
+    }
+
+    #[test]
+    fn test_set_viewport_with_fractional_scale() {
+        let cmd = parse_command(&args("set viewport 375 812 3"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "viewport");
+        assert_eq!(cmd["width"], 375);
+        assert_eq!(cmd["height"], 812);
+        assert_eq!(cmd["deviceScaleFactor"], 3.0);
+    }
+
+    #[test]
+    fn test_set_viewport_missing_height() {
+        let result = parse_command(&args("set viewport 1920"), &default_flags());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_set_viewport_invalid_scale() {
+        let result = parse_command(&args("set viewport 1920 1080 abc"), &default_flags());
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn test_find_first_no_value() {
         let cmd = parse_command(&args("find first a click"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "nth");
@@ -3749,5 +3810,19 @@ mod tests {
             result.unwrap_err(),
             ParseError::MissingArguments { .. }
         ));
+    }
+
+    // === Inspect / CDP URL ===
+
+    #[test]
+    fn test_inspect() {
+        let cmd = parse_command(&args("inspect"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "inspect");
+    }
+
+    #[test]
+    fn test_get_cdp_url() {
+        let cmd = parse_command(&args("get cdp-url"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "cdp_url");
     }
 }

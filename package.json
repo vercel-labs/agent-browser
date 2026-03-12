@@ -1,6 +1,6 @@
 {
   "name": "agent-browser",
-  "version": "0.16.3",
+  "version": "0.18.0",
   "description": "Headless browser automation CLI for AI agents",
   "type": "module",
   "main": "dist/daemon.js",
@@ -33,6 +33,10 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e:dogfood": "vitest run test/e2e/dogfood.eval.ts",
+    "bench": "pnpm build && tsx test/benchmarks/run.ts",
+    "bench:node": "pnpm build && tsx test/benchmarks/run.ts --node-only",
+    "bench:native": "pnpm build && tsx test/benchmarks/run.ts --native-only",
+    "bench:engine": "pnpm build && tsx test/benchmarks/run.ts --engine",
     "postinstall": "node scripts/postinstall.js",
     "changeset": "changeset",
     "ci:version": "changeset version && pnpm run version:sync && pnpm install --no-frozen-lockfile",

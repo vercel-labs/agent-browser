@@ -80,6 +80,7 @@ Every CLI flag can be set in the config file using its camelCase equivalent:
     <tr><td><code>actionPolicy</code></td><td><code>--action-policy</code></td><td>string</td></tr>
     <tr><td><code>confirmActions</code></td><td><code>--confirm-actions</code></td><td>string</td></tr>
     <tr><td><code>confirmInteractive</code></td><td><code>--confirm-interactive</code></td><td>boolean</td></tr>
+    <tr><td><code>engine</code></td><td><code>--engine</code></td><td>string (<code>chrome</code>, <code>lightpanda</code>)</td></tr>
     <tr><td><code>native</code></td><td><code>--native</code></td><td>boolean (experimental)</td></tr>
     <tr><td><code>headers</code></td><td><code>--headers</code></td><td>string (JSON)</td></tr>
   </tbody>
@@ -187,6 +188,7 @@ These environment variables configure additional daemon and runtime behavior:
     <tr><td><code>AGENT_BROWSER_ACTION_POLICY</code></td><td>Path to action policy JSON file.</td><td>(none)</td></tr>
     <tr><td><code>AGENT_BROWSER_CONFIRM_ACTIONS</code></td><td>Comma-separated action categories requiring confirmation.</td><td>(none)</td></tr>
     <tr><td><code>AGENT_BROWSER_CONFIRM_INTERACTIVE</code></td><td>Enable interactive confirmation prompts (auto-denies if stdin is not a TTY).</td><td>(disabled)</td></tr>
+    <tr><td><code>AGENT_BROWSER_ENGINE</code></td><td>Browser engine to use: <code>chrome</code> (default), <code>lightpanda</code>. Implies <code>--native</code>.</td><td><code>chrome</code></td></tr>
     <tr><td><code>AGENT_BROWSER_NATIVE</code></td><td>Use the experimental native Rust daemon instead of Node.js/Playwright.</td><td>(disabled)</td></tr>
   </tbody>
 </table>

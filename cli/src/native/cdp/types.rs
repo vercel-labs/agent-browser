@@ -532,6 +532,7 @@ pub struct BrowserVersionInfo {
 /// Chromium source) into `cli/cdp-protocol/` and rebuild.
 ///
 /// Usage: `use super::cdp::types::generated::cdp_page::*;`
+#[allow(clippy::upper_case_acronyms)]
 pub mod generated {
     include!(concat!(env!("OUT_DIR"), "/cdp_generated.rs"));
 }

@@ -131,6 +131,7 @@ agent-browser get value <sel>         # Get input value
 agent-browser get attr <sel> <attr>   # Get attribute
 agent-browser get title               # Get page title
 agent-browser get url                 # Get current URL
+agent-browser get cdp-url             # Get CDP WebSocket URL (for DevTools, debugging)
 agent-browser get count <sel>         # Count matching elements
 agent-browser get box <sel>           # Get bounding box
 agent-browser get styles <sel>        # Get computed styles
@@ -198,7 +199,7 @@ agent-browser mouse wheel <dy> [dx]   # Scroll wheel
 ### Browser Settings
 
 ```bash
-agent-browser set viewport <w> <h>    # Set viewport size
+agent-browser set viewport <w> <h> [scale]  # Set viewport size (scale for retina, e.g. 2)
 agent-browser set device <name>       # Emulate device ("iPhone 14")
 agent-browser set geo <lat> <lng>     # Set geolocation
 agent-browser set offline [on|off]    # Toggle offline mode
@@ -284,6 +285,7 @@ agent-browser console --clear         # Clear console
 agent-browser errors                  # View page errors (uncaught JavaScript exceptions)
 agent-browser errors --clear          # Clear errors
 agent-browser highlight <sel>         # Highlight element
+agent-browser inspect                 # Open Chrome DevTools for the active page
 agent-browser state save <path>       # Save auth state
 agent-browser state load <path>       # Load auth state
 agent-browser state list              # List saved state files
@@ -308,6 +310,47 @@ agent-browser reload                  # Reload page
 agent-browser install                 # Download Chromium browser
 agent-browser install --with-deps     # Also install system deps (Linux)
 ```
+
+## Authentication
+
+agent-browser provides multiple ways to persist login sessions so you don't re-authenticate every run.
+
+### Quick summary
+
+| Approach | Best for | Flag / Env |
+|----------|----------|------------|
+| **Persistent profile** | Full browser state (cookies, IndexedDB, service workers, cache) across restarts | `--profile <path>` / `AGENT_BROWSER_PROFILE` |
+| **Session persistence** | Auto-save/restore cookies + localStorage by name | `--session-name <name>` / `AGENT_BROWSER_SESSION_NAME` |
+| **Import from your browser** | Grab auth from a Chrome session you already logged into | `--auto-connect` + `state save` |
+| **State file** | Load a previously saved state JSON on launch | `--state <path>` / `AGENT_BROWSER_STATE` |
+| **Auth vault** | Store credentials locally (encrypted), login by name | `auth save` / `auth login` |
+
+### Import auth from your browser
+
+If you are already logged in to a site in Chrome, you can grab that auth state and reuse it:
+
+```bash
+# 1. Launch Chrome with remote debugging enabled
+#    macOS:
+"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --remote-debugging-port=9222
+#    Or use --auto-connect to discover an already-running Chrome
+
+# 2. Connect and save the authenticated state
+agent-browser --auto-connect state save ./my-auth.json
+
+# 3. Use the saved auth in future sessions
+agent-browser --state ./my-auth.json open https://app.example.com/dashboard
+
+# 4. Or use --session-name for automatic persistence
+agent-browser --session-name myapp state load ./my-auth.json
+# From now on, --session-name myapp auto-saves/restores this state
+```
+
+> **Security notes:**
+> - `--remote-debugging-port` exposes full browser control on localhost. Any local process can connect. Only use on trusted machines and close Chrome when done.
+> - State files contain session tokens in plaintext. Add them to `.gitignore` and delete when no longer needed. For encryption at rest, set `AGENT_BROWSER_ENCRYPTION_KEY` (see [State Encryption](#state-encryption)).
+
+For full details on login flows, OAuth, 2FA, cookie-based auth, and the auth vault, see the [Authentication](docs/src/app/sessions/page.mdx) docs.
 
 ## Sessions
 
@@ -418,7 +461,7 @@ agent-browser includes security features for safe AI agent deployments. All feat
 | `AGENT_BROWSER_CONFIRM_ACTIONS`     | Action categories requiring confirmation |
 | `AGENT_BROWSER_CONFIRM_INTERACTIVE` | Enable interactive confirmation prompts  |
 
-See [Security documentation](https://agent-browser.vercel.app/security) for details.
+See [Security documentation](https://agent-browser.dev/security) for details.
 
 ## Snapshot Options
 
@@ -447,6 +490,8 @@ The `-C` flag is useful for modern web apps that use custom clickable elements (
 ## Annotated Screenshots
 
 The `--annotate` flag overlays numbered labels on interactive elements in the screenshot. Each label `[N]` corresponds to ref `@eN`, so the same refs work for both visual and text-based workflows.
+
+In native mode, annotated screenshots are supported on the CDP-backed browser path (`--native` with Chromium/Lightpanda). The Safari/WebDriver backend does not yet support `--annotate`.
 
 ```bash
 agent-browser screenshot --annotate
@@ -498,6 +543,7 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 | `--action-policy <path>` | Path to action policy JSON file (or `AGENT_BROWSER_ACTION_POLICY` env) |
 | `--confirm-actions <list>` | Action categories requiring confirmation (or `AGENT_BROWSER_CONFIRM_ACTIONS` env) |
 | `--confirm-interactive` | Interactive confirmation prompts; auto-denies if stdin is not a TTY (or `AGENT_BROWSER_CONFIRM_INTERACTIVE` env) |
+| `--engine <name>` | Browser engine: `chrome` (default), `lightpanda`; implies `--native` (or `AGENT_BROWSER_ENGINE` env) |
 | `--native` | [Experimental] Use native Rust daemon instead of Node.js (or `AGENT_BROWSER_NATIVE` env) |
 | `--config <path>` | Use a custom config file (or `AGENT_BROWSER_CONFIG` env) |
 | `--debug` | Debug output |
@@ -718,7 +764,22 @@ agent-browser --executable-path /path/to/chromium open example.com
 AGENT_BROWSER_EXECUTABLE_PATH=/path/to/chromium agent-browser open example.com
 ```
 
-### Serverless Example (Vercel/AWS Lambda)
+### Serverless (Vercel)
+
+Run agent-browser + Chrome in an ephemeral Vercel Sandbox microVM. No external server needed:
+
+```typescript
+import { Sandbox } from "@vercel/sandbox";
+
+const sandbox = await Sandbox.create({ runtime: "node24" });
+await sandbox.runCommand("agent-browser", ["open", "https://example.com"]);
+const result = await sandbox.runCommand("agent-browser", ["screenshot", "--json"]);
+await sandbox.stop();
+```
+
+See the [environments example](examples/environments/) for a working demo with a UI and deploy-to-Vercel button.
+
+### Serverless (AWS Lambda)
 
 ```typescript
 import chromium from '@sparticuz/chromium';
@@ -1174,7 +1235,6 @@ To enable Browserbase, use the `-p` flag:
 
 ```bash
 export BROWSERBASE_API_KEY="your-api-key"
-export BROWSERBASE_PROJECT_ID="your-project-id"
 agent-browser -p browserbase open https://example.com
 ```
 
@@ -1183,13 +1243,12 @@ Or use environment variables for CI/scripts:
 ```bash
 export AGENT_BROWSER_PROVIDER=browserbase
 export BROWSERBASE_API_KEY="your-api-key"
-export BROWSERBASE_PROJECT_ID="your-project-id"
 agent-browser open https://example.com
 ```
 
 When enabled, agent-browser connects to a Browserbase session instead of launching a local browser. All commands work identically.
 
-Get your API key and project ID from the [Browserbase Dashboard](https://browserbase.com/overview).
+Get your API key from the [Browserbase Dashboard](https://browserbase.com/overview).
 
 ### Browser Use
 

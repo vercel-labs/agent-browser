@@ -35,11 +35,13 @@ pub async fn close_provider_session(session: &ProviderSession) {
         "browserbase" => {
             if let Ok(api_key) = env::var("BROWSERBASE_API_KEY") {
                 let _ = client
-                    .delete(format!(
+                    .post(format!(
                         "https://api.browserbase.com/v1/sessions/{}",
                         session.session_id
                     ))
+                    .header("Content-Type", "application/json")
                     .header("X-BB-API-Key", &api_key)
+                    .json(&serde_json::json!({ "status": "REQUEST_RELEASE" }))
                     .send()
                     .await;
             }
@@ -80,15 +82,11 @@ pub async fn close_provider_session(session: &ProviderSession) {
 async fn connect_browserbase() -> Result<(String, Option<ProviderSession>), String> {
     let api_key = env::var("BROWSERBASE_API_KEY")
         .map_err(|_| "BROWSERBASE_API_KEY environment variable is not set")?;
-    let project_id = env::var("BROWSERBASE_PROJECT_ID")
-        .map_err(|_| "BROWSERBASE_PROJECT_ID environment variable is not set")?;
 
     let client = reqwest::Client::new();
     let response = client
         .post("https://api.browserbase.com/v1/sessions")
-        .header("Content-Type", "application/json")
         .header("X-BB-API-Key", &api_key)
-        .json(&json!({ "projectId": project_id }))
         .send()
         .await
         .map_err(|e| format!("Browserbase request failed: {}", e))?;
@@ -185,8 +183,7 @@ async fn connect_browser_use() -> Result<(String, Option<ProviderSession>), Stri
 }
 
 async fn connect_kernel() -> Result<(String, Option<ProviderSession>), String> {
-    let api_key =
-        env::var("KERNEL_API_KEY").map_err(|_| "KERNEL_API_KEY environment variable is not set")?;
+    let api_key = env::var("KERNEL_API_KEY").ok();
     let endpoint =
         env::var("KERNEL_ENDPOINT").unwrap_or_else(|_| "https://api.onkernel.com".to_string());
 
@@ -218,10 +215,11 @@ async fn connect_kernel() -> Result<(String, Option<ProviderSession>), String> {
     }
 
     let client = reqwest::Client::new();
-    let response = client
-        .post(&url)
-        .header("Content-Type", "application/json")
-        .header("Authorization", format!("Bearer {}", api_key))
+    let mut request = client.post(&url).header("Content-Type", "application/json");
+    if let Some(ref key) = api_key {
+        request = request.header("Authorization", format!("Bearer {}", key));
+    }
+    let response = request
         .json(&body)
         .send()
         .await
