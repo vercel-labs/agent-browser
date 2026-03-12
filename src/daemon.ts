@@ -696,6 +696,26 @@ export async function startDaemon(options?: {
       idleTimer = null;
     }
 
+    // Auto-save session state before closing (same as the explicit `close` command path)
+    if (manager instanceof BrowserManager && manager.isLaunched()) {
+      const savePath = getSessionSaveStatePath();
+      if (savePath) {
+        try {
+          const { encrypted } = await saveStateToFile(manager, savePath);
+          fs.chmodSync(savePath, 0o600);
+          if (process.env.AGENT_BROWSER_DEBUG === '1') {
+            console.error(
+              `Auto-saved session state before shutdown: ${savePath}${encrypted ? ' (encrypted)' : ''}`
+            );
+          }
+        } catch (err) {
+          if (process.env.AGENT_BROWSER_DEBUG === '1') {
+            console.error(`Failed to auto-save session state before shutdown:`, err);
+          }
+        }
+      }
+    }
+
     // Stop stream server if running
     if (streamServer) {
       await streamServer.stop();
