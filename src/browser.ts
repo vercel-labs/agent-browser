@@ -926,6 +926,8 @@ export class BrowserManager {
       );
     }
 
+    const browserbaseRegion = process.env.BROWSERBASE_REGION;
+
     const response = await fetch('https://api.browserbase.com/v1/sessions', {
       method: 'POST',
       headers: {
@@ -934,6 +936,7 @@ export class BrowserManager {
       },
       body: JSON.stringify({
         projectId: browserbaseProjectId,
+        ...(browserbaseRegion && { region: browserbaseRegion }),
       }),
     });
 
