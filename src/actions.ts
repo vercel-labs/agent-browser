@@ -1599,7 +1599,8 @@ async function handleGetAttribute(
 async function handleGetText(command: GetTextCommand, browser: BrowserManager): Promise<Response> {
   const page = browser.getPage();
   const locator = browser.getLocator(command.selector);
-  const text = await locator.textContent();
+  const inner = await locator.innerText();
+  const text = inner || (await locator.textContent()) || '';
   return successResponse(command.id, { text, origin: page.url() });
 }
 
