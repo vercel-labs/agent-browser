@@ -1,10 +1,12 @@
 use serde_json::{json, Value};
 use std::env;
+use std::time::Instant;
 use tokio::sync::broadcast;
 
 use super::auth;
 use super::browser::{BrowserManager, WaitUntil};
 use super::cdp::chrome::LaunchOptions;
+use super::cdp::client::CdpPingHandle;
 use super::cdp::types::{
     AttachToTargetParams, AttachToTargetResult, CdpEvent, ConsoleApiCalledEvent,
     CreateTargetResult, ExceptionThrownEvent, TargetCreatedEvent, TargetDestroyedEvent,
@@ -76,6 +78,17 @@ pub enum BackendType {
     WebDriver,
 }
 
+/// Returned by `DaemonState::alive_check_info` to tell the daemon whether an
+/// expensive connection-liveness check is needed and, if so, provides a
+/// lightweight handle to perform it outside the state lock.
+pub enum AliveCheckInfo {
+    /// No alive check needed (recently verified, no browser, or skip-launch action).
+    Skip,
+    /// A slow CDP round-trip is needed. The `CdpPingHandle` can be used outside
+    /// the lock to avoid blocking other connections.
+    Check(CdpPingHandle),
+}
+
 pub struct DaemonState {
     pub browser: Option<BrowserManager>,
     pub appium: Option<AppiumManager>,
@@ -100,6 +113,9 @@ pub struct DaemonState {
     pub tracked_requests: Vec<TrackedRequest>,
     pub request_tracking: bool,
     pub active_frame_id: Option<String>,
+    /// Tracks when the last command completed successfully so we can skip
+    /// redundant `is_connection_alive` CDP round-trips on every command.
+    last_successful_command: Option<Instant>,
 }
 
 impl DaemonState {
@@ -131,6 +147,7 @@ impl DaemonState {
             tracked_requests: Vec::new(),
             request_tracking: false,
             active_frame_id: None,
+            last_successful_command: None,
         }
     }
 
@@ -384,9 +401,68 @@ impl DaemonState {
 
         (pending_acks, new_targets, destroyed_targets, fetch_paused)
     }
+
+    /// Determines whether an expensive `is_connection_alive` check is needed
+    /// for the given command. Returns a `CdpPingHandle` that can be used
+    /// **outside** the state lock so other connections aren't blocked.
+    pub fn alive_check_info(&self, cmd: &Value) -> AliveCheckInfo {
+        let action = cmd.get("action").and_then(|v| v.as_str()).unwrap_or("");
+
+        let skip_launch = matches!(
+            action,
+            "" | "launch"
+                | "close"
+                | "credentials_set"
+                | "credentials_get"
+                | "credentials_delete"
+                | "credentials_list"
+                | "auth_save"
+                | "auth_show"
+                | "auth_delete"
+                | "auth_list"
+                | "state_list"
+                | "state_show"
+                | "state_clear"
+                | "state_clean"
+                | "state_rename"
+                | "device_list"
+        );
+        if skip_launch {
+            return AliveCheckInfo::Skip;
+        }
+
+        match &self.browser {
+            None => AliveCheckInfo::Skip,
+            Some(mgr) => {
+                let recently_ok = self
+                    .last_successful_command
+                    .map(|t| t.elapsed().as_secs() < ALIVE_CHECK_INTERVAL_SECS)
+                    .unwrap_or(false);
+                if recently_ok {
+                    AliveCheckInfo::Skip
+                } else {
+                    AliveCheckInfo::Check(mgr.client.ping_handle())
+                }
+            }
+        }
+    }
 }
 
-pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
+const ALIVE_CHECK_INTERVAL_SECS: u64 = 5;
+
+/// Pre-command setup: drains CDP events, checks policies, and ensures browser
+/// is launched. Returns `Some(response)` if the command should be short-circuited
+/// (e.g. policy denial), or `None` to continue with command execution.
+///
+/// `alive_hint` is an optional result from a connection-liveness check
+/// performed outside the state lock (via `CdpPingHandle`). When
+/// `Some(true)`, the inline `is_connection_alive` round-trip is skipped.
+/// All other values fall through to an inline check for correctness.
+pub async fn pre_command_setup(
+    cmd: &Value,
+    state: &mut DaemonState,
+    alive_hint: Option<bool>,
+) -> Option<Value> {
     let action = cmd.get("action").and_then(|v| v.as_str()).unwrap_or("");
     let id = cmd
         .get("id")
@@ -429,7 +505,6 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
             if let Ok(attach) = attach_result {
                 let _ = mgr.enable_domains_pub(&attach.session_id).await;
 
-                // Install domain filter on new pages
                 if let Some(ref filter) = state.domain_filter {
                     let _ = network::install_domain_filter(
                         &mgr.client,
@@ -450,7 +525,6 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         }
     }
 
-    // Handle Fetch.requestPaused events (route interception + domain filter)
     for paused in &fetch_paused {
         if let Some(ref browser) = state.browser {
             resolve_fetch_paused(browser, state.domain_filter.as_ref(), &state.routes, paused)
@@ -458,32 +532,30 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         }
     }
 
-    // Hot-reload and check action policy
     if let Some(ref mut policy) = state.policy {
         let _ = policy.reload();
         match policy.check(action) {
             PolicyResult::Allow => {}
             PolicyResult::Deny(reason) => {
-                return error_response(
+                return Some(error_response(
                     &id,
                     &format!("Action '{}' denied by policy: {}", action, reason),
-                );
+                ));
             }
             PolicyResult::RequiresConfirmation => {
                 state.pending_confirmation = Some(PendingConfirmation {
                     action: action.to_string(),
                     cmd: cmd.clone(),
                 });
-                return json!({
+                return Some(json!({
                     "id": id,
                     "success": true,
                     "data": { "confirmation_required": true, "action": action },
-                });
+                }));
             }
         }
     }
 
-    // Check AGENT_BROWSER_CONFIRM_ACTIONS (category-based, independent of policy file)
     if action != "confirm" && action != "deny" {
         if let Some(ref ca) = state.confirm_actions {
             if ca.requires_confirmation(action) {
@@ -491,7 +563,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
                     action: action.to_string(),
                     cmd: cmd.clone(),
                 });
-                return json!({
+                return Some(json!({
                     "id": id,
                     "success": true,
                     "data": {
@@ -499,7 +571,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
                         "confirmation_id": id,
                         "action": action,
                     },
-                });
+                }));
             }
         }
     }
@@ -524,9 +596,16 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
             | "device_list"
     );
     if !skip_launch {
-        // Check if existing connection is stale and needs re-launch
         let needs_launch = if let Some(ref mgr) = state.browser {
-            !mgr.is_connection_alive().await
+            let recently_ok = state
+                .last_successful_command
+                .map(|t| t.elapsed().as_secs() < ALIVE_CHECK_INTERVAL_SECS)
+                .unwrap_or(false);
+            if recently_ok || alive_hint == Some(true) {
+                false
+            } else {
+                !mgr.is_connection_alive().await
+            }
         } else {
             true
         };
@@ -538,8 +617,9 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
                 }
                 state.browser = None;
             }
+            state.last_successful_command = None;
             if let Err(e) = auto_launch(state).await {
-                return error_response(&id, &format!("Auto-launch failed: {}", e));
+                return Some(error_response(&id, &format!("Auto-launch failed: {}", e)));
             }
         }
 
@@ -549,6 +629,17 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
             }
         }
     }
+
+    None
+}
+
+pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
+    let action = cmd.get("action").and_then(|v| v.as_str()).unwrap_or("");
+    let id = cmd
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
 
     // WebDriver backend: reject unsupported CDP-only actions
     if matches!(state.backend_type, BackendType::WebDriver)
@@ -717,8 +808,14 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
     };
 
     match result {
-        Ok(data) => success_response(&id, data),
-        Err(e) => error_response(&id, &super::browser::to_ai_friendly_error(&e)),
+        Ok(data) => {
+            state.last_successful_command = Some(Instant::now());
+            success_response(&id, data)
+        }
+        Err(e) => {
+            state.last_successful_command = None;
+            error_response(&id, &super::browser::to_ai_friendly_error(&e))
+        }
     }
 }
 
@@ -1238,6 +1335,7 @@ async fn handle_close(state: &mut DaemonState) -> Result<Value, String> {
         mgr.close().await?;
     }
     state.browser = None;
+    state.last_successful_command = None;
 
     // Close WebDriver sessions
     if let Some(ref mut wb) = state.webdriver_backend {
@@ -1711,7 +1809,7 @@ async fn handle_back(state: &mut DaemonState) -> Result<Value, String> {
     if let Some(ref wb) = state.webdriver_backend {
         if state.browser.is_none() {
             wb.back().await?;
-            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+            tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
             let url = wb.get_url().await.unwrap_or_default();
             state.ref_map.clear();
             return Ok(json!({ "url": url }));
@@ -1719,7 +1817,7 @@ async fn handle_back(state: &mut DaemonState) -> Result<Value, String> {
     }
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     mgr.evaluate("history.back()", None).await?;
-    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
     let url = mgr.get_url().await.unwrap_or_default();
     state.ref_map.clear();
     Ok(json!({ "url": url }))
@@ -1729,7 +1827,7 @@ async fn handle_forward(state: &mut DaemonState) -> Result<Value, String> {
     if let Some(ref wb) = state.webdriver_backend {
         if state.browser.is_none() {
             wb.forward().await?;
-            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+            tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
             let url = wb.get_url().await.unwrap_or_default();
             state.ref_map.clear();
             return Ok(json!({ "url": url }));
@@ -1737,7 +1835,7 @@ async fn handle_forward(state: &mut DaemonState) -> Result<Value, String> {
     }
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     mgr.evaluate("history.forward()", None).await?;
-    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
     let url = mgr.get_url().await.unwrap_or_default();
     state.ref_map.clear();
     Ok(json!({ "url": url }))
@@ -1747,7 +1845,7 @@ async fn handle_reload(state: &mut DaemonState) -> Result<Value, String> {
     if let Some(ref wb) = state.webdriver_backend {
         if state.browser.is_none() {
             wb.reload().await?;
-            tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
             let url = wb.get_url().await.unwrap_or_default();
             state.ref_map.clear();
             return Ok(json!({ "url": url }));
@@ -1892,7 +1990,7 @@ async fn poll_until_true(
             return Err(format!("Wait timed out after {}ms", timeout_ms));
         }
 
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
     }
 }
 

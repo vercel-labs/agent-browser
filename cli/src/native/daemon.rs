@@ -7,7 +7,7 @@ use std::process;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::signal;
 
-use super::actions::{execute_command, DaemonState};
+use super::actions::{execute_command, pre_command_setup, AliveCheckInfo, DaemonState};
 use super::state;
 
 pub async fn run_daemon(session: &str) {
@@ -167,9 +167,30 @@ where
 
                 let is_close = cmd.get("action").and_then(|v| v.as_str()) == Some("close");
 
+                // Phase 1: Determine if a slow connection-liveness check is
+                // needed (quick lock, no I/O).
+                let check_info = {
+                    let s = state.lock().await;
+                    s.alive_check_info(&cmd)
+                };
+
+                // Phase 2: Perform the slow CDP ping *outside* the lock so
+                // other connections can make progress.
+                let alive_hint = match check_info {
+                    AliveCheckInfo::Skip => None,
+                    AliveCheckInfo::Check(handle) => Some(handle.is_alive().await),
+                };
+
+                // Phase 3: Run pre-command setup and execution atomically
+                // under a single lock, using the alive hint to skip the
+                // redundant inline check when the connection was verified.
                 let response = {
                     let mut s = state.lock().await;
-                    execute_command(&cmd, &mut s).await
+                    if let Some(resp) = pre_command_setup(&cmd, &mut s, alive_hint).await {
+                        resp
+                    } else {
+                        execute_command(&cmd, &mut s).await
+                    }
                 };
 
                 let mut resp = serde_json::to_string(&response).unwrap_or_default();
@@ -258,9 +279,10 @@ fn get_daemon_socket_dir() -> PathBuf {
 
 #[cfg(windows)]
 fn get_port_for_session(session: &str) -> u16 {
-    let mut hash: i64 = 0;
-    for b in session.bytes() {
-        hash = hash.wrapping_mul(31).wrapping_add(b as i64);
+    // Must match the hash algorithm in connection.rs and daemon.ts
+    let mut hash: i32 = 0;
+    for c in session.chars() {
+        hash = ((hash << 5).wrapping_sub(hash)).wrapping_add(c as i32);
     }
-    49152 + (hash.unsigned_abs() % 16383) as u16
+    49152 + ((hash.unsigned_abs() as u32 % 16383) as u16)
 }
