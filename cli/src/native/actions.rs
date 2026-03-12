@@ -91,6 +91,10 @@ pub struct DaemonState {
     pub recording_state: RecordingState,
     event_rx: Option<broadcast::Receiver<CdpEvent>>,
     pub screencasting: bool,
+    pub screencast_format: String,
+    pub screencast_quality: i32,
+    pub screencast_max_width: i32,
+    pub screencast_max_height: i32,
     pub policy: Option<ActionPolicy>,
     pub pending_confirmation: Option<PendingConfirmation>,
     pub har_recording: bool,
@@ -122,6 +126,22 @@ impl DaemonState {
             recording_state: RecordingState::new(),
             event_rx: None,
             screencasting: false,
+            screencast_format: env::var("AGENT_BROWSER_STREAM_FORMAT")
+                .ok()
+                .filter(|s| s == "jpeg" || s == "png")
+                .unwrap_or_else(|| "jpeg".to_string()),
+            screencast_quality: env::var("AGENT_BROWSER_STREAM_QUALITY")
+                .ok()
+                .and_then(|s| s.parse::<i32>().ok())
+                .unwrap_or(80),
+            screencast_max_width: env::var("AGENT_BROWSER_STREAM_MAX_WIDTH")
+                .ok()
+                .and_then(|s| s.parse::<i32>().ok())
+                .unwrap_or(1280),
+            screencast_max_height: env::var("AGENT_BROWSER_STREAM_MAX_HEIGHT")
+                .ok()
+                .and_then(|s| s.parse::<i32>().ok())
+                .unwrap_or(720),
             policy: ActionPolicy::load_if_exists(),
             pending_confirmation: None,
             har_recording: false,
@@ -2487,7 +2507,7 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
     let result = recording::recording_start(&mut state.recording_state, path)?;
 
     // Start screencast on new page
-    stream::start_screencast(&mgr.client, &new_session_id, "jpeg", 80, 1280, 720).await?;
+    stream::start_screencast(&mgr.client, &new_session_id, &state.screencast_format, state.screencast_quality, state.screencast_max_width, state.screencast_max_height).await?;
     state.screencasting = true;
 
     Ok(result)
@@ -2540,7 +2560,7 @@ async fn handle_recording_restart(cmd: &Value, state: &mut DaemonState) -> Resul
 
     if let Some(ref browser) = state.browser {
         let session_id = browser.active_session_id()?.to_string();
-        stream::start_screencast(&browser.client, &session_id, "jpeg", 80, 1280, 720).await?;
+        stream::start_screencast(&browser.client, &session_id, &state.screencast_format, state.screencast_quality, state.screencast_max_width, state.screencast_max_height).await?;
         state.screencasting = true;
     }
 
@@ -3109,10 +3129,14 @@ async fn handle_screencast_start(cmd: &Value, state: &mut DaemonState) -> Result
         return Err("Screencast already active".to_string());
     }
 
-    let format = cmd.get("format").and_then(|v| v.as_str()).unwrap_or("jpeg");
-    let quality = cmd.get("quality").and_then(|v| v.as_i64()).unwrap_or(80) as i32;
-    let max_width = cmd.get("maxWidth").and_then(|v| v.as_i64()).unwrap_or(1280) as i32;
-    let max_height = cmd.get("maxHeight").and_then(|v| v.as_i64()).unwrap_or(720) as i32;
+    let format_str;
+    let format = match cmd.get("format").and_then(|v| v.as_str()) {
+        Some(f) => f,
+        None => { format_str = state.screencast_format.clone(); &format_str }
+    };
+    let quality = cmd.get("quality").and_then(|v| v.as_i64()).map(|v| v as i32).unwrap_or(state.screencast_quality);
+    let max_width = cmd.get("maxWidth").and_then(|v| v.as_i64()).map(|v| v as i32).unwrap_or(state.screencast_max_width);
+    let max_height = cmd.get("maxHeight").and_then(|v| v.as_i64()).map(|v| v as i32).unwrap_or(state.screencast_max_height);
 
     stream::start_screencast(
         &mgr.client,
@@ -4154,7 +4178,7 @@ async fn handle_video_start(cmd: &Value, state: &mut DaemonState) -> Result<Valu
     let session_id = mgr.active_session_id()?.to_string();
 
     recording::recording_start(&mut state.recording_state, path)?;
-    stream::start_screencast(&mgr.client, &session_id, "jpeg", 80, 1280, 720).await?;
+    stream::start_screencast(&mgr.client, &session_id, &state.screencast_format, state.screencast_quality, state.screencast_max_width, state.screencast_max_height).await?;
     state.screencasting = true;
 
     Ok(json!({

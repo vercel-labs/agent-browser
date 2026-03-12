@@ -121,7 +121,11 @@ export class StreamServer {
   private screencastOptions: StreamScreencastOptions;
   private isScreencasting: boolean = false;
 
-  constructor(browser: BrowserManager, port: number = 9223, screencastOptions?: StreamScreencastOptions) {
+  constructor(
+    browser: BrowserManager,
+    port: number = 9223,
+    screencastOptions?: StreamScreencastOptions
+  ) {
     this.browser = browser;
     this.port = port;
     this.screencastOptions = screencastOptions ?? {};

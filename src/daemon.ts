@@ -362,18 +362,15 @@ export async function startDaemon(options?: {
     const screencastOptions: StreamScreencastOptions = {};
     if (process.env.AGENT_BROWSER_STREAM_MAX_WIDTH) {
       const parsed = parseInt(process.env.AGENT_BROWSER_STREAM_MAX_WIDTH, 10);
-      if (!Number.isNaN(parsed))
-        screencastOptions.maxWidth = parsed;
+      if (!Number.isNaN(parsed)) screencastOptions.maxWidth = parsed;
     }
     if (process.env.AGENT_BROWSER_STREAM_MAX_HEIGHT) {
       const parsed = parseInt(process.env.AGENT_BROWSER_STREAM_MAX_HEIGHT, 10);
-      if (!Number.isNaN(parsed))
-        screencastOptions.maxHeight = parsed;
+      if (!Number.isNaN(parsed)) screencastOptions.maxHeight = parsed;
     }
     if (process.env.AGENT_BROWSER_STREAM_QUALITY) {
       const parsed = parseInt(process.env.AGENT_BROWSER_STREAM_QUALITY, 10);
-      if (!Number.isNaN(parsed))
-        screencastOptions.quality = parsed;
+      if (!Number.isNaN(parsed)) screencastOptions.quality = parsed;
     }
     if (process.env.AGENT_BROWSER_STREAM_FORMAT) {
       const fmt = process.env.AGENT_BROWSER_STREAM_FORMAT;
