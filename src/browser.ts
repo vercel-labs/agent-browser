@@ -476,16 +476,8 @@ export class BrowserManager {
    * Start tracking requests
    */
   startRequestTracking(): void {
-    const page = this.getPage();
-    page.on('request', (request: Request) => {
-      this.trackedRequests.push({
-        url: request.url(),
-        method: request.method(),
-        headers: request.headers(),
-        timestamp: Date.now(),
-        resourceType: request.resourceType(),
-      });
-    });
+    // Request tracking is now always active via setupPageTracking().
+    // This method is kept for backwards compatibility.
   }
 
   /**
@@ -1786,6 +1778,17 @@ export class BrowserManager {
       this.pageErrors.push({
         message: error.message,
         timestamp: Date.now(),
+      });
+    });
+
+    // Track all network requests (including document navigations, not just XHR/fetch)
+    page.on('request', (request: Request) => {
+      this.trackedRequests.push({
+        url: request.url(),
+        method: request.method(),
+        headers: request.headers(),
+        timestamp: Date.now(),
+        resourceType: request.resourceType(),
       });
     });
 
