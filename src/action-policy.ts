@@ -134,6 +134,8 @@ const ACTION_CATEGORIES: Record<string, string> = {
   recording_restart: '_internal',
   profiler_start: '_internal',
   profiler_stop: '_internal',
+  react_profile_start: '_internal',
+  react_profile_stop: '_internal',
   clipboard: '_internal',
   viewport: '_internal',
   useragent: '_internal',

@@ -391,6 +391,15 @@ const profilerStopSchema = baseCommandSchema.extend({
   path: z.string().min(1).optional(),
 });
 
+const reactProfileStartSchema = baseCommandSchema.extend({
+  action: z.literal('react_profile_start'),
+});
+
+const reactProfileStopSchema = baseCommandSchema.extend({
+  action: z.literal('react_profile_stop'),
+  path: z.string().min(1).optional(),
+});
+
 const harStartSchema = baseCommandSchema.extend({
   action: z.literal('har_start'),
 });
@@ -998,6 +1007,8 @@ const commandSchema = z.discriminatedUnion('action', [
   traceStopSchema,
   profilerStartSchema,
   profilerStopSchema,
+  reactProfileStartSchema,
+  reactProfileStopSchema,
   harStartSchema,
   harStopSchema,
   stateSaveSchema,
