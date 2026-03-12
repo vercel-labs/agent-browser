@@ -1335,6 +1335,7 @@ export class BrowserManager {
       }
 
       this.browser = browser;
+      this.browserlessStopUrl = session.stop;
       context.setDefaultTimeout(getDefaultTimeout());
       this.contexts.push(context);
       this.setupContextTracking(context);
