@@ -1,3 +1,4 @@
+use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -5,16 +6,43 @@ use std::time::Duration;
 
 use super::types::BrowserVersionInfo;
 
+enum ChromeHandle {
+    Child(Child),
+    Pid(u32),
+}
+
+#[cfg(target_os = "macos")]
+struct ResolvedChromePath {
+    executable_path: PathBuf,
+    app_bundle: Option<PathBuf>,
+}
+
 pub struct ChromeProcess {
-    child: Child,
+    handle: ChromeHandle,
     pub ws_url: String,
+    temp_stderr_log: Option<PathBuf>,
     temp_user_data_dir: Option<PathBuf>,
 }
 
 impl ChromeProcess {
+    #[cfg(test)]
+    pub fn pid(&self) -> Option<u32> {
+        match self.handle {
+            ChromeHandle::Pid(pid) => Some(pid),
+            ChromeHandle::Child(_) => None,
+        }
+    }
+
     pub fn kill(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        match &mut self.handle {
+            ChromeHandle::Child(child) => {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            ChromeHandle::Pid(pid) => {
+                force_kill_pid(*pid);
+            }
+        }
     }
 
     /// Wait for Chrome to exit on its own (after Browser.close CDP command),
@@ -25,10 +53,18 @@ impl ChromeProcess {
         let poll_interval = Duration::from_millis(50);
 
         while start.elapsed() < timeout {
-            match self.child.try_wait() {
-                Ok(Some(_)) => return,
-                Ok(None) => std::thread::sleep(poll_interval),
-                Err(_) => break,
+            match &mut self.handle {
+                ChromeHandle::Child(child) => match child.try_wait() {
+                    Ok(Some(_)) => return,
+                    Ok(None) => std::thread::sleep(poll_interval),
+                    Err(_) => break,
+                },
+                ChromeHandle::Pid(pid) => {
+                    if !is_pid_running(*pid) {
+                        return;
+                    }
+                    std::thread::sleep(poll_interval);
+                }
             }
         }
 
@@ -39,6 +75,9 @@ impl ChromeProcess {
 impl Drop for ChromeProcess {
     fn drop(&mut self) {
         self.kill();
+        if let Some(ref path) = self.temp_stderr_log {
+            let _ = std::fs::remove_file(path);
+        }
         if let Some(ref dir) = self.temp_user_data_dir {
             for attempt in 0..3 {
                 match std::fs::remove_dir_all(dir) {
@@ -61,6 +100,7 @@ impl Drop for ChromeProcess {
 
 pub struct LaunchOptions {
     pub headless: bool,
+    pub no_activate: bool,
     pub executable_path: Option<String>,
     pub proxy: Option<String>,
     pub proxy_bypass: Option<String>,
@@ -79,6 +119,7 @@ impl Default for LaunchOptions {
     fn default() -> Self {
         Self {
             headless: true,
+            no_activate: false,
             executable_path: None,
             proxy: None,
             proxy_bypass: None,
@@ -97,6 +138,7 @@ impl Default for LaunchOptions {
 
 struct ChromeArgs {
     args: Vec<String>,
+    launch_marker: Option<String>,
     temp_user_data_dir: Option<PathBuf>,
 }
 
@@ -180,13 +222,38 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
         args.push("--no-sandbox".to_string());
     }
 
+    let launch_marker = no_activate_launch_marker(options);
+    if let Some(ref marker) = launch_marker {
+        args.push(format!("--agent-browser-launch-id={}", marker));
+    }
+
     Ok(ChromeArgs {
         args,
+        launch_marker,
         temp_user_data_dir,
     })
 }
 
+#[cfg(target_os = "macos")]
+fn no_activate_launch_marker(options: &LaunchOptions) -> Option<String> {
+    (options.no_activate && !options.headless).then(|| uuid::Uuid::new_v4().to_string())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn no_activate_launch_marker(_options: &LaunchOptions) -> Option<String> {
+    None
+}
+
 pub fn launch_chrome(options: &LaunchOptions) -> Result<ChromeProcess, String> {
+    #[cfg(not(target_os = "macos"))]
+    if options.no_activate {
+        return Err("--no-activate is only supported on macOS native Chrome".to_string());
+    }
+
+    #[cfg(target_os = "macos")]
+    let chrome = resolve_chrome_path(options.executable_path.as_deref())
+        .ok_or("Chrome not found. Install Chrome or use --executable-path.")?;
+    #[cfg(not(target_os = "macos"))]
     let chrome_path = match &options.executable_path {
         Some(p) => PathBuf::from(p),
         None => {
@@ -196,8 +263,19 @@ pub fn launch_chrome(options: &LaunchOptions) -> Result<ChromeProcess, String> {
 
     let ChromeArgs {
         args,
+        launch_marker,
         temp_user_data_dir,
     } = build_chrome_args(options)?;
+
+    #[cfg(target_os = "macos")]
+    if options.no_activate && !options.headless {
+        return launch_chrome_without_activation(
+            &chrome,
+            &args,
+            launch_marker,
+            temp_user_data_dir,
+        );
+    }
 
     let cleanup_temp_dir = |dir: &Option<PathBuf>| {
         if let Some(ref d) = dir {
@@ -205,7 +283,10 @@ pub fn launch_chrome(options: &LaunchOptions) -> Result<ChromeProcess, String> {
         }
     };
 
-    let mut child = Command::new(&chrome_path)
+    #[cfg(target_os = "macos")]
+    let chrome_path = &chrome.executable_path;
+
+    let mut child = Command::new(chrome_path)
         .args(&args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -233,11 +314,207 @@ pub fn launch_chrome(options: &LaunchOptions) -> Result<ChromeProcess, String> {
     };
 
     Ok(ChromeProcess {
-        child,
+        handle: ChromeHandle::Child(child),
         ws_url,
+        temp_stderr_log: None,
         temp_user_data_dir,
     })
 }
+
+#[cfg(target_os = "macos")]
+fn launch_chrome_without_activation(
+    chrome: &ResolvedChromePath,
+    args: &[String],
+    launch_marker: Option<String>,
+    temp_user_data_dir: Option<PathBuf>,
+) -> Result<ChromeProcess, String> {
+    let cleanup_temp_dir = |dir: &Option<PathBuf>| {
+        if let Some(ref d) = dir {
+            let _ = std::fs::remove_dir_all(d);
+        }
+    };
+
+    let app_bundle = chrome.app_bundle.as_ref().ok_or_else(|| {
+        format!(
+            "--no-activate requires a macOS .app bundle, but '{}' is not inside one",
+            chrome.executable_path.display()
+        )
+    })?;
+
+    let stderr_log_path =
+        std::env::temp_dir().join(format!("agent-browser-chrome-stderr-{}.log", uuid::Uuid::new_v4()));
+    File::create(&stderr_log_path)
+        .map_err(|e| format!("Failed to create temp Chrome stderr log: {}", e))?;
+
+    let status = Command::new("/usr/bin/open")
+        .arg("-g")
+        .arg("-n")
+        .arg("--stderr")
+        .arg(&stderr_log_path)
+        .arg("-a")
+        .arg(&app_bundle)
+        .arg("--args")
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|e| {
+            cleanup_temp_dir(&temp_user_data_dir);
+            format!(
+                "Failed to launch Chrome without activation via open at '{}': {}",
+                app_bundle.display(),
+                e
+            )
+        })?;
+
+    if !status.success() {
+        cleanup_temp_dir(&temp_user_data_dir);
+        return Err(format!("Chrome launch via open failed with exit status {}", status));
+    }
+
+    let launch_marker = launch_marker.ok_or_else(|| {
+        cleanup_temp_dir(&temp_user_data_dir);
+        "Missing no-activate Chrome launch marker".to_string()
+    })?;
+
+    let pid = wait_for_pid_by_launch_marker(&launch_marker, Duration::from_secs(10)).ok_or_else(
+        || {
+            cleanup_temp_dir(&temp_user_data_dir);
+            format!(
+                "Timed out locating the Chrome process for launch marker {}",
+                launch_marker
+            )
+        },
+    )?;
+
+    let ws_url = wait_for_ws_url_from_stderr_file(&stderr_log_path, Duration::from_secs(30))
+        .ok_or_else(|| {
+            force_kill_pid(pid);
+            let _ = std::fs::remove_file(&stderr_log_path);
+            cleanup_temp_dir(&temp_user_data_dir);
+            "Timeout waiting for Chrome DevTools URL from redirected stderr".to_string()
+        })?;
+
+    Ok(ChromeProcess {
+        handle: ChromeHandle::Pid(pid),
+        ws_url,
+        temp_stderr_log: Some(stderr_log_path),
+        temp_user_data_dir,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn resolve_chrome_path(executable_path: Option<&str>) -> Option<ResolvedChromePath> {
+    match executable_path {
+        Some(path) => {
+            let executable_path = PathBuf::from(path);
+            Some(ResolvedChromePath {
+                app_bundle: app_bundle_for_executable(&executable_path),
+                executable_path,
+            })
+        }
+        None => find_chrome_install(),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn app_bundle_for_executable(executable: &Path) -> Option<PathBuf> {
+    executable.ancestors().find_map(|ancestor| {
+        ancestor.extension().is_some_and(|ext| ext == "app").then(|| ancestor.to_path_buf())
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn wait_for_pid_by_launch_marker(launch_marker: &str, timeout: Duration) -> Option<u32> {
+    let needle = format!("--agent-browser-launch-id={}", launch_marker);
+    let deadline = std::time::Instant::now() + timeout;
+
+    while std::time::Instant::now() < deadline {
+        if let Some(pid) = find_pid_by_command_substring(&needle) {
+            return Some(pid);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn find_pid_by_command_substring(needle: &str) -> Option<u32> {
+    let output = Command::new("ps")
+        .args(["axww", "-o", "pid=,command="])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find_map(|line| {
+            if !line.contains(needle) {
+                return None;
+            }
+            if line.contains(" --type=") {
+                return None;
+            }
+            line.split_whitespace().next()?.parse::<u32>().ok()
+        })
+}
+
+fn wait_for_ws_url_from_stderr_file(stderr_log_path: &Path, timeout: Duration) -> Option<String> {
+    let deadline = std::time::Instant::now() + timeout;
+    let prefix = "DevTools listening on ";
+
+    while std::time::Instant::now() < deadline {
+        if let Ok(content) = std::fs::read_to_string(stderr_log_path) {
+            for line in content.lines() {
+                if let Some(url) = line.strip_prefix(prefix) {
+                    return Some(url.trim().to_string());
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    None
+}
+
+#[cfg(unix)]
+fn is_pid_running(pid: u32) -> bool {
+    unsafe {
+        libc::kill(pid as i32, 0) == 0
+            || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+    }
+}
+
+#[cfg(not(unix))]
+fn is_pid_running(_pid: u32) -> bool {
+    false
+}
+
+#[cfg(unix)]
+fn force_kill_pid(pid: u32) {
+    unsafe {
+        let _ = libc::kill(pid as i32, libc::SIGTERM);
+    }
+
+    let deadline = std::time::Instant::now() + Duration::from_millis(250);
+    while std::time::Instant::now() < deadline {
+        if !is_pid_running(pid) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+
+    unsafe {
+        let _ = libc::kill(pid as i32, libc::SIGKILL);
+    }
+}
+
+#[cfg(not(unix))]
+fn force_kill_pid(_pid: u32) {}
 
 fn wait_for_ws_url(reader: BufReader<std::process::ChildStderr>) -> Result<String, String> {
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
@@ -322,23 +599,17 @@ fn chrome_launch_error(message: &str, stderr_lines: &[String]) -> String {
 pub fn find_chrome() -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     {
-        let candidates = [
-            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-            "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
-            "/Applications/Chromium.app/Contents/MacOS/Chromium",
-        ];
-        for c in &candidates {
-            let p = PathBuf::from(c);
-            if p.exists() {
-                return Some(p);
-            }
-        }
-
-        if let Some(p) = find_playwright_chromium() {
-            return Some(p);
-        }
+        return find_chrome_install().map(|chrome| chrome.executable_path);
     }
 
+    #[cfg(not(target_os = "macos"))]
+    {
+        find_chrome_non_macos()
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn find_chrome_non_macos() -> Option<PathBuf> {
     #[cfg(target_os = "linux")]
     {
         let candidates = [
@@ -380,6 +651,36 @@ pub fn find_chrome() -> Option<PathBuf> {
             if p.exists() {
                 return Some(p);
             }
+        }
+    }
+
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn find_chrome_install() -> Option<ResolvedChromePath> {
+    #[cfg(target_os = "macos")]
+    {
+        let candidates = [
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
+            "/Applications/Chromium.app/Contents/MacOS/Chromium",
+        ];
+        for c in &candidates {
+            let p = PathBuf::from(c);
+            if p.is_file() {
+                return Some(ResolvedChromePath {
+                    app_bundle: app_bundle_for_executable(&p),
+                    executable_path: p,
+                });
+            }
+        }
+
+        if let Some(p) = find_playwright_chromium() {
+            return Some(ResolvedChromePath {
+                app_bundle: app_bundle_for_executable(&p),
+                executable_path: p,
+            });
         }
     }
 
@@ -838,8 +1139,9 @@ mod tests {
                 .spawn()
                 .unwrap();
             let _process = ChromeProcess {
-                child,
+                handle: ChromeHandle::Child(child),
                 ws_url: String::new(),
+                temp_stderr_log: None,
                 temp_user_data_dir: Some(dir.clone()),
             };
             // _process dropped here

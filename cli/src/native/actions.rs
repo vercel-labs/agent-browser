@@ -445,6 +445,8 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
                     url: te.target_info.url.clone(),
                     title: te.target_info.title.clone(),
                     target_type: te.target_info.target_type.clone(),
+                    browser_context_id: te.target_info.browser_context_id.clone(),
+                    window_id: None,
                 });
             }
         }
@@ -767,6 +769,9 @@ fn launch_options_from_env() -> LaunchOptions {
 
     LaunchOptions {
         headless: !headed,
+        no_activate: env::var("AGENT_BROWSER_NO_ACTIVATE")
+            .map(|v| v == "1" || v == "true")
+            .unwrap_or(false),
         executable_path: env::var("AGENT_BROWSER_EXECUTABLE_PATH").ok(),
         proxy: env::var("AGENT_BROWSER_PROXY").ok(),
         proxy_bypass: env::var("AGENT_BROWSER_PROXY_BYPASS").ok(),
@@ -939,6 +944,15 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
 
     let options = LaunchOptions {
         headless,
+        no_activate: cmd
+            .get("noActivate")
+            .and_then(|v| v.as_bool())
+            .or_else(|| {
+                env::var("AGENT_BROWSER_NO_ACTIVATE")
+                    .ok()
+                    .map(|v| v == "1" || v == "true")
+            })
+            .unwrap_or(false),
         executable_path: cmd
             .get("executablePath")
             .and_then(|v| v.as_str())
@@ -2471,6 +2485,8 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
         url: nav_url.clone(),
         title: String::new(),
         target_type: "page".to_string(),
+        browser_context_id: Some(context_id),
+        window_id: None,
     });
 
     // Navigate to URL
@@ -4022,6 +4038,7 @@ async fn handle_waitfordownload(cmd: &Value, state: &DaemonState) -> Result<Valu
 
 async fn handle_window_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
+    let background_window = mgr.prefers_background_windows();
 
     // Create a new browser context
     let context_result = mgr
@@ -4038,7 +4055,13 @@ async fn handle_window_new(cmd: &Value, state: &mut DaemonState) -> Result<Value
         .client
         .send_command_typed(
             "Target.createTarget",
-            &json!({ "url": "about:blank", "browserContextId": context_id }),
+            &super::cdp::types::CreateTargetParams {
+                url: "about:blank".to_string(),
+                new_window: Some(true),
+                background: background_window.then_some(true),
+                focus: background_window.then_some(false),
+                browser_context_id: Some(context_id.clone()),
+            },
             None,
         )
         .await?;
@@ -4061,6 +4084,8 @@ async fn handle_window_new(cmd: &Value, state: &mut DaemonState) -> Result<Value
         url: "about:blank".to_string(),
         title: String::new(),
         target_type: "page".to_string(),
+        browser_context_id: Some(context_id),
+        window_id: None,
     });
 
     if let Some(viewport) = cmd.get("viewport") {

@@ -7,9 +7,12 @@
 //! Run serially to avoid Chrome instance contention:
 //!   cargo test e2e -- --ignored --test-threads=1
 
+use std::time::{Duration, Instant};
+
 use serde_json::{json, Value};
 
 use super::actions::{execute_command, DaemonState};
+use super::cdp::chrome::discover_cdp_url;
 
 fn assert_success(resp: &Value) {
     assert_eq!(
@@ -22,6 +25,46 @@ fn assert_success(resp: &Value) {
 
 fn get_data(resp: &Value) -> &Value {
     resp.get("data").expect("Missing 'data' in response")
+}
+
+fn devtools_port_from_ws_url(ws_url: &str) -> Option<u16> {
+    let url = url::Url::parse(ws_url).ok()?;
+    url.port()
+}
+
+#[cfg(unix)]
+fn is_pid_running(pid: u32) -> bool {
+    unsafe {
+        libc::kill(pid as i32, 0) == 0
+            || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+    }
+}
+
+#[cfg(unix)]
+struct PidCleanupGuard {
+    pid: u32,
+}
+
+#[cfg(unix)]
+impl Drop for PidCleanupGuard {
+    fn drop(&mut self) {
+        if is_pid_running(self.pid) {
+            unsafe {
+                let _ = libc::kill(self.pid as i32, libc::SIGKILL);
+            }
+        }
+    }
+}
+
+async fn wait_for_cdp_disconnect(port: u16, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if discover_cdp_url(port).await.is_err() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    false
 }
 
 // ---------------------------------------------------------------------------
@@ -1474,5 +1517,140 @@ async fn e2e_profile_cookie_persistence() {
         assert_success(&resp);
     }
 
+    let _ = std::fs::remove_dir_all(&profile_dir);
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+#[ignore]
+async fn e2e_no_activate_launch_and_interact() {
+    let mut state = DaemonState::new();
+    let profile_dir = std::env::temp_dir().join(format!(
+        "agent-browser-no-activate-close-{}",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&profile_dir).unwrap();
+
+    let html = concat!(
+        "<html><body>",
+        "<input id='name' value=''>",
+        "<input id='agree' type='checkbox'>",
+        "</body></html>"
+    );
+
+    let resp = execute_command(
+        &json!({
+            "id": "1",
+            "action": "launch",
+            "headless": false,
+            "noActivate": true,
+            "profile": profile_dir.display().to_string()
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let devtools_port = state
+        .browser
+        .as_ref()
+        .and_then(|browser| devtools_port_from_ws_url(&browser.ws_url))
+        .expect("Connected browser should expose a DevTools port");
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "setcontent", "html": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2b", "action": "wait", "selector": "#agree" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "fill", "selector": "#name", "value": "Alice" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "click", "selector": "#agree" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "evaluate", "script": "({ name: document.querySelector('#name').value, agree: document.querySelector('#agree').checked })" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"]["name"], "Alice");
+    assert_eq!(get_data(&resp)["result"]["agree"], true);
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+    assert!(
+        wait_for_cdp_disconnect(devtools_port, Duration::from_secs(5)).await,
+        "CDP endpoint on port {} should stop responding after Browser.close",
+        devtools_port
+    );
+
+    let _ = std::fs::remove_dir_all(&profile_dir);
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+#[ignore]
+async fn e2e_no_activate_close_kills_stopped_pid() {
+    let mut state = DaemonState::new();
+    let profile_dir = std::env::temp_dir().join(format!(
+        "agent-browser-no-activate-pid-close-{}",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&profile_dir).unwrap();
+
+    let launch_resp = execute_command(
+        &json!({
+            "id": "1",
+            "action": "launch",
+            "headless": false,
+            "noActivate": true,
+            "profile": profile_dir.display().to_string()
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&launch_resp);
+
+    let pid = state
+        .browser
+        .as_ref()
+        .and_then(|browser| browser.browser_pid())
+        .expect("No-activate launch should expose the native browser pid");
+    let guard = PidCleanupGuard { pid };
+
+    unsafe {
+        assert_eq!(libc::kill(pid as i32, libc::SIGSTOP), 0);
+    }
+
+    // This intentionally runs through the full close fallback path. With the
+    // browser stopped, Browser.close cannot answer, so close() waits for the
+    // 30s CdpClient::send_command timeout in native/cdp/client.rs before the
+    // pid-based kill fallback executes.
+    let close_resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&close_resp);
+    assert!(
+        !is_pid_running(pid),
+        "Stopped browser pid {} should be terminated by close fallback",
+        pid
+    );
+
+    std::mem::forget(guard);
     let _ = std::fs::remove_dir_all(&profile_dir);
 }

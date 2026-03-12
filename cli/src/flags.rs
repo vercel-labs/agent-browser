@@ -12,6 +12,7 @@ const PROJECT_CONFIG_FILENAME: &str = "agent-browser.json";
 #[serde(default, rename_all = "camelCase")]
 pub struct Config {
     pub headed: Option<bool>,
+    pub no_activate: Option<bool>,
     pub json: Option<bool>,
     pub full: Option<bool>,
     pub debug: Option<bool>,
@@ -49,6 +50,7 @@ impl Config {
     fn merge(self, other: Config) -> Config {
         Config {
             headed: other.headed.or(self.headed),
+            no_activate: other.no_activate.or(self.no_activate),
             json: other.json.or(self.json),
             full: other.full.or(self.full),
             debug: other.debug.or(self.debug),
@@ -211,6 +213,7 @@ pub struct Flags {
     pub json: bool,
     pub full: bool,
     pub headed: bool,
+    pub no_activate: bool,
     pub debug: bool,
     pub session: String,
     pub headers: Option<String>,
@@ -283,6 +286,8 @@ pub fn parse_flags(args: &[String]) -> Flags {
         json: env_var_is_truthy("AGENT_BROWSER_JSON") || config.json.unwrap_or(false),
         full: env_var_is_truthy("AGENT_BROWSER_FULL") || config.full.unwrap_or(false),
         headed: env_var_is_truthy("AGENT_BROWSER_HEADED") || config.headed.unwrap_or(false),
+        no_activate: env_var_is_truthy("AGENT_BROWSER_NO_ACTIVATE")
+            || config.no_activate.unwrap_or(false),
         debug: env_var_is_truthy("AGENT_BROWSER_DEBUG") || config.debug.unwrap_or(false),
         session: env::var("AGENT_BROWSER_SESSION")
             .ok()
@@ -381,6 +386,13 @@ pub fn parse_flags(args: &[String]) -> Flags {
             "--headed" => {
                 let (val, consumed) = parse_bool_arg(args, i);
                 flags.headed = val;
+                if consumed {
+                    i += 1;
+                }
+            }
+            "--no-activate" => {
+                let (val, consumed) = parse_bool_arg(args, i);
+                flags.no_activate = val;
                 if consumed {
                     i += 1;
                 }
@@ -606,6 +618,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--json",
         "--full",
         "--headed",
+        "--no-activate",
         "--debug",
         "--ignore-https-errors",
         "--allow-file-access",
@@ -1114,6 +1127,12 @@ mod tests {
     }
 
     #[test]
+    fn test_no_activate_bare_defaults_true() {
+        let flags = parse_flags(&args("--no-activate open example.com"));
+        assert!(flags.no_activate);
+    }
+
+    #[test]
     fn test_debug_false() {
         let flags = parse_flags(&args("--debug false open example.com"));
         assert!(!flags.debug);
@@ -1183,6 +1202,12 @@ mod tests {
     #[test]
     fn test_clean_args_removes_bare_bool_flag() {
         let cleaned = clean_args(&args("--headed --debug open example.com"));
+        assert_eq!(cleaned, vec!["open", "example.com"]);
+    }
+
+    #[test]
+    fn test_clean_args_removes_no_activate() {
+        let cleaned = clean_args(&args("--no-activate open example.com"));
         assert_eq!(cleaned, vec!["open", "example.com"]);
     }
 

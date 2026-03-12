@@ -398,6 +398,7 @@ fn main() {
 
     let daemon_opts = DaemonOptions {
         headed: flags.headed,
+        no_activate: flags.no_activate,
         debug: flags.debug,
         executable_path: flags.executable_path.as_deref(),
         extensions: &flags.extensions,

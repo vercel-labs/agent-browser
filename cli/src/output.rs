@@ -2438,6 +2438,7 @@ Options:
   --full, -f                 Full page screenshot
   --annotate                 Annotated screenshot with numbered labels and legend
   --headed                   Show browser window (not headless) (or AGENT_BROWSER_HEADED env)
+  --no-activate              On macOS native Chrome, launch headed without foreground activation when possible
   --cdp <port>               Connect via CDP (Chrome DevTools Protocol)
   --auto-connect             Auto-discover and connect to running Chrome
   --color-scheme <scheme>    Color scheme: dark, light, no-preference (or AGENT_BROWSER_COLOR_SCHEME)
@@ -2483,6 +2484,7 @@ Environment:
   AGENT_BROWSER_EXECUTABLE_PATH  Custom browser executable path
   AGENT_BROWSER_EXTENSIONS       Comma-separated browser extension paths
   AGENT_BROWSER_HEADED           Show browser window (not headless)
+  AGENT_BROWSER_NO_ACTIVATE      On macOS native Chrome, try to launch headed without foreground activation
   AGENT_BROWSER_JSON             JSON output
   AGENT_BROWSER_FULL             Full page screenshot
   AGENT_BROWSER_ANNOTATE         Annotated screenshot with numbered labels and legend

@@ -83,6 +83,9 @@ fn validate_lightpanda_options(options: &LaunchOptions) -> Result<(), String> {
             "Custom Chrome arguments (--args) are not supported with Lightpanda".to_string(),
         );
     }
+    if options.no_activate {
+        return Err("--no-activate is only supported with native Chrome on macOS".to_string());
+    }
     Ok(())
 }
 
@@ -118,6 +121,8 @@ pub struct PageInfo {
     pub url: String,
     pub title: String,
     pub target_type: String, // "page" or "webview"
+    pub browser_context_id: Option<String>,
+    pub window_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -143,6 +148,14 @@ pub enum BrowserProcess {
 }
 
 impl BrowserProcess {
+    #[cfg(test)]
+    pub fn pid(&self) -> Option<u32> {
+        match self {
+            BrowserProcess::Chrome(p) => p.pid(),
+            BrowserProcess::Lightpanda(_) => None,
+        }
+    }
+
     pub fn kill(&mut self) {
         match self {
             BrowserProcess::Chrome(p) => p.kill(),
@@ -160,7 +173,10 @@ impl BrowserProcess {
 
 pub struct BrowserManager {
     pub client: CdpClient,
+    #[cfg(test)]
+    pub ws_url: String,
     browser_process: Option<BrowserProcess>,
+    background_new_windows: bool,
     pages: Vec<PageInfo>,
     active_page_index: usize,
     default_timeout_ms: u64,
@@ -169,6 +185,7 @@ pub struct BrowserManager {
 impl BrowserManager {
     pub async fn launch(options: LaunchOptions, engine: Option<&str>) -> Result<Self, String> {
         let engine = engine.unwrap_or("chrome");
+        let background_new_windows = options.no_activate && !options.headless;
 
         match engine {
             "chrome" => {
@@ -222,7 +239,10 @@ impl BrowserManager {
         let client = CdpClient::connect(&ws_url).await?;
         let mut manager = Self {
             client,
+            #[cfg(test)]
+            ws_url,
             browser_process: Some(process),
+            background_new_windows,
             pages: Vec::new(),
             active_page_index: 0,
             default_timeout_ms: 25_000,
@@ -284,7 +304,10 @@ impl BrowserManager {
         let client = CdpClient::connect(&ws_url).await?;
         let mut manager = Self {
             client,
+            #[cfg(test)]
+            ws_url,
             browser_process: None,
+            background_new_windows: false,
             pages: Vec::new(),
             active_page_index: 0,
             default_timeout_ms: 10_000,
@@ -329,6 +352,10 @@ impl BrowserManager {
                     "Target.createTarget",
                     &CreateTargetParams {
                         url: "about:blank".to_string(),
+                        new_window: None,
+                        background: None,
+                        focus: None,
+                        browser_context_id: None,
                     },
                     None,
                 )
@@ -352,6 +379,8 @@ impl BrowserManager {
                 url: "about:blank".to_string(),
                 title: String::new(),
                 target_type: "page".to_string(),
+                browser_context_id: None,
+                window_id: None,
             });
             self.active_page_index = 0;
             self.enable_domains(&attach_result.session_id).await?;
@@ -375,6 +404,8 @@ impl BrowserManager {
                     url: target.url.clone(),
                     title: target.title.clone(),
                     target_type: target.target_type.clone(),
+                    browser_context_id: target.browser_context_id.clone(),
+                    window_id: None,
                 });
             }
 
@@ -408,6 +439,10 @@ impl BrowserManager {
             .get(self.active_page_index)
             .map(|p| p.session_id.as_str())
             .ok_or_else(|| "No active page".to_string())
+    }
+
+    pub fn prefers_background_windows(&self) -> bool {
+        self.background_new_windows
     }
 
     pub async fn navigate(&mut self, url: &str, wait_until: WaitUntil) -> Result<Value, String> {
@@ -608,6 +643,10 @@ impl BrowserManager {
         Ok(())
     }
 
+    #[cfg(test)]
+    pub fn browser_pid(&self) -> Option<u32> {
+        self.browser_process.as_ref().and_then(|process| process.pid())
+    }
     pub fn has_pages(&self) -> bool {
         !self.pages.is_empty()
     }
@@ -647,6 +686,10 @@ impl BrowserManager {
                 "Target.createTarget",
                 &CreateTargetParams {
                     url: "about:blank".to_string(),
+                    new_window: None,
+                    background: None,
+                    focus: None,
+                    browser_context_id: None,
                 },
                 None,
             )
@@ -670,6 +713,8 @@ impl BrowserManager {
             url: "about:blank".to_string(),
             title: String::new(),
             target_type: "page".to_string(),
+            browser_context_id: None,
+            window_id: None,
         });
         self.active_page_index = 0;
         self.enable_domains(&attach_result.session_id).await?;
@@ -718,6 +763,10 @@ impl BrowserManager {
                 "Target.createTarget",
                 &CreateTargetParams {
                     url: target_url.to_string(),
+                    new_window: None,
+                    background: None,
+                    focus: None,
+                    browser_context_id: None,
                 },
                 None,
             )
@@ -744,6 +793,8 @@ impl BrowserManager {
             url: target_url.to_string(),
             title: String::new(),
             target_type: "page".to_string(),
+            browser_context_id: None,
+            window_id: None,
         });
         self.active_page_index = index;
 
