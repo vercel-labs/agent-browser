@@ -792,4 +792,13 @@ mod tests {
         assert!(!is_transient_error("Permission denied"));
         assert!(!is_transient_error("Daemon not found"));
     }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_get_port_for_session() {
+        assert_eq!(get_port_for_session("default"), 50838);
+        assert_eq!(get_port_for_session("my-session"), 63105);
+        assert_eq!(get_port_for_session("work"), 51184);
+        assert_eq!(get_port_for_session(""), 49152);
+    }
 }

@@ -185,7 +185,7 @@ export function getSession(): string {
  * Get port number for TCP mode (Windows)
  * Uses a hash of the session name to get a consistent port
  */
-function getPortForSession(session: string): number {
+export function getPortForSession(session: string): number {
   let hash = 0;
   for (let i = 0; i < session.length; i++) {
     hash = (hash << 5) - hash + session.charCodeAt(i);
