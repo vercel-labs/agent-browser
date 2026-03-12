@@ -1544,3 +1544,86 @@ async fn e2e_profile_cookie_persistence() {
 
     let _ = std::fs::remove_dir_all(&profile_dir);
 }
+
+// ---------------------------------------------------------------------------
+// Inspect / CDP URL
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore]
+async fn e2e_get_cdp_url() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(&json!({ "id": "2", "action": "cdp_url" }), &mut state).await;
+    assert_success(&resp);
+    let cdp_url = get_data(&resp)["cdpUrl"]
+        .as_str()
+        .expect("cdpUrl should be a string");
+    assert!(
+        cdp_url.starts_with("ws://"),
+        "CDP URL should start with ws://, got: {}",
+        cdp_url
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_inspect() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": "https://example.com" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(&json!({ "id": "3", "action": "inspect" }), &mut state).await;
+    assert_success(&resp);
+    let data = get_data(&resp);
+    assert_eq!(data["opened"], true);
+    let url = data["url"]
+        .as_str()
+        .expect("inspect url should be a string");
+    assert!(
+        url.starts_with("http://127.0.0.1:"),
+        "Inspect URL should be http://127.0.0.1:<port>, got: {}",
+        url
+    );
+
+    // Verify the HTTP redirect serves a 302 to the DevTools frontend
+    let http_resp = reqwest::get(url).await;
+    match http_resp {
+        Ok(r) => {
+            let final_url = r.url().to_string();
+            assert!(
+                final_url.contains("devtools/devtools_app.html"),
+                "Redirect should point to DevTools frontend, got: {}",
+                final_url
+            );
+        }
+        Err(e) => {
+            panic!("HTTP GET to inspect URL failed: {}", e);
+        }
+    }
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}

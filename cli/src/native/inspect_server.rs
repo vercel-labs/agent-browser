@@ -131,16 +131,20 @@ async fn handle_connection(
     Ok(())
 }
 
+const MAX_HEADER_BYTES: usize = 8192;
+
 async fn handle_http_redirect(
     buf_reader: BufReader<tokio::net::TcpStream>,
     chrome_host_port: String,
     proxy_port: u16,
 ) -> Result<(), String> {
     let mut br = buf_reader;
+    let mut total_bytes = 0usize;
     loop {
         let mut line = String::new();
-        br.read_line(&mut line).await.map_err(|e| e.to_string())?;
-        if line == "\r\n" || line == "\n" || line.is_empty() {
+        let n = br.read_line(&mut line).await.map_err(|e| e.to_string())?;
+        total_bytes += n;
+        if line == "\r\n" || line == "\n" || line.is_empty() || total_bytes > MAX_HEADER_BYTES {
             break;
         }
     }

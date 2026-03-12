@@ -21,6 +21,10 @@ export function stripSessionId(json: string): string {
   return JSON.stringify(msg);
 }
 
+// The Node.js path opens its own WebSocket to Chrome rather than sharing
+// Playwright's internal connection. This avoids interfering with Playwright's
+// CDP session management. The Rust/native path takes the opposite approach,
+// sharing the daemon's existing browser-level WebSocket via InspectProxyHandle.
 export class InspectServer {
   private httpServer: http.Server;
   private wss: WebSocketServer;
@@ -166,6 +170,22 @@ export class InspectServer {
       devtoolsWs.close();
     });
 
+    const messageBuffer: string[] = [];
+
+    devtoolsWs.on('message', (data) => {
+      if (!this.chromeWs || this.chromeWs.readyState !== WebSocket.OPEN) return;
+      const text = String(data);
+      if (!sessionId) {
+        messageBuffer.push(text);
+        return;
+      }
+      try {
+        this.chromeWs.send(injectSessionId(text, sessionId));
+      } catch (err) {
+        console.error('[inspect] DevTools message forwarding error:', err);
+      }
+    });
+
     const attachPromise = new Promise<string | null>((resolve) => {
       this.pendingAttaches.set(attachId, resolve);
       this.chromeWs!.send(attachMsg);
@@ -192,14 +212,14 @@ export class InspectServer {
       sessionId = sid;
       this.sessions.set(sid, devtoolsWs);
 
-      devtoolsWs.on('message', (data) => {
-        if (!this.chromeWs || this.chromeWs.readyState !== WebSocket.OPEN) return;
+      for (const buffered of messageBuffer) {
         try {
-          this.chromeWs.send(injectSessionId(String(data), sid!));
+          this.chromeWs!.send(injectSessionId(buffered, sid));
         } catch (err) {
           console.error('[inspect] DevTools message forwarding error:', err);
         }
-      });
+      }
+      messageBuffer.length = 0;
     });
   }
 
