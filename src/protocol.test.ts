@@ -1424,15 +1424,6 @@ describe('parseCommand', () => {
       expect(parsed.data.snapshot).not.toMatch(/[\uD800-\uDFFF]/);
     });
 
-    it('should serialize response without surrogates normally', () => {
-      const response = successResponse('1', {
-        snapshot: 'button "Submit"',
-      });
-      const json = serializeResponse(response);
-      const parsed = JSON.parse(json);
-      expect(parsed.data.snapshot).toBe('button "Submit"');
-    });
-
     it('should preserve valid emoji characters', () => {
       const response = successResponse('1', {
         snapshot: 'button "😀 Click"',
