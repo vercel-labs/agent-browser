@@ -5,7 +5,7 @@ use std::sync::Arc;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 use tokio::sync::{broadcast, oneshot, Mutex};
-use tokio_tungstenite::connect_async;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 
 use super::types::{CdpCommand, CdpEvent, CdpMessage};
@@ -40,7 +40,29 @@ pub struct CdpClient {
 
 impl CdpClient {
     pub async fn connect(url: &str) -> Result<Self, String> {
-        let (ws_stream, _) = connect_async(url)
+        Self::connect_with_headers(url, None).await
+    }
+
+    pub async fn connect_with_headers(
+        url: &str,
+        headers: Option<Vec<(String, String)>>,
+    ) -> Result<Self, String> {
+        let mut request = url.into_client_request()
+            .map_err(|e| format!("Invalid WebSocket URL: {}", e))?;
+
+        if let Some(hdrs) = headers {
+            let req_headers = request.headers_mut();
+            for (key, value) in hdrs {
+                if let (Ok(name), Ok(val)) = (
+                    key.parse::<tokio_tungstenite::tungstenite::http::header::HeaderName>(),
+                    value.parse::<tokio_tungstenite::tungstenite::http::header::HeaderValue>(),
+                ) {
+                    req_headers.insert(name, val);
+                }
+            }
+        }
+
+        let (ws_stream, _) = tokio_tungstenite::connect_async(request)
             .await
             .map_err(|e| format!("CDP WebSocket connect failed: {}", e))?;
 

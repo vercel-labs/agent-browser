@@ -5,6 +5,10 @@ edition = "2021"
 description = "Fast browser automation CLI for AI agents"
 license = "Apache-2.0"
 
+[features]
+default = []
+agentcore = ["hmac", "hex", "chrono", "urlencoding"]
+
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -22,6 +26,12 @@ sha2 = "0.10"
 aes-gcm = "0.10"
 async-trait = "0.1"
 similar = "2"
+
+# AgentCore provider (optional - lightweight SigV4 signing)
+hmac = { version = "0.12", optional = true }
+hex = { version = "0.4", optional = true }
+chrono = { version = "0.4", optional = true }
+urlencoding = { version = "2", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

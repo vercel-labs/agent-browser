@@ -282,15 +282,22 @@ impl BrowserManager {
     }
 
     pub async fn connect_cdp(url: &str) -> Result<Self, String> {
+        Self::connect_cdp_with_headers(url, None).await
+    }
+
+    pub async fn connect_cdp_with_headers(
+        url: &str,
+        headers: Option<Vec<(String, String)>>,
+    ) -> Result<Self, String> {
         let ws_url = resolve_cdp_url(url).await?;
-        let client = CdpClient::connect(&ws_url).await?;
+        let client = CdpClient::connect_with_headers(&ws_url, headers).await?;
         let mut manager = Self {
             client,
             browser_process: None,
             ws_url,
             pages: Vec::new(),
             active_page_index: 0,
-            default_timeout_ms: 10_000,
+            default_timeout_ms: 60_000, // AgentCore needs longer timeout
         };
 
         manager.discover_and_attach_targets().await?;
