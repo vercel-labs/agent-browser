@@ -2533,7 +2533,7 @@ Options:
   --full, -f                 Full page screenshot
   --annotate                 Annotated screenshot with numbered labels and legend
   --screenshot-dir <path>    Default screenshot output directory (or AGENT_BROWSER_SCREENSHOT_DIR)
-  --screenshot-quality <n>   JPEG quality 0-100 (or AGENT_BROWSER_SCREENSHOT_QUALITY)
+  --screenshot-quality <n>   JPEG quality 0-100; ignored for PNG (or AGENT_BROWSER_SCREENSHOT_QUALITY)
   --screenshot-format <fmt>  Screenshot format: png, jpeg (or AGENT_BROWSER_SCREENSHOT_FORMAT)
   --headed                   Show browser window (not headless) (or AGENT_BROWSER_HEADED env)
   --cdp <port>               Connect via CDP (Chrome DevTools Protocol)

@@ -2136,10 +2136,10 @@ async function handleClipboard(
 
   switch (command.operation) {
     case 'copy':
-      await page.keyboard.press('Control+c');
+      await page.keyboard.press('ControlOrMeta+c');
       return successResponse(command.id, { copied: true });
     case 'paste':
-      await page.keyboard.press('Control+v');
+      await page.keyboard.press('ControlOrMeta+v');
       return successResponse(command.id, { pasted: true });
     case 'read': {
       const text = await page.evaluate('navigator.clipboard.readText()');

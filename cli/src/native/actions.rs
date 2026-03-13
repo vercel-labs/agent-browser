@@ -3113,6 +3113,9 @@ async fn handle_clipboard(cmd: &Value, state: &DaemonState) -> Result<Value, Str
 
     let session_id = mgr.active_session_id()?.to_string();
 
+    // Meta (Cmd) on macOS, Control on other platforms
+    let modifier: i32 = if cfg!(target_os = "macos") { 4 } else { 2 };
+
     match action {
         "write" => {
             let text = cmd
@@ -3130,7 +3133,7 @@ async fn handle_clipboard(cmd: &Value, state: &DaemonState) -> Result<Value, Str
         "copy" => {
             let params = serde_json::json!({
                 "type": "keyDown",
-                "modifiers": 2,
+                "modifiers": modifier,
                 "key": "c",
                 "code": "KeyC",
                 "windowsVirtualKeyCode": 67,
@@ -3141,7 +3144,7 @@ async fn handle_clipboard(cmd: &Value, state: &DaemonState) -> Result<Value, Str
                 .await?;
             let up_params = serde_json::json!({
                 "type": "keyUp",
-                "modifiers": 2,
+                "modifiers": modifier,
                 "key": "c",
                 "code": "KeyC",
                 "windowsVirtualKeyCode": 67,
@@ -3155,7 +3158,7 @@ async fn handle_clipboard(cmd: &Value, state: &DaemonState) -> Result<Value, Str
         "paste" => {
             let params = serde_json::json!({
                 "type": "keyDown",
-                "modifiers": 2,
+                "modifiers": modifier,
                 "key": "v",
                 "code": "KeyV",
                 "windowsVirtualKeyCode": 86,
@@ -3166,7 +3169,7 @@ async fn handle_clipboard(cmd: &Value, state: &DaemonState) -> Result<Value, Str
                 .await?;
             let up_params = serde_json::json!({
                 "type": "keyUp",
-                "modifiers": 2,
+                "modifiers": modifier,
                 "key": "v",
                 "code": "KeyV",
                 "windowsVirtualKeyCode": 86,

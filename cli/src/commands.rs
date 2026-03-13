@@ -2780,6 +2780,64 @@ mod tests {
         assert_eq!(cmd["text"], "Welcome");
     }
 
+    // === Clipboard Tests ===
+
+    #[test]
+    fn test_clipboard_read_default() {
+        let cmd = parse_command(&args("clipboard"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "clipboard");
+        assert_eq!(cmd["operation"], "read");
+    }
+
+    #[test]
+    fn test_clipboard_read_explicit() {
+        let cmd = parse_command(&args("clipboard read"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "clipboard");
+        assert_eq!(cmd["operation"], "read");
+    }
+
+    #[test]
+    fn test_clipboard_write() {
+        let cmd = parse_command(&args("clipboard write hello"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "clipboard");
+        assert_eq!(cmd["operation"], "write");
+        assert_eq!(cmd["text"], "hello");
+    }
+
+    #[test]
+    fn test_clipboard_write_multi_word() {
+        let cmd = parse_command(&args("clipboard write hello world"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "clipboard");
+        assert_eq!(cmd["operation"], "write");
+        assert_eq!(cmd["text"], "hello world");
+    }
+
+    #[test]
+    fn test_clipboard_copy() {
+        let cmd = parse_command(&args("clipboard copy"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "clipboard");
+        assert_eq!(cmd["operation"], "copy");
+    }
+
+    #[test]
+    fn test_clipboard_paste() {
+        let cmd = parse_command(&args("clipboard paste"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "clipboard");
+        assert_eq!(cmd["operation"], "paste");
+    }
+
+    #[test]
+    fn test_clipboard_write_missing_text() {
+        let result = parse_command(&args("clipboard write"), &default_flags());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_clipboard_unknown_subcommand() {
+        let result = parse_command(&args("clipboard clear"), &default_flags());
+        assert!(result.is_err());
+    }
+
     // === Unknown command ===
 
     // === Record Tests ===

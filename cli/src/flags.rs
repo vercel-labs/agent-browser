@@ -368,7 +368,8 @@ pub fn parse_flags(args: &[String]) -> Flags {
             .or(config.screenshot_quality),
         screenshot_format: env::var("AGENT_BROWSER_SCREENSHOT_FORMAT")
             .ok()
-            .or(config.screenshot_format),
+            .or(config.screenshot_format)
+            .filter(|s| s == "png" || s == "jpeg"),
         cli_executable_path: false,
         cli_extensions: false,
         cli_profile: false,
@@ -624,7 +625,9 @@ pub fn parse_flags(args: &[String]) -> Flags {
             }
             "--screenshot-format" => {
                 if let Some(s) = args.get(i + 1) {
-                    flags.screenshot_format = Some(s.clone());
+                    if s == "png" || s == "jpeg" {
+                        flags.screenshot_format = Some(s.clone());
+                    }
                     i += 1;
                 }
             }
