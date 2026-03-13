@@ -267,6 +267,7 @@ pub struct Flags {
     pub cli_annotate: bool,
     pub cli_download_path: bool,
     pub cli_native: bool,
+    pub cli_headed: bool,
 }
 
 pub fn parse_flags(args: &[String]) -> Flags {
@@ -382,6 +383,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
         cli_annotate: false,
         cli_download_path: false,
         cli_native: false,
+        cli_headed: false,
     };
 
     let mut i = 0;
@@ -404,6 +406,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
             "--headed" => {
                 let (val, consumed) = parse_bool_arg(args, i);
                 flags.headed = val;
+                flags.cli_headed = true;
                 if consumed {
                     i += 1;
                 }
