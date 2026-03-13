@@ -1,9 +1,18 @@
 {
   "name": "agent-browser",
-  "version": "0.13.0",
+  "version": "0.19.0",
   "description": "Headless browser automation CLI for AI agents",
   "type": "module",
-  "main": "dist/daemon.js",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
   "files": [
     "dist",
     "bin",
@@ -32,6 +41,11 @@
     "format:check": "prettier --check 'src/**/*.ts'",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:e2e:dogfood": "vitest run test/e2e/dogfood.eval.ts",
+    "bench": "pnpm build && tsx test/benchmarks/run.ts",
+    "bench:node": "pnpm build && tsx test/benchmarks/run.ts --node-only",
+    "bench:native": "pnpm build && tsx test/benchmarks/run.ts --native-only",
+    "bench:engine": "pnpm build && tsx test/benchmarks/run.ts --engine",
     "postinstall": "node scripts/postinstall.js",
     "changeset": "changeset",
     "ci:version": "changeset version && pnpm run version:sync && pnpm install --no-frozen-lockfile",
@@ -62,6 +76,7 @@
     "zod": "^3.22.4"
   },
   "devDependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.52",
     "@changesets/cli": "^2.29.8",
     "@types/node": "^20.10.0",
     "@types/ws": "^8.18.1",

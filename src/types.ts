@@ -31,6 +31,12 @@ export interface LaunchCommand extends BaseCommand {
   provider?: string;
   ignoreHTTPSErrors?: boolean;
   allowFileAccess?: boolean; // Enable file:// URL access and cross-origin file requests
+  colorScheme?: 'light' | 'dark' | 'no-preference'; // Persistent color scheme override
+  downloadPath?: string; // Directory for browser downloads (Playwright's downloadsPath)
+  allowedDomains?: string[];
+  actionPolicy?: string;
+  confirmActions?: string[];
+  engine?: 'chrome' | 'lightpanda';
   // Auto-load state file for session persistence
   autoStateFilePath?: string;
 }
@@ -257,6 +263,7 @@ export interface ViewportCommand extends BaseCommand {
   action: 'viewport';
   width: number;
   height: number;
+  deviceScaleFactor?: number;
 }
 
 // User agent
@@ -287,6 +294,14 @@ export interface ReloadCommand extends BaseCommand {
 // Get URL/Title
 export interface UrlCommand extends BaseCommand {
   action: 'url';
+}
+
+export interface CdpUrlCommand extends BaseCommand {
+  action: 'cdp_url';
+}
+
+export interface InspectCommand extends BaseCommand {
+  action: 'inspect';
 }
 
 export interface TitleCommand extends BaseCommand {
@@ -666,10 +681,13 @@ export interface ErrorsCommand extends BaseCommand {
   clear?: boolean;
 }
 
-// Keyboard shortcuts
+// Raw keyboard input (no selector needed)
 export interface KeyboardCommand extends BaseCommand {
   action: 'keyboard';
-  keys: string; // e.g., "Control+a", "Shift+Tab"
+  subaction?: 'type' | 'press' | 'insertText'; // press kept for backward compat
+  keys?: string; // for legacy press path
+  text?: string; // for type/insertText
+  delay?: number; // for type (ms between keystrokes)
 }
 
 // Mouse wheel
@@ -689,7 +707,7 @@ export interface TapCommand extends BaseCommand {
 // Clipboard
 export interface ClipboardCommand extends BaseCommand {
   action: 'clipboard';
-  operation: 'copy' | 'paste' | 'read';
+  operation: 'copy' | 'paste' | 'read' | 'write';
   text?: string;
 }
 
@@ -808,6 +826,7 @@ export interface ScreenshotCommand extends BaseCommand {
   format?: 'png' | 'jpeg';
   quality?: number;
   annotate?: boolean;
+  screenshotDir?: string;
 }
 
 export interface SnapshotCommand extends BaseCommand {
@@ -823,6 +842,7 @@ export interface EvaluateCommand extends BaseCommand {
 export interface WaitCommand extends BaseCommand {
   action: 'wait';
   selector?: string;
+  text?: string;
   timeout?: number;
   state?: 'attached' | 'detached' | 'visible' | 'hidden';
 }
@@ -936,6 +956,8 @@ export type Command =
   | ForwardCommand
   | ReloadCommand
   | UrlCommand
+  | CdpUrlCommand
+  | InspectCommand
   | TitleCommand
   | GetAttributeCommand
   | GetTextCommand
@@ -1017,7 +1039,54 @@ export type Command =
   | DeviceListCommand
   | DiffSnapshotCommand
   | DiffScreenshotCommand
-  | DiffUrlCommand;
+  | DiffUrlCommand
+  | AuthSaveCommand
+  | AuthLoginCommand
+  | AuthListCommand
+  | AuthDeleteCommand
+  | AuthShowCommand
+  | ConfirmCommand
+  | DenyCommand;
+
+export interface AuthSaveCommand extends BaseCommand {
+  action: 'auth_save';
+  name: string;
+  url: string;
+  username: string;
+  password: string;
+  usernameSelector?: string;
+  passwordSelector?: string;
+  submitSelector?: string;
+}
+
+export interface AuthLoginCommand extends BaseCommand {
+  action: 'auth_login';
+  name: string;
+}
+
+export interface AuthListCommand extends BaseCommand {
+  action: 'auth_list';
+}
+
+export interface AuthDeleteCommand extends BaseCommand {
+  action: 'auth_delete';
+  name: string;
+}
+
+export interface AuthShowCommand extends BaseCommand {
+  action: 'auth_show';
+  name: string;
+}
+
+export interface ConfirmCommand extends BaseCommand {
+  action: 'confirm';
+  confirmationId: string;
+}
+
+export interface DenyCommand extends BaseCommand {
+  action: 'deny';
+  confirmationId: string;
+}
 
 // Diff commands
 export interface DiffSnapshotCommand extends BaseCommand {
@@ -1086,14 +1155,39 @@ export interface ScreenshotData {
 
 export interface SnapshotData {
   snapshot: string;
+  refs?: Record<string, { role: string; name?: string }>;
+  origin?: string;
 }
 
 export interface EvaluateData {
   result: unknown;
+  origin?: string;
 }
 
 export interface ContentData {
   html: string;
+  origin?: string;
+}
+
+export interface TextData {
+  text: string | null;
+  origin?: string;
+}
+
+export interface AttributeData {
+  attribute: string;
+  value: string | null;
+  origin?: string;
+}
+
+export interface ValueData {
+  value: string;
+  origin?: string;
+}
+
+export interface ConsoleData {
+  messages: Array<{ type: string; text: string }>;
+  origin?: string;
 }
 
 export interface TabInfo {

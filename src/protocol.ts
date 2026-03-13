@@ -49,8 +49,14 @@ const launchSchema = baseCommandSchema.extend({
   provider: z.string().optional(),
   ignoreHTTPSErrors: z.boolean().optional(),
   allowFileAccess: z.boolean().optional(),
+  colorScheme: z.enum(['light', 'dark', 'no-preference']).optional(),
+  downloadPath: z.string().optional(),
   profile: z.string().optional(),
   storageState: z.string().optional(),
+  allowedDomains: z.array(z.string()).optional(),
+  actionPolicy: z.string().optional(),
+  confirmActions: z.array(z.string()).optional(),
+  engine: z.enum(['chrome', 'lightpanda']).optional(),
 });
 
 const navigateSchema = baseCommandSchema.extend({
@@ -264,6 +270,7 @@ const viewportSchema = baseCommandSchema.extend({
   action: z.literal('viewport'),
   width: z.number().positive(),
   height: z.number().positive(),
+  deviceScaleFactor: z.number().positive().optional(),
 });
 
 const userAgentSchema = baseCommandSchema.extend({
@@ -441,7 +448,10 @@ const errorsSchema = baseCommandSchema.extend({
 
 const keyboardSchema = baseCommandSchema.extend({
   action: z.literal('keyboard'),
-  keys: z.string().min(1),
+  subaction: z.enum(['type', 'press', 'insertText']).optional(),
+  keys: z.string().min(1).optional(),
+  text: z.string().min(1).optional(),
+  delay: z.number().optional(),
 });
 
 const wheelSchema = baseCommandSchema.extend({
@@ -458,7 +468,7 @@ const tapSchema = baseCommandSchema.extend({
 
 const clipboardSchema = baseCommandSchema.extend({
   action: z.literal('clipboard'),
-  operation: z.enum(['copy', 'paste', 'read']),
+  operation: z.enum(['copy', 'paste', 'read', 'write']),
   text: z.string().optional(),
 });
 
@@ -784,6 +794,7 @@ const screenshotSchema = baseCommandSchema.extend({
   format: z.enum(['png', 'jpeg']).optional(),
   quality: z.number().min(0).max(100).optional(),
   annotate: z.boolean().optional(),
+  screenshotDir: z.string().optional(),
 });
 
 const snapshotSchema = baseCommandSchema.extend({
@@ -804,6 +815,7 @@ const evaluateSchema = baseCommandSchema.extend({
 const waitSchema = baseCommandSchema.extend({
   action: z.literal('wait'),
   selector: z.string().min(1).optional(),
+  text: z.string().min(1).optional(),
   timeout: z.number().positive().optional(),
   state: z.enum(['attached', 'detached', 'visible', 'hidden']).optional(),
 });
@@ -866,6 +878,53 @@ const windowNewSchema = baseCommandSchema.extend({
     })
     .nullable()
     .optional(),
+});
+
+const authProfileName = z
+  .string()
+  .min(1)
+  .regex(/^[a-zA-Z0-9_-]+$/, {
+    message: 'Profile name must contain only alphanumeric characters, hyphens, and underscores',
+  });
+
+const authSaveSchema = baseCommandSchema.extend({
+  action: z.literal('auth_save'),
+  name: authProfileName,
+  url: z.string().min(1),
+  username: z.string().min(1),
+  password: z.string().min(1),
+  usernameSelector: z.string().optional(),
+  passwordSelector: z.string().optional(),
+  submitSelector: z.string().optional(),
+});
+
+const authLoginSchema = baseCommandSchema.extend({
+  action: z.literal('auth_login'),
+  name: authProfileName,
+});
+
+const authListSchema = baseCommandSchema.extend({
+  action: z.literal('auth_list'),
+});
+
+const authDeleteSchema = baseCommandSchema.extend({
+  action: z.literal('auth_delete'),
+  name: authProfileName,
+});
+
+const authShowSchema = baseCommandSchema.extend({
+  action: z.literal('auth_show'),
+  name: authProfileName,
+});
+
+const confirmSchema = baseCommandSchema.extend({
+  action: z.literal('confirm'),
+  confirmationId: z.string().min(1),
+});
+
+const denySchema = baseCommandSchema.extend({
+  action: z.literal('deny'),
+  confirmationId: z.string().min(1),
 });
 
 // Union schema for all commands
@@ -1005,6 +1064,13 @@ const commandSchema = z.discriminatedUnion('action', [
   diffSnapshotSchema,
   diffScreenshotSchema,
   diffUrlSchema,
+  confirmSchema,
+  denySchema,
+  authSaveSchema,
+  authLoginSchema,
+  authListSchema,
+  authDeleteSchema,
+  authShowSchema,
 ]);
 
 // Parse result type
@@ -1057,6 +1123,16 @@ export function parseCommand(input: string): ParseResult {
     };
   }
 
+  if (command.action === 'keyboard') {
+    const sub = command.subaction ?? 'press';
+    if ((sub === 'type' || sub === 'insertText') && !command.text) {
+      return { success: false, error: `keyboard ${sub} requires text`, id };
+    }
+    if (sub === 'press' && !command.keys) {
+      return { success: false, error: 'keyboard press requires keys', id };
+    }
+  }
+
   return { success: true, command };
 }
 
@@ -1075,8 +1151,12 @@ export function errorResponse(id: string, error: string): Response {
 }
 
 /**
- * Serialize a response to JSON string
+ * Serialize a response to JSON string.
+ * Replaces lone Unicode surrogates with U+FFFD to prevent
+ * serde_json parsing errors on the Rust side.
  */
 export function serializeResponse(response: Response): string {
-  return JSON.stringify(response);
+  return JSON.stringify(response, (_key, value) =>
+    typeof value === 'string' && !value.isWellFormed() ? value.toWellFormed() : value
+  );
 }

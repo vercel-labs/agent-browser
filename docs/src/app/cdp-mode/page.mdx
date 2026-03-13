@@ -60,6 +60,21 @@ This is useful when:
 - You want a zero-configuration connection to your existing browser
 - You don't want to track which port Chrome is using
 
+## Color scheme
+
+Playwright overrides the browser's color scheme to `light` by default when connecting via CDP. Use `--color-scheme` to set a persistent preference:
+
+```bash
+agent-browser --cdp 9222 --color-scheme dark open https://example.com
+agent-browser --cdp 9222 snapshot  # stays in dark mode
+```
+
+Or set it globally via config or environment variable:
+
+```bash
+AGENT_BROWSER_COLOR_SCHEME=dark agent-browser --cdp 9222 open https://example.com
+```
+
 ## Use cases
 
 This enables control of:
@@ -79,7 +94,7 @@ This enables control of:
   <tbody>
     <tr><td><code>--session &lt;name&gt;</code></td><td>Use isolated session</td></tr>
     <tr><td><code>--profile &lt;path&gt;</code></td><td>Persistent browser profile directory</td></tr>
-    <tr><td><code>-p &lt;provider&gt;</code></td><td>Cloud browser provider (<code>browserbase</code>, <code>browseruse</code>, <code>hyperbrowser</code>, <code>kernel</code>)</td></tr>
+    <tr><td><code>-p &lt;provider&gt;</code></td><td>Cloud browser provider (<code>browserbase</code>, <code>browseruse</code>, <code>hyperbrowser</code>, <code>kernel</code>, <code>browserless</code>)</td></tr>
     <tr><td><code>--headers &lt;json&gt;</code></td><td>HTTP headers scoped to origin</td></tr>
     <tr><td><code>--executable-path</code></td><td>Custom browser executable</td></tr>
     <tr><td><code>--args &lt;args&gt;</code></td><td>Browser launch args (comma-separated)</td></tr>
@@ -93,6 +108,7 @@ This enables control of:
     <tr><td><code>--headed</code></td><td>Show browser window</td></tr>
     <tr><td><code>{"--cdp <port|url>"}</code></td><td>CDP connection (port or WebSocket URL)</td></tr>
     <tr><td><code>--auto-connect</code></td><td>Auto-discover and connect to running Chrome</td></tr>
+    <tr><td><code>--color-scheme &lt;scheme&gt;</code></td><td>Persistent color scheme (<code>dark</code>, <code>light</code>, <code>no-preference</code>)</td></tr>
     <tr><td><code>--debug</code></td><td>Debug output</td></tr>
   </tbody>
 </table>
@@ -104,7 +120,6 @@ Use cloud browser infrastructure when local browsers aren't available:
 ```bash
 # Browserbase
 export BROWSERBASE_API_KEY="your-api-key"
-export BROWSERBASE_PROJECT_ID="your-project-id"
 agent-browser -p browserbase open https://example.com
 
 # Browser Use
@@ -118,6 +133,10 @@ agent-browser -p hyperbrowser open https://example.com
 # Kernel
 export KERNEL_API_KEY="your-api-key"
 agent-browser -p kernel open https://example.com
+
+# Browserless
+export BROWSERLESS_API_KEY="your-api-key"
+agent-browser -p browserless open https://example.com
 
 # Or via environment variable
 export AGENT_BROWSER_PROVIDER=browserbase

@@ -1,5 +1,133 @@
 # agent-browser
 
+## 0.19.0
+
+### Minor Changes
+
+- 56bb92b: ### New Features
+  - **Browserless.io provider** -- Added browserless.io as a browser provider, supported in both Node.js and native daemon paths. Connect to remote Browserless instances with `--provider browserless` or `AGENT_BROWSER_PROVIDER=browserless`. Configurable via `BROWSERLESS_API_KEY`, `BROWSERLESS_API_URL`, and `BROWSERLESS_BROWSER_TYPE` environment variables. (#502, #746)
+  - **`clipboard` command** -- Read from and write to the browser clipboard. Supports `read`, `write <text>`, `copy` (simulates Ctrl+C), and `paste` (simulates Ctrl+V) operations. (#749)
+  - **Screenshot output configuration** -- New global flags `--screenshot-dir`, `--screenshot-quality`, `--screenshot-format` and corresponding `AGENT_BROWSER_SCREENSHOT_DIR`, `AGENT_BROWSER_SCREENSHOT_QUALITY`, `AGENT_BROWSER_SCREENSHOT_FORMAT` environment variables for persistent screenshot settings. (#749)
+
+  ### Bug Fixes
+  - Fixed `wait --text` not working in native daemon path (#749)
+  - Fixed `BrowserManager.navigate()` and package entry point (#748)
+  - Fixed extensions not being loaded from `config.json` (#750)
+  - Fixed scroll on page load (#747)
+  - Fixed HTML retrieval by using `browser.getLocator()` for selector operations (#745)
+
+## 0.18.0
+
+### Minor Changes
+
+- 942b8cd: ### New Features
+  - **`inspect` command** - Opens Chrome DevTools for the active page by launching a local proxy server that forwards the DevTools frontend to the browser's CDP WebSocket. Commands continue to work while DevTools is open. Implemented in both Node.js and native paths. (#736)
+  - **`get cdp-url` subcommand** - Retrieve the Chrome DevTools Protocol WebSocket URL for the active page, useful for external debugging tools. (#736)
+  - **Native screenshot annotate** - The `--annotate` flag for screenshots now works in the native Rust daemon, bringing parity with the Node.js path. (#706)
+
+  ### Improvements
+  - **KERNEL_API_KEY now optional** - External credential injection no longer requires `KERNEL_API_KEY` to be set, making it easier to use Kernel with pre-configured environments. (#687)
+  - **Browserbase simplified** - Removed the `BROWSERBASE_PROJECT_ID` requirement, reducing setup friction for Browserbase users. (#625)
+
+  ### Bug Fixes
+  - Fixed Browserbase API using incorrect endpoint to release sessions (#707)
+  - Fixed CDP connect paths using hardcoded 10s timeout instead of `getDefaultTimeout()` (#704)
+  - Fixed lone Unicode surrogates causing errors by sanitizing with `toWellFormed()` (#720)
+  - Fixed CDP connection failure on IPv6-first systems (#717)
+  - Fixed recordings not inheriting the current viewport settings (#718)
+
+## 0.17.1
+
+### Patch Changes
+
+- 94cd888: Added support for device scale factor (retina display) in the viewport command via an optional scale parameter. Also added webview target type support for better Electron application compatibility, and the pages list now includes target type information.
+
+## 0.17.0
+
+### Minor Changes
+
+- 94521e7: ### New Features
+  - **Lightpanda browser engine support** - Added `--engine <name>` flag to select the browser engine (`chrome` by default, or `lightpanda`), implying `--native` mode. Configurable via `AGENT_BROWSER_ENGINE` environment variable (#646)
+  - **Dialog dismiss command** - Added support for `dismiss` subcommand in dialog command parsing (#605)
+
+  ### Improvements
+  - **Daemon startup error reporting** - Daemon startup errors are now surfaced directly instead of showing an opaque timeout message (#614)
+  - **CDP port discovery** - Replaced broken hand-rolled HTTP client with `reqwest` for more reliable CDP port discovery (#619)
+  - **Chrome extensions** - Extensions now load correctly by forcing headed mode when extensions are present (#652)
+  - **Google Translate bar suppression** - Suppressed the Google Translate bar in native headless mode to avoid interference (#649)
+  - **Auth cookie persistence** - Auth cookies are now persisted on browser close in native mode (#650)
+
+  ### Bug Fixes
+  - Fixed native auth login failing due to incompatible encryption format (#648)
+
+  ### Documentation
+  - Improved snapshot usage guidance and added reproducibility check (#630)
+  - Added `--engine` flag to the README options table
+
+  ### Performance
+  - Added benchmarks to the CLI codebase (#637)
+
+## 0.16.3
+
+### Patch Changes
+
+- 7d2c895: Fixed an issue where the --native flag was being passed to child processes even when not explicitly specified on the command line. The flag is now only forwarded when the user explicitly provides it, consistent with how other CLI flags like --allow-file-access and --download-path are handled.
+
+## 0.16.2
+
+### Patch Changes
+
+- 01ac557: Added AGENT_BROWSER_HEADED environment variable support for running the browser in headed mode, and improved temporary profile cleanup when launching Chrome directly. Also includes documentation clarification that browser extensions work in both headed and headless modes.
+
+## 0.16.1
+
+### Patch Changes
+
+- c4180c8: Improved Chrome launch reliability by automatically detecting containerized environments (Docker, Podman, Kubernetes) and enabling --no-sandbox when needed. Added support for discovering Playwright-installed Chromium browsers and enhanced error messages with helpful diagnostics when Chrome fails to launch.
+
+## 0.16.0
+
+### Minor Changes
+
+- 05018b3: Added experimental native Rust daemon (`--native` flag, `AGENT_BROWSER_NATIVE=1` env, or `"native": true` in config). The native daemon communicates with Chrome directly via CDP, eliminating Node.js and Playwright dependencies. Supports 150+ commands with full parity to the default Node.js daemon. Includes WebDriver backend for Safari/iOS, CDP protocol codegen, request tracking, frame context management, and comprehensive e2e and parity tests.
+
+## 0.15.3
+
+### Patch Changes
+
+- 62241b5: Fixed Windows compatibility issues including proper handling of extended-length path prefixes from canonicalize(), prevention of MSYS/Git Bash path translation that could mangle arguments, and improved daemon startup reliability. Also added ARM64 Windows support in postinstall shims and expanded CI testing with a full daemon lifecycle test on Windows.
+
+## 0.15.2
+
+### Patch Changes
+
+- 6aea316: Documentation site improvements and internal tooling updates including enhanced code blocks, mobile navigation, and docs chat components. CLI connection and output handling refinements. Skill creator reference documentation and scripts have been reorganized.
+
+## 0.15.1
+
+### Patch Changes
+
+- 7bd8ce9: Added support for chrome:// and chrome-extension:// URLs in navigation and recording commands. These special browser URLs are now preserved as-is instead of having https:// incorrectly prepended.
+
+## 0.15.0
+
+### Minor Changes
+
+- 2e38882: - Added security hardening: authentication vault, content boundary markers, domain allowlist, action policy, action confirmation, and output length limits.
+  - Added `--download-path` flag (and `AGENT_BROWSER_DOWNLOAD_PATH` env / `downloadPath` config key) to set a default download directory.
+  - Added `--selector` flag to `scroll` command for scrolling within specific container elements.
+
+## 0.14.0
+
+### Minor Changes
+
+- b7665e5: - Added `keyboard` command for raw keyboard input -- type with real keystrokes, insert text, and press shortcuts at the currently focused element without needing a selector.
+  - Added `--color-scheme` flag and `AGENT_BROWSER_COLOR_SCHEME` env var for persistent dark/light mode preference across browser sessions.
+  - Fixed IPC EAGAIN errors (os error 35/11) by adding backpressure-aware socket writes, command serialization, and lowering the default Playwright timeout to 25s (configurable via `AGENT_BROWSER_DEFAULT_TIMEOUT`).
+  - Fixed remote debugging (CDP) reconnection.
+  - Fixed state load failing when no browser is running.
+  - Fixed `--annotate` flag warning appearing when not explicitly passed via CLI.
+
 ## 0.13.0
 
 ### Minor Changes

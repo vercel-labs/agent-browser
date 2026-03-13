@@ -33,6 +33,19 @@ pub struct Config {
     pub auto_connect: Option<bool>,
     pub headers: Option<String>,
     pub annotate: Option<bool>,
+    pub color_scheme: Option<String>,
+    pub download_path: Option<String>,
+    pub content_boundaries: Option<bool>,
+    pub max_output: Option<usize>,
+    pub allowed_domains: Option<Vec<String>>,
+    pub action_policy: Option<String>,
+    pub confirm_actions: Option<String>,
+    pub confirm_interactive: Option<bool>,
+    pub native: Option<bool>,
+    pub engine: Option<String>,
+    pub screenshot_dir: Option<String>,
+    pub screenshot_quality: Option<u32>,
+    pub screenshot_format: Option<String>,
 }
 
 impl Config {
@@ -66,6 +79,19 @@ impl Config {
             auto_connect: other.auto_connect.or(self.auto_connect),
             headers: other.headers.or(self.headers),
             annotate: other.annotate.or(self.annotate),
+            color_scheme: other.color_scheme.or(self.color_scheme),
+            download_path: other.download_path.or(self.download_path),
+            content_boundaries: other.content_boundaries.or(self.content_boundaries),
+            max_output: other.max_output.or(self.max_output),
+            allowed_domains: other.allowed_domains.or(self.allowed_domains),
+            action_policy: other.action_policy.or(self.action_policy),
+            confirm_actions: other.confirm_actions.or(self.confirm_actions),
+            confirm_interactive: other.confirm_interactive.or(self.confirm_interactive),
+            native: other.native.or(self.native),
+            engine: other.engine.or(self.engine),
+            screenshot_dir: other.screenshot_dir.or(self.screenshot_dir),
+            screenshot_quality: other.screenshot_quality.or(self.screenshot_quality),
+            screenshot_format: other.screenshot_format.or(self.screenshot_format),
         }
     }
 }
@@ -112,6 +138,11 @@ fn parse_bool_arg(args: &[String], i: usize) -> (bool, bool) {
 /// Extract --config <path> from args before full flag parsing.
 /// Returns `Some(Some(path))` if --config <path> found, `Some(None)` if --config
 /// was the last arg with no value, `None` if --config not present.
+///
+/// Only flags that consume a following argument need to be listed here.
+/// Boolean flags (--content-boundaries, --confirm-interactive, etc.) are
+/// intentionally absent -- they don't take a value, so they can't cause
+/// the next argument to be mis-consumed.
 fn extract_config_path(args: &[String]) -> Option<Option<String>> {
     const FLAGS_WITH_VALUE: &[&str] = &[
         "--session",
@@ -129,6 +160,16 @@ fn extract_config_path(args: &[String]) -> Option<Option<String>> {
         "--provider",
         "--device",
         "--session-name",
+        "--color-scheme",
+        "--download-path",
+        "--max-output",
+        "--allowed-domains",
+        "--action-policy",
+        "--confirm-actions",
+        "--engine",
+        "--screenshot-dir",
+        "--screenshot-quality",
+        "--screenshot-format",
     ];
     let mut i = 0;
     while i < args.len() {
@@ -153,8 +194,7 @@ pub fn load_config(args: &[String]) -> Result<Config, String> {
         });
 
     if let Some((source, maybe_path)) = explicit {
-        let path_str =
-            maybe_path.ok_or_else(|| format!("{} requires a file path", source))?;
+        let path_str = maybe_path.ok_or_else(|| format!("{} requires a file path", source))?;
         let path = PathBuf::from(&path_str);
         if !path.exists() {
             return Err(format!("config file not found: {}", path_str));
@@ -199,6 +239,19 @@ pub struct Flags {
     pub auto_connect: bool,
     pub session_name: Option<String>,
     pub annotate: bool,
+    pub color_scheme: Option<String>,
+    pub download_path: Option<String>,
+    pub content_boundaries: bool,
+    pub max_output: Option<usize>,
+    pub allowed_domains: Option<Vec<String>>,
+    pub action_policy: Option<String>,
+    pub confirm_actions: Option<String>,
+    pub confirm_interactive: bool,
+    pub native: bool,
+    pub engine: Option<String>,
+    pub screenshot_dir: Option<String>,
+    pub screenshot_quality: Option<u32>,
+    pub screenshot_format: Option<String>,
 
     // Track which launch-time options were explicitly passed via CLI
     // (as opposed to being set only via environment variables)
@@ -211,6 +264,10 @@ pub struct Flags {
     pub cli_proxy: bool,
     pub cli_proxy_bypass: bool,
     pub cli_allow_file_access: bool,
+    pub cli_annotate: bool,
+    pub cli_download_path: bool,
+    pub cli_native: bool,
+    pub cli_headed: bool,
 }
 
 pub fn parse_flags(args: &[String]) -> Flags {
@@ -236,48 +293,84 @@ pub fn parse_flags(args: &[String]) -> Flags {
     };
 
     let mut flags = Flags {
-        json: env_var_is_truthy("AGENT_BROWSER_JSON")
-            || config.json.unwrap_or(false),
-        full: env_var_is_truthy("AGENT_BROWSER_FULL")
-            || config.full.unwrap_or(false),
-        headed: env_var_is_truthy("AGENT_BROWSER_HEADED")
-            || config.headed.unwrap_or(false),
-        debug: env_var_is_truthy("AGENT_BROWSER_DEBUG")
-            || config.debug.unwrap_or(false),
-        session: env::var("AGENT_BROWSER_SESSION").ok()
+        json: env_var_is_truthy("AGENT_BROWSER_JSON") || config.json.unwrap_or(false),
+        full: env_var_is_truthy("AGENT_BROWSER_FULL") || config.full.unwrap_or(false),
+        headed: env_var_is_truthy("AGENT_BROWSER_HEADED") || config.headed.unwrap_or(false),
+        debug: env_var_is_truthy("AGENT_BROWSER_DEBUG") || config.debug.unwrap_or(false),
+        session: env::var("AGENT_BROWSER_SESSION")
+            .ok()
             .or(config.session)
             .unwrap_or_else(|| "default".to_string()),
         headers: config.headers,
-        executable_path: env::var("AGENT_BROWSER_EXECUTABLE_PATH").ok()
+        executable_path: env::var("AGENT_BROWSER_EXECUTABLE_PATH")
+            .ok()
             .or(config.executable_path),
         cdp: config.cdp,
         extensions,
-        profile: env::var("AGENT_BROWSER_PROFILE").ok()
-            .or(config.profile),
-        state: env::var("AGENT_BROWSER_STATE").ok()
-            .or(config.state),
-        proxy: env::var("AGENT_BROWSER_PROXY").ok()
-            .or(config.proxy),
-        proxy_bypass: env::var("AGENT_BROWSER_PROXY_BYPASS").ok()
+        profile: env::var("AGENT_BROWSER_PROFILE").ok().or(config.profile),
+        state: env::var("AGENT_BROWSER_STATE").ok().or(config.state),
+        proxy: env::var("AGENT_BROWSER_PROXY").ok().or(config.proxy),
+        proxy_bypass: env::var("AGENT_BROWSER_PROXY_BYPASS")
+            .ok()
             .or(config.proxy_bypass),
-        args: env::var("AGENT_BROWSER_ARGS").ok()
-            .or(config.args),
-        user_agent: env::var("AGENT_BROWSER_USER_AGENT").ok()
+        args: env::var("AGENT_BROWSER_ARGS").ok().or(config.args),
+        user_agent: env::var("AGENT_BROWSER_USER_AGENT")
+            .ok()
             .or(config.user_agent),
-        provider: env::var("AGENT_BROWSER_PROVIDER").ok()
-            .or(config.provider),
+        provider: env::var("AGENT_BROWSER_PROVIDER").ok().or(config.provider),
         ignore_https_errors: env_var_is_truthy("AGENT_BROWSER_IGNORE_HTTPS_ERRORS")
             || config.ignore_https_errors.unwrap_or(false),
         allow_file_access: env_var_is_truthy("AGENT_BROWSER_ALLOW_FILE_ACCESS")
             || config.allow_file_access.unwrap_or(false),
-        device: env::var("AGENT_BROWSER_IOS_DEVICE").ok()
-            .or(config.device),
+        device: env::var("AGENT_BROWSER_IOS_DEVICE").ok().or(config.device),
         auto_connect: env_var_is_truthy("AGENT_BROWSER_AUTO_CONNECT")
             || config.auto_connect.unwrap_or(false),
-        session_name: env::var("AGENT_BROWSER_SESSION_NAME").ok()
+        session_name: env::var("AGENT_BROWSER_SESSION_NAME")
+            .ok()
             .or(config.session_name),
-        annotate: env_var_is_truthy("AGENT_BROWSER_ANNOTATE")
-            || config.annotate.unwrap_or(false),
+        annotate: env_var_is_truthy("AGENT_BROWSER_ANNOTATE") || config.annotate.unwrap_or(false),
+        color_scheme: env::var("AGENT_BROWSER_COLOR_SCHEME")
+            .ok()
+            .or(config.color_scheme),
+        download_path: env::var("AGENT_BROWSER_DOWNLOAD_PATH")
+            .ok()
+            .or(config.download_path),
+        content_boundaries: env_var_is_truthy("AGENT_BROWSER_CONTENT_BOUNDARIES")
+            || config.content_boundaries.unwrap_or(false),
+        max_output: env::var("AGENT_BROWSER_MAX_OUTPUT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .or(config.max_output),
+        allowed_domains: env::var("AGENT_BROWSER_ALLOWED_DOMAINS")
+            .ok()
+            .map(|s| {
+                s.split(',')
+                    .map(|d| d.trim().to_lowercase())
+                    .filter(|d| !d.is_empty())
+                    .collect()
+            })
+            .or(config.allowed_domains),
+        action_policy: env::var("AGENT_BROWSER_ACTION_POLICY")
+            .ok()
+            .or(config.action_policy),
+        confirm_actions: env::var("AGENT_BROWSER_CONFIRM_ACTIONS")
+            .ok()
+            .or(config.confirm_actions),
+        confirm_interactive: env_var_is_truthy("AGENT_BROWSER_CONFIRM_INTERACTIVE")
+            || config.confirm_interactive.unwrap_or(false),
+        native: env_var_is_truthy("AGENT_BROWSER_NATIVE") || config.native.unwrap_or(false),
+        engine: env::var("AGENT_BROWSER_ENGINE").ok().or(config.engine),
+        screenshot_dir: env::var("AGENT_BROWSER_SCREENSHOT_DIR")
+            .ok()
+            .or(config.screenshot_dir),
+        screenshot_quality: env::var("AGENT_BROWSER_SCREENSHOT_QUALITY")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .or(config.screenshot_quality),
+        screenshot_format: env::var("AGENT_BROWSER_SCREENSHOT_FORMAT")
+            .ok()
+            .or(config.screenshot_format)
+            .filter(|s| s == "png" || s == "jpeg"),
         cli_executable_path: false,
         cli_extensions: false,
         cli_profile: false,
@@ -287,6 +380,10 @@ pub fn parse_flags(args: &[String]) -> Flags {
         cli_proxy: false,
         cli_proxy_bypass: false,
         cli_allow_file_access: false,
+        cli_annotate: false,
+        cli_download_path: false,
+        cli_native: false,
+        cli_headed: false,
     };
 
     let mut i = 0;
@@ -295,22 +392,31 @@ pub fn parse_flags(args: &[String]) -> Flags {
             "--json" => {
                 let (val, consumed) = parse_bool_arg(args, i);
                 flags.json = val;
-                if consumed { i += 1; }
+                if consumed {
+                    i += 1;
+                }
             }
             "--full" | "-f" => {
                 let (val, consumed) = parse_bool_arg(args, i);
                 flags.full = val;
-                if consumed { i += 1; }
+                if consumed {
+                    i += 1;
+                }
             }
             "--headed" => {
                 let (val, consumed) = parse_bool_arg(args, i);
                 flags.headed = val;
-                if consumed { i += 1; }
+                flags.cli_headed = true;
+                if consumed {
+                    i += 1;
+                }
             }
             "--debug" => {
                 let (val, consumed) = parse_bool_arg(args, i);
                 flags.debug = val;
-                if consumed { i += 1; }
+                if consumed {
+                    i += 1;
+                }
             }
             "--session" => {
                 if let Some(s) = args.get(i + 1) {
@@ -395,13 +501,17 @@ pub fn parse_flags(args: &[String]) -> Flags {
             "--ignore-https-errors" => {
                 let (val, consumed) = parse_bool_arg(args, i);
                 flags.ignore_https_errors = val;
-                if consumed { i += 1; }
+                if consumed {
+                    i += 1;
+                }
             }
             "--allow-file-access" => {
                 let (val, consumed) = parse_bool_arg(args, i);
                 flags.allow_file_access = val;
                 flags.cli_allow_file_access = true;
-                if consumed { i += 1; }
+                if consumed {
+                    i += 1;
+                }
             }
             "--device" => {
                 if let Some(d) = args.get(i + 1) {
@@ -412,7 +522,9 @@ pub fn parse_flags(args: &[String]) -> Flags {
             "--auto-connect" => {
                 let (val, consumed) = parse_bool_arg(args, i);
                 flags.auto_connect = val;
-                if consumed { i += 1; }
+                if consumed {
+                    i += 1;
+                }
             }
             "--session-name" => {
                 if let Some(s) = args.get(i + 1) {
@@ -423,7 +535,118 @@ pub fn parse_flags(args: &[String]) -> Flags {
             "--annotate" => {
                 let (val, consumed) = parse_bool_arg(args, i);
                 flags.annotate = val;
-                if consumed { i += 1; }
+                flags.cli_annotate = true;
+                if consumed {
+                    i += 1;
+                }
+            }
+            "--color-scheme" => {
+                if let Some(s) = args.get(i + 1) {
+                    flags.color_scheme = Some(s.clone());
+                    i += 1;
+                }
+            }
+            "--download-path" => {
+                if let Some(s) = args.get(i + 1) {
+                    flags.download_path = Some(s.clone());
+                    flags.cli_download_path = true;
+                    i += 1;
+                }
+            }
+            "--content-boundaries" => {
+                let (val, consumed) = parse_bool_arg(args, i);
+                flags.content_boundaries = val;
+                if consumed {
+                    i += 1;
+                }
+            }
+            "--max-output" => {
+                if let Some(s) = args.get(i + 1) {
+                    if let Ok(n) = s.parse::<usize>() {
+                        flags.max_output = Some(n);
+                    }
+                    i += 1;
+                }
+            }
+            "--allowed-domains" => {
+                if let Some(s) = args.get(i + 1) {
+                    flags.allowed_domains = Some(
+                        s.split(',')
+                            .map(|d| d.trim().to_lowercase())
+                            .filter(|d| !d.is_empty())
+                            .collect(),
+                    );
+                    i += 1;
+                }
+            }
+            "--action-policy" => {
+                if let Some(s) = args.get(i + 1) {
+                    flags.action_policy = Some(s.clone());
+                    i += 1;
+                }
+            }
+            "--confirm-actions" => {
+                if let Some(s) = args.get(i + 1) {
+                    flags.confirm_actions = Some(s.clone());
+                    i += 1;
+                }
+            }
+            "--confirm-interactive" => {
+                let (val, consumed) = parse_bool_arg(args, i);
+                flags.confirm_interactive = val;
+                if consumed {
+                    i += 1;
+                }
+            }
+            "--engine" => {
+                if let Some(s) = args.get(i + 1) {
+                    flags.engine = Some(s.clone());
+                    i += 1;
+                }
+            }
+            "--native" => {
+                let (val, consumed) = parse_bool_arg(args, i);
+                flags.native = val;
+                flags.cli_native = true;
+                if consumed {
+                    i += 1;
+                }
+            }
+            "--screenshot-dir" => {
+                if let Some(s) = args.get(i + 1) {
+                    flags.screenshot_dir = Some(s.clone());
+                    i += 1;
+                }
+            }
+            "--screenshot-quality" => {
+                if let Some(s) = args.get(i + 1) {
+                    if let Ok(n) = s.parse::<u32>() {
+                        if n <= 100 {
+                            flags.screenshot_quality = Some(n);
+                        } else {
+                            eprintln!(
+                                "{} --screenshot-quality must be 0-100, got {}",
+                                color::warning_indicator(),
+                                n
+                            );
+                        }
+                    }
+                    i += 1;
+                }
+            }
+            "--screenshot-format" => {
+                if let Some(s) = args.get(i + 1) {
+                    if s == "png" || s == "jpeg" {
+                        flags.screenshot_format = Some(s.clone());
+                    } else {
+                        eprintln!(
+                            "{} --screenshot-format must be png or jpeg, got '{}'",
+                            color::warning_indicator(),
+                            s
+                        );
+                    }
+                    i += 1;
+                }
             }
             "--config" => {
                 // Already handled by load_config(); skip the value
@@ -450,6 +673,9 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--allow-file-access",
         "--auto-connect",
         "--annotate",
+        "--content-boundaries",
+        "--confirm-interactive",
+        "--native",
     ];
     // Global flags that always take a value (need to skip the next arg too)
     const GLOBAL_FLAGS_WITH_VALUE: &[&str] = &[
@@ -468,7 +694,17 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--provider",
         "--device",
         "--session-name",
+        "--color-scheme",
+        "--download-path",
+        "--max-output",
+        "--allowed-domains",
+        "--action-policy",
+        "--confirm-actions",
         "--config",
+        "--engine",
+        "--screenshot-dir",
+        "--screenshot-quality",
+        "--screenshot-format",
     ];
 
     let mut i = 0;
@@ -646,6 +882,32 @@ mod tests {
     }
 
     #[test]
+    fn test_cli_annotate_tracking() {
+        let flags = parse_flags(&args("--annotate screenshot"));
+        assert!(flags.cli_annotate);
+        assert!(flags.annotate);
+    }
+
+    #[test]
+    fn test_cli_annotate_not_set_without_flag() {
+        let flags = parse_flags(&args("screenshot"));
+        assert!(!flags.cli_annotate);
+    }
+
+    #[test]
+    fn test_cli_download_path_tracking() {
+        let flags = parse_flags(&args("--download-path /tmp/dl snapshot"));
+        assert!(flags.cli_download_path);
+        assert_eq!(flags.download_path, Some("/tmp/dl".to_string()));
+    }
+
+    #[test]
+    fn test_cli_download_path_not_set_without_flag() {
+        let flags = parse_flags(&args("snapshot"));
+        assert!(!flags.cli_download_path);
+    }
+
+    #[test]
     fn test_cli_multiple_flags_tracking() {
         let flags = parse_flags(&args(
             "--executable-path /chrome --profile /profile --proxy http://proxy snapshot",
@@ -692,7 +954,10 @@ mod tests {
         assert_eq!(config.session.as_deref(), Some("test-session"));
         assert_eq!(config.session_name.as_deref(), Some("my-app"));
         assert_eq!(config.executable_path.as_deref(), Some("/usr/bin/chromium"));
-        assert_eq!(config.extensions, Some(vec!["/ext1".to_string(), "/ext2".to_string()]));
+        assert_eq!(
+            config.extensions,
+            Some(vec!["/ext1".to_string(), "/ext2".to_string()])
+        );
         assert_eq!(config.profile.as_deref(), Some("/tmp/profile"));
         assert_eq!(config.state.as_deref(), Some("/tmp/state.json"));
         assert_eq!(config.proxy.as_deref(), Some("http://proxy:8080"));
@@ -1001,7 +1266,11 @@ mod tests {
         let merged = user.merge(project);
         assert_eq!(
             merged.extensions,
-            Some(vec!["/ext1".to_string(), "/ext2".to_string(), "/ext3".to_string()])
+            Some(vec![
+                "/ext1".to_string(),
+                "/ext2".to_string(),
+                "/ext3".to_string()
+            ])
         );
     }
 

@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Buggy App - Dogfood Test Fixture</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: system-ui, sans-serif; color: #333; background: #f9f9f9; }
+    header { background: #1a1a2e; color: #fff; padding: 16px 24px; display: flex; justify-content: space-between; align-items: center; }
+    header h1 { font-size: 20px; }
+    nav { display: flex; gap: 16px; }
+    nav a { color: #ccc; text-decoration: none; }
+    nav a:hover { color: #fff; }
+    main { max-width: 960px; margin: 0 auto; padding: 32px 24px; }
+    .card { background: #fff; border: 1px solid #e0e0e0; border-radius: 8px; padding: 24px; margin-bottom: 24px; }
+    .card h2 { margin-bottom: 12px; }
+    .btn { padding: 8px 16px; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; }
+    .btn-primary { background: #3b82f6; color: #fff; }
+    .btn-danger { background: #ef4444; color: #fff; }
+    input, textarea { padding: 8px 12px; border: 1px solid #d0d0d0; border-radius: 4px; font-size: 14px; width: 100%; margin-bottom: 12px; }
+    label { display: block; margin-bottom: 4px; font-weight: 500; }
+    footer { text-align: center; padding: 24px; color: #999; font-size: 12px; }
+
+    /* BUG: Visual - clipped text via overflow: hidden on a short container */
+    .clipped-container {
+      overflow: hidden;
+      height: 20px;
+      border: 1px solid #e0e0e0;
+      padding: 4px 8px;
+      margin-top: 8px;
+    }
+
+    /* BUG: Visual - misaligned element */
+    .misaligned {
+      display: flex;
+      align-items: flex-start; /* should be center */
+      gap: 12px;
+      padding: 12px;
+      background: #f0f4ff;
+      border-radius: 8px;
+      margin-top: 12px;
+    }
+    .misaligned .icon {
+      width: 40px;
+      height: 40px;
+      background: #3b82f6;
+      border-radius: 50%;
+      flex-shrink: 0;
+      margin-top: 14px; /* intentionally off */
+    }
+    .misaligned .label {
+      font-size: 16px;
+      line-height: 40px;
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>Buggy App</h1>
+  <nav>
+    <a href="#dashboard">Dashboard</a>
+    <a href="#settings">Settings</a>
+    <!-- BUG: Functional - broken link to nonexistent page -->
+    <a href="#/this-page-does-not-exist">Reports</a>
+    <a href="#help">Help</a>
+  </nav>
+</header>
+
+<main>
+  <!-- BUG: Content - typo "Welocme" -->
+  <h2 style="margin-bottom: 24px;">Welocme to the Dashboard</h2>
+
+  <!-- Card 1: Functional bug - button throws JS error -->
+  <div class="card">
+    <h2>Quick Actions</h2>
+    <p>Perform common tasks from here.</p>
+    <div style="margin-top: 12px; display: flex; gap: 8px;">
+      <!-- BUG: Functional - button throws JS error on click -->
+      <button class="btn btn-primary" onclick="processAction()">Run Analysis</button>
+      <button class="btn btn-danger" onclick="deleteAllData()">Delete All Data</button>
+    </div>
+  </div>
+
+  <!-- Card 2: Visual bugs - clipped text and misaligned element -->
+  <div class="card">
+    <h2>System Status</h2>
+    <!-- BUG: Visual - text is clipped because container is too short -->
+    <div class="clipped-container">
+      The system is currently operating normally. All services are online and responding within expected latency thresholds. Last health check completed at 14:32 UTC.
+    </div>
+    <!-- BUG: Visual - icon and label are misaligned -->
+    <div class="misaligned">
+      <div class="icon"></div>
+      <span class="label">All systems operational</span>
+    </div>
+  </div>
+
+  <!-- Card 3: Content bug - placeholder text -->
+  <div class="card">
+    <h2>Recent Activity</h2>
+    <!-- BUG: Content - lorem ipsum placeholder left in -->
+    <p>Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris.</p>
+  </div>
+
+  <!-- Card 4: UX bug - form with no feedback on submit -->
+  <div class="card">
+    <h2>Contact Support</h2>
+    <form id="support-form">
+      <label for="subject">Subject</label>
+      <input type="text" id="subject" placeholder="Enter subject">
+      <label for="message">Message</label>
+      <textarea id="message" rows="3" placeholder="Describe your issue"></textarea>
+      <!-- BUG: UX - submit does nothing, no feedback -->
+      <button type="submit" class="btn btn-primary">Send Message</button>
+    </form>
+  </div>
+
+  <!-- Card 5: UX bug - empty state with no message -->
+  <div class="card">
+    <h2>Notifications</h2>
+    <!-- BUG: UX - empty container with no empty state message -->
+    <div id="notifications-list" style="min-height: 60px;">
+    </div>
+  </div>
+</main>
+
+<footer>
+  &copy; 2025 Buggy App Inc. All rights reserved.
+</footer>
+
+<script>
+  // BUG: Console - error on page load
+  console.error("Failed to initialize analytics: endpoint not configured");
+
+  // BUG: Console - failed fetch on page load
+  fetch("https://api.nonexistent-endpoint.invalid/v1/health")
+    .catch(function() {});
+
+  // BUG: Functional - function referenced by button is broken
+  function processAction() {
+    // Throws because undefinedService is not defined
+    undefinedService.runAnalysis();
+  }
+
+  // No confirmation for destructive action
+  function deleteAllData() {
+    alert("All data deleted!");
+  }
+
+  // Form submit does nothing
+  document.getElementById("support-form").addEventListener("submit", function(e) {
+    e.preventDefault();
+  });
+</script>
+
+</body>
+</html>

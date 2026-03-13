@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 jobs:
   version-sync:
@@ -55,13 +56,38 @@ jobs:
         run: pnpm test
 
   rust:
+    name: Rust
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: cli
+
+      - name: Format check
+        run: cargo fmt --manifest-path cli/Cargo.toml -- --check
+
+      - name: Clippy check
+        run: cargo clippy --manifest-path cli/Cargo.toml -- -D warnings
+
+      - name: Run Rust tests
+        run: cargo test --profile ci --manifest-path cli/Cargo.toml
+
+  rust-cross:
     name: Rust (${{ matrix.os }} - ${{ matrix.target }})
+    if: github.event_name != 'pull_request'
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
         include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
           - os: macos-latest
             target: aarch64-apple-darwin
           - os: macos-latest
@@ -78,29 +104,19 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Cache Cargo dependencies
-        uses: actions/cache@v4
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            cli/target/
-          key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ hashFiles('cli/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-${{ matrix.target }}-
-
-      - name: Build release binary
-        run: cargo build --release --manifest-path cli/Cargo.toml --target ${{ matrix.target }}
+          workspaces: cli
 
       - name: Run Rust tests
-        run: cargo test --manifest-path cli/Cargo.toml --target ${{ matrix.target }}
+        run: cargo test --profile ci --manifest-path cli/Cargo.toml --target ${{ matrix.target }}
 
   windows-integration:
     name: Windows Integration Test
+    if: github.event_name != 'pull_request'
     runs-on: windows-latest
-    needs: rust
+    needs: rust-cross
 
     steps:
       - name: Checkout repository
@@ -122,18 +138,10 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
 
-      - name: Cache Cargo dependencies
-        uses: actions/cache@v4
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            cli/target/
-          key: windows-cargo-x86_64-pc-windows-msvc-${{ hashFiles('cli/Cargo.lock') }}
-          restore-keys: |
-            windows-cargo-x86_64-pc-windows-msvc-
+          workspaces: cli
 
       - name: Build Rust CLI
         run: cargo build --release --manifest-path cli/Cargo.toml --target x86_64-pc-windows-msvc
@@ -173,6 +181,23 @@ jobs:
           }
         shell: pwsh
 
+      - name: Test daemon lifecycle (open, snapshot, close)
+        run: |
+          $env:PATH = "$pwd\bin;$env:PATH"
+          Write-Host "--- Opening page ---"
+          bin/agent-browser-win32-x64.exe open https://example.com
+          if ($LASTEXITCODE -ne 0) { Write-Error "open failed"; exit 1 }
+          Write-Host "--- Taking snapshot ---"
+          $snapshot = bin/agent-browser-win32-x64.exe snapshot
+          if ($LASTEXITCODE -ne 0) { Write-Error "snapshot failed"; exit 1 }
+          Write-Host $snapshot
+          Write-Host "--- Closing browser ---"
+          bin/agent-browser-win32-x64.exe close
+          if ($LASTEXITCODE -ne 0) { Write-Error "close failed"; exit 1 }
+          Write-Host "--- Windows daemon lifecycle test passed ---"
+        shell: pwsh
+        timeout-minutes: 5
+
   serverless-chromium:
     name: Serverless Chromium (@sparticuz/chromium)
     runs-on: ubuntu-latest
@@ -206,8 +231,9 @@ jobs:
 
   global-install:
     name: Global Install (${{ matrix.os }})
+    if: github.event_name != 'pull_request'
     runs-on: ${{ matrix.os }}
-    needs: rust
+    needs: rust-cross
     strategy:
       matrix:
         include:
@@ -241,18 +267,10 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Cache Cargo dependencies
-        uses: actions/cache@v4
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            cli/target/
-          key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ hashFiles('cli/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-${{ matrix.target }}-
+          workspaces: cli
 
       - name: Build Rust CLI
         run: cargo build --release --manifest-path cli/Cargo.toml --target ${{ matrix.target }}

@@ -15,6 +15,7 @@ export const navigation: NavSection[] = [
       { name: "Introduction", href: "/" },
       { name: "Installation", href: "/installation" },
       { name: "Quick Start", href: "/quick-start" },
+      { name: "Skills", href: "/skills" },
     ],
   },
   {
@@ -35,6 +36,16 @@ export const navigation: NavSection[] = [
       { name: "Streaming", href: "/streaming" },
       { name: "Profiler", href: "/profiler" },
       { name: "iOS Simulator", href: "/ios" },
+      { name: "Security", href: "/security" },
+      { name: "Next.js + Vercel", href: "/next" },
+      { name: "Native Mode (Experimental)", href: "/native-mode" },
+    ],
+  },
+  {
+    title: "Engines",
+    items: [
+      { name: "Chrome", href: "/engines/chrome" },
+      { name: "Lightpanda", href: "/engines/lightpanda" },
     ],
   },
   {
