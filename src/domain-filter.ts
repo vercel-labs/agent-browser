@@ -51,7 +51,8 @@ export function buildWebSocketFilterScript(allowedDomains: string[]): string {
   }
   function _checkUrl(url) {
     try {
-      var parsed = new URL(url);
+      // Resolve relative URLs against current page origin (e.g., /__webpack_hmr)
+      var parsed = new URL(url, location.href);
       return _isDomainAllowed(parsed.hostname);
     } catch(e) {
       return false;
