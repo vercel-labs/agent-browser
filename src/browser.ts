@@ -9,6 +9,7 @@ import {
   type Frame,
   type Dialog,
   type Request,
+  type Download,
   type Route,
   type Locator,
   type CDPSession,
@@ -146,6 +147,7 @@ export class BrowserManager {
   private scopedHeaderRoutes: Map<string, (route: Route) => Promise<void>> = new Map();
   private colorScheme: 'light' | 'dark' | 'no-preference' | null = null;
   private downloadPath: string | null = null;
+  private pendingDownloads: Download[] = [];
   private allowedDomains: string[] = [];
   private inspectServer: InspectServer | null = null;
 
@@ -529,6 +531,18 @@ export class BrowserManager {
    */
   clearRequests(): void {
     this.trackedRequests = [];
+  }
+
+  /**
+   * Take a pending download from the queue, or wait for the next one.
+   */
+  async waitForDownload(timeout?: number): Promise<Download> {
+    if (this.pendingDownloads.length > 0) {
+      return this.pendingDownloads.shift()!;
+    }
+    const page = this.getPage();
+    const download = await page.waitForEvent('download', { timeout });
+    return download;
   }
 
   /**
@@ -1923,6 +1937,11 @@ export class BrowserManager {
         message: error.message,
         timestamp: Date.now(),
       });
+    });
+
+    // Track downloads eagerly so wait --download works even after the event fired
+    page.on('download', (download: Download) => {
+      this.pendingDownloads.push(download);
     });
 
     page.on('close', () => {
