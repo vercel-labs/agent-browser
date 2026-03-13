@@ -830,6 +830,34 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
             return;
         }
 
+        // Storage get (all keys)
+        if let Some(storage_data) = data.get("data").and_then(|v| v.as_object()) {
+            if storage_data.is_empty() {
+                println!("{} (empty)", color::success_indicator());
+            } else {
+                for (k, v) in storage_data {
+                    let val_str = match v.as_str() {
+                        Some(s) => s.to_string(),
+                        None => serde_json::to_string(v).unwrap_or_default(),
+                    };
+                    println!("{}: {}", k, val_str);
+                }
+            }
+            return;
+        }
+
+        // Storage get (single key) — value may not be a string
+        if data.get("key").is_some() {
+            if let Some(value) = data.get("value") {
+                match value.as_str() {
+                    Some(s) => println!("{}", s),
+                    None if value.is_null() => println!("null"),
+                    None => println!("{}", serde_json::to_string(value).unwrap_or_default()),
+                }
+                return;
+            }
+        }
+
         // Default success
         println!("{} Done", color::success_indicator());
     }
