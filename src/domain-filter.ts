@@ -51,8 +51,13 @@ export function buildWebSocketFilterScript(allowedDomains: string[]): string {
   }
   function _checkUrl(url) {
     try {
-      var parsed = new URL(url);
-      return _isDomainAllowed(parsed.hostname);
+      // Handle relative URLs (e.g., /__webpack_hmr) by resolving against page origin
+      var fullUrl = url;
+      if (url.startsWith('/') || url.startsWith('.')) {
+        fullUrl = location.origin + url;
+      }
+      var parsed = new URL(fullUrl);
+      return parsed.hostname ? _isDomainAllowed(parsed.hostname) : true;
     } catch(e) {
       return false;
     }
