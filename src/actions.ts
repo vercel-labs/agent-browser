@@ -631,7 +631,7 @@ async function handleNavigate(
   }
 
   await page.goto(command.url, {
-    waitUntil: command.waitUntil ?? 'load',
+    waitUntil: command.waitUntil ?? 'domcontentloaded',
   });
 
   return successResponse(command.id, {
@@ -2760,7 +2760,7 @@ async function handleDiffScreenshot(
 async function handleDiffUrl(command: DiffUrlCommand, browser: BrowserManager): Promise<Response> {
   const page = browser.getPage();
 
-  const waitUntil = command.waitUntil ?? 'load';
+  const waitUntil = command.waitUntil ?? 'domcontentloaded';
   const snapshotOpts = {
     selector: command.selector,
     compact: command.compact,
