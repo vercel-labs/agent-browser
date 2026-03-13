@@ -1245,7 +1245,6 @@ mod tests {
         assert_eq!(to_ai_friendly_error(err), err);
     }
 
-    /// Errors containing "no element" should also be mapped.
     #[test]
     fn test_to_ai_friendly_error_catches_no_element() {
         let mapped = "Element not found. Verify the selector is correct and the element exists in the DOM.";
