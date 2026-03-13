@@ -5267,6 +5267,7 @@ mod tests {
 
     #[test]
     fn test_launch_options_from_env_defaults() {
+        let _guard = EnvGuard::new(&["AGENT_BROWSER_HEADED"]);
         let opts = launch_options_from_env();
         assert!(opts.headless);
         assert!(opts.args.is_empty());
