@@ -1,7 +1,7 @@
 //! Browser provider connections for remote CDP sessions.
 //!
-//! Supports Browserbase, Browser Use, and Kernel providers. Each provider
-//! returns a CDP WebSocket URL for connecting via BrowserManager.
+//! Supports Browserbase, Browserless, Browser Use, and Kernel providers.
+//! Each provider returns a CDP WebSocket URL for connecting via BrowserManager.
 
 use serde_json::{json, Value};
 use std::env;
@@ -19,10 +19,11 @@ pub async fn connect_provider(
 ) -> Result<(String, Option<ProviderSession>), String> {
     match provider_name.to_lowercase().as_str() {
         "browserbase" => connect_browserbase().await,
+        "browserless" => connect_browserless().await,
         "browser-use" | "browseruse" => connect_browser_use().await,
         "kernel" => connect_kernel().await,
         _ => Err(format!(
-            "Unknown provider '{}'. Supported: browserbase, browser-use, kernel",
+            "Unknown provider '{}'. Supported: browserbase, browserless, browser-use, kernel",
             provider_name
         )),
     }
@@ -35,11 +36,13 @@ pub async fn close_provider_session(session: &ProviderSession) {
         "browserbase" => {
             if let Ok(api_key) = env::var("BROWSERBASE_API_KEY") {
                 let _ = client
-                    .delete(format!(
+                    .post(format!(
                         "https://api.browserbase.com/v1/sessions/{}",
                         session.session_id
                     ))
+                    .header("Content-Type", "application/json")
                     .header("X-BB-API-Key", &api_key)
+                    .json(&serde_json::json!({ "status": "REQUEST_RELEASE" }))
                     .send()
                     .await;
             }
@@ -57,6 +60,10 @@ pub async fn close_provider_session(session: &ProviderSession) {
                     .send()
                     .await;
             }
+        }
+        "browserless" => {
+            // session_id holds the stop URL for browserless
+            let _ = client.delete(&session.session_id).send().await;
         }
         "kernel" => {
             if let Ok(api_key) = env::var("KERNEL_API_KEY") {
@@ -80,15 +87,11 @@ pub async fn close_provider_session(session: &ProviderSession) {
 async fn connect_browserbase() -> Result<(String, Option<ProviderSession>), String> {
     let api_key = env::var("BROWSERBASE_API_KEY")
         .map_err(|_| "BROWSERBASE_API_KEY environment variable is not set")?;
-    let project_id = env::var("BROWSERBASE_PROJECT_ID")
-        .map_err(|_| "BROWSERBASE_PROJECT_ID environment variable is not set")?;
 
     let client = reqwest::Client::new();
     let response = client
         .post("https://api.browserbase.com/v1/sessions")
-        .header("Content-Type", "application/json")
         .header("X-BB-API-Key", &api_key)
-        .json(&json!({ "projectId": project_id }))
         .send()
         .await
         .map_err(|e| format!("Browserbase request failed: {}", e))?;
@@ -127,6 +130,87 @@ async fn connect_browserbase() -> Result<(String, Option<ProviderSession>), Stri
         Some(ProviderSession {
             provider: "browserbase".to_string(),
             session_id,
+        }),
+    ))
+}
+
+async fn connect_browserless() -> Result<(String, Option<ProviderSession>), String> {
+    let api_key = env::var("BROWSERLESS_API_KEY")
+        .map_err(|_| "BROWSERLESS_API_KEY environment variable is not set")?;
+
+    let api_url = env::var("BROWSERLESS_API_URL")
+        .unwrap_or_else(|_| "https://production-sfo.browserless.io".to_string());
+    let browser_type =
+        env::var("BROWSERLESS_BROWSER_TYPE").unwrap_or_else(|_| "chromium".to_string());
+
+    let supported = ["chromium", "chrome"];
+    if !supported.contains(&browser_type.as_str()) {
+        return Err(format!(
+            "BROWSERLESS_BROWSER_TYPE \"{}\" is not supported. Only {} are allowed.",
+            browser_type,
+            supported.join(", ")
+        ));
+    }
+
+    let ttl: u64 = env::var("BROWSERLESS_TTL")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(300000);
+    let stealth = env::var("BROWSERLESS_STEALTH")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(true);
+
+    let url = format!("{}/session", api_url.trim_end_matches('/'));
+
+    let client = reqwest::Client::new();
+    let response = client
+        .post(&url)
+        .query(&[("token", &api_key)])
+        .header("Content-Type", "application/json")
+        .json(&json!({
+            "ttl": ttl,
+            "stealth": stealth,
+            "browser": browser_type,
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("Browserless request failed: {}", e))?;
+
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|e| format!("Failed to read Browserless response: {}", e))?;
+
+    if !status.is_success() {
+        return Err(format!(
+            "Browserless API error ({}): {}",
+            status.as_u16(),
+            body
+        ));
+    }
+
+    let json: Value =
+        serde_json::from_str(&body).map_err(|e| format!("Invalid Browserless response: {}", e))?;
+
+    let connect_url = json
+        .get("connect")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .ok_or_else(|| "Browserless response missing 'connect' URL".to_string())?;
+
+    let stop_url = json
+        .get("stop")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .ok_or_else(|| "Browserless response missing 'stop' URL".to_string())?;
+
+    Ok((
+        connect_url,
+        Some(ProviderSession {
+            provider: "browserless".to_string(),
+            // Store the stop URL as the session_id for cleanup
+            session_id: stop_url,
         }),
     ))
 }
@@ -185,8 +269,7 @@ async fn connect_browser_use() -> Result<(String, Option<ProviderSession>), Stri
 }
 
 async fn connect_kernel() -> Result<(String, Option<ProviderSession>), String> {
-    let api_key =
-        env::var("KERNEL_API_KEY").map_err(|_| "KERNEL_API_KEY environment variable is not set")?;
+    let api_key = env::var("KERNEL_API_KEY").ok();
     let endpoint =
         env::var("KERNEL_ENDPOINT").unwrap_or_else(|_| "https://api.onkernel.com".to_string());
 
@@ -218,10 +301,11 @@ async fn connect_kernel() -> Result<(String, Option<ProviderSession>), String> {
     }
 
     let client = reqwest::Client::new();
-    let response = client
-        .post(&url)
-        .header("Content-Type", "application/json")
-        .header("Authorization", format!("Bearer {}", api_key))
+    let mut request = client.post(&url).header("Content-Type", "application/json");
+    if let Some(ref key) = api_key {
+        request = request.header("Authorization", format!("Bearer {}", key));
+    }
+    let response = request
         .json(&body)
         .send()
         .await

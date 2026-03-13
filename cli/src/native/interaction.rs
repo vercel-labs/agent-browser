@@ -206,6 +206,22 @@ pub async fn type_text(
 }
 
 pub async fn press_key(client: &CdpClient, session_id: &str, key: &str) -> Result<(), String> {
+    press_key_with_modifiers(client, session_id, key, None).await
+}
+
+/// Dispatch a keyDown+keyUp sequence for `key` with an optional CDP modifier bitmask.
+///
+/// Modifier values follow the CDP `Input.dispatchKeyEvent` spec:
+/// 1 = Alt, 2 = Control, 4 = Meta (Cmd), 8 = Shift.
+///
+/// Callers that need a platform-appropriate modifier (e.g. Cmd on macOS,
+/// Ctrl elsewhere) must choose the value themselves -- see `cfg!(target_os)`.
+pub async fn press_key_with_modifiers(
+    client: &CdpClient,
+    session_id: &str,
+    key: &str,
+    modifiers: Option<i32>,
+) -> Result<(), String> {
     let (key_name, code, key_code) = named_key_info(key);
 
     client
@@ -219,7 +235,7 @@ pub async fn press_key(client: &CdpClient, session_id: &str, key: &str) -> Resul
                 unmodified_text: None,
                 windows_virtual_key_code: Some(key_code),
                 native_virtual_key_code: Some(key_code),
-                modifiers: None,
+                modifiers,
             },
             Some(session_id),
         )
@@ -236,7 +252,7 @@ pub async fn press_key(client: &CdpClient, session_id: &str, key: &str) -> Resul
                 unmodified_text: None,
                 windows_virtual_key_code: Some(key_code),
                 native_virtual_key_code: Some(key_code),
-                modifiers: None,
+                modifiers,
             },
             Some(session_id),
         )

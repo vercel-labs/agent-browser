@@ -263,6 +263,7 @@ export interface ViewportCommand extends BaseCommand {
   action: 'viewport';
   width: number;
   height: number;
+  deviceScaleFactor?: number;
 }
 
 // User agent
@@ -293,6 +294,14 @@ export interface ReloadCommand extends BaseCommand {
 // Get URL/Title
 export interface UrlCommand extends BaseCommand {
   action: 'url';
+}
+
+export interface CdpUrlCommand extends BaseCommand {
+  action: 'cdp_url';
+}
+
+export interface InspectCommand extends BaseCommand {
+  action: 'inspect';
 }
 
 export interface TitleCommand extends BaseCommand {
@@ -698,7 +707,7 @@ export interface TapCommand extends BaseCommand {
 // Clipboard
 export interface ClipboardCommand extends BaseCommand {
   action: 'clipboard';
-  operation: 'copy' | 'paste' | 'read';
+  operation: 'copy' | 'paste' | 'read' | 'write';
   text?: string;
 }
 
@@ -817,6 +826,7 @@ export interface ScreenshotCommand extends BaseCommand {
   format?: 'png' | 'jpeg';
   quality?: number;
   annotate?: boolean;
+  screenshotDir?: string;
 }
 
 export interface SnapshotCommand extends BaseCommand {
@@ -832,6 +842,7 @@ export interface EvaluateCommand extends BaseCommand {
 export interface WaitCommand extends BaseCommand {
   action: 'wait';
   selector?: string;
+  text?: string;
   timeout?: number;
   state?: 'attached' | 'detached' | 'visible' | 'hidden';
 }
@@ -945,6 +956,8 @@ export type Command =
   | ForwardCommand
   | ReloadCommand
   | UrlCommand
+  | CdpUrlCommand
+  | InspectCommand
   | TitleCommand
   | GetAttributeCommand
   | GetTextCommand

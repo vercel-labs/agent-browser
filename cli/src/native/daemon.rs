@@ -258,9 +258,26 @@ fn get_daemon_socket_dir() -> PathBuf {
 
 #[cfg(windows)]
 fn get_port_for_session(session: &str) -> u16 {
-    let mut hash: i64 = 0;
-    for b in session.bytes() {
-        hash = hash.wrapping_mul(31).wrapping_add(b as i64);
+    let mut hash: i32 = 0;
+    for c in session.chars() {
+        hash = ((hash << 5).wrapping_sub(hash)).wrapping_add(c as i32);
     }
-    49152 + (hash.unsigned_abs() % 16383) as u16
+    49152 + ((hash.unsigned_abs() as u32 % 16383) as u16)
+}
+
+#[cfg(test)]
+#[cfg(windows)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_port_matches_client_algorithm() {
+        // These values are computed by the identical djb2 implementation in
+        // connection.rs. Both sides must agree on the port for the daemon to
+        // start successfully.
+        assert_eq!(get_port_for_session("default"), 50838);
+        assert_eq!(get_port_for_session("my-session"), 63105);
+        assert_eq!(get_port_for_session("work"), 51184);
+        assert_eq!(get_port_for_session(""), 49152);
+    }
 }

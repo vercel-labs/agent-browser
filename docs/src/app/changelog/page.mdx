@@ -4,6 +4,126 @@ export const metadata = pageMetadata("changelog")
 
 # Changelog
 
+## v0.19.0
+
+<p className="text-[#888] text-sm">March 2026</p>
+
+### New Features
+
+- **Browserless.io provider** -- Added browserless.io as a browser provider, supported in both Node.js and native daemon paths. Connect to remote Browserless instances using the `--provider browserless` flag or `AGENT_BROWSER_PROVIDER=browserless` environment variable.
+
+```bash
+export BROWSERLESS_API_KEY="your-api-key"
+agent-browser --provider browserless open example.com
+agent-browser --provider browserless screenshot ./page.png
+```
+
+- **`clipboard` command** -- Read from and write to the browser clipboard. Supports `read`, `write`, `copy` (simulates Ctrl+C), and `paste` (simulates Ctrl+V) operations.
+
+```bash
+agent-browser clipboard read
+agent-browser clipboard write "Hello, World!"
+agent-browser clipboard copy
+agent-browser clipboard paste
+```
+
+- **Screenshot output configuration** -- New global flags for persistent screenshot settings: `--screenshot-dir`, `--screenshot-quality`, and `--screenshot-format`. Also available as environment variables `AGENT_BROWSER_SCREENSHOT_DIR`, `AGENT_BROWSER_SCREENSHOT_QUALITY`, and `AGENT_BROWSER_SCREENSHOT_FORMAT`.
+
+```bash
+agent-browser screenshot --screenshot-dir ./shots
+agent-browser screenshot --screenshot-format jpeg --screenshot-quality 80
+```
+
+### Bug Fixes
+
+- Fixed `wait --text` not working in native daemon path
+- Fixed `BrowserManager.navigate()` and package entry point
+- Fixed extensions not being loaded from `config.json`
+- Fixed scroll on page load
+- Fixed HTML retrieval by using `browser.getLocator()` for selector operations
+
+---
+
+## v0.18.0
+
+<p className="text-[#888] text-sm">March 2026</p>
+
+### New Features
+
+- **`inspect` command** -- Opens Chrome DevTools for the active page by launching a local proxy server that forwards the DevTools frontend to the browser's CDP WebSocket. Agent commands continue to work while DevTools is open. Implemented in both Node.js and native daemon paths.
+
+```bash
+agent-browser open example.com
+agent-browser inspect          # opens DevTools in your browser
+agent-browser click "Submit"   # commands still work while DevTools is open
+```
+
+- **`get cdp-url` subcommand** -- Retrieve the Chrome DevTools Protocol WebSocket URL for the active page, useful for connecting external debugging tools.
+
+```bash
+agent-browser get cdp-url
+```
+
+- **Native screenshot annotate** -- The `--annotate` flag for screenshots now works in the native Rust daemon, bringing full parity with the Node.js path.
+
+### Improvements
+
+- **KERNEL_API_KEY now optional** -- External credential injection no longer requires `KERNEL_API_KEY` to be set, making it easier to use Kernel with pre-configured environments.
+- **Browserbase simplified** -- Removed the `BROWSERBASE_PROJECT_ID` requirement, reducing setup friction for Browserbase users.
+
+### Bug Fixes
+
+- Fixed Browserbase API using incorrect endpoint to release sessions
+- Fixed CDP connect paths using hardcoded 10s timeout instead of the configurable default timeout
+- Fixed lone Unicode surrogates causing errors by sanitizing with `toWellFormed()`
+- Fixed CDP connection failure on IPv6-first systems
+- Fixed recordings not inheriting the current viewport settings
+
+---
+
+## v0.17.1
+
+<p className="text-[#888] text-sm">March 2026</p>
+
+### Improvements
+
+- **Viewport scale factor** -- Added support for device scale factor (retina display) in the viewport command via an optional `scale` parameter.
+- **Webview target support** -- Added webview target type support for better Electron application compatibility. The pages list now includes target type information.
+
+---
+
+## v0.17.0
+
+<p className="text-[#888] text-sm">March 2026</p>
+
+### New Features
+
+- **Lightpanda browser engine support** -- Added `--engine <name>` flag to select the browser engine (`chrome` by default, or `lightpanda`), implying `--native` mode. Configurable via `AGENT_BROWSER_ENGINE` environment variable.
+
+```bash
+agent-browser --engine lightpanda open example.com
+```
+
+- **Dialog dismiss command** -- Added support for `dismiss` subcommand in dialog command parsing.
+
+### Improvements
+
+- **Daemon startup error reporting** -- Daemon startup errors are now surfaced directly instead of showing an opaque timeout message.
+- **CDP port discovery** -- Replaced hand-rolled HTTP client with `reqwest` for more reliable CDP port discovery.
+- **Chrome extensions** -- Extensions now load correctly by forcing headed mode when extensions are present.
+- **Google Translate bar suppression** -- Suppressed the Google Translate bar in native headless mode to avoid interference.
+- **Auth cookie persistence** -- Auth cookies are now persisted on browser close in native mode.
+
+### Bug Fixes
+
+- Fixed native auth login failing due to incompatible encryption format.
+
+### Performance
+
+- Added benchmarks to the CLI codebase.
+
+---
+
 ## v0.16.0
 
 <p className="text-[#888] text-sm">March 2026</p>

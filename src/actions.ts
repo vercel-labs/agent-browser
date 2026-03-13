@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import { exec } from 'node:child_process';
 import type { Page, Frame } from 'playwright-core';
 import { mkdirSync } from 'node:fs';
 import type { BrowserManager, ScreencastFrame } from './browser.js';
@@ -431,6 +432,10 @@ async function dispatchAction(command: Command, browser: BrowserManager): Promis
       return await handleReload(command, browser);
     case 'url':
       return await handleUrl(command, browser);
+    case 'cdp_url':
+      return handleCdpUrl(command, browser);
+    case 'inspect':
+      return await handleInspect(command, browser);
     case 'title':
       return await handleTitle(command, browser);
     case 'getattribute':
@@ -616,23 +621,12 @@ async function handleNavigate(
   command: NavigateCommand,
   browser: BrowserManager
 ): Promise<Response<NavigateData>> {
-  browser.checkDomainAllowed(command.url);
-
-  const page = browser.getPage();
-
-  // If headers are provided, set up scoped headers for this origin
-  if (command.headers && Object.keys(command.headers).length > 0) {
-    await browser.setScopedHeaders(command.url, command.headers);
-  }
-
-  await page.goto(command.url, {
-    waitUntil: command.waitUntil ?? 'load',
+  const result = await browser.navigate(command.url, {
+    headers: command.headers,
+    waitUntil: command.waitUntil,
   });
 
-  return successResponse(command.id, {
-    url: page.url(),
-    title: await page.title(),
-  });
+  return successResponse(command.id, result);
 }
 
 async function handleClick(command: ClickCommand, browser: BrowserManager): Promise<Response> {
@@ -747,7 +741,7 @@ async function handleScreenshot(
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
       const random = Math.random().toString(36).substring(2, 8);
       const filename = `screenshot-${timestamp}-${random}.${ext}`;
-      const screenshotDir = path.join(getAppDir(), 'tmp', 'screenshots');
+      const screenshotDir = command.screenshotDir ?? path.join(getAppDir(), 'tmp', 'screenshots');
       mkdirSync(screenshotDir, { recursive: true });
       savePath = path.join(screenshotDir, filename);
     }
@@ -960,7 +954,12 @@ async function handleEvaluate(
 async function handleWait(command: WaitCommand, browser: BrowserManager): Promise<Response> {
   const page = browser.getPage();
 
-  if (command.selector) {
+  if (command.text) {
+    await page.waitForFunction(
+      `(document.body.innerText || '').includes(${JSON.stringify(command.text)})`,
+      { timeout: command.timeout }
+    );
+  } else if (command.selector) {
     await page.waitForSelector(command.selector, {
       state: command.state ?? 'visible',
       timeout: command.timeout,
@@ -968,7 +967,6 @@ async function handleWait(command: WaitCommand, browser: BrowserManager): Promis
   } else if (command.timeout) {
     await page.waitForTimeout(command.timeout);
   } else {
-    // Default: wait for load state
     await page.waitForLoadState('load');
   }
 
@@ -1051,7 +1049,8 @@ async function handleContent(
 
   let html: string;
   if (command.selector) {
-    html = await page.locator(command.selector).innerHTML();
+    const locator = browser.getLocator(command.selector);
+    html = await locator.innerHTML();
   } else {
     html = await page.content();
   }
@@ -1465,11 +1464,33 @@ async function handleViewport(
   command: ViewportCommand,
   browser: BrowserManager
 ): Promise<Response> {
-  await browser.setViewport(command.width, command.height);
-  return successResponse(command.id, {
+  if (command.deviceScaleFactor && command.deviceScaleFactor !== 1) {
+    await browser.setViewport(command.width, command.height);
+    await browser.setDeviceScaleFactor(
+      command.deviceScaleFactor,
+      command.width,
+      command.height,
+      false
+    );
+  } else {
+    // deviceScaleFactor is 1 or undefined -- clear any previously-set CDP
+    // Emulation.setDeviceMetricsOverride so stale DPR doesn't persist.
+    try {
+      await browser.clearDeviceMetricsOverride();
+    } catch {
+      // Ignore if override was never set
+    }
+    await browser.setViewport(command.width, command.height);
+  }
+
+  const result: Record<string, unknown> = {
     width: command.width,
     height: command.height,
-  });
+  };
+  if (command.deviceScaleFactor !== undefined) {
+    result.deviceScaleFactor = command.deviceScaleFactor;
+  }
+  return successResponse(command.id, result);
 }
 
 async function handleUserAgent(
@@ -1555,6 +1576,73 @@ async function handleUrl(
   return successResponse(command.id, { url: page.url() });
 }
 
+function handleCdpUrl(command: Command & { action: 'cdp_url' }, browser: BrowserManager): Response {
+  const cdpUrl = browser.getCdpUrl();
+  if (!cdpUrl) {
+    return errorResponse(command.id, 'CDP URL not available (browser may not be launched)');
+  }
+  return successResponse(command.id, { cdpUrl });
+}
+
+async function handleInspect(
+  command: Command & { action: 'inspect' },
+  browser: BrowserManager
+): Promise<Response> {
+  const cdpUrl = browser.getCdpUrl();
+  if (!cdpUrl) {
+    return errorResponse(command.id, 'CDP URL not available (browser may not be launched)');
+  }
+
+  // Shut down any existing inspect server so we always target the current page
+  browser.stopInspectServer();
+
+  const stripped = cdpUrl.replace(/^(wss?|https?):\/\//, '');
+  const hostPort = stripped.split('/')[0];
+
+  // Get the target ID so the inspect server can create its own dedicated CDP session
+  const page = browser.getPage();
+  const context = page.context();
+  const tmpCdp = await context.newCDPSession(page);
+  let targetId = '';
+  try {
+    const info: any = await tmpCdp.send('Target.getTargetInfo' as any);
+    targetId = info?.targetInfo?.targetId || '';
+  } catch (err) {
+    console.error('[inspect] getTargetInfo failed:', err);
+  }
+  await tmpCdp.detach();
+
+  if (!targetId) {
+    return errorResponse(command.id, 'Could not determine target ID for active page');
+  }
+
+  const { InspectServer } = await import('./inspect-server.js');
+  const server = new InspectServer({
+    chromeHostPort: hostPort,
+    targetId,
+    chromeWsUrl: cdpUrl,
+  });
+  await server.start();
+  browser.setInspectServer(server);
+
+  const url = `http://127.0.0.1:${server.port}`;
+  openUrlInBrowser(url);
+  return successResponse(command.id, { opened: true, url });
+}
+
+function openUrlInBrowser(url: string): void {
+  const platform = process.platform;
+  const cmd =
+    platform === 'darwin'
+      ? `open "${url}"`
+      : platform === 'win32'
+        ? `start "" "${url}"`
+        : `xdg-open "${url}"`;
+  exec(cmd, (err) => {
+    if (err) console.error('[inspect] Failed to open browser:', err.message);
+  });
+}
+
 async function handleTitle(
   command: Command & { action: 'title' },
   browser: BrowserManager
@@ -1577,7 +1665,8 @@ async function handleGetAttribute(
 async function handleGetText(command: GetTextCommand, browser: BrowserManager): Promise<Response> {
   const page = browser.getPage();
   const locator = browser.getLocator(command.selector);
-  const text = await locator.textContent();
+  const inner = await locator.innerText();
+  const text = inner || (await locator.textContent()) || '';
   return successResponse(command.id, { text, origin: page.url() });
 }
 
@@ -1609,8 +1698,8 @@ async function handleIsChecked(
 }
 
 async function handleCount(command: CountCommand, browser: BrowserManager): Promise<Response> {
-  const page = browser.getPage();
-  const count = await page.locator(command.selector).count();
+  const locator = browser.getLocator(command.selector);
+  const count = await locator.count();
   return successResponse(command.id, { count });
 }
 
@@ -1618,8 +1707,8 @@ async function handleBoundingBox(
   command: BoundingBoxCommand,
   browser: BrowserManager
 ): Promise<Response> {
-  const page = browser.getPage();
-  const box = await page.locator(command.selector).boundingBox();
+  const locator = browser.getLocator(command.selector);
+  const box = await locator.boundingBox();
   return successResponse(command.id, { box });
 }
 
@@ -1796,8 +1885,6 @@ async function handleStateLoad(
   }
 
   await browser.launch({
-    id: command.id,
-    action: 'launch',
     headless: true,
     autoStateFilePath: command.path,
   });
@@ -2014,7 +2101,7 @@ async function handleWheel(command: WheelCommand, browser: BrowserManager): Prom
   const page = browser.getPage();
 
   if (command.selector) {
-    const element = page.locator(command.selector);
+    const element = browser.getLocator(command.selector);
     await element.hover();
   }
 
@@ -2036,14 +2123,22 @@ async function handleClipboard(
 
   switch (command.operation) {
     case 'copy':
-      await page.keyboard.press('Control+c');
+      await page.keyboard.press('ControlOrMeta+c');
       return successResponse(command.id, { copied: true });
     case 'paste':
-      await page.keyboard.press('Control+v');
+      await page.keyboard.press('ControlOrMeta+v');
       return successResponse(command.id, { pasted: true });
-    case 'read':
+    case 'read': {
       const text = await page.evaluate('navigator.clipboard.readText()');
       return successResponse(command.id, { text });
+    }
+    case 'write': {
+      if (!command.text) {
+        return errorResponse(command.id, "Missing 'text' parameter for clipboard write");
+      }
+      await page.evaluate(`navigator.clipboard.writeText(${JSON.stringify(command.text)})`);
+      return successResponse(command.id, { written: command.text });
+    }
     default:
       return errorResponse(command.id, 'Unknown clipboard operation');
   }
@@ -2053,14 +2148,14 @@ async function handleHighlight(
   command: HighlightCommand,
   browser: BrowserManager
 ): Promise<Response> {
-  const page = browser.getPage();
-  await page.locator(command.selector).highlight();
+  const locator = browser.getLocator(command.selector);
+  await locator.highlight();
   return successResponse(command.id, { highlighted: true });
 }
 
 async function handleClear(command: ClearCommand, browser: BrowserManager): Promise<Response> {
-  const page = browser.getPage();
-  await page.locator(command.selector).clear();
+  const locator = browser.getLocator(command.selector);
+  await locator.clear();
   return successResponse(command.id, { cleared: true });
 }
 
@@ -2068,8 +2163,8 @@ async function handleSelectAll(
   command: SelectAllCommand,
   browser: BrowserManager
 ): Promise<Response> {
-  const page = browser.getPage();
-  await page.locator(command.selector).selectText();
+  const locator = browser.getLocator(command.selector);
+  await locator.selectText();
   return successResponse(command.id, { selected: true });
 }
 
@@ -2077,8 +2172,8 @@ async function handleInnerText(
   command: InnerTextCommand,
   browser: BrowserManager
 ): Promise<Response> {
-  const page = browser.getPage();
-  const text = await page.locator(command.selector).innerText();
+  const locator = browser.getLocator(command.selector);
+  const text = await locator.innerText();
   return successResponse(command.id, { text });
 }
 
@@ -2087,7 +2182,8 @@ async function handleInnerHtml(
   browser: BrowserManager
 ): Promise<Response> {
   const page = browser.getPage();
-  const html = await page.locator(command.selector).innerHTML();
+  const locator = browser.getLocator(command.selector);
+  const html = await locator.innerHTML();
   return successResponse(command.id, { html, origin: page.url() });
 }
 
@@ -2105,8 +2201,8 @@ async function handleSetValue(
   command: SetValueCommand,
   browser: BrowserManager
 ): Promise<Response> {
-  const page = browser.getPage();
-  await page.locator(command.selector).fill(command.value);
+  const locator = browser.getLocator(command.selector);
+  await locator.fill(command.value);
   return successResponse(command.id, { set: true });
 }
 
@@ -2114,8 +2210,8 @@ async function handleDispatch(
   command: DispatchEventCommand,
   browser: BrowserManager
 ): Promise<Response> {
-  const page = browser.getPage();
-  await page.locator(command.selector).dispatchEvent(command.event, command.eventInit);
+  const locator = browser.getLocator(command.selector);
+  await locator.dispatchEvent(command.event, command.eventInit);
   return successResponse(command.id, { dispatched: command.event });
 }
 
@@ -2265,8 +2361,7 @@ async function handleGetByTestId(
 }
 
 async function handleNth(command: NthCommand, browser: BrowserManager): Promise<Response> {
-  const page = browser.getPage();
-  const base = page.locator(command.selector);
+  const base = browser.getLocator(command.selector);
   const locator = command.index === -1 ? base.last() : base.nth(command.index);
 
   switch (command.subaction) {
@@ -2433,8 +2528,8 @@ async function handleMultiSelect(
   command: MultiSelectCommand,
   browser: BrowserManager
 ): Promise<Response> {
-  const page = browser.getPage();
-  const selected = await page.locator(command.selector).selectOption(command.values);
+  const locator = browser.getLocator(command.selector);
+  const selected = await locator.selectOption(command.values);
   return successResponse(command.id, { selected });
 }
 
@@ -2643,7 +2738,7 @@ async function handleDiffScreenshot(
   const page = browser.getPage();
   let screenshotBuffer: Buffer;
   if (command.selector) {
-    const locator = browser.getLocatorFromRef(command.selector) || page.locator(command.selector);
+    const locator = browser.getLocator(command.selector);
     screenshotBuffer = await locator.screenshot({ type: 'png' });
   } else {
     screenshotBuffer = await page.screenshot({ fullPage: command.fullPage, type: 'png' });

@@ -12,6 +12,7 @@ use super::cdp::types::{
 use super::cookies;
 use super::diff;
 use super::element::RefMap;
+use super::inspect_server::InspectServer;
 use super::interaction;
 use super::network::{self, DomainFilter, EventTracker};
 use super::policy::{ActionPolicy, ConfirmActions, PolicyResult};
@@ -96,6 +97,7 @@ pub struct DaemonState {
     pub har_recording: bool,
     pub har_entries: Vec<HarEntry>,
     pub confirm_actions: Option<ConfirmActions>,
+    pub inspect_server: Option<InspectServer>,
     pub routes: Vec<RouteEntry>,
     pub tracked_requests: Vec<TrackedRequest>,
     pub request_tracking: bool,
@@ -127,6 +129,7 @@ impl DaemonState {
             har_recording: false,
             har_entries: Vec::new(),
             confirm_actions: ConfirmActions::from_env(),
+            inspect_server: None,
             routes: Vec::new(),
             tracked_requests: Vec::new(),
             request_tracking: false,
@@ -167,7 +170,8 @@ impl DaemonState {
                             if let Ok(te) =
                                 serde_json::from_value::<TargetCreatedEvent>(event.params.clone())
                             {
-                                if te.target_info.target_type == "page"
+                                if (te.target_info.target_type == "page"
+                                    || te.target_info.target_type == "webview")
                                     && !te.target_info.url.is_empty()
                                 {
                                     let already_tracked = self
@@ -443,6 +447,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
                     session_id: attach.session_id,
                     url: te.target_info.url.clone(),
                     title: te.target_info.title.clone(),
+                    target_type: te.target_info.target_type.clone(),
                 });
             }
         }
@@ -565,6 +570,8 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         "launch" => handle_launch(cmd, state).await,
         "navigate" => handle_navigate(cmd, state).await,
         "url" => handle_url(state).await,
+        "cdp_url" => handle_cdp_url(state),
+        "inspect" => handle_inspect(state).await,
         "title" => handle_title(state).await,
         "content" => handle_content(state).await,
         "evaluate" => handle_evaluate(cmd, state).await,
@@ -1168,6 +1175,50 @@ async fn handle_url(state: &DaemonState) -> Result<Value, String> {
     Ok(json!({ "url": url }))
 }
 
+fn handle_cdp_url(state: &DaemonState) -> Result<Value, String> {
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    Ok(json!({ "cdpUrl": mgr.get_cdp_url() }))
+}
+
+async fn handle_inspect(state: &mut DaemonState) -> Result<Value, String> {
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+
+    // Shut down any existing inspect server so we always target the current page
+    if let Some(server) = state.inspect_server.take() {
+        server.shutdown();
+    }
+
+    let target_id = mgr.active_target_id()?.to_string();
+    let chrome_hp = mgr.chrome_host_port().to_string();
+    let proxy_handle = mgr.client.inspect_handle();
+
+    let server = InspectServer::start(proxy_handle, target_id, chrome_hp).await?;
+    let url = format!("http://127.0.0.1:{}", server.port());
+    open_url_in_browser(&url);
+
+    state.inspect_server = Some(server);
+    Ok(json!({ "opened": true, "url": url }))
+}
+
+fn open_url_in_browser(url: &str) {
+    #[cfg(target_os = "macos")]
+    let result = std::process::Command::new("open").arg(url).spawn();
+    #[cfg(target_os = "linux")]
+    let result = std::process::Command::new("xdg-open").arg(url).spawn();
+    #[cfg(target_os = "windows")]
+    let result = std::process::Command::new("cmd")
+        .args(["/c", "start", "", url])
+        .spawn();
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    let result: Result<std::process::Child, std::io::Error> = Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "unsupported platform",
+    ));
+    if let Err(e) = result {
+        eprintln!("[inspect] Failed to open browser: {}", e);
+    }
+}
+
 async fn handle_title(state: &DaemonState) -> Result<Value, String> {
     if let Some(ref wb) = state.webdriver_backend {
         if state.browser.is_none() {
@@ -1252,6 +1303,10 @@ async fn handle_close(state: &mut DaemonState) -> Result<Value, String> {
     state.safari_driver = None;
     state.backend_type = BackendType::Cdp;
 
+    if let Some(server) = state.inspect_server.take() {
+        server.shutdown();
+    }
+
     state.ref_map.clear();
     Ok(json!({ "closed": true }))
 }
@@ -1293,8 +1348,20 @@ async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
 }
 
 async fn handle_screenshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let annotate = cmd
+        .get("annotate")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
     if let Some(ref wb) = state.webdriver_backend {
         if state.browser.is_none() {
+            if annotate {
+                return Err(
+                    "Annotated screenshots are not yet implemented on the WebDriver backend"
+                        .to_string(),
+                );
+            }
+
             let base64_data = wb.screenshot().await?;
             let path = cmd.get("path").and_then(|v| v.as_str());
             if let Some(p) = path {
@@ -1347,12 +1414,37 @@ async fn handle_screenshot(cmd: &Value, state: &mut DaemonState) -> Result<Value
             .get("quality")
             .and_then(|v| v.as_i64())
             .map(|q| q as i32),
+        annotate,
+        output_dir: cmd
+            .get("screenshotDir")
+            .and_then(|v| v.as_str())
+            .map(String::from),
     };
 
-    let (path, _base64) =
+    if annotate {
+        state.ref_map.clear();
+        let _ = snapshot::take_snapshot(
+            &mgr.client,
+            &session_id,
+            &SnapshotOptions {
+                interactive: true,
+                ..SnapshotOptions::default()
+            },
+            &mut state.ref_map,
+        )
+        .await?;
+    }
+
+    let result =
         screenshot::take_screenshot(&mgr.client, &session_id, &state.ref_map, &options).await?;
 
-    Ok(json!({ "path": path }))
+    let mut response = json!({ "path": result.path });
+    if !result.annotations.is_empty() {
+        response["annotations"] = serde_json::to_value(&result.annotations)
+            .map_err(|e| format!("Failed to serialize annotations: {}", e))?;
+    }
+
+    Ok(response)
 }
 
 async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -1553,6 +1645,11 @@ async fn handle_wait(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
     let session_id = mgr.active_session_id()?.to_string();
     let timeout_ms = cmd.get("timeout").and_then(|v| v.as_u64()).unwrap_or(30000);
 
+    if let Some(text) = cmd.get("text").and_then(|v| v.as_str()) {
+        wait_for_text(&mgr.client, &session_id, text, timeout_ms).await?;
+        return Ok(json!({ "waited": "text", "text": text }));
+    }
+
     if let Some(selector) = cmd.get("selector").and_then(|v| v.as_str()) {
         let state_str = cmd
             .get("state")
@@ -1565,11 +1662,6 @@ async fn handle_wait(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
     if let Some(url_pattern) = cmd.get("url").and_then(|v| v.as_str()) {
         wait_for_url(&mgr.client, &session_id, url_pattern, timeout_ms).await?;
         return Ok(json!({ "waited": "url", "url": url_pattern }));
-    }
-
-    if let Some(text) = cmd.get("text").and_then(|v| v.as_str()) {
-        wait_for_text(&mgr.client, &session_id, text, timeout_ms).await?;
-        return Ok(json!({ "waited": "text", "text": text }));
     }
 
     if let Some(fn_str) = cmd.get("function").and_then(|v| v.as_str()) {
@@ -2468,6 +2560,7 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
         session_id: new_session_id.clone(),
         url: nav_url.clone(),
         title: String::new(),
+        target_type: "page".to_string(),
     });
 
     // Navigate to URL
@@ -3018,8 +3111,13 @@ async fn handle_clipboard(cmd: &Value, state: &DaemonState) -> Result<Value, Str
         .and_then(|v| v.as_str())
         .unwrap_or("read");
 
+    let session_id = mgr.active_session_id()?.to_string();
+
+    // cfg! is compile-time; assumes the browser runs on the same OS as the CLI binary.
+    let modifier: i32 = if cfg!(target_os = "macos") { 4 } else { 2 };
+
     match action {
-        "write" | "copy" => {
+        "write" => {
             let text = cmd
                 .get("text")
                 .or_else(|| cmd.get("value"))
@@ -3030,7 +3128,17 @@ async fn handle_clipboard(cmd: &Value, state: &DaemonState) -> Result<Value, Str
                 serde_json::to_string(text).unwrap_or_default()
             );
             mgr.evaluate(&js, None).await?;
-            Ok(json!({ "copied": text }))
+            Ok(json!({ "written": text }))
+        }
+        "copy" => {
+            interaction::press_key_with_modifiers(&mgr.client, &session_id, "c", Some(modifier))
+                .await?;
+            Ok(json!({ "copied": true }))
+        }
+        "paste" => {
+            interaction::press_key_with_modifiers(&mgr.client, &session_id, "v", Some(modifier))
+                .await?;
+            Ok(json!({ "pasted": true }))
         }
         _ => {
             let result = mgr.evaluate("navigator.clipboard.readText()", None).await?;
@@ -4057,6 +4165,7 @@ async fn handle_window_new(cmd: &Value, state: &mut DaemonState) -> Result<Value
         session_id: attach.session_id,
         url: "about:blank".to_string(),
         title: String::new(),
+        target_type: "page".to_string(),
     });
 
     if let Some(viewport) = cmd.get("viewport") {
@@ -4099,13 +4208,15 @@ async fn handle_diff_screenshot(cmd: &Value, state: &DaemonState) -> Result<Valu
             .unwrap_or(false),
         format: "png".to_string(),
         quality: None,
+        annotate: false,
+        output_dir: None,
     };
 
-    let (_path, base64_data) =
+    let result =
         screenshot::take_screenshot(&mgr.client, &session_id, &state.ref_map, &options).await?;
 
     let current_bytes =
-        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &base64_data)
+        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &result.base64)
             .map_err(|e| format!("Failed to decode screenshot: {}", e))?;
 
     let baseline_bytes =
@@ -5156,6 +5267,7 @@ mod tests {
 
     #[test]
     fn test_launch_options_from_env_defaults() {
+        let _guard = EnvGuard::new(&["AGENT_BROWSER_HEADED"]);
         let opts = launch_options_from_env();
         assert!(opts.headless);
         assert!(opts.args.is_empty());

@@ -19,6 +19,7 @@ import os from 'node:os';
 import { existsSync, mkdirSync, rmSync, readFileSync, statSync } from 'node:fs';
 import { writeFile, mkdir } from 'node:fs/promises';
 import type { LaunchCommand, TraceEvent } from './types.js';
+import type { InspectServer } from './inspect-server.js';
 import { type RefMap, type EnhancedSnapshot, getEnhancedSnapshot, parseRef } from './snapshot.js';
 import { safeHeaderMerge } from './state-utils.js';
 import { isDomainAllowed, installDomainFilter, parseDomainList } from './domain-filter.js';
@@ -34,7 +35,7 @@ import {
  * Can be overridden via the AGENT_BROWSER_DEFAULT_TIMEOUT environment variable.
  * Default is 25s, which is below the CLI's 30s IPC read timeout to ensure
  * Playwright errors are returned before the CLI gives up with EAGAIN.
- * CDP and recording contexts use a shorter fixed timeout (10s) and are not affected.
+ * Recording contexts use a shorter fixed timeout (10s) and are not affected.
  */
 export function getDefaultTimeout(): number {
   const envValue = process.env.AGENT_BROWSER_DEFAULT_TIMEOUT;
@@ -45,6 +46,31 @@ export function getDefaultTimeout(): number {
     }
   }
   return 25000;
+}
+
+/**
+ * Handles boolean env vars and parsing (e.g., "true", "1", "false", "0"),
+ * with a default value if not set or invalid
+ */
+export function parseBooleanEnvVar(name: string, defaultValue: boolean): boolean {
+  const truthyVals = ['1', 'true'];
+  const falsyVals = ['0', 'false'];
+
+  if (!Object.hasOwn(process.env, name)) {
+    return defaultValue;
+  }
+
+  const param = process.env[name]!.toLowerCase();
+
+  if (truthyVals.includes(param)) {
+    return true;
+  }
+
+  if (falsyVals.includes(param)) {
+    return false;
+  }
+
+  return defaultValue;
 }
 
 // Screencast frame data from CDP
@@ -71,6 +97,36 @@ export interface ScreencastOptions {
   everyNthFrame?: number;
 }
 
+export interface NavigateOptions {
+  waitUntil?: 'load' | 'domcontentloaded' | 'networkidle';
+  headers?: Record<string, string>;
+}
+
+export type BrowserLaunchOptions = Pick<
+  LaunchCommand,
+  | 'headless'
+  | 'viewport'
+  | 'browser'
+  | 'headers'
+  | 'executablePath'
+  | 'cdpPort'
+  | 'cdpUrl'
+  | 'autoConnect'
+  | 'extensions'
+  | 'profile'
+  | 'storageState'
+  | 'proxy'
+  | 'args'
+  | 'userAgent'
+  | 'provider'
+  | 'ignoreHTTPSErrors'
+  | 'allowFileAccess'
+  | 'colorScheme'
+  | 'downloadPath'
+  | 'allowedDomains'
+  | 'autoStateFilePath'
+>;
+
 interface TrackedRequest {
   url: string;
   method: string;
@@ -96,6 +152,7 @@ interface PageError {
 export class BrowserManager {
   private browser: Browser | null = null;
   private cdpEndpoint: string | null = null; // stores port number or full URL
+  private resolvedWsUrl: string | null = null;
   private isPersistentContext: boolean = false;
   private browserbaseSessionId: string | null = null;
   private browserbaseApiKey: string | null = null;
@@ -103,6 +160,7 @@ export class BrowserManager {
   private browserUseApiKey: string | null = null;
   private kernelSessionId: string | null = null;
   private kernelApiKey: string | null = null;
+  private browserlessStopUrl: string | null = null;
   private contexts: BrowserContext[] = [];
   private pages: Page[] = [];
   private activePageIndex: number = 0;
@@ -119,6 +177,19 @@ export class BrowserManager {
   private colorScheme: 'light' | 'dark' | 'no-preference' | null = null;
   private downloadPath: string | null = null;
   private allowedDomains: string[] = [];
+  private inspectServer: InspectServer | null = null;
+
+  stopInspectServer(): void {
+    if (this.inspectServer) {
+      this.inspectServer.stop();
+      this.inspectServer = null;
+    }
+  }
+
+  setInspectServer(server: InspectServer): void {
+    this.stopInspectServer();
+    this.inspectServer = server;
+  }
 
   /**
    * Set the persistent color scheme preference.
@@ -165,6 +236,18 @@ export class BrowserManager {
    */
   isLaunched(): boolean {
     return this.browser !== null || this.isPersistentContext;
+  }
+
+  getCdpUrl(): string | null {
+    if (this.resolvedWsUrl) return this.resolvedWsUrl;
+    if (this.cdpEndpoint?.startsWith('ws://') || this.cdpEndpoint?.startsWith('wss://')) {
+      return this.cdpEndpoint;
+    }
+    try {
+      return (this.browser as any)?.wsEndpoint?.() ?? null;
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -403,6 +486,49 @@ export class BrowserManager {
       }
       this.activeFrame = frame;
     }
+  }
+
+  /**
+   * Navigate the active page to a URL and return the resolved URL + title.
+   * If the browser is launched but all pages have been closed, a new page is
+   * created automatically before navigating (stale-session recovery).
+   */
+  async navigate(
+    url: string,
+    options: NavigateOptions = {}
+  ): Promise<{ url: string; title: string }> {
+    this.checkDomainAllowed(url);
+    await this.ensurePage();
+
+    if (options.headers && Object.keys(options.headers).length > 0) {
+      await this.setScopedHeaders(url, options.headers);
+    }
+
+    const page = this.getPage();
+    await page.goto(url, {
+      waitUntil: options.waitUntil ?? 'load',
+    });
+
+    return {
+      url: page.url(),
+      title: await page.title(),
+    };
+  }
+
+  /**
+   * Get the active page URL.
+   */
+  async getUrl(): Promise<string> {
+    await this.ensurePage();
+    return this.getPage().url();
+  }
+
+  /**
+   * Get the active page title.
+   */
+  async getTitle(): Promise<string> {
+    await this.ensurePage();
+    return this.getPage().title();
   }
 
   /**
@@ -862,12 +988,18 @@ export class BrowserManager {
    * Close a Browserbase session via API
    */
   private async closeBrowserbaseSession(sessionId: string, apiKey: string): Promise<void> {
-    await fetch(`https://api.browserbase.com/v1/sessions/${sessionId}`, {
-      method: 'DELETE',
+    const response = await fetch(`https://api.browserbase.com/v1/sessions/${sessionId}`, {
+      method: 'POST',
       headers: {
+        'Content-Type': 'application/json',
         'X-BB-API-Key': apiKey,
       },
+      body: JSON.stringify({ status: 'REQUEST_RELEASE' }),
     });
+
+    if (!response.ok) {
+      throw new Error(`Failed to close Browserbase session: ${response.statusText}`);
+    }
   }
 
   /**
@@ -891,12 +1023,14 @@ export class BrowserManager {
   /**
    * Close a Kernel session via API
    */
-  private async closeKernelSession(sessionId: string, apiKey: string): Promise<void> {
+  private async closeKernelSession(sessionId: string, apiKey: string | undefined): Promise<void> {
+    const headers: Record<string, string> = {};
+    if (apiKey) {
+      headers['Authorization'] = `Bearer ${apiKey}`;
+    }
     const response = await fetch(`https://api.onkernel.com/browsers/${sessionId}`, {
       method: 'DELETE',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-      },
+      headers,
     });
 
     if (!response.ok) {
@@ -905,28 +1039,34 @@ export class BrowserManager {
   }
 
   /**
+   * Close a Browserless session via its stop URL
+   */
+  private async closeBrowserlessSession(stopUrl: string): Promise<void> {
+    const response = await fetch(stopUrl, {
+      method: 'DELETE',
+    });
+
+    if (!response.ok) {
+      throw new Error(`Failed to close Browserless session: ${response.statusText}`);
+    }
+  }
+
+  /**
    * Connect to Browserbase remote browser via CDP.
-   * Requires BROWSERBASE_API_KEY and BROWSERBASE_PROJECT_ID environment variables.
+   * Requires BROWSERBASE_API_KEY environment variable.
    */
   private async connectToBrowserbase(): Promise<void> {
     const browserbaseApiKey = process.env.BROWSERBASE_API_KEY;
-    const browserbaseProjectId = process.env.BROWSERBASE_PROJECT_ID;
 
-    if (!browserbaseApiKey || !browserbaseProjectId) {
-      throw new Error(
-        'BROWSERBASE_API_KEY and BROWSERBASE_PROJECT_ID are required when using browserbase as a provider'
-      );
+    if (!browserbaseApiKey) {
+      throw new Error('BROWSERBASE_API_KEY is required when using browserbase as a provider');
     }
 
     const response = await fetch('https://api.browserbase.com/v1/sessions', {
       method: 'POST',
       headers: {
-        'Content-Type': 'application/json',
         'X-BB-API-Key': browserbaseApiKey,
       },
-      body: JSON.stringify({
-        projectId: browserbaseProjectId,
-      }),
     });
 
     if (!response.ok) {
@@ -952,7 +1092,7 @@ export class BrowserManager {
       this.browserbaseSessionId = session.id;
       this.browserbaseApiKey = browserbaseApiKey;
       this.browser = browser;
-      context.setDefaultTimeout(10000);
+      context.setDefaultTimeout(getDefaultTimeout());
       this.contexts.push(context);
       this.setupContextTracking(context);
       await this.ensureDomainFilter(context);
@@ -974,16 +1114,19 @@ export class BrowserManager {
    */
   private async findOrCreateKernelProfile(
     profileName: string,
-    apiKey: string
+    apiKey: string | undefined
   ): Promise<{ name: string }> {
+    const headers: Record<string, string> = {};
+    if (apiKey) {
+      headers['Authorization'] = `Bearer ${apiKey}`;
+    }
+
     // First, try to get the existing profile
     const getResponse = await fetch(
       `https://api.onkernel.com/profiles/${encodeURIComponent(profileName)}`,
       {
         method: 'GET',
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-        },
+        headers,
       }
     );
 
@@ -1001,7 +1144,7 @@ export class BrowserManager {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`,
+        ...headers,
       },
       body: JSON.stringify({ name: profileName }),
     });
@@ -1015,13 +1158,13 @@ export class BrowserManager {
 
   /**
    * Connect to Kernel remote browser via CDP.
-   * Requires KERNEL_API_KEY environment variable.
+   * Uses KERNEL_API_KEY environment variable for authentication when set.
+   * When running inside environments with external credential injection
+   * (e.g. Vercel Sandbox credentials brokering), the API key can be omitted
+   * and auth headers will be injected at the network layer.
    */
   private async connectToKernel(): Promise<void> {
     const kernelApiKey = process.env.KERNEL_API_KEY;
-    if (!kernelApiKey) {
-      throw new Error('KERNEL_API_KEY is required when using kernel as a provider');
-    }
 
     // Find or create profile if KERNEL_PROFILE_NAME is set
     const profileName = process.env.KERNEL_PROFILE_NAME;
@@ -1037,12 +1180,16 @@ export class BrowserManager {
       };
     }
 
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    if (kernelApiKey) {
+      headers['Authorization'] = `Bearer ${kernelApiKey}`;
+    }
+
     const response = await fetch('https://api.onkernel.com/browsers', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${kernelApiKey}`,
-      },
+      headers,
       body: JSON.stringify({
         // Kernel browsers are headful by default with stealth mode available
         // The user can configure these via environment variables if needed
@@ -1093,7 +1240,7 @@ export class BrowserManager {
       }
 
       this.kernelSessionId = session.session_id;
-      this.kernelApiKey = kernelApiKey;
+      this.kernelApiKey = kernelApiKey ?? null;
       this.browser = browser;
       context.setDefaultTimeout(getDefaultTimeout());
       this.contexts.push(context);
@@ -1187,10 +1334,103 @@ export class BrowserManager {
   }
 
   /**
+   * Connect to Browserless remote browser via CDP.
+   * Requires BROWSERLESS_API_KEY environment variable.
+   */
+  private async connectToBrowserless(): Promise<void> {
+    const browserlessToken = process.env.BROWSERLESS_API_KEY;
+    if (!browserlessToken) {
+      throw new Error('BROWSERLESS_API_KEY is required when using browserless as a provider');
+    }
+
+    const supportedBrowsers = ['chromium', 'chrome'];
+    const apiUrl = process.env.BROWSERLESS_API_URL || 'https://production-sfo.browserless.io';
+    const browserType = process.env.BROWSERLESS_BROWSER_TYPE || 'chromium';
+    const ttl = parseInt(process.env.BROWSERLESS_TTL || '300000', 10);
+    const stealth = parseBooleanEnvVar('BROWSERLESS_STEALTH', true);
+
+    if (!supportedBrowsers.includes(browserType)) {
+      throw new Error(
+        `BROWSERLESS_BROWSER_TYPE "${browserType}" is not supported. Only ${supportedBrowsers.join(', ')} are allowed.`
+      );
+    }
+
+    const response = await fetch(
+      `${apiUrl}/session?token=${encodeURIComponent(browserlessToken)}`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          ttl,
+          stealth,
+          browser: browserType,
+        }),
+      }
+    );
+
+    if (!response.ok) {
+      throw new Error(`Failed to create Browserless session: ${response.statusText}`);
+    }
+
+    let session: { connect: string; stop: string };
+    try {
+      session = (await response.json()) as { connect: string; stop: string };
+    } catch (error) {
+      throw new Error(
+        `Failed to parse Browserless session response: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+
+    if (!session.connect || !session.stop) {
+      throw new Error(
+        `Invalid Browserless session response: missing ${!session.connect ? 'connect' : 'stop'}`
+      );
+    }
+
+    const browser = await chromium.connectOverCDP(session.connect).catch(() => {
+      throw new Error('Failed to connect to Browserless session via CDP');
+    });
+
+    try {
+      const contexts = browser.contexts();
+      let context: BrowserContext;
+      let page: Page;
+
+      if (contexts.length === 0) {
+        context = await browser.newContext();
+        page = await context.newPage();
+      } else {
+        context = contexts[0];
+        const pages = context.pages();
+        page = pages[0] ?? (await context.newPage());
+      }
+
+      this.browser = browser;
+      this.browserlessStopUrl = session.stop;
+      context.setDefaultTimeout(getDefaultTimeout());
+      this.contexts.push(context);
+      this.setupContextTracking(context);
+      await this.ensureDomainFilter(context);
+      await this.sanitizeExistingPages([page]);
+      this.pages.push(page);
+      this.activePageIndex = 0;
+      this.setupPageTracking(page);
+    } catch (error) {
+      await this.closeBrowserlessSession(session.stop).catch((sessionError) => {
+        console.error('Failed to close Browserless session during cleanup:', sessionError);
+      });
+      this.browserlessStopUrl = null;
+      throw error;
+    }
+  }
+
+  /**
    * Launch the browser with the specified options
    * If already launched, this is a no-op (browser stays open)
    */
-  async launch(options: LaunchCommand): Promise<void> {
+  async launch(options: BrowserLaunchOptions): Promise<void> {
     // Determine CDP endpoint: prefer cdpUrl over cdpPort for flexibility
     const cdpEndpoint = options.cdpUrl ?? (options.cdpPort ? String(options.cdpPort) : undefined);
     const hasExtensions = !!options.extensions?.length;
@@ -1287,6 +1527,10 @@ export class BrowserManager {
     // Kernel: requires explicit opt-in via -p kernel flag or AGENT_BROWSER_PROVIDER=kernel
     if (provider === 'kernel') {
       await this.connectToKernel();
+      return;
+    }
+    if (provider === 'browserless') {
+      await this.connectToBrowserless();
       return;
     }
 
@@ -1394,6 +1638,7 @@ export class BrowserManager {
         ...(this.downloadPath && { downloadsPath: this.downloadPath }),
       });
       this.cdpEndpoint = null;
+      this.resolvedWsUrl = null;
 
       // Check for auto-load state file (supports encrypted files)
       let storageState:
@@ -1514,10 +1759,10 @@ export class BrowserManager {
       cdpUrl = cdpEndpoint;
     } else if (/^\d+$/.test(cdpEndpoint)) {
       // Numeric string - treat as port number (handles JSON serialization quirks)
-      cdpUrl = `http://localhost:${cdpEndpoint}`;
+      cdpUrl = `http://127.0.0.1:${cdpEndpoint}`;
     } else {
       // Unknown format - still try as port for backward compatibility
-      cdpUrl = `http://localhost:${cdpEndpoint}`;
+      cdpUrl = `http://127.0.0.1:${cdpEndpoint}`;
     }
 
     const browser = await chromium
@@ -1525,7 +1770,7 @@ export class BrowserManager {
       .catch(() => {
         throw new Error(
           `Failed to connect via CDP to ${cdpUrl}. ` +
-            (cdpUrl.includes('localhost')
+            (cdpUrl.includes('127.0.0.1')
               ? `Make sure the app is running with --remote-debugging-port=${cdpEndpoint}`
               : 'Make sure the remote browser is accessible and the URL is correct.')
         );
@@ -1549,8 +1794,25 @@ export class BrowserManager {
       this.browser = browser;
       this.cdpEndpoint = cdpEndpoint;
 
+      let resolvedWs: string | null = null;
+      try {
+        resolvedWs = (browser as any).wsEndpoint?.() ?? null;
+      } catch (err) {
+        console.error('[inspect] wsEndpoint() failed:', err);
+      }
+      if (!resolvedWs && (cdpUrl.startsWith('http://') || cdpUrl.startsWith('https://'))) {
+        try {
+          const resp = await fetch(`${cdpUrl}/json/version`);
+          const info: any = await resp.json();
+          resolvedWs = info.webSocketDebuggerUrl ?? null;
+        } catch (err) {
+          console.error('[inspect] /json/version fetch failed:', err);
+        }
+      }
+      this.resolvedWsUrl = resolvedWs;
+
       for (const context of contexts) {
-        context.setDefaultTimeout(10000);
+        context.setDefaultTimeout(getDefaultTimeout());
         this.contexts.push(context);
         this.setupContextTracking(context);
         await this.ensureDomainFilter(context);
@@ -1776,7 +2038,7 @@ export class BrowserManager {
    * Create a new tab in the current context
    */
   async newTab(): Promise<{ index: number; total: number }> {
-    if (!this.browser || this.contexts.length === 0) {
+    if (!this.isLaunched() || this.contexts.length === 0) {
       throw new Error('Browser not launched');
     }
 
@@ -1803,7 +2065,11 @@ export class BrowserManager {
     total: number;
   }> {
     if (!this.browser) {
-      throw new Error('Browser not launched');
+      throw new Error(
+        this.isPersistentContext
+          ? 'newWindow is not supported in extension (persistent context) mode'
+          : 'Browser not launched'
+      );
     }
 
     const context = await this.browser.newContext({
@@ -2324,8 +2590,8 @@ export class BrowserManager {
 
     this.recordingOutputPath = outputPath;
 
-    // Create a new context with video recording enabled and restored state
-    const viewport = { width: 1280, height: 720 };
+    // Reuse the active page viewport when available so recording matches the current layout.
+    const viewport = currentPage?.viewportSize() ?? { width: 1280, height: 720 };
     this.recordingContext = await this.browser.newContext({
       viewport,
       recordVideo: {
@@ -2463,6 +2729,8 @@ export class BrowserManager {
    * Close the browser and clean up
    */
   async close(): Promise<void> {
+    this.stopInspectServer();
+
     // Stop recording if active (saves video)
     if (this.recordingContext) {
       await this.stopRecording();
@@ -2513,9 +2781,16 @@ export class BrowserManager {
         }
       );
       this.browser = null;
-    } else if (this.kernelSessionId && this.kernelApiKey) {
-      await this.closeKernelSession(this.kernelSessionId, this.kernelApiKey).catch((error) => {
-        console.error('Failed to close Kernel session:', error);
+    } else if (this.kernelSessionId) {
+      await this.closeKernelSession(this.kernelSessionId, this.kernelApiKey ?? undefined).catch(
+        (error) => {
+          console.error('Failed to close Kernel session:', error);
+        }
+      );
+      this.browser = null;
+    } else if (this.browserlessStopUrl) {
+      await this.closeBrowserlessSession(this.browserlessStopUrl).catch((error) => {
+        console.error('Failed to close Browserless session:', error);
       });
       this.browser = null;
     } else if (this.cdpEndpoint !== null) {
@@ -2541,12 +2816,14 @@ export class BrowserManager {
     this.pages = [];
     this.contexts = [];
     this.cdpEndpoint = null;
+    this.resolvedWsUrl = null;
     this.browserbaseSessionId = null;
     this.browserbaseApiKey = null;
     this.browserUseSessionId = null;
     this.browserUseApiKey = null;
     this.kernelSessionId = null;
     this.kernelApiKey = null;
+    this.browserlessStopUrl = null;
     this.isPersistentContext = false;
     this.activePageIndex = 0;
     this.colorScheme = null;

@@ -1,7 +1,21 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
+import {
+  describe,
+  it,
+  expect,
+  expectTypeOf,
+  beforeAll,
+  afterAll,
+  beforeEach,
+  afterEach,
+  vi,
+} from 'vitest';
 import { BrowserManager, getDefaultTimeout } from './browser.js';
+import type { BrowserManager as PublicBrowserManager, BrowserLaunchOptions } from './index.js';
 import { executeCommand } from './actions.js';
 import { chromium } from 'playwright-core';
+import os from 'node:os';
+import path from 'node:path';
+import { existsSync, rmSync } from 'node:fs';
 
 describe('BrowserManager', () => {
   let browser: BrowserManager;
@@ -37,18 +51,16 @@ describe('BrowserManager', () => {
 
     it('should be no-op when relaunching with same options', async () => {
       const browserInstance = browser.getBrowser();
-      await browser.launch({ id: 'test', action: 'launch', headless: true });
+      await browser.launch({ headless: true });
       expect(browser.getBrowser()).toBe(browserInstance);
     });
 
     it('should reconnect when CDP port changes', async () => {
       const newBrowser = new BrowserManager();
-      await newBrowser.launch({ id: 'test', action: 'launch', headless: true });
+      await newBrowser.launch({ headless: true });
       expect(newBrowser.getBrowser()).not.toBeNull();
 
-      await expect(
-        newBrowser.launch({ id: 'test', action: 'launch', cdpPort: 59999 })
-      ).rejects.toThrow();
+      await expect(newBrowser.launch({ cdpPort: 59999 })).rejects.toThrow();
 
       expect(newBrowser.getBrowser()).toBeNull();
       await newBrowser.close();
@@ -272,10 +284,92 @@ describe('BrowserManager', () => {
       expect(page.url()).toBe('https://example.com/');
     });
 
+    it('should navigate via BrowserManager API', async () => {
+      const result = await browser.navigate('https://example.com');
+      expect(result).toEqual({
+        url: 'https://example.com/',
+        title: 'Example Domain',
+      });
+    });
+
+    it('should navigate with custom headers without throwing', async () => {
+      const result = await browser.navigate('https://example.com', {
+        headers: { 'X-Custom-Header': 'test-value' },
+      });
+      expect(result.url).toBe('https://example.com/');
+      expect(result.title).toBe('Example Domain');
+    });
+
+    it('should navigate with waitUntil option', async () => {
+      const result = await browser.navigate('https://example.com', {
+        waitUntil: 'domcontentloaded',
+      });
+      expect(result.url).toBe('https://example.com/');
+    });
+
     it('should get page title', async () => {
       const page = browser.getPage();
       const title = await page.title();
       expect(title).toBe('Example Domain');
+    });
+
+    it('should expose current URL and title via BrowserManager API', async () => {
+      await browser.navigate('https://example.com');
+      await expect(browser.getUrl()).resolves.toBe('https://example.com/');
+      await expect(browser.getTitle()).resolves.toBe('Example Domain');
+    });
+  });
+
+  describe('navigate() domain filtering', () => {
+    it('should block navigation to a domain outside allowedDomains', async () => {
+      const restricted = new BrowserManager();
+      await restricted.launch({ headless: true, allowedDomains: ['example.com'] });
+      try {
+        await expect(restricted.navigate('https://httpbin.org')).rejects.toThrow(
+          'Navigation blocked'
+        );
+      } finally {
+        await restricted.close();
+      }
+    });
+
+    it('should allow navigation within allowedDomains', async () => {
+      const restricted = new BrowserManager();
+      await restricted.launch({ headless: true, allowedDomains: ['example.com'] });
+      try {
+        const result = await restricted.navigate('https://example.com');
+        expect(result.url).toBe('https://example.com/');
+      } finally {
+        await restricted.close();
+      }
+    });
+
+    it('should block non-http(s) schemes regardless of allowedDomains', async () => {
+      const restricted = new BrowserManager();
+      await restricted.launch({ headless: true, allowedDomains: ['example.com'] });
+      try {
+        await expect(restricted.navigate('ftp://example.com')).rejects.toThrow(
+          'Navigation blocked'
+        );
+      } finally {
+        await restricted.close();
+      }
+    });
+  });
+
+  describe('navigate() public API types (issue #307)', () => {
+    it('BrowserManager exported from package entry has navigate method', () => {
+      // Compile-time proof: if this file type-checks, the public API surface is correct.
+      // navigate() must exist on BrowserManager — absence was the bug in #307.
+      expectTypeOf<InstanceType<typeof PublicBrowserManager>>().toHaveProperty('navigate');
+      expectTypeOf<InstanceType<typeof PublicBrowserManager>>().toHaveProperty('launch');
+    });
+
+    it('BrowserLaunchOptions does not require id or action', () => {
+      // id and action are IPC-only fields that must not leak into the public API
+      expectTypeOf<BrowserLaunchOptions>().not.toHaveProperty('id');
+      expectTypeOf<BrowserLaunchOptions>().not.toHaveProperty('action');
+      expectTypeOf<BrowserLaunchOptions>().not.toHaveProperty('engine');
     });
   });
 
@@ -634,6 +728,25 @@ describe('BrowserManager', () => {
       const size = page.viewportSize();
       expect(size?.width).toBe(1920);
       expect(size?.height).toBe(1080);
+    });
+
+    it('should inherit the current viewport when starting a recording', async () => {
+      const recordingPath = path.join(os.tmpdir(), `agent-browser-recording-${Date.now()}.webm`);
+
+      await browser.setViewport(440, 956);
+
+      try {
+        await browser.startRecording(recordingPath);
+        const recordingPage = (browser as any).recordingPage;
+        expect(recordingPage.viewportSize()).toEqual({ width: 440, height: 956 });
+      } finally {
+        if (browser.isRecording()) {
+          await browser.stopRecording();
+        }
+        if (existsSync(recordingPath)) {
+          rmSync(recordingPath, { force: true });
+        }
+      }
     });
 
     it('should disable viewport when --start-maximized is in args', async () => {
@@ -1218,6 +1331,32 @@ describe('BrowserManager', () => {
         })
       ).resolves.not.toThrow();
     });
+  });
+});
+
+describe('BrowserManager (persistent context / --profile mode)', () => {
+  let profileBrowser: BrowserManager;
+  let tmpProfileDir: string;
+
+  beforeAll(async () => {
+    tmpProfileDir = path.join(os.tmpdir(), `agent-browser-test-profile-${Date.now()}`);
+    profileBrowser = new BrowserManager();
+    await profileBrowser.launch({ headless: true, profile: tmpProfileDir });
+  });
+
+  afterAll(async () => {
+    await profileBrowser.close();
+    rmSync(tmpProfileDir, { recursive: true, force: true });
+  });
+
+  it('should report as launched in persistent context mode', () => {
+    expect(profileBrowser.isLaunched()).toBe(true);
+  });
+
+  it('should create new tab in persistent context mode without throwing', async () => {
+    const result = await profileBrowser.newTab();
+    expect(result.index).toBe(1);
+    expect(result.total).toBe(2);
   });
 });
 

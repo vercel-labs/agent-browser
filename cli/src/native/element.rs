@@ -47,8 +47,45 @@ impl RefMap {
         );
     }
 
+    pub fn add_selector(
+        &mut self,
+        ref_id: String,
+        selector: String,
+        role: &str,
+        name: &str,
+        nth: Option<usize>,
+    ) {
+        self.map.insert(
+            ref_id,
+            RefEntry {
+                backend_node_id: None,
+                role: role.to_string(),
+                name: name.to_string(),
+                nth,
+                selector: Some(selector),
+            },
+        );
+    }
+
     pub fn get(&self, ref_id: &str) -> Option<&RefEntry> {
         self.map.get(ref_id)
+    }
+
+    pub fn entries_sorted(&self) -> Vec<(String, RefEntry)> {
+        let mut entries = self
+            .map
+            .iter()
+            .map(|(ref_id, entry)| (ref_id.clone(), entry.clone()))
+            .collect::<Vec<_>>();
+
+        entries.sort_by_key(|(ref_id, _)| {
+            ref_id
+                .strip_prefix('e')
+                .and_then(|n| n.parse::<usize>().ok())
+                .unwrap_or(usize::MAX)
+        });
+
+        entries
     }
 
     pub fn clear(&mut self) {

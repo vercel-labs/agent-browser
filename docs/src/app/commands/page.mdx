@@ -28,6 +28,8 @@ agent-browser drag <src> <dst>        # Drag and drop
 agent-browser upload <sel> <files>    # Upload files
 agent-browser screenshot [path]       # Screenshot (--full for full page)
 agent-browser screenshot --annotate   # Annotated screenshot with numbered element labels
+agent-browser screenshot --screenshot-dir ./shots    # Save to custom directory
+agent-browser screenshot --screenshot-format jpeg --screenshot-quality 80
 agent-browser pdf <path>              # Save page as PDF
 agent-browser snapshot                # Accessibility tree with refs
 agent-browser eval <js>               # Run JavaScript
@@ -44,6 +46,7 @@ agent-browser get value <sel>         # Get input value
 agent-browser get attr <sel> <attr>   # Get attribute
 agent-browser get title               # Get page title
 agent-browser get url                 # Get current URL
+agent-browser get cdp-url             # Get CDP WebSocket URL
 agent-browser get count <sel>         # Count matching elements
 agent-browser get box <sel>           # Get bounding box
 agent-browser get styles <sel>        # Get computed styles
@@ -95,11 +98,13 @@ agent-browser find nth 2 ".card" hover
 ```bash
 agent-browser wait <selector>         # Wait for element
 agent-browser wait <ms>               # Wait for time
-agent-browser wait --text "Welcome"   # Wait for text
+agent-browser wait --text "Welcome"   # Wait for text (substring match)
 agent-browser wait --url "**/dash"    # Wait for URL pattern
 agent-browser wait --load networkidle # Wait for load state
 agent-browser wait --fn "condition"   # Wait for JS condition
 agent-browser wait --download [path]  # Wait for download
+agent-browser wait --fn "!document.body.innerText.includes('Loading...')"  # Wait for text to disappear
+agent-browser wait "#spinner" --state hidden           # Wait for element to disappear
 ```
 
 ## Downloads
@@ -120,10 +125,19 @@ agent-browser mouse up [button]       # Release button
 agent-browser mouse wheel <dy> [dx]   # Scroll wheel
 ```
 
+## Clipboard
+
+```bash
+agent-browser clipboard read                      # Read text from clipboard
+agent-browser clipboard write "Hello, World!"     # Write text to clipboard
+agent-browser clipboard copy                      # Copy current selection (Ctrl+C)
+agent-browser clipboard paste                     # Paste from clipboard (Ctrl+V)
+```
+
 ## Settings
 
 ```bash
-agent-browser set viewport <w> <h>    # Set viewport size
+agent-browser set viewport <w> <h> [scale]  # Set viewport size (scale for retina, e.g. 2)
 agent-browser set device <name>       # Emulate device ("iPhone 14")
 agent-browser set geo <lat> <lng>     # Set geolocation
 agent-browser set offline [on|off]    # Toggle offline mode
@@ -199,6 +213,7 @@ agent-browser console --clear         # Clear console log
 agent-browser errors                  # View page errors
 agent-browser errors --clear          # Clear error log
 agent-browser highlight <sel>         # Highlight element
+agent-browser inspect                 # Open Chrome DevTools for the active page
 ```
 
 ## Auth vault
@@ -288,11 +303,14 @@ agent-browser reload                  # Reload page
 --proxy-bypass <hosts>   # Hosts to bypass proxy
 --ignore-https-errors    # Ignore HTTPS certificate errors
 --allow-file-access      # Allow file:// URLs to access local files (Chromium only)
--p, --provider <name>    # Browser provider (ios, browserbase, kernel, browseruse)
+-p, --provider <name>    # Browser provider (ios, browserbase, kernel, browseruse, browserless)
 --device <name>          # iOS device name (e.g., "iPhone 15 Pro")
 --json                   # JSON output (for scripts)
 --full, -f               # Full page screenshot
 --annotate               # Annotated screenshot with numbered element labels
+--screenshot-dir <path>   # Default screenshot output directory (or AGENT_BROWSER_SCREENSHOT_DIR)
+--screenshot-quality <n>  # JPEG quality 0-100 (or AGENT_BROWSER_SCREENSHOT_QUALITY)
+--screenshot-format <fmt> # Format: png (default), jpeg (or AGENT_BROWSER_SCREENSHOT_FORMAT)
 --headed                 # Show browser window (not headless)
 --cdp <port|url>         # Connect via Chrome DevTools Protocol (port or WebSocket URL)
 --auto-connect           # Auto-discover and connect to running Chrome

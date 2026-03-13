@@ -86,6 +86,92 @@ async fn e2e_launch_navigate_evaluate_close() {
     assert_eq!(get_data(&resp)["closed"], true);
 }
 
+#[tokio::test]
+#[ignore]
+async fn e2e_lightpanda_launch_can_open_page() {
+    let lightpanda_bin = match std::env::var("LIGHTPANDA_BIN") {
+        Ok(path) if !path.is_empty() => path,
+        _ => return,
+    };
+
+    let mut state = DaemonState::new();
+
+    let resp = tokio::time::timeout(
+        tokio::time::Duration::from_secs(20),
+        execute_command(
+            &json!({
+                "id": "1",
+                "action": "launch",
+                "headless": true,
+                "engine": "lightpanda",
+                "executablePath": lightpanda_bin,
+            }),
+            &mut state,
+        ),
+    )
+    .await
+    .expect("Lightpanda launch should not hang");
+
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["launched"], true);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": "https://example.com" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["url"], "https://example.com/");
+    assert_eq!(get_data(&resp)["title"], "Example Domain");
+
+    let resp = execute_command(&json!({ "id": "3", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["closed"], true);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_lightpanda_auto_launch_can_open_page() {
+    let lightpanda_bin = match std::env::var("LIGHTPANDA_BIN") {
+        Ok(path) if !path.is_empty() => path,
+        _ => return,
+    };
+
+    let prev_engine = std::env::var("AGENT_BROWSER_ENGINE").ok();
+    let prev_path = std::env::var("AGENT_BROWSER_EXECUTABLE_PATH").ok();
+    std::env::set_var("AGENT_BROWSER_ENGINE", "lightpanda");
+    std::env::set_var("AGENT_BROWSER_EXECUTABLE_PATH", &lightpanda_bin);
+
+    let mut state = DaemonState::new();
+
+    let resp = tokio::time::timeout(
+        tokio::time::Duration::from_secs(20),
+        execute_command(
+            &json!({ "id": "1", "action": "navigate", "url": "https://example.com" }),
+            &mut state,
+        ),
+    )
+    .await
+    .expect("Lightpanda auto-launch should not hang");
+
+    match prev_engine {
+        Some(value) => std::env::set_var("AGENT_BROWSER_ENGINE", value),
+        None => std::env::remove_var("AGENT_BROWSER_ENGINE"),
+    }
+    match prev_path {
+        Some(value) => std::env::set_var("AGENT_BROWSER_EXECUTABLE_PATH", value),
+        None => std::env::remove_var("AGENT_BROWSER_EXECUTABLE_PATH"),
+    }
+
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["url"], "https://example.com/");
+    assert_eq!(get_data(&resp)["title"], "Example Domain");
+
+    let resp = execute_command(&json!({ "id": "2", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["closed"], true);
+}
+
 // ---------------------------------------------------------------------------
 // Snapshot with refs and ref-based click
 // ---------------------------------------------------------------------------
@@ -196,6 +282,74 @@ async fn e2e_screenshot() {
     assert_success(&resp);
     assert!(std::path::Path::new(&tmp_path).exists());
     let _ = std::fs::remove_file(&tmp_path);
+
+    let resp = execute_command(
+        &json!({
+            "id": "5",
+            "action": "setcontent",
+            "html": r##"
+                <html><body>
+                  <button onclick="document.getElementById('result').textContent = 'clicked'">Submit</button>
+                  <a href="#">Home</a>
+                  <div id="result"></div>
+                </body></html>
+            "##,
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "screenshot", "annotate": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let annotations = get_data(&resp)["annotations"]
+        .as_array()
+        .expect("Annotated screenshot should return annotations");
+    assert!(
+        !annotations.is_empty(),
+        "Annotated screenshot should have at least one annotation"
+    );
+
+    let submit_ref = annotations
+        .iter()
+        .find(|ann| ann.get("name").and_then(|v| v.as_str()) == Some("Submit"))
+        .and_then(|ann| ann.get("ref").and_then(|v| v.as_str()))
+        .expect("Expected a Submit annotation");
+
+    let resp = execute_command(
+        &json!({
+            "id": "7",
+            "action": "evaluate",
+            "script": "document.getElementById('__agent_browser_annotations__') === null"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], true);
+
+    let resp = execute_command(
+        &json!({ "id": "8", "action": "click", "selector": format!("@{}", submit_ref) }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "9",
+            "action": "evaluate",
+            "script": "document.getElementById('result').textContent"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], "clicked");
 
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     assert_success(&resp);
@@ -772,6 +926,77 @@ async fn e2e_wait() {
         start.elapsed().as_millis() >= 150,
         "Timeout wait should sleep at least 150ms"
     );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+// ---------------------------------------------------------------------------
+// Viewport with deviceScaleFactor (retina)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore]
+async fn e2e_viewport_scale_factor() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": "about:blank" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Default devicePixelRatio should be 1
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "evaluate", "script": "window.devicePixelRatio" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let default_dpr = get_data(&resp)["result"].as_f64().unwrap();
+    assert_eq!(default_dpr, 1.0, "Default devicePixelRatio should be 1");
+
+    // Set viewport with 2x scale factor
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "viewport", "width": 1920, "height": 1080, "deviceScaleFactor": 2.0 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["width"], 1920);
+    assert_eq!(get_data(&resp)["height"], 1080);
+    assert_eq!(get_data(&resp)["deviceScaleFactor"], 2.0);
+
+    // devicePixelRatio should now be 2
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "evaluate", "script": "window.devicePixelRatio" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let new_dpr = get_data(&resp)["result"].as_f64().unwrap();
+    assert_eq!(
+        new_dpr, 2.0,
+        "devicePixelRatio should be 2 after setting scale factor"
+    );
+
+    // CSS viewport width should still be 1920 (not 3840)
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "evaluate", "script": "window.innerWidth" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let css_width = get_data(&resp)["result"].as_i64().unwrap();
+    assert_eq!(css_width, 1920, "CSS width should remain 1920 at 2x scale");
 
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     assert_success(&resp);
@@ -1404,4 +1629,87 @@ async fn e2e_profile_cookie_persistence() {
     }
 
     let _ = std::fs::remove_dir_all(&profile_dir);
+}
+
+// ---------------------------------------------------------------------------
+// Inspect / CDP URL
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore]
+async fn e2e_get_cdp_url() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(&json!({ "id": "2", "action": "cdp_url" }), &mut state).await;
+    assert_success(&resp);
+    let cdp_url = get_data(&resp)["cdpUrl"]
+        .as_str()
+        .expect("cdpUrl should be a string");
+    assert!(
+        cdp_url.starts_with("ws://"),
+        "CDP URL should start with ws://, got: {}",
+        cdp_url
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_inspect() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": "https://example.com" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(&json!({ "id": "3", "action": "inspect" }), &mut state).await;
+    assert_success(&resp);
+    let data = get_data(&resp);
+    assert_eq!(data["opened"], true);
+    let url = data["url"]
+        .as_str()
+        .expect("inspect url should be a string");
+    assert!(
+        url.starts_with("http://127.0.0.1:"),
+        "Inspect URL should be http://127.0.0.1:<port>, got: {}",
+        url
+    );
+
+    // Verify the HTTP redirect serves a 302 to the DevTools frontend
+    let http_resp = reqwest::get(url).await;
+    match http_resp {
+        Ok(r) => {
+            let final_url = r.url().to_string();
+            assert!(
+                final_url.contains("devtools/devtools_app.html"),
+                "Redirect should point to DevTools frontend, got: {}",
+                final_url
+            );
+        }
+        Err(e) => {
+            panic!("HTTP GET to inspect URL failed: {}", e);
+        }
+    }
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
 }

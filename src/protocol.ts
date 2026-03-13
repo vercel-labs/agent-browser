@@ -270,6 +270,7 @@ const viewportSchema = baseCommandSchema.extend({
   action: z.literal('viewport'),
   width: z.number().positive(),
   height: z.number().positive(),
+  deviceScaleFactor: z.number().positive().optional(),
 });
 
 const userAgentSchema = baseCommandSchema.extend({
@@ -467,7 +468,7 @@ const tapSchema = baseCommandSchema.extend({
 
 const clipboardSchema = baseCommandSchema.extend({
   action: z.literal('clipboard'),
-  operation: z.enum(['copy', 'paste', 'read']),
+  operation: z.enum(['copy', 'paste', 'read', 'write']),
   text: z.string().optional(),
 });
 
@@ -793,6 +794,7 @@ const screenshotSchema = baseCommandSchema.extend({
   format: z.enum(['png', 'jpeg']).optional(),
   quality: z.number().min(0).max(100).optional(),
   annotate: z.boolean().optional(),
+  screenshotDir: z.string().optional(),
 });
 
 const snapshotSchema = baseCommandSchema.extend({
@@ -813,6 +815,7 @@ const evaluateSchema = baseCommandSchema.extend({
 const waitSchema = baseCommandSchema.extend({
   action: z.literal('wait'),
   selector: z.string().min(1).optional(),
+  text: z.string().min(1).optional(),
   timeout: z.number().positive().optional(),
   state: z.enum(['attached', 'detached', 'visible', 'hidden']).optional(),
 });
@@ -1148,8 +1151,12 @@ export function errorResponse(id: string, error: string): Response {
 }
 
 /**
- * Serialize a response to JSON string
+ * Serialize a response to JSON string.
+ * Replaces lone Unicode surrogates with U+FFFD to prevent
+ * serde_json parsing errors on the Rust side.
  */
 export function serializeResponse(response: Response): string {
-  return JSON.stringify(response);
+  return JSON.stringify(response, (_key, value) =>
+    typeof value === 'string' && !value.isWellFormed() ? value.toWellFormed() : value
+  );
 }

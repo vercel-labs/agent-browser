@@ -71,6 +71,19 @@ let currentSession = process.env.AGENT_BROWSER_SESSION || 'default';
 // Stream server for browser preview
 let streamServer: StreamServer | null = null;
 
+// Idle timeout - shut down daemon after period of inactivity
+// Configurable via AGENT_BROWSER_IDLE_TIMEOUT_MS env var (default: 15 minutes, 0 to disable)
+const DEFAULT_IDLE_TIMEOUT_MS = 15 * 60 * 1000;
+const IDLE_TIMEOUT_MS = (() => {
+  const env = process.env.AGENT_BROWSER_IDLE_TIMEOUT_MS;
+  if (env !== undefined) {
+    const val = parseInt(env, 10);
+    return isNaN(val) ? DEFAULT_IDLE_TIMEOUT_MS : val;
+  }
+  return DEFAULT_IDLE_TIMEOUT_MS;
+})();
+let idleTimer: ReturnType<typeof setTimeout> | null = null;
+
 // Default stream port (can be overridden with AGENT_BROWSER_STREAM_PORT)
 const DEFAULT_STREAM_PORT = 9223;
 
@@ -185,7 +198,7 @@ export function getSession(): string {
  * Get port number for TCP mode (Windows)
  * Uses a hash of the session name to get a consistent port
  */
-function getPortForSession(session: string): number {
+export function getPortForSession(session: string): number {
   let hash = 0;
   for (let i = 0; i < session.length; i++) {
     hash = (hash << 5) - hash + session.charCodeAt(i);
@@ -366,6 +379,28 @@ export async function startDaemon(options?: {
     fs.writeFileSync(streamPortFile, streamPort.toString());
   }
 
+  // Idle timeout: shut down daemon if no commands arrive within the timeout period.
+  // Reset on every incoming command. Set AGENT_BROWSER_IDLE_TIMEOUT_MS=0 to disable.
+  let shutdownRef: (() => Promise<void>) | null = null;
+
+  function resetIdleTimer(): void {
+    if (IDLE_TIMEOUT_MS <= 0) return;
+    if (idleTimer) clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => {
+      if (process.env.AGENT_BROWSER_DEBUG === '1') {
+        console.error(`[DEBUG] Idle timeout reached (${IDLE_TIMEOUT_MS}ms), shutting down daemon`);
+      }
+      if (shutdownRef) shutdownRef();
+    }, IDLE_TIMEOUT_MS);
+    // Don't let the idle timer keep the process alive on its own
+    if (idleTimer && typeof idleTimer === 'object' && 'unref' in idleTimer) {
+      idleTimer.unref();
+    }
+  }
+
+  // Start the idle timer immediately
+  resetIdleTimer();
+
   const server = net.createServer((socket) => {
     let buffer = '';
     let httpChecked = false;
@@ -382,6 +417,8 @@ export async function startDaemon(options?: {
 
       while (commandQueue.length > 0) {
         const line = commandQueue.shift()!;
+        // Reset idle timer on every command
+        resetIdleTimer();
 
         try {
           const parseResult = parseCommand(line);
@@ -466,8 +503,6 @@ export async function startDaemon(options?: {
                   ? colorSchemeEnv
                   : undefined;
               await manager.launch({
-                id: 'auto',
-                action: 'launch' as const,
                 headless:
                   process.env.AGENT_BROWSER_HEADED !== '1' &&
                   process.env.AGENT_BROWSER_HEADED !== 'true',
@@ -653,6 +688,32 @@ export async function startDaemon(options?: {
     if (shuttingDown) return;
     shuttingDown = true;
 
+    // Clear idle timer
+    if (idleTimer) {
+      clearTimeout(idleTimer);
+      idleTimer = null;
+    }
+
+    // Auto-save session state before closing (same as the explicit `close` command path)
+    if (manager instanceof BrowserManager && manager.isLaunched()) {
+      const savePath = getSessionSaveStatePath();
+      if (savePath) {
+        try {
+          const { encrypted } = await saveStateToFile(manager, savePath);
+          fs.chmodSync(savePath, 0o600);
+          if (process.env.AGENT_BROWSER_DEBUG === '1') {
+            console.error(
+              `Auto-saved session state before shutdown: ${savePath}${encrypted ? ' (encrypted)' : ''}`
+            );
+          }
+        } catch (err) {
+          if (process.env.AGENT_BROWSER_DEBUG === '1') {
+            console.error(`Failed to auto-save session state before shutdown:`, err);
+          }
+        }
+      }
+    }
+
     // Stop stream server if running
     if (streamServer) {
       await streamServer.stop();
@@ -671,6 +732,9 @@ export async function startDaemon(options?: {
     cleanupSocket();
     process.exit(0);
   };
+
+  // Wire up idle timeout to shutdown
+  shutdownRef = shutdown;
 
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);

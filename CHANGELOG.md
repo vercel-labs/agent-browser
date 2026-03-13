@@ -1,5 +1,72 @@
 # agent-browser
 
+## 0.19.0
+
+### Minor Changes
+
+- 56bb92b: ### New Features
+  - **Browserless.io provider** -- Added browserless.io as a browser provider, supported in both Node.js and native daemon paths. Connect to remote Browserless instances with `--provider browserless` or `AGENT_BROWSER_PROVIDER=browserless`. Configurable via `BROWSERLESS_API_KEY`, `BROWSERLESS_API_URL`, and `BROWSERLESS_BROWSER_TYPE` environment variables. (#502, #746)
+  - **`clipboard` command** -- Read from and write to the browser clipboard. Supports `read`, `write <text>`, `copy` (simulates Ctrl+C), and `paste` (simulates Ctrl+V) operations. (#749)
+  - **Screenshot output configuration** -- New global flags `--screenshot-dir`, `--screenshot-quality`, `--screenshot-format` and corresponding `AGENT_BROWSER_SCREENSHOT_DIR`, `AGENT_BROWSER_SCREENSHOT_QUALITY`, `AGENT_BROWSER_SCREENSHOT_FORMAT` environment variables for persistent screenshot settings. (#749)
+
+  ### Bug Fixes
+  - Fixed `wait --text` not working in native daemon path (#749)
+  - Fixed `BrowserManager.navigate()` and package entry point (#748)
+  - Fixed extensions not being loaded from `config.json` (#750)
+  - Fixed scroll on page load (#747)
+  - Fixed HTML retrieval by using `browser.getLocator()` for selector operations (#745)
+
+## 0.18.0
+
+### Minor Changes
+
+- 942b8cd: ### New Features
+  - **`inspect` command** - Opens Chrome DevTools for the active page by launching a local proxy server that forwards the DevTools frontend to the browser's CDP WebSocket. Commands continue to work while DevTools is open. Implemented in both Node.js and native paths. (#736)
+  - **`get cdp-url` subcommand** - Retrieve the Chrome DevTools Protocol WebSocket URL for the active page, useful for external debugging tools. (#736)
+  - **Native screenshot annotate** - The `--annotate` flag for screenshots now works in the native Rust daemon, bringing parity with the Node.js path. (#706)
+
+  ### Improvements
+  - **KERNEL_API_KEY now optional** - External credential injection no longer requires `KERNEL_API_KEY` to be set, making it easier to use Kernel with pre-configured environments. (#687)
+  - **Browserbase simplified** - Removed the `BROWSERBASE_PROJECT_ID` requirement, reducing setup friction for Browserbase users. (#625)
+
+  ### Bug Fixes
+  - Fixed Browserbase API using incorrect endpoint to release sessions (#707)
+  - Fixed CDP connect paths using hardcoded 10s timeout instead of `getDefaultTimeout()` (#704)
+  - Fixed lone Unicode surrogates causing errors by sanitizing with `toWellFormed()` (#720)
+  - Fixed CDP connection failure on IPv6-first systems (#717)
+  - Fixed recordings not inheriting the current viewport settings (#718)
+
+## 0.17.1
+
+### Patch Changes
+
+- 94cd888: Added support for device scale factor (retina display) in the viewport command via an optional scale parameter. Also added webview target type support for better Electron application compatibility, and the pages list now includes target type information.
+
+## 0.17.0
+
+### Minor Changes
+
+- 94521e7: ### New Features
+  - **Lightpanda browser engine support** - Added `--engine <name>` flag to select the browser engine (`chrome` by default, or `lightpanda`), implying `--native` mode. Configurable via `AGENT_BROWSER_ENGINE` environment variable (#646)
+  - **Dialog dismiss command** - Added support for `dismiss` subcommand in dialog command parsing (#605)
+
+  ### Improvements
+  - **Daemon startup error reporting** - Daemon startup errors are now surfaced directly instead of showing an opaque timeout message (#614)
+  - **CDP port discovery** - Replaced broken hand-rolled HTTP client with `reqwest` for more reliable CDP port discovery (#619)
+  - **Chrome extensions** - Extensions now load correctly by forcing headed mode when extensions are present (#652)
+  - **Google Translate bar suppression** - Suppressed the Google Translate bar in native headless mode to avoid interference (#649)
+  - **Auth cookie persistence** - Auth cookies are now persisted on browser close in native mode (#650)
+
+  ### Bug Fixes
+  - Fixed native auth login failing due to incompatible encryption format (#648)
+
+  ### Documentation
+  - Improved snapshot usage guidance and added reproducibility check (#630)
+  - Added `--engine` flag to the README options table
+
+  ### Performance
+  - Added benchmarks to the CLI codebase (#637)
+
 ## 0.16.3
 
 ### Patch Changes
