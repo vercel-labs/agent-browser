@@ -72,6 +72,36 @@ export interface ScreencastOptions {
   everyNthFrame?: number;
 }
 
+export interface NavigateOptions {
+  waitUntil?: 'load' | 'domcontentloaded' | 'networkidle';
+  headers?: Record<string, string>;
+}
+
+export type BrowserLaunchOptions = Pick<
+  LaunchCommand,
+  | 'headless'
+  | 'viewport'
+  | 'browser'
+  | 'headers'
+  | 'executablePath'
+  | 'cdpPort'
+  | 'cdpUrl'
+  | 'autoConnect'
+  | 'extensions'
+  | 'profile'
+  | 'storageState'
+  | 'proxy'
+  | 'args'
+  | 'userAgent'
+  | 'provider'
+  | 'ignoreHTTPSErrors'
+  | 'allowFileAccess'
+  | 'colorScheme'
+  | 'downloadPath'
+  | 'allowedDomains'
+  | 'autoStateFilePath'
+>;
+
 interface TrackedRequest {
   url: string;
   method: string;
@@ -430,6 +460,49 @@ export class BrowserManager {
       }
       this.activeFrame = frame;
     }
+  }
+
+  /**
+   * Navigate the active page to a URL and return the resolved URL + title.
+   * If the browser is launched but all pages have been closed, a new page is
+   * created automatically before navigating (stale-session recovery).
+   */
+  async navigate(
+    url: string,
+    options: NavigateOptions = {}
+  ): Promise<{ url: string; title: string }> {
+    this.checkDomainAllowed(url);
+    await this.ensurePage();
+
+    if (options.headers && Object.keys(options.headers).length > 0) {
+      await this.setScopedHeaders(url, options.headers);
+    }
+
+    const page = this.getPage();
+    await page.goto(url, {
+      waitUntil: options.waitUntil ?? 'load',
+    });
+
+    return {
+      url: page.url(),
+      title: await page.title(),
+    };
+  }
+
+  /**
+   * Get the active page URL.
+   */
+  async getUrl(): Promise<string> {
+    await this.ensurePage();
+    return this.getPage().url();
+  }
+
+  /**
+   * Get the active page title.
+   */
+  async getTitle(): Promise<string> {
+    await this.ensurePage();
+    return this.getPage().title();
   }
 
   /**
@@ -1225,7 +1298,7 @@ export class BrowserManager {
    * Launch the browser with the specified options
    * If already launched, this is a no-op (browser stays open)
    */
-  async launch(options: LaunchCommand): Promise<void> {
+  async launch(options: BrowserLaunchOptions): Promise<void> {
     // Determine CDP endpoint: prefer cdpUrl over cdpPort for flexibility
     const cdpEndpoint = options.cdpUrl ?? (options.cdpPort ? String(options.cdpPort) : undefined);
     const hasExtensions = !!options.extensions?.length;

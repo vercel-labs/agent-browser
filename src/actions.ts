@@ -621,23 +621,12 @@ async function handleNavigate(
   command: NavigateCommand,
   browser: BrowserManager
 ): Promise<Response<NavigateData>> {
-  browser.checkDomainAllowed(command.url);
-
-  const page = browser.getPage();
-
-  // If headers are provided, set up scoped headers for this origin
-  if (command.headers && Object.keys(command.headers).length > 0) {
-    await browser.setScopedHeaders(command.url, command.headers);
-  }
-
-  await page.goto(command.url, {
-    waitUntil: command.waitUntil ?? 'load',
+  const result = await browser.navigate(command.url, {
+    headers: command.headers,
+    waitUntil: command.waitUntil,
   });
 
-  return successResponse(command.id, {
-    url: page.url(),
-    title: await page.title(),
-  });
+  return successResponse(command.id, result);
 }
 
 async function handleClick(command: ClickCommand, browser: BrowserManager): Promise<Response> {
@@ -1891,8 +1880,6 @@ async function handleStateLoad(
   }
 
   await browser.launch({
-    id: command.id,
-    action: 'launch',
     headless: true,
     autoStateFilePath: command.path,
   });

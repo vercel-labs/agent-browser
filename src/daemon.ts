@@ -503,8 +503,6 @@ export async function startDaemon(options?: {
                   ? colorSchemeEnv
                   : undefined;
               await manager.launch({
-                id: 'auto',
-                action: 'launch' as const,
                 headless:
                   process.env.AGENT_BROWSER_HEADED !== '1' &&
                   process.env.AGENT_BROWSER_HEADED !== 'true',
