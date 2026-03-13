@@ -900,6 +900,20 @@ export interface WindowNewCommand extends BaseCommand {
 }
 
 // Union of all command types
+export interface SaveFileCommand extends BaseCommand {
+  action: 'savefile';
+  outputPath: string;
+  selector?: string;
+}
+
+export interface DropFileCommand extends BaseCommand {
+  action: 'dropfile';
+  selector: string;
+  filePath: string;
+  fileName?: string;
+  mimeType?: string;
+}
+
 export type Command =
   | LaunchCommand
   | NavigateCommand
@@ -1044,7 +1058,9 @@ export type Command =
   | AuthDeleteCommand
   | AuthShowCommand
   | ConfirmCommand
-  | DenyCommand;
+  | DenyCommand
+  | SaveFileCommand
+  | DropFileCommand;
 
 export interface AuthSaveCommand extends BaseCommand {
   action: 'auth_save';
