@@ -184,7 +184,7 @@ pub async fn install_domain_filter_script(
             const OrigWS = window.WebSocket;
             window.WebSocket = function(url, protocols) {{
                 try {{
-                    const u = new URL(url);
+                    const u = new URL(url, location.href);
                     if (!_isDomainAllowed(u.hostname)) throw new DOMException('WebSocket blocked: ' + u.hostname, 'SecurityError');
                 }} catch(e) {{ if (e instanceof DOMException) throw e; }}
                 return new OrigWS(url, protocols);
