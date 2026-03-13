@@ -763,31 +763,43 @@ async function handleScreenshot(
       const { refs } = await browser.getSnapshot({ interactive: true });
 
       const entries = Object.entries(refs);
-      const results = await Promise.all(
-        entries.map(async ([ref, data]): Promise<Annotation | null> => {
-          try {
-            const locator = browser.getLocatorFromRef(ref);
-            if (!locator) return null;
-            const box = await locator.boundingBox();
-            if (!box || box.width === 0 || box.height === 0) return null;
-            const num = parseInt(ref.replace('e', ''), 10);
-            return {
-              ref,
-              number: num,
-              role: data.role,
-              name: data.name || undefined,
-              box: {
-                x: Math.round(box.x),
-                y: Math.round(box.y),
-                width: Math.round(box.width),
-                height: Math.round(box.height),
-              },
-            };
-          } catch {
-            return null;
-          }
-        })
-      );
+
+      // Process in batches to avoid saturating Chrome with CDP calls (#509)
+      const BATCH_SIZE = 20;
+      const ELEMENT_TIMEOUT = 1000;
+      const results: (Annotation | null)[] = [];
+      for (let i = 0; i < entries.length; i += BATCH_SIZE) {
+        const batch = entries.slice(i, i + BATCH_SIZE);
+        const batchResults = await Promise.all(
+          batch.map(async ([ref, data]): Promise<Annotation | null> => {
+            try {
+              const locator = browser.getLocatorFromRef(ref);
+              if (!locator) return null;
+              const box = await Promise.race([
+                locator.boundingBox(),
+                new Promise<null>((resolve) => setTimeout(() => resolve(null), ELEMENT_TIMEOUT)),
+              ]);
+              if (!box || box.width === 0 || box.height === 0) return null;
+              const num = parseInt(ref.replace('e', ''), 10);
+              return {
+                ref,
+                number: num,
+                role: data.role,
+                name: data.name || undefined,
+                box: {
+                  x: Math.round(box.x),
+                  y: Math.round(box.y),
+                  width: Math.round(box.width),
+                  height: Math.round(box.height),
+                },
+              };
+            } catch {
+              return null;
+            }
+          })
+        );
+        results.push(...batchResults);
+      }
 
       // When a selector is provided the screenshot is cropped to that element,
       // so filter to annotations that overlap the target and shift coordinates.
