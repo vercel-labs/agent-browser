@@ -801,7 +801,7 @@ See the [environments example](examples/environments/) for a working demo with a
 
 ```typescript
 import chromium from '@sparticuz/chromium';
-import { BrowserManager } from 'agent-browser';
+import { BrowserManager } from 'agent-browser/dist/browser';
 
 export async function handler() {
   const browser = new BrowserManager();
