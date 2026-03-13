@@ -1071,6 +1071,18 @@ export class IOSManager {
   }
 
   /**
+   * Get inner html of element
+   */
+  async getInnerHtml(selector: string): Promise<string> {
+    if (!this.browser) {
+      throw new Error('iOS browser not launched');
+    }
+
+    const element = await this.getElement(selector);
+    return element.getHTML({ includeSelectorTag: false });
+  }
+
+  /**
    * Get attribute value
    */
   async getAttribute(selector: string, attribute: string): Promise<string | null> {
