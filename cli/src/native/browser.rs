@@ -1241,7 +1241,7 @@ mod tests {
     /// Errors containing "not found" but NOT "element" should pass through unchanged.
     #[test]
     fn test_to_ai_friendly_error_ignores_non_element_not_found() {
-        let err = "Browser not found";
+        let err = "Chrome not found. Install Chrome or use --executable-path.";
         assert_eq!(to_ai_friendly_error(err), err);
     }
 
