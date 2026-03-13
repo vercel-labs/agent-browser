@@ -2084,10 +2084,14 @@ fn parse_storage(rest: &[&str], id: &str) -> Result<Value, ParseError> {
     match rest.first().copied() {
         Some("local") | Some("session") => {
             let storage_type = rest.first().unwrap();
-            let op = rest.get(1).unwrap_or(&"get");
-            let key = rest.get(2);
-            let value = rest.get(3);
-            match *op {
+            let (op, key, value) = match rest.get(1) {
+                Some(&"get") => ("get", rest.get(2), rest.get(3)),
+                Some(&"set") => ("set", rest.get(2), rest.get(3)),
+                Some(&"clear") => ("clear", rest.get(2), rest.get(3)),
+                Some(_) => ("get", rest.get(1), rest.get(2)),
+                None => ("get", None, None),
+            };
+            match op {
                 "set" => {
                     let k = key.ok_or_else(|| ParseError::MissingArguments {
                         context: format!("storage {} set", storage_type),
@@ -2365,10 +2369,26 @@ mod tests {
     }
 
     #[test]
+    fn test_storage_local_get_implicit_key() {
+        let cmd = parse_command(&args("storage local mykey"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "storage_get");
+        assert_eq!(cmd["type"], "local");
+        assert_eq!(cmd["key"], "mykey");
+    }
+
+    #[test]
     fn test_storage_session_get() {
         let cmd = parse_command(&args("storage session"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "storage_get");
         assert_eq!(cmd["type"], "session");
+    }
+
+    #[test]
+    fn test_storage_session_get_implicit_key() {
+        let cmd = parse_command(&args("storage session mykey"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "storage_get");
+        assert_eq!(cmd["type"], "session");
+        assert_eq!(cmd["key"], "mykey");
     }
 
     #[test]

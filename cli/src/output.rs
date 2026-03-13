@@ -64,6 +64,31 @@ fn print_with_boundaries(content: &str, origin: Option<&str>, opts: &OutputOptio
     }
 }
 
+fn format_storage_value(value: &serde_json::Value) -> String {
+    value
+        .as_str()
+        .map(ToString::to_string)
+        .unwrap_or_else(|| serde_json::to_string(value).unwrap_or_default())
+}
+
+fn format_storage_text(data: &serde_json::Value) -> Option<String> {
+    if let Some(entries) = data.get("data").and_then(|v| v.as_object()) {
+        if entries.is_empty() {
+            return Some("No storage entries".to_string());
+        }
+
+        let lines = entries
+            .iter()
+            .map(|(key, value)| format!("{}: {}", key, format_storage_value(value)))
+            .collect::<Vec<_>>();
+        return Some(lines.join("\n"));
+    }
+
+    let key = data.get("key").and_then(|v| v.as_str())?;
+    let value = data.get("value")?;
+    Some(format!("{}: {}", key, format_storage_value(value)))
+}
+
 pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &OutputOptions) {
     if opts.json {
         if opts.content_boundaries {
@@ -100,6 +125,12 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
     }
 
     if let Some(data) = &resp.data {
+        if action == Some("storage_get") {
+            if let Some(output) = format_storage_text(data) {
+                println!("{}", output);
+                return;
+            }
+        }
         // Inspect response (check before generic URL handler since it also has a "url" field)
         if action == Some("inspect") {
             let opened = data
@@ -2726,4 +2757,47 @@ fn print_screenshot_diff(data: &serde_json::Map<String, serde_json::Value>) {
 
 pub fn print_version() {
     println!("agent-browser {}", env!("CARGO_PKG_VERSION"));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_storage_text;
+    use serde_json::json;
+
+    #[test]
+    fn test_format_storage_text_for_all_entries() {
+        let data = json!({
+            "data": {
+                "token": "abc123",
+                "user": "alice"
+            }
+        });
+
+        let rendered = format_storage_text(&data).unwrap();
+
+        assert_eq!(rendered, "token: abc123\nuser: alice");
+    }
+
+    #[test]
+    fn test_format_storage_text_for_key_lookup() {
+        let data = json!({
+            "key": "token",
+            "value": "abc123"
+        });
+
+        let rendered = format_storage_text(&data).unwrap();
+
+        assert_eq!(rendered, "token: abc123");
+    }
+
+    #[test]
+    fn test_format_storage_text_for_empty_store() {
+        let data = json!({
+            "data": {}
+        });
+
+        let rendered = format_storage_text(&data).unwrap();
+
+        assert_eq!(rendered, "No storage entries");
+    }
 }
