@@ -110,9 +110,16 @@ pub fn launch_lightpanda(options: &LightpandaLaunchOptions) -> Result<Lightpanda
         args.push(proxy.clone());
     }
 
-    // Disable inactivity timeout so the connection stays alive during long sessions
+    // Use the maximum inactivity timeout (1 week) so the connection stays alive
+    // during long sessions. Lightpanda treats 0 as "timeout immediately" rather
+    // than "no timeout".
     args.push("--timeout".to_string());
-    args.push("0".to_string());
+    args.push("604800".to_string());
+
+    // Lightpanda defaults to --log_level warn, which suppresses the "server
+    // running" info message we need to detect the listen address.
+    args.push("--log_level".to_string());
+    args.push("info".to_string());
 
     let mut child = Command::new(&binary_path)
         .args(&args)
@@ -200,11 +207,15 @@ fn wait_for_address(
 }
 
 fn extract_address(line: &str) -> Option<String> {
-    // Match "address = HOST:PORT" anywhere in the line
-    if let Some(idx) = line.find("address = ") {
-        let addr = line[idx + "address = ".len()..].trim().to_string();
-        if !addr.is_empty() {
-            return Some(addr);
+    // Lightpanda uses logfmt (`address=...`) in release, pretty (`address = ...`) in debug.
+    for pattern in &["address=", "address = "] {
+        if let Some(idx) = line.find(pattern) {
+            let addr = line[idx + pattern.len()..].trim().to_string();
+            // logfmt lines may have subsequent key=value pairs
+            let addr = addr.split_whitespace().next().unwrap_or("").to_string();
+            if !addr.is_empty() {
+                return Some(addr);
+            }
         }
     }
     None
@@ -234,8 +245,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_extract_address_standard() {
-        // Lightpanda outputs the address on a separate indented line
+    fn test_extract_address_pretty_debug_build() {
         assert_eq!(
             extract_address("      address = 127.0.0.1:9222"),
             Some("127.0.0.1:9222".to_string())
@@ -243,7 +253,17 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_address_inline() {
+    fn test_extract_address_logfmt_release_build() {
+        assert_eq!(
+            extract_address(
+                "$time=1234 $scope=app $level=info $msg=\"server running\" address=127.0.0.1:9222"
+            ),
+            Some("127.0.0.1:9222".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_address_pretty_inline() {
         assert_eq!(
             extract_address("INFO  app : server running address = 127.0.0.1:4567"),
             Some("127.0.0.1:4567".to_string())
