@@ -19,7 +19,20 @@ const launchSchema = baseCommandSchema.extend({
     .nullable()
     .optional(),
   browser: z.enum(['chromium', 'firefox', 'webkit']).optional(),
-  cdpPort: z.number().positive().optional(),
+  // CDP port: accept 1-65535 as number, or numeric string in the same range
+  cdpPort: z
+    .union([
+      z.number().int().min(1).max(65535),
+      z.string().refine(
+        (val) => {
+          if (!/^\d+$/.test(val)) return false;
+          const port = parseInt(val, 10);
+          return port >= 1 && port <= 65535;
+        },
+        { message: 'cdpPort must be a port number (1-65535) or a numeric string in the same range' }
+      ),
+    ])
+    .optional(),
   cdpUrl: z
     .string()
     .url()
