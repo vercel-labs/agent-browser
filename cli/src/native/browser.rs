@@ -1,12 +1,13 @@
 use serde_json::{json, Value};
 use std::collections::HashSet;
+use std::future::Future;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, Mutex};
 
-use super::cdp::chrome::{
-    auto_connect_cdp, discover_cdp_url, launch_chrome, ChromeProcess, LaunchOptions,
-};
+use super::cdp::chrome::{auto_connect_cdp, launch_chrome, ChromeProcess, LaunchOptions};
 use super::cdp::client::CdpClient;
+use super::cdp::discovery::discover_cdp_url;
 use super::cdp::lightpanda::{launch_lightpanda, LightpandaLaunchOptions, LightpandaProcess};
 use super::cdp::types::*;
 
@@ -167,6 +168,10 @@ pub struct BrowserManager {
     default_timeout_ms: u64,
 }
 
+const LIGHTPANDA_CDP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const LIGHTPANDA_CDP_CONNECT_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const LIGHTPANDA_TARGET_INIT_TIMEOUT: Duration = Duration::from_secs(10);
+
 impl BrowserManager {
     pub async fn launch(options: LaunchOptions, engine: Option<&str>) -> Result<Self, String> {
         let engine = engine.unwrap_or("chrome");
@@ -205,9 +210,7 @@ impl BrowserManager {
                     proxy: options.proxy.clone(),
                     port: None,
                 };
-                let lp = tokio::task::spawn_blocking(move || launch_lightpanda(&lp_options))
-                    .await
-                    .map_err(|e| format!("Lightpanda launch task failed: {}", e))??;
+                let lp = launch_lightpanda(&lp_options).await?;
                 let url = lp.ws_url.clone();
                 (url, BrowserProcess::Lightpanda(lp))
             }
@@ -220,17 +223,21 @@ impl BrowserManager {
             }
         };
 
-        let client = CdpClient::connect(&ws_url).await?;
-        let mut manager = Self {
-            client,
-            browser_process: Some(process),
-            ws_url,
-            pages: Vec::new(),
-            active_page_index: 0,
-            default_timeout_ms: 25_000,
+        let manager = if engine == "lightpanda" {
+            initialize_lightpanda_manager(ws_url, process).await?
+        } else {
+            let client = CdpClient::connect(&ws_url).await?;
+            let mut manager = Self {
+                client,
+                browser_process: Some(process),
+                ws_url,
+                pages: Vec::new(),
+                active_page_index: 0,
+                default_timeout_ms: 25_000,
+            };
+            manager.discover_and_attach_targets().await?;
+            manager
         };
-
-        manager.discover_and_attach_targets().await?;
 
         let session_id = manager.active_session_id()?.to_string();
 
@@ -1119,6 +1126,120 @@ impl BrowserManager {
     }
 }
 
+async fn connect_cdp_with_retry(
+    ws_url: &str,
+    total_timeout: Duration,
+    poll_interval: Duration,
+) -> Result<CdpClient, String> {
+    let deadline = Instant::now() + total_timeout;
+
+    loop {
+        match CdpClient::connect(ws_url).await {
+            Ok(client) => return Ok(client),
+            Err(err) => {
+                if Instant::now() >= deadline {
+                    return Err(err);
+                }
+            }
+        }
+
+        tokio::time::sleep(poll_interval).await;
+    }
+}
+
+async fn initialize_lightpanda_manager(
+    ws_url: String,
+    process: BrowserProcess,
+) -> Result<BrowserManager, String> {
+    let deadline = Instant::now() + LIGHTPANDA_TARGET_INIT_TIMEOUT;
+    let mut process = Some(process);
+
+    loop {
+        let client = match connect_cdp_with_retry(
+            &ws_url,
+            LIGHTPANDA_CDP_CONNECT_TIMEOUT,
+            LIGHTPANDA_CDP_CONNECT_POLL_INTERVAL,
+        )
+        .await
+        {
+            Ok(client) => client,
+            Err(err) => {
+                if Instant::now() >= deadline {
+                    return Err(lightpanda_target_init_timeout(Some(&err)));
+                }
+                tokio::time::sleep(LIGHTPANDA_CDP_CONNECT_POLL_INTERVAL).await;
+                continue;
+            }
+        };
+
+        let mut manager = BrowserManager {
+            client,
+            browser_process: None,
+            ws_url: ws_url.clone(),
+            pages: Vec::new(),
+            active_page_index: 0,
+            default_timeout_ms: 25_000,
+        };
+
+        match discover_and_attach_lightpanda_targets(&mut manager, deadline).await {
+            Ok(()) => {
+                manager.browser_process = process.take();
+                return Ok(manager);
+            }
+            Err(err) => {
+                if Instant::now() >= deadline {
+                    return Err(lightpanda_target_init_timeout(Some(&err)));
+                }
+                tokio::time::sleep(LIGHTPANDA_CDP_CONNECT_POLL_INTERVAL).await;
+            }
+        }
+    }
+}
+
+async fn discover_and_attach_lightpanda_targets(
+    manager: &mut BrowserManager,
+    deadline: Instant,
+) -> Result<(), String> {
+    run_with_lightpanda_deadline(
+        deadline,
+        manager.discover_and_attach_targets(),
+        "Target domain initialization attempt exceeded the remaining startup deadline",
+    )
+    .await
+}
+
+fn remaining_until(deadline: Instant) -> Option<Duration> {
+    deadline.checked_duration_since(Instant::now())
+}
+
+async fn run_with_lightpanda_deadline<F, T>(
+    deadline: Instant,
+    operation: F,
+    timeout_context: &'static str,
+) -> Result<T, String>
+where
+    F: Future<Output = Result<T, String>>,
+{
+    let remaining = remaining_until(deadline)
+        .ok_or_else(|| lightpanda_target_init_timeout(Some("deadline expired before retry")))?;
+
+    match tokio::time::timeout(remaining, operation).await {
+        Ok(result) => result,
+        Err(_) => Err(lightpanda_target_init_timeout(Some(timeout_context))),
+    }
+}
+
+fn lightpanda_target_init_timeout(last_error: Option<&str>) -> String {
+    let mut message = format!(
+        "Timed out after {}ms waiting for Lightpanda Target domain to initialize",
+        LIGHTPANDA_TARGET_INIT_TIMEOUT.as_millis(),
+    );
+    if let Some(last_error) = last_error {
+        message.push_str(&format!("\nLast error: {}", last_error));
+    }
+    message
+}
+
 async fn resolve_cdp_url(input: &str) -> Result<String, String> {
     if input.starts_with("ws://") || input.starts_with("wss://") {
         return Ok(input.to_string());
@@ -1145,6 +1266,7 @@ async fn resolve_cdp_url(input: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::time::sleep;
 
     #[test]
     fn test_validate_launch_options_extensions_and_cdp() {
@@ -1250,5 +1372,60 @@ mod tests {
         let mapped =
             "Element not found. Verify the selector is correct and the element exists in the DOM.";
         assert_eq!(to_ai_friendly_error("No element found for css 'x'"), mapped);
+    }
+
+    #[test]
+    fn test_remaining_until_returns_none_for_past_deadline() {
+        let deadline = Instant::now()
+            .checked_sub(Duration::from_millis(1))
+            .expect("past instant should be representable");
+        assert!(remaining_until(deadline).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_run_with_lightpanda_deadline_enforces_timeout() {
+        let deadline = Instant::now() + Duration::from_millis(25);
+        let err = tokio::time::timeout(
+            Duration::from_secs(1),
+            run_with_lightpanda_deadline(
+                deadline,
+                async {
+                    sleep(Duration::from_millis(100)).await;
+                    Ok::<(), String>(())
+                },
+                "Target domain initialization attempt exceeded the remaining startup deadline",
+            ),
+        )
+        .await
+        .expect("outer timeout should not fire")
+        .unwrap_err();
+
+        assert!(err.contains(
+            "Timed out after 10000ms waiting for Lightpanda Target domain to initialize"
+        ));
+        assert!(err.contains("remaining startup deadline"));
+    }
+
+    #[tokio::test]
+    async fn test_run_with_lightpanda_deadline_returns_operation_error() {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let err = run_with_lightpanda_deadline(
+            deadline,
+            async { Err::<(), String>("Target.getTargets failed".to_string()) },
+            "unused timeout context",
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err, "Target.getTargets failed");
+    }
+
+    #[test]
+    fn test_lightpanda_target_init_timeout_includes_last_error() {
+        let err = lightpanda_target_init_timeout(Some("Target.setDiscoverTargets failed"));
+        assert!(err.contains(
+            "Timed out after 10000ms waiting for Lightpanda Target domain to initialize"
+        ));
+        assert!(err.contains("Target.setDiscoverTargets failed"));
     }
 }

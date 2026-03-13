@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
-use super::types::BrowserVersionInfo;
+use super::discovery::discover_cdp_url;
 
 pub struct ChromeProcess {
     child: Child,
@@ -384,28 +384,6 @@ pub fn find_chrome() -> Option<PathBuf> {
     }
 
     None
-}
-
-pub async fn discover_cdp_url(port: u16) -> Result<String, String> {
-    let url = format!("http://127.0.0.1:{}/json/version", port);
-
-    let body = tokio::time::timeout(Duration::from_secs(2), async {
-        reqwest_get_string(&url).await
-    })
-    .await
-    .map_err(|_| format!("Timeout connecting to CDP on port {}", port))?
-    .map_err(|e| format!("Failed to connect to CDP on port {}: {}", port, e))?;
-
-    let info: BrowserVersionInfo = serde_json::from_str(&body)
-        .map_err(|e| format!("Invalid /json/version response: {}", e))?;
-
-    info.web_socket_debugger_url
-        .ok_or_else(|| format!("No webSocketDebuggerUrl in /json/version on port {}", port))
-}
-
-async fn reqwest_get_string(url: &str) -> Result<String, String> {
-    let resp = reqwest::get(url).await.map_err(|e| e.to_string())?;
-    resp.text().await.map_err(|e| e.to_string())
 }
 
 pub fn read_devtools_active_port(user_data_dir: &Path) -> Option<(u16, String)> {
