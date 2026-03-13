@@ -742,6 +742,51 @@ export class BrowserManager {
   }
 
   /**
+   * Fully emulate a device using CDP: sets viewport, device scale factor,
+   * mobile flag, touch emulation, and user agent override.
+   * Falls back to viewport-only when CDP is unavailable (Firefox/WebKit).
+   */
+  async setDevice(deviceName: string): Promise<void> {
+    const device = this.getDevice(deviceName);
+    if (!device) {
+      throw new Error(`Unknown device: ${deviceName}`);
+    }
+
+    const page = this.getPage();
+    const { viewport, userAgent, deviceScaleFactor, isMobile, hasTouch } = device;
+
+    // Always apply viewport size via Playwright API
+    await page.setViewportSize({ width: viewport.width, height: viewport.height });
+
+    try {
+      const cdp = await this.getCDPSession();
+
+      // Override device metrics (viewport, DPR, mobile flag)
+      await cdp.send('Emulation.setDeviceMetricsOverride', {
+        width: viewport.width,
+        height: viewport.height,
+        deviceScaleFactor: deviceScaleFactor ?? 1,
+        mobile: isMobile ?? false,
+        screenWidth: viewport.width,
+        screenHeight: viewport.height,
+      });
+
+      // Enable/disable touch emulation
+      await cdp.send('Emulation.setTouchEmulationEnabled', {
+        enabled: hasTouch ?? false,
+        maxTouchPoints: hasTouch ? 5 : 0,
+      });
+
+      // Override user agent
+      await cdp.send('Emulation.setUserAgentOverride', {
+        userAgent,
+      });
+    } catch {
+      // CDP not available (non-Chromium or CDP connection issue) — viewport already set above
+    }
+  }
+
+  /**
    * Start console message tracking
    */
   startConsoleTracking(): void {
