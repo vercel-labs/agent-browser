@@ -81,6 +81,7 @@ pub fn recording_stop(state: &mut RecordingState) -> Result<Value, String> {
 
     let result = Command::new("ffmpeg")
         .args(["-y", "-framerate", "30", "-i", &frame_pattern])
+        .args(["-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2"])
         .args(codec_args)
         .args(["-pix_fmt", "yuv420p"])
         .arg(output)
