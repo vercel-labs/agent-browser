@@ -587,6 +587,28 @@ mod tests {
     use super::*;
     use crate::test_utils::EnvGuard;
 
+    #[cfg(unix)]
+    fn spawn_noop_child() -> Child {
+        Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap()
+    }
+
+    #[cfg(windows)]
+    fn spawn_noop_child() -> Child {
+        Command::new("cmd.exe")
+            .args(["/C", "exit 0"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap()
+    }
+
     #[test]
     fn test_find_chrome_returns_some_on_host() {
         // This test only makes sense on systems with Chrome installed
@@ -817,13 +839,7 @@ mod tests {
             // Simulate a ChromeProcess with a temp dir but a dummy child.
             // We can't actually spawn Chrome here, but we can verify the Drop
             // logic by creating a small helper process.
-            let child = Command::new("echo")
-                .arg("test")
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .unwrap();
+            let child = spawn_noop_child();
             let _process = ChromeProcess {
                 child,
                 ws_url: String::new(),
