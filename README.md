@@ -107,7 +107,8 @@ agent-browser scroll <dir> [px]       # Scroll (up/down/left/right, --selector <
 agent-browser scrollintoview <sel>    # Scroll element into view (alias: scrollinto)
 agent-browser drag <src> <tgt>        # Drag and drop
 agent-browser upload <sel> <files>    # Upload files
-agent-browser screenshot [path]       # Take screenshot (--full for full page, saves to a temporary directory if no path)
+agent-browser screenshot [sel] [path] # Take screenshot (--full for full page, saves to a temporary directory if no path)
+agent-browser screenshot @e3          # Screenshot a specific element
 agent-browser screenshot --annotate   # Annotated screenshot with numbered element labels
 agent-browser screenshot --screenshot-dir ./shots    # Save to custom directory
 agent-browser screenshot --screenshot-format jpeg --screenshot-quality 80
@@ -518,6 +519,17 @@ agent-browser click @e2     # Click the "Home" link labeled [2]
 ```
 
 This is useful for multimodal AI models that can reason about visual layout, unlabeled icon buttons, canvas elements, or visual state that the text accessibility tree cannot capture.
+
+## Element Screenshots
+
+You can screenshot a specific element by passing a selector (ref, CSS selector, etc.):
+
+```bash
+agent-browser screenshot @e3                    # Screenshot element by ref
+agent-browser screenshot @e3 ./element.png      # Save element screenshot to file
+agent-browser screenshot "#hero-banner"         # Screenshot by CSS ID
+agent-browser screenshot ".card"                # Screenshot by CSS class
+```
 
 ## Options
 

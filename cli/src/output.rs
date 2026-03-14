@@ -1380,8 +1380,14 @@ agent-browser screenshot - Take a screenshot
 
 Usage: agent-browser screenshot [selector] [path]
 
-Captures a screenshot of the current page. If no path is provided,
-saves to a temporary directory with a generated filename.
+Captures a screenshot of the current page or a specific element.
+If no path is provided, saves to a temporary directory with a generated filename.
+
+Selector:
+  @ref                 Element ref from snapshot (e.g. @e3)
+  .class               CSS class selector
+  #id                  CSS ID selector
+  Any valid CSS selector is accepted.
 
 Options:
   --full, -f           Capture full page (not just viewport)
@@ -1405,6 +1411,9 @@ Examples:
   agent-browser screenshot
   agent-browser screenshot ./screenshot.png
   agent-browser screenshot --full ./full-page.png
+  agent-browser screenshot @e3                     # Screenshot a specific element
+  agent-browser screenshot @e3 ./element.png       # Element screenshot to file
+  agent-browser screenshot "#hero-banner"          # Screenshot by CSS selector
   agent-browser screenshot --annotate              # Labeled screenshot + legend
   agent-browser screenshot --annotate ./page.png   # Save annotated screenshot
   agent-browser screenshot --annotate --json       # JSON output with annotations
