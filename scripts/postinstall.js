@@ -20,8 +20,25 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = join(__dirname, '..');
 const binDir = join(projectRoot, 'bin');
 
+// Detect if the system uses musl libc (e.g. Alpine Linux)
+function isMusl() {
+  if (platform() !== 'linux') return false;
+  try {
+    const lddOutput = execSync('ldd --version 2>&1', { encoding: 'utf8' });
+    return lddOutput.toLowerCase().includes('musl');
+  } catch {
+    try {
+      const result = execSync('ldd --version 2>&1 || true', { encoding: 'utf8' });
+      return result.toLowerCase().includes('musl');
+    } catch {
+      return existsSync('/lib/ld-musl-x86_64.so.1') || existsSync('/lib/ld-musl-aarch64.so.1');
+    }
+  }
+}
+
 // Platform detection
-const platformKey = `${platform()}-${arch()}`;
+const osKey = platform() === 'linux' && isMusl() ? 'linux-musl' : platform();
+const platformKey = `${osKey}-${arch()}`;
 const ext = platform() === 'win32' ? '.exe' : '';
 const binaryName = `agent-browser-${platformKey}${ext}`;
 const binaryPath = join(binDir, binaryName);
