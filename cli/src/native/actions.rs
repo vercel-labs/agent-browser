@@ -658,7 +658,9 @@ impl DaemonState {
                         .await;
                     }
 
+                    let tab_id = mgr.assign_tab_id();
                     mgr.add_page(super::browser::PageInfo {
+                        tab_id,
                         target_id: te.target_info.target_id.clone(),
                         session_id: attach.session_id,
                         url: te.target_info.url.clone(),
@@ -3567,14 +3569,14 @@ async fn handle_tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
 
 async fn handle_tab_switch(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
-    let index = cmd
-        .get("index")
+    let tab_id = cmd
+        .get("tabId")
         .and_then(|v| v.as_u64())
-        .ok_or("Missing 'index' parameter")? as usize;
+        .ok_or("Missing 'tabId' parameter")? as u32;
     state.ref_map.clear();
     state.iframe_sessions.clear();
     state.active_frame_id = None;
-    let result = mgr.tab_switch(index).await?;
+    let result = mgr.tab_switch_by_id(tab_id).await?;
 
     if let Some(ref server) = state.stream_server {
         if let Ok(dims) = mgr
@@ -3599,14 +3601,14 @@ async fn handle_tab_switch(cmd: &Value, state: &mut DaemonState) -> Result<Value
 
 async fn handle_tab_close(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
-    let index = cmd
-        .get("index")
+    let tab_id = cmd
+        .get("tabId")
         .and_then(|v| v.as_u64())
-        .map(|i| i as usize);
+        .map(|i| i as u32);
     state.ref_map.clear();
     state.iframe_sessions.clear();
     state.active_frame_id = None;
-    mgr.tab_close(index).await
+    mgr.tab_close_by_id(tab_id).await
 }
 
 async fn handle_viewport(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -3985,7 +3987,9 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
         }
 
         // Add page and switch to it
+        let tab_id = mgr.assign_tab_id();
         mgr.add_page(super::browser::PageInfo {
+            tab_id,
             target_id: create_result.target_id,
             session_id: new_session_id.clone(),
             url: nav_url.clone(),
@@ -5896,7 +5900,9 @@ async fn handle_window_new(cmd: &Value, state: &mut DaemonState) -> Result<Value
         )
         .await?;
 
+    let tab_id = mgr.assign_tab_id();
     mgr.add_page(super::browser::PageInfo {
+        tab_id,
         target_id: create_result.target_id,
         session_id: attach.session_id,
         url: "about:blank".to_string(),
@@ -5924,7 +5930,7 @@ async fn handle_window_new(cmd: &Value, state: &mut DaemonState) -> Result<Value
     let total = mgr.page_count();
     state.ref_map.clear();
 
-    Ok(json!({ "index": total - 1, "total": total }))
+    Ok(json!({ "tabId": tab_id, "total": total }))
 }
 
 async fn handle_diff_screenshot(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
