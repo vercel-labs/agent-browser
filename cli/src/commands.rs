@@ -1753,6 +1753,20 @@ fn parse_find(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                 },
             })?;
             let subaction = rest.get(2).unwrap_or(&"click");
+
+            // Detect position modifiers (first/last/nth) used after a locator type
+            // e.g., "find role spinbutton first fill '20'" — "first" is in the subaction slot
+            if matches!(*subaction, "first" | "last" | "nth") && !matches!(*locator, "first" | "last" | "nth") {
+                return Err(ParseError::InvalidValue {
+                    message: format!(
+                        "\"{}\" cannot be used as a modifier after \"{}\". \
+                         Use it as the primary locator: find {} <selector> [action] [text]",
+                        subaction, locator, subaction
+                    ),
+                    usage: "find first <selector> [action] [text]",
+                });
+            }
+
             let fill_value = if rest.len() > 3 {
                 Some(rest[3..].join(" "))
             } else {
