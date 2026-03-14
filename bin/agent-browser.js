@@ -20,17 +20,10 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 function isMusl() {
   if (platform() !== 'linux') return false;
   try {
-    const lddOutput = execSync('ldd --version 2>&1', { encoding: 'utf8' });
-    return lddOutput.toLowerCase().includes('musl');
+    const result = execSync('ldd --version 2>&1 || true', { encoding: 'utf8' });
+    return result.toLowerCase().includes('musl');
   } catch {
-    // ldd --version exits non-zero on musl, check stderr
-    try {
-      const result = execSync('ldd --version 2>&1 || true', { encoding: 'utf8' });
-      return result.toLowerCase().includes('musl');
-    } catch {
-      // Fallback: check for musl dynamic linker
-      return existsSync('/lib/ld-musl-x86_64.so.1') || existsSync('/lib/ld-musl-aarch64.so.1');
-    }
+    return existsSync('/lib/ld-musl-x86_64.so.1') || existsSync('/lib/ld-musl-aarch64.so.1');
   }
 }
 

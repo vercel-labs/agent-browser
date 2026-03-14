@@ -24,15 +24,10 @@ const binDir = join(projectRoot, 'bin');
 function isMusl() {
   if (platform() !== 'linux') return false;
   try {
-    const lddOutput = execSync('ldd --version 2>&1', { encoding: 'utf8' });
-    return lddOutput.toLowerCase().includes('musl');
+    const result = execSync('ldd --version 2>&1 || true', { encoding: 'utf8' });
+    return result.toLowerCase().includes('musl');
   } catch {
-    try {
-      const result = execSync('ldd --version 2>&1 || true', { encoding: 'utf8' });
-      return result.toLowerCase().includes('musl');
-    } catch {
-      return existsSync('/lib/ld-musl-x86_64.so.1') || existsSync('/lib/ld-musl-aarch64.so.1');
-    }
+    return existsSync('/lib/ld-musl-x86_64.so.1') || existsSync('/lib/ld-musl-aarch64.so.1');
   }
 }
 
