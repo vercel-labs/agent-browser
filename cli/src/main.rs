@@ -164,7 +164,8 @@ fn run_session(args: &[String], session: &str, json_mode: bool) {
 }
 
 fn main() {
-    // Ignore SIGPIPE to prevent panic when piping to head/tail
+    // Rust ignores SIGPIPE by default, causing println! to panic on broken pipes.
+    // Reset to SIG_DFL so the OS terminates the process cleanly instead.
     #[cfg(unix)]
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
