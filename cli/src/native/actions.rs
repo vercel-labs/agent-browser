@@ -1377,7 +1377,20 @@ async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         snapshot::take_snapshot(&mgr.client, &session_id, &options, &mut state.ref_map).await?;
 
     let url = mgr.get_url().await.unwrap_or_default();
-    Ok(json!({ "snapshot": tree, "origin": url }))
+
+    let refs: serde_json::Map<String, Value> = state
+        .ref_map
+        .entries_sorted()
+        .into_iter()
+        .map(|(ref_id, entry)| {
+            let mut obj = serde_json::Map::new();
+            obj.insert("role".into(), Value::String(entry.role));
+            obj.insert("name".into(), Value::String(entry.name));
+            (ref_id, Value::Object(obj))
+        })
+        .collect();
+
+    Ok(json!({ "snapshot": tree, "origin": url, "refs": refs }))
 }
 
 async fn handle_screenshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
