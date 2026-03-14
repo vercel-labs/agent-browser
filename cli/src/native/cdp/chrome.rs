@@ -180,6 +180,10 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
         args.push("--no-sandbox".to_string());
     }
 
+    if should_disable_dev_shm(&args) {
+        args.push("--disable-dev-shm-usage".to_string());
+    }
+
     Ok(ChromeArgs {
         args,
         temp_user_data_dir,
@@ -521,6 +525,36 @@ fn should_disable_sandbox(existing_args: &[String]) -> bool {
         }
 
         // Generic container detection: cgroup contains docker/kubepods/lxc
+        if let Ok(cgroup) = std::fs::read_to_string("/proc/1/cgroup") {
+            if cgroup.contains("docker") || cgroup.contains("kubepods") || cgroup.contains("lxc") {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+/// Returns true if Chrome should use disk instead of /dev/shm for shared memory.
+/// On CI runners and containers, /dev/shm is often too small (64MB default),
+/// which causes Chrome to crash mid-session.
+fn should_disable_dev_shm(existing_args: &[String]) -> bool {
+    if existing_args.iter().any(|a| a == "--disable-dev-shm-usage") {
+        return false;
+    }
+
+    if std::env::var("CI").is_ok() {
+        return true;
+    }
+
+    #[cfg(unix)]
+    {
+        if unsafe { libc::geteuid() } == 0 {
+            return true;
+        }
+        if Path::new("/.dockerenv").exists() || Path::new("/run/.containerenv").exists() {
+            return true;
+        }
         if let Ok(cgroup) = std::fs::read_to_string("/proc/1/cgroup") {
             if cgroup.contains("docker") || cgroup.contains("kubepods") || cgroup.contains("lxc") {
                 return true;
