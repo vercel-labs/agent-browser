@@ -1,5 +1,50 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
+
+/// Deserialize a value that may be either a string or an integer into a String.
+/// Lightpanda sends numeric nodeIds/childIds in AX tree responses, while Chrome
+/// sends strings. This accepts both.
+fn string_or_int<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let v = Value::deserialize(deserializer)?;
+    match v {
+        Value::String(s) => Ok(s),
+        Value::Number(n) => Ok(n.to_string()),
+        other => Err(serde::de::Error::custom(format!(
+            "expected string or integer, got {}",
+            other
+        ))),
+    }
+}
+
+/// Deserialize an optional Vec where each element may be a string or integer.
+fn opt_vec_string_or_int<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let opt: Option<Vec<Value>> = Option::deserialize(deserializer)?;
+    match opt {
+        None => Ok(None),
+        Some(vec) => {
+            let mut result = Vec::with_capacity(vec.len());
+            for v in vec {
+                match v {
+                    Value::String(s) => result.push(s),
+                    Value::Number(n) => result.push(n.to_string()),
+                    other => {
+                        return Err(serde::de::Error::custom(format!(
+                            "expected string or integer in array, got {}",
+                            other
+                        )))
+                    }
+                }
+            }
+            Ok(Some(result))
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // CDP message envelope
@@ -257,12 +302,14 @@ pub struct GetFullAXTreeResult {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AXNode {
+    #[serde(deserialize_with = "string_or_int")]
     pub node_id: String,
     pub role: Option<AXValue>,
     pub name: Option<AXValue>,
     pub value: Option<AXValue>,
     pub description: Option<AXValue>,
     pub properties: Option<Vec<AXProperty>>,
+    #[serde(default, deserialize_with = "opt_vec_string_or_int")]
     pub child_ids: Option<Vec<String>>,
     pub backend_d_o_m_node_id: Option<i64>,
     pub ignored: Option<bool>,
