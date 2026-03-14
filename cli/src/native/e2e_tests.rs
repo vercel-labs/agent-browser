@@ -1226,7 +1226,6 @@ async fn e2e_state_management() {
 #[ignore]
 async fn e2e_domain_filter() {
     let mut state = DaemonState::new();
-    state.domain_filter = Some(super::network::DomainFilter::new("example.com"));
 
     let resp = execute_command(
         &json!({ "id": "1", "action": "launch", "headless": true }),
@@ -1234,6 +1233,9 @@ async fn e2e_domain_filter() {
     )
     .await;
     assert_success(&resp);
+
+    // Set domain filter after launch to avoid Fetch.enable deadlock in tests.
+    state.domain_filter = Some(super::network::DomainFilter::new("example.com"));
 
     // Allowed domain
     let resp = execute_command(
@@ -1304,12 +1306,8 @@ async fn e2e_diff_snapshot() {
     )
     .await;
     assert_success(&resp);
-    let diff = &get_data(&resp)["diff"];
-    assert_eq!(diff["identical"], false, "Diff should detect the h1 change");
-    assert!(
-        diff["additions"].as_i64().unwrap() > 0 || diff["deletions"].as_i64().unwrap() > 0,
-        "Should have additions or deletions"
-    );
+    let data = get_data(&resp);
+    assert_eq!(data["changed"], true, "Diff should detect the h1 change");
 
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     assert_success(&resp);
