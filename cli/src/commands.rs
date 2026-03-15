@@ -599,16 +599,23 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                 Some("save") => {
                     let name = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
                         context: "auth save".to_string(),
-                        usage: "agent-browser auth save <name> --url <url> --username <user> --password <pass>",
+                        usage: "agent-browser auth save <name> --url <url> [--onepassword-item <item> [--onepassword-vault <vault>] | ((--username <user> | --username-op <op://...>) (--password <pass> | --password-stdin | --password-op <op://...>))]",
                     })?;
 
                     let mut url = None;
+                    let mut onepassword_item = None;
+                    let mut onepassword_vault = None;
                     let mut username = None;
+                    let mut username_op_ref = None;
                     let mut password = None;
+                    let mut password_op_ref = None;
                     let mut password_stdin = false;
                     let mut username_selector = None;
                     let mut password_selector = None;
                     let mut submit_selector = None;
+                    let mut otp_op_ref = None;
+                    let mut otp_selector = None;
+                    let mut otp_submit_selector = None;
 
                     let mut j = 2;
                     while j < rest.len() {
@@ -617,12 +624,28 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                                 url = rest.get(j + 1).cloned();
                                 j += 1;
                             }
+                            "--onepassword-item" => {
+                                onepassword_item = rest.get(j + 1).cloned();
+                                j += 1;
+                            }
+                            "--onepassword-vault" => {
+                                onepassword_vault = rest.get(j + 1).cloned();
+                                j += 1;
+                            }
                             "--username" => {
                                 username = rest.get(j + 1).cloned();
                                 j += 1;
                             }
+                            "--username-op" => {
+                                username_op_ref = rest.get(j + 1).cloned();
+                                j += 1;
+                            }
                             "--password" => {
                                 password = rest.get(j + 1).cloned();
+                                j += 1;
+                            }
+                            "--password-op" => {
+                                password_op_ref = rest.get(j + 1).cloned();
                                 j += 1;
                             }
                             "--password-stdin" => {
@@ -640,11 +663,23 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                                 submit_selector = rest.get(j + 1).cloned();
                                 j += 1;
                             }
+                            "--otp-op" => {
+                                otp_op_ref = rest.get(j + 1).cloned();
+                                j += 1;
+                            }
+                            "--otp-selector" => {
+                                otp_selector = rest.get(j + 1).cloned();
+                                j += 1;
+                            }
+                            "--otp-submit-selector" => {
+                                otp_submit_selector = rest.get(j + 1).cloned();
+                                j += 1;
+                            }
                             other => {
                                 if other.starts_with("--") {
                                     return Err(ParseError::InvalidValue {
                                         message: format!("unknown flag '{}' for auth save", other),
-                                        usage: "agent-browser auth save <name> --url <url> --username <user> --password <pass>",
+                                        usage: "agent-browser auth save <name> --url <url> [--onepassword-item <item> [--onepassword-vault <vault>] | ((--username <user> | --username-op <op://...>) (--password <pass> | --password-stdin | --password-op <op://...>))]",
                                     });
                                 }
                             }
@@ -654,17 +689,80 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
 
                     let url_val = url.ok_or_else(|| ParseError::MissingArguments {
                         context: "auth save".to_string(),
-                        usage: "agent-browser auth save <name> --url <url> --username <user> --password <pass> [--password-stdin]",
-                    })?;
-                    let user_val = username.ok_or_else(|| ParseError::MissingArguments {
-                        context: "auth save".to_string(),
-                        usage: "agent-browser auth save <name> --url <url> --username <user> --password <pass> [--password-stdin]",
+                        usage: "agent-browser auth save <name> --url <url> [--onepassword-item <item> [--onepassword-vault <vault>] | ((--username <user> | --username-op <op://...>) (--password <pass> | --password-stdin | --password-op <op://...>))]",
                     })?;
 
-                    if !password_stdin && password.is_none() {
+                    let using_onepassword_item = onepassword_item.is_some();
+
+                    if onepassword_vault.is_some() && !using_onepassword_item {
+                        return Err(ParseError::InvalidValue {
+                            message: "--onepassword-vault requires --onepassword-item"
+                                .to_string(),
+                            usage: "agent-browser auth save <name> --url <url> [--onepassword-item <item> [--onepassword-vault <vault>] | ((--username <user> | --username-op <op://...>) (--password <pass> | --password-stdin | --password-op <op://...>))]",
+                        });
+                    }
+
+                    let username_source_count =
+                        usize::from(username.is_some()) + usize::from(username_op_ref.is_some());
+
+                    if using_onepassword_item
+                        && (username.is_some()
+                            || username_op_ref.is_some()
+                            || password.is_some()
+                            || password_stdin
+                            || password_op_ref.is_some()
+                            || otp_op_ref.is_some())
+                    {
+                        return Err(ParseError::InvalidValue {
+                            message: "Use either --onepassword-item or the individual username/password/otp flags".to_string(),
+                            usage: "agent-browser auth save <name> --url <url> [--onepassword-item <item> [--onepassword-vault <vault>] | ((--username <user> | --username-op <op://...>) (--password <pass> | --password-stdin | --password-op <op://...>))]",
+                        });
+                    }
+
+                    if !using_onepassword_item && username_source_count > 1 {
+                        return Err(ParseError::InvalidValue {
+                            message: "Use exactly one of --username or --username-op".to_string(),
+                            usage: "agent-browser auth save <name> --url <url> [--onepassword-item <item> [--onepassword-vault <vault>] | ((--username <user> | --username-op <op://...>) (--password <pass> | --password-stdin | --password-op <op://...>))]",
+                        });
+                    }
+
+                    if !using_onepassword_item && username_source_count == 0 {
                         return Err(ParseError::MissingArguments {
                             context: "auth save".to_string(),
-                            usage: "agent-browser auth save <name> --url <url> --username <user> --password <pass> [--password-stdin]",
+                            usage: "agent-browser auth save <name> --url <url> [--onepassword-item <item> [--onepassword-vault <vault>] | ((--username <user> | --username-op <op://...>) (--password <pass> | --password-stdin | --password-op <op://...>))]",
+                        });
+                    }
+
+                    let password_source_count = usize::from(password.is_some())
+                        + usize::from(password_stdin)
+                        + usize::from(password_op_ref.is_some());
+
+                    if !using_onepassword_item && password_source_count > 1 {
+                        return Err(ParseError::InvalidValue {
+                            message: "Use exactly one of --password, --password-stdin, or --password-op".to_string(),
+                            usage: "agent-browser auth save <name> --url <url> [--onepassword-item <item> [--onepassword-vault <vault>] | ((--username <user> | --username-op <op://...>) (--password <pass> | --password-stdin | --password-op <op://...>))]",
+                        });
+                    }
+
+                    if !using_onepassword_item
+                        && !password_stdin
+                        && password.is_none()
+                        && password_op_ref.is_none()
+                    {
+                        return Err(ParseError::MissingArguments {
+                            context: "auth save".to_string(),
+                            usage: "agent-browser auth save <name> --url <url> [--onepassword-item <item> [--onepassword-vault <vault>] | ((--username <user> | --username-op <op://...>) (--password <pass> | --password-stdin | --password-op <op://...>))]",
+                        });
+                    }
+
+                    if !using_onepassword_item
+                        && otp_op_ref.is_none()
+                        && (otp_selector.is_some() || otp_submit_selector.is_some())
+                    {
+                        return Err(ParseError::InvalidValue {
+                            message: "--otp-selector and --otp-submit-selector require --otp-op"
+                                .to_string(),
+                            usage: "agent-browser auth save <name> --url <url> [--onepassword-item <item> [--onepassword-vault <vault>] | ((--username <user> | --username-op <op://...>) (--password <pass> | --password-stdin | --password-op <op://...>))]",
                         });
                     }
 
@@ -673,13 +771,27 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                         "action": "auth_save",
                         "name": name,
                         "url": url_val,
-                        "username": user_val,
                     });
+                    if let Some(item) = onepassword_item {
+                        cmd["onePasswordItem"] = json!(item);
+                    }
+                    if let Some(vault) = onepassword_vault {
+                        cmd["onePasswordVault"] = json!(vault);
+                    }
+                    if let Some(user_val) = username {
+                        cmd["username"] = json!(user_val);
+                    }
+                    if let Some(username_op) = username_op_ref {
+                        cmd["usernameOpRef"] = json!(username_op);
+                    }
                     if password_stdin {
                         cmd["passwordStdin"] = json!(true);
                     }
                     if let Some(pass_val) = password {
                         cmd["password"] = json!(pass_val);
+                    }
+                    if let Some(password_op) = password_op_ref {
+                        cmd["passwordOpRef"] = json!(password_op);
                     }
                     if let Some(us) = username_selector {
                         cmd["usernameSelector"] = json!(us);
@@ -689,6 +801,15 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                     }
                     if let Some(ss) = submit_selector {
                         cmd["submitSelector"] = json!(ss);
+                    }
+                    if let Some(otp_op) = otp_op_ref {
+                        cmd["otpOpRef"] = json!(otp_op);
+                    }
+                    if let Some(otp_sel) = otp_selector {
+                        cmd["otpSelector"] = json!(otp_sel);
+                    }
+                    if let Some(otp_submit_sel) = otp_submit_selector {
+                        cmd["otpSubmitSelector"] = json!(otp_submit_sel);
                     }
                     Ok(cmd)
                 }
@@ -3075,6 +3196,152 @@ mod tests {
         let cmd = parse_command(&args("eval document.title"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "evaluate");
         assert_eq!(cmd["script"], "document.title");
+    }
+
+    #[test]
+    fn test_auth_save_with_password_op_and_otp() {
+        let input: Vec<String> = vec![
+            "auth".to_string(),
+            "save".to_string(),
+            "github".to_string(),
+            "--url".to_string(),
+            "https://github.com/login".to_string(),
+            "--username-op".to_string(),
+            "op://work/github/username".to_string(),
+            "--password-op".to_string(),
+            "op://work/github/password".to_string(),
+            "--otp-op".to_string(),
+            "op://work/github/one-time password?attribute=otp".to_string(),
+            "--otp-selector".to_string(),
+            "#otp".to_string(),
+            "--otp-submit-selector".to_string(),
+            "button.verify".to_string(),
+        ];
+
+        let cmd = parse_command(&input, &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "auth_save");
+        assert_eq!(cmd["usernameOpRef"], "op://work/github/username");
+        assert_eq!(cmd["passwordOpRef"], "op://work/github/password");
+        assert_eq!(
+            cmd["otpOpRef"],
+            "op://work/github/one-time password?attribute=otp"
+        );
+        assert_eq!(cmd["otpSelector"], "#otp");
+        assert_eq!(cmd["otpSubmitSelector"], "button.verify");
+        assert!(cmd.get("password").is_none());
+    }
+
+    #[test]
+    fn test_auth_save_with_username_op_and_password_stdin() {
+        let cmd = parse_command(
+            &args("auth save github --url https://github.com/login --username-op op://work/github/username --password-stdin"),
+            &default_flags(),
+        )
+        .unwrap();
+
+        assert_eq!(cmd["action"], "auth_save");
+        assert_eq!(cmd["usernameOpRef"], "op://work/github/username");
+        assert_eq!(cmd["passwordStdin"], true);
+        assert!(cmd.get("username").is_none());
+    }
+
+    #[test]
+    fn test_auth_save_with_onepassword_item() {
+        let cmd = parse_command(
+            &args("auth save github --url https://github.com/login --onepassword-item GitHub --onepassword-vault Work --otp-selector #otp"),
+            &default_flags(),
+        )
+        .unwrap();
+
+        assert_eq!(cmd["action"], "auth_save");
+        assert_eq!(cmd["onePasswordItem"], "GitHub");
+        assert_eq!(cmd["onePasswordVault"], "Work");
+        assert_eq!(cmd["otpSelector"], "#otp");
+        assert!(cmd.get("username").is_none());
+        assert!(cmd.get("password").is_none());
+    }
+
+    #[test]
+    fn test_auth_save_requires_password_source() {
+        let result = parse_command(
+            &args("auth save github --url https://github.com/login --username user"),
+            &default_flags(),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_auth_save_requires_username_source() {
+        let result = parse_command(
+            &args("auth save github --url https://github.com/login --password-op op://work/github/password"),
+            &default_flags(),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_auth_save_rejects_multiple_username_sources() {
+        let result = parse_command(
+            &args("auth save github --url https://github.com/login --username user --username-op op://work/github/username --password-op op://work/github/password"),
+            &default_flags(),
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err
+            .format()
+            .contains("Use exactly one of --username or --username-op"));
+    }
+
+    #[test]
+    fn test_auth_save_rejects_multiple_password_sources() {
+        let result = parse_command(
+            &args("auth save github --url https://github.com/login --username user --password pass --password-op op://work/github/password"),
+            &default_flags(),
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err
+            .format()
+            .contains("Use exactly one of --password, --password-stdin, or --password-op"));
+    }
+
+    #[test]
+    fn test_auth_save_rejects_otp_selectors_without_otp_reference() {
+        let result = parse_command(
+            &args("auth save github --url https://github.com/login --username user --password-op op://work/github/password --otp-selector #otp"),
+            &default_flags(),
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err
+            .format()
+            .contains("--otp-selector and --otp-submit-selector require --otp-op"));
+    }
+
+    #[test]
+    fn test_auth_save_rejects_onepassword_vault_without_item() {
+        let result = parse_command(
+            &args("auth save github --url https://github.com/login --onepassword-vault Work --username user --password pass"),
+            &default_flags(),
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err
+            .format()
+            .contains("--onepassword-vault requires --onepassword-item"));
+    }
+
+    #[test]
+    fn test_auth_save_rejects_mixing_onepassword_item_with_manual_sources() {
+        let result = parse_command(
+            &args("auth save github --url https://github.com/login --onepassword-item GitHub --username user --password pass"),
+            &default_flags(),
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.format().contains(
+            "Use either --onepassword-item or the individual username/password/otp flags"
+        ));
     }
 
     #[test]

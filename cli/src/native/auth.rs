@@ -5,6 +5,7 @@ use serde_json::{json, Value};
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
+use std::process::Command;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -12,13 +13,32 @@ pub struct AuthProfile {
     pub name: String,
     pub url: String,
     pub username: String,
+    /// Optional 1Password item specifier for resolving login credentials at runtime.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub one_password_item: Option<String>,
+    /// Optional vault hint used together with `one_password_item`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub one_password_vault: Option<String>,
+    /// Optional 1Password secret reference for resolving the username at login time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub username_op_ref: Option<String>,
     pub password: String,
+    /// Optional 1Password secret reference for resolving the password at login time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub password_op_ref: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub username_selector: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub password_selector: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub submit_selector: Option<String>,
+    /// Optional 1Password secret reference for resolving a one-time password code.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub otp_op_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub otp_selector: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub otp_submit_selector: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -27,6 +47,22 @@ pub struct AuthProfile {
 
 // Keep legacy Credential alias for backward compatibility
 pub type Credential = AuthProfile;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AuthSaveOptions<'a> {
+    pub one_password_item: Option<&'a str>,
+    pub one_password_vault: Option<&'a str>,
+    pub username: Option<&'a str>,
+    pub username_op_ref: Option<&'a str>,
+    pub password: Option<&'a str>,
+    pub password_op_ref: Option<&'a str>,
+    pub username_selector: Option<&'a str>,
+    pub password_selector: Option<&'a str>,
+    pub submit_selector: Option<&'a str>,
+    pub otp_op_ref: Option<&'a str>,
+    pub otp_selector: Option<&'a str>,
+    pub otp_submit_selector: Option<&'a str>,
+}
 
 fn validate_profile_name(name: &str) -> Result<(), String> {
     if name.is_empty()
@@ -52,6 +88,25 @@ fn get_auth_dir() -> PathBuf {
 
 fn get_profile_path(name: &str) -> PathBuf {
     get_auth_dir().join(format!("{}.json", name))
+}
+
+fn validate_1password_reference(reference: &str) -> Result<(), String> {
+    if reference.trim().starts_with("op://") {
+        Ok(())
+    } else {
+        Err(format!(
+            "Invalid 1Password secret reference '{}'. Expected a value starting with op://",
+            reference
+        ))
+    }
+}
+
+fn validate_1password_item_specifier(item: &str) -> Result<(), String> {
+    if item.trim().is_empty() {
+        Err("1Password item specifier cannot be empty".to_string())
+    } else {
+        Ok(())
+    }
 }
 
 const ENCRYPTION_KEY_ENV: &str = "AGENT_BROWSER_ENCRYPTION_KEY";
@@ -262,6 +317,188 @@ fn load_profile(name: &str) -> Result<AuthProfile, String> {
     decrypt_profile(&data)
 }
 
+fn run_op_command(op_bin: &str, args: &[&str]) -> Result<Vec<u8>, String> {
+    let output = Command::new(op_bin)
+        .args(args)
+        .output()
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                format!(
+                    "1Password CLI ('{}') was not found. Install the 'op' CLI and sign in before using 1Password-backed auth profiles.",
+                    op_bin
+                )
+            } else {
+                format!("Failed to execute 1Password CLI: {}", e)
+            }
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let detail = if !stderr.is_empty() {
+            stderr
+        } else if !stdout.is_empty() {
+            stdout
+        } else {
+            format!("op exited with status {}", output.status)
+        };
+        return Err(detail);
+    }
+
+    Ok(output.stdout)
+}
+
+#[derive(Debug, Deserialize)]
+struct OnePasswordItemField {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    label: String,
+    #[serde(default)]
+    purpose: Option<String>,
+    #[serde(rename = "type", default)]
+    field_type: Option<String>,
+    #[serde(default)]
+    value: Option<Value>,
+    #[serde(default)]
+    reference: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OnePasswordItem {
+    #[serde(default)]
+    fields: Vec<OnePasswordItemField>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedOnePasswordItem {
+    pub username: String,
+    pub password: String,
+    pub otp_reference: Option<String>,
+}
+
+fn value_as_string(value: &Value) -> Option<String> {
+    value.as_str().map(ToString::to_string)
+}
+
+fn is_purpose(field: &OnePasswordItemField, purpose: &str) -> bool {
+    field
+        .purpose
+        .as_deref()
+        .map(|p| p.eq_ignore_ascii_case(purpose))
+        .unwrap_or(false)
+}
+
+fn is_field_name(field: &OnePasswordItemField, name: &str) -> bool {
+    field.id.eq_ignore_ascii_case(name) || field.label.eq_ignore_ascii_case(name)
+}
+
+fn append_query_parameter(reference: &str, query: &str) -> String {
+    if reference.contains('?') {
+        format!("{}&{}", reference, query)
+    } else {
+        format!("{}?{}", reference, query)
+    }
+}
+
+fn read_1password_item_json_with_op_bin(
+    op_bin: &str,
+    item: &str,
+    vault: Option<&str>,
+) -> Result<OnePasswordItem, String> {
+    validate_1password_item_specifier(item)?;
+
+    let mut args = vec!["item", "get", item];
+    if let Some(vault) = vault {
+        args.push("--vault");
+        args.push(vault);
+    }
+    args.push("--reveal");
+    args.push("--format");
+    args.push("json");
+
+    let stdout = run_op_command(op_bin, &args)
+        .map_err(|detail| format!("Failed to retrieve 1Password item details: {}", detail))?;
+
+    serde_json::from_slice::<OnePasswordItem>(&stdout)
+        .map_err(|e| format!("Failed to parse 1Password item JSON: {}", e))
+}
+
+fn resolve_1password_item_with_op_bin(
+    op_bin: &str,
+    item: &str,
+    vault: Option<&str>,
+) -> Result<ResolvedOnePasswordItem, String> {
+    let item_json = read_1password_item_json_with_op_bin(op_bin, item, vault)?;
+
+    let username = item_json
+        .fields
+        .iter()
+        .find(|field| is_purpose(field, "username") || is_field_name(field, "username"))
+        .and_then(|field| field.value.as_ref())
+        .and_then(value_as_string)
+        .ok_or("1Password item is missing a username field")?;
+
+    let password = item_json
+        .fields
+        .iter()
+        .find(|field| is_purpose(field, "password") || is_field_name(field, "password"))
+        .and_then(|field| field.value.as_ref())
+        .and_then(value_as_string)
+        .ok_or("1Password item is missing a password field")?;
+
+    let otp_reference = item_json
+        .fields
+        .iter()
+        .find(|field| {
+            field
+                .field_type
+                .as_deref()
+                .map(|field_type| field_type.eq_ignore_ascii_case("otp"))
+                .unwrap_or(false)
+        })
+        .and_then(|field| field.reference.as_deref())
+        .map(|reference| append_query_parameter(reference, "attribute=otp"));
+
+    Ok(ResolvedOnePasswordItem {
+        username,
+        password,
+        otp_reference,
+    })
+}
+
+fn resolve_1password_reference_with_op_bin(
+    op_bin: &str,
+    reference: &str,
+) -> Result<String, String> {
+    validate_1password_reference(reference)?;
+
+    let stdout = run_op_command(op_bin, &["read", "--no-newline", reference])
+        .map_err(|detail| format!("Failed to resolve 1Password secret reference: {}", detail))?;
+
+    let value = String::from_utf8(stdout)
+        .map_err(|e| format!("1Password CLI returned invalid UTF-8: {}", e))?;
+
+    if value.is_empty() {
+        return Err("1Password CLI returned an empty secret value".to_string());
+    }
+
+    Ok(value)
+}
+
+/// Resolve a 1Password secret reference using the local `op` CLI.
+pub fn resolve_1password_reference(reference: &str) -> Result<String, String> {
+    resolve_1password_reference_with_op_bin("op", reference)
+}
+
+/// Resolve username, password, and optional OTP from a 1Password Login item.
+pub fn resolve_1password_item(
+    item: &str,
+    vault: Option<&str>,
+) -> Result<ResolvedOnePasswordItem, String> {
+    resolve_1password_item_with_op_bin("op", item, vault)
+}
+
 pub fn credentials_set(
     name: &str,
     username: &str,
@@ -273,40 +510,97 @@ pub fn credentials_set(
         name: name.to_string(),
         url: url.unwrap_or("").to_string(),
         username: username.to_string(),
+        one_password_item: None,
+        one_password_vault: None,
+        username_op_ref: None,
         password: password.to_string(),
+        password_op_ref: None,
         username_selector: None,
         password_selector: None,
         submit_selector: None,
+        otp_op_ref: None,
+        otp_selector: None,
+        otp_submit_selector: None,
         created_at: None,
         last_login_at: None,
     };
     save_profile(&profile)?;
-    Ok(json!({ "saved": name }))
+    Ok(json!({ "saved": true, "name": name }))
 }
 
-pub fn auth_save(
-    name: &str,
-    url: &str,
-    username: &str,
-    password: &str,
-    username_selector: Option<&str>,
-    password_selector: Option<&str>,
-    submit_selector: Option<&str>,
-) -> Result<Value, String> {
+pub fn auth_save(name: &str, url: &str, options: AuthSaveOptions<'_>) -> Result<Value, String> {
     validate_profile_name(name)?;
+    let using_one_password_item = options.one_password_item.is_some();
+    if options.one_password_vault.is_some() && !using_one_password_item {
+        return Err("--onepassword-vault requires --onepassword-item".to_string());
+    }
+    if let Some(item) = options.one_password_item {
+        validate_1password_item_specifier(item)?;
+    }
+    if using_one_password_item {
+        let has_other_secret_sources = options.username.is_some()
+            || options.username_op_ref.is_some()
+            || options.password.is_some()
+            || options.password_op_ref.is_some()
+            || options.otp_op_ref.is_some();
+        if has_other_secret_sources {
+            return Err(
+                "Use either --onepassword-item or individual username/password/otp sources"
+                    .to_string(),
+            );
+        }
+    }
+    let username_source_count =
+        usize::from(options.username.is_some()) + usize::from(options.username_op_ref.is_some());
+    if !using_one_password_item && username_source_count == 0 {
+        return Err("Auth profile requires either a username or --username-op".to_string());
+    }
+    if !using_one_password_item && username_source_count > 1 {
+        return Err("Auth profile accepts only one username source".to_string());
+    }
+    let password_source_count =
+        usize::from(options.password.is_some()) + usize::from(options.password_op_ref.is_some());
+    if !using_one_password_item && password_source_count == 0 {
+        return Err("Auth profile requires either a password or --password-op".to_string());
+    }
+    if !using_one_password_item && password_source_count > 1 {
+        return Err("Auth profile accepts only one password source".to_string());
+    }
+    if let Some(reference) = options.username_op_ref {
+        validate_1password_reference(reference)?;
+    }
+    if let Some(reference) = options.password_op_ref {
+        validate_1password_reference(reference)?;
+    }
+    if let Some(reference) = options.otp_op_ref {
+        validate_1password_reference(reference)?;
+    }
+    if !using_one_password_item
+        && options.otp_op_ref.is_none()
+        && (options.otp_selector.is_some() || options.otp_submit_selector.is_some())
+    {
+        return Err("OTP selectors require an --otp-op reference".to_string());
+    }
     let profile = AuthProfile {
         name: name.to_string(),
         url: url.to_string(),
-        username: username.to_string(),
-        password: password.to_string(),
-        username_selector: username_selector.map(String::from),
-        password_selector: password_selector.map(String::from),
-        submit_selector: submit_selector.map(String::from),
+        one_password_item: options.one_password_item.map(String::from),
+        one_password_vault: options.one_password_vault.map(String::from),
+        username: options.username.unwrap_or("").to_string(),
+        username_op_ref: options.username_op_ref.map(String::from),
+        password: options.password.unwrap_or("").to_string(),
+        password_op_ref: options.password_op_ref.map(String::from),
+        username_selector: options.username_selector.map(String::from),
+        password_selector: options.password_selector.map(String::from),
+        submit_selector: options.submit_selector.map(String::from),
+        otp_op_ref: options.otp_op_ref.map(String::from),
+        otp_selector: options.otp_selector.map(String::from),
+        otp_submit_selector: options.otp_submit_selector.map(String::from),
         created_at: None,
         last_login_at: None,
     };
     save_profile(&profile)?;
-    Ok(json!({ "saved": name }))
+    Ok(json!({ "saved": true, "name": name }))
 }
 
 pub fn credentials_get(name: &str) -> Result<Value, String> {
@@ -315,7 +609,12 @@ pub fn credentials_get(name: &str) -> Result<Value, String> {
         "name": profile.name,
         "username": profile.username,
         "url": profile.url,
-        "hasPassword": true,
+        "hasPassword": !profile.password.is_empty()
+            || profile.password_op_ref.is_some()
+            || profile.one_password_item.is_some(),
+        "hasUsername": !profile.username.is_empty()
+            || profile.username_op_ref.is_some()
+            || profile.one_password_item.is_some(),
     }))
 }
 
@@ -330,7 +629,7 @@ pub fn credentials_delete(name: &str) -> Result<Value, String> {
         return Err(format!("Auth profile '{}' not found", name));
     }
     fs::remove_file(&path).map_err(|e| format!("Failed to delete profile: {}", e))?;
-    Ok(json!({ "deleted": name }))
+    Ok(json!({ "deleted": true, "name": name }))
 }
 
 pub fn credentials_list() -> Result<Value, String> {
@@ -374,14 +673,39 @@ pub fn credentials_list() -> Result<Value, String> {
 pub fn auth_show(name: &str) -> Result<Value, String> {
     validate_profile_name(name)?;
     let profile = load_profile(name)?;
+    let username_source = if profile.one_password_item.is_some() {
+        "1password-item"
+    } else if profile.username_op_ref.is_some() {
+        "1password"
+    } else if !profile.username.is_empty() {
+        "stored"
+    } else {
+        "missing"
+    };
+    let password_source = if profile.one_password_item.is_some() {
+        "1password-item"
+    } else if profile.password_op_ref.is_some() {
+        "1password"
+    } else if !profile.password.is_empty() {
+        "stored"
+    } else {
+        "missing"
+    };
     Ok(json!({
         "profile": {
             "name": profile.name,
             "url": profile.url,
             "username": profile.username,
+            "onePasswordItem": profile.one_password_item,
+            "onePasswordVault": profile.one_password_vault,
+            "usernameSource": username_source,
             "usernameSelector": profile.username_selector,
             "passwordSelector": profile.password_selector,
             "submitSelector": profile.submit_selector,
+            "passwordSource": password_source,
+            "otpEnabled": profile.otp_op_ref.is_some() || profile.one_password_item.is_some(),
+            "otpSelector": profile.otp_selector,
+            "otpSubmitSelector": profile.otp_submit_selector,
         }
     }))
 }
@@ -423,11 +747,18 @@ mod tests {
         let profile = AuthProfile {
             name: "test".to_string(),
             url: "https://example.com".to_string(),
-            username: "user".to_string(),
+            one_password_item: None,
+            one_password_vault: None,
+            username: "".to_string(),
+            username_op_ref: Some("op://vault/item/username".to_string()),
             password: "pass".to_string(),
+            password_op_ref: Some("op://vault/item/password".to_string()),
             username_selector: None,
             password_selector: None,
             submit_selector: Some("button[type=submit]".to_string()),
+            otp_op_ref: Some("op://vault/item/otp".to_string()),
+            otp_selector: Some("#otp".to_string()),
+            otp_submit_selector: Some("button.verify".to_string()),
             created_at: None,
             last_login_at: None,
         };
@@ -435,9 +766,18 @@ mod tests {
         let parsed: AuthProfile = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.name, "test");
         assert_eq!(
+            parsed.username_op_ref,
+            Some("op://vault/item/username".to_string())
+        );
+        assert_eq!(
+            parsed.password_op_ref,
+            Some("op://vault/item/password".to_string())
+        );
+        assert_eq!(
             parsed.submit_selector,
             Some("button[type=submit]".to_string())
         );
+        assert_eq!(parsed.otp_selector, Some("#otp".to_string()));
         assert!(parsed.username_selector.is_none());
     }
 
@@ -447,11 +787,18 @@ mod tests {
             let profile = AuthProfile {
                 name: "roundtrip".to_string(),
                 url: "https://example.com".to_string(),
+                one_password_item: None,
+                one_password_vault: None,
                 username: "user".to_string(),
+                username_op_ref: None,
                 password: "s3cret!".to_string(),
+                password_op_ref: None,
                 username_selector: None,
                 password_selector: None,
                 submit_selector: None,
+                otp_op_ref: None,
+                otp_selector: None,
+                otp_submit_selector: None,
                 created_at: None,
                 last_login_at: None,
             };
@@ -493,11 +840,18 @@ mod tests {
             let profile = AuthProfile {
                 name: "json-test".to_string(),
                 url: "https://example.com/login".to_string(),
+                one_password_item: None,
+                one_password_vault: None,
                 username: "admin".to_string(),
+                username_op_ref: None,
                 password: "hunter2".to_string(),
+                password_op_ref: None,
                 username_selector: Some("#email".to_string()),
                 password_selector: None,
                 submit_selector: None,
+                otp_op_ref: None,
+                otp_selector: None,
+                otp_submit_selector: None,
                 created_at: None,
                 last_login_at: None,
             };
@@ -536,11 +890,18 @@ mod tests {
             let profile = AuthProfile {
                 name: "format-check".to_string(),
                 url: "https://example.com".to_string(),
+                one_password_item: None,
+                one_password_vault: None,
                 username: "user".to_string(),
+                username_op_ref: None,
                 password: "pass".to_string(),
+                password_op_ref: None,
                 username_selector: None,
                 password_selector: None,
                 submit_selector: None,
+                otp_op_ref: None,
+                otp_selector: None,
+                otp_submit_selector: None,
                 created_at: None,
                 last_login_at: None,
             };
@@ -552,5 +913,168 @@ mod tests {
             assert!(parsed["authTag"].is_string());
             assert!(parsed["data"].is_string());
         });
+    }
+
+    #[test]
+    fn test_validate_1password_reference() {
+        assert!(validate_1password_reference("op://work/github/password").is_ok());
+        assert!(validate_1password_reference("https://example.com").is_err());
+    }
+
+    #[test]
+    fn test_auth_save_rejects_multiple_password_sources() {
+        let result = auth_save(
+            "github",
+            "https://github.com/login",
+            AuthSaveOptions {
+                username: Some("user"),
+                password: Some("pass"),
+                password_op_ref: Some("op://work/github/password"),
+                ..Default::default()
+            },
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("only one password source"));
+    }
+
+    #[test]
+    fn test_auth_save_rejects_onepassword_vault_without_item() {
+        let result = auth_save(
+            "github",
+            "https://github.com/login",
+            AuthSaveOptions {
+                one_password_vault: Some("Work"),
+                username: Some("user"),
+                password: Some("pass"),
+                ..Default::default()
+            },
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("--onepassword-vault requires"));
+    }
+
+    #[test]
+    fn test_auth_save_rejects_mixed_onepassword_item_and_manual_sources() {
+        let result = auth_save(
+            "github",
+            "https://github.com/login",
+            AuthSaveOptions {
+                one_password_item: Some("GitHub"),
+                username: Some("user"),
+                password: Some("pass"),
+                ..Default::default()
+            },
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("either --onepassword-item"));
+    }
+
+    #[test]
+    fn test_auth_save_rejects_otp_selectors_without_reference() {
+        let result = auth_save(
+            "github",
+            "https://github.com/login",
+            AuthSaveOptions {
+                username: Some("user"),
+                password: Some("pass"),
+                otp_selector: Some("#otp"),
+                ..Default::default()
+            },
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("OTP selectors require"));
+    }
+
+    #[test]
+    fn test_auth_save_rejects_multiple_username_sources() {
+        let result = auth_save(
+            "github",
+            "https://github.com/login",
+            AuthSaveOptions {
+                username: Some("user"),
+                username_op_ref: Some("op://work/github/username"),
+                password: Some("pass"),
+                ..Default::default()
+            },
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("only one username source"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_resolve_1password_reference_with_stub_binary() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let script_path = std::env::temp_dir().join(format!(
+            "agent-browser-op-stub-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+
+        fs::write(
+            &script_path,
+            "#!/bin/sh\nif [ \"$1\" = \"read\" ] && [ \"$2\" = \"--no-newline\" ]; then\n  printf '654321'\nelse\n  echo 'unexpected args' >&2\n  exit 1\nfi\n",
+        )
+        .unwrap();
+        fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let result = resolve_1password_reference_with_op_bin(
+            script_path.to_str().unwrap(),
+            "op://work/github/one-time password?attribute=otp",
+        )
+        .unwrap();
+
+        assert_eq!(result, "654321");
+
+        let _ = fs::remove_file(&script_path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_resolve_1password_item_with_stub_binary() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let script_path = std::env::temp_dir().join(format!(
+            "agent-browser-op-item-stub-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+
+        fs::write(
+            &script_path,
+            r##"#!/bin/sh
+if [ "$1" = "item" ] && [ "$2" = "get" ]; then
+  printf '%s' '{"fields":[{"id":"username","label":"username","purpose":"USERNAME","type":"STRING","value":"octocat"},{"id":"password","label":"password","purpose":"PASSWORD","type":"CONCEALED","value":"s3cret"},{"id":"otp","label":"one-time password","type":"OTP","reference":"op://work/github/one-time password"}]}'
+else
+  echo 'unexpected args' >&2
+  exit 1
+fi
+"##,
+        )
+        .unwrap();
+        fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let result = resolve_1password_item_with_op_bin(
+            script_path.to_str().unwrap(),
+            "GitHub",
+            Some("Work"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            result,
+            ResolvedOnePasswordItem {
+                username: "octocat".to_string(),
+                password: "s3cret".to_string(),
+                otp_reference: Some("op://work/github/one-time password?attribute=otp".to_string()),
+            }
+        );
+
+        let _ = fs::remove_file(&script_path);
     }
 }
