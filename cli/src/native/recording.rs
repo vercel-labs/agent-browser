@@ -98,7 +98,16 @@ fn build_ffmpeg_command(output_path: &str) -> tokio::process::Command {
             "-analyzeduration",
             "0",
         ])
-        .args(["-f", "image2pipe", "-c:v", "mjpeg", "-framerate", "25", "-i", "pipe:0"])
+        .args([
+            "-f",
+            "image2pipe",
+            "-c:v",
+            "mjpeg",
+            "-framerate",
+            "25",
+            "-i",
+            "pipe:0",
+        ])
         .args(["-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2"]);
 
     if output_path.ends_with(".webm") {
