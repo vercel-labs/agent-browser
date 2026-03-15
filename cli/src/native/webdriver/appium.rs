@@ -40,11 +40,11 @@ impl AppiumManager {
         })
     }
 
-    pub async fn create_ios_session(
-        &mut self,
+    pub fn build_ios_capabilities(
+        device_udid: Option<&str>,
         device_name: Option<&str>,
         platform_version: Option<&str>,
-    ) -> Result<Value, String> {
+    ) -> Value {
         let mut caps = json!({
             "platformName": "iOS",
             "appium:automationName": "XCUITest",
@@ -62,10 +62,23 @@ impl AppiumManager {
             caps["appium:platformVersion"] = json!(ver);
         }
 
-        if let Some(ref udid) = self.device_udid {
+        if let Some(udid) = device_udid {
             caps["appium:udid"] = json!(udid);
         }
 
+        caps
+    }
+
+    pub async fn create_ios_session(
+        &mut self,
+        device_name: Option<&str>,
+        platform_version: Option<&str>,
+    ) -> Result<Value, String> {
+        let caps = Self::build_ios_capabilities(
+            self.device_udid.as_deref(),
+            device_name,
+            platform_version,
+        );
         self.client.create_session(caps).await
     }
 
@@ -199,24 +212,13 @@ mod tests {
         assert_eq!(APPIUM_STARTUP_TIMEOUT_SECS, 30);
     }
 
-    #[tokio::test]
-    async fn test_ios_capabilities_use_vendor_prefix() {
-        let mut manager = AppiumManager {
-            client: WebDriverClient::new(APPIUM_DEFAULT_PORT),
-            appium_process: None,
-            device_udid: Some("TEST-UDID-123".to_string()),
-        };
-
-        // Build capabilities the same way create_ios_session does
-        let mut caps = json!({
-            "platformName": "iOS",
-            "appium:automationName": "XCUITest",
-            "browserName": "Safari",
-            "appium:noReset": true,
-        });
-        caps["appium:deviceName"] = json!("iPhone 16 Pro");
-        caps["appium:platformVersion"] = json!("18.5");
-        caps["appium:udid"] = json!("TEST-UDID-123");
+    #[test]
+    fn test_ios_capabilities_use_vendor_prefix() {
+        let caps = AppiumManager::build_ios_capabilities(
+            Some("TEST-UDID-123"),
+            Some("iPhone 16 Pro"),
+            Some("18.5"),
+        );
 
         // W3C standard capabilities must NOT have vendor prefix
         assert!(caps.get("platformName").is_some());
