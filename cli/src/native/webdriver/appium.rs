@@ -47,23 +47,23 @@ impl AppiumManager {
     ) -> Result<Value, String> {
         let mut caps = json!({
             "platformName": "iOS",
-            "automationName": "XCUITest",
+            "appium:automationName": "XCUITest",
             "browserName": "Safari",
-            "noReset": true,
+            "appium:noReset": true,
         });
 
         if let Some(name) = device_name {
-            caps["deviceName"] = json!(name);
+            caps["appium:deviceName"] = json!(name);
         } else {
-            caps["deviceName"] = json!("iPhone");
+            caps["appium:deviceName"] = json!("iPhone");
         }
 
         if let Some(ver) = platform_version {
-            caps["platformVersion"] = json!(ver);
+            caps["appium:platformVersion"] = json!(ver);
         }
 
         if let Some(ref udid) = self.device_udid {
-            caps["udid"] = json!(udid);
+            caps["appium:udid"] = json!(udid);
         }
 
         self.client.create_session(caps).await
@@ -197,5 +197,42 @@ mod tests {
     fn test_appium_constants() {
         assert_eq!(APPIUM_DEFAULT_PORT, 4723);
         assert_eq!(APPIUM_STARTUP_TIMEOUT_SECS, 30);
+    }
+
+    #[tokio::test]
+    async fn test_ios_capabilities_use_vendor_prefix() {
+        let mut manager = AppiumManager {
+            client: WebDriverClient::new(APPIUM_DEFAULT_PORT),
+            appium_process: None,
+            device_udid: Some("TEST-UDID-123".to_string()),
+        };
+
+        // Build capabilities the same way create_ios_session does
+        let mut caps = json!({
+            "platformName": "iOS",
+            "appium:automationName": "XCUITest",
+            "browserName": "Safari",
+            "appium:noReset": true,
+        });
+        caps["appium:deviceName"] = json!("iPhone 16 Pro");
+        caps["appium:platformVersion"] = json!("18.5");
+        caps["appium:udid"] = json!("TEST-UDID-123");
+
+        // W3C standard capabilities must NOT have vendor prefix
+        assert!(caps.get("platformName").is_some());
+        assert!(caps.get("browserName").is_some());
+
+        // Non-standard capabilities MUST have appium: vendor prefix
+        assert!(caps.get("appium:automationName").is_some());
+        assert!(caps.get("appium:noReset").is_some());
+        assert!(caps.get("appium:deviceName").is_some());
+        assert!(caps.get("appium:platformVersion").is_some());
+        assert!(caps.get("appium:udid").is_some());
+
+        // Must NOT have unprefixed non-standard capabilities
+        assert!(caps.get("automationName").is_none());
+        assert!(caps.get("noReset").is_none());
+        assert!(caps.get("deviceName").is_none());
+        assert!(caps.get("udid").is_none());
     }
 }
