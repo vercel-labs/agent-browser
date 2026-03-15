@@ -485,6 +485,121 @@ async fn e2e_form_interaction() {
     assert_success(&resp);
 }
 
+#[tokio::test]
+#[ignore]
+async fn e2e_frame_context_commands() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = r#"
+        <html>
+          <body>
+            <input id="shared" value="outer">
+            <input id="agree" type="checkbox">
+            <button id="outer-btn">Outer</button>
+            <iframe
+              id="test-frame"
+              name="test-frame"
+              srcdoc="<html><body><input id='shared' value='inner'><input id='agree' type='checkbox'><button>Inner</button></body></html>"
+            ></iframe>
+          </body>
+        </html>
+    "#;
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "setcontent", "html": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "frame", "selector": "#test-frame" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "fill", "selector": "#shared", "value": "updated" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "click", "selector": "#agree" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "evaluate", "script": "document.getElementById('shared').value" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], "updated");
+
+    let resp = execute_command(
+        &json!({ "id": "7", "action": "evaluate", "script": "document.getElementById('agree').checked" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], true);
+
+    let resp = execute_command(
+        &json!({ "id": "8", "action": "snapshot", "interactive": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let frame_snapshot = get_data(&resp)["snapshot"].as_str().unwrap();
+    assert!(frame_snapshot.contains("Inner"));
+    assert!(!frame_snapshot.contains("Outer"));
+
+    let resp = execute_command(&json!({ "id": "9", "action": "mainframe" }), &mut state).await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "10", "action": "evaluate", "script": "document.getElementById('shared').value" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], "outer");
+
+    let resp = execute_command(
+        &json!({ "id": "11", "action": "evaluate", "script": "document.getElementById('agree').checked" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], false);
+
+    let resp = execute_command(
+        &json!({ "id": "12", "action": "snapshot", "interactive": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let main_snapshot = get_data(&resp)["snapshot"].as_str().unwrap();
+    assert!(main_snapshot.contains("Outer"));
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 // ---------------------------------------------------------------------------
 // Navigation: back, forward, reload
 // ---------------------------------------------------------------------------

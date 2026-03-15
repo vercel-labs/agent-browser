@@ -563,6 +563,23 @@ impl BrowserManager {
         Ok(result.as_str().unwrap_or("").to_string())
     }
 
+    pub async fn url_for_frame(&self, frame_id: Option<&str>) -> Result<String, String> {
+        let Some(frame_id) = frame_id else {
+            return self.get_url().await;
+        };
+
+        let session_id = self.active_session_id()?.to_string();
+        let tree: Value = self
+            .client
+            .send_command_no_params("Page.getFrameTree", Some(&session_id))
+            .await?;
+
+        find_frame_value(&tree["frameTree"], frame_id)
+            .and_then(|frame| frame.get("url").and_then(|value| value.as_str()))
+            .map(str::to_string)
+            .ok_or_else(|| format!("Frame not found: {}", frame_id))
+    }
+
     pub async fn get_title(&self) -> Result<String, String> {
         let result = self.evaluate_simple("document.title").await?;
         Ok(result.as_str().unwrap_or("").to_string())
@@ -575,20 +592,46 @@ impl BrowserManager {
         Ok(result.as_str().unwrap_or("").to_string())
     }
 
-    pub async fn evaluate(&self, script: &str, _args: Option<Value>) -> Result<Value, String> {
+    pub async fn create_frame_execution_context(&self, frame_id: &str) -> Result<i64, String> {
         let session_id = self.active_session_id()?.to_string();
+        let result: Value = self
+            .client
+            .send_command(
+                "Page.createIsolatedWorld",
+                Some(json!({
+                    "frameId": frame_id,
+                    "worldName": "agent-browser",
+                })),
+                Some(&session_id),
+            )
+            .await?;
+
+        result
+            .get("executionContextId")
+            .and_then(|value| value.as_i64())
+            .ok_or_else(|| format!("Could not create execution context for frame {}", frame_id))
+    }
+
+    pub async fn evaluate_in_context(
+        &self,
+        script: &str,
+        execution_context_id: Option<i64>,
+    ) -> Result<Value, String> {
+        let session_id = self.active_session_id()?.to_string();
+
+        let mut params = json!({
+            "expression": script,
+            "returnByValue": true,
+            "awaitPromise": true,
+        });
+
+        if let Some(context_id) = execution_context_id {
+            params["contextId"] = json!(context_id);
+        }
 
         let result: EvaluateResult = self
             .client
-            .send_command_typed(
-                "Runtime.evaluate",
-                &EvaluateParams {
-                    expression: script.to_string(),
-                    return_by_value: Some(true),
-                    await_promise: Some(true),
-                },
-                Some(&session_id),
-            )
+            .send_command_typed("Runtime.evaluate", &params, Some(&session_id))
             .await?;
 
         if let Some(ref details) = result.exception_details {
@@ -601,6 +644,10 @@ impl BrowserManager {
         }
 
         Ok(result.result.value.unwrap_or(Value::Null))
+    }
+
+    pub async fn evaluate(&self, script: &str, _args: Option<Value>) -> Result<Value, String> {
+        self.evaluate_in_context(script, None).await
     }
 
     async fn evaluate_simple(&self, expression: &str) -> Result<Value, String> {
@@ -1138,6 +1185,21 @@ impl BrowserManager {
             .await?;
         Ok(())
     }
+}
+
+fn find_frame_value<'a>(tree: &'a Value, frame_id: &str) -> Option<&'a Value> {
+    let frame = tree.get("frame")?;
+    if frame.get("id").and_then(|value| value.as_str()) == Some(frame_id) {
+        return Some(frame);
+    }
+
+    tree.get("childFrames")
+        .and_then(|value| value.as_array())
+        .and_then(|children| {
+            children
+                .iter()
+                .find_map(|child| find_frame_value(child, frame_id))
+        })
 }
 
 async fn connect_cdp_with_retry(

@@ -127,11 +127,48 @@ pub fn parse_ref(input: &str) -> Option<String> {
     None
 }
 
+async fn evaluate_in_context(
+    client: &CdpClient,
+    session_id: &str,
+    expression: &str,
+    return_by_value: bool,
+    await_promise: bool,
+    execution_context_id: Option<i64>,
+) -> Result<EvaluateResult, String> {
+    if let Some(context_id) = execution_context_id {
+        return client
+            .send_command_typed(
+                "Runtime.evaluate",
+                &serde_json::json!({
+                    "expression": expression,
+                    "returnByValue": return_by_value,
+                    "awaitPromise": await_promise,
+                    "contextId": context_id,
+                }),
+                Some(session_id),
+            )
+            .await;
+    }
+
+    client
+        .send_command_typed(
+            "Runtime.evaluate",
+            &EvaluateParams {
+                expression: expression.to_string(),
+                return_by_value: Some(return_by_value),
+                await_promise: Some(await_promise),
+            },
+            Some(session_id),
+        )
+        .await
+}
+
 pub async fn resolve_element_center(
     client: &CdpClient,
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
+    execution_context_id: Option<i64>,
 ) -> Result<(f64, f64), String> {
     if let Some(ref_id) = parse_ref(selector_or_ref) {
         let entry = ref_map
@@ -177,7 +214,32 @@ pub async fn resolve_element_center(
     }
 
     // CSS selector
-    resolve_by_selector(client, session_id, selector_or_ref).await
+    let object_id = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        execution_context_id,
+    )
+    .await?;
+
+    let result: Result<DomGetBoxModelResult, String> = client
+        .send_command_typed(
+            "DOM.getBoxModel",
+            &DomGetBoxModelParams {
+                backend_node_id: None,
+                node_id: None,
+                object_id: Some(object_id),
+            },
+            Some(session_id),
+        )
+        .await;
+
+    if let Ok(r) = result {
+        return Ok(box_model_center(&r.model));
+    }
+
+    resolve_by_selector(client, session_id, selector_or_ref, execution_context_id).await
 }
 
 pub async fn resolve_element_object_id(
@@ -185,6 +247,7 @@ pub async fn resolve_element_object_id(
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
+    execution_context_id: Option<i64>,
 ) -> Result<String, String> {
     if let Some(ref_id) = parse_ref(selector_or_ref) {
         let entry = ref_map
@@ -193,16 +256,21 @@ pub async fn resolve_element_object_id(
 
         // Try cached backend_node_id first (fast path)
         if let Some(backend_node_id) = entry.backend_node_id {
+            let params = if let Some(context_id) = execution_context_id {
+                serde_json::json!({
+                    "backendNodeId": backend_node_id,
+                    "executionContextId": context_id,
+                    "objectGroup": "agent-browser",
+                })
+            } else {
+                serde_json::json!({
+                    "backendNodeId": backend_node_id,
+                    "objectGroup": "agent-browser",
+                })
+            };
+
             let result: Result<DomResolveNodeResult, String> = client
-                .send_command_typed(
-                    "DOM.resolveNode",
-                    &DomResolveNodeParams {
-                        backend_node_id: Some(backend_node_id),
-                        node_id: None,
-                        object_group: Some("agent-browser".to_string()),
-                    },
-                    Some(session_id),
-                )
+                .send_command_typed("DOM.resolveNode", &params, Some(session_id))
                 .await;
 
             if let Ok(r) = result {
@@ -217,16 +285,22 @@ pub async fn resolve_element_object_id(
         let fresh_id =
             find_node_id_by_role_name(client, session_id, &entry.role, &entry.name, entry.nth)
                 .await?;
+
+        let params = if let Some(context_id) = execution_context_id {
+            serde_json::json!({
+                "backendNodeId": fresh_id,
+                "executionContextId": context_id,
+                "objectGroup": "agent-browser",
+            })
+        } else {
+            serde_json::json!({
+                "backendNodeId": fresh_id,
+                "objectGroup": "agent-browser",
+            })
+        };
+
         let result: DomResolveNodeResult = client
-            .send_command_typed(
-                "DOM.resolveNode",
-                &DomResolveNodeParams {
-                    backend_node_id: Some(fresh_id),
-                    node_id: None,
-                    object_group: Some("agent-browser".to_string()),
-                },
-                Some(session_id),
-            )
+            .send_command_typed("DOM.resolveNode", &params, Some(session_id))
             .await?;
         return result
             .object
@@ -239,17 +313,8 @@ pub async fn resolve_element_object_id(
         "document.querySelector({})",
         serde_json::to_string(selector_or_ref).unwrap_or_default()
     );
-    let result: EvaluateResult = client
-        .send_command_typed(
-            "Runtime.evaluate",
-            &EvaluateParams {
-                expression: js,
-                return_by_value: Some(false),
-                await_promise: Some(false),
-            },
-            Some(session_id),
-        )
-        .await?;
+    let result =
+        evaluate_in_context(client, session_id, &js, false, false, execution_context_id).await?;
 
     result
         .result
@@ -320,6 +385,7 @@ async fn resolve_by_selector(
     client: &CdpClient,
     session_id: &str,
     selector: &str,
+    execution_context_id: Option<i64>,
 ) -> Result<(f64, f64), String> {
     let js = format!(
         r#"(() => {{
@@ -331,17 +397,8 @@ async fn resolve_by_selector(
         sel = serde_json::to_string(selector).unwrap_or_default(),
     );
 
-    let result: EvaluateResult = client
-        .send_command_typed(
-            "Runtime.evaluate",
-            &EvaluateParams {
-                expression: js,
-                return_by_value: Some(true),
-                await_promise: Some(false),
-            },
-            Some(session_id),
-        )
-        .await?;
+    let result =
+        evaluate_in_context(client, session_id, &js, true, false, execution_context_id).await?;
 
     let val = result.result.value.unwrap_or(Value::Null);
     let x = val.get("x").and_then(|v| v.as_f64());
@@ -364,13 +421,48 @@ fn box_model_center(model: &BoxModel) -> (f64, f64) {
     }
 }
 
+fn box_model_rect(model: &BoxModel) -> Value {
+    let xs = [
+        model.content.first().copied().unwrap_or(0.0),
+        model.content.get(2).copied().unwrap_or(0.0),
+        model.content.get(4).copied().unwrap_or(0.0),
+        model.content.get(6).copied().unwrap_or(0.0),
+    ];
+    let ys = [
+        model.content.get(1).copied().unwrap_or(0.0),
+        model.content.get(3).copied().unwrap_or(0.0),
+        model.content.get(5).copied().unwrap_or(0.0),
+        model.content.get(7).copied().unwrap_or(0.0),
+    ];
+
+    let min_x = xs.into_iter().fold(f64::INFINITY, f64::min);
+    let max_x = xs.into_iter().fold(f64::NEG_INFINITY, f64::max);
+    let min_y = ys.into_iter().fold(f64::INFINITY, f64::min);
+    let max_y = ys.into_iter().fold(f64::NEG_INFINITY, f64::max);
+
+    serde_json::json!({
+        "x": min_x,
+        "y": min_y,
+        "width": (max_x - min_x).max(0.0),
+        "height": (max_y - min_y).max(0.0),
+    })
+}
+
 pub async fn get_element_text(
     client: &CdpClient,
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
+    execution_context_id: Option<i64>,
 ) -> Result<String, String> {
-    let object_id = resolve_element_object_id(client, session_id, ref_map, selector_or_ref).await?;
+    let object_id = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        execution_context_id,
+    )
+    .await?;
 
     let result: EvaluateResult = client
         .send_command_typed(
@@ -400,8 +492,16 @@ pub async fn get_element_attribute(
     ref_map: &RefMap,
     selector_or_ref: &str,
     attribute: &str,
+    execution_context_id: Option<i64>,
 ) -> Result<Value, String> {
-    let object_id = resolve_element_object_id(client, session_id, ref_map, selector_or_ref).await?;
+    let object_id = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        execution_context_id,
+    )
+    .await?;
 
     let result: EvaluateResult = client
         .send_command_typed(
@@ -428,8 +528,16 @@ pub async fn is_element_visible(
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
+    execution_context_id: Option<i64>,
 ) -> Result<bool, String> {
-    let object_id = resolve_element_object_id(client, session_id, ref_map, selector_or_ref).await?;
+    let object_id = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        execution_context_id,
+    )
+    .await?;
 
     let result: EvaluateResult = client
         .send_command_typed(
@@ -465,8 +573,16 @@ pub async fn is_element_enabled(
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
+    execution_context_id: Option<i64>,
 ) -> Result<bool, String> {
-    let object_id = resolve_element_object_id(client, session_id, ref_map, selector_or_ref).await?;
+    let object_id = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        execution_context_id,
+    )
+    .await?;
 
     let result: EvaluateResult = client
         .send_command_typed(
@@ -494,8 +610,16 @@ pub async fn is_element_checked(
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
+    execution_context_id: Option<i64>,
 ) -> Result<bool, String> {
-    let object_id = resolve_element_object_id(client, session_id, ref_map, selector_or_ref).await?;
+    let object_id = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        execution_context_id,
+    )
+    .await?;
 
     let result: EvaluateResult = client
         .send_command_typed(
@@ -523,8 +647,16 @@ pub async fn get_element_inner_text(
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
+    execution_context_id: Option<i64>,
 ) -> Result<String, String> {
-    let object_id = resolve_element_object_id(client, session_id, ref_map, selector_or_ref).await?;
+    let object_id = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        execution_context_id,
+    )
+    .await?;
 
     let result: EvaluateResult = client
         .send_command_typed(
@@ -552,8 +684,16 @@ pub async fn get_element_inner_html(
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
+    execution_context_id: Option<i64>,
 ) -> Result<String, String> {
-    let object_id = resolve_element_object_id(client, session_id, ref_map, selector_or_ref).await?;
+    let object_id = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        execution_context_id,
+    )
+    .await?;
 
     let result: EvaluateResult = client
         .send_command_typed(
@@ -581,8 +721,16 @@ pub async fn get_element_input_value(
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
+    execution_context_id: Option<i64>,
 ) -> Result<String, String> {
-    let object_id = resolve_element_object_id(client, session_id, ref_map, selector_or_ref).await?;
+    let object_id = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        execution_context_id,
+    )
+    .await?;
 
     let result: EvaluateResult = client
         .send_command_typed(
@@ -613,8 +761,16 @@ pub async fn set_element_value(
     ref_map: &RefMap,
     selector_or_ref: &str,
     value: &str,
+    execution_context_id: Option<i64>,
 ) -> Result<(), String> {
-    let object_id = resolve_element_object_id(client, session_id, ref_map, selector_or_ref).await?;
+    let object_id = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        execution_context_id,
+    )
+    .await?;
 
     let js = format!(
         "function() {{ this.value = {}; this.dispatchEvent(new Event('input', {{bubbles: true}})); this.dispatchEvent(new Event('change', {{bubbles: true}})); }}",
@@ -643,54 +799,45 @@ pub async fn get_element_bounding_box(
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
+    execution_context_id: Option<i64>,
 ) -> Result<Value, String> {
-    let object_id = resolve_element_object_id(client, session_id, ref_map, selector_or_ref).await?;
+    let object_id = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        execution_context_id,
+    )
+    .await?;
 
-    let result: EvaluateResult = client
+    let result: DomGetBoxModelResult = client
         .send_command_typed(
-            "Runtime.callFunctionOn",
-            &CallFunctionOnParams {
-                function_declaration: r#"function() {
-                    const r = this.getBoundingClientRect();
-                    return { x: r.x, y: r.y, width: r.width, height: r.height };
-                }"#
-                .to_string(),
+            "DOM.getBoxModel",
+            &DomGetBoxModelParams {
+                backend_node_id: None,
+                node_id: None,
                 object_id: Some(object_id),
-                arguments: None,
-                return_by_value: Some(true),
-                await_promise: Some(false),
             },
             Some(session_id),
         )
         .await?;
 
-    result
-        .result
-        .value
-        .ok_or_else(|| format!("Could not get bounding box for: {}", selector_or_ref))
+    Ok(box_model_rect(&result.model))
 }
 
 pub async fn get_element_count(
     client: &CdpClient,
     session_id: &str,
     selector: &str,
+    execution_context_id: Option<i64>,
 ) -> Result<i64, String> {
     let js = format!(
         "document.querySelectorAll({}).length",
         serde_json::to_string(selector).unwrap_or_default()
     );
 
-    let result: EvaluateResult = client
-        .send_command_typed(
-            "Runtime.evaluate",
-            &EvaluateParams {
-                expression: js,
-                return_by_value: Some(true),
-                await_promise: Some(false),
-            },
-            Some(session_id),
-        )
-        .await?;
+    let result =
+        evaluate_in_context(client, session_id, &js, true, false, execution_context_id).await?;
 
     Ok(result.result.value.and_then(|v| v.as_i64()).unwrap_or(0))
 }
@@ -701,8 +848,16 @@ pub async fn get_element_styles(
     ref_map: &RefMap,
     selector_or_ref: &str,
     properties: Option<Vec<String>>,
+    execution_context_id: Option<i64>,
 ) -> Result<Value, String> {
-    let object_id = resolve_element_object_id(client, session_id, ref_map, selector_or_ref).await?;
+    let object_id = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        execution_context_id,
+    )
+    .await?;
 
     let js = match properties {
         Some(props) => {

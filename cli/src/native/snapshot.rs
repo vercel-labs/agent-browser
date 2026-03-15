@@ -4,8 +4,7 @@ use serde_json::Value;
 
 use super::cdp::client::CdpClient;
 use super::cdp::types::{
-    AXNode, AXProperty, AXValue, CallFunctionOnParams, EvaluateParams, EvaluateResult,
-    GetFullAXTreeResult,
+    AXNode, AXProperty, AXValue, CallFunctionOnParams, EvaluateResult, GetFullAXTreeResult,
 };
 use super::element::RefMap;
 
@@ -127,6 +126,8 @@ pub async fn take_snapshot(
     session_id: &str,
     options: &SnapshotOptions,
     ref_map: &mut RefMap,
+    frame_id: Option<&str>,
+    execution_context_id: Option<i64>,
 ) -> Result<String, String> {
     client
         .send_command_no_params("DOM.enable", Some(session_id))
@@ -135,12 +136,14 @@ pub async fn take_snapshot(
         .send_command_no_params("Accessibility.enable", Some(session_id))
         .await?;
 
+    let params = if let Some(frame_id) = frame_id {
+        serde_json::json!({ "frameId": frame_id })
+    } else {
+        serde_json::json!({})
+    };
+
     let ax_tree: GetFullAXTreeResult = client
-        .send_command_typed(
-            "Accessibility.getFullAXTree",
-            &serde_json::json!({}),
-            Some(session_id),
-        )
+        .send_command_typed("Accessibility.getFullAXTree", &params, Some(session_id))
         .await?;
 
     let (tree_nodes, root_indices) = build_tree(&ax_tree.nodes);
@@ -213,7 +216,9 @@ pub async fn take_snapshot(
     }
 
     if options.cursor {
-        let cursor_section = find_cursor_interactive_elements(client, session_id, ref_map).await?;
+        let cursor_section =
+            find_cursor_interactive_elements(client, session_id, ref_map, execution_context_id)
+                .await?;
         if !cursor_section.is_empty() {
             trimmed.push_str("\n# Cursor-interactive elements:\n");
             trimmed.push_str(&cursor_section);
@@ -227,6 +232,7 @@ async fn find_cursor_interactive_elements(
     client: &CdpClient,
     session_id: &str,
     ref_map: &mut RefMap,
+    execution_context_id: Option<i64>,
 ) -> Result<String, String> {
     let js = r#"
 (function() {
@@ -255,16 +261,23 @@ async fn find_cursor_interactive_elements(
 })()
 "#;
 
+    let params = if let Some(context_id) = execution_context_id {
+        serde_json::json!({
+            "expression": js,
+            "returnByValue": false,
+            "awaitPromise": false,
+            "contextId": context_id,
+        })
+    } else {
+        serde_json::json!({
+            "expression": js,
+            "returnByValue": false,
+            "awaitPromise": false,
+        })
+    };
+
     let result: EvaluateResult = client
-        .send_command_typed(
-            "Runtime.evaluate",
-            &EvaluateParams {
-                expression: js.to_string(),
-                return_by_value: Some(false),
-                await_promise: Some(false),
-            },
-            Some(session_id),
-        )
+        .send_command_typed("Runtime.evaluate", &params, Some(session_id))
         .await?;
 
     let array_object_id = match result.result.object_id {

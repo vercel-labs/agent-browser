@@ -11,8 +11,47 @@ pub async fn click(
     selector_or_ref: &str,
     button: &str,
     click_count: i32,
+    execution_context_id: Option<i64>,
 ) -> Result<(), String> {
-    let (x, y) = resolve_element_center(client, session_id, ref_map, selector_or_ref).await?;
+    if execution_context_id.is_some() && button == "left" && click_count == 1 {
+        let object_id = resolve_element_object_id(
+            client,
+            session_id,
+            ref_map,
+            selector_or_ref,
+            execution_context_id,
+        )
+        .await?;
+
+        client
+            .send_command_typed::<_, Value>(
+                "Runtime.callFunctionOn",
+                &CallFunctionOnParams {
+                    function_declaration: r#"function() {
+                        this.scrollIntoView({ block: 'center', inline: 'center' });
+                        this.click();
+                    }"#
+                    .to_string(),
+                    object_id: Some(object_id),
+                    arguments: None,
+                    return_by_value: Some(true),
+                    await_promise: Some(false),
+                },
+                Some(session_id),
+            )
+            .await?;
+
+        return Ok(());
+    }
+
+    let (x, y) = resolve_element_center(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        execution_context_id,
+    )
+    .await?;
     dispatch_click(client, session_id, x, y, button, click_count).await
 }
 
@@ -21,8 +60,18 @@ pub async fn dblclick(
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
+    execution_context_id: Option<i64>,
 ) -> Result<(), String> {
-    click(client, session_id, ref_map, selector_or_ref, "left", 2).await
+    click(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        "left",
+        2,
+        execution_context_id,
+    )
+    .await
 }
 
 pub async fn hover(
@@ -30,8 +79,16 @@ pub async fn hover(
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
+    execution_context_id: Option<i64>,
 ) -> Result<(), String> {
-    let (x, y) = resolve_element_center(client, session_id, ref_map, selector_or_ref).await?;
+    let (x, y) = resolve_element_center(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        execution_context_id,
+    )
+    .await?;
     client
         .send_command_typed::<_, Value>(
             "Input.dispatchMouseEvent",
@@ -58,8 +115,16 @@ pub async fn fill(
     ref_map: &RefMap,
     selector_or_ref: &str,
     value: &str,
+    execution_context_id: Option<i64>,
 ) -> Result<(), String> {
-    let object_id = resolve_element_object_id(client, session_id, ref_map, selector_or_ref).await?;
+    let object_id = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        execution_context_id,
+    )
+    .await?;
 
     // Focus the element
     client
@@ -118,8 +183,16 @@ pub async fn type_text(
     text: &str,
     clear: bool,
     delay_ms: Option<u64>,
+    execution_context_id: Option<i64>,
 ) -> Result<(), String> {
-    let object_id = resolve_element_object_id(client, session_id, ref_map, selector_or_ref).await?;
+    let object_id = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        execution_context_id,
+    )
+    .await?;
 
     // Focus
     client
@@ -268,9 +341,12 @@ pub async fn scroll(
     selector_or_ref: Option<&str>,
     delta_x: f64,
     delta_y: f64,
+    execution_context_id: Option<i64>,
 ) -> Result<(), String> {
     if let Some(sel) = selector_or_ref {
-        let object_id = resolve_element_object_id(client, session_id, ref_map, sel).await?;
+        let object_id =
+            resolve_element_object_id(client, session_id, ref_map, sel, execution_context_id)
+                .await?;
         let js = "function(dx, dy) { this.scrollBy(dx, dy); }".to_string();
         client
             .send_command_typed::<_, Value>(
@@ -296,16 +372,23 @@ pub async fn scroll(
             .await?;
     } else {
         let js = format!("window.scrollBy({}, {})", delta_x, delta_y);
+        let params = if let Some(context_id) = execution_context_id {
+            serde_json::json!({
+                "expression": js,
+                "returnByValue": true,
+                "awaitPromise": false,
+                "contextId": context_id,
+            })
+        } else {
+            serde_json::json!({
+                "expression": js,
+                "returnByValue": true,
+                "awaitPromise": false,
+            })
+        };
+
         client
-            .send_command_typed::<_, Value>(
-                "Runtime.evaluate",
-                &EvaluateParams {
-                    expression: js,
-                    return_by_value: Some(true),
-                    await_promise: Some(false),
-                },
-                Some(session_id),
-            )
+            .send_command_typed::<_, Value>("Runtime.evaluate", &params, Some(session_id))
             .await?;
     }
     Ok(())
@@ -317,8 +400,16 @@ pub async fn select_option(
     ref_map: &RefMap,
     selector_or_ref: &str,
     values: &[String],
+    execution_context_id: Option<i64>,
 ) -> Result<(), String> {
-    let object_id = resolve_element_object_id(client, session_id, ref_map, selector_or_ref).await?;
+    let object_id = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        execution_context_id,
+    )
+    .await?;
 
     let js = r#"function(vals) {
             const options = Array.from(this.options);
@@ -354,11 +445,27 @@ pub async fn check(
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
+    execution_context_id: Option<i64>,
 ) -> Result<(), String> {
-    let is_checked =
-        super::element::is_element_checked(client, session_id, ref_map, selector_or_ref).await?;
+    let is_checked = super::element::is_element_checked(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        execution_context_id,
+    )
+    .await?;
     if !is_checked {
-        click(client, session_id, ref_map, selector_or_ref, "left", 1).await?;
+        click(
+            client,
+            session_id,
+            ref_map,
+            selector_or_ref,
+            "left",
+            1,
+            execution_context_id,
+        )
+        .await?;
     }
     Ok(())
 }
@@ -368,11 +475,27 @@ pub async fn uncheck(
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
+    execution_context_id: Option<i64>,
 ) -> Result<(), String> {
-    let is_checked =
-        super::element::is_element_checked(client, session_id, ref_map, selector_or_ref).await?;
+    let is_checked = super::element::is_element_checked(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        execution_context_id,
+    )
+    .await?;
     if is_checked {
-        click(client, session_id, ref_map, selector_or_ref, "left", 1).await?;
+        click(
+            client,
+            session_id,
+            ref_map,
+            selector_or_ref,
+            "left",
+            1,
+            execution_context_id,
+        )
+        .await?;
     }
     Ok(())
 }
@@ -382,8 +505,16 @@ pub async fn focus(
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
+    execution_context_id: Option<i64>,
 ) -> Result<(), String> {
-    let object_id = resolve_element_object_id(client, session_id, ref_map, selector_or_ref).await?;
+    let object_id = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        execution_context_id,
+    )
+    .await?;
 
     client
         .send_command_typed::<_, Value>(
@@ -407,8 +538,16 @@ pub async fn clear(
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
+    execution_context_id: Option<i64>,
 ) -> Result<(), String> {
-    let object_id = resolve_element_object_id(client, session_id, ref_map, selector_or_ref).await?;
+    let object_id = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        execution_context_id,
+    )
+    .await?;
 
     client
         .send_command_typed::<_, Value>(
@@ -438,8 +577,16 @@ pub async fn select_all(
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
+    execution_context_id: Option<i64>,
 ) -> Result<(), String> {
-    let object_id = resolve_element_object_id(client, session_id, ref_map, selector_or_ref).await?;
+    let object_id = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        execution_context_id,
+    )
+    .await?;
 
     client
         .send_command_typed::<_, Value>(
@@ -475,8 +622,16 @@ pub async fn scroll_into_view(
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
+    execution_context_id: Option<i64>,
 ) -> Result<(), String> {
-    let object_id = resolve_element_object_id(client, session_id, ref_map, selector_or_ref).await?;
+    let object_id = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        execution_context_id,
+    )
+    .await?;
 
     client
         .send_command_typed::<_, Value>(
@@ -504,8 +659,16 @@ pub async fn dispatch_event(
     selector_or_ref: &str,
     event_type: &str,
     event_init: Option<&Value>,
+    execution_context_id: Option<i64>,
 ) -> Result<(), String> {
-    let object_id = resolve_element_object_id(client, session_id, ref_map, selector_or_ref).await?;
+    let object_id = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        execution_context_id,
+    )
+    .await?;
 
     let init_json = event_init
         .map(|v| serde_json::to_string(v).unwrap_or("{}".to_string()))
@@ -539,8 +702,16 @@ pub async fn highlight(
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
+    execution_context_id: Option<i64>,
 ) -> Result<(), String> {
-    let object_id = resolve_element_object_id(client, session_id, ref_map, selector_or_ref).await?;
+    let object_id = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        execution_context_id,
+    )
+    .await?;
 
     client
         .send_command_typed::<_, Value>(
@@ -573,8 +744,16 @@ pub async fn tap_touch(
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
+    execution_context_id: Option<i64>,
 ) -> Result<(), String> {
-    let (x, y) = resolve_element_center(client, session_id, ref_map, selector_or_ref).await?;
+    let (x, y) = resolve_element_center(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        execution_context_id,
+    )
+    .await?;
 
     client
         .send_command(
