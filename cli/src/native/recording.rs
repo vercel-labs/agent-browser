@@ -98,22 +98,11 @@ fn build_ffmpeg_command(output_path: &str) -> tokio::process::Command {
             "-analyzeduration",
             "0",
         ])
-        .args(["-f", "image2pipe", "-c:v", "mjpeg", "-i", "pipe:0"])
+        .args(["-f", "image2pipe", "-c:v", "mjpeg", "-framerate", "25", "-i", "pipe:0"])
         .args(["-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2"]);
 
     if output_path.ends_with(".webm") {
-        cmd.args([
-            "-c:v",
-            "libvpx-vp9",
-            "-crf",
-            "30",
-            "-b:v",
-            "0",
-            "-deadline",
-            "realtime",
-            "-cpu-used",
-            "4",
-        ]);
+        cmd.args(["-c:v", "libvpx", "-crf", "30", "-b:v", "1M"]);
     } else {
         cmd.args(["-c:v", "libx264", "-preset", "ultrafast"]);
     }
@@ -369,7 +358,7 @@ mod tests {
         let cmd = build_ffmpeg_command("/tmp/out.webm");
         let args: Vec<&std::ffi::OsStr> = cmd.as_std().get_args().collect();
         let args_str: Vec<&str> = args.iter().filter_map(|a| a.to_str()).collect();
-        assert!(args_str.contains(&"libvpx-vp9"));
+        assert!(args_str.contains(&"libvpx"));
         assert!(args_str.contains(&"/tmp/out.webm"));
     }
 
