@@ -366,6 +366,7 @@ pub fn find_chrome() -> Option<PathBuf> {
             "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
             "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
             "/Applications/Chromium.app/Contents/MacOS/Chromium",
+            "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
         ];
         for c in &candidates {
             let p = PathBuf::from(c);
@@ -382,6 +383,8 @@ pub fn find_chrome() -> Option<PathBuf> {
             "google-chrome-stable",
             "chromium-browser",
             "chromium",
+            "brave-browser",
+            "brave-browser-stable",
         ];
         for name in &candidates {
             if let Ok(output) = Command::new("which").arg(name).output() {
@@ -402,9 +405,14 @@ pub fn find_chrome() -> Option<PathBuf> {
             r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
         ];
         if let Ok(local) = std::env::var("LOCALAPPDATA") {
-            let p = PathBuf::from(&local).join(r"Google\Chrome\Application\chrome.exe");
-            if p.exists() {
-                return Some(p);
+            let chrome = PathBuf::from(&local).join(r"Google\Chrome\Application\chrome.exe");
+            if chrome.exists() {
+                return Some(chrome);
+            }
+            let brave =
+                PathBuf::from(&local).join(r"BraveSoftware\Brave-Browser\Application\brave.exe");
+            if brave.exists() {
+                return Some(brave);
             }
         }
         for c in &candidates {
@@ -468,7 +476,12 @@ fn get_chrome_user_data_dirs() -> Vec<PathBuf> {
     {
         if let Some(home) = dirs::home_dir() {
             let base = home.join("Library/Application Support");
-            for name in ["Google/Chrome", "Google/Chrome Canary", "Chromium"] {
+            for name in [
+                "Google/Chrome",
+                "Google/Chrome Canary",
+                "Chromium",
+                "BraveSoftware/Brave-Browser",
+            ] {
                 dirs.push(base.join(name));
             }
         }
@@ -478,7 +491,12 @@ fn get_chrome_user_data_dirs() -> Vec<PathBuf> {
     {
         if let Some(home) = dirs::home_dir() {
             let config = home.join(".config");
-            for name in ["google-chrome", "google-chrome-unstable", "chromium"] {
+            for name in [
+                "google-chrome",
+                "google-chrome-unstable",
+                "chromium",
+                "BraveSoftware/Brave-Browser",
+            ] {
                 dirs.push(config.join(name));
             }
         }
@@ -492,6 +510,7 @@ fn get_chrome_user_data_dirs() -> Vec<PathBuf> {
                 r"Google\Chrome\User Data",
                 r"Google\Chrome SxS\User Data",
                 r"Chromium\User Data",
+                r"BraveSoftware\Brave-Browser\User Data",
             ] {
                 dirs.push(base.join(name));
             }
