@@ -1,5 +1,6 @@
 use serde_json::{json, Value};
 use std::env;
+use std::io::Write;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use tokio::sync::{broadcast, oneshot, RwLock};
@@ -902,9 +903,9 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
 
     // Relaunch logic: check if we can reuse the existing connection
     let needs_relaunch = if let Some(ref mgr) = state.browser {
-        let has_cdp_arg = cdp_url.is_some() || cdp_port.is_some();
-        let was_cdp = mgr.is_cdp_connection();
-        has_cdp_arg != was_cdp || !mgr.is_connection_alive().await
+        let is_external = cdp_url.is_some() || cdp_port.is_some() || auto_connect;
+        let was_external = mgr.is_cdp_connection();
+        is_external != was_external || !mgr.is_connection_alive().await
     } else {
         true
     };
@@ -1277,7 +1278,7 @@ fn open_url_in_browser(url: &str) {
         "unsupported platform",
     ));
     if let Err(e) = result {
-        eprintln!("[inspect] Failed to open browser: {}", e);
+        let _ = writeln!(std::io::stderr(), "[inspect] Failed to open browser: {}", e);
     }
 }
 
@@ -1407,7 +1408,20 @@ async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         snapshot::take_snapshot(&mgr.client, &session_id, &options, &mut state.ref_map).await?;
 
     let url = mgr.get_url().await.unwrap_or_default();
-    Ok(json!({ "snapshot": tree, "origin": url }))
+
+    let refs: serde_json::Map<String, Value> = state
+        .ref_map
+        .entries_sorted()
+        .into_iter()
+        .map(|(ref_id, entry)| {
+            let mut obj = serde_json::Map::new();
+            obj.insert("role".into(), Value::String(entry.role));
+            obj.insert("name".into(), Value::String(entry.name));
+            (ref_id, Value::Object(obj))
+        })
+        .collect();
+
+    Ok(json!({ "snapshot": tree, "origin": url, "refs": refs }))
 }
 
 async fn handle_screenshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -1920,11 +1934,17 @@ async fn handle_reload(state: &mut DaemonState) -> Result<Value, String> {
 
     let mut rx = mgr.client.subscribe();
     let _ = tokio::time::timeout(tokio::time::Duration::from_secs(10), async {
-        while let Ok(event) = rx.recv().await {
-            if event.method == "Page.loadEventFired"
-                && event.session_id.as_deref() == Some(&session_id)
-            {
-                return;
+        loop {
+            match rx.recv().await {
+                Ok(event) => {
+                    if event.method == "Page.loadEventFired"
+                        && event.session_id.as_deref() == Some(&session_id)
+                    {
+                        return;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(_) => break,
             }
         }
     })
@@ -4151,6 +4171,7 @@ async fn handle_responsebody(cmd: &Value, state: &DaemonState) -> Result<Value, 
                     }
                 }
             }
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
             Ok(Err(_)) => return Err("Event stream closed".to_string()),
             Err(_) => {
                 return Err(format!(
@@ -4189,6 +4210,7 @@ async fn handle_waitfordownload(cmd: &Value, state: &DaemonState) -> Result<Valu
                     return Ok(json!({ "path": path }));
                 }
             }
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
             Ok(Err(_)) => return Err("Event stream closed".to_string()),
             Err(_) => return Err("Timeout waiting for download".to_string()),
         }

@@ -1,4 +1,4 @@
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
@@ -47,7 +47,10 @@ impl Drop for ChromeProcess {
                         std::thread::sleep(Duration::from_millis(100));
                     }
                     Err(e) => {
-                        eprintln!(
+                        // Use write! instead of eprintln! to avoid panicking
+                        // if the daemon's stderr pipe is broken (parent dropped it).
+                        let _ = writeln!(
+                            std::io::stderr(),
                             "Warning: failed to clean up temp profile {}: {}",
                             dir.display(),
                             e
@@ -180,6 +183,10 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
         args.push("--no-sandbox".to_string());
     }
 
+    if should_disable_dev_shm(&args) {
+        args.push("--disable-dev-shm-usage".to_string());
+    }
+
     Ok(ChromeArgs {
         args,
         temp_user_data_dir,
@@ -194,6 +201,33 @@ pub fn launch_chrome(options: &LaunchOptions) -> Result<ChromeProcess, String> {
         }
     };
 
+    let max_attempts = 3;
+    let mut last_err = String::new();
+
+    for attempt in 1..=max_attempts {
+        match try_launch_chrome(&chrome_path, options) {
+            Ok(process) => return Ok(process),
+            Err(e) => {
+                last_err = e;
+                if attempt < max_attempts {
+                    // Use write! instead of eprintln! to avoid panicking
+                    // if the daemon's stderr pipe is broken (parent dropped it).
+                    let _ = writeln!(
+                        std::io::stderr(),
+                        "[chrome] Launch attempt {}/{} failed, retrying in 500ms...",
+                        attempt,
+                        max_attempts
+                    );
+                    std::thread::sleep(Duration::from_millis(500));
+                }
+            }
+        }
+    }
+
+    Err(last_err)
+}
+
+fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<ChromeProcess, String> {
     let ChromeArgs {
         args,
         temp_user_data_dir,
@@ -205,7 +239,7 @@ pub fn launch_chrome(options: &LaunchOptions) -> Result<ChromeProcess, String> {
         }
     };
 
-    let mut child = Command::new(&chrome_path)
+    let mut child = Command::new(chrome_path)
         .args(&args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -498,6 +532,36 @@ fn should_disable_sandbox(existing_args: &[String]) -> bool {
         }
 
         // Generic container detection: cgroup contains docker/kubepods/lxc
+        if let Ok(cgroup) = std::fs::read_to_string("/proc/1/cgroup") {
+            if cgroup.contains("docker") || cgroup.contains("kubepods") || cgroup.contains("lxc") {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+/// Returns true if Chrome should use disk instead of /dev/shm for shared memory.
+/// On CI runners and containers, /dev/shm is often too small (64MB default),
+/// which causes Chrome to crash mid-session.
+fn should_disable_dev_shm(existing_args: &[String]) -> bool {
+    if existing_args.iter().any(|a| a == "--disable-dev-shm-usage") {
+        return false;
+    }
+
+    if std::env::var("CI").is_ok() {
+        return true;
+    }
+
+    #[cfg(unix)]
+    {
+        if unsafe { libc::geteuid() } == 0 {
+            return true;
+        }
+        if Path::new("/.dockerenv").exists() || Path::new("/run/.containerenv").exists() {
+            return true;
+        }
         if let Ok(cgroup) = std::fs::read_to_string("/proc/1/cgroup") {
             if cgroup.contains("docker") || cgroup.contains("kubepods") || cgroup.contains("lxc") {
                 return true;

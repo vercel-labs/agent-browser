@@ -1711,3 +1711,95 @@ async fn e2e_inspect() {
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     assert_success(&resp);
 }
+
+// ---------------------------------------------------------------------------
+// Stale ref fallback (#805): clicking a ref after the DOM has been replaced
+// should fall back to role/name lookup instead of failing.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore]
+async fn e2e_click_stale_ref_falls_back_to_role_name() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Navigate to a page with a button that replaces the DOM when clicked.
+    let html = r#"data:text/html,<body>
+        <div id="c">
+            <button onclick="
+                var c = document.getElementById('c');
+                c.innerHTML = '';
+                var b = document.createElement('button');
+                b.textContent = 'Target';
+                b.onclick = function() { document.title = 'clicked'; };
+                c.appendChild(b);
+                document.title = 'replaced';
+            ">Replace</button>
+            <button>Target</button>
+        </div>
+    </body>"#;
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Snapshot to populate the ref_map with backend_node_ids.
+    let resp = execute_command(&json!({ "id": "3", "action": "snapshot" }), &mut state).await;
+    assert_success(&resp);
+    let snapshot = get_data(&resp)["snapshot"].as_str().unwrap();
+    assert!(
+        snapshot.contains("Replace"),
+        "Snapshot should contain Replace button"
+    );
+    assert!(
+        snapshot.contains("Target"),
+        "Snapshot should contain Target button"
+    );
+
+    // Click "Replace" — this removes all DOM nodes and recreates them,
+    // making the backend_node_id for "Target" stale.
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "click", "selector": "e1" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
+    // Verify the DOM was actually replaced.
+    let resp = execute_command(&json!({ "id": "5", "action": "title" }), &mut state).await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["title"], "replaced");
+
+    // Now click the stale "Target" ref. Before the fix this returned:
+    //   "CDP error (DOM.getBoxModel): Could not compute box model."
+    // After the fix it falls back to role/name lookup and succeeds.
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "click", "selector": "e2" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
+    // Verify the fallback click hit the right (recreated) button.
+    let resp = execute_command(&json!({ "id": "7", "action": "title" }), &mut state).await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["title"],
+        "clicked",
+        "Stale ref should have been resolved via role/name fallback"
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}

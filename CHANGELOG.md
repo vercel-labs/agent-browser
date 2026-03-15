@@ -1,5 +1,61 @@
 # agent-browser
 
+## 0.20.6
+
+### Patch Changes
+
+- fa91c22: ### Bug Fixes
+
+  - **Stale accessibility tree reference fallback** - Fixed an issue where interacting with an element whose **`backend_node_id`** had become stale (e.g. after the DOM was replaced) would fail with a `Could not compute box model` CDP error. Element resolution now re-queries the accessibility tree using role/name lookup to obtain a fresh node ID before retrying the operation (#806)
+
+## 0.20.5
+
+### Patch Changes
+
+- fc091d2: ### Bug Fixes
+
+  - **Daemon panic on broken stderr pipe** - Replaced all `eprintln!` calls with `writeln!(std::io::stderr(), ...)` wrapped in `let _ =` to silently discard write errors, preventing the daemon from panicking when the parent process drops the stderr pipe during Chrome launch (#802)
+
+## 0.20.4
+
+### Patch Changes
+
+- e2ebde2: ### Bug Fixes
+
+  - **Broadcast channel lag handling** - Fixed an issue where **broadcast channel lag** errors were incorrectly treated as stream closure, causing premature termination of event listeners in reload, response body, download, and navigation wait operations. Lagged messages are now skipped and the loop continues instead of breaking (#797)
+
+  ### Improvements
+
+  - Removed unused **pnpm setup** steps from the `global-install` CI job, simplifying the workflow configuration (#798)
+
+## 0.20.3
+
+### Patch Changes
+
+- e365909: ### Bug Fixes
+
+  - **Chrome launch retry** - Chrome will now retry launching up to 3 times with a 500ms delay between attempts, improving resilience against transient startup failures (#791)
+  - **Remote CDP snapshot hang** - Resolved an issue where snapshots would hang indefinitely over remote CDP (WSS) connections by removing WebSocket message and frame size limits to accommodate large responses (e.g. `Accessibility.getFullAXTree`), accepting binary frames from remote proxies such as Browserless, and immediately clearing pending commands when the connection closes rather than waiting for the 30-second timeout (#792)
+
+## 0.20.2
+
+### Patch Changes
+
+- 944fa01: ### New Features
+
+  - **Linux musl (Alpine) builds** - Added pre-built binaries for **linux-musl** targeting both **x64** and **arm64** architectures, enabling native support for Alpine Linux and other musl-based distributions without requiring glibc (#784)
+
+  ### Improvements
+
+  - **Consecutive `--auto-connect` commands** - Added support for issuing multiple consecutive `--auto-connect` commands without requiring a full browser relaunch; external connections are now correctly identified and reused (#786)
+  - **External browser disconnect behavior** - When using `--auto-connect` or `--cdp`, closing the agent session now disconnects cleanly without shutting down the user's browser process
+
+  ### Bug Fixes
+
+  - **Restored `refs` dict in `--json` snapshot output** - The `refs` map containing role and name metadata for referenced elements is now correctly included in JSON snapshot responses (#787)
+  - Fixed e2e test assertions for `diff_snapshot` and `domain_filter` to correctly reflect expected behavior (#783)
+  - Fixed Chrome temp-dir cleanup test failing on Windows (#766)
+
 ## 0.20.1
 
 ### Patch Changes

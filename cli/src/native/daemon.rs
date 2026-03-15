@@ -1,6 +1,7 @@
 use serde_json::Value;
 use std::env;
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
 use std::process;
 use std::sync::Arc;
@@ -47,11 +48,12 @@ pub async fn run_daemon(session: &str) {
                         stream_client = Some(client_slot.clone());
                         let stream_path = socket_dir.join(format!("{}.stream", session));
                         if let Err(e) = fs::write(&stream_path, stream_server.port().to_string()) {
-                            eprintln!("Failed to write .stream file: {}", e);
+                            let _ =
+                                writeln!(std::io::stderr(), "Failed to write .stream file: {}", e);
                         }
                     }
                     Err(e) => {
-                        eprintln!("Stream server failed to start: {}", e);
+                        let _ = writeln!(std::io::stderr(), "Stream server failed to start: {}", e);
                     }
                 }
             }
@@ -73,7 +75,7 @@ pub async fn run_daemon(session: &str) {
     let _ = fs::remove_file(&stream_path);
 
     if let Err(e) = result {
-        eprintln!("Daemon error: {}", e);
+        let _ = writeln!(std::io::stderr(), "Daemon error: {}", e);
         process::exit(1);
     }
 }
@@ -112,7 +114,7 @@ async fn run_socket_server(
                         });
                     }
                     Err(e) => {
-                        eprintln!("Accept error: {}", e);
+                        let _ = writeln!(std::io::stderr(), "Accept error: {}", e);
                     }
                 }
             }
@@ -185,7 +187,7 @@ async fn run_socket_server(
                         });
                     }
                     Err(e) => {
-                        eprintln!("Accept error: {}", e);
+                        let _ = writeln!(std::io::stderr(), "Accept error: {}", e);
                     }
                 }
             }
@@ -299,21 +301,25 @@ async fn shutdown_signal() {
         let mut sigint = match signal::unix::signal(signal::unix::SignalKind::interrupt()) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("Failed to install SIGINT handler: {}", e);
+                let _ = writeln!(std::io::stderr(), "Failed to install SIGINT handler: {}", e);
                 process::exit(1);
             }
         };
         let mut sigterm = match signal::unix::signal(signal::unix::SignalKind::terminate()) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("Failed to install SIGTERM handler: {}", e);
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "Failed to install SIGTERM handler: {}",
+                    e
+                );
                 process::exit(1);
             }
         };
         let mut sighup = match signal::unix::signal(signal::unix::SignalKind::hangup()) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("Failed to install SIGHUP handler: {}", e);
+                let _ = writeln!(std::io::stderr(), "Failed to install SIGHUP handler: {}", e);
                 process::exit(1);
             }
         };
@@ -328,7 +334,7 @@ async fn shutdown_signal() {
     #[cfg(windows)]
     {
         if let Err(e) = signal::ctrl_c().await {
-            eprintln!("Failed to install Ctrl+C handler: {}", e);
+            let _ = writeln!(std::io::stderr(), "Failed to install Ctrl+C handler: {}", e);
             process::exit(1);
         }
     }

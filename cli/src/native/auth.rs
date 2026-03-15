@@ -3,6 +3,7 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -137,7 +138,8 @@ fn ensure_encryption_key() -> Result<Vec<u8>, String> {
         let _ = fs::set_permissions(&key_file, fs::Permissions::from_mode(0o600));
     }
 
-    eprintln!(
+    let _ = writeln!(
+        std::io::stderr(),
         "[agent-browser] Auto-generated encryption key at {} -- back up this file or set {}",
         key_file.display(),
         ENCRYPTION_KEY_ENV

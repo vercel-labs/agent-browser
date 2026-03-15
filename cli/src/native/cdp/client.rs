@@ -5,7 +5,7 @@ use std::sync::Arc;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 use tokio::sync::{broadcast, oneshot, Mutex};
-use tokio_tungstenite::connect_async;
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
 
 use super::types::{CdpCommand, CdpEvent, CdpMessage};
@@ -40,9 +40,19 @@ pub struct CdpClient {
 
 impl CdpClient {
     pub async fn connect(url: &str) -> Result<Self, String> {
-        let (ws_stream, _) = connect_async(url)
-            .await
-            .map_err(|e| format!("CDP WebSocket connect failed: {}", e))?;
+        // Use unlimited message/frame sizes to handle large CDP responses
+        // (e.g. Accessibility.getFullAXTree) over remote WSS connections where
+        // proxies may produce frames exceeding the default 16 MiB limit.
+        let ws_config = WebSocketConfig {
+            max_message_size: None,
+            max_frame_size: None,
+            ..Default::default()
+        };
+
+        let (ws_stream, _) =
+            tokio_tungstenite::connect_async_with_config(url, Some(ws_config), false)
+                .await
+                .map_err(|e| format!("CDP WebSocket connect failed: {}", e))?;
 
         let (ws_tx, mut ws_rx) = ws_stream.split();
         let ws_tx = Arc::new(Mutex::new(ws_tx));
@@ -57,8 +67,14 @@ impl CdpClient {
 
         let reader_handle = tokio::spawn(async move {
             while let Some(msg) = ws_rx.next().await {
+                // Accept both Text and Binary frames — remote CDP proxies
+                // (e.g. Browserless) may send responses as Binary frames.
                 let msg = match msg {
                     Ok(Message::Text(text)) => text,
+                    Ok(Message::Binary(data)) => match String::from_utf8(data) {
+                        Ok(text) => text,
+                        Err(_) => continue,
+                    },
                     Ok(Message::Close(_)) => break,
                     Ok(_) => continue,
                     Err(_) => break,
@@ -99,6 +115,11 @@ impl CdpClient {
                     let _ = event_tx_clone.send(event);
                 }
             }
+
+            // Reader loop exited (connection closed or error). Drop all pending
+            // command senders so callers get an immediate channel-closed error
+            // instead of waiting for the 30-second timeout.
+            pending_clone.lock().await.clear();
         });
 
         Ok(Self {

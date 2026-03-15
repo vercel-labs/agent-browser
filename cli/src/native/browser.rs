@@ -469,9 +469,17 @@ impl BrowserManager {
         let timeout = tokio::time::Duration::from_millis(self.default_timeout_ms);
 
         tokio::time::timeout(timeout, async {
-            while let Ok(event) = rx.recv().await {
-                if event.method == event_name && event.session_id.as_deref() == Some(session_id) {
-                    return Ok(());
+            loop {
+                match rx.recv().await {
+                    Ok(event) => {
+                        if event.method == event_name
+                            && event.session_id.as_deref() == Some(session_id)
+                        {
+                            return Ok(());
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
             }
             Err("Event stream closed".to_string())
@@ -526,6 +534,7 @@ impl BrowserManager {
                         }
                     }
                     Ok(Ok(_)) => {}
+                    Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
                     Ok(Err(_)) => break,
                     Err(_) => {
                         // Timeout on recv -- check if idle long enough
@@ -609,10 +618,15 @@ impl BrowserManager {
     }
 
     pub async fn close(&mut self) -> Result<(), String> {
-        let _ = self
-            .client
-            .send_command_no_params("Browser.close", None)
-            .await;
+        if self.browser_process.is_some() {
+            // Only send Browser.close when we launched the browser ourselves.
+            // For external connections (--auto-connect, --cdp) we just disconnect
+            // without shutting down the user's browser.
+            let _ = self
+                .client
+                .send_command_no_params("Browser.close", None)
+                .await;
+        }
 
         if let Some(mut process) = self.browser_process.take() {
             let timeout = std::time::Duration::from_secs(5);
