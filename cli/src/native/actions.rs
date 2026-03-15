@@ -5034,7 +5034,10 @@ async fn handle_auth_login(cmd: &Value, state: &mut DaemonState) -> Result<Value
     .await?;
 
     let otp_code = if let Some(ref item) = one_password_item {
-        item.otp.clone()
+        item.otp_reference
+            .as_deref()
+            .map(auth::resolve_1password_reference)
+            .transpose()?
     } else if let Some(otp_op_ref) = cred.otp_op_ref.as_deref() {
         Some(auth::resolve_1password_reference(otp_op_ref)?)
     } else {
