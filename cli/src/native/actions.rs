@@ -1,7 +1,8 @@
 use serde_json::{json, Value};
 use std::env;
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{broadcast, oneshot, RwLock};
 
 use super::auth;
 use super::browser::{BrowserManager, WaitUntil};
@@ -163,6 +164,47 @@ impl DaemonState {
             let mut guard = slot.write().await;
             *guard = self.browser.as_ref().map(|m| Arc::clone(&m.client));
         }
+    }
+
+    /// Start screencast and spawn a background recording task that pipes
+    /// frames to ffmpeg in real-time.
+    async fn start_recording_task(
+        &mut self,
+        client: Arc<CdpClient>,
+        session_id: String,
+    ) -> Result<(), String> {
+        stream::start_screencast(&client, &session_id, "jpeg", 80, 1280, 720).await?;
+        self.screencasting = true;
+
+        let event_rx = client.subscribe();
+        let shared_count = Arc::new(AtomicU64::new(0));
+        let (cancel_tx, cancel_rx) = oneshot::channel();
+        let handle = recording::spawn_recording_task(
+            event_rx,
+            client,
+            session_id,
+            self.recording_state.output_path.clone(),
+            shared_count.clone(),
+            cancel_rx,
+        );
+        self.recording_state.screencast_task = Some(handle);
+        self.recording_state.shared_frame_count = Some(shared_count);
+        self.recording_state.cancel_tx = Some(cancel_tx);
+        Ok(())
+    }
+
+    /// Stop screencast, wait for the recording task to finish (pads last
+    /// frame, closes ffmpeg), and sync the frame count back into state.
+    async fn stop_recording_task(&mut self) -> Result<(), String> {
+        if self.screencasting {
+            if let Some(ref browser) = self.browser {
+                if let Ok(session_id) = browser.active_session_id() {
+                    let _ = stream::stop_screencast(&browser.client, session_id).await;
+                }
+            }
+            self.screencasting = false;
+        }
+        recording::stop_recording_task(&mut self.recording_state).await
     }
 
     fn drain_cdp_events(
@@ -345,20 +387,8 @@ impl DaemonState {
                             }
                         }
                         "Page.screencastFrame" => {
-                            if self.recording_state.active {
-                                if let Some(data) =
-                                    event.params.get("data").and_then(|v| v.as_str())
-                                {
-                                    if let Ok(bytes) = base64::Engine::decode(
-                                        &base64::engine::general_purpose::STANDARD,
-                                        data,
-                                    ) {
-                                        recording::recording_add_frame(
-                                            &mut self.recording_state,
-                                            &bytes,
-                                        );
-                                    }
-                                }
+                            if self.recording_state.has_background_task() {
+                                continue;
                             }
                             if let Some(sid) =
                                 event.params.get("sessionId").and_then(|v| v.as_i64())
@@ -2554,132 +2584,111 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty());
 
-    let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
-    let old_session_id = mgr.active_session_id()?.to_string();
+    let (client, new_session_id) = {
+        let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
+        let old_session_id = mgr.active_session_id()?.to_string();
 
-    // Capture current URL if no URL specified
-    let nav_url = if let Some(u) = recording_url {
-        u.to_string()
-    } else {
-        mgr.get_url()
+        // Capture current URL if no URL specified
+        let nav_url = if let Some(u) = recording_url {
+            u.to_string()
+        } else {
+            mgr.get_url()
+                .await
+                .unwrap_or_else(|_| "about:blank".to_string())
+        };
+
+        // Capture current cookies
+        let cookies_result = mgr
+            .client
+            .send_command_no_params("Network.getAllCookies", Some(&old_session_id))
             .await
-            .unwrap_or_else(|_| "about:blank".to_string())
-    };
+            .ok();
 
-    // Capture current cookies
-    let cookies_result = mgr
-        .client
-        .send_command_no_params("Network.getAllCookies", Some(&old_session_id))
-        .await
-        .ok();
+        // Create new browser context
+        let ctx_result = mgr
+            .client
+            .send_command_no_params("Target.createBrowserContext", None)
+            .await?;
+        let context_id = ctx_result
+            .get("browserContextId")
+            .and_then(|v| v.as_str())
+            .ok_or("Failed to get browserContextId")?
+            .to_string();
 
-    // Create new browser context
-    let ctx_result = mgr
-        .client
-        .send_command_no_params("Target.createBrowserContext", None)
-        .await?;
-    let context_id = ctx_result
-        .get("browserContextId")
-        .and_then(|v| v.as_str())
-        .ok_or("Failed to get browserContextId")?
-        .to_string();
+        // Create page in new context
+        let create_result: CreateTargetResult = mgr
+            .client
+            .send_command_typed(
+                "Target.createTarget",
+                &json!({ "url": "about:blank", "browserContextId": context_id }),
+                None,
+            )
+            .await?;
 
-    // Create page in new context
-    let create_result: CreateTargetResult = mgr
-        .client
-        .send_command_typed(
-            "Target.createTarget",
-            &json!({ "url": "about:blank", "browserContextId": context_id }),
-            None,
-        )
-        .await?;
+        let attach_result: AttachToTargetResult = mgr
+            .client
+            .send_command_typed(
+                "Target.attachToTarget",
+                &AttachToTargetParams {
+                    target_id: create_result.target_id.clone(),
+                    flatten: true,
+                },
+                None,
+            )
+            .await?;
 
-    let attach_result: AttachToTargetResult = mgr
-        .client
-        .send_command_typed(
-            "Target.attachToTarget",
-            &AttachToTargetParams {
-                target_id: create_result.target_id.clone(),
-                flatten: true,
-            },
-            None,
-        )
-        .await?;
+        let new_session_id = attach_result.session_id.clone();
+        mgr.enable_domains_pub(&new_session_id).await?;
 
-    let new_session_id = attach_result.session_id.clone();
-    mgr.enable_domains_pub(&new_session_id).await?;
-
-    // Transfer cookies to new context
-    if let Some(ref cr) = cookies_result {
-        if let Some(cookie_arr) = cr.get("cookies").and_then(|v| v.as_array()) {
-            if !cookie_arr.is_empty() {
-                let _ = mgr
-                    .client
-                    .send_command(
-                        "Network.setCookies",
-                        Some(json!({ "cookies": cookie_arr })),
-                        Some(&new_session_id),
-                    )
-                    .await;
+        // Transfer cookies to new context
+        if let Some(ref cr) = cookies_result {
+            if let Some(cookie_arr) = cr.get("cookies").and_then(|v| v.as_array()) {
+                if !cookie_arr.is_empty() {
+                    let _ = mgr
+                        .client
+                        .send_command(
+                            "Network.setCookies",
+                            Some(json!({ "cookies": cookie_arr })),
+                            Some(&new_session_id),
+                        )
+                        .await;
+                }
             }
         }
-    }
 
-    // Add page and switch to it
-    mgr.add_page(super::browser::PageInfo {
-        target_id: create_result.target_id,
-        session_id: new_session_id.clone(),
-        url: nav_url.clone(),
-        title: String::new(),
-        target_type: "page".to_string(),
-    });
+        // Add page and switch to it
+        mgr.add_page(super::browser::PageInfo {
+            target_id: create_result.target_id,
+            session_id: new_session_id.clone(),
+            url: nav_url.clone(),
+            title: String::new(),
+            target_type: "page".to_string(),
+        });
 
-    // Navigate to URL
-    if nav_url != "about:blank" {
-        let _ = mgr
-            .client
-            .send_command(
-                "Page.navigate",
-                Some(json!({ "url": nav_url })),
-                Some(&new_session_id),
-            )
-            .await;
-        tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
-    }
+        // Navigate to URL
+        if nav_url != "about:blank" {
+            let _ = mgr
+                .client
+                .send_command(
+                    "Page.navigate",
+                    Some(json!({ "url": nav_url })),
+                    Some(&new_session_id),
+                )
+                .await;
+            tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+        }
+
+        (mgr.client.clone(), new_session_id)
+    };
 
     let result = recording::recording_start(&mut state.recording_state, path)?;
-
-    // Start screencast on new page
-    stream::start_screencast(&mgr.client, &new_session_id, "jpeg", 80, 1280, 720).await?;
-    state.screencasting = true;
+    state.start_recording_task(client, new_session_id).await?;
 
     Ok(result)
 }
 
 async fn handle_recording_stop(state: &mut DaemonState) -> Result<Value, String> {
-    // Stop screencast
-    if state.screencasting {
-        if let Some(ref browser) = state.browser {
-            if let Ok(session_id) = browser.active_session_id() {
-                let _ = stream::stop_screencast(&browser.client, session_id).await;
-            }
-        }
-        state.screencasting = false;
-    }
-
-    // Drain remaining frames before stopping
-    let (ack_ids, _, _, _) = state.drain_cdp_events();
-    if !ack_ids.is_empty() {
-        if let Some(ref browser) = state.browser {
-            if let Ok(session_id) = browser.active_session_id() {
-                for ack_sid in ack_ids {
-                    let _ =
-                        stream::ack_screencast_frame(&browser.client, session_id, ack_sid).await;
-                }
-            }
-        }
-    }
-
+    state.stop_recording_task().await?;
     recording::recording_stop(&mut state.recording_state)
 }
 
@@ -2689,22 +2698,12 @@ async fn handle_recording_restart(cmd: &Value, state: &mut DaemonState) -> Resul
         .and_then(|v| v.as_str())
         .ok_or("Missing 'path' parameter")?;
 
-    // Stop screencast, restart recording, start screencast again
-    if state.screencasting {
-        if let Some(ref browser) = state.browser {
-            if let Ok(session_id) = browser.active_session_id() {
-                let _ = stream::stop_screencast(&browser.client, session_id).await;
-            }
-        }
-        state.screencasting = false;
-    }
-
+    let _ = state.stop_recording_task().await;
     let result = recording::recording_restart(&mut state.recording_state, path)?;
 
     if let Some(ref browser) = state.browser {
         let session_id = browser.active_session_id()?.to_string();
-        stream::start_screencast(&browser.client, &session_id, "jpeg", 80, 1280, 720).await?;
-        state.screencasting = true;
+        state.start_recording_task(browser.client.clone(), session_id).await?;
     }
 
     Ok(result)
@@ -4329,8 +4328,7 @@ async fn handle_video_start(cmd: &Value, state: &mut DaemonState) -> Result<Valu
     let session_id = mgr.active_session_id()?.to_string();
 
     recording::recording_start(&mut state.recording_state, path)?;
-    stream::start_screencast(&mgr.client, &session_id, "jpeg", 80, 1280, 720).await?;
-    state.screencasting = true;
+    state.start_recording_task(mgr.client.clone(), session_id).await?;
 
     Ok(json!({
         "started": true,
@@ -4346,27 +4344,7 @@ async fn handle_video_stop(state: &mut DaemonState) -> Result<Value, String> {
         }));
     }
 
-    if state.screencasting {
-        if let Some(ref browser) = state.browser {
-            if let Ok(session_id) = browser.active_session_id() {
-                let _ = stream::stop_screencast(&browser.client, session_id).await;
-            }
-        }
-        state.screencasting = false;
-    }
-
-    let (ack_ids, _, _, _) = state.drain_cdp_events();
-    if !ack_ids.is_empty() {
-        if let Some(ref browser) = state.browser {
-            if let Ok(session_id) = browser.active_session_id() {
-                for ack_sid in ack_ids {
-                    let _ =
-                        stream::ack_screencast_frame(&browser.client, session_id, ack_sid).await;
-                }
-            }
-        }
-    }
-
+    state.stop_recording_task().await?;
     recording::recording_stop(&mut state.recording_state)
 }
 
