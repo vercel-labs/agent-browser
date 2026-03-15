@@ -456,12 +456,15 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
             println!("{} {}", color::success_indicator(), label);
             return;
         }
-        // Recording start (has "started" field)
+        // Started actions (profiling, HAR, recording)
         if let Some(started) = data.get("started").and_then(|v| v.as_bool()) {
             if started {
                 match action {
                     Some("profiler_start") => {
                         println!("{} Profiling started", color::success_indicator());
+                    }
+                    Some("har_start") => {
+                        println!("{} HAR recording started", color::success_indicator());
                     }
                     _ => {
                         if let Some(path) = data.get("path").and_then(|v| v.as_str()) {
@@ -591,9 +594,12 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
                     data.get("eventCount").and_then(|c| c.as_u64()).unwrap_or(0)
                 ),
                 "har_stop" => println!(
-                    "{} HAR saved to {}",
+                    "{} HAR saved to {} ({} requests)",
                     color::success_indicator(),
-                    color::green(path)
+                    color::green(path),
+                    data.get("requestCount")
+                        .and_then(|c| c.as_u64())
+                        .unwrap_or(0)
                 ),
                 "download" | "waitfordownload" => println!(
                     "{} Download saved to {}",
@@ -1721,6 +1727,7 @@ Subcommands:
   requests [options]         List captured requests
     --clear                  Clear request log
     --filter <pattern>       Filter by URL pattern
+  har <start|stop> [path]    Record and export a HAR file
 
 Global Options:
   --json               Output as JSON
@@ -1733,6 +1740,8 @@ Examples:
   agent-browser network requests
   agent-browser network requests --filter "api"
   agent-browser network requests --clear
+  agent-browser network har start
+  agent-browser network har stop ./capture.har
 "##
         }
 
@@ -2484,6 +2493,7 @@ Network:  agent-browser network <action>
   route <url> [--abort|--body <json>]
   unroute [url]
   requests [--clear] [--filter <pattern>]
+  har <start|stop> [path]
 
 Storage:
   cookies [get|set|clear]    Manage cookies (set supports --url, --domain, --path, --httpOnly, --secure, --sameSite, --expires)

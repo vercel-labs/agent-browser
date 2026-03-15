@@ -1,8 +1,10 @@
 use serde_json::{json, Value};
 use std::env;
 use std::io::Write;
+use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
+use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use tokio::sync::{broadcast, oneshot, RwLock};
 
 use super::auth;
@@ -38,12 +40,21 @@ pub struct PendingConfirmation {
     pub cmd: Value,
 }
 
+/// Captured request/response metadata used to export HAR 1.2 files.
 pub struct HarEntry {
     pub method: String,
     pub url: String,
     pub status: Option<i64>,
+    pub status_text: Option<String>,
     pub mime_type: Option<String>,
     pub request_id: String,
+    pub request_headers: Value,
+    pub request_body_size: i64,
+    pub response_headers: Value,
+    pub started_date_time: String,
+    pub resource_type: String,
+    pub http_version: Option<String>,
+    pub response_body_size: Option<i64>,
 }
 
 pub struct RouteEntry {
@@ -338,12 +349,36 @@ impl DaemonState {
                                     .unwrap_or("")
                                     .to_string();
                                 if self.har_recording {
+                                    let headers =
+                                        request.get("headers").cloned().unwrap_or(json!({}));
+                                    let request_body_size = request
+                                        .get("postData")
+                                        .and_then(|v| v.as_str())
+                                        .map(|body| body.len() as i64)
+                                        .unwrap_or(0);
+                                    let resource_type = event
+                                        .params
+                                        .get("type")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("Other")
+                                        .to_string();
+                                    let started_date_time = har_started_date_time(
+                                        event.params.get("wallTime").and_then(|v| v.as_f64()),
+                                    );
                                     self.har_entries.push(HarEntry {
                                         method: method.clone(),
                                         url: url.clone(),
                                         status: None,
+                                        status_text: None,
                                         mime_type: None,
                                         request_id,
+                                        request_headers: headers,
+                                        request_body_size,
+                                        response_headers: json!({}),
+                                        started_date_time,
+                                        resource_type,
+                                        http_version: None,
+                                        response_body_size: None,
                                     });
                                 }
                                 if self.request_tracking {
@@ -381,6 +416,19 @@ impl DaemonState {
                                     .get("mimeType")
                                     .and_then(|v| v.as_str())
                                     .map(String::from);
+                                let status_text = response
+                                    .get("statusText")
+                                    .and_then(|v| v.as_str())
+                                    .map(String::from);
+                                let headers = response.get("headers").cloned().unwrap_or(json!({}));
+                                let http_version = response
+                                    .get("protocol")
+                                    .and_then(|v| v.as_str())
+                                    .map(String::from);
+                                let response_body_size = response
+                                    .get("encodedDataLength")
+                                    .and_then(|v| v.as_f64())
+                                    .map(|size| size.max(0.0) as i64);
                                 if let Some(entry) = self
                                     .har_entries
                                     .iter_mut()
@@ -388,7 +436,35 @@ impl DaemonState {
                                     .find(|e| e.request_id == request_id)
                                 {
                                     entry.status = status;
+                                    entry.status_text = status_text;
                                     entry.mime_type = mime_type;
+                                    entry.response_headers = headers;
+                                    entry.http_version = http_version;
+                                    if response_body_size.is_some() {
+                                        entry.response_body_size = response_body_size;
+                                    }
+                                }
+                            }
+                        }
+                        "Network.loadingFinished" if self.har_recording => {
+                            let request_id = event
+                                .params
+                                .get("requestId")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            let encoded_data_length = event
+                                .params
+                                .get("encodedDataLength")
+                                .and_then(|v| v.as_f64())
+                                .map(|size| size.max(0.0) as i64);
+                            if let Some(entry) = self
+                                .har_entries
+                                .iter_mut()
+                                .rev()
+                                .find(|e| e.request_id == request_id)
+                            {
+                                if encoded_data_length.is_some() {
+                                    entry.response_body_size = encoded_data_length;
                                 }
                             }
                         }
@@ -571,6 +647,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         action,
         "" | "launch"
             | "close"
+            | "har_stop"
             | "credentials_set"
             | "credentials_get"
             | "credentials_delete"
@@ -4402,6 +4479,7 @@ async fn handle_video_stop(state: &mut DaemonState) -> Result<Value, String> {
     recording::recording_stop(&mut state.recording_state)
 }
 
+/// Begin capturing network traffic for a later HAR export.
 async fn handle_har_start(state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
@@ -4413,46 +4491,212 @@ async fn handle_har_start(state: &mut DaemonState) -> Result<Value, String> {
     Ok(json!({ "started": true }))
 }
 
+/// Stop HAR recording and write the captured requests to disk.
 async fn handle_har_stop(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let path = cmd
-        .get("path")
-        .and_then(|v| v.as_str())
-        .ok_or("Missing 'path' parameter")?;
+    let path = har_output_path(cmd.get("path").and_then(|v| v.as_str()));
 
     state.har_recording = false;
 
-    let entries: Vec<Value> = state
-        .har_entries
-        .drain(..)
-        .map(|e| {
-            json!({
-                "request": {
-                    "method": e.method,
-                    "url": e.url,
-                },
-                "response": {
-                    "status": e.status.unwrap_or(0),
-                    "content": {
-                        "mimeType": e.mime_type.unwrap_or_default(),
-                    }
-                }
-            })
-        })
-        .collect();
+    let entries: Vec<Value> = state.har_entries.drain(..).map(har_entry_json).collect();
     let request_count = entries.len();
+    let browser = har_browser_metadata(state).await;
 
-    let har = json!({
-        "log": {
-            "version": "1.2",
-            "entries": entries
-        }
+    let mut log = json!({
+        "version": "1.2",
+        "creator": {
+            "name": "agent-browser",
+            "version": env!("CARGO_PKG_VERSION")
+        },
+        "entries": entries
     });
+    if let Some(browser) = browser {
+        log["browser"] = browser;
+    }
+    let har = json!({ "log": log });
 
     let har_str = serde_json::to_string_pretty(&har)
         .map_err(|e| format!("Failed to serialize HAR: {}", e))?;
-    std::fs::write(path, har_str).map_err(|e| format!("Failed to write HAR: {}", e))?;
+    std::fs::write(&path, har_str).map_err(|e| format!("Failed to write HAR: {}", e))?;
 
     Ok(json!({ "path": path, "requestCount": request_count }))
+}
+
+fn har_entry_json(entry: HarEntry) -> Value {
+    let query_string = har_query_string(&entry.url);
+    let request_headers = har_headers(&entry.request_headers);
+    let response_headers = har_headers(&entry.response_headers);
+    let http_version = entry.http_version.unwrap_or_default();
+    let body_size = entry.response_body_size.unwrap_or(-1);
+    let content_size = entry.response_body_size.unwrap_or(0);
+
+    json!({
+        "startedDateTime": entry.started_date_time,
+        "time": 0,
+        "request": {
+            "method": entry.method,
+            "url": entry.url,
+            "httpVersion": http_version.clone(),
+            "cookies": [],
+            "headers": request_headers,
+            "queryString": query_string,
+            "headersSize": -1,
+            "bodySize": entry.request_body_size,
+        },
+        "response": {
+            "status": entry.status.unwrap_or(0),
+            "statusText": entry.status_text.unwrap_or_default(),
+            "httpVersion": http_version,
+            "cookies": [],
+            "headers": response_headers,
+            "content": {
+                "size": content_size,
+                "mimeType": entry.mime_type.unwrap_or_default(),
+            },
+            "redirectURL": har_redirect_url(&entry.response_headers),
+            "headersSize": -1,
+            "bodySize": body_size,
+        },
+        "cache": {},
+        "timings": {
+            "blocked": -1,
+            "dns": -1,
+            "connect": -1,
+            "send": -1,
+            "wait": -1,
+            "receive": -1,
+            "ssl": -1,
+        },
+        "_resourceType": entry.resource_type,
+    })
+}
+
+/// Convert the raw CDP header object into HAR header items.
+fn har_headers(headers: &Value) -> Vec<Value> {
+    let Some(obj) = headers.as_object() else {
+        return Vec::new();
+    };
+
+    let mut entries: Vec<(&String, &Value)> = obj.iter().collect();
+    entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+    entries
+        .into_iter()
+        .map(|(name, value)| {
+            json!({
+                "name": name,
+                "value": har_header_value(value),
+            })
+        })
+        .collect()
+}
+
+fn har_header_value(value: &Value) -> String {
+    match value {
+        Value::Null => String::new(),
+        Value::String(s) => s.clone(),
+        Value::Number(n) => n.to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::Array(values) => values
+            .iter()
+            .map(har_header_value)
+            .collect::<Vec<_>>()
+            .join(", "),
+        Value::Object(_) => value.to_string(),
+    }
+}
+
+fn har_query_string(raw_url: &str) -> Vec<Value> {
+    let Ok(url) = url::Url::parse(raw_url) else {
+        return Vec::new();
+    };
+
+    url.query_pairs()
+        .map(|(name, value)| {
+            json!({
+                "name": name.into_owned(),
+                "value": value.into_owned(),
+            })
+        })
+        .collect()
+}
+
+fn har_redirect_url(headers: &Value) -> String {
+    har_header_lookup(headers, "location").unwrap_or_default()
+}
+
+fn har_header_lookup(headers: &Value, expected_name: &str) -> Option<String> {
+    headers.as_object().and_then(|obj| {
+        obj.iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(expected_name))
+            .map(|(_, value)| har_header_value(value))
+    })
+}
+
+fn har_output_path(explicit_path: Option<&str>) -> String {
+    match explicit_path {
+        Some(path) => path.to_string(),
+        None => {
+            let dir = get_har_dir();
+            let _ = std::fs::create_dir_all(&dir);
+            dir.join(format!("har-{}.har", unix_timestamp_millis()))
+                .to_string_lossy()
+                .to_string()
+        }
+    }
+}
+
+fn get_har_dir() -> PathBuf {
+    if let Some(home) = dirs::home_dir() {
+        home.join(".agent-browser").join("tmp").join("har")
+    } else {
+        std::env::temp_dir().join("agent-browser").join("har")
+    }
+}
+
+fn unix_timestamp_millis() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+}
+
+fn har_started_date_time(wall_time: Option<f64>) -> String {
+    wall_time
+        .and_then(offset_date_time_from_epoch_seconds)
+        .unwrap_or_else(OffsetDateTime::now_utc)
+        .format(&Rfc3339)
+        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
+}
+
+fn offset_date_time_from_epoch_seconds(seconds: f64) -> Option<OffsetDateTime> {
+    if !seconds.is_finite() || seconds < 0.0 {
+        return None;
+    }
+
+    let nanos = (seconds * 1_000_000_000.0).round() as i128;
+    OffsetDateTime::from_unix_timestamp_nanos(nanos).ok()
+}
+
+async fn har_browser_metadata(state: &DaemonState) -> Option<Value> {
+    let mgr = state.browser.as_ref()?;
+    if !mgr.is_connection_alive().await {
+        return None;
+    }
+
+    let version = mgr
+        .client
+        .send_command_no_params("Browser.getVersion", None)
+        .await
+        .ok()?;
+    browser_metadata_from_version(&version)
+}
+
+fn browser_metadata_from_version(version: &Value) -> Option<Value> {
+    let product = version.get("product").and_then(|v| v.as_str())?;
+    let (name, browser_version) = product.split_once('/').unwrap_or((product, ""));
+    Some(json!({
+        "name": name,
+        "version": browser_version,
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -5340,6 +5584,7 @@ fn error_response(id: &str, error: &str) -> Value {
 mod tests {
     use super::*;
     use crate::test_utils::EnvGuard;
+    use std::fs;
 
     #[test]
     fn test_success_response_structure() {
@@ -5386,6 +5631,139 @@ mod tests {
             !opts.headless,
             "AGENT_BROWSER_HEADED=1 should set headless=false"
         );
+    }
+
+    #[test]
+    fn test_har_entry_json_enriches_request_and_response() {
+        let entry = HarEntry {
+            method: "POST".to_string(),
+            url: "https://example.com/api?foo=bar&baz=qux".to_string(),
+            status: Some(201),
+            status_text: Some("Created".to_string()),
+            mime_type: Some("application/json".to_string()),
+            request_id: "req-1".to_string(),
+            request_headers: json!({
+                "Accept": "application/json",
+                "X-Trace": ["a", "b"],
+            }),
+            request_body_size: 17,
+            response_headers: json!({
+                "Content-Type": "application/json",
+                "Location": "https://example.com/api/1",
+            }),
+            started_date_time: "2026-03-15T12:00:00Z".to_string(),
+            resource_type: "XHR".to_string(),
+            http_version: Some("h2".to_string()),
+            response_body_size: Some(42),
+        };
+
+        let har = har_entry_json(entry);
+        assert_eq!(har["startedDateTime"], "2026-03-15T12:00:00Z");
+        assert_eq!(har["request"]["method"], "POST");
+        assert_eq!(har["request"]["httpVersion"], "h2");
+        assert_eq!(har["request"]["queryString"][0]["name"], "foo");
+        assert_eq!(har["request"]["queryString"][0]["value"], "bar");
+        assert_eq!(har["request"]["bodySize"], 17);
+        assert_eq!(har["response"]["status"], 201);
+        assert_eq!(har["response"]["statusText"], "Created");
+        assert_eq!(har["response"]["content"]["mimeType"], "application/json");
+        assert_eq!(har["response"]["content"]["size"], 42);
+        assert_eq!(har["response"]["redirectURL"], "https://example.com/api/1");
+        assert_eq!(har["_resourceType"], "XHR");
+    }
+
+    #[test]
+    fn test_har_started_date_time_uses_rfc3339() {
+        assert_eq!(har_started_date_time(Some(0.0)), "1970-01-01T00:00:00Z");
+    }
+
+    #[tokio::test]
+    async fn test_handle_har_stop_without_path_uses_default_location() {
+        let mut state = DaemonState::new();
+        state.har_recording = true;
+        state.har_entries.push(HarEntry {
+            method: "GET".to_string(),
+            url: "https://example.com/".to_string(),
+            status: Some(200),
+            status_text: Some("OK".to_string()),
+            mime_type: Some("text/html".to_string()),
+            request_id: "req-2".to_string(),
+            request_headers: json!({ "Accept": "text/html" }),
+            request_body_size: 0,
+            response_headers: json!({ "Content-Type": "text/html" }),
+            started_date_time: "2026-03-15T12:00:00Z".to_string(),
+            resource_type: "Document".to_string(),
+            http_version: Some("h2".to_string()),
+            response_body_size: Some(128),
+        });
+
+        let result = handle_har_stop(&json!({ "action": "har_stop" }), &mut state)
+            .await
+            .unwrap();
+
+        let path = result["path"].as_str().unwrap();
+        assert!(path.ends_with(".har"));
+        assert!(std::path::Path::new(path).starts_with(get_har_dir()));
+        assert_eq!(result["requestCount"], 1);
+        assert!(!state.har_recording);
+        assert!(state.har_entries.is_empty());
+
+        let har: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(har["log"]["version"], "1.2");
+        assert_eq!(har["log"]["creator"]["name"], "agent-browser");
+        assert!(har["log"].get("browser").is_none());
+        assert_eq!(har["log"]["entries"][0]["response"]["content"]["size"], 128);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn test_execute_har_stop_skips_browser_auto_launch() {
+        let path = std::env::temp_dir().join(format!(
+            "agent-browser-har-stop-{}.har",
+            unix_timestamp_millis()
+        ));
+        let mut state = DaemonState::new();
+        state.har_entries.push(HarEntry {
+            method: "GET".to_string(),
+            url: "https://example.com/".to_string(),
+            status: Some(200),
+            status_text: Some("OK".to_string()),
+            mime_type: Some("text/html".to_string()),
+            request_id: "req-3".to_string(),
+            request_headers: json!({}),
+            request_body_size: 0,
+            response_headers: json!({}),
+            started_date_time: "2026-03-15T12:00:00Z".to_string(),
+            resource_type: "Document".to_string(),
+            http_version: Some("h2".to_string()),
+            response_body_size: Some(64),
+        });
+
+        let result = execute_command(
+            &json!({
+                "action": "har_stop",
+                "id": "har-stop-1",
+                "path": path.to_string_lossy().to_string()
+            }),
+            &mut state,
+        )
+        .await;
+
+        assert_eq!(result["success"], true);
+        assert_eq!(result["data"]["requestCount"], 1);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_browser_metadata_from_version_parses_product() {
+        let metadata = browser_metadata_from_version(&json!({
+            "product": "HeadlessChrome/123.0.6312.0"
+        }))
+        .unwrap();
+
+        assert_eq!(metadata["name"], "HeadlessChrome");
+        assert_eq!(metadata["version"], "123.0.6312.0");
     }
 
     #[tokio::test]
