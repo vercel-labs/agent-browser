@@ -453,9 +453,17 @@ pub async fn auto_connect_cdp() -> Result<String, String> {
             if let Ok(ws_url) = discover_cdp_url(port).await {
                 return Ok(ws_url);
             }
-            // M144+: direct WebSocket
-            let ws_url = format!("ws://127.0.0.1:{}{}", port, ws_path);
-            return Ok(ws_url);
+            // M144+: direct WebSocket — verify the port is actually listening
+            // before returning, otherwise a stale DevToolsActivePort file
+            // (left behind after Chrome exits/crashes) produces a confusing
+            // "connection refused" error instead of falling through.
+            if is_port_reachable(port) {
+                let ws_url = format!("ws://127.0.0.1:{}{}", port, ws_path);
+                return Ok(ws_url);
+            }
+            // Port is dead — remove the stale file so future runs skip it.
+            let stale = dir.join("DevToolsActivePort");
+            let _ = std::fs::remove_file(&stale);
         }
     }
 
@@ -467,6 +475,16 @@ pub async fn auto_connect_cdp() -> Result<String, String> {
     }
 
     Err("No running Chrome instance found. Launch Chrome with --remote-debugging-port or use --cdp.".to_string())
+}
+
+fn is_port_reachable(port: u16) -> bool {
+    use std::net::TcpStream;
+    let addr = format!("127.0.0.1:{}", port);
+    TcpStream::connect_timeout(
+        &addr.parse().unwrap(),
+        Duration::from_millis(500),
+    )
+    .is_ok()
 }
 
 fn get_chrome_user_data_dirs() -> Vec<PathBuf> {

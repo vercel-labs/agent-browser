@@ -234,6 +234,7 @@ pub struct DaemonOptions<'a> {
     pub action_policy: Option<&'a str>,
     pub confirm_actions: Option<&'a str>,
     pub engine: Option<&'a str>,
+    pub auto_connect: bool,
 }
 
 fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
@@ -299,6 +300,9 @@ fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
     }
     if let Some(engine) = opts.engine {
         cmd.env("AGENT_BROWSER_ENGINE", engine);
+    }
+    if opts.auto_connect {
+        cmd.env("AGENT_BROWSER_AUTO_CONNECT", "1");
     }
 }
 
@@ -525,6 +529,8 @@ fn is_transient_error(error: &str) -> bool {
         || error.contains("os error 2") // No such file or directory (socket gone)
         || error.contains("os error 61") // Connection refused (macOS)
         || error.contains("os error 111") // Connection refused (Linux)
+        || error.contains("os error 10061") // Connection refused (Windows)
+        || error.contains("os error 10054") // Connection reset by peer (Windows)
 }
 
 fn send_command_once(cmd: &Value, session: &str) -> Result<Response, String> {
