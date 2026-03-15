@@ -332,7 +332,7 @@ agent-browser provides multiple ways to persist login sessions so you don't re-a
 | **Session persistence** | Auto-save/restore cookies + localStorage by name | `--session-name <name>` / `AGENT_BROWSER_SESSION_NAME` |
 | **Import from your browser** | Grab auth from a Chrome session you already logged into | `--auto-connect` + `state save` |
 | **State file** | Load a previously saved state JSON on launch | `--state <path>` / `AGENT_BROWSER_STATE` |
-| **Auth vault** | Store credentials locally (encrypted), login by name | `auth save` / `auth login` |
+| **Auth vault** | Store credentials locally (encrypted), optionally resolve username, password, and OTP from 1Password, login by name | `auth save` / `auth login` |
 
 ### Import auth from your browser
 
@@ -360,6 +360,24 @@ agent-browser --session-name myapp state load ./my-auth.json
 > - State files contain session tokens in plaintext. Add them to `.gitignore` and delete when no longer needed. For encryption at rest, set `AGENT_BROWSER_ENCRYPTION_KEY` (see [State Encryption](#state-encryption)).
 
 For full details on login flows, OAuth, 2FA, cookie-based auth, and the auth vault, see the [Authentication](docs/src/app/sessions/page.mdx) docs.
+
+### Auth vault with 1Password CLI
+
+For sites where you want agent-browser to fill a username, password, and optional TOTP code without storing those values directly in the profile, you can point the auth vault at a single 1Password Login item.
+
+```bash
+# Requires the 1Password CLI (`op`) to be installed and already signed in
+agent-browser auth save github \
+  --url https://github.com/login \
+  --onepassword-item GitHub \
+  --onepassword-vault Work
+
+agent-browser auth login github
+```
+
+This keeps the saved profile encrypted locally while resolving the username, password, and any built-in OTP field at login time via the local `op` CLI.
+
+If you need field-level control, agent-browser still supports advanced 1Password secret references via `--username-op`, `--password-op`, and `--otp-op`.
 
 ## Sessions
 
@@ -454,7 +472,7 @@ agent-browser --session-name secure open example.com
 
 agent-browser includes security features for safe AI agent deployments. All features are opt-in -- existing workflows are unaffected until you explicitly enable a feature:
 
-- **Authentication Vault** -- Store credentials locally (always encrypted), reference by name. The LLM never sees passwords. A key is auto-generated at `~/.agent-browser/.encryption-key` if `AGENT_BROWSER_ENCRYPTION_KEY` is not set: `echo "pass" | agent-browser auth save github --url https://github.com/login --username user --password-stdin` then `agent-browser auth login github`
+- **Authentication Vault** -- Store credentials locally (always encrypted), reference them by name, and optionally resolve usernames, passwords, and OTP codes from 1Password using either a Login item or advanced `op://...` secret references. The LLM never sees secrets. A key is auto-generated at `~/.agent-browser/.encryption-key` if `AGENT_BROWSER_ENCRYPTION_KEY` is not set: `echo "pass" | agent-browser auth save github --url https://github.com/login --username user --password-stdin` then `agent-browser auth login github`
 - **Content Boundary Markers** -- Wrap page output in delimiters so LLMs can distinguish tool output from untrusted content: `--content-boundaries`
 - **Domain Allowlist** -- Restrict navigation to trusted domains (wildcards like `*.example.com` also match the bare domain): `--allowed-domains "example.com,*.example.com"`. Sub-resource requests (scripts, images, fetch) and WebSocket/EventSource connections to non-allowed domains are also blocked. Include any CDN domains your target pages depend on (e.g., `*.cdn.example.com`).
 - **Action Policy** -- Gate destructive actions with a static policy file: `--action-policy ./policy.json`
