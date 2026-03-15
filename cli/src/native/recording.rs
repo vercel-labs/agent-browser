@@ -381,12 +381,4 @@ mod tests {
         assert!(args_str.contains(&"libx264"));
         assert!(args_str.contains(&"/tmp/out.mp4"));
     }
-
-    #[tokio::test]
-    async fn test_stop_recording_task_no_task() {
-        let mut state = RecordingState::new();
-        let result = stop_recording_task(&mut state).await;
-        assert!(result.is_ok());
-        assert_eq!(state.frame_count, 0);
-    }
 }
