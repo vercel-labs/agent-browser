@@ -100,10 +100,14 @@ pub async fn take_screenshot(
     session_id: &str,
     ref_map: &RefMap,
     options: &ScreenshotOptions,
+    execution_context_id: Option<i64>,
 ) -> Result<ScreenshotResult, String> {
     let target_rect = if options.annotate {
         match options.selector.as_deref() {
-            Some(selector) => get_rect_for_selector(client, session_id, ref_map, selector).await?,
+            Some(selector) => {
+                get_rect_for_selector(client, session_id, ref_map, selector, execution_context_id)
+                    .await?
+            }
             None => None,
         }
     } else {
@@ -111,7 +115,7 @@ pub async fn take_screenshot(
     };
 
     let raw_annotations = if options.annotate {
-        collect_annotations(client, session_id, ref_map).await?
+        collect_annotations(client, session_id, ref_map, execution_context_id).await?
     } else {
         Vec::new()
     };
@@ -124,7 +128,8 @@ pub async fn take_screenshot(
         false
     };
 
-    let base64 = capture_screenshot_base64(client, session_id, ref_map, options).await;
+    let base64 =
+        capture_screenshot_base64(client, session_id, ref_map, options, execution_context_id).await;
 
     if overlay_injected {
         let _ = remove_annotation_overlay(client, session_id).await;
@@ -166,6 +171,7 @@ async fn capture_screenshot_base64(
     session_id: &str,
     ref_map: &RefMap,
     options: &ScreenshotOptions,
+    execution_context_id: Option<i64>,
 ) -> Result<String, String> {
     let mut params = CaptureScreenshotParams {
         format: Some(options.format.clone()),
@@ -200,7 +206,10 @@ async fn capture_screenshot_base64(
             });
         }
     } else if let Some(ref selector) = options.selector {
-        if let Some(rect) = get_rect_for_selector(client, session_id, ref_map, selector).await? {
+        if let Some(rect) =
+            get_rect_for_selector(client, session_id, ref_map, selector, execution_context_id)
+                .await?
+        {
             params.clip = Some(Viewport {
                 x: rect.x,
                 y: rect.y,
@@ -222,17 +231,23 @@ async fn collect_annotations(
     client: &CdpClient,
     session_id: &str,
     ref_map: &RefMap,
+    execution_context_id: Option<i64>,
 ) -> Result<Vec<RawAnnotation>, String> {
     let mut annotations = Vec::new();
 
     for (ref_id, entry) in ref_map.entries_sorted() {
-        let object_id =
-            match super::element::resolve_element_object_id(client, session_id, ref_map, &ref_id)
-                .await
-            {
-                Ok(id) => id,
-                Err(_) => continue,
-            };
+        let object_id = match super::element::resolve_element_object_id(
+            client,
+            session_id,
+            ref_map,
+            &ref_id,
+            execution_context_id,
+        )
+        .await
+        {
+            Ok(id) => id,
+            Err(_) => continue,
+        };
 
         let Some(rect) = get_rect_for_object(client, session_id, &object_id).await? else {
             continue;
@@ -264,9 +279,16 @@ async fn get_rect_for_selector(
     session_id: &str,
     ref_map: &RefMap,
     selector: &str,
+    execution_context_id: Option<i64>,
 ) -> Result<Option<Rect>, String> {
-    let object_id =
-        super::element::resolve_element_object_id(client, session_id, ref_map, selector).await?;
+    let object_id = super::element::resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector,
+        execution_context_id,
+    )
+    .await?;
     get_rect_for_object(client, session_id, &object_id).await
 }
 
@@ -275,34 +297,46 @@ async fn get_rect_for_object(
     session_id: &str,
     object_id: &str,
 ) -> Result<Option<Rect>, String> {
-    let result: EvaluateResult = client
+    let result: DomGetBoxModelResult = client
         .send_command_typed(
-            "Runtime.callFunctionOn",
-            &CallFunctionOnParams {
-                function_declaration: r#"function() {
-                    const rect = this.getBoundingClientRect();
-                    return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
-                }"#
-                .to_string(),
+            "DOM.getBoxModel",
+            &DomGetBoxModelParams {
+                backend_node_id: None,
+                node_id: None,
                 object_id: Some(object_id.to_string()),
-                arguments: None,
-                return_by_value: Some(true),
-                await_promise: Some(false),
             },
             Some(session_id),
         )
         .await?;
 
-    Ok(result.result.value.as_ref().and_then(parse_rect))
+    Ok(Some(parse_box_model_rect(&result.model)))
 }
 
-fn parse_rect(value: &Value) -> Option<Rect> {
-    Some(Rect {
-        x: value.get("x")?.as_f64()?,
-        y: value.get("y")?.as_f64()?,
-        width: value.get("width")?.as_f64()?,
-        height: value.get("height")?.as_f64()?,
-    })
+fn parse_box_model_rect(model: &BoxModel) -> Rect {
+    let xs = [
+        model.content.first().copied().unwrap_or(0.0),
+        model.content.get(2).copied().unwrap_or(0.0),
+        model.content.get(4).copied().unwrap_or(0.0),
+        model.content.get(6).copied().unwrap_or(0.0),
+    ];
+    let ys = [
+        model.content.get(1).copied().unwrap_or(0.0),
+        model.content.get(3).copied().unwrap_or(0.0),
+        model.content.get(5).copied().unwrap_or(0.0),
+        model.content.get(7).copied().unwrap_or(0.0),
+    ];
+
+    let min_x = xs.into_iter().fold(f64::INFINITY, f64::min);
+    let max_x = xs.into_iter().fold(f64::NEG_INFINITY, f64::max);
+    let min_y = ys.into_iter().fold(f64::INFINITY, f64::min);
+    let max_y = ys.into_iter().fold(f64::NEG_INFINITY, f64::max);
+
+    Rect {
+        x: min_x,
+        y: min_y,
+        width: (max_x - min_x).max(0.0),
+        height: (max_y - min_y).max(0.0),
+    }
 }
 
 fn filter_annotations(

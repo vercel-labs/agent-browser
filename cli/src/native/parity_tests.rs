@@ -615,14 +615,21 @@ async fn test_addscript_and_addinitscript_separate_dispatch() {
 async fn test_frame_context_management() {
     let mut state = DaemonState::new();
     assert!(state.active_frame_id.is_none());
+    assert!(state.frame_context_ids.is_empty());
 
     // Set a frame ID and verify it persists
     state.active_frame_id = Some("child-frame-123".to_string());
+    state
+        .frame_context_ids
+        .insert("child-frame-123".to_string(), 42);
     assert_eq!(state.active_frame_id.as_deref(), Some("child-frame-123"));
+    assert_eq!(state.frame_context_ids.get("child-frame-123"), Some(&42));
 
     // Clearing the frame ID (what mainframe does)
     state.active_frame_id = None;
+    state.frame_context_ids.clear();
     assert!(state.active_frame_id.is_none());
+    assert!(state.frame_context_ids.is_empty());
 }
 
 #[tokio::test]

@@ -1,4 +1,5 @@
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::env;
 use std::io::Write;
 use std::sync::Arc;
@@ -105,6 +106,7 @@ pub struct DaemonState {
     pub tracked_requests: Vec<TrackedRequest>,
     pub request_tracking: bool,
     pub active_frame_id: Option<String>,
+    pub frame_context_ids: HashMap<String, i64>,
     /// Shared slot for stream server to receive CDP client when browser launches.
     pub stream_client: Option<Arc<RwLock<Option<Arc<CdpClient>>>>>,
 }
@@ -139,6 +141,7 @@ impl DaemonState {
             tracked_requests: Vec::new(),
             request_tracking: false,
             active_frame_id: None,
+            frame_context_ids: HashMap::new(),
             stream_client: None,
         }
     }
@@ -410,6 +413,54 @@ impl DaemonState {
 
         (pending_acks, new_targets, destroyed_targets, fetch_paused)
     }
+}
+
+fn clear_active_frame_context(state: &mut DaemonState) {
+    state.active_frame_id = None;
+    state.frame_context_ids.clear();
+}
+
+async fn active_execution_context_id(state: &mut DaemonState) -> Result<Option<i64>, String> {
+    let Some(frame_id) = state.active_frame_id.clone() else {
+        return Ok(None);
+    };
+
+    if let Some(context_id) = state.frame_context_ids.get(&frame_id) {
+        return Ok(Some(*context_id));
+    }
+
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let context_id = mgr.create_frame_execution_context(&frame_id).await?;
+    state.frame_context_ids.insert(frame_id, context_id);
+    Ok(Some(context_id))
+}
+
+async fn current_origin(state: &DaemonState) -> Result<String, String> {
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    mgr.url_for_frame(state.active_frame_id.as_deref()).await
+}
+
+async fn runtime_evaluate(
+    client: &CdpClient,
+    session_id: &str,
+    expression: &str,
+    return_by_value: bool,
+    await_promise: bool,
+    execution_context_id: Option<i64>,
+) -> Result<super::cdp::types::EvaluateResult, String> {
+    let mut params = json!({
+        "expression": expression,
+        "returnByValue": return_by_value,
+        "awaitPromise": await_promise,
+    });
+
+    if let Some(context_id) = execution_context_id {
+        params["contextId"] = json!(context_id);
+    }
+
+    client
+        .send_command_typed("Runtime.evaluate", &params, Some(session_id))
+        .await
 }
 
 pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
@@ -890,6 +941,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         return Ok(json!({ "launched": true, "reused": true }));
     }
     state.ref_map.clear();
+    clear_active_frame_context(state);
     let extensions: Option<Vec<String>> =
         cmd.get("extensions").and_then(|v| v.as_array()).map(|arr| {
             arr.iter()
@@ -1151,17 +1203,16 @@ async fn handle_navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     }
 
     // WebDriver backend path
-    if let Some(ref wb) = state.webdriver_backend {
-        if state.browser.is_none() {
-            state.ref_map.clear();
+    if state.browser.is_none() {
+        state.ref_map.clear();
+        clear_active_frame_context(state);
+        if let Some(ref wb) = state.webdriver_backend {
             wb.navigate(url).await?;
             let new_url = wb.get_url().await.unwrap_or_else(|_| url.to_string());
             let title = wb.get_title().await.unwrap_or_default();
             return Ok(json!({ "url": new_url, "title": title }));
         }
     }
-
-    let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
 
     let wait_until = cmd
         .get("waitUntil")
@@ -1174,6 +1225,10 @@ async fn handle_navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         .and_then(|v| v.as_object())
         .filter(|m| !m.is_empty());
 
+    state.ref_map.clear();
+    clear_active_frame_context(state);
+    let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
+
     if let Some(headers_map) = scoped_headers {
         let session_id = mgr.active_session_id()?.to_string();
         let headers: std::collections::HashMap<String, String> = headers_map
@@ -1183,7 +1238,6 @@ async fn handle_navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         network::set_extra_headers(&mgr.client, &session_id, &headers).await?;
     }
 
-    state.ref_map.clear();
     let result = mgr.navigate(url, wait_until).await;
 
     if scoped_headers.is_some() {
@@ -1273,12 +1327,22 @@ async fn handle_content(state: &DaemonState) -> Result<Value, String> {
         }
     }
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let html = mgr.get_content().await?;
-    let url = mgr.get_url().await.unwrap_or_default();
+    let html = match state.active_frame_id.as_ref() {
+        Some(frame_id) => {
+            let context_id = mgr.create_frame_execution_context(frame_id).await?;
+            mgr.evaluate_in_context("document.documentElement.outerHTML", Some(context_id))
+                .await?
+                .as_str()
+                .unwrap_or("")
+                .to_string()
+        }
+        None => mgr.get_content().await?,
+    };
+    let url = current_origin(state).await?;
     Ok(json!({ "html": html, "origin": url }))
 }
 
-async fn handle_evaluate(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+async fn handle_evaluate(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     if let Some(ref wb) = state.webdriver_backend {
         if state.browser.is_none() {
             let script = cmd
@@ -1290,14 +1354,15 @@ async fn handle_evaluate(cmd: &Value, state: &DaemonState) -> Result<Value, Stri
             return Ok(json!({ "result": result, "origin": url }));
         }
     }
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let script = cmd
         .get("script")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'script' parameter")?;
 
-    let result = mgr.evaluate(script, None).await?;
-    let url = mgr.get_url().await.unwrap_or_default();
+    let context_id = active_execution_context_id(state).await?;
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let result = mgr.evaluate_in_context(script, context_id).await?;
+    let url = current_origin(state).await?;
     Ok(json!({ "result": result, "origin": url }))
 }
 
@@ -1342,6 +1407,7 @@ async fn handle_close(state: &mut DaemonState) -> Result<Value, String> {
     }
 
     state.ref_map.clear();
+    clear_active_frame_context(state);
     Ok(json!({ "closed": true }))
 }
 
@@ -1350,9 +1416,6 @@ async fn handle_close(state: &mut DaemonState) -> Result<Value, String> {
 // ---------------------------------------------------------------------------
 
 async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let session_id = mgr.active_session_id()?.to_string();
-
     let options = SnapshotOptions {
         selector: cmd
             .get("selector")
@@ -1373,11 +1436,27 @@ async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         cursor: cmd.get("cursor").and_then(|v| v.as_bool()).unwrap_or(false),
     };
 
+    let context_id = active_execution_context_id(state).await?;
+    let frame_id = state.active_frame_id.clone();
     state.ref_map.clear();
-    let tree =
-        snapshot::take_snapshot(&mgr.client, &session_id, &options, &mut state.ref_map).await?;
+    let session_id = {
+        let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+        mgr.active_session_id()?.to_string()
+    };
+    let tree = {
+        let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+        snapshot::take_snapshot(
+            &mgr.client,
+            &session_id,
+            &options,
+            &mut state.ref_map,
+            frame_id.as_deref(),
+            context_id,
+        )
+        .await?
+    };
 
-    let url = mgr.get_url().await.unwrap_or_default();
+    let url = current_origin(state).await?;
 
     let refs: serde_json::Map<String, Value> = state
         .ref_map
@@ -1436,9 +1515,6 @@ async fn handle_screenshot(cmd: &Value, state: &mut DaemonState) -> Result<Value
             return Ok(json!({ "path": tmp }));
         }
     }
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let session_id = mgr.active_session_id()?.to_string();
-
     let format = cmd
         .get("format")
         .or_else(|| cmd.get("type"))
@@ -1468,22 +1544,43 @@ async fn handle_screenshot(cmd: &Value, state: &mut DaemonState) -> Result<Value
             .map(String::from),
     };
 
+    let context_id = active_execution_context_id(state).await?;
+    let frame_id = state.active_frame_id.clone();
+    let session_id = {
+        let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+        mgr.active_session_id()?.to_string()
+    };
+
     if annotate {
         state.ref_map.clear();
-        let _ = snapshot::take_snapshot(
-            &mgr.client,
-            &session_id,
-            &SnapshotOptions {
-                interactive: true,
-                ..SnapshotOptions::default()
-            },
-            &mut state.ref_map,
-        )
-        .await?;
+        {
+            let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+            let _ = snapshot::take_snapshot(
+                &mgr.client,
+                &session_id,
+                &SnapshotOptions {
+                    interactive: true,
+                    ..SnapshotOptions::default()
+                },
+                &mut state.ref_map,
+                frame_id.as_deref(),
+                context_id,
+            )
+            .await?;
+        }
     }
 
-    let result =
-        screenshot::take_screenshot(&mgr.client, &session_id, &state.ref_map, &options).await?;
+    let result = {
+        let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+        screenshot::take_screenshot(
+            &mgr.client,
+            &session_id,
+            &state.ref_map,
+            &options,
+            context_id,
+        )
+        .await?
+    };
 
     let mut response = json!({ "path": result.path });
     if !result.annotations.is_empty() {
@@ -1507,15 +1604,21 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         }
     }
 
+    let new_tab = cmd.get("newTab").and_then(|v| v.as_bool()).unwrap_or(false);
+    let context_id = active_execution_context_id(state).await?;
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
 
-    let new_tab = cmd.get("newTab").and_then(|v| v.as_bool()).unwrap_or(false);
-
     if new_tab {
         use super::element::resolve_element_object_id;
-        let object_id =
-            resolve_element_object_id(&mgr.client, &session_id, &state.ref_map, selector).await?;
+        let object_id = resolve_element_object_id(
+            &mgr.client,
+            &session_id,
+            &state.ref_map,
+            selector,
+            context_id,
+        )
+        .await?;
         let call_params = json!({
             "objectId": object_id,
             "functionDeclaration": "function() { var h = this.getAttribute('href'); if (!h) return null; try { return new URL(h, document.baseURI).toString(); } catch(e) { return null; } }",
@@ -1541,8 +1644,9 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
             })?
             .to_string();
 
-        let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
         state.ref_map.clear();
+        clear_active_frame_context(state);
+        let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
         mgr.tab_new(Some(&href)).await?;
 
         return Ok(json!({ "clicked": selector, "newTab": true, "url": href }));
@@ -1558,6 +1662,7 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         selector,
         button,
         click_count,
+        context_id,
     )
     .await?;
 
@@ -1565,14 +1670,22 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
 }
 
 async fn handle_dblclick(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let session_id = mgr.active_session_id()?.to_string();
     let selector = cmd
         .get("selector")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'selector' parameter")?;
+    let context_id = active_execution_context_id(state).await?;
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?.to_string();
 
-    interaction::dblclick(&mgr.client, &session_id, &state.ref_map, selector).await?;
+    interaction::dblclick(
+        &mgr.client,
+        &session_id,
+        &state.ref_map,
+        selector,
+        context_id,
+    )
+    .await?;
     Ok(json!({ "clicked": selector }))
 }
 
@@ -1593,16 +1706,23 @@ async fn handle_fill(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
         }
     }
 
+    let context_id = active_execution_context_id(state).await?;
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
 
-    interaction::fill(&mgr.client, &session_id, &state.ref_map, selector, value).await?;
+    interaction::fill(
+        &mgr.client,
+        &session_id,
+        &state.ref_map,
+        selector,
+        value,
+        context_id,
+    )
+    .await?;
     Ok(json!({ "filled": selector }))
 }
 
 async fn handle_type(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let session_id = mgr.active_session_id()?.to_string();
     let selector = cmd
         .get("selector")
         .and_then(|v| v.as_str())
@@ -1613,6 +1733,9 @@ async fn handle_type(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
         .ok_or("Missing 'text' parameter")?;
     let clear = cmd.get("clear").and_then(|v| v.as_bool()).unwrap_or(false);
     let delay = cmd.get("delay").and_then(|v| v.as_u64());
+    let context_id = active_execution_context_id(state).await?;
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?.to_string();
 
     interaction::type_text(
         &mgr.client,
@@ -1622,6 +1745,7 @@ async fn handle_type(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
         text,
         clear,
         delay,
+        context_id,
     )
     .await?;
     Ok(json!({ "typed": text }))
@@ -1640,20 +1764,26 @@ async fn handle_press(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
 }
 
 async fn handle_hover(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let session_id = mgr.active_session_id()?.to_string();
     let selector = cmd
         .get("selector")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'selector' parameter")?;
+    let context_id = active_execution_context_id(state).await?;
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?.to_string();
 
-    interaction::hover(&mgr.client, &session_id, &state.ref_map, selector).await?;
+    interaction::hover(
+        &mgr.client,
+        &session_id,
+        &state.ref_map,
+        selector,
+        context_id,
+    )
+    .await?;
     Ok(json!({ "hovered": selector }))
 }
 
 async fn handle_scroll(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let session_id = mgr.active_session_id()?.to_string();
     let selector = cmd.get("selector").and_then(|v| v.as_str());
 
     let (mut dx, mut dy) = (
@@ -1671,14 +1801,24 @@ async fn handle_scroll(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
             _ => {}
         }
     }
+    let context_id = active_execution_context_id(state).await?;
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?.to_string();
 
-    interaction::scroll(&mgr.client, &session_id, &state.ref_map, selector, dx, dy).await?;
+    interaction::scroll(
+        &mgr.client,
+        &session_id,
+        &state.ref_map,
+        selector,
+        dx,
+        dy,
+        context_id,
+    )
+    .await?;
     Ok(json!({ "scrolled": true }))
 }
 
 async fn handle_select(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let session_id = mgr.active_session_id()?.to_string();
     let selector = cmd
         .get("selector")
         .and_then(|v| v.as_str())
@@ -1696,42 +1836,70 @@ async fn handle_select(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
             .map(|s| vec![s.to_string()])
             .unwrap_or_default(),
     };
+    let context_id = active_execution_context_id(state).await?;
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?.to_string();
 
-    interaction::select_option(&mgr.client, &session_id, &state.ref_map, selector, &values).await?;
+    interaction::select_option(
+        &mgr.client,
+        &session_id,
+        &state.ref_map,
+        selector,
+        &values,
+        context_id,
+    )
+    .await?;
     Ok(json!({ "selected": values }))
 }
 
 async fn handle_check(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let session_id = mgr.active_session_id()?.to_string();
     let selector = cmd
         .get("selector")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'selector' parameter")?;
+    let context_id = active_execution_context_id(state).await?;
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?.to_string();
 
-    interaction::check(&mgr.client, &session_id, &state.ref_map, selector).await?;
+    interaction::check(
+        &mgr.client,
+        &session_id,
+        &state.ref_map,
+        selector,
+        context_id,
+    )
+    .await?;
     Ok(json!({ "checked": selector }))
 }
 
 async fn handle_uncheck(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let session_id = mgr.active_session_id()?.to_string();
     let selector = cmd
         .get("selector")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'selector' parameter")?;
+    let context_id = active_execution_context_id(state).await?;
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?.to_string();
 
-    interaction::uncheck(&mgr.client, &session_id, &state.ref_map, selector).await?;
+    interaction::uncheck(
+        &mgr.client,
+        &session_id,
+        &state.ref_map,
+        selector,
+        context_id,
+    )
+    .await?;
     Ok(json!({ "unchecked": selector }))
 }
 
 async fn handle_wait(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let timeout_ms = cmd.get("timeout").and_then(|v| v.as_u64()).unwrap_or(30000);
+    let context_id = active_execution_context_id(state).await?;
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
-    let timeout_ms = cmd.get("timeout").and_then(|v| v.as_u64()).unwrap_or(30000);
 
     if let Some(text) = cmd.get("text").and_then(|v| v.as_str()) {
-        wait_for_text(&mgr.client, &session_id, text, timeout_ms).await?;
+        wait_for_text(&mgr.client, &session_id, text, timeout_ms, context_id).await?;
         return Ok(json!({ "waited": "text", "text": text }));
     }
 
@@ -1740,7 +1908,15 @@ async fn handle_wait(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
             .get("state")
             .and_then(|v| v.as_str())
             .unwrap_or("visible");
-        wait_for_selector(&mgr.client, &session_id, selector, state_str, timeout_ms).await?;
+        wait_for_selector(
+            &mgr.client,
+            &session_id,
+            selector,
+            state_str,
+            timeout_ms,
+            context_id,
+        )
+        .await?;
         return Ok(json!({ "waited": "selector", "selector": selector }));
     }
 
@@ -1750,7 +1926,7 @@ async fn handle_wait(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
     }
 
     if let Some(fn_str) = cmd.get("function").and_then(|v| v.as_str()) {
-        wait_for_function(&mgr.client, &session_id, fn_str, timeout_ms).await?;
+        wait_for_function(&mgr.client, &session_id, fn_str, timeout_ms, context_id).await?;
         return Ok(json!({ "waited": "function" }));
     }
 
@@ -1767,22 +1943,27 @@ async fn handle_wait(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
 }
 
 async fn handle_gettext(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let session_id = mgr.active_session_id()?.to_string();
     let selector = cmd
         .get("selector")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'selector' parameter")?;
+    let context_id = active_execution_context_id(state).await?;
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?.to_string();
 
-    let text = super::element::get_element_text(&mgr.client, &session_id, &state.ref_map, selector)
-        .await?;
-    let url = mgr.get_url().await.unwrap_or_default();
+    let text = super::element::get_element_text(
+        &mgr.client,
+        &session_id,
+        &state.ref_map,
+        selector,
+        context_id,
+    )
+    .await?;
+    let url = current_origin(state).await?;
     Ok(json!({ "text": text, "origin": url }))
 }
 
 async fn handle_getattribute(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let session_id = mgr.active_session_id()?.to_string();
     let selector = cmd
         .get("selector")
         .and_then(|v| v.as_str())
@@ -1791,6 +1972,9 @@ async fn handle_getattribute(cmd: &Value, state: &mut DaemonState) -> Result<Val
         .get("attribute")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'attribute' parameter")?;
+    let context_id = active_execution_context_id(state).await?;
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?.to_string();
 
     let value = super::element::get_element_attribute(
         &mgr.client,
@@ -1798,54 +1982,73 @@ async fn handle_getattribute(cmd: &Value, state: &mut DaemonState) -> Result<Val
         &state.ref_map,
         selector,
         attribute,
+        context_id,
     )
     .await?;
-    let url = mgr.get_url().await.unwrap_or_default();
+    let url = current_origin(state).await?;
     Ok(json!({ "value": value, "origin": url }))
 }
 
 async fn handle_isvisible(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let session_id = mgr.active_session_id()?.to_string();
     let selector = cmd
         .get("selector")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'selector' parameter")?;
+    let context_id = active_execution_context_id(state).await?;
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?.to_string();
 
-    let visible =
-        super::element::is_element_visible(&mgr.client, &session_id, &state.ref_map, selector)
-            .await?;
-    let url = mgr.get_url().await.unwrap_or_default();
+    let visible = super::element::is_element_visible(
+        &mgr.client,
+        &session_id,
+        &state.ref_map,
+        selector,
+        context_id,
+    )
+    .await?;
+    let url = current_origin(state).await?;
     Ok(json!({ "visible": visible, "origin": url }))
 }
 
 async fn handle_isenabled(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let session_id = mgr.active_session_id()?.to_string();
     let selector = cmd
         .get("selector")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'selector' parameter")?;
+    let context_id = active_execution_context_id(state).await?;
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?.to_string();
 
-    let enabled =
-        super::element::is_element_enabled(&mgr.client, &session_id, &state.ref_map, selector)
-            .await?;
-    let url = mgr.get_url().await.unwrap_or_default();
+    let enabled = super::element::is_element_enabled(
+        &mgr.client,
+        &session_id,
+        &state.ref_map,
+        selector,
+        context_id,
+    )
+    .await?;
+    let url = current_origin(state).await?;
     Ok(json!({ "enabled": enabled, "origin": url }))
 }
 
 async fn handle_ischecked(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let session_id = mgr.active_session_id()?.to_string();
     let selector = cmd
         .get("selector")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'selector' parameter")?;
+    let context_id = active_execution_context_id(state).await?;
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?.to_string();
 
-    let checked =
-        super::element::is_element_checked(&mgr.client, &session_id, &state.ref_map, selector)
-            .await?;
-    let url = mgr.get_url().await.unwrap_or_default();
+    let checked = super::element::is_element_checked(
+        &mgr.client,
+        &session_id,
+        &state.ref_map,
+        selector,
+        context_id,
+    )
+    .await?;
+    let url = current_origin(state).await?;
     Ok(json!({ "checked": checked, "origin": url }))
 }
 
@@ -1856,6 +2059,7 @@ async fn handle_back(state: &mut DaemonState) -> Result<Value, String> {
             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
             let url = wb.get_url().await.unwrap_or_default();
             state.ref_map.clear();
+            clear_active_frame_context(state);
             return Ok(json!({ "url": url }));
         }
     }
@@ -1864,6 +2068,7 @@ async fn handle_back(state: &mut DaemonState) -> Result<Value, String> {
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
     let url = mgr.get_url().await.unwrap_or_default();
     state.ref_map.clear();
+    clear_active_frame_context(state);
     Ok(json!({ "url": url }))
 }
 
@@ -1874,6 +2079,7 @@ async fn handle_forward(state: &mut DaemonState) -> Result<Value, String> {
             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
             let url = wb.get_url().await.unwrap_or_default();
             state.ref_map.clear();
+            clear_active_frame_context(state);
             return Ok(json!({ "url": url }));
         }
     }
@@ -1882,6 +2088,7 @@ async fn handle_forward(state: &mut DaemonState) -> Result<Value, String> {
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
     let url = mgr.get_url().await.unwrap_or_default();
     state.ref_map.clear();
+    clear_active_frame_context(state);
     Ok(json!({ "url": url }))
 }
 
@@ -1892,6 +2099,7 @@ async fn handle_reload(state: &mut DaemonState) -> Result<Value, String> {
             tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
             let url = wb.get_url().await.unwrap_or_default();
             state.ref_map.clear();
+            clear_active_frame_context(state);
             return Ok(json!({ "url": url }));
         }
     }
@@ -1922,6 +2130,7 @@ async fn handle_reload(state: &mut DaemonState) -> Result<Value, String> {
 
     let url = mgr.get_url().await.unwrap_or_default();
     state.ref_map.clear();
+    clear_active_frame_context(state);
     Ok(json!({ "url": url }))
 }
 
@@ -1935,6 +2144,7 @@ async fn wait_for_selector(
     selector: &str,
     state: &str,
     timeout_ms: u64,
+    execution_context_id: Option<i64>,
 ) -> Result<(), String> {
     let check_fn = match state {
         "attached" => format!(
@@ -1966,7 +2176,14 @@ async fn wait_for_selector(
         ),
     };
 
-    poll_until_true(client, session_id, &check_fn, timeout_ms).await
+    poll_until_true(
+        client,
+        session_id,
+        &check_fn,
+        timeout_ms,
+        execution_context_id,
+    )
+    .await
 }
 
 async fn wait_for_url(
@@ -1979,7 +2196,7 @@ async fn wait_for_url(
         "location.href.includes({})",
         serde_json::to_string(pattern).unwrap_or_default()
     );
-    poll_until_true(client, session_id, &check_fn, timeout_ms).await
+    poll_until_true(client, session_id, &check_fn, timeout_ms, None).await
 }
 
 async fn wait_for_text(
@@ -1987,12 +2204,20 @@ async fn wait_for_text(
     session_id: &str,
     text: &str,
     timeout_ms: u64,
+    execution_context_id: Option<i64>,
 ) -> Result<(), String> {
     let check_fn = format!(
         "(document.body.innerText || '').includes({})",
         serde_json::to_string(text).unwrap_or_default()
     );
-    poll_until_true(client, session_id, &check_fn, timeout_ms).await
+    poll_until_true(
+        client,
+        session_id,
+        &check_fn,
+        timeout_ms,
+        execution_context_id,
+    )
+    .await
 }
 
 async fn wait_for_function(
@@ -2000,9 +2225,17 @@ async fn wait_for_function(
     session_id: &str,
     fn_str: &str,
     timeout_ms: u64,
+    execution_context_id: Option<i64>,
 ) -> Result<(), String> {
     let check_fn = format!("!!({})", fn_str);
-    poll_until_true(client, session_id, &check_fn, timeout_ms).await
+    poll_until_true(
+        client,
+        session_id,
+        &check_fn,
+        timeout_ms,
+        execution_context_id,
+    )
+    .await
 }
 
 async fn poll_until_true(
@@ -2010,21 +2243,20 @@ async fn poll_until_true(
     session_id: &str,
     expression: &str,
     timeout_ms: u64,
+    execution_context_id: Option<i64>,
 ) -> Result<(), String> {
     let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
 
     loop {
-        let result: super::cdp::types::EvaluateResult = client
-            .send_command_typed(
-                "Runtime.evaluate",
-                &super::cdp::types::EvaluateParams {
-                    expression: expression.to_string(),
-                    return_by_value: Some(true),
-                    await_promise: Some(true),
-                },
-                Some(session_id),
-            )
-            .await?;
+        let result = runtime_evaluate(
+            client,
+            session_id,
+            expression,
+            true,
+            true,
+            execution_context_id,
+        )
+        .await?;
 
         if result
             .result
@@ -2132,13 +2364,15 @@ async fn handle_storage_clear(cmd: &Value, state: &DaemonState) -> Result<Value,
     Ok(json!({ "cleared": true }))
 }
 
-async fn handle_setcontent(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let session_id = mgr.active_session_id()?.to_string();
+async fn handle_setcontent(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let html = cmd
         .get("html")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'html' parameter")?;
+    state.ref_map.clear();
+    clear_active_frame_context(state);
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?.to_string();
     network::set_content(&mgr.client, &session_id, html).await?;
     Ok(json!({ "set": true }))
 }
@@ -2246,9 +2480,6 @@ async fn handle_state_rename(cmd: &Value) -> Result<Value, String> {
 // ---------------------------------------------------------------------------
 
 async fn handle_diff_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let session_id = mgr.active_session_id()?.to_string();
-
     let compact = cmd
         .get("compact")
         .and_then(|v| v.as_bool())
@@ -2268,8 +2499,24 @@ async fn handle_diff_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Va
         selector,
         ..SnapshotOptions::default()
     };
-    let current =
-        snapshot::take_snapshot(&mgr.client, &session_id, &options, &mut state.ref_map).await?;
+    let context_id = active_execution_context_id(state).await?;
+    let frame_id = state.active_frame_id.clone();
+    let session_id = {
+        let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+        mgr.active_session_id()?.to_string()
+    };
+    let current = {
+        let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+        snapshot::take_snapshot(
+            &mgr.client,
+            &session_id,
+            &options,
+            &mut state.ref_map,
+            frame_id.as_deref(),
+            context_id,
+        )
+        .await?
+    };
 
     let baseline = cmd.get("baseline").and_then(|v| v.as_str());
 
@@ -2292,8 +2539,6 @@ async fn handle_diff_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Va
 }
 
 async fn handle_diff_url(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
-
     let url1 = cmd
         .get("url1")
         .and_then(|v| v.as_str())
@@ -2310,17 +2555,33 @@ async fn handle_diff_url(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         .unwrap_or(WaitUntil::Load);
 
     // Navigate to URL1 and snapshot
+    clear_active_frame_context(state);
+    let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
     mgr.navigate(url1, wait_until).await?;
     let session_id = mgr.active_session_id()?.to_string();
     let options = SnapshotOptions::default();
-    let snap1 =
-        snapshot::take_snapshot(&mgr.client, &session_id, &options, &mut state.ref_map).await?;
+    let snap1 = snapshot::take_snapshot(
+        &mgr.client,
+        &session_id,
+        &options,
+        &mut state.ref_map,
+        None,
+        None,
+    )
+    .await?;
 
     // Navigate to URL2 and snapshot
     mgr.navigate(url2, wait_until).await?;
     state.ref_map.clear();
-    let snap2 =
-        snapshot::take_snapshot(&mgr.client, &session_id, &options, &mut state.ref_map).await?;
+    let snap2 = snapshot::take_snapshot(
+        &mgr.client,
+        &session_id,
+        &options,
+        &mut state.ref_map,
+        None,
+        None,
+    )
+    .await?;
 
     let result = diff::diff_text(&snap1, &snap2);
     Ok(json!({
@@ -2448,29 +2709,32 @@ async fn handle_tab_list(state: &DaemonState) -> Result<Value, String> {
 }
 
 async fn handle_tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
     let url = cmd.get("url").and_then(|v| v.as_str());
     state.ref_map.clear();
+    clear_active_frame_context(state);
+    let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
     mgr.tab_new(url).await
 }
 
 async fn handle_tab_switch(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
     let index = cmd
         .get("index")
         .and_then(|v| v.as_u64())
         .ok_or("Missing 'index' parameter")? as usize;
     state.ref_map.clear();
+    clear_active_frame_context(state);
+    let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
     mgr.tab_switch(index).await
 }
 
 async fn handle_tab_close(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
     let index = cmd
         .get("index")
         .and_then(|v| v.as_u64())
         .map(|i| i as usize);
     state.ref_map.clear();
+    clear_active_frame_context(state);
+    let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
     mgr.tab_close(index).await
 }
 
@@ -2782,56 +3046,86 @@ async fn handle_pdf(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
 // ---------------------------------------------------------------------------
 
 async fn handle_focus(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let session_id = mgr.active_session_id()?.to_string();
     let selector = cmd
         .get("selector")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'selector' parameter")?;
+    let context_id = active_execution_context_id(state).await?;
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?.to_string();
 
-    interaction::focus(&mgr.client, &session_id, &state.ref_map, selector).await?;
+    interaction::focus(
+        &mgr.client,
+        &session_id,
+        &state.ref_map,
+        selector,
+        context_id,
+    )
+    .await?;
     Ok(json!({ "focused": selector }))
 }
 
 async fn handle_clear(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let session_id = mgr.active_session_id()?.to_string();
     let selector = cmd
         .get("selector")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'selector' parameter")?;
+    let context_id = active_execution_context_id(state).await?;
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?.to_string();
 
-    interaction::clear(&mgr.client, &session_id, &state.ref_map, selector).await?;
+    interaction::clear(
+        &mgr.client,
+        &session_id,
+        &state.ref_map,
+        selector,
+        context_id,
+    )
+    .await?;
     Ok(json!({ "cleared": selector }))
 }
 
 async fn handle_selectall(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let session_id = mgr.active_session_id()?.to_string();
     let selector = cmd
         .get("selector")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'selector' parameter")?;
+    let context_id = active_execution_context_id(state).await?;
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?.to_string();
 
-    interaction::select_all(&mgr.client, &session_id, &state.ref_map, selector).await?;
+    interaction::select_all(
+        &mgr.client,
+        &session_id,
+        &state.ref_map,
+        selector,
+        context_id,
+    )
+    .await?;
     Ok(json!({ "selected": selector }))
 }
 
 async fn handle_scrollintoview(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let session_id = mgr.active_session_id()?.to_string();
     let selector = cmd
         .get("selector")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'selector' parameter")?;
+    let context_id = active_execution_context_id(state).await?;
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?.to_string();
 
-    interaction::scroll_into_view(&mgr.client, &session_id, &state.ref_map, selector).await?;
+    interaction::scroll_into_view(
+        &mgr.client,
+        &session_id,
+        &state.ref_map,
+        selector,
+        context_id,
+    )
+    .await?;
     Ok(json!({ "scrolled": selector }))
 }
 
 async fn handle_dispatch(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let session_id = mgr.active_session_id()?.to_string();
     let selector = cmd
         .get("selector")
         .and_then(|v| v.as_str())
@@ -2842,6 +3136,9 @@ async fn handle_dispatch(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         .and_then(|v| v.as_str())
         .ok_or("Missing 'event' parameter")?;
     let event_init = cmd.get("eventInit");
+    let context_id = active_execution_context_id(state).await?;
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?.to_string();
 
     interaction::dispatch_event(
         &mgr.client,
@@ -2850,20 +3147,29 @@ async fn handle_dispatch(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         selector,
         event_type,
         event_init,
+        context_id,
     )
     .await?;
     Ok(json!({ "dispatched": event_type, "selector": selector }))
 }
 
 async fn handle_highlight(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let session_id = mgr.active_session_id()?.to_string();
     let selector = cmd
         .get("selector")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'selector' parameter")?;
+    let context_id = active_execution_context_id(state).await?;
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?.to_string();
 
-    interaction::highlight(&mgr.client, &session_id, &state.ref_map, selector).await?;
+    interaction::highlight(
+        &mgr.client,
+        &session_id,
+        &state.ref_map,
+        selector,
+        context_id,
+    )
+    .await?;
     Ok(json!({ "highlighted": selector }))
 }
 
@@ -2881,76 +3187,97 @@ async fn handle_tap(cmd: &Value, state: &mut DaemonState) -> Result<Value, Strin
     }
 
     let sel = selector.ok_or("Missing 'selector' parameter")?;
+    let context_id = active_execution_context_id(state).await?;
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
 
-    interaction::tap_touch(&mgr.client, &session_id, &state.ref_map, sel).await?;
+    interaction::tap_touch(&mgr.client, &session_id, &state.ref_map, sel, context_id).await?;
     Ok(json!({ "tapped": sel }))
 }
 
 async fn handle_boundingbox(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let session_id = mgr.active_session_id()?.to_string();
     let selector = cmd
         .get("selector")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'selector' parameter")?;
+    let context_id = active_execution_context_id(state).await?;
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?.to_string();
 
     let bbox = super::element::get_element_bounding_box(
         &mgr.client,
         &session_id,
         &state.ref_map,
         selector,
+        context_id,
     )
     .await?;
     Ok(bbox)
 }
 
 async fn handle_innertext(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let session_id = mgr.active_session_id()?.to_string();
     let selector = cmd
         .get("selector")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'selector' parameter")?;
+    let context_id = active_execution_context_id(state).await?;
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?.to_string();
 
-    let text =
-        super::element::get_element_inner_text(&mgr.client, &session_id, &state.ref_map, selector)
-            .await?;
+    let text = super::element::get_element_inner_text(
+        &mgr.client,
+        &session_id,
+        &state.ref_map,
+        selector,
+        context_id,
+    )
+    .await?;
     Ok(json!({ "text": text }))
 }
 
 async fn handle_innerhtml(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let session_id = mgr.active_session_id()?.to_string();
     let selector = cmd
         .get("selector")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'selector' parameter")?;
+    let context_id = active_execution_context_id(state).await?;
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?.to_string();
 
-    let html =
-        super::element::get_element_inner_html(&mgr.client, &session_id, &state.ref_map, selector)
-            .await?;
-    Ok(json!({ "html": html }))
+    let html = super::element::get_element_inner_html(
+        &mgr.client,
+        &session_id,
+        &state.ref_map,
+        selector,
+        context_id,
+    )
+    .await?;
+    let origin = current_origin(state).await?;
+    Ok(json!({ "html": html, "origin": origin }))
 }
 
 async fn handle_inputvalue(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let session_id = mgr.active_session_id()?.to_string();
     let selector = cmd
         .get("selector")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'selector' parameter")?;
+    let context_id = active_execution_context_id(state).await?;
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?.to_string();
 
-    let value =
-        super::element::get_element_input_value(&mgr.client, &session_id, &state.ref_map, selector)
-            .await?;
-    Ok(json!({ "value": value }))
+    let value = super::element::get_element_input_value(
+        &mgr.client,
+        &session_id,
+        &state.ref_map,
+        selector,
+        context_id,
+    )
+    .await?;
+    let origin = current_origin(state).await?;
+    Ok(json!({ "value": value, "origin": origin }))
 }
 
 async fn handle_setvalue(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let session_id = mgr.active_session_id()?.to_string();
     let selector = cmd
         .get("selector")
         .and_then(|v| v.as_str())
@@ -2959,27 +3286,37 @@ async fn handle_setvalue(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         .get("value")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'value' parameter")?;
+    let context_id = active_execution_context_id(state).await?;
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?.to_string();
 
-    super::element::set_element_value(&mgr.client, &session_id, &state.ref_map, selector, value)
-        .await?;
+    super::element::set_element_value(
+        &mgr.client,
+        &session_id,
+        &state.ref_map,
+        selector,
+        value,
+        context_id,
+    )
+    .await?;
     Ok(json!({ "set": selector, "value": value }))
 }
 
 async fn handle_count(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let session_id = mgr.active_session_id()?.to_string();
     let selector = cmd
         .get("selector")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'selector' parameter")?;
+    let context_id = active_execution_context_id(state).await?;
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?.to_string();
 
-    let count = super::element::get_element_count(&mgr.client, &session_id, selector).await?;
+    let count =
+        super::element::get_element_count(&mgr.client, &session_id, selector, context_id).await?;
     Ok(json!({ "count": count, "selector": selector }))
 }
 
 async fn handle_styles(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let session_id = mgr.active_session_id()?.to_string();
     let selector = cmd
         .get("selector")
         .and_then(|v| v.as_str())
@@ -2990,6 +3327,9 @@ async fn handle_styles(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
             .filter_map(|v| v.as_str().map(String::from))
             .collect()
     });
+    let context_id = active_execution_context_id(state).await?;
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?.to_string();
 
     let styles = super::element::get_element_styles(
         &mgr.client,
@@ -2997,6 +3337,7 @@ async fn handle_styles(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         &state.ref_map,
         selector,
         properties,
+        context_id,
     )
     .await?;
     Ok(json!({ "styles": styles }))
@@ -3375,29 +3716,27 @@ async fn handle_waitforloadstate(cmd: &Value, state: &DaemonState) -> Result<Val
     Ok(json!({ "state": load_state }))
 }
 
-async fn handle_waitforfunction(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let session_id = mgr.active_session_id()?.to_string();
+async fn handle_waitforfunction(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let expression = cmd
         .get("expression")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'expression' parameter")?;
     let timeout_ms = cmd.get("timeout").and_then(|v| v.as_u64()).unwrap_or(30000);
+    let context_id = active_execution_context_id(state).await?;
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?.to_string();
 
-    wait_for_function(&mgr.client, &session_id, expression, timeout_ms).await?;
+    wait_for_function(&mgr.client, &session_id, expression, timeout_ms, context_id).await?;
 
-    let result: super::cdp::types::EvaluateResult = mgr
-        .client
-        .send_command_typed(
-            "Runtime.evaluate",
-            &super::cdp::types::EvaluateParams {
-                expression: format!("({})", expression),
-                return_by_value: Some(true),
-                await_promise: Some(true),
-            },
-            Some(&session_id),
-        )
-        .await?;
+    let result = runtime_evaluate(
+        &mgr.client,
+        &session_id,
+        &format!("({})", expression),
+        true,
+        true,
+        context_id,
+    )
+    .await?;
 
     Ok(json!({ "result": result.result.value.unwrap_or(Value::Null) }))
 }
@@ -3407,9 +3746,6 @@ async fn handle_waitforfunction(cmd: &Value, state: &DaemonState) -> Result<Valu
 // ---------------------------------------------------------------------------
 
 async fn handle_frame(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
-    let session_id = mgr.active_session_id()?.to_string();
-
     let selector = cmd.get("selector").and_then(|v| v.as_str());
     let name = cmd.get("name").and_then(|v| v.as_str());
     let url = cmd.get("url").and_then(|v| v.as_str());
@@ -3417,11 +3753,6 @@ async fn handle_frame(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
     if selector.is_none() && name.is_none() && url.is_none() {
         return Err("At least one of 'selector', 'name', or 'url' is required".to_string());
     }
-
-    let tree_result = mgr
-        .client
-        .send_command_no_params("Page.getFrameTree", Some(&session_id))
-        .await?;
 
     fn find_frame(tree: &Value, name: Option<&str>, url: Option<&str>) -> Option<String> {
         let frame = tree.get("frame")?;
@@ -3450,31 +3781,45 @@ async fn handle_frame(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         None
     }
 
-    let frame_tree = &tree_result["frameTree"];
+    let selected = {
+        let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
+        let session_id = mgr.active_session_id()?.to_string();
+        let tree_result = mgr
+            .client
+            .send_command_no_params("Page.getFrameTree", Some(&session_id))
+            .await?;
+        let frame_tree = &tree_result["frameTree"];
 
-    // If selector, resolve via JS to find the iframe's contentWindow
-    if let Some(sel) = selector {
-        let js = format!(
-            r#"(() => {{
-                const el = document.querySelector({});
-                if (!el) return null;
-                if (el.tagName === 'IFRAME' || el.tagName === 'FRAME') {{
-                    return el.name || el.id || 'frame';
-                }}
-                return null;
-            }})()"#,
-            serde_json::to_string(sel).unwrap_or_default()
-        );
-        let result = mgr.evaluate(&js, None).await?;
-        let frame_name = result.as_str().ok_or("Could not find frame for selector")?;
-        if let Some(frame_id) = find_frame(frame_tree, Some(frame_name), None) {
-            state.active_frame_id = Some(frame_id);
-            return Ok(json!({ "frame": frame_name }));
+        // If selector, resolve via JS to find the iframe's contentWindow
+        if let Some(sel) = selector {
+            let js = format!(
+                r#"(() => {{
+                    const el = document.querySelector({});
+                    if (!el) return null;
+                    if (el.tagName === 'IFRAME' || el.tagName === 'FRAME') {{
+                        return el.name || el.id || 'frame';
+                    }}
+                    return null;
+                }})()"#,
+                serde_json::to_string(sel).unwrap_or_default()
+            );
+            let result = mgr.evaluate(&js, None).await?;
+            let frame_name = result.as_str().ok_or("Could not find frame for selector")?;
+            if let Some(frame_id) = find_frame(frame_tree, Some(frame_name), None) {
+                Some((frame_id, frame_name.to_string()))
+            } else {
+                None
+            }
+        } else if let Some(frame_id) = find_frame(frame_tree, name, url) {
+            let label = name.or(url).unwrap_or("frame");
+            Some((frame_id, label.to_string()))
+        } else {
+            None
         }
-    }
+    };
 
-    if let Some(frame_id) = find_frame(frame_tree, name, url) {
-        let label = name.or(url).unwrap_or("frame");
+    if let Some((frame_id, label)) = selected {
+        clear_active_frame_context(state);
         state.active_frame_id = Some(frame_id);
         return Ok(json!({ "frame": label }));
     }
@@ -3483,7 +3828,7 @@ async fn handle_frame(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
 }
 
 async fn handle_mainframe(state: &mut DaemonState) -> Result<Value, String> {
-    state.active_frame_id = None;
+    clear_active_frame_context(state);
     Ok(json!({ "frame": "main" }))
 }
 
@@ -3500,6 +3845,7 @@ async fn execute_subaction(
         .get("subaction")
         .and_then(|v| v.as_str())
         .unwrap_or("click");
+    let context_id = active_execution_context_id(state).await?;
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
 
@@ -3512,6 +3858,7 @@ async fn execute_subaction(
                 selector,
                 "left",
                 1,
+                context_id,
             )
             .await?;
             Ok(json!({ "clicked": selector }))
@@ -3521,15 +3868,37 @@ async fn execute_subaction(
                 .get("value")
                 .and_then(|v| v.as_str())
                 .ok_or("Missing 'value' for fill subaction")?;
-            interaction::fill(&mgr.client, &session_id, &state.ref_map, selector, value).await?;
+            interaction::fill(
+                &mgr.client,
+                &session_id,
+                &state.ref_map,
+                selector,
+                value,
+                context_id,
+            )
+            .await?;
             Ok(json!({ "filled": selector }))
         }
         "check" => {
-            interaction::check(&mgr.client, &session_id, &state.ref_map, selector).await?;
+            interaction::check(
+                &mgr.client,
+                &session_id,
+                &state.ref_map,
+                selector,
+                context_id,
+            )
+            .await?;
             Ok(json!({ "checked": selector }))
         }
         "hover" => {
-            interaction::hover(&mgr.client, &session_id, &state.ref_map, selector).await?;
+            interaction::hover(
+                &mgr.client,
+                &session_id,
+                &state.ref_map,
+                selector,
+                context_id,
+            )
+            .await?;
             Ok(json!({ "hovered": selector }))
         }
         "text" => {
@@ -3538,6 +3907,7 @@ async fn execute_subaction(
                 &session_id,
                 &state.ref_map,
                 selector,
+                context_id,
             )
             .await?;
             Ok(json!({ "text": text }))
@@ -3626,14 +3996,15 @@ async fn resolve_semantic_locator(
 }
 
 async fn handle_getbyrole(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let session_id = mgr.active_session_id()?.to_string();
     let role = cmd
         .get("role")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'role' parameter")?;
     let name = cmd.get("name").and_then(|v| v.as_str());
     let exact = cmd.get("exact").and_then(|v| v.as_bool()).unwrap_or(false);
+    let context_id = active_execution_context_id(state).await?;
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?.to_string();
 
     let name_match = name
         .map(|n| {
@@ -3667,18 +4038,7 @@ async fn handle_getbyrole(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         name_match = name_match,
     );
 
-    let result: super::cdp::types::EvaluateResult = mgr
-        .client
-        .send_command_typed(
-            "Runtime.evaluate",
-            &super::cdp::types::EvaluateParams {
-                expression: js,
-                return_by_value: Some(true),
-                await_promise: Some(false),
-            },
-            Some(&session_id),
-        )
-        .await?;
+    let result = runtime_evaluate(&mgr.client, &session_id, &js, true, false, context_id).await?;
 
     if !result
         .result
@@ -3696,15 +4056,12 @@ async fn handle_getbyrole(cmd: &Value, state: &mut DaemonState) -> Result<Value,
 
     // Clean up the marker attribute
     if let Some(ref browser) = state.browser {
-        if let Ok(sid) = browser.active_session_id() {
-            let _ = browser
-                .evaluate(
-                    "document.querySelector('[data-agent-browser-located]')?.removeAttribute('data-agent-browser-located')",
-                    None,
-                )
-                .await;
-            let _ = sid;
-        }
+        let _ = browser
+            .evaluate_in_context(
+                "document.querySelector('[data-agent-browser-located]')?.removeAttribute('data-agent-browser-located')",
+                context_id,
+            )
+            .await;
     }
 
     result
@@ -3716,13 +4073,14 @@ async fn handle_semantic_locator(
     strategy: &str,
     param_name: &str,
 ) -> Result<Value, String> {
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let session_id = mgr.active_session_id()?.to_string();
     let value = cmd
         .get(param_name)
         .and_then(|v| v.as_str())
         .ok_or(format!("Missing '{}' parameter", param_name))?;
     let exact = cmd.get("exact").and_then(|v| v.as_bool()).unwrap_or(false);
+    let context_id = active_execution_context_id(state).await?;
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?.to_string();
 
     let match_fn = if exact {
         format!(
@@ -3798,18 +4156,8 @@ async fn handle_semantic_locator(
         }
     };
 
-    let result: super::cdp::types::EvaluateResult = mgr
-        .client
-        .send_command_typed(
-            "Runtime.evaluate",
-            &super::cdp::types::EvaluateParams {
-                expression: query,
-                return_by_value: Some(true),
-                await_promise: Some(false),
-            },
-            Some(&session_id),
-        )
-        .await?;
+    let result =
+        runtime_evaluate(&mgr.client, &session_id, &query, true, false, context_id).await?;
 
     if !result
         .result
@@ -3826,9 +4174,9 @@ async fn handle_semantic_locator(
 
     if let Some(ref browser) = state.browser {
         let _ = browser
-            .evaluate(
+            .evaluate_in_context(
                 "document.querySelector('[data-agent-browser-located]')?.removeAttribute('data-agent-browser-located')",
-                None,
+                context_id,
             )
             .await;
     }
@@ -3861,8 +4209,6 @@ async fn handle_getbytestid(cmd: &Value, state: &mut DaemonState) -> Result<Valu
 }
 
 async fn handle_nth(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let session_id = mgr.active_session_id()?.to_string();
     let selector = cmd
         .get("selector")
         .and_then(|v| v.as_str())
@@ -3871,6 +4217,9 @@ async fn handle_nth(cmd: &Value, state: &mut DaemonState) -> Result<Value, Strin
         .get("index")
         .and_then(|v| v.as_i64())
         .ok_or("Missing 'index' parameter")?;
+    let context_id = active_execution_context_id(state).await?;
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?.to_string();
 
     let js = format!(
         r#"(() => {{
@@ -3884,18 +4233,7 @@ async fn handle_nth(cmd: &Value, state: &mut DaemonState) -> Result<Value, Strin
         idx = index,
     );
 
-    let result: super::cdp::types::EvaluateResult = mgr
-        .client
-        .send_command_typed(
-            "Runtime.evaluate",
-            &super::cdp::types::EvaluateParams {
-                expression: js,
-                return_by_value: Some(true),
-                await_promise: Some(false),
-            },
-            Some(&session_id),
-        )
-        .await?;
+    let result = runtime_evaluate(&mgr.client, &session_id, &js, true, false, context_id).await?;
 
     if !result
         .result
@@ -3915,9 +4253,9 @@ async fn handle_nth(cmd: &Value, state: &mut DaemonState) -> Result<Value, Strin
 
     if let Some(ref browser) = state.browser {
         let _ = browser
-            .evaluate(
+            .evaluate_in_context(
                 "document.querySelector('[data-agent-browser-located]')?.removeAttribute('data-agent-browser-located')",
-                None,
+                context_id,
             )
             .await;
     }
@@ -3925,13 +4263,13 @@ async fn handle_nth(cmd: &Value, state: &mut DaemonState) -> Result<Value, Strin
     action_result
 }
 
-async fn handle_find(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let _session_id = mgr.active_session_id()?.to_string();
+async fn handle_find(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let selector = cmd
         .get("selector")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'selector' parameter")?;
+    let context_id = active_execution_context_id(state).await?;
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
 
     let js = format!(
         r#"(() => {{
@@ -3946,7 +4284,7 @@ async fn handle_find(cmd: &Value, state: &DaemonState) -> Result<Value, String> 
         serde_json::to_string(selector).unwrap_or_default()
     );
 
-    let result = mgr.evaluate(&js, None).await?;
+    let result = mgr.evaluate_in_context(&js, context_id).await?;
     Ok(json!({ "elements": result, "selector": selector }))
 }
 
@@ -3980,8 +4318,6 @@ async fn handle_evalhandle(cmd: &Value, state: &DaemonState) -> Result<Value, St
 // ---------------------------------------------------------------------------
 
 async fn handle_drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let session_id = mgr.active_session_id()?.to_string();
     let source = cmd
         .get("source")
         .and_then(|v| v.as_str())
@@ -3991,12 +4327,25 @@ async fn handle_drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
         .and_then(|v| v.as_str())
         .ok_or("Missing 'target' parameter")?;
 
-    let (sx, sy) =
-        super::element::resolve_element_center(&mgr.client, &session_id, &state.ref_map, source)
-            .await?;
-    let (tx, ty) =
-        super::element::resolve_element_center(&mgr.client, &session_id, &state.ref_map, target)
-            .await?;
+    let context_id = active_execution_context_id(state).await?;
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?.to_string();
+    let (sx, sy) = super::element::resolve_element_center(
+        &mgr.client,
+        &session_id,
+        &state.ref_map,
+        source,
+        context_id,
+    )
+    .await?;
+    let (tx, ty) = super::element::resolve_element_center(
+        &mgr.client,
+        &session_id,
+        &state.ref_map,
+        target,
+        context_id,
+    )
+    .await?;
 
     // Mouse down at source
     mgr.client
@@ -4279,9 +4628,7 @@ async fn handle_window_new(cmd: &Value, state: &mut DaemonState) -> Result<Value
     Ok(json!({ "index": total - 1, "total": total }))
 }
 
-async fn handle_diff_screenshot(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let session_id = mgr.active_session_id()?.to_string();
+async fn handle_diff_screenshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let baseline_path = cmd
         .get("baseline")
         .and_then(|v| v.as_str())
@@ -4305,8 +4652,17 @@ async fn handle_diff_screenshot(cmd: &Value, state: &DaemonState) -> Result<Valu
         output_dir: None,
     };
 
-    let result =
-        screenshot::take_screenshot(&mgr.client, &session_id, &state.ref_map, &options).await?;
+    let context_id = active_execution_context_id(state).await?;
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?.to_string();
+    let result = screenshot::take_screenshot(
+        &mgr.client,
+        &session_id,
+        &state.ref_map,
+        &options,
+        context_id,
+    )
+    .await?;
 
     let current_bytes =
         base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &result.base64)
@@ -4885,6 +5241,7 @@ async fn handle_auth_login(cmd: &Value, state: &mut DaemonState) -> Result<Value
         &state.ref_map,
         &user_sel,
         &username,
+        None,
     )
     .await?;
 
@@ -4896,6 +5253,7 @@ async fn handle_auth_login(cmd: &Value, state: &mut DaemonState) -> Result<Value
         &state.ref_map,
         &pass_sel,
         &password,
+        None,
     )
     .await?;
 
@@ -4925,6 +5283,7 @@ async fn handle_auth_login(cmd: &Value, state: &mut DaemonState) -> Result<Value
         &sub_sel,
         "left",
         1,
+        None,
     )
     .await?;
 
