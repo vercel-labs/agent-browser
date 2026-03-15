@@ -48,10 +48,11 @@ mkdir -p "$CLAUDE_CONFIG_DIR"
 
 if [ -f "$CLAUDE_CONFIG_FILE" ]; then
   # Merge vsphere entry into existing config using Python
+  export CLAUDE_CONFIG_FILE
   python3 - <<'PYEOF'
-import json, sys, os
+import json, os
 
-config_file = os.environ.get("CLAUDE_CONFIG_FILE")
+config_file = os.environ["CLAUDE_CONFIG_FILE"]
 with open(config_file, "r") as f:
     config = json.load(f)
 
