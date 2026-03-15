@@ -106,6 +106,9 @@ pub struct DaemonState {
     pub tracked_requests: Vec<TrackedRequest>,
     pub request_tracking: bool,
     pub active_frame_id: Option<String>,
+    /// CSS selector that targets the active iframe element in the parent page.
+    /// Used by `resolve_element_in_frame` to compute the iframe's viewport offset.
+    pub active_frame_selector: Option<String>,
     /// Shared slot for stream server to receive CDP client when browser launches.
     pub stream_client: Option<Arc<RwLock<Option<Arc<CdpClient>>>>>,
     /// Stream server instance kept alive so the broadcast channel remains open.
@@ -142,6 +145,7 @@ impl DaemonState {
             tracked_requests: Vec::new(),
             request_tracking: false,
             active_frame_id: None,
+            active_frame_selector: None,
             stream_client: None,
             stream_server: None,
         }
@@ -3552,17 +3556,21 @@ async fn handle_frame(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         let f_id = info["id"].as_str().unwrap_or("");
         let f_src = info["src"].as_str().unwrap_or("");
 
-        // Try matching by name first, then id, then src URL
+        // Try matching by name first, then src URL, then id-as-name fallback.
+        // CDP's `name` field maps to `iframe.name`, NOT `iframe.id`, so
+        // preferring `src` over `id` gives better results.
         let label;
         let matched = if !f_name.is_empty() {
             label = f_name.to_string();
             find_frame_in_tree(frame_tree, Some(f_name), None)
-        } else if !f_id.is_empty() {
-            label = f_id.to_string();
-            find_frame_in_tree(frame_tree, Some(f_id), None)
         } else if !f_src.is_empty() {
             label = f_src.to_string();
             find_frame_in_tree(frame_tree, None, Some(f_src))
+        } else if !f_id.is_empty() {
+            // CDP name field does not map to HTML id; try name match as a
+            // fallback since some browsers populate name from id.
+            label = f_id.to_string();
+            find_frame_in_tree(frame_tree, Some(f_id), None)
         } else {
             // Anonymous iframe — try first child frame
             label = "frame".to_string();
@@ -3571,6 +3579,7 @@ async fn handle_frame(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
 
         if let Some(frame_id) = matched {
             state.active_frame_id = Some(frame_id);
+            state.active_frame_selector = Some(sel.to_string());
             return Ok(json!({ "frame": label }));
         }
     }
@@ -3578,6 +3587,14 @@ async fn handle_frame(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
     if let Some(frame_id) = find_frame_in_tree(frame_tree, name, url) {
         let label = name.or(url).unwrap_or("frame");
         state.active_frame_id = Some(frame_id);
+        // Build a CSS selector that targets the specific iframe element
+        state.active_frame_selector = if let Some(n) = name {
+            Some(format!("iframe[name=\"{}\"], frame[name=\"{}\"]", n, n))
+        } else if let Some(u) = url {
+            Some(format!("iframe[src=\"{}\"], frame[src=\"{}\"]", u, u))
+        } else {
+            None
+        };
         return Ok(json!({ "frame": label }));
     }
 
@@ -3586,6 +3603,7 @@ async fn handle_frame(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
 
 async fn handle_mainframe(state: &mut DaemonState) -> Result<Value, String> {
     state.active_frame_id = None;
+    state.active_frame_selector = None;
     Ok(json!({ "frame": "main" }))
 }
 
@@ -3604,6 +3622,7 @@ async fn handle_framelocator(cmd: &Value, state: &mut DaemonState) -> Result<Val
         None => {
             // Clear frame locator — return to main frame
             state.active_frame_id = None;
+            state.active_frame_selector = None;
             Ok(json!({ "frameLocator": "cleared", "frame": "main" }))
         }
         Some(sel) => {
@@ -3628,6 +3647,7 @@ async fn execute_subaction(
         .get("subaction")
         .and_then(|v| v.as_str())
         .unwrap_or("click");
+    let frame_selector = state.active_frame_selector.clone();
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
 
@@ -3642,8 +3662,14 @@ async fn execute_subaction(
             if context_id.is_some() {
                 // Frame-scoped click: resolve coordinates inside the frame,
                 // then adjust for the iframe's position in the main page.
-                let (x, y) =
-                    resolve_element_in_frame(mgr, &session_id, selector, context_id).await?;
+                let (x, y) = resolve_element_in_frame(
+                    mgr,
+                    &session_id,
+                    selector,
+                    context_id,
+                    frame_selector.as_deref(),
+                )
+                .await?;
                 interaction::dispatch_click(&mgr.client, &session_id, x, y, "left", 1).await?;
             } else {
                 interaction::click(
@@ -3674,8 +3700,14 @@ async fn execute_subaction(
         }
         "check" => {
             if context_id.is_some() {
-                let (x, y) =
-                    resolve_element_in_frame(mgr, &session_id, selector, context_id).await?;
+                let (x, y) = resolve_element_in_frame(
+                    mgr,
+                    &session_id,
+                    selector,
+                    context_id,
+                    frame_selector.as_deref(),
+                )
+                .await?;
                 interaction::dispatch_click(&mgr.client, &session_id, x, y, "left", 1).await?;
             } else {
                 interaction::check(&mgr.client, &session_id, &state.ref_map, selector).await?;
@@ -3684,8 +3716,14 @@ async fn execute_subaction(
         }
         "hover" => {
             if context_id.is_some() {
-                let (x, y) =
-                    resolve_element_in_frame(mgr, &session_id, selector, context_id).await?;
+                let (x, y) = resolve_element_in_frame(
+                    mgr,
+                    &session_id,
+                    selector,
+                    context_id,
+                    frame_selector.as_deref(),
+                )
+                .await?;
                 mgr.client
                     .send_command_typed::<_, Value>(
                         "Input.dispatchMouseEvent",
@@ -3744,6 +3782,7 @@ async fn resolve_element_in_frame(
     _session_id: &str,
     selector: &str,
     context_id: Option<i64>,
+    frame_selector: Option<&str>,
 ) -> Result<(f64, f64), String> {
     // Get element position relative to the iframe viewport
     let js = format!(
@@ -3770,10 +3809,22 @@ async fn resolve_element_in_frame(
     // iframe are already relative to the iframe's viewport. For cross-origin
     // or out-of-process iframes, CDP's Input.dispatchMouseEvent uses the
     // page viewport, so we need to add the iframe element's offset.
-    // We get the iframe's position from the main frame.
-    let iframe_offset = mgr
-        .evaluate(
-            r#"(() => {
+    // When we have a specific frame selector, use it to find the right
+    // iframe instead of grabbing the first visible one on the page.
+    let offset_js = if let Some(fs) = frame_selector {
+        format!(
+            r#"(() => {{
+            const el = document.querySelector({fs});
+            if (el) {{
+                const r = el.getBoundingClientRect();
+                return {{ x: r.x, y: r.y }};
+            }}
+            return {{ x: 0, y: 0 }};
+        }})()"#,
+            fs = serde_json::to_string(fs).unwrap_or_default(),
+        )
+    } else {
+        r#"(() => {
             const iframes = document.querySelectorAll('iframe, frame');
             for (const f of iframes) {
                 const r = f.getBoundingClientRect();
@@ -3782,14 +3833,23 @@ async fn resolve_element_in_frame(
                 }
             }
             return { x: 0, y: 0 };
-        })()"#,
-            None,
-        )
+        })()"#
+            .to_string()
+    };
+
+    let iframe_offset = mgr
+        .evaluate(&offset_js, None)
         .await
         .unwrap_or(serde_json::json!({ "x": 0, "y": 0 }));
 
-    let offset_x = iframe_offset.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
-    let offset_y = iframe_offset.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let offset_x = iframe_offset
+        .get("x")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
+    let offset_y = iframe_offset
+        .get("y")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
 
     Ok((x + offset_x, y + offset_y))
 }
@@ -3885,8 +3945,8 @@ async fn resolve_semantic_locator(
                 expression: js,
                 return_by_value: Some(true),
                 await_promise: Some(false),
-                    context_id: None,
-                },
+                context_id: None,
+            },
             Some(session_id),
         )
         .await?;
@@ -4151,8 +4211,8 @@ async fn handle_nth(cmd: &Value, state: &mut DaemonState) -> Result<Value, Strin
                 expression: js,
                 return_by_value: Some(true),
                 await_promise: Some(false),
-                    context_id: None,
-                },
+                context_id: None,
+            },
             Some(&session_id),
         )
         .await?;
@@ -4226,8 +4286,8 @@ async fn handle_evalhandle(cmd: &Value, state: &DaemonState) -> Result<Value, St
                 expression: script.to_string(),
                 return_by_value: Some(false),
                 await_promise: Some(true),
-                    context_id: None,
-                },
+                context_id: None,
+            },
             Some(&session_id),
         )
         .await?;
