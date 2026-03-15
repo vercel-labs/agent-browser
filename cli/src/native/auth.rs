@@ -374,7 +374,7 @@ struct OnePasswordItem {
 pub struct ResolvedOnePasswordItem {
     pub username: String,
     pub password: String,
-    pub otp: Option<String>,
+    pub otp_reference: Option<String>,
 }
 
 fn value_as_string(value: &Value) -> Option<String> {
@@ -447,7 +447,7 @@ fn resolve_1password_item_with_op_bin(
         .and_then(value_as_string)
         .ok_or("1Password item is missing a password field")?;
 
-    let otp = item_json
+    let otp_reference = item_json
         .fields
         .iter()
         .find(|field| {
@@ -458,14 +458,12 @@ fn resolve_1password_item_with_op_bin(
                 .unwrap_or(false)
         })
         .and_then(|field| field.reference.as_deref())
-        .map(|reference| append_query_parameter(reference, "attribute=otp"))
-        .map(|reference| resolve_1password_reference_with_op_bin(op_bin, &reference))
-        .transpose()?;
+        .map(|reference| append_query_parameter(reference, "attribute=otp"));
 
     Ok(ResolvedOnePasswordItem {
         username,
         password,
-        otp,
+        otp_reference,
     })
 }
 
@@ -1052,8 +1050,6 @@ mod tests {
             r##"#!/bin/sh
 if [ "$1" = "item" ] && [ "$2" = "get" ]; then
   printf '%s' '{"fields":[{"id":"username","label":"username","purpose":"USERNAME","type":"STRING","value":"octocat"},{"id":"password","label":"password","purpose":"PASSWORD","type":"CONCEALED","value":"s3cret"},{"id":"otp","label":"one-time password","type":"OTP","reference":"op://work/github/one-time password"}]}'
-elif [ "$1" = "read" ] && [ "$2" = "--no-newline" ] && [ "$3" = "op://work/github/one-time password?attribute=otp" ]; then
-  printf '654321'
 else
   echo 'unexpected args' >&2
   exit 1
@@ -1075,7 +1071,7 @@ fi
             ResolvedOnePasswordItem {
                 username: "octocat".to_string(),
                 password: "s3cret".to_string(),
-                otp: Some("654321".to_string()),
+                otp_reference: Some("op://work/github/one-time password?attribute=otp".to_string()),
             }
         );
 
