@@ -41,7 +41,10 @@ pub struct Config {
     pub action_policy: Option<String>,
     pub confirm_actions: Option<String>,
     pub confirm_interactive: Option<bool>,
-    pub native: Option<bool>,
+    pub engine: Option<String>,
+    pub screenshot_dir: Option<String>,
+    pub screenshot_quality: Option<u32>,
+    pub screenshot_format: Option<String>,
 }
 
 impl Config {
@@ -83,7 +86,10 @@ impl Config {
             action_policy: other.action_policy.or(self.action_policy),
             confirm_actions: other.confirm_actions.or(self.confirm_actions),
             confirm_interactive: other.confirm_interactive.or(self.confirm_interactive),
-            native: other.native.or(self.native),
+            engine: other.engine.or(self.engine),
+            screenshot_dir: other.screenshot_dir.or(self.screenshot_dir),
+            screenshot_quality: other.screenshot_quality.or(self.screenshot_quality),
+            screenshot_format: other.screenshot_format.or(self.screenshot_format),
         }
     }
 }
@@ -158,6 +164,10 @@ fn extract_config_path(args: &[String]) -> Option<Option<String>> {
         "--allowed-domains",
         "--action-policy",
         "--confirm-actions",
+        "--engine",
+        "--screenshot-dir",
+        "--screenshot-quality",
+        "--screenshot-format",
     ];
     let mut i = 0;
     while i < args.len() {
@@ -235,7 +245,10 @@ pub struct Flags {
     pub action_policy: Option<String>,
     pub confirm_actions: Option<String>,
     pub confirm_interactive: bool,
-    pub native: bool,
+    pub engine: Option<String>,
+    pub screenshot_dir: Option<String>,
+    pub screenshot_quality: Option<u32>,
+    pub screenshot_format: Option<String>,
 
     // Track which launch-time options were explicitly passed via CLI
     // (as opposed to being set only via environment variables)
@@ -250,7 +263,7 @@ pub struct Flags {
     pub cli_allow_file_access: bool,
     pub cli_annotate: bool,
     pub cli_download_path: bool,
-    pub cli_native: bool,
+    pub cli_headed: bool,
 }
 
 pub fn parse_flags(args: &[String]) -> Flags {
@@ -341,7 +354,18 @@ pub fn parse_flags(args: &[String]) -> Flags {
             .or(config.confirm_actions),
         confirm_interactive: env_var_is_truthy("AGENT_BROWSER_CONFIRM_INTERACTIVE")
             || config.confirm_interactive.unwrap_or(false),
-        native: env_var_is_truthy("AGENT_BROWSER_NATIVE") || config.native.unwrap_or(false),
+        engine: env::var("AGENT_BROWSER_ENGINE").ok().or(config.engine),
+        screenshot_dir: env::var("AGENT_BROWSER_SCREENSHOT_DIR")
+            .ok()
+            .or(config.screenshot_dir),
+        screenshot_quality: env::var("AGENT_BROWSER_SCREENSHOT_QUALITY")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .or(config.screenshot_quality),
+        screenshot_format: env::var("AGENT_BROWSER_SCREENSHOT_FORMAT")
+            .ok()
+            .or(config.screenshot_format)
+            .filter(|s| s == "png" || s == "jpeg"),
         cli_executable_path: false,
         cli_extensions: false,
         cli_profile: false,
@@ -353,7 +377,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
         cli_allow_file_access: false,
         cli_annotate: false,
         cli_download_path: false,
-        cli_native: false,
+        cli_headed: false,
     };
 
     let mut i = 0;
@@ -376,6 +400,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
             "--headed" => {
                 let (val, consumed) = parse_bool_arg(args, i);
                 flags.headed = val;
+                flags.cli_headed = true;
                 if consumed {
                     i += 1;
                 }
@@ -567,11 +592,45 @@ pub fn parse_flags(args: &[String]) -> Flags {
                     i += 1;
                 }
             }
-            "--native" => {
-                let (val, consumed) = parse_bool_arg(args, i);
-                flags.native = val;
-                flags.cli_native = true;
-                if consumed {
+            "--engine" => {
+                if let Some(s) = args.get(i + 1) {
+                    flags.engine = Some(s.clone());
+                    i += 1;
+                }
+            }
+            "--screenshot-dir" => {
+                if let Some(s) = args.get(i + 1) {
+                    flags.screenshot_dir = Some(s.clone());
+                    i += 1;
+                }
+            }
+            "--screenshot-quality" => {
+                if let Some(s) = args.get(i + 1) {
+                    if let Ok(n) = s.parse::<u32>() {
+                        if n <= 100 {
+                            flags.screenshot_quality = Some(n);
+                        } else {
+                            eprintln!(
+                                "{} --screenshot-quality must be 0-100, got {}",
+                                color::warning_indicator(),
+                                n
+                            );
+                        }
+                    }
+                    i += 1;
+                }
+            }
+            "--screenshot-format" => {
+                if let Some(s) = args.get(i + 1) {
+                    if s == "png" || s == "jpeg" {
+                        flags.screenshot_format = Some(s.clone());
+                    } else {
+                        eprintln!(
+                            "{} --screenshot-format must be png or jpeg, got '{}'",
+                            color::warning_indicator(),
+                            s
+                        );
+                    }
                     i += 1;
                 }
             }
@@ -602,7 +661,6 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--annotate",
         "--content-boundaries",
         "--confirm-interactive",
-        "--native",
     ];
     // Global flags that always take a value (need to skip the next arg too)
     const GLOBAL_FLAGS_WITH_VALUE: &[&str] = &[
@@ -628,6 +686,10 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--action-policy",
         "--confirm-actions",
         "--config",
+        "--engine",
+        "--screenshot-dir",
+        "--screenshot-quality",
+        "--screenshot-format",
     ];
 
     let mut i = 0;

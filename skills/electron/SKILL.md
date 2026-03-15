@@ -102,6 +102,31 @@ agent-browser tab 2
 agent-browser tab --url "*settings*"
 ```
 
+## Webview Support
+
+Electron `<webview>` elements are automatically discovered and can be controlled like regular pages. Webviews appear as separate targets in the tab list with `type: "webview"`:
+
+```bash
+# Connect to running Electron app
+agent-browser connect 9222
+
+# List targets -- webviews appear alongside pages
+agent-browser tab
+# Example output:
+#   0: [page]    Slack - Main Window     https://app.slack.com/
+#   1: [webview] Embedded Content        https://example.com/widget
+
+# Switch to a webview
+agent-browser tab 1
+
+# Interact with the webview normally
+agent-browser snapshot -i
+agent-browser click @e3
+agent-browser screenshot webview.png
+```
+
+**Note:** Webview support works via raw CDP connection.
+
 ## Common Patterns
 
 ### Inspect and Navigate an App
@@ -163,7 +188,7 @@ agent-browser --session vscode snapshot -i
 
 ## Color Scheme
 
-Playwright overrides the color scheme to `light` by default when connecting via CDP. To preserve dark mode:
+The default color scheme when connecting via CDP may be `light`. To preserve dark mode:
 
 ```bash
 agent-browser connect 9222

@@ -31,6 +31,16 @@ jobs:
             target: aarch64-unknown-linux-gnu
             binary: agent-browser-linux-arm64
             use_zigbuild: true
+          - name: Linux musl x64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            binary: agent-browser-linux-musl-x64
+            use_zigbuild: true
+          - name: Linux musl ARM64
+            os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            binary: agent-browser-linux-musl-arm64
+            use_zigbuild: true
           - name: Windows x64
             os: ubuntu-latest
             target: x86_64-pc-windows-gnu
@@ -175,6 +185,8 @@ jobs:
           EXPECTED_BINARIES=(
             "agent-browser-linux-x64"
             "agent-browser-linux-arm64"
+            "agent-browser-linux-musl-x64"
+            "agent-browser-linux-musl-arm64"
             "agent-browser-win32-x64.exe"
             "agent-browser-darwin-x64"
             "agent-browser-darwin-arm64"
@@ -199,7 +211,7 @@ jobs:
             echo "Error: $ERRORS binary issues found"
             exit 1
           fi
-          echo "All 5 platform binaries present and valid"
+          echo "All 7 platform binaries present and valid"
 
       - name: Create Release Pull Request or Publish to npm
         id: changesets
@@ -241,8 +253,8 @@ jobs:
       - name: Verify binaries exist
         run: |
           BINARY_COUNT=$(ls bin/agent-browser-* 2>/dev/null | wc -l)
-          if [ "$BINARY_COUNT" -lt 5 ]; then
-            echo "Error: Expected 5 binaries, found $BINARY_COUNT"
+          if [ "$BINARY_COUNT" -lt 7 ]; then
+            echo "Error: Expected 7 binaries, found $BINARY_COUNT"
             ls -la bin/
             exit 1
           fi

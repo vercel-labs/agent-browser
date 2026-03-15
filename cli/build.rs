@@ -175,7 +175,7 @@ fn to_snake_case(s: &str) -> String {
             // Only insert underscore at transitions from lowercase to uppercase,
             // or when an uppercase sequence ends (e.g. "DOM" -> "dom", not "d_o_m")
             let prev_upper = chars[i - 1].is_uppercase();
-            let next_lower = chars.get(i + 1).map_or(false, |n| n.is_lowercase());
+            let next_lower = chars.get(i + 1).is_some_and(|n| n.is_lowercase());
             if !prev_upper || next_lower {
                 result.push('_');
             }
@@ -202,7 +202,7 @@ fn resolve_ref(
             // Check if this type actually exists in the referenced domain
             if domain_types
                 .get(ref_domain)
-                .map_or(false, |t| t.contains(ref_type))
+                .is_some_and(|t| t.contains(ref_type))
             {
                 format!(
                     "super::cdp_{}::{}",
@@ -339,7 +339,7 @@ fn generate_domain(
                 if variant == "Self" {
                     variant = "SelfValue".to_string();
                 }
-                if variant.chars().next().map_or(false, |c| c.is_ascii_digit()) {
+                if variant.chars().next().is_some_and(|c| c.is_ascii_digit()) {
                     variant = format!("V{}", variant);
                 }
                 if seen_variants.insert(variant.clone()) {

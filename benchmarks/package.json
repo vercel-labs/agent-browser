@@ -1,0 +1,13 @@
+{
+  "name": "agent-browser-benchmarks",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "bench": "tsx bench.ts"
+  },
+  "dependencies": {
+    "@vercel/sandbox": "^1.8.0",
+    "tsx": "^4.19.0"
+  }
+}

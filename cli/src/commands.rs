@@ -137,7 +137,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
 
         // === Core Actions ===
         "click" => {
-            let new_tab = rest.iter().any(|arg| *arg == "--new-tab");
+            let new_tab = rest.contains(&"--new-tab");
             let sel = rest
                 .iter()
                 .find(|arg| **arg != "--new-tab")
@@ -391,7 +391,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                 return Ok(json!({ "id": id, "action": "waitforfunction", "expression": expr }));
             }
 
-            // Check for --text flag: wait --text "Welcome"
+            // Check for --text flag: wait --text "Welcome" [--timeout ms]
             if let Some(idx) = rest.iter().position(|&s| s == "--text" || s == "-t") {
                 let text = rest
                     .get(idx + 1)
@@ -399,10 +399,13 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                         context: "wait --text".to_string(),
                         usage: "wait --text <text>",
                     })?;
-                // Use getByText locator to wait for text to appear
-                return Ok(
-                    json!({ "id": id, "action": "wait", "selector": format!("text={}", text) }),
-                );
+                let mut cmd = json!({ "id": id, "action": "wait", "text": text });
+                if let Some(t_idx) = rest.iter().position(|&s| s == "--timeout") {
+                    if let Some(Ok(ms)) = rest.get(t_idx + 1).map(|s| s.parse::<u64>()) {
+                        cmd["timeout"] = json!(ms);
+                    }
+                }
+                return Ok(cmd);
             }
 
             // Check for --download flag: wait --download [path] [--timeout ms]
@@ -474,9 +477,27 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                 }
                 _ => (None, None),
             };
-            Ok(
-                json!({ "id": id, "action": "screenshot", "path": path, "selector": selector, "fullPage": flags.full, "annotate": flags.annotate }),
-            )
+            let mut cmd = json!({
+                "id": id, "action": "screenshot",
+                "path": path, "selector": selector,
+                "fullPage": flags.full, "annotate": flags.annotate
+            });
+            if let Some(ref fmt) = flags.screenshot_format {
+                cmd["format"] = json!(fmt);
+            }
+            if let Some(q) = flags.screenshot_quality {
+                cmd["quality"] = json!(q);
+                if flags.screenshot_format.as_deref() != Some("jpeg") {
+                    eprintln!(
+                        "{} --screenshot-quality is ignored for PNG; use --screenshot-format jpeg",
+                        color::warning_indicator()
+                    );
+                }
+            }
+            if let Some(ref dir) = flags.screenshot_dir {
+                cmd["screenshotDir"] = json!(dir);
+            }
+            Ok(cmd)
         }
         "pdf" => {
             let path = rest.first().ok_or_else(|| ParseError::MissingArguments {
@@ -568,6 +589,9 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
         // === Close ===
         "close" | "quit" | "exit" => Ok(json!({ "id": id, "action": "close" })),
 
+        // === Inspect ===
+        "inspect" => Ok(json!({ "id": id, "action": "inspect" })),
+
         // === Authentication Vault ===
         "auth" => {
             let sub = rest.first().map(|s| s.as_ref());
@@ -588,7 +612,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
 
                     let mut j = 2;
                     while j < rest.len() {
-                        match rest[j].as_ref() {
+                        match rest[j] {
                             "--url" => {
                                 url = rest.get(j + 1).cloned();
                                 j += 1;
@@ -1037,7 +1061,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
             }
         }
 
-        // === Recording (Playwright native video recording) ===
+        // === Recording (browser video recording) ===
         "record" => {
             const VALID: &[&str] = &["start", "stop", "restart"];
             match rest.first().copied() {
@@ -1105,6 +1129,27 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
             })?;
             Ok(json!({ "id": id, "action": "highlight", "selector": sel }))
         }
+
+        // === Clipboard ===
+        "clipboard" => match rest.first().copied() {
+            Some("read") | None => {
+                Ok(json!({ "id": id, "action": "clipboard", "operation": "read" }))
+            }
+            Some("write") => {
+                rest.get(1).ok_or_else(|| ParseError::MissingArguments {
+                    context: "clipboard write".to_string(),
+                    usage: "clipboard write <text>",
+                })?;
+                let text = rest[1..].join(" ");
+                Ok(json!({ "id": id, "action": "clipboard", "operation": "write", "text": text }))
+            }
+            Some("copy") => Ok(json!({ "id": id, "action": "clipboard", "operation": "copy" })),
+            Some("paste") => Ok(json!({ "id": id, "action": "clipboard", "operation": "paste" })),
+            Some(sub) => Err(ParseError::UnknownSubcommand {
+                subcommand: sub.to_string(),
+                valid_options: &["read", "write", "copy", "paste"],
+            }),
+        },
 
         // === State ===
         "state" => {
@@ -1559,7 +1604,7 @@ fn parse_diff(rest: &[&str], id: &str, flags: &Flags) -> Result<Value, ParseErro
 
 fn parse_get(rest: &[&str], id: &str) -> Result<Value, ParseError> {
     const VALID: &[&str] = &[
-        "text", "html", "value", "attr", "url", "title", "count", "box", "styles",
+        "text", "html", "value", "attr", "url", "title", "count", "box", "styles", "cdp-url",
     ];
 
     match rest.first().copied() {
@@ -1596,6 +1641,7 @@ fn parse_get(rest: &[&str], id: &str) -> Result<Value, ParseError> {
             Ok(json!({ "id": id, "action": "getattribute", "selector": sel, "attribute": attr }))
         }
         Some("url") => Ok(json!({ "id": id, "action": "url" })),
+        Some("cdp-url") => Ok(json!({ "id": id, "action": "cdp_url" })),
         Some("title") => Ok(json!({ "id": id, "action": "title" })),
         Some("count") => {
             let sel = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
@@ -1624,7 +1670,7 @@ fn parse_get(rest: &[&str], id: &str) -> Result<Value, ParseError> {
         }),
         None => Err(ParseError::MissingArguments {
             context: "get".to_string(),
-            usage: "get <text|html|value|attr|url|title|count|box|styles> [args...]",
+            usage: "get <text|html|value|attr|url|title|count|box|styles|cdp-url> [args...]",
         }),
     }
 }
@@ -1871,25 +1917,35 @@ fn parse_set(rest: &[&str], id: &str) -> Result<Value, ParseError> {
         Some("viewport") => {
             let w_str = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
                 context: "set viewport".to_string(),
-                usage: "set viewport <width> <height>",
+                usage: "set viewport <width> <height> [scale]",
             })?;
             let h_str = rest.get(2).ok_or_else(|| ParseError::MissingArguments {
                 context: "set viewport".to_string(),
-                usage: "set viewport <width> <height>",
+                usage: "set viewport <width> <height> [scale]",
             })?;
             let w = w_str
                 .parse::<i32>()
                 .map_err(|_| ParseError::MissingArguments {
                     context: "set viewport".to_string(),
-                    usage: "set viewport <width> <height>",
+                    usage: "set viewport <width> <height> [scale]",
                 })?;
             let h = h_str
                 .parse::<i32>()
                 .map_err(|_| ParseError::MissingArguments {
                     context: "set viewport".to_string(),
-                    usage: "set viewport <width> <height>",
+                    usage: "set viewport <width> <height> [scale]",
                 })?;
-            Ok(json!({ "id": id, "action": "viewport", "width": w, "height": h }))
+            let mut cmd = json!({ "id": id, "action": "viewport", "width": w, "height": h });
+            if let Some(scale_str) = rest.get(3) {
+                let scale = scale_str
+                    .parse::<f64>()
+                    .map_err(|_| ParseError::MissingArguments {
+                        context: "set viewport".to_string(),
+                        usage: "set viewport <width> <height> [scale]",
+                    })?;
+                cmd["deviceScaleFactor"] = json!(scale);
+            }
+            Ok(cmd)
         }
         Some("device") => {
             let dev = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
@@ -2028,10 +2084,14 @@ fn parse_storage(rest: &[&str], id: &str) -> Result<Value, ParseError> {
     match rest.first().copied() {
         Some("local") | Some("session") => {
             let storage_type = rest.first().unwrap();
-            let op = rest.get(1).unwrap_or(&"get");
-            let key = rest.get(2);
-            let value = rest.get(3);
-            match *op {
+            let (op, key, value) = match rest.get(1) {
+                Some(&"get") => ("get", rest.get(2), rest.get(3)),
+                Some(&"set") => ("set", rest.get(2), rest.get(3)),
+                Some(&"clear") => ("clear", rest.get(2), rest.get(3)),
+                Some(_) => ("get", rest.get(1), rest.get(2)),
+                None => ("get", None, None),
+            };
+            match op {
                 "set" => {
                     let k = key.ok_or_else(|| ParseError::MissingArguments {
                         context: format!("storage {} set", storage_type),
@@ -2107,7 +2167,7 @@ mod tests {
             cli_allow_file_access: false,
             cli_annotate: false,
             cli_download_path: false,
-            cli_native: false,
+            cli_headed: false,
             annotate: false,
             color_scheme: None,
             download_path: None,
@@ -2117,7 +2177,10 @@ mod tests {
             action_policy: None,
             confirm_actions: None,
             confirm_interactive: false,
-            native: false,
+            engine: None,
+            screenshot_dir: None,
+            screenshot_quality: None,
+            screenshot_format: None,
         }
     }
 
@@ -2305,10 +2368,26 @@ mod tests {
     }
 
     #[test]
+    fn test_storage_local_get_implicit_key() {
+        let cmd = parse_command(&args("storage local mykey"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "storage_get");
+        assert_eq!(cmd["type"], "local");
+        assert_eq!(cmd["key"], "mykey");
+    }
+
+    #[test]
     fn test_storage_session_get() {
         let cmd = parse_command(&args("storage session"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "storage_get");
         assert_eq!(cmd["type"], "session");
+    }
+
+    #[test]
+    fn test_storage_session_get_implicit_key() {
+        let cmd = parse_command(&args("storage session mykey"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "storage_get");
+        assert_eq!(cmd["type"], "session");
+        assert_eq!(cmd["key"], "mykey");
     }
 
     #[test]
@@ -2734,7 +2813,78 @@ mod tests {
     fn test_wait_text() {
         let cmd = parse_command(&args("wait --text Welcome"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "wait");
-        assert_eq!(cmd["selector"], "text=Welcome");
+        assert_eq!(cmd["text"], "Welcome");
+        assert!(cmd.get("timeout").is_none());
+    }
+
+    #[test]
+    fn test_wait_text_with_timeout() {
+        let cmd = parse_command(
+            &args("wait --text Welcome --timeout 5000"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "wait");
+        assert_eq!(cmd["text"], "Welcome");
+        assert_eq!(cmd["timeout"], 5000);
+    }
+
+    // === Clipboard Tests ===
+
+    #[test]
+    fn test_clipboard_read_default() {
+        let cmd = parse_command(&args("clipboard"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "clipboard");
+        assert_eq!(cmd["operation"], "read");
+    }
+
+    #[test]
+    fn test_clipboard_read_explicit() {
+        let cmd = parse_command(&args("clipboard read"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "clipboard");
+        assert_eq!(cmd["operation"], "read");
+    }
+
+    #[test]
+    fn test_clipboard_write() {
+        let cmd = parse_command(&args("clipboard write hello"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "clipboard");
+        assert_eq!(cmd["operation"], "write");
+        assert_eq!(cmd["text"], "hello");
+    }
+
+    #[test]
+    fn test_clipboard_write_multi_word() {
+        let cmd = parse_command(&args("clipboard write hello world"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "clipboard");
+        assert_eq!(cmd["operation"], "write");
+        assert_eq!(cmd["text"], "hello world");
+    }
+
+    #[test]
+    fn test_clipboard_copy() {
+        let cmd = parse_command(&args("clipboard copy"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "clipboard");
+        assert_eq!(cmd["operation"], "copy");
+    }
+
+    #[test]
+    fn test_clipboard_paste() {
+        let cmd = parse_command(&args("clipboard paste"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "clipboard");
+        assert_eq!(cmd["operation"], "paste");
+    }
+
+    #[test]
+    fn test_clipboard_write_missing_text() {
+        let result = parse_command(&args("clipboard write"), &default_flags());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_clipboard_unknown_subcommand() {
+        let result = parse_command(&args("clipboard clear"), &default_flags());
+        assert!(result.is_err());
     }
 
     // === Unknown command ===
@@ -3042,6 +3192,45 @@ mod tests {
         assert_eq!(cmd["action"], "emulatemedia");
         assert_eq!(cmd["colorScheme"], "light");
         assert_eq!(cmd["reducedMotion"], "reduce");
+    }
+
+    #[test]
+    fn test_set_viewport() {
+        let cmd = parse_command(&args("set viewport 1920 1080"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "viewport");
+        assert_eq!(cmd["width"], 1920);
+        assert_eq!(cmd["height"], 1080);
+        assert!(cmd.get("deviceScaleFactor").is_none());
+    }
+
+    #[test]
+    fn test_set_viewport_with_scale() {
+        let cmd = parse_command(&args("set viewport 1920 1080 2"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "viewport");
+        assert_eq!(cmd["width"], 1920);
+        assert_eq!(cmd["height"], 1080);
+        assert_eq!(cmd["deviceScaleFactor"], 2.0);
+    }
+
+    #[test]
+    fn test_set_viewport_with_fractional_scale() {
+        let cmd = parse_command(&args("set viewport 375 812 3"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "viewport");
+        assert_eq!(cmd["width"], 375);
+        assert_eq!(cmd["height"], 812);
+        assert_eq!(cmd["deviceScaleFactor"], 3.0);
+    }
+
+    #[test]
+    fn test_set_viewport_missing_height() {
+        let result = parse_command(&args("set viewport 1920"), &default_flags());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_set_viewport_invalid_scale() {
+        let result = parse_command(&args("set viewport 1920 1080 abc"), &default_flags());
+        assert!(result.is_err());
     }
 
     #[test]
@@ -3756,5 +3945,19 @@ mod tests {
             result.unwrap_err(),
             ParseError::MissingArguments { .. }
         ));
+    }
+
+    // === Inspect / CDP URL ===
+
+    #[test]
+    fn test_inspect() {
+        let cmd = parse_command(&args("inspect"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "inspect");
+    }
+
+    #[test]
+    fn test_get_cdp_url() {
+        let cmd = parse_command(&args("get cdp-url"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "cdp_url");
     }
 }

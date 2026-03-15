@@ -1,10 +1,14 @@
 use serde_json::{json, Value};
 use std::env;
-use tokio::sync::broadcast;
+use std::io::Write;
+use std::sync::atomic::AtomicU64;
+use std::sync::Arc;
+use tokio::sync::{broadcast, oneshot, RwLock};
 
 use super::auth;
 use super::browser::{BrowserManager, WaitUntil};
 use super::cdp::chrome::LaunchOptions;
+use super::cdp::client::CdpClient;
 use super::cdp::types::{
     AttachToTargetParams, AttachToTargetResult, CdpEvent, ConsoleApiCalledEvent,
     CreateTargetResult, ExceptionThrownEvent, TargetCreatedEvent, TargetDestroyedEvent,
@@ -12,6 +16,7 @@ use super::cdp::types::{
 use super::cookies;
 use super::diff;
 use super::element::RefMap;
+use super::inspect_server::InspectServer;
 use super::interaction;
 use super::network::{self, DomainFilter, EventTracker};
 use super::policy::{ActionPolicy, ConfirmActions, PolicyResult};
@@ -21,7 +26,7 @@ use super::screenshot::{self, ScreenshotOptions};
 use super::snapshot::{self, SnapshotOptions};
 use super::state;
 use super::storage;
-use super::stream;
+use super::stream::{self, StreamServer};
 use super::tracing::{self as native_tracing, TracingState};
 use super::webdriver::appium::AppiumManager;
 use super::webdriver::backend::{BrowserBackend, WebDriverBackend, WEBDRIVER_UNSUPPORTED_ACTIONS};
@@ -100,10 +105,15 @@ pub struct DaemonState {
     pub har_recording: bool,
     pub har_entries: Vec<HarEntry>,
     pub confirm_actions: Option<ConfirmActions>,
+    pub inspect_server: Option<InspectServer>,
     pub routes: Vec<RouteEntry>,
     pub tracked_requests: Vec<TrackedRequest>,
     pub request_tracking: bool,
     pub active_frame_id: Option<String>,
+    /// Shared slot for stream server to receive CDP client when browser launches.
+    pub stream_client: Option<Arc<RwLock<Option<Arc<CdpClient>>>>>,
+    /// Stream server instance kept alive so the broadcast channel remains open.
+    pub stream_server: Option<Arc<StreamServer>>,
 }
 
 impl DaemonState {
@@ -147,17 +157,80 @@ impl DaemonState {
             har_recording: false,
             har_entries: Vec::new(),
             confirm_actions: ConfirmActions::from_env(),
+            inspect_server: None,
             routes: Vec::new(),
             tracked_requests: Vec::new(),
             request_tracking: false,
             active_frame_id: None,
+            stream_client: None,
+            stream_server: None,
         }
+    }
+
+    /// Create state with an optional stream client slot and server instance
+    /// (for daemon startup with stream server).
+    pub fn new_with_stream(
+        stream_client: Option<Arc<RwLock<Option<Arc<CdpClient>>>>>,
+        stream_server: Option<Arc<StreamServer>>,
+    ) -> Self {
+        let mut s = Self::new();
+        s.stream_client = stream_client;
+        s.stream_server = stream_server;
+        s
     }
 
     fn subscribe_to_browser_events(&mut self) {
         if let Some(ref browser) = self.browser {
             self.event_rx = Some(browser.client.subscribe());
         }
+    }
+
+    /// Update the stream server's CDP client slot when browser is set or cleared.
+    pub async fn update_stream_client(&self) {
+        if let Some(ref slot) = self.stream_client {
+            let mut guard = slot.write().await;
+            *guard = self.browser.as_ref().map(|m| Arc::clone(&m.client));
+        }
+        if let Some(ref server) = self.stream_server {
+            // Update the CDP page session ID so screencast commands target the right page
+            let session_id = self
+                .browser
+                .as_ref()
+                .and_then(|m| m.active_session_id().ok().map(|s| s.to_string()));
+            server.set_cdp_session_id(session_id).await;
+
+            // Broadcast connection status change to WebSocket clients
+            let connected = self.browser.is_some();
+            let sc = server.is_screencasting().await;
+            server.broadcast_status(connected, sc, 1280, 720);
+            // Notify the background CDP event loop that the client changed
+            server.notify_client_changed();
+        }
+    }
+
+    /// Spawn a background task that polls screenshots and pipes them to ffmpeg.
+    async fn start_recording_task(
+        &mut self,
+        client: Arc<CdpClient>,
+        session_id: String,
+    ) -> Result<(), String> {
+        let shared_count = Arc::new(AtomicU64::new(0));
+        let (cancel_tx, cancel_rx) = oneshot::channel();
+        let handle = recording::spawn_recording_task(
+            client,
+            session_id,
+            self.recording_state.output_path.clone(),
+            shared_count.clone(),
+            cancel_rx,
+        );
+        self.recording_state.capture_task = Some(handle);
+        self.recording_state.shared_frame_count = Some(shared_count);
+        self.recording_state.cancel_tx = Some(cancel_tx);
+        Ok(())
+    }
+
+    async fn stop_recording_task(&mut self) -> Result<(), String> {
+        recording::stop_recording_task(&mut self.recording_state).await
     }
 
     fn drain_cdp_events(
@@ -187,13 +260,14 @@ impl DaemonState {
                             if let Ok(te) =
                                 serde_json::from_value::<TargetCreatedEvent>(event.params.clone())
                             {
-                                if te.target_info.target_type == "page"
+                                if (te.target_info.target_type == "page"
+                                    || te.target_info.target_type == "webview")
                                     && !te.target_info.url.is_empty()
                                 {
                                     let already_tracked = self
                                         .browser
                                         .as_ref()
-                                        .map_or(true, |b| b.has_target(&te.target_info.target_id));
+                                        .is_none_or(|b| b.has_target(&te.target_info.target_id));
                                     if !already_tracked {
                                         new_targets.push(te);
                                     }
@@ -339,25 +413,15 @@ impl DaemonState {
                             }
                         }
                         "Page.screencastFrame" => {
-                            if self.recording_state.active {
-                                if let Some(data) =
-                                    event.params.get("data").and_then(|v| v.as_str())
+                            // Frame broadcasting and acks are handled in real-time by the
+                            // stream server's background CDP event loop. Here we just
+                            // collect acks as a fallback for non-streaming mode.
+                            if self.stream_server.is_none() {
+                                if let Some(sid) =
+                                    event.params.get("sessionId").and_then(|v| v.as_i64())
                                 {
-                                    if let Ok(bytes) = base64::Engine::decode(
-                                        &base64::engine::general_purpose::STANDARD,
-                                        data,
-                                    ) {
-                                        recording::recording_add_frame(
-                                            &mut self.recording_state,
-                                            &bytes,
-                                        );
-                                    }
+                                    pending_acks.push(sid);
                                 }
-                            }
-                            if let Some(sid) =
-                                event.params.get("sessionId").and_then(|v| v.as_i64())
-                            {
-                                pending_acks.push(sid);
                             }
                         }
                         "Fetch.requestPaused" => {
@@ -463,6 +527,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
                     session_id: attach.session_id,
                     url: te.target_info.url.clone(),
                     title: te.target_info.title.clone(),
+                    target_type: te.target_info.target_type.clone(),
                 });
             }
         }
@@ -555,6 +620,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
                     let _ = mgr.close().await;
                 }
                 state.browser = None;
+                state.update_stream_client().await;
             }
             if let Err(e) = auto_launch(state).await {
                 return error_response(&id, &format!("Auto-launch failed: {}", e));
@@ -569,22 +635,24 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
     }
 
     // WebDriver backend: reject unsupported CDP-only actions
-    if matches!(state.backend_type, BackendType::WebDriver) {
-        if WEBDRIVER_UNSUPPORTED_ACTIONS.contains(&action) {
-            return error_response(
-                &id,
-                &format!(
-                    "Action '{}' is not supported on the WebDriver backend",
-                    action
-                ),
-            );
-        }
+    if matches!(state.backend_type, BackendType::WebDriver)
+        && WEBDRIVER_UNSUPPORTED_ACTIONS.contains(&action)
+    {
+        return error_response(
+            &id,
+            &format!(
+                "Action '{}' is not supported on the WebDriver backend",
+                action
+            ),
+        );
     }
 
     let result = match action {
         "launch" => handle_launch(cmd, state).await,
         "navigate" => handle_navigate(cmd, state).await,
         "url" => handle_url(state).await,
+        "cdp_url" => handle_cdp_url(state),
+        "inspect" => handle_inspect(state).await,
         "title" => handle_title(state).await,
         "content" => handle_content(state).await,
         "evaluate" => handle_evaluate(cmd, state).await,
@@ -746,11 +814,13 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
 
 async fn auto_launch(state: &mut DaemonState) -> Result<(), String> {
     let options = launch_options_from_env();
+    let engine = env::var("AGENT_BROWSER_ENGINE").ok();
 
     if let Ok(cdp) = env::var("AGENT_BROWSER_CDP") {
         let mgr = BrowserManager::connect_cdp(&cdp).await?;
         state.browser = Some(mgr);
         state.subscribe_to_browser_events();
+        state.update_stream_client().await;
         try_auto_restore_state(state).await;
         return Ok(());
     }
@@ -759,13 +829,15 @@ async fn auto_launch(state: &mut DaemonState) -> Result<(), String> {
         let mgr = BrowserManager::connect_auto().await?;
         state.browser = Some(mgr);
         state.subscribe_to_browser_events();
+        state.update_stream_client().await;
         try_auto_restore_state(state).await;
         return Ok(());
     }
 
-    let mgr = BrowserManager::launch(options).await?;
+    let mgr = BrowserManager::launch(options, engine.as_deref()).await?;
     state.browser = Some(mgr);
     state.subscribe_to_browser_events();
+    state.update_stream_client().await;
     try_auto_restore_state(state).await;
     Ok(())
 }
@@ -858,17 +930,9 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
 
     // Relaunch logic: check if we can reuse the existing connection
     let needs_relaunch = if let Some(ref mgr) = state.browser {
-        let has_cdp_arg = cdp_url.is_some() || cdp_port.is_some();
-        let was_cdp = mgr.is_cdp_connection();
-        if has_cdp_arg != was_cdp {
-            true
-        } else if has_cdp_arg && !mgr.is_connection_alive().await {
-            true
-        } else if auto_connect && !mgr.is_connection_alive().await {
-            true
-        } else {
-            !mgr.is_connection_alive().await
-        }
+        let is_external = cdp_url.is_some() || cdp_port.is_some() || auto_connect;
+        let was_external = mgr.is_cdp_connection();
+        is_external != was_external || !mgr.is_connection_alive().await
     } else {
         true
     };
@@ -877,6 +941,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         if let Some(ref mut b) = state.browser {
             b.close().await?;
             state.browser = None;
+            state.update_stream_client().await;
         }
     } else {
         return Ok(json!({ "launched": true, "reused": true }));
@@ -914,18 +979,21 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     if let Some(url) = cdp_url {
         state.browser = Some(BrowserManager::connect_cdp(url).await?);
         state.subscribe_to_browser_events();
+        state.update_stream_client().await;
         return Ok(json!({ "launched": true }));
     }
 
     if let Some(port) = cdp_port {
         state.browser = Some(BrowserManager::connect_cdp(&port.to_string()).await?);
         state.subscribe_to_browser_events();
+        state.update_stream_client().await;
         return Ok(json!({ "launched": true }));
     }
 
     if auto_connect {
         state.browser = Some(BrowserManager::connect_auto().await?);
         state.subscribe_to_browser_events();
+        state.update_stream_client().await;
         return Ok(json!({ "launched": true }));
     }
 
@@ -943,6 +1011,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
                     Ok(mgr) => {
                         state.browser = Some(mgr);
                         state.subscribe_to_browser_events();
+                        state.update_stream_client().await;
                         return Ok(json!({ "launched": true, "provider": provider }));
                     }
                     Err(e) => {
@@ -955,6 +1024,12 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
             }
         }
     }
+
+    let engine = cmd
+        .get("engine")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .or_else(|| env::var("AGENT_BROWSER_ENGINE").ok());
 
     let options = LaunchOptions {
         headless,
@@ -1020,8 +1095,9 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         state.domain_filter = Some(DomainFilter::new(domains));
     }
 
-    state.browser = Some(BrowserManager::launch(options).await?);
+    state.browser = Some(BrowserManager::launch(options, engine.as_deref()).await?);
     state.subscribe_to_browser_events();
+    state.update_stream_client().await;
 
     if let Some(ref filter) = state.domain_filter {
         if let Some(ref mgr) = state.browser {
@@ -1189,6 +1265,50 @@ async fn handle_url(state: &DaemonState) -> Result<Value, String> {
     Ok(json!({ "url": url }))
 }
 
+fn handle_cdp_url(state: &DaemonState) -> Result<Value, String> {
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    Ok(json!({ "cdpUrl": mgr.get_cdp_url() }))
+}
+
+async fn handle_inspect(state: &mut DaemonState) -> Result<Value, String> {
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+
+    // Shut down any existing inspect server so we always target the current page
+    if let Some(server) = state.inspect_server.take() {
+        server.shutdown();
+    }
+
+    let target_id = mgr.active_target_id()?.to_string();
+    let chrome_hp = mgr.chrome_host_port().to_string();
+    let proxy_handle = mgr.client.inspect_handle();
+
+    let server = InspectServer::start(proxy_handle, target_id, chrome_hp).await?;
+    let url = format!("http://127.0.0.1:{}", server.port());
+    open_url_in_browser(&url);
+
+    state.inspect_server = Some(server);
+    Ok(json!({ "opened": true, "url": url }))
+}
+
+fn open_url_in_browser(url: &str) {
+    #[cfg(target_os = "macos")]
+    let result = std::process::Command::new("open").arg(url).spawn();
+    #[cfg(target_os = "linux")]
+    let result = std::process::Command::new("xdg-open").arg(url).spawn();
+    #[cfg(target_os = "windows")]
+    let result = std::process::Command::new("cmd")
+        .args(["/c", "start", "", url])
+        .spawn();
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    let result: Result<std::process::Child, std::io::Error> = Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "unsupported platform",
+    ));
+    if let Err(e) = result {
+        let _ = writeln!(std::io::stderr(), "[inspect] Failed to open browser: {}", e);
+    }
+}
+
 async fn handle_title(state: &DaemonState) -> Result<Value, String> {
     if let Some(ref wb) = state.webdriver_backend {
         if state.browser.is_none() {
@@ -1257,6 +1377,7 @@ async fn handle_close(state: &mut DaemonState) -> Result<Value, String> {
         mgr.close().await?;
     }
     state.browser = None;
+    state.update_stream_client().await;
 
     // Close WebDriver sessions
     if let Some(ref mut wb) = state.webdriver_backend {
@@ -1272,6 +1393,10 @@ async fn handle_close(state: &mut DaemonState) -> Result<Value, String> {
     }
     state.safari_driver = None;
     state.backend_type = BackendType::Cdp;
+
+    if let Some(server) = state.inspect_server.take() {
+        server.shutdown();
+    }
 
     state.ref_map.clear();
     Ok(json!({ "closed": true }))
@@ -1299,7 +1424,7 @@ async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
         depth: cmd
-            .get("depth")
+            .get("maxDepth")
             .and_then(|v| v.as_u64())
             .map(|d| d as usize),
         cursor: cmd.get("cursor").and_then(|v| v.as_bool()).unwrap_or(false),
@@ -1310,12 +1435,37 @@ async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         snapshot::take_snapshot(&mgr.client, &session_id, &options, &mut state.ref_map).await?;
 
     let url = mgr.get_url().await.unwrap_or_default();
-    Ok(json!({ "snapshot": tree, "origin": url }))
+
+    let refs: serde_json::Map<String, Value> = state
+        .ref_map
+        .entries_sorted()
+        .into_iter()
+        .map(|(ref_id, entry)| {
+            let mut obj = serde_json::Map::new();
+            obj.insert("role".into(), Value::String(entry.role));
+            obj.insert("name".into(), Value::String(entry.name));
+            (ref_id, Value::Object(obj))
+        })
+        .collect();
+
+    Ok(json!({ "snapshot": tree, "origin": url, "refs": refs }))
 }
 
 async fn handle_screenshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let annotate = cmd
+        .get("annotate")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
     if let Some(ref wb) = state.webdriver_backend {
         if state.browser.is_none() {
+            if annotate {
+                return Err(
+                    "Annotated screenshots are not yet implemented on the WebDriver backend"
+                        .to_string(),
+                );
+            }
+
             let base64_data = wb.screenshot().await?;
             let path = cmd.get("path").and_then(|v| v.as_str());
             if let Some(p) = path {
@@ -1368,12 +1518,37 @@ async fn handle_screenshot(cmd: &Value, state: &mut DaemonState) -> Result<Value
             .get("quality")
             .and_then(|v| v.as_i64())
             .map(|q| q as i32),
+        annotate,
+        output_dir: cmd
+            .get("screenshotDir")
+            .and_then(|v| v.as_str())
+            .map(String::from),
     };
 
-    let (path, _base64) =
+    if annotate {
+        state.ref_map.clear();
+        let _ = snapshot::take_snapshot(
+            &mgr.client,
+            &session_id,
+            &SnapshotOptions {
+                interactive: true,
+                ..SnapshotOptions::default()
+            },
+            &mut state.ref_map,
+        )
+        .await?;
+    }
+
+    let result =
         screenshot::take_screenshot(&mgr.client, &session_id, &state.ref_map, &options).await?;
 
-    Ok(json!({ "path": path }))
+    let mut response = json!({ "path": result.path });
+    if !result.annotations.is_empty() {
+        response["annotations"] = serde_json::to_value(&result.annotations)
+            .map_err(|e| format!("Failed to serialize annotations: {}", e))?;
+    }
+
+    Ok(response)
 }
 
 async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -1391,6 +1566,44 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
 
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
+
+    let new_tab = cmd.get("newTab").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    if new_tab {
+        use super::element::resolve_element_object_id;
+        let object_id =
+            resolve_element_object_id(&mgr.client, &session_id, &state.ref_map, selector).await?;
+        let call_params = json!({
+            "objectId": object_id,
+            "functionDeclaration": "function() { var h = this.getAttribute('href'); if (!h) return null; try { return new URL(h, document.baseURI).toString(); } catch(e) { return null; } }",
+            "returnByValue": true
+        });
+        let call_result = mgr
+            .client
+            .send_command(
+                "Runtime.callFunctionOn",
+                Some(call_params),
+                Some(&session_id),
+            )
+            .await?;
+        let href = call_result
+            .get("result")
+            .and_then(|r| r.get("value"))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                format!(
+                    "Element '{}' does not have an href attribute. --new-tab only works on links.",
+                    selector
+                )
+            })?
+            .to_string();
+
+        let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
+        state.ref_map.clear();
+        mgr.tab_new(Some(&href)).await?;
+
+        return Ok(json!({ "clicked": selector, "newTab": true, "url": href }));
+    }
 
     let button = cmd.get("button").and_then(|v| v.as_str()).unwrap_or("left");
     let click_count = cmd.get("clickCount").and_then(|v| v.as_i64()).unwrap_or(1) as i32;
@@ -1574,6 +1787,11 @@ async fn handle_wait(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
     let session_id = mgr.active_session_id()?.to_string();
     let timeout_ms = cmd.get("timeout").and_then(|v| v.as_u64()).unwrap_or(30000);
 
+    if let Some(text) = cmd.get("text").and_then(|v| v.as_str()) {
+        wait_for_text(&mgr.client, &session_id, text, timeout_ms).await?;
+        return Ok(json!({ "waited": "text", "text": text }));
+    }
+
     if let Some(selector) = cmd.get("selector").and_then(|v| v.as_str()) {
         let state_str = cmd
             .get("state")
@@ -1586,11 +1804,6 @@ async fn handle_wait(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
     if let Some(url_pattern) = cmd.get("url").and_then(|v| v.as_str()) {
         wait_for_url(&mgr.client, &session_id, url_pattern, timeout_ms).await?;
         return Ok(json!({ "waited": "url", "url": url_pattern }));
-    }
-
-    if let Some(text) = cmd.get("text").and_then(|v| v.as_str()) {
-        wait_for_text(&mgr.client, &session_id, text, timeout_ms).await?;
-        return Ok(json!({ "waited": "text", "text": text }));
     }
 
     if let Some(fn_str) = cmd.get("function").and_then(|v| v.as_str()) {
@@ -1748,11 +1961,17 @@ async fn handle_reload(state: &mut DaemonState) -> Result<Value, String> {
 
     let mut rx = mgr.client.subscribe();
     let _ = tokio::time::timeout(tokio::time::Duration::from_secs(10), async {
-        while let Ok(event) = rx.recv().await {
-            if event.method == "Page.loadEventFired"
-                && event.session_id.as_deref() == Some(&session_id)
-            {
-                return;
+        loop {
+            match rx.recv().await {
+                Ok(event) => {
+                    if event.method == "Page.loadEventFired"
+                        && event.session_id.as_deref() == Some(&session_id)
+                    {
+                        return;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(_) => break,
             }
         }
     })
@@ -2412,131 +2631,111 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty());
 
-    let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
-    let old_session_id = mgr.active_session_id()?.to_string();
+    let (client, new_session_id) = {
+        let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
+        let old_session_id = mgr.active_session_id()?.to_string();
 
-    // Capture current URL if no URL specified
-    let nav_url = if let Some(u) = recording_url {
-        u.to_string()
-    } else {
-        mgr.get_url()
+        // Capture current URL if no URL specified
+        let nav_url = if let Some(u) = recording_url {
+            u.to_string()
+        } else {
+            mgr.get_url()
+                .await
+                .unwrap_or_else(|_| "about:blank".to_string())
+        };
+
+        // Capture current cookies
+        let cookies_result = mgr
+            .client
+            .send_command_no_params("Network.getAllCookies", Some(&old_session_id))
             .await
-            .unwrap_or_else(|_| "about:blank".to_string())
-    };
+            .ok();
 
-    // Capture current cookies
-    let cookies_result = mgr
-        .client
-        .send_command_no_params("Network.getAllCookies", Some(&old_session_id))
-        .await
-        .ok();
+        // Create new browser context
+        let ctx_result = mgr
+            .client
+            .send_command_no_params("Target.createBrowserContext", None)
+            .await?;
+        let context_id = ctx_result
+            .get("browserContextId")
+            .and_then(|v| v.as_str())
+            .ok_or("Failed to get browserContextId")?
+            .to_string();
 
-    // Create new browser context
-    let ctx_result = mgr
-        .client
-        .send_command_no_params("Target.createBrowserContext", None)
-        .await?;
-    let context_id = ctx_result
-        .get("browserContextId")
-        .and_then(|v| v.as_str())
-        .ok_or("Failed to get browserContextId")?
-        .to_string();
+        // Create page in new context
+        let create_result: CreateTargetResult = mgr
+            .client
+            .send_command_typed(
+                "Target.createTarget",
+                &json!({ "url": "about:blank", "browserContextId": context_id }),
+                None,
+            )
+            .await?;
 
-    // Create page in new context
-    let create_result: CreateTargetResult = mgr
-        .client
-        .send_command_typed(
-            "Target.createTarget",
-            &json!({ "url": "about:blank", "browserContextId": context_id }),
-            None,
-        )
-        .await?;
+        let attach_result: AttachToTargetResult = mgr
+            .client
+            .send_command_typed(
+                "Target.attachToTarget",
+                &AttachToTargetParams {
+                    target_id: create_result.target_id.clone(),
+                    flatten: true,
+                },
+                None,
+            )
+            .await?;
 
-    let attach_result: AttachToTargetResult = mgr
-        .client
-        .send_command_typed(
-            "Target.attachToTarget",
-            &AttachToTargetParams {
-                target_id: create_result.target_id.clone(),
-                flatten: true,
-            },
-            None,
-        )
-        .await?;
+        let new_session_id = attach_result.session_id.clone();
+        mgr.enable_domains_pub(&new_session_id).await?;
 
-    let new_session_id = attach_result.session_id.clone();
-    mgr.enable_domains_pub(&new_session_id).await?;
-
-    // Transfer cookies to new context
-    if let Some(ref cr) = cookies_result {
-        if let Some(cookie_arr) = cr.get("cookies").and_then(|v| v.as_array()) {
-            if !cookie_arr.is_empty() {
-                let _ = mgr
-                    .client
-                    .send_command(
-                        "Network.setCookies",
-                        Some(json!({ "cookies": cookie_arr })),
-                        Some(&new_session_id),
-                    )
-                    .await;
+        // Transfer cookies to new context
+        if let Some(ref cr) = cookies_result {
+            if let Some(cookie_arr) = cr.get("cookies").and_then(|v| v.as_array()) {
+                if !cookie_arr.is_empty() {
+                    let _ = mgr
+                        .client
+                        .send_command(
+                            "Network.setCookies",
+                            Some(json!({ "cookies": cookie_arr })),
+                            Some(&new_session_id),
+                        )
+                        .await;
+                }
             }
         }
-    }
 
-    // Add page and switch to it
-    mgr.add_page(super::browser::PageInfo {
-        target_id: create_result.target_id,
-        session_id: new_session_id.clone(),
-        url: nav_url.clone(),
-        title: String::new(),
-    });
+        // Add page and switch to it
+        mgr.add_page(super::browser::PageInfo {
+            target_id: create_result.target_id,
+            session_id: new_session_id.clone(),
+            url: nav_url.clone(),
+            title: String::new(),
+            target_type: "page".to_string(),
+        });
 
-    // Navigate to URL
-    if nav_url != "about:blank" {
-        let _ = mgr
-            .client
-            .send_command(
-                "Page.navigate",
-                Some(json!({ "url": nav_url })),
-                Some(&new_session_id),
-            )
-            .await;
-        tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
-    }
+        // Navigate to URL
+        if nav_url != "about:blank" {
+            let _ = mgr
+                .client
+                .send_command(
+                    "Page.navigate",
+                    Some(json!({ "url": nav_url })),
+                    Some(&new_session_id),
+                )
+                .await;
+            tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+        }
+
+        (mgr.client.clone(), new_session_id)
+    };
 
     let result = recording::recording_start(&mut state.recording_state, path)?;
-
-    // Start screencast on new page
-    stream::start_screencast(&mgr.client, &new_session_id, &state.screencast_format, state.screencast_quality, state.screencast_max_width, state.screencast_max_height).await?;
-    state.screencasting = true;
+    state.start_recording_task(client, new_session_id).await?;
 
     Ok(result)
 }
 
 async fn handle_recording_stop(state: &mut DaemonState) -> Result<Value, String> {
-    // Stop screencast
-    if state.screencasting {
-        if let Some(ref browser) = state.browser {
-            if let Ok(session_id) = browser.active_session_id() {
-                let _ = stream::stop_screencast(&browser.client, session_id).await;
-            }
-        }
-        state.screencasting = false;
-    }
-
-    // Drain remaining frames before stopping
-    let (ack_ids, _, _, _) = state.drain_cdp_events();
-    if !ack_ids.is_empty() {
-        if let Some(ref browser) = state.browser {
-            if let Ok(session_id) = browser.active_session_id() {
-                for ack_sid in ack_ids {
-                    let _ =
-                        stream::ack_screencast_frame(&browser.client, session_id, ack_sid).await;
-                }
-            }
-        }
-    }
-
+    state.stop_recording_task().await?;
     recording::recording_stop(&mut state.recording_state)
 }
 
@@ -2546,22 +2745,14 @@ async fn handle_recording_restart(cmd: &Value, state: &mut DaemonState) -> Resul
         .and_then(|v| v.as_str())
         .ok_or("Missing 'path' parameter")?;
 
-    // Stop screencast, restart recording, start screencast again
-    if state.screencasting {
-        if let Some(ref browser) = state.browser {
-            if let Ok(session_id) = browser.active_session_id() {
-                let _ = stream::stop_screencast(&browser.client, session_id).await;
-            }
-        }
-        state.screencasting = false;
-    }
-
+    let _ = state.stop_recording_task().await;
     let result = recording::recording_restart(&mut state.recording_state, path)?;
 
     if let Some(ref browser) = state.browser {
         let session_id = browser.active_session_id()?.to_string();
-        stream::start_screencast(&browser.client, &session_id, &state.screencast_format, state.screencast_quality, state.screencast_max_width, state.screencast_max_height).await?;
-        state.screencasting = true;
+        state
+            .start_recording_task(browser.client.clone(), session_id)
+            .await?;
     }
 
     Ok(result)
@@ -3039,8 +3230,13 @@ async fn handle_clipboard(cmd: &Value, state: &DaemonState) -> Result<Value, Str
         .and_then(|v| v.as_str())
         .unwrap_or("read");
 
+    let session_id = mgr.active_session_id()?.to_string();
+
+    // cfg! is compile-time; assumes the browser runs on the same OS as the CLI binary.
+    let modifier: i32 = if cfg!(target_os = "macos") { 4 } else { 2 };
+
     match action {
-        "write" | "copy" => {
+        "write" => {
             let text = cmd
                 .get("text")
                 .or_else(|| cmd.get("value"))
@@ -3051,7 +3247,17 @@ async fn handle_clipboard(cmd: &Value, state: &DaemonState) -> Result<Value, Str
                 serde_json::to_string(text).unwrap_or_default()
             );
             mgr.evaluate(&js, None).await?;
-            Ok(json!({ "copied": text }))
+            Ok(json!({ "written": text }))
+        }
+        "copy" => {
+            interaction::press_key_with_modifiers(&mgr.client, &session_id, "c", Some(modifier))
+                .await?;
+            Ok(json!({ "copied": true }))
+        }
+        "paste" => {
+            interaction::press_key_with_modifiers(&mgr.client, &session_id, "v", Some(modifier))
+                .await?;
+            Ok(json!({ "pasted": true }))
         }
         _ => {
             let result = mgr.evaluate("navigator.clipboard.readText()", None).await?;
@@ -3149,6 +3355,10 @@ async fn handle_screencast_start(cmd: &Value, state: &mut DaemonState) -> Result
     .await?;
     state.screencasting = true;
 
+    if let Some(ref server) = state.stream_server {
+        server.broadcast_status(true, true, max_width as u32, max_height as u32);
+    }
+
     Ok(json!({ "started": true }))
 }
 
@@ -3162,6 +3372,10 @@ async fn handle_screencast_stop(state: &mut DaemonState) -> Result<Value, String
 
     stream::stop_screencast(&mgr.client, session_id).await?;
     state.screencasting = false;
+
+    if let Some(ref server) = state.stream_server {
+        server.broadcast_status(true, false, 0, 0);
+    }
 
     Ok(json!({ "stopped": true }))
 }
@@ -3249,12 +3463,7 @@ async fn handle_frame(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         .send_command_no_params("Page.getFrameTree", Some(&session_id))
         .await?;
 
-    fn find_frame(
-        tree: &Value,
-        selector: Option<&str>,
-        name: Option<&str>,
-        url: Option<&str>,
-    ) -> Option<String> {
+    fn find_frame(tree: &Value, name: Option<&str>, url: Option<&str>) -> Option<String> {
         let frame = tree.get("frame")?;
         let frame_name = frame.get("name").and_then(|v| v.as_str()).unwrap_or("");
         let frame_url = frame.get("url").and_then(|v| v.as_str()).unwrap_or("");
@@ -3273,7 +3482,7 @@ async fn handle_frame(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
 
         if let Some(children) = tree.get("childFrames").and_then(|v| v.as_array()) {
             for child in children {
-                if let Some(id) = find_frame(child, selector, name, url) {
+                if let Some(id) = find_frame(child, name, url) {
                     return Some(id);
                 }
             }
@@ -3298,13 +3507,13 @@ async fn handle_frame(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         );
         let result = mgr.evaluate(&js, None).await?;
         let frame_name = result.as_str().ok_or("Could not find frame for selector")?;
-        if let Some(frame_id) = find_frame(frame_tree, None, Some(frame_name), None) {
+        if let Some(frame_id) = find_frame(frame_tree, Some(frame_name), None) {
             state.active_frame_id = Some(frame_id);
             return Ok(json!({ "frame": frame_name }));
         }
     }
 
-    if let Some(frame_id) = find_frame(frame_tree, selector, name, url) {
+    if let Some(frame_id) = find_frame(frame_tree, name, url) {
         let label = name.or(url).unwrap_or("frame");
         state.active_frame_id = Some(frame_id);
         return Ok(json!({ "frame": label }));
@@ -4003,6 +4212,7 @@ async fn handle_responsebody(cmd: &Value, state: &DaemonState) -> Result<Value, 
                     }
                 }
             }
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
             Ok(Err(_)) => return Err("Event stream closed".to_string()),
             Err(_) => {
                 return Err(format!(
@@ -4032,16 +4242,16 @@ async fn handle_waitfordownload(cmd: &Value, state: &DaemonState) -> Result<Valu
             Ok(Ok(event)) => {
                 if event.method == "Page.downloadProgress"
                     && event.session_id.as_deref() == Some(&session_id)
+                    && event.params.get("state").and_then(|v| v.as_str()) == Some("completed")
                 {
-                    if event.params.get("state").and_then(|v| v.as_str()) == Some("completed") {
-                        let path = cmd
-                            .get("path")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("download");
-                        return Ok(json!({ "path": path }));
-                    }
+                    let path = cmd
+                        .get("path")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("download");
+                    return Ok(json!({ "path": path }));
                 }
             }
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
             Ok(Err(_)) => return Err("Event stream closed".to_string()),
             Err(_) => return Err("Timeout waiting for download".to_string()),
         }
@@ -4088,6 +4298,7 @@ async fn handle_window_new(cmd: &Value, state: &mut DaemonState) -> Result<Value
         session_id: attach.session_id,
         url: "about:blank".to_string(),
         title: String::new(),
+        target_type: "page".to_string(),
     });
 
     if let Some(viewport) = cmd.get("viewport") {
@@ -4130,13 +4341,15 @@ async fn handle_diff_screenshot(cmd: &Value, state: &DaemonState) -> Result<Valu
             .unwrap_or(false),
         format: "png".to_string(),
         quality: None,
+        annotate: false,
+        output_dir: None,
     };
 
-    let (_path, base64_data) =
+    let result =
         screenshot::take_screenshot(&mgr.client, &session_id, &state.ref_map, &options).await?;
 
     let current_bytes =
-        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &base64_data)
+        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &result.base64)
             .map_err(|e| format!("Failed to decode screenshot: {}", e))?;
 
     let baseline_bytes =
@@ -4178,8 +4391,9 @@ async fn handle_video_start(cmd: &Value, state: &mut DaemonState) -> Result<Valu
     let session_id = mgr.active_session_id()?.to_string();
 
     recording::recording_start(&mut state.recording_state, path)?;
-    stream::start_screencast(&mgr.client, &session_id, &state.screencast_format, state.screencast_quality, state.screencast_max_width, state.screencast_max_height).await?;
-    state.screencasting = true;
+    state
+        .start_recording_task(mgr.client.clone(), session_id)
+        .await?;
 
     Ok(json!({
         "started": true,
@@ -4195,27 +4409,7 @@ async fn handle_video_stop(state: &mut DaemonState) -> Result<Value, String> {
         }));
     }
 
-    if state.screencasting {
-        if let Some(ref browser) = state.browser {
-            if let Ok(session_id) = browser.active_session_id() {
-                let _ = stream::stop_screencast(&browser.client, session_id).await;
-            }
-        }
-        state.screencasting = false;
-    }
-
-    let (ack_ids, _, _, _) = state.drain_cdp_events();
-    if !ack_ids.is_empty() {
-        if let Some(ref browser) = state.browser {
-            if let Ok(session_id) = browser.active_session_id() {
-                for ack_sid in ack_ids {
-                    let _ =
-                        stream::ack_screencast_frame(&browser.client, session_id, ack_sid).await;
-                }
-            }
-        }
-    }
-
+    state.stop_recording_task().await?;
     recording::recording_stop(&mut state.recording_state)
 }
 
@@ -5187,6 +5381,7 @@ mod tests {
 
     #[test]
     fn test_launch_options_from_env_defaults() {
+        let _guard = EnvGuard::new(&["AGENT_BROWSER_HEADED"]);
         let opts = launch_options_from_env();
         assert!(opts.headless);
         assert!(opts.args.is_empty());
@@ -5198,7 +5393,10 @@ mod tests {
         let _guard = EnvGuard::new(&["AGENT_BROWSER_HEADED"]);
         _guard.set("AGENT_BROWSER_HEADED", "1");
         let opts = launch_options_from_env();
-        assert!(!opts.headless, "AGENT_BROWSER_HEADED=1 should set headless=false");
+        assert!(
+            !opts.headless,
+            "AGENT_BROWSER_HEADED=1 should set headless=false"
+        );
     }
 
     #[tokio::test]
@@ -5250,6 +5448,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_credentials_roundtrip_via_actions() {
+        let _lock = crate::native::auth::AUTH_TEST_MUTEX.lock().unwrap();
+        let key_var = "AGENT_BROWSER_ENCRYPTION_KEY";
+        let original = std::env::var(key_var).ok();
+        // SAFETY: AUTH_TEST_MUTEX serializes all test access so no concurrent mutation.
+        unsafe { std::env::set_var(key_var, "a".repeat(64)) };
+
         let mut state = DaemonState::new();
 
         let set_cmd = json!({
@@ -5282,6 +5486,12 @@ mod tests {
         });
         let result = execute_command(&del_cmd, &mut state).await;
         assert_eq!(result["success"], true);
+
+        // SAFETY: AUTH_TEST_MUTEX serializes all test access so no concurrent mutation.
+        match original {
+            Some(val) => unsafe { std::env::set_var(key_var, val) },
+            None => unsafe { std::env::remove_var(key_var) },
+        }
     }
 
     #[tokio::test]

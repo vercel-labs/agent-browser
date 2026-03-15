@@ -65,24 +65,13 @@ const STRUCTURAL_ROLES: &[&str] = &[
     "RootWebArea",
 ];
 
+#[derive(Default)]
 pub struct SnapshotOptions {
     pub selector: Option<String>,
     pub interactive: bool,
     pub compact: bool,
     pub depth: Option<usize>,
     pub cursor: bool,
-}
-
-impl Default for SnapshotOptions {
-    fn default() -> Self {
-        Self {
-            selector: None,
-            interactive: false,
-            compact: false,
-            depth: None,
-            cursor: false,
-        }
-    }
 }
 
 struct TreeNode {
@@ -97,6 +86,7 @@ struct TreeNode {
     value_text: Option<String>,
     backend_node_id: Option<i64>,
     children: Vec<usize>,
+    parent_idx: Option<usize>,
     has_ref: bool,
     ref_id: Option<String>,
     depth: usize,
@@ -146,6 +136,61 @@ pub async fn take_snapshot(
         .send_command_no_params("Accessibility.enable", Some(session_id))
         .await?;
 
+    // If a CSS selector is provided, resolve the set of backendNodeIds that
+    // belong to the DOM subtree rooted at the matched element.  We use this
+    // set to pick the right AX subtree root(s) later.
+    let selector_backend_ids: Option<std::collections::HashSet<i64>> =
+        if let Some(ref selector) = options.selector {
+            let js = format!(
+                "document.querySelector({})",
+                serde_json::to_string(selector).unwrap_or_default()
+            );
+            let result: EvaluateResult = client
+                .send_command_typed(
+                    "Runtime.evaluate",
+                    &EvaluateParams {
+                        expression: js,
+                        return_by_value: Some(false),
+                        await_promise: Some(false),
+                    },
+                    Some(session_id),
+                )
+                .await?;
+
+            let object_id = result
+                .result
+                .object_id
+                .ok_or_else(|| format!("Selector '{}' did not match any element", selector))?;
+
+            // Request the full DOM subtree (depth: -1) so we can collect all
+            // backendNodeIds that live under the matched element.
+            let describe: Value = client
+                .send_command(
+                    "DOM.describeNode",
+                    Some(serde_json::json!({ "objectId": object_id, "depth": -1 })),
+                    Some(session_id),
+                )
+                .await?;
+
+            let root_node = describe
+                .get("node")
+                .ok_or_else(|| format!("Could not resolve DOM node for selector '{}'", selector))?;
+
+            let mut ids = std::collections::HashSet::new();
+            collect_backend_node_ids(root_node, &mut ids);
+
+            if ids.is_empty() {
+                return Err(format!(
+                    "Could not resolve backendNodeId for selector '{}'",
+                    selector
+                ));
+            }
+
+            Some(ids)
+        } else {
+            None
+        };
+
     let ax_tree: GetFullAXTreeResult = client
         .send_command_typed(
             "Accessibility.getFullAXTree",
@@ -155,6 +200,39 @@ pub async fn take_snapshot(
         .await?;
 
     let (tree_nodes, root_indices) = build_tree(&ax_tree.nodes);
+
+    // When a selector is given, find AX nodes whose backendDOMNodeId falls
+    // within the target DOM subtree and pick the top-level ones as roots.
+    let effective_roots = if let Some(ref id_set) = selector_backend_ids {
+        // Mark which tree_nodes belong to the target DOM subtree.
+        let in_subtree: Vec<bool> = tree_nodes
+            .iter()
+            .map(|n| n.backend_node_id.is_some_and(|bid| id_set.contains(&bid)))
+            .collect();
+
+        // An AX node is a "top-level" match if it is in the subtree but its
+        // parent (in the AX tree) is not.
+        let mut roots = Vec::new();
+        for (idx, node) in tree_nodes.iter().enumerate() {
+            if !in_subtree[idx] {
+                continue;
+            }
+            let parent_in_subtree = node.parent_idx.is_some_and(|pidx| in_subtree[pidx]);
+            if !parent_in_subtree {
+                roots.push(idx);
+            }
+        }
+
+        if roots.is_empty() {
+            return Err(format!(
+                "No accessibility node found for selector '{}'",
+                options.selector.as_deref().unwrap_or("")
+            ));
+        }
+        roots
+    } else {
+        root_indices
+    };
 
     let mut tracker = RoleNameTracker::new();
     let mut next_ref: usize = ref_map.next_ref_num();
@@ -207,7 +285,7 @@ pub async fn take_snapshot(
     ref_map.set_next_ref_num(next_ref);
 
     let mut output = String::new();
-    for &root_idx in &root_indices {
+    for &root_idx in &effective_roots {
         render_tree(&tree_nodes, root_idx, 0, &mut output, options);
     }
 
@@ -364,8 +442,7 @@ async fn find_cursor_interactive_elements(
         let escaped = text
             .replace('\\', "\\\\")
             .replace('"', "\\\"")
-            .replace('\n', " ")
-            .replace('\r', " ");
+            .replace(['\n', '\r'], " ");
         lines.push(format!("[ref={}] ({}) \"{}\"", ref_id, kind, escaped));
     }
 
@@ -399,6 +476,7 @@ fn build_tree(nodes: &[AXNode]) -> (Vec<TreeNode>, Vec<usize>) {
                 value_text: None,
                 backend_node_id: None,
                 children: Vec::new(),
+                parent_idx: None,
                 has_ref: false,
                 ref_id: None,
                 depth: 0,
@@ -419,6 +497,7 @@ fn build_tree(nodes: &[AXNode]) -> (Vec<TreeNode>, Vec<usize>) {
             value_text,
             backend_node_id: node.backend_d_o_m_node_id,
             children: Vec::new(),
+            parent_idx: None,
             has_ref: false,
             ref_id: None,
             depth: 0,
@@ -432,6 +511,7 @@ fn build_tree(nodes: &[AXNode]) -> (Vec<TreeNode>, Vec<usize>) {
             for cid in child_ids {
                 if let Some(&child_idx) = id_to_idx.get(cid) {
                     tree_nodes[i].children.push(child_idx);
+                    tree_nodes[child_idx].parent_idx = Some(i);
                 }
             }
         }
@@ -681,6 +761,28 @@ fn extract_properties(props: &Option<Vec<AXProperty>>) -> NodeProperties {
     }
 
     (level, checked, expanded, selected, disabled, required)
+}
+
+/// Recursively collect all `backendNodeId` values from a CDP DOM node tree
+/// (as returned by `DOM.describeNode` with `depth: -1`).
+fn collect_backend_node_ids(node: &Value, ids: &mut std::collections::HashSet<i64>) {
+    if let Some(id) = node.get("backendNodeId").and_then(|v| v.as_i64()) {
+        ids.insert(id);
+    }
+    if let Some(children) = node.get("children").and_then(|v| v.as_array()) {
+        for child in children {
+            collect_backend_node_ids(child, ids);
+        }
+    }
+    // Shadow DOM and content documents
+    if let Some(shadow) = node.get("shadowRoots").and_then(|v| v.as_array()) {
+        for child in shadow {
+            collect_backend_node_ids(child, ids);
+        }
+    }
+    if let Some(doc) = node.get("contentDocument") {
+        collect_backend_node_ids(doc, ids);
+    }
 }
 
 #[cfg(test)]
