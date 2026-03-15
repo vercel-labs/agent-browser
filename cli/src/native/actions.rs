@@ -167,44 +167,28 @@ impl DaemonState {
         }
     }
 
-    /// Start screencast and spawn a background recording task that pipes
-    /// frames to ffmpeg in real-time.
+    /// Spawn a background task that polls screenshots and pipes them to ffmpeg.
     async fn start_recording_task(
         &mut self,
         client: Arc<CdpClient>,
         session_id: String,
     ) -> Result<(), String> {
-        stream::start_screencast(&client, &session_id, "jpeg", 80, 1280, 720).await?;
-        self.screencasting = true;
-
-        let event_rx = client.subscribe();
         let shared_count = Arc::new(AtomicU64::new(0));
         let (cancel_tx, cancel_rx) = oneshot::channel();
         let handle = recording::spawn_recording_task(
-            event_rx,
             client,
             session_id,
             self.recording_state.output_path.clone(),
             shared_count.clone(),
             cancel_rx,
         );
-        self.recording_state.screencast_task = Some(handle);
+        self.recording_state.capture_task = Some(handle);
         self.recording_state.shared_frame_count = Some(shared_count);
         self.recording_state.cancel_tx = Some(cancel_tx);
         Ok(())
     }
 
-    /// Stop screencast, wait for the recording task to finish (pads last
-    /// frame, closes ffmpeg), and sync the frame count back into state.
     async fn stop_recording_task(&mut self) -> Result<(), String> {
-        if self.screencasting {
-            if let Some(ref browser) = self.browser {
-                if let Ok(session_id) = browser.active_session_id() {
-                    let _ = stream::stop_screencast(&browser.client, session_id).await;
-                }
-            }
-            self.screencasting = false;
-        }
         recording::stop_recording_task(&mut self.recording_state).await
     }
 
@@ -388,9 +372,6 @@ impl DaemonState {
                             }
                         }
                         "Page.screencastFrame" => {
-                            if self.recording_state.has_background_task() {
-                                continue;
-                            }
                             if let Some(sid) =
                                 event.params.get("sessionId").and_then(|v| v.as_i64())
                             {

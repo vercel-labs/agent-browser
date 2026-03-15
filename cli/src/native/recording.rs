@@ -1,24 +1,22 @@
 use serde_json::{json, Value};
-use std::collections::VecDeque;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::oneshot;
 
 use super::cdp::client::CdpClient;
-use super::cdp::types::CdpEvent;
-use super::stream;
+use super::cdp::types::{CaptureScreenshotParams, CaptureScreenshotResult};
 
-const TARGET_FPS: f64 = 25.0;
-const ACK_INTERVAL_MS: u64 = 35;
+const CAPTURE_INTERVAL_MS: u64 = 100;
+const CAPTURE_FPS: u32 = 10;
 
 pub struct RecordingState {
     pub active: bool,
     pub output_path: String,
     pub frame_count: u64,
-    pub screencast_task: Option<tokio::task::JoinHandle<Result<(), String>>>,
+    pub capture_task: Option<tokio::task::JoinHandle<Result<(), String>>>,
     pub shared_frame_count: Option<Arc<AtomicU64>>,
     pub cancel_tx: Option<oneshot::Sender<()>>,
 }
@@ -29,14 +27,10 @@ impl RecordingState {
             active: false,
             output_path: String::new(),
             frame_count: 0,
-            screencast_task: None,
+            capture_task: None,
             shared_frame_count: None,
             cancel_tx: None,
         }
-    }
-
-    pub fn has_background_task(&self) -> bool {
-        self.screencast_task.is_some()
     }
 }
 
@@ -104,7 +98,7 @@ fn build_ffmpeg_command(output_path: &str) -> tokio::process::Command {
             "-c:v",
             "mjpeg",
             "-framerate",
-            "25",
+            &CAPTURE_FPS.to_string(),
             "-i",
             "pipe:0",
         ])
@@ -126,11 +120,9 @@ fn build_ffmpeg_command(output_path: &str) -> tokio::process::Command {
     cmd
 }
 
-/// Spawn a background task that receives screencast frames from CDP,
-/// pipes them to ffmpeg in real-time, and returns when cancelled or
-/// the broadcast closes. Acks are throttled at 35ms intervals.
+/// Spawn a background task that captures screenshots at a fixed interval
+/// and pipes them to ffmpeg in real-time.
 pub fn spawn_recording_task(
-    mut event_rx: broadcast::Receiver<CdpEvent>,
     client: Arc<CdpClient>,
     session_id: String,
     output_path: String,
@@ -152,101 +144,49 @@ pub fn spawn_recording_task(
             .take()
             .ok_or_else(|| "Failed to open ffmpeg stdin".to_string())?;
 
-        let mut pending_acks: VecDeque<i64> = VecDeque::new();
-        let mut ack_interval = tokio::time::interval(Duration::from_millis(ACK_INTERVAL_MS));
-        ack_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut interval = tokio::time::interval(Duration::from_millis(CAPTURE_INTERVAL_MS));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-        let mut last_frame: Option<Vec<u8>> = None;
-        let mut last_frame_number: u64 = 0;
-        let mut first_timestamp: Option<f64> = None;
+        let params = CaptureScreenshotParams {
+            format: Some("jpeg".to_string()),
+            quality: Some(80),
+            clip: None,
+            from_surface: Some(true),
+            capture_beyond_viewport: None,
+        };
 
         loop {
             tokio::select! {
                 _ = &mut cancel_rx => break,
+                _ = interval.tick() => {}
+            }
 
-                _ = ack_interval.tick() => {
-                    if let Some(sid) = pending_acks.pop_front() {
-                        let _ = stream::ack_screencast_frame(&client, &session_id, sid).await;
-                    }
-                }
+            let result: Result<CaptureScreenshotResult, _> = client
+                .send_command_typed("Page.captureScreenshot", &params, Some(&session_id))
+                .await;
 
-                result = event_rx.recv() => {
-                    let event = match result {
-                        Ok(ev) => ev,
-                        Err(broadcast::error::RecvError::Lagged(n)) => {
-                            eprintln!("[recording] broadcast lagged, skipped {} events", n);
-                            continue;
-                        }
-                        Err(broadcast::error::RecvError::Closed) => break,
-                    };
-
-                    if event.method != "Page.screencastFrame" {
-                        continue;
-                    }
-
-                    if let Some(sid) = event.params.get("sessionId").and_then(|v| v.as_i64()) {
-                        pending_acks.push_back(sid);
-                    }
-
-                    let timestamp = event
-                        .params
-                        .get("metadata")
-                        .and_then(|m| m.get("timestamp"))
-                        .and_then(|t| t.as_f64())
-                        .unwrap_or(0.0);
-
-                    let relative_ts = if let Some(first) = first_timestamp {
-                        timestamp - first
-                    } else {
-                        first_timestamp = Some(timestamp);
-                        0.0
-                    };
-
-                    let frame_number = (relative_ts * TARGET_FPS).round().max(0.0) as u64;
-
-                    let data = match event.params.get("data").and_then(|v| v.as_str()) {
-                        Some(d) => d,
-                        None => continue,
-                    };
-                    let bytes = match base64::Engine::decode(
-                        &base64::engine::general_purpose::STANDARD,
-                        data,
-                    ) {
-                        Ok(b) => b,
-                        Err(_) => continue,
-                    };
-
-                    // Fill gap with repeated previous frame, then write current frame
-                    if let Some(ref prev) = last_frame {
-                        let gap = frame_number.saturating_sub(last_frame_number);
-                        for _ in 0..gap.saturating_sub(1) {
-                            if stdin.write_all(prev).await.is_err() {
-                                break;
-                            }
-                            shared_count.fetch_add(1, Ordering::Relaxed);
-                        }
-                    }
-
-                    if stdin.write_all(&bytes).await.is_err() {
+            let screenshot = match result {
+                Ok(s) => s,
+                Err(e) => {
+                    if e.contains("Target closed") || e.contains("not found") {
                         break;
                     }
-                    shared_count.fetch_add(1, Ordering::Relaxed);
-
-                    last_frame = Some(bytes);
-                    last_frame_number = frame_number;
+                    continue;
                 }
-            }
-        }
+            };
 
-        // Pad last frame for ~1 second
-        if let Some(ref last) = last_frame {
-            let pad_count = TARGET_FPS as u64;
-            for _ in 0..pad_count {
-                if stdin.write_all(last).await.is_err() {
-                    break;
-                }
-                shared_count.fetch_add(1, Ordering::Relaxed);
+            let bytes = match base64::Engine::decode(
+                &base64::engine::general_purpose::STANDARD,
+                &screenshot.data,
+            ) {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+
+            if stdin.write_all(&bytes).await.is_err() {
+                break;
             }
+            shared_count.fetch_add(1, Ordering::Relaxed);
         }
 
         drop(stdin);
@@ -274,7 +214,7 @@ pub async fn stop_recording_task(state: &mut RecordingState) -> Result<(), Strin
     }
 
     let counter = state.shared_frame_count.take();
-    let handle = state.screencast_task.take();
+    let handle = state.capture_task.take();
 
     let result = if let Some(h) = handle {
         match h.await {
