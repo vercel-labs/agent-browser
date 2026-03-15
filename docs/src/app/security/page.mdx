@@ -11,7 +11,7 @@ All security features are opt-in. By default, agent-browser imposes no restricti
 
 These features are designed to mitigate the following threats when an LLM-based agent drives a browser:
 
-- **Credential exposure** -- Passwords stored in the auth vault are never included in LLM context. The CLI handles vault operations locally; credentials do not pass through the daemon's IPC channel.
+- **Credential exposure** -- Secrets stored in the auth vault are never included in LLM context. The CLI handles vault operations locally; credentials do not pass through the daemon's IPC channel. When using 1Password-backed profiles, agent-browser stores only the item name or secret reference in the profile and resolves the username, password, or OTP locally through the `op` CLI at login time.
 - **Prompt injection via page content** -- Malicious pages can embed text that looks like tool output or system instructions. Content boundary markers (`--content-boundaries`) let the orchestrator distinguish trusted tool output from untrusted page content.
 - **Unauthorized navigation / data exfiltration** -- A compromised or manipulated agent could navigate to attacker-controlled domains to exfiltrate data. The domain allowlist (`--allowed-domains`) blocks navigations, sub-resource requests, WebSocket connections, EventSource streams, and `sendBeacon` calls to non-allowed domains.
 - **Unauthorized destructive actions** -- Action policy (`--action-policy`) and confirmation gating (`--confirm-actions`) prevent the agent from performing dangerous operations (eval, downloads, uploads) without explicit approval.
@@ -27,7 +27,7 @@ These features are designed to mitigate the following threats when an LLM-based 
 
 ## Authentication Vault
 
-Store credentials locally and reference them by name. The LLM never sees passwords.
+Store credentials locally and reference them by name. The LLM never sees secrets. Profiles can store encrypted values directly, keep only a 1Password Login item name, or use field-level 1Password references that resolve at login time.
 
 ```bash
 # Save credentials (encrypted if AGENT_BROWSER_ENCRYPTION_KEY is set)
@@ -36,6 +36,12 @@ echo "pass" | agent-browser auth save github --url https://github.com/login --us
 
 # Or pass directly (a warning will be shown)
 agent-browser auth save github --url https://github.com/login --username user --password pass
+
+# Or resolve secrets from a single 1Password Login item at login time
+agent-browser auth save github \
+  --url https://github.com/login \
+  --onepassword-item GitHub \
+  --onepassword-vault Work
 
 # Login using saved credentials
 agent-browser auth login github
@@ -62,6 +68,8 @@ agent-browser auth save myapp \
 ```
 
 Profiles are stored in `~/.agent-browser/auth/` and always encrypted with AES-256-GCM. If `AGENT_BROWSER_ENCRYPTION_KEY` is not set, a key is auto-generated at `~/.agent-browser/.encryption-key` on first use. Back up this file or set the environment variable explicitly for portability.
+
+For 1Password-backed profiles, the saved JSON contains only the item name or `op://...` references; the actual username, password, or OTP is fetched locally from the signed-in `op` CLI during `auth login`.
 
 File permissions are enforced on both Unix (`chmod 600`/`700`) and Windows (`icacls` restricted to the current user) to prevent other users from reading encryption keys or auth profiles.
 

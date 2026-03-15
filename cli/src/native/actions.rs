@@ -4792,6 +4792,77 @@ async fn handle_http_credentials(cmd: &Value, state: &DaemonState) -> Result<Val
 // Auth handlers
 // ---------------------------------------------------------------------------
 
+async fn find_first_existing_selector(
+    mgr: &BrowserManager,
+    selectors: &[&str],
+) -> Result<Option<String>, String> {
+    for selector in selectors {
+        let js = format!(
+            "!!document.querySelector({})",
+            serde_json::to_string(selector).unwrap_or_default()
+        );
+        if let Ok(val) = mgr.evaluate(&js, None).await {
+            if val.as_bool().unwrap_or(false) {
+                return Ok(Some((*selector).to_string()));
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+async fn wait_for_any_existing_selector(
+    mgr: &BrowserManager,
+    selectors: &[&str],
+    timeout_ms: u64,
+) -> Result<String, String> {
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
+
+    loop {
+        if let Some(selector) = find_first_existing_selector(mgr, selectors).await? {
+            return Ok(selector);
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            return Err(format!(
+                "Could not find any matching selector after {}ms",
+                timeout_ms
+            ));
+        }
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    }
+}
+
+async fn wait_for_navigation_after_auth_submit(mgr: &BrowserManager, session_id: &str) {
+    let mut rx = mgr.client.subscribe();
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(10);
+    let mut navigated = false;
+
+    loop {
+        let result = tokio::time::timeout_at(deadline, rx.recv()).await;
+        match result {
+            Ok(Ok(event)) => {
+                if event.session_id.as_deref() == Some(session_id) {
+                    match event.method.as_str() {
+                        "Page.frameNavigated" | "Page.loadEventFired" => {
+                            navigated = true;
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Ok(Err(_)) => break,
+            Err(_) => break,
+        }
+    }
+
+    if !navigated {
+        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+    }
+}
+
 async fn handle_auth_save(cmd: &Value) -> Result<Value, String> {
     let name = cmd
         .get("name")
@@ -4801,25 +4872,35 @@ async fn handle_auth_save(cmd: &Value) -> Result<Value, String> {
         .get("url")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'url'")?;
-    let username = cmd
-        .get("username")
-        .and_then(|v| v.as_str())
-        .ok_or("Missing 'username'")?;
-    let password = cmd
-        .get("password")
-        .and_then(|v| v.as_str())
-        .ok_or("Missing 'password'")?;
+    let one_password_item = cmd.get("onePasswordItem").and_then(|v| v.as_str());
+    let one_password_vault = cmd.get("onePasswordVault").and_then(|v| v.as_str());
+    let username = cmd.get("username").and_then(|v| v.as_str());
+    let username_op_ref = cmd.get("usernameOpRef").and_then(|v| v.as_str());
+    let password = cmd.get("password").and_then(|v| v.as_str());
+    let password_op_ref = cmd.get("passwordOpRef").and_then(|v| v.as_str());
     let username_selector = cmd.get("usernameSelector").and_then(|v| v.as_str());
     let password_selector = cmd.get("passwordSelector").and_then(|v| v.as_str());
     let submit_selector = cmd.get("submitSelector").and_then(|v| v.as_str());
+    let otp_op_ref = cmd.get("otpOpRef").and_then(|v| v.as_str());
+    let otp_selector = cmd.get("otpSelector").and_then(|v| v.as_str());
+    let otp_submit_selector = cmd.get("otpSubmitSelector").and_then(|v| v.as_str());
     auth::auth_save(
         name,
         url,
-        username,
-        password,
-        username_selector,
-        password_selector,
-        submit_selector,
+        auth::AuthSaveOptions {
+            one_password_item,
+            one_password_vault,
+            username,
+            username_op_ref,
+            password,
+            password_op_ref,
+            username_selector,
+            password_selector,
+            submit_selector,
+            otp_op_ref,
+            otp_selector,
+            otp_submit_selector,
+        },
     )
 }
 
@@ -4833,8 +4914,36 @@ async fn handle_auth_login(cmd: &Value, state: &mut DaemonState) -> Result<Value
         return Err("Credential has no URL".to_string());
     }
     let url = cred.url;
-    let username = cred.username;
-    let password = cred.password;
+    let one_password_item = if let Some(item) = cred.one_password_item.as_deref() {
+        Some(auth::resolve_1password_item(
+            item,
+            cred.one_password_vault.as_deref(),
+        )?)
+    } else {
+        None
+    };
+    let username = if let Some(ref item) = one_password_item {
+        item.username.clone()
+    } else if let Some(username_op_ref) = cred.username_op_ref.as_deref() {
+        auth::resolve_1password_reference(username_op_ref)?
+    } else if !cred.username.is_empty() {
+        cred.username.clone()
+    } else {
+        return Err(
+            "Credential has no username, 1Password item, or 1Password secret reference".to_string(),
+        );
+    };
+    let password = if let Some(ref item) = one_password_item {
+        item.password.clone()
+    } else if let Some(password_op_ref) = cred.password_op_ref.as_deref() {
+        auth::resolve_1password_reference(password_op_ref)?
+    } else if !cred.password.is_empty() {
+        cred.password.clone()
+    } else {
+        return Err(
+            "Credential has no password, 1Password item, or 1Password secret reference".to_string(),
+        );
+    };
 
     let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
     mgr.navigate(&url, WaitUntil::Load).await?;
@@ -4852,6 +4961,14 @@ async fn handle_auth_login(cmd: &Value, state: &mut DaemonState) -> Result<Value
         "button[type=submit]",
         "input[type=submit]",
         "button:not([type])",
+    ];
+    let auto_otp_selectors = [
+        "input[autocomplete='one-time-code']",
+        "input[name*=otp i]",
+        "input[id*=otp i]",
+        "input[name*=code i]",
+        "input[id*=code i]",
+        "input[inputmode='numeric']",
     ];
 
     let username_sel = cmd
@@ -4874,20 +4991,9 @@ async fn handle_auth_login(cmd: &Value, state: &mut DaemonState) -> Result<Value
     let user_sel = if let Some(s) = username_sel {
         s
     } else {
-        let mut found = None;
-        for sel in &auto_user_selectors {
-            let js = format!(
-                "!!document.querySelector({})",
-                serde_json::to_string(sel).unwrap_or_default()
-            );
-            if let Ok(val) = mgr.evaluate(&js, None).await {
-                if val.as_bool().unwrap_or(false) {
-                    found = Some(sel.to_string());
-                    break;
-                }
-            }
-        }
-        found.ok_or("Could not find username field")?
+        find_first_existing_selector(mgr, &auto_user_selectors)
+            .await?
+            .ok_or("Could not find username field")?
     };
     interaction::fill(
         &mgr.client,
@@ -4913,20 +5019,9 @@ async fn handle_auth_login(cmd: &Value, state: &mut DaemonState) -> Result<Value
     let sub_sel = if let Some(s) = submit_sel {
         s
     } else {
-        let mut found = None;
-        for sel in &auto_submit_selectors {
-            let js = format!(
-                "!!document.querySelector({})",
-                serde_json::to_string(sel).unwrap_or_default()
-            );
-            if let Ok(val) = mgr.evaluate(&js, None).await {
-                if val.as_bool().unwrap_or(false) {
-                    found = Some(sel.to_string());
-                    break;
-                }
-            }
-        }
-        found.ok_or("Could not find submit button")?
+        find_first_existing_selector(mgr, &auto_submit_selectors)
+            .await?
+            .ok_or("Could not find submit button")?
     };
     interaction::click(
         &mgr.client,
@@ -4938,32 +5033,58 @@ async fn handle_auth_login(cmd: &Value, state: &mut DaemonState) -> Result<Value
     )
     .await?;
 
-    // Wait for navigation after submit (with fallback timeout)
-    let mut rx = mgr.client.subscribe();
-    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(10);
-    let mut navigated = false;
+    let otp_code = if let Some(ref item) = one_password_item {
+        item.otp.clone()
+    } else if let Some(otp_op_ref) = cred.otp_op_ref.as_deref() {
+        Some(auth::resolve_1password_reference(otp_op_ref)?)
+    } else {
+        None
+    };
 
-    loop {
-        let result = tokio::time::timeout_at(deadline, rx.recv()).await;
-        match result {
-            Ok(Ok(event)) => {
-                if event.session_id.as_deref() == Some(&session_id) {
-                    match event.method.as_str() {
-                        "Page.frameNavigated" | "Page.loadEventFired" => {
-                            navigated = true;
-                            break;
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            Ok(Err(_)) => break,
-            Err(_) => break,
+    if let Some(otp_code) = otp_code {
+        let otp_selector = if let Some(selector) = cmd
+            .get("otpSelector")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .or(cred.otp_selector.clone())
+        {
+            wait_for_selector(&mgr.client, &session_id, &selector, "visible", 15_000).await?;
+            selector
+        } else {
+            let selector = wait_for_any_existing_selector(mgr, &auto_otp_selectors, 15_000).await?;
+            wait_for_selector(&mgr.client, &session_id, &selector, "visible", 15_000).await?;
+            selector
+        };
+        interaction::fill(
+            &mgr.client,
+            &session_id,
+            &state.ref_map,
+            &otp_selector,
+            &otp_code,
+        )
+        .await?;
+
+        let otp_submit_selector = cmd
+            .get("otpSubmitSelector")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .or(cred.otp_submit_selector.clone())
+            .or(find_first_existing_selector(mgr, &auto_submit_selectors).await?);
+
+        if let Some(otp_submit_selector) = otp_submit_selector {
+            interaction::click(
+                &mgr.client,
+                &session_id,
+                &state.ref_map,
+                &otp_submit_selector,
+                "left",
+                1,
+            )
+            .await?;
+            wait_for_navigation_after_auth_submit(mgr, &session_id).await;
         }
-    }
-
-    if !navigated {
-        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+    } else {
+        wait_for_navigation_after_auth_submit(mgr, &session_id).await;
     }
 
     Ok(json!({ "loggedIn": true, "name": name }))
