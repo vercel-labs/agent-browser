@@ -806,7 +806,13 @@ async fn auto_launch(state: &mut DaemonState) -> Result<(), String> {
     }
 
     if env::var("AGENT_BROWSER_AUTO_CONNECT").is_ok() {
-        let mgr = BrowserManager::connect_auto().await?;
+        let mut mgr = BrowserManager::connect_auto().await?;
+        mgr.tab_new(None).await?;
+        let session_id = mgr.active_session_id()?.to_string();
+        let _ = mgr
+            .client
+            .send_command("Page.bringToFront", None, Some(&session_id))
+            .await;
         state.browser = Some(mgr);
         state.subscribe_to_browser_events();
         state.update_stream_client().await;
@@ -971,7 +977,15 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     }
 
     if auto_connect {
-        state.browser = Some(BrowserManager::connect_auto().await?);
+        let mut mgr = BrowserManager::connect_auto().await?;
+        // Open a fresh tab so subsequent navigations don't hijack an existing one.
+        mgr.tab_new(None).await?;
+        let session_id = mgr.active_session_id()?.to_string();
+        let _ = mgr
+            .client
+            .send_command("Page.bringToFront", None, Some(&session_id))
+            .await;
+        state.browser = Some(mgr);
         state.subscribe_to_browser_events();
         state.update_stream_client().await;
         return Ok(json!({ "launched": true }));
