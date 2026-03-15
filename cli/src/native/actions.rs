@@ -2723,7 +2723,9 @@ async fn handle_recording_restart(cmd: &Value, state: &mut DaemonState) -> Resul
 
     if let Some(ref browser) = state.browser {
         let session_id = browser.active_session_id()?.to_string();
-        state.start_recording_task(browser.client.clone(), session_id).await?;
+        state
+            .start_recording_task(browser.client.clone(), session_id)
+            .await?;
     }
 
     Ok(result)
@@ -4350,7 +4352,9 @@ async fn handle_video_start(cmd: &Value, state: &mut DaemonState) -> Result<Valu
     let session_id = mgr.active_session_id()?.to_string();
 
     recording::recording_start(&mut state.recording_state, path)?;
-    state.start_recording_task(mgr.client.clone(), session_id).await?;
+    state
+        .start_recording_task(mgr.client.clone(), session_id)
+        .await?;
 
     Ok(json!({
         "started": true,

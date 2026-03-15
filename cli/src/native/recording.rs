@@ -90,7 +90,14 @@ fn build_ffmpeg_command(output_path: &str) -> tokio::process::Command {
 
     cmd.args(["-y"])
         .args(["-avioflags", "direct"])
-        .args(["-fpsprobesize", "0", "-probesize", "32", "-analyzeduration", "0"])
+        .args([
+            "-fpsprobesize",
+            "0",
+            "-probesize",
+            "32",
+            "-analyzeduration",
+            "0",
+        ])
         .args(["-f", "image2pipe", "-c:v", "mjpeg", "-i", "pipe:0"])
         .args(["-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2"]);
 
@@ -134,14 +141,12 @@ pub fn spawn_recording_task(
     tokio::spawn(async move {
         let mut cancel_rx = std::pin::pin!(cancel_rx);
 
-        let mut ffmpeg = build_ffmpeg_command(&output_path)
-            .spawn()
-            .map_err(|e| {
-                format!(
-                    "ffmpeg not found or failed to execute: {}. Install ffmpeg to enable recording.",
-                    e
-                )
-            })?;
+        let mut ffmpeg = build_ffmpeg_command(&output_path).spawn().map_err(|e| {
+            format!(
+                "ffmpeg not found or failed to execute: {}. Install ffmpeg to enable recording.",
+                e
+            )
+        })?;
 
         let mut stdin = ffmpeg
             .stdin
