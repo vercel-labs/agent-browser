@@ -120,7 +120,8 @@ fn build_ffmpeg_command(output_path: &str) -> tokio::process::Command {
         .arg(output_path)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
 
     cmd
 }
