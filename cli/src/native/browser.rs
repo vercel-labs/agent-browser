@@ -87,6 +87,14 @@ fn validate_lightpanda_options(options: &LaunchOptions) -> Result<(), String> {
     Ok(())
 }
 
+/// Returns true for Chrome internal targets that should not be selected
+/// during auto-connect (e.g. chrome://, chrome-extension://, devtools://).
+fn is_internal_chrome_target(url: &str) -> bool {
+    url.starts_with("chrome://")
+        || url.starts_with("chrome-extension://")
+        || url.starts_with("devtools://")
+}
+
 /// Converts common error messages into AI-friendly, actionable descriptions.
 pub fn to_ai_friendly_error(error: &str) -> String {
     let lower = error.to_lowercase();
@@ -327,7 +335,9 @@ impl BrowserManager {
             .target_infos
             .into_iter()
             .filter(|t| {
-                (t.target_type == "page" || t.target_type == "webview") && !t.url.is_empty()
+                (t.target_type == "page" || t.target_type == "webview")
+                    && !t.url.is_empty()
+                    && !is_internal_chrome_target(&t.url)
             })
             .collect();
 
@@ -1441,5 +1451,22 @@ mod tests {
             "Timed out after 10000ms waiting for Lightpanda Target domain to initialize"
         ));
         assert!(err.contains("Target.setDiscoverTargets failed"));
+    }
+
+    #[test]
+    fn test_is_internal_chrome_target() {
+        assert!(is_internal_chrome_target("chrome://newtab/"));
+        assert!(is_internal_chrome_target(
+            "chrome://omnibox-popup.top-chrome/"
+        ));
+        assert!(is_internal_chrome_target(
+            "chrome-extension://abc123/popup.html"
+        ));
+        assert!(is_internal_chrome_target(
+            "devtools://devtools/bundled/inspector.html"
+        ));
+        assert!(!is_internal_chrome_target("https://example.com"));
+        assert!(!is_internal_chrome_target("http://localhost:3000"));
+        assert!(!is_internal_chrome_target("about:blank"));
     }
 }
