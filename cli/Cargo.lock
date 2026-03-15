@@ -45,7 +45,7 @@ dependencies = [
 
 [[package]]
 name = "agent-browser"
-version = "0.20.7"
+version = "0.20.8"
 dependencies = [
  "aes-gcm",
  "async-trait",
