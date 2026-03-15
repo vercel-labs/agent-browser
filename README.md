@@ -792,7 +792,7 @@ See the [environments example](examples/environments/) for a working demo with a
 
 ### Serverless (AWS Lambda)
 
-```javascript
+```typescript
 import chromium from '@sparticuz/chromium';
 import { execSync } from 'child_process';
 
