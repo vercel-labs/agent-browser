@@ -2039,13 +2039,6 @@ async fn e2e_snapshot_cursor_interactive() {
 
     let snapshot = get_data(&resp)["snapshot"].as_str().unwrap();
 
-    // Cursor section must appear
-    assert!(
-        snapshot.contains("# Cursor-interactive elements:") || snapshot.contains("clickable"),
-        "Cursor section missing from snapshot -i -C:\n{}",
-        snapshot,
-    );
-
     // v0.19.0 output format: role + hints
     assert!(
         snapshot.contains("clickable") && snapshot.contains("[cursor:pointer"),
@@ -2060,20 +2053,26 @@ async fn e2e_snapshot_cursor_interactive() {
         snapshot,
     );
 
-    // Text dedup: "Link" and "Btn" are in the ARIA tree, so must NOT appear
-    // in the cursor section.
-    let cursor_section = snapshot
-        .split("# Cursor-interactive elements:")
-        .nth(1)
-        .unwrap_or(snapshot);
-    assert!(
-        !cursor_section.contains("\"Link\""),
-        "ARIA link text should be deduped from cursor section"
-    );
-    assert!(
-        !cursor_section.contains("\"Btn\""),
-        "ARIA button text should be deduped from cursor section"
-    );
+    // Text dedup: "Link" and "Btn" are in the ARIA tree, so must NOT suffix
+    // with cursor-interactive info. Verify line by line.
+    for line in snapshot.lines() {
+        assert!(
+            !(line.contains("\"Link\"")
+                && (line.contains("clickable")
+                    || line.contains("focusable")
+                    || line.contains("editable"))),
+            "Standard <a> element should not have cursor-interactive info:\n{}",
+            line
+        );
+        assert!(
+            !(line.contains("\"Btn\"")
+                && (line.contains("clickable")
+                    || line.contains("focusable")
+                    || line.contains("editable"))),
+            "Standard <button> element should not have cursor-interactive info:\n{}",
+            line
+        );
+    }
 
     // Must complete quickly (< 5s), not hit the 30s CDP timeout
     assert!(
