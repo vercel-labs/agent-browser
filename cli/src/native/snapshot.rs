@@ -89,6 +89,15 @@ struct TreeNode {
     has_ref: bool,
     ref_id: Option<String>,
     depth: usize,
+    /// Cursor-interactive information (only set when options.cursor is true)
+    cursor_info: Option<CursorElementInfo>,
+}
+
+/// Information about a cursor-interactive element (elements with cursor:pointer, onclick, tabindex, etc.)
+#[derive(Clone)]
+struct CursorElementInfo {
+    kind: String, // "clickable", "focusable", "editable"
+    hints: Vec<String>,
 }
 
 struct RoleNameTracker {
@@ -238,12 +247,26 @@ pub async fn take_snapshot(
 
     let mut nodes_with_refs: Vec<(usize, usize)> = Vec::new();
 
+    // When cursor mode is enabled, pre-collect cursor-interactive elements
+    // so we can mark them with refs during tree building
+    let cursor_elements: HashMap<i64, CursorElementInfo> =
+        if options.cursor {
+            find_cursor_interactive_elements(client, session_id)
+                .await
+                .unwrap_or_default()
+        } else {
+            HashMap::new()
+        };
+
     for (idx, node) in tree_nodes.iter().enumerate() {
         let role = node.role.as_str();
         let should_ref = if INTERACTIVE_ROLES.contains(&role) {
             true
         } else if CONTENT_ROLES.contains(&role) {
             !node.name.is_empty()
+        } else if options.cursor {
+            // In cursor mode, also ref elements that are cursor-interactive
+            node.backend_node_id.is_some_and(|bid| cursor_elements.contains_key(&bid))
         } else {
             false
         };
@@ -281,6 +304,17 @@ pub async fn take_snapshot(
         tree_nodes[*idx].ref_id = Some(ref_id);
     }
 
+    // Populate cursor_info for ref-bearing nodes when cursor mode is enabled
+    if options.cursor {
+        for (idx, _) in &nodes_with_refs {
+            if let Some(bid) = tree_nodes[*idx].backend_node_id {
+                if let Some(cursor_info) = cursor_elements.get(&bid) {
+                    tree_nodes[*idx].cursor_info = Some((*cursor_info).clone());
+                }
+            }
+        }
+    }
+
     ref_map.set_next_ref_num(next_ref);
 
     let mut output = String::new();
@@ -292,22 +326,7 @@ pub async fn take_snapshot(
         output = compact_tree(&output, options.interactive);
     }
 
-    let mut trimmed = output.trim().to_string();
-    let tree_is_empty = trimmed.is_empty();
-
-    if options.cursor {
-        let cursor_section = find_cursor_interactive_elements(client, session_id, ref_map).await?;
-        if !cursor_section.is_empty() {
-            // v0.19.0 parity: when interactive tree is empty but cursor elements exist,
-            // the cursor elements replace the empty message (no separator).
-            if tree_is_empty {
-                trimmed = cursor_section;
-            } else {
-                trimmed.push_str("\n# Cursor-interactive elements:\n");
-                trimmed.push_str(&cursor_section);
-            }
-        }
-    }
+    let trimmed = output.trim().to_string();
 
     if trimmed.is_empty() {
         if options.interactive {
@@ -322,8 +341,7 @@ pub async fn take_snapshot(
 async fn find_cursor_interactive_elements(
     client: &CdpClient,
     session_id: &str,
-    ref_map: &mut RefMap,
-) -> Result<String, String> {
+) -> Result<HashMap<i64, CursorElementInfo>, String> {
     // Single JS evaluation that matches the v0.19.0 Node.js findCursorInteractiveElements():
     // - Uses querySelectorAll('*') to walk all elements
     // - Checks getComputedStyle(el).cursor === 'pointer'
@@ -376,7 +394,6 @@ async fn find_cursor_interactive_elements(
         }
 
         var text = (el.textContent || '').trim().slice(0, 100);
-        if (!text) continue;
 
         var rect = el.getBoundingClientRect();
         if (rect.width === 0 || rect.height === 0) continue;
@@ -414,10 +431,8 @@ async fn find_cursor_interactive_elements(
         .unwrap_or_default();
 
     if elements.is_empty() {
-        return Ok(String::new());
+        return Ok(HashMap::new());
     }
-
-    let mut existing_texts = build_dedup_set(ref_map);
 
     // Batch-resolve backendNodeIds: use DOM.getDocument to get the root nodeId,
     // then DOM.querySelectorAll to get all tagged elements in a single call.
@@ -510,25 +525,9 @@ async fn find_cursor_interactive_elements(
         eprintln!("[agent-browser] Warning: failed to clean up data-__ab-ci attributes: {e}");
     }
 
-    // Build refs and output lines with v0.19.0-compatible format.
-    let mut next_ref = ref_map.next_ref_num();
-    let mut lines: Vec<String> = Vec::new();
-
+    // Build the map
+    let mut map: HashMap<i64, CursorElementInfo> = HashMap::new();
     for (i, elem) in elements.iter().enumerate() {
-        let text = elem
-            .get("text")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .trim()
-            .to_string();
-
-        // Text dedup: skip if this text already appears in the ARIA tree refs (v0.19.0 parity)
-        let text_lower = text.to_lowercase();
-        if existing_texts.contains(&text_lower) {
-            continue;
-        }
-        existing_texts.insert(text_lower);
-
         let backend_node_id = idx_to_backend.get(&i).copied();
 
         // Role differentiation: v0.19.0 uses 'clickable' for cursor:pointer or onclick,
@@ -558,43 +557,29 @@ async fn find_cursor_interactive_elements(
             "focusable"
         };
 
-        let mut hints: Vec<&str> = Vec::new();
+        let mut hints: Vec<String> = Vec::new();
         if has_cursor_pointer {
-            hints.push("cursor:pointer");
+            hints.push("cursor:pointer".to_string());
         }
         if has_on_click {
-            hints.push("onclick");
+            hints.push("onclick".to_string());
         }
         if has_tab_index {
-            hints.push("tabindex");
+            hints.push("tabindex".to_string());
         }
         if is_editable {
-            hints.push("contenteditable");
+            hints.push("contenteditable".to_string());
         }
 
-        let ref_id = format!("e{}", next_ref);
-        next_ref += 1;
-
-        ref_map.add(ref_id.clone(), backend_node_id, kind, &text, None);
-
-        let escaped = text
-            .replace('\\', "\\\\")
-            .replace('"', "\\\"")
-            .replace(['\n', '\r'], " ");
-
-        // v0.19.0 output format: - clickable "text" [ref=eN] [cursor:pointer, onclick]
-        lines.push(format!(
-            "- {} \"{}\" [ref={}] [{}]",
-            kind,
-            escaped,
-            ref_id,
-            hints.join(", ")
-        ));
+        if let Some(bid) = backend_node_id {
+            map.insert(bid, CursorElementInfo { 
+                kind: kind.to_string(), 
+                hints
+            });
+        }
     }
 
-    ref_map.set_next_ref_num(next_ref);
-
-    Ok(lines.join("\n"))
+    Ok(map)
 }
 
 fn build_tree(nodes: &[AXNode]) -> (Vec<TreeNode>, Vec<usize>) {
@@ -626,6 +611,7 @@ fn build_tree(nodes: &[AXNode]) -> (Vec<TreeNode>, Vec<usize>) {
                 has_ref: false,
                 ref_id: None,
                 depth: 0,
+                cursor_info: None,
             });
             id_to_idx.insert(node.node_id.clone(), i);
             continue;
@@ -647,6 +633,7 @@ fn build_tree(nodes: &[AXNode]) -> (Vec<TreeNode>, Vec<usize>) {
             has_ref: false,
             ref_id: None,
             depth: 0,
+            cursor_info: None,
         });
         id_to_idx.insert(node.node_id.clone(), i);
     }
@@ -775,6 +762,11 @@ fn render_tree(
 
     if !attrs.is_empty() {
         line.push_str(&format!(" [{}]", attrs.join(", ")));
+    }
+
+    // Add cursor-interactive kind & hints
+    if let Some(ref cursor_info) = node.cursor_info {
+        line.push_str(&format!(" {} [{}]", &cursor_info.kind, &cursor_info.hints.join(", ")));
     }
 
     // Value
