@@ -793,6 +793,138 @@ async fn e2e_tabs() {
     assert_success(&resp);
 }
 
+#[tokio::test]
+#[ignore]
+async fn e2e_tab_ids_not_reused() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // First tab gets tabId 1
+    let resp = execute_command(&json!({ "id": "2", "action": "tab_list" }), &mut state).await;
+    assert_success(&resp);
+    let tabs = get_data(&resp)["tabs"].as_array().unwrap();
+    assert_eq!(tabs[0]["tabId"], 1);
+
+    // Open tab 2 and tab 3
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "tab_new", "url": "data:text/html,<h1>Tab 2</h1>" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["tabId"], 2);
+
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "tab_new", "url": "data:text/html,<h1>Tab 3</h1>" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["tabId"], 3);
+
+    // Close tab 2
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "tab_close", "tabId": 2 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Open a new tab — should get tabId 4, NOT 2
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "tab_new", "url": "data:text/html,<h1>Tab 4</h1>" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["tabId"], 4,
+        "Tab IDs must not be reused after closing"
+    );
+
+    // Verify final state: tabs 1, 3, 4
+    let resp = execute_command(&json!({ "id": "7", "action": "tab_list" }), &mut state).await;
+    assert_success(&resp);
+    let tabs = get_data(&resp)["tabs"].as_array().unwrap();
+    assert_eq!(tabs.len(), 3);
+    let ids: Vec<i64> = tabs.iter().map(|t| t["tabId"].as_i64().unwrap()).collect();
+    assert_eq!(ids, vec![1, 3, 4]);
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_tab_global_targeting() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Navigate tab 1
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": "data:text/html,<h1>Page A</h1>" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Open tab 2 (becomes active)
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "tab_new", "url": "data:text/html,<h1>Page B</h1>" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["tabId"], 2);
+
+    // Use tabId to evaluate on tab 1 while tab 2 is active
+    // (simulates --tab 1 evaluate ...)
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "evaluate", "tabId": 1, "script": "document.querySelector('h1').textContent" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["result"], "Page A",
+        "tabId should target tab 1 even though tab 2 was active"
+    );
+
+    // Verify tab 2 content is still accessible
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "evaluate", "tabId": 2, "script": "document.querySelector('h1').textContent" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], "Page B");
+
+    // Without tabId, should use the current active tab (now tab 1 from the switch)
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "evaluate", "script": "document.querySelector('h1').textContent" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    // After targeting tab 1 then tab 2, active tab is now tab 2
+    assert_eq!(get_data(&resp)["result"], "Page B");
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 // ---------------------------------------------------------------------------
 // Element queries: isvisible, isenabled, gettext, getattribute
 // ---------------------------------------------------------------------------

@@ -905,6 +905,17 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         );
     }
 
+    // Pre-dispatch: if tabId is set on a non-tab command, switch to that tab first
+    if !matches!(action, "tab_list" | "tab_new" | "tab_switch" | "tab_close" | "launch" | "close") {
+        if let Some(tab_id) = cmd.get("tabId").and_then(|v| v.as_u64()) {
+            if let Some(ref mut mgr) = state.browser {
+                if let Err(e) = mgr.tab_switch_by_id(tab_id as u32).await {
+                    return error_response(&id, &e);
+                }
+            }
+        }
+    }
+
     let result = match action {
         "launch" => handle_launch(cmd, state).await,
         "navigate" => handle_navigate(cmd, state).await,
