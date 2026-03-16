@@ -15,12 +15,12 @@ fn parse_idle_timeout(s: &str) -> Result<String, String> {
     if s.is_empty() {
         return Err("Empty idle timeout".to_string());
     }
-    
+
     // Check if it ends with a time unit
     if s.len() > 1 {
         let (num_str, unit) = s.split_at(s.len() - 1);
         let num: u64 = num_str.parse().map_err(|_| "Invalid number")?;
-        
+
         let ms = match unit {
             "s" => num * 1000,
             "m" => num * 60 * 1000,
@@ -28,13 +28,14 @@ fn parse_idle_timeout(s: &str) -> Result<String, String> {
             "M" => num * 60 * 1000, // alias for minutes
             _ => {
                 // Not a recognized unit - check if it's raw milliseconds
-                s.parse::<u64>().map_err(|_| "Invalid idle timeout format")?;
+                s.parse::<u64>()
+                    .map_err(|_| "Invalid idle timeout format")?;
                 return Ok(s.to_string());
             }
         };
         return Ok(ms.to_string());
     }
-    
+
     // Single character or pure number
     s.parse::<u64>().map_err(|_| "Invalid idle timeout")?;
     Ok(s.to_string())
@@ -462,7 +463,11 @@ pub fn parse_flags(args: &[String]) -> Flags {
                 if let Some(s) = args.get(i + 1) {
                     match parse_idle_timeout(s) {
                         Ok(ms) => flags.idle_timeout = Some(ms),
-                        Err(e) => eprintln!("{} Invalid --idle-timeout: {}", color::warning_indicator(), e),
+                        Err(e) => eprintln!(
+                            "{} Invalid --idle-timeout: {}",
+                            color::warning_indicator(),
+                            e
+                        ),
                     }
                     i += 1;
                 }
@@ -739,6 +744,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--screenshot-dir",
         "--screenshot-quality",
         "--screenshot-format",
+        "--idle-timeout",
     ];
 
     let mut i = 0;
@@ -875,6 +881,12 @@ mod tests {
         let cleaned = clean_args(&args(
             "--json --executable-path /path/to/chromium --headed open example.com",
         ));
+        assert_eq!(cleaned, vec!["open", "example.com"]);
+    }
+
+    #[test]
+    fn test_clean_args_removes_idle_timeout_before_command() {
+        let cleaned = clean_args(&args("--idle-timeout 10s open example.com"));
         assert_eq!(cleaned, vec!["open", "example.com"]);
     }
 

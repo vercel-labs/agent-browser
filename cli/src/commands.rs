@@ -2181,6 +2181,7 @@ mod tests {
             screenshot_dir: None,
             screenshot_quality: None,
             screenshot_format: None,
+            idle_timeout: None,
         }
     }
 
