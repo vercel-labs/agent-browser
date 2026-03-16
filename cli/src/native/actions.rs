@@ -3588,13 +3588,9 @@ async fn handle_frame(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         let label = name.or(url).unwrap_or("frame");
         state.active_frame_id = Some(frame_id);
         // Build a CSS selector that targets the specific iframe element
-        state.active_frame_selector = if let Some(n) = name {
-            Some(format!("iframe[name=\"{}\"], frame[name=\"{}\"]", n, n))
-        } else if let Some(u) = url {
-            Some(format!("iframe[src=\"{}\"], frame[src=\"{}\"]", u, u))
-        } else {
-            None
-        };
+        state.active_frame_selector = name
+            .map(|n| format!("iframe[name=\"{}\"], frame[name=\"{}\"]", n, n))
+            .or_else(|| url.map(|u| format!("iframe[src=\"{}\"], frame[src=\"{}\"]", u, u)));
         return Ok(json!({ "frame": label }));
     }
 

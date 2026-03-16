@@ -965,12 +965,8 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                 Ok(json!({ "id": id, "action": "mainframe" }))
             } else if rest.first().copied() == Some("locator") {
                 match rest.get(1).copied() {
-                    None | Some("clear") => {
-                        Ok(json!({ "id": id, "action": "framelocator" }))
-                    }
-                    Some(sel) => {
-                        Ok(json!({ "id": id, "action": "framelocator", "selector": sel }))
-                    }
+                    None | Some("clear") => Ok(json!({ "id": id, "action": "framelocator" })),
+                    Some(sel) => Ok(json!({ "id": id, "action": "framelocator", "selector": sel })),
                 }
             } else {
                 let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
