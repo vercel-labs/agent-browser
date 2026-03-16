@@ -11,9 +11,12 @@ const DEFAULT_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(2);
 /// of the interface it was reached through.
 pub async fn discover_cdp_url(host: &str, port: u16) -> Result<String, String> {
     let info = fetch_cdp_info(host, port, DEFAULT_DISCOVERY_TIMEOUT).await?;
-    let ws_url = info
-        .web_socket_debugger_url
-        .ok_or_else(|| format!("No webSocketDebuggerUrl in /json/version at {}:{}", host, port))?;
+    let ws_url = info.web_socket_debugger_url.ok_or_else(|| {
+        format!(
+            "No webSocketDebuggerUrl in /json/version at {}:{}",
+            host, port
+        )
+    })?;
     Ok(rewrite_ws_host(&ws_url, host, port))
 }
 
@@ -126,5 +129,4 @@ mod tests {
         let rewritten = rewrite_ws_host(original, "::1", 9222);
         assert_eq!(rewritten, "ws://[::1]:9222/devtools/browser/abc");
     }
-
 }
