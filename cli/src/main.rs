@@ -317,6 +317,7 @@ fn main() {
         confirm_actions: flags.confirm_actions.as_deref(),
         engine: flags.engine.as_deref(),
         idle_timeout: flags.idle_timeout.as_deref(),
+        cdp: flags.cdp.as_deref(),
     };
     let daemon_result = match ensure_daemon(&flags.session, &daemon_opts) {
         Ok(result) => result,
