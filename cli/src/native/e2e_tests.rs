@@ -927,6 +927,195 @@ async fn e2e_tab_global_targeting() {
     assert_success(&resp);
 }
 
+#[tokio::test]
+#[ignore]
+async fn e2e_tab_global_targeting_snapshot() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Navigate tab 1
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": "data:text/html,<h1>Page A</h1>" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Open tab 2 (becomes active)
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "tab_new", "url": "data:text/html,<h1>Page B</h1>" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["tabId"], 2);
+
+    // Snapshot tab 1 via tabId while tab 2 is active
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "snapshot", "tabId": 1 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let snapshot = get_data(&resp)["snapshot"].as_str().unwrap();
+    assert!(
+        snapshot.contains("Page A"),
+        "Snapshot with tabId=1 should contain 'Page A', got: {}",
+        snapshot
+    );
+    assert!(
+        !snapshot.contains("Page B"),
+        "Snapshot with tabId=1 should NOT contain 'Page B', got: {}",
+        snapshot
+    );
+
+    // Snapshot tab 2 via tabId
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "snapshot", "tabId": 2 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let snapshot = get_data(&resp)["snapshot"].as_str().unwrap();
+    assert!(
+        snapshot.contains("Page B"),
+        "Snapshot with tabId=2 should contain 'Page B', got: {}",
+        snapshot
+    );
+    assert!(
+        !snapshot.contains("Page A"),
+        "Snapshot with tabId=2 should NOT contain 'Page A', got: {}",
+        snapshot
+    );
+
+    // Snapshot without tabId should use the last-switched tab (tab 2)
+    let resp = execute_command(&json!({ "id": "6", "action": "snapshot" }), &mut state).await;
+    assert_success(&resp);
+    let snapshot = get_data(&resp)["snapshot"].as_str().unwrap();
+    assert!(
+        snapshot.contains("Page B"),
+        "Snapshot without tabId should use active tab (Page B), got: {}",
+        snapshot
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_tab_global_targeting_snapshot_non_contiguous() {
+    // Reproduces the bug where --tab 3 snapshot shows tab 1's content
+    // when tab IDs are non-contiguous (e.g. tabs [1] and [3] after
+    // closing tab [2]).
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Navigate tab 1 to Page A
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": "data:text/html,<h1>Page A</h1>" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Open tab 2
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "tab_new", "url": "data:text/html,<h1>Page B</h1>" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["tabId"], 2);
+
+    // Open tab 3
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "tab_new", "url": "data:text/html,<h1>Page C</h1>" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["tabId"], 3);
+
+    // Close tab 2 to create non-contiguous IDs: [1, 3]
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "tab_close", "tabId": 2 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Verify tab list shows [1] and [3]
+    let resp = execute_command(&json!({ "id": "6", "action": "tab_list" }), &mut state).await;
+    assert_success(&resp);
+    let tabs = get_data(&resp)["tabs"].as_array().unwrap();
+    assert_eq!(tabs.len(), 2);
+    assert_eq!(tabs[0]["tabId"], 1);
+    assert_eq!(tabs[1]["tabId"], 3);
+
+    // Switch active tab back to tab 1
+    let resp = execute_command(
+        &json!({ "id": "7", "action": "tab_switch", "tabId": 1 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Snapshot tab 3 via tabId while tab 1 is active
+    // (simulates: --tab 3 snapshot)
+    let resp = execute_command(
+        &json!({ "id": "8", "action": "snapshot", "tabId": 3 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let snapshot = get_data(&resp)["snapshot"].as_str().unwrap();
+    assert!(
+        snapshot.contains("Page C"),
+        "Snapshot with tabId=3 should contain 'Page C', got: {}",
+        snapshot
+    );
+    assert!(
+        !snapshot.contains("Page A"),
+        "Snapshot with tabId=3 should NOT contain 'Page A', got: {}",
+        snapshot
+    );
+
+    // Snapshot tab 1 via tabId
+    let resp = execute_command(
+        &json!({ "id": "9", "action": "snapshot", "tabId": 1 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let snapshot = get_data(&resp)["snapshot"].as_str().unwrap();
+    assert!(
+        snapshot.contains("Page A"),
+        "Snapshot with tabId=1 should contain 'Page A', got: {}",
+        snapshot
+    );
+    assert!(
+        !snapshot.contains("Page C"),
+        "Snapshot with tabId=1 should NOT contain 'Page C', got: {}",
+        snapshot
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 // ---------------------------------------------------------------------------
 // Element queries: isvisible, isenabled, gettext, getattribute
 // ---------------------------------------------------------------------------
