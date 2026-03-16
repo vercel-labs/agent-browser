@@ -249,14 +249,13 @@ pub async fn take_snapshot(
 
     // When cursor mode is enabled, pre-collect cursor-interactive elements
     // so we can mark them with refs during tree building
-    let cursor_elements: HashMap<i64, CursorElementInfo> =
-        if options.cursor {
-            find_cursor_interactive_elements(client, session_id)
-                .await
-                .unwrap_or_default()
-        } else {
-            HashMap::new()
-        };
+    let cursor_elements: HashMap<i64, CursorElementInfo> = if options.cursor {
+        find_cursor_interactive_elements(client, session_id)
+            .await
+            .unwrap_or_default()
+    } else {
+        HashMap::new()
+    };
 
     for (idx, node) in tree_nodes.iter().enumerate() {
         let role = node.role.as_str();
@@ -266,7 +265,8 @@ pub async fn take_snapshot(
             !node.name.is_empty()
         } else if options.cursor {
             // In cursor mode, also ref elements that are cursor-interactive
-            node.backend_node_id.is_some_and(|bid| cursor_elements.contains_key(&bid))
+            node.backend_node_id
+                .is_some_and(|bid| cursor_elements.contains_key(&bid))
         } else {
             false
         };
@@ -572,10 +572,13 @@ async fn find_cursor_interactive_elements(
         }
 
         if let Some(bid) = backend_node_id {
-            map.insert(bid, CursorElementInfo { 
-                kind: kind.to_string(), 
-                hints
-            });
+            map.insert(
+                bid,
+                CursorElementInfo {
+                    kind: kind.to_string(),
+                    hints,
+                },
+            );
         }
     }
 
@@ -766,7 +769,11 @@ fn render_tree(
 
     // Add cursor-interactive kind & hints
     if let Some(ref cursor_info) = node.cursor_info {
-        line.push_str(&format!(" {} [{}]", &cursor_info.kind, &cursor_info.hints.join(", ")));
+        line.push_str(&format!(
+            " {} [{}]",
+            &cursor_info.kind,
+            &cursor_info.hints.join(", ")
+        ));
     }
 
     // Value
