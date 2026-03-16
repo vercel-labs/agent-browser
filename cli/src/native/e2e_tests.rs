@@ -844,7 +844,8 @@ async fn e2e_tab_ids_not_reused() {
     .await;
     assert_success(&resp);
     assert_eq!(
-        get_data(&resp)["tabId"], 4,
+        get_data(&resp)["tabId"],
+        4,
         "Tab IDs must not be reused after closing"
     );
 
@@ -898,7 +899,8 @@ async fn e2e_tab_global_targeting() {
     .await;
     assert_success(&resp);
     assert_eq!(
-        get_data(&resp)["result"], "Page A",
+        get_data(&resp)["result"],
+        "Page A",
         "tabId should target tab 1 even though tab 2 was active"
     );
 

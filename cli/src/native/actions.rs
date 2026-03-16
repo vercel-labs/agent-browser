@@ -906,7 +906,10 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
     }
 
     // Pre-dispatch: if tabId is set on a non-tab command, switch to that tab first
-    if !matches!(action, "tab_list" | "tab_new" | "tab_switch" | "tab_close" | "launch" | "close") {
+    if !matches!(
+        action,
+        "tab_list" | "tab_new" | "tab_switch" | "tab_close" | "launch" | "close"
+    ) {
         if let Some(tab_id) = cmd.get("tabId").and_then(|v| v.as_u64()) {
             if let Some(ref mut mgr) = state.browser {
                 if let Err(e) = mgr.tab_switch_by_id(tab_id as u32).await {
@@ -2985,10 +2988,7 @@ async fn handle_tab_switch(cmd: &Value, state: &mut DaemonState) -> Result<Value
 
 async fn handle_tab_close(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
-    let tab_id = cmd
-        .get("tabId")
-        .and_then(|v| v.as_u64())
-        .map(|i| i as u32);
+    let tab_id = cmd.get("tabId").and_then(|v| v.as_u64()).map(|i| i as u32);
     state.ref_map.clear();
     state.iframe_sessions.clear();
     state.active_frame_id = None;

@@ -1093,10 +1093,7 @@ impl BrowserManager {
         self.tab_switch(index).await
     }
 
-    pub async fn tab_close_by_id(
-        &mut self,
-        tab_id: Option<u32>,
-    ) -> Result<Value, String> {
+    pub async fn tab_close_by_id(&mut self, tab_id: Option<u32>) -> Result<Value, String> {
         let index = match tab_id {
             Some(id) => Some(
                 self.pages
