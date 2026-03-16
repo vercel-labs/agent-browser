@@ -29,13 +29,22 @@ pub async fn discover_cdp_url_with_timeout(
     Ok(rewrite_ws_host(&ws_url, host, port))
 }
 
+/// Bracket an IPv6 address for use in URLs. No-op for IPv4 or already-bracketed addresses.
+fn bracket_ipv6(host: &str) -> String {
+    if host.contains(':') && !host.starts_with('[') {
+        format!("[{}]", host)
+    } else {
+        host.to_string()
+    }
+}
+
 /// Fetch `/json/version` from the given host:port and parse the response.
 async fn fetch_cdp_info(
     host: &str,
     port: u16,
     timeout: Duration,
 ) -> Result<BrowserVersionInfo, String> {
-    let url = format!("http://{}:{}/json/version", host, port);
+    let url = format!("http://{}:{}/json/version", bracket_ipv6(host), port);
 
     let body = tokio::time::timeout(timeout, reqwest_get_string(&url))
         .await
@@ -51,13 +60,7 @@ async fn fetch_cdp_info(
 /// browser is on a remote machine or behind a port-forward.
 fn rewrite_ws_host(ws_url: &str, host: &str, port: u16) -> String {
     if let Ok(mut parsed) = url::Url::parse(ws_url) {
-        // For IPv6 addresses, set_host needs brackets
-        let host_value = if host.contains(':') && !host.starts_with('[') {
-            format!("[{}]", host)
-        } else {
-            host.to_string()
-        };
-        let _ = parsed.set_host(Some(&host_value));
+        let _ = parsed.set_host(Some(&bracket_ipv6(host)));
         let _ = parsed.set_port(Some(port));
         parsed.to_string()
     } else {
