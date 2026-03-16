@@ -1275,12 +1275,12 @@ async fn resolve_cdp_url(input: &str) -> Result<String, String> {
             .host_str()
             .ok_or_else(|| format!("No host in CDP URL: {}", input))?;
         let port = parsed.port().unwrap_or(9222);
-        return discover_cdp_url(host, port, None).await;
+        return discover_cdp_url(host, port).await;
     }
 
     // Try as numeric port
     if let Ok(port) = input.parse::<u16>() {
-        return discover_cdp_url("127.0.0.1", port, None).await;
+        return discover_cdp_url("127.0.0.1", port).await;
     }
 
     Err(format!(

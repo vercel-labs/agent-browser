@@ -9,14 +9,17 @@ const DEFAULT_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(2);
 /// The returned `webSocketDebuggerUrl` has its host/port rewritten to match
 /// the requested target, since Chrome always reports `127.0.0.1` regardless
 /// of the interface it was reached through.
-///
-/// Pass `None` for `timeout` to use the default (2 seconds).
-pub async fn discover_cdp_url(
+pub async fn discover_cdp_url(host: &str, port: u16) -> Result<String, String> {
+    discover_cdp_url_with_timeout(host, port, DEFAULT_DISCOVERY_TIMEOUT).await
+}
+
+/// Like [`discover_cdp_url`] but with a custom request timeout.
+pub async fn discover_cdp_url_with_timeout(
     host: &str,
     port: u16,
-    timeout: Option<Duration>,
+    timeout: Duration,
 ) -> Result<String, String> {
-    let info = fetch_cdp_info(host, port, timeout.unwrap_or(DEFAULT_DISCOVERY_TIMEOUT)).await?;
+    let info = fetch_cdp_info(host, port, timeout).await?;
     let ws_url = info.web_socket_debugger_url.ok_or_else(|| {
         format!(
             "No webSocketDebuggerUrl in /json/version at {}:{}",
@@ -95,7 +98,7 @@ mod tests {
         let (port, server) =
             spawn_json_server(r#"{"webSocketDebuggerUrl":"ws://127.0.0.1:1234/"}"#).await;
 
-        let ws_url = discover_cdp_url("127.0.0.1", port, None).await.unwrap();
+        let ws_url = discover_cdp_url("127.0.0.1", port).await.unwrap();
         assert_eq!(ws_url, format!("ws://127.0.0.1:{}/", port));
         server.await.unwrap();
     }
@@ -104,7 +107,7 @@ mod tests {
     async fn invalid_json_returns_parse_error() {
         let (port, server) = spawn_json_server("not-json").await;
 
-        let err = discover_cdp_url("127.0.0.1", port, None).await.unwrap_err();
+        let err = discover_cdp_url("127.0.0.1", port).await.unwrap_err();
         assert!(err.contains("Invalid /json/version response"));
         server.await.unwrap();
     }
