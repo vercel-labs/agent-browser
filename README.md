@@ -1307,6 +1307,34 @@ When enabled, agent-browser connects to a Kernel cloud session instead of launch
 
 Get your API key from the [Kernel Dashboard](https://dashboard.onkernel.com).
 
+## VMware vSphere Integration
+
+The `vmware-vsphere-mcp/` directory provides a Docker-based MCP server that connects
+Claude Desktop to VMware vCenter, enabling natural-language VM management.
+
+See [`vmware-vsphere-mcp/USAGE.md`](vmware-vsphere-mcp/USAGE.md) for setup instructions.
+
+Quick start:
+
+```bash
+cd vmware-vsphere-mcp
+cp .env.example .env          # fill in vCenter credentials
+docker compose up -d --build  # start the MCP server
+```
+
+Then add to `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "vsphere": {
+      "command": "npx",
+      "args": ["-y", "supergateway", "--streamableHttp", "http://localhost:8000/mcp"]
+    }
+  }
+}
+```
+
 ## License
 
 Apache-2.0
