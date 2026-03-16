@@ -365,7 +365,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(ws_url, "ws://127.0.0.1:9222/");
+        assert_eq!(ws_url, format!("ws://127.0.0.1:{}/", port));
         let _ = child.kill();
         let _ = child.wait();
     }

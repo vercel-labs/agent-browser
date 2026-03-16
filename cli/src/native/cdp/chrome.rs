@@ -450,7 +450,7 @@ pub async fn auto_connect_cdp() -> Result<String, String> {
     for dir in &user_data_dirs {
         if let Some((port, ws_path)) = read_devtools_active_port(dir) {
             // Try HTTP endpoint first (pre-M144)
-            if let Ok(ws_url) = discover_cdp_url(port).await {
+            if let Ok(ws_url) = discover_cdp_url("127.0.0.1", port).await {
                 return Ok(ws_url);
             }
             // M144+: direct WebSocket
@@ -461,7 +461,7 @@ pub async fn auto_connect_cdp() -> Result<String, String> {
 
     // Fallback: probe common ports
     for port in [9222u16, 9229] {
-        if let Ok(ws_url) = discover_cdp_url(port).await {
+        if let Ok(ws_url) = discover_cdp_url("127.0.0.1", port).await {
             return Ok(ws_url);
         }
     }
