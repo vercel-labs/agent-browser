@@ -8,6 +8,48 @@ const CONFIG_DIR: &str = ".agent-browser";
 const CONFIG_FILENAME: &str = "config.json";
 const PROJECT_CONFIG_FILENAME: &str = "agent-browser.json";
 
+/// Parse idle timeout from user-friendly format.
+/// Supports: "10s" (seconds), "3m" (minutes), "1h" (hours), or raw milliseconds.
+fn parse_idle_timeout(s: &str) -> Result<String, String> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Err("Empty idle timeout".to_string());
+    }
+
+    // If the value ends with a unit suffix, convert it to milliseconds.
+    if s.chars().last().is_some_and(|c| c.is_ascii_alphabetic()) {
+        let (num_str, unit) = s.split_at(s.len() - 1);
+        let num: u64 = num_str.parse().map_err(|_| "Invalid number")?;
+
+        let ms = match unit {
+            "s" => num * 1000,
+            "m" => num * 60 * 1000,
+            "h" => num * 60 * 60 * 1000,
+            _ => return Err("Invalid idle timeout unit (use s, m, h, or raw ms)".to_string()),
+        };
+        return Ok(ms.to_string());
+    }
+
+    // Pure numbers are already expressed in milliseconds.
+    s.parse::<u64>().map_err(|_| "Invalid idle timeout")?;
+    Ok(s.to_string())
+}
+
+fn parse_idle_timeout_value(value: Option<String>, source: &str) -> Option<String> {
+    value.and_then(|raw| match parse_idle_timeout(&raw) {
+        Ok(ms) => Some(ms),
+        Err(e) => {
+            eprintln!(
+                "{} invalid idle timeout from {}: {}",
+                color::warning_indicator(),
+                source,
+                e
+            );
+            None
+        }
+    })
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Config {
@@ -45,6 +87,7 @@ pub struct Config {
     pub screenshot_dir: Option<String>,
     pub screenshot_quality: Option<u32>,
     pub screenshot_format: Option<String>,
+    pub idle_timeout: Option<String>,
 }
 
 impl Config {
@@ -90,6 +133,7 @@ impl Config {
             screenshot_dir: other.screenshot_dir.or(self.screenshot_dir),
             screenshot_quality: other.screenshot_quality.or(self.screenshot_quality),
             screenshot_format: other.screenshot_format.or(self.screenshot_format),
+            idle_timeout: other.idle_timeout.or(self.idle_timeout),
         }
     }
 }
@@ -97,7 +141,13 @@ impl Config {
 fn read_config_file(path: &Path) -> Option<Config> {
     let content = fs::read_to_string(path).ok()?;
     match serde_json::from_str::<Config>(&content) {
-        Ok(config) => Some(config),
+        Ok(mut config) => {
+            config.idle_timeout = parse_idle_timeout_value(
+                config.idle_timeout.take(),
+                &format!("config file {}", path.display()),
+            );
+            Some(config)
+        }
         Err(e) => {
             eprintln!(
                 "{} invalid config file {}: {}",
@@ -168,6 +218,7 @@ fn extract_config_path(args: &[String]) -> Option<Option<String>> {
         "--screenshot-dir",
         "--screenshot-quality",
         "--screenshot-format",
+        "--idle-timeout",
     ];
     let mut i = 0;
     while i < args.len() {
@@ -249,6 +300,7 @@ pub struct Flags {
     pub screenshot_dir: Option<String>,
     pub screenshot_quality: Option<u32>,
     pub screenshot_format: Option<String>,
+    pub idle_timeout: Option<String>, // Canonical milliseconds string for AGENT_BROWSER_IDLE_TIMEOUT_MS
 
     // Track which launch-time options were explicitly passed via CLI
     // (as opposed to being set only via environment variables)
@@ -366,6 +418,11 @@ pub fn parse_flags(args: &[String]) -> Flags {
             .ok()
             .or(config.screenshot_format)
             .filter(|s| s == "png" || s == "jpeg"),
+        idle_timeout: parse_idle_timeout_value(
+            env::var("AGENT_BROWSER_IDLE_TIMEOUT_MS").ok(),
+            "AGENT_BROWSER_IDLE_TIMEOUT_MS",
+        )
+        .or(config.idle_timeout),
         cli_executable_path: false,
         cli_extensions: false,
         cli_profile: false,
@@ -415,6 +472,19 @@ pub fn parse_flags(args: &[String]) -> Flags {
             "--session" => {
                 if let Some(s) = args.get(i + 1) {
                     flags.session = s.clone();
+                    i += 1;
+                }
+            }
+            "--idle-timeout" => {
+                if let Some(s) = args.get(i + 1) {
+                    match parse_idle_timeout(s) {
+                        Ok(ms) => flags.idle_timeout = Some(ms),
+                        Err(e) => eprintln!(
+                            "{} Invalid --idle-timeout: {}",
+                            color::warning_indicator(),
+                            e
+                        ),
+                    }
                     i += 1;
                 }
             }
@@ -690,6 +760,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--screenshot-dir",
         "--screenshot-quality",
         "--screenshot-format",
+        "--idle-timeout",
     ];
 
     let mut i = 0;
@@ -732,6 +803,36 @@ mod tests {
     fn test_parse_headers_flag() {
         let flags = parse_flags(&args(r#"open example.com --headers {"Auth":"token"}"#));
         assert_eq!(flags.headers, Some(r#"{"Auth":"token"}"#.to_string()));
+    }
+
+    #[test]
+    fn test_parse_idle_timeout_raw_ms() {
+        assert_eq!(parse_idle_timeout("10").unwrap(), "10");
+    }
+
+    #[test]
+    fn test_parse_idle_timeout_seconds() {
+        assert_eq!(parse_idle_timeout("10s").unwrap(), "10000");
+    }
+
+    #[test]
+    fn test_parse_idle_timeout_minutes() {
+        assert_eq!(parse_idle_timeout("3m").unwrap(), "180000");
+    }
+
+    #[test]
+    fn test_parse_idle_timeout_hours() {
+        assert_eq!(parse_idle_timeout("1h").unwrap(), "3600000");
+    }
+
+    #[test]
+    fn test_parse_idle_timeout_rejects_capital_m() {
+        assert!(parse_idle_timeout("10M").is_err());
+    }
+
+    #[test]
+    fn test_parse_idle_timeout_rejects_unknown_unit() {
+        assert!(parse_idle_timeout("10x").is_err());
     }
 
     #[test]
@@ -827,6 +928,18 @@ mod tests {
             "--json --executable-path /path/to/chromium --headed open example.com",
         ));
         assert_eq!(cleaned, vec!["open", "example.com"]);
+    }
+
+    #[test]
+    fn test_clean_args_removes_idle_timeout_before_command() {
+        let cleaned = clean_args(&args("--idle-timeout 10s open example.com"));
+        assert_eq!(cleaned, vec!["open", "example.com"]);
+    }
+
+    #[test]
+    fn test_parse_idle_timeout_flag_converts_to_ms() {
+        let flags = parse_flags(&args("--idle-timeout 10s open example.com"));
+        assert_eq!(flags.idle_timeout.as_deref(), Some("10000"));
     }
 
     #[test]
@@ -1029,6 +1142,22 @@ mod tests {
         let config = read_config_file(&config_path).unwrap();
         assert_eq!(config.headed, Some(true));
         assert_eq!(config.proxy.as_deref(), Some("http://test:1234"));
+
+        let _ = fs::remove_file(&config_path);
+        let _ = fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn test_load_config_from_file_parses_idle_timeout() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join("ab-test-idle-timeout-config");
+        let _ = fs::create_dir_all(&dir);
+        let config_path = dir.join("test-config.json");
+        let mut f = fs::File::create(&config_path).unwrap();
+        writeln!(f, r#"{{"idleTimeout": "10s"}}"#).unwrap();
+
+        let config = read_config_file(&config_path).unwrap();
+        assert_eq!(config.idle_timeout.as_deref(), Some("10000"));
 
         let _ = fs::remove_file(&config_path);
         let _ = fs::remove_dir(&dir);

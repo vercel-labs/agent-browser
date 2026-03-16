@@ -497,11 +497,44 @@ pub async fn is_element_checked(
 ) -> Result<bool, String> {
     let object_id = resolve_element_object_id(client, session_id, ref_map, selector_or_ref).await?;
 
+    // Mirrors Playwright's getChecked() with follow-label retargeting:
+    // 1. If element is a native checkbox/radio input, return .checked
+    // 2. If element has an ARIA checked role, return aria-checked
+    // 3. Follow label → input association (label.control)
+    // 4. Check for nested checkbox/radio input as last resort
     let result: EvaluateResult = client
         .send_command_typed(
             "Runtime.callFunctionOn",
             &CallFunctionOnParams {
-                function_declaration: "function() { return !!this.checked; }".to_string(),
+                function_declaration: r#"function() {
+                    var el = this;
+                    // Native checkbox/radio input
+                    var tag = el.tagName && el.tagName.toUpperCase();
+                    if (tag === 'INPUT' && (el.type === 'checkbox' || el.type === 'radio')) {
+                        return el.checked;
+                    }
+                    // ARIA role-based checked state
+                    var role = el.getAttribute && el.getAttribute('role');
+                    var ariaCheckedRoles = ['checkbox','radio','switch','menuitemcheckbox','menuitemradio','option','treeitem'];
+                    if (role && ariaCheckedRoles.indexOf(role) !== -1) {
+                        return el.getAttribute('aria-checked') === 'true';
+                    }
+                    // Follow label association (Playwright follow-label retarget)
+                    var label = el;
+                    if (tag !== 'LABEL') {
+                        label = el.closest && el.closest('label');
+                    }
+                    if (label && label.tagName && label.tagName.toUpperCase() === 'LABEL' && label.control) {
+                        var ctrl = label.control;
+                        if (ctrl.type === 'checkbox' || ctrl.type === 'radio') {
+                            return ctrl.checked;
+                        }
+                    }
+                    // Check for nested native input
+                    var input = el.querySelector && el.querySelector('input[type="checkbox"], input[type="radio"]');
+                    if (input) return input.checked;
+                    return false;
+                }"#.to_string(),
                 object_id: Some(object_id),
                 arguments: None,
                 return_by_value: Some(true),

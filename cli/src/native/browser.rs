@@ -503,69 +503,8 @@ impl BrowserManager {
         session_id: &str,
         rx: &mut broadcast::Receiver<CdpEvent>,
     ) -> Result<(), String> {
-        let pending = Arc::new(Mutex::new(HashSet::<String>::new()));
         let timeout = tokio::time::Duration::from_millis(self.default_timeout_ms);
-
-        tokio::time::timeout(timeout, async {
-            let mut idle_start: Option<tokio::time::Instant> = None;
-
-            loop {
-                let recv_result =
-                    tokio::time::timeout(tokio::time::Duration::from_millis(600), rx.recv()).await;
-
-                match recv_result {
-                    Ok(Ok(event)) if event.session_id.as_deref() == Some(session_id) => {
-                        let mut p = pending.lock().await;
-                        match event.method.as_str() {
-                            "Network.requestWillBeSent" => {
-                                if let Some(id) =
-                                    event.params.get("requestId").and_then(|v| v.as_str())
-                                {
-                                    p.insert(id.to_string());
-                                    idle_start = None;
-                                }
-                            }
-                            "Network.loadingFinished" | "Network.loadingFailed" => {
-                                if let Some(id) =
-                                    event.params.get("requestId").and_then(|v| v.as_str())
-                                {
-                                    p.remove(id);
-                                    if p.is_empty() {
-                                        idle_start = Some(tokio::time::Instant::now());
-                                    }
-                                }
-                            }
-                            "Page.loadEventFired" => {
-                                if p.is_empty() {
-                                    idle_start = Some(tokio::time::Instant::now());
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                    Ok(Ok(_)) => {}
-                    Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
-                    Ok(Err(_)) => break,
-                    Err(_) => {
-                        // Timeout on recv -- check if idle long enough
-                        let p = pending.lock().await;
-                        if p.is_empty() {
-                            return Ok(());
-                        }
-                    }
-                }
-
-                if let Some(start) = idle_start {
-                    if start.elapsed() >= tokio::time::Duration::from_millis(500) {
-                        return Ok(());
-                    }
-                }
-            }
-
-            Ok(())
-        })
-        .await
-        .map_err(|_| "Timeout waiting for networkidle".to_string())?
+        poll_network_idle(session_id, rx, timeout).await
     }
 
     pub async fn get_url(&self) -> Result<String, String> {
@@ -1150,6 +1089,82 @@ impl BrowserManager {
     }
 }
 
+/// Core network-idle polling loop, extracted so it can be unit-tested without a
+/// full `BrowserManager` / CDP connection.
+///
+/// Returns `Ok(())` once no network requests have been in-flight for at least
+/// 500 ms, or `Err` if `overall_timeout` elapses first.
+async fn poll_network_idle(
+    session_id: &str,
+    rx: &mut broadcast::Receiver<CdpEvent>,
+    overall_timeout: tokio::time::Duration,
+) -> Result<(), String> {
+    let pending = Arc::new(Mutex::new(HashSet::<String>::new()));
+
+    tokio::time::timeout(overall_timeout, async {
+        let mut idle_start: Option<tokio::time::Instant> = None;
+
+        loop {
+            let recv_result =
+                tokio::time::timeout(tokio::time::Duration::from_millis(600), rx.recv()).await;
+
+            match recv_result {
+                Ok(Ok(event)) if event.session_id.as_deref() == Some(session_id) => {
+                    let mut p = pending.lock().await;
+                    match event.method.as_str() {
+                        "Network.requestWillBeSent" => {
+                            if let Some(id) = event.params.get("requestId").and_then(|v| v.as_str())
+                            {
+                                p.insert(id.to_string());
+                                idle_start = None;
+                            }
+                        }
+                        "Network.loadingFinished" | "Network.loadingFailed" => {
+                            if let Some(id) = event.params.get("requestId").and_then(|v| v.as_str())
+                            {
+                                p.remove(id);
+                                if p.is_empty() {
+                                    idle_start = Some(tokio::time::Instant::now());
+                                }
+                            }
+                        }
+                        "Page.loadEventFired" => {
+                            if p.is_empty() {
+                                idle_start = Some(tokio::time::Instant::now());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                Ok(Ok(_)) => {}
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
+                Ok(Err(_)) => break,
+                Err(_) => {
+                    // Timeout on recv -- if no pending requests, start (or
+                    // continue) the idle timer instead of returning
+                    // immediately.  This prevents false-positive idle
+                    // detection when the subscription starts after the page
+                    // has already loaded (e.g. cached pages).
+                    let p = pending.lock().await;
+                    if p.is_empty() && idle_start.is_none() {
+                        idle_start = Some(tokio::time::Instant::now());
+                    }
+                }
+            }
+
+            if let Some(start) = idle_start {
+                if start.elapsed() >= tokio::time::Duration::from_millis(500) {
+                    return Ok(());
+                }
+            }
+        }
+
+        Ok(())
+    })
+    .await
+    .map_err(|_| "Timeout waiting for networkidle".to_string())?
+}
+
 async fn connect_cdp_with_retry(
     ws_url: &str,
     total_timeout: Duration,
@@ -1270,15 +1285,17 @@ async fn resolve_cdp_url(input: &str) -> Result<String, String> {
     }
 
     if input.starts_with("http://") || input.starts_with("https://") {
-        // Parse out the port and discover
         let parsed = url::Url::parse(input).map_err(|e| format!("Invalid CDP URL: {}", e))?;
+        let host = parsed
+            .host_str()
+            .ok_or_else(|| format!("No host in CDP URL: {}", input))?;
         let port = parsed.port().unwrap_or(9222);
-        return discover_cdp_url(port).await;
+        return discover_cdp_url(host, port).await;
     }
 
     // Try as numeric port
     if let Ok(port) = input.parse::<u16>() {
-        return discover_cdp_url(port).await;
+        return discover_cdp_url("127.0.0.1", port).await;
     }
 
     Err(format!(
@@ -1468,5 +1485,163 @@ mod tests {
         assert!(!is_internal_chrome_target("https://example.com"));
         assert!(!is_internal_chrome_target("http://localhost:3000"));
         assert!(!is_internal_chrome_target("about:blank"));
+    }
+
+    // -----------------------------------------------------------------------
+    // poll_network_idle tests
+    // -----------------------------------------------------------------------
+
+    fn cdp_event(method: &str, session_id: &str, params: Value) -> CdpEvent {
+        CdpEvent {
+            method: method.to_string(),
+            params,
+            session_id: Some(session_id.to_string()),
+        }
+    }
+
+    /// Regression test for #846: when no network events arrive at all (e.g.
+    /// page fully served from cache), poll_network_idle must NOT return
+    /// instantly.  It should observe at least 500 ms of idle before resolving.
+    #[tokio::test]
+    async fn test_network_idle_no_events_does_not_return_instantly() {
+        let (tx, mut rx) = broadcast::channel::<CdpEvent>(16);
+        let session = "s1";
+
+        let start = tokio::time::Instant::now();
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            poll_network_idle(session, &mut rx, Duration::from_secs(5)),
+        )
+        .await
+        .expect("outer timeout should not fire");
+
+        assert!(result.is_ok());
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(500),
+            "network idle returned in {:?}, expected >= 500ms",
+            elapsed
+        );
+
+        drop(tx);
+    }
+
+    /// Normal flow: requests start and finish, idle is detected after the last
+    /// request completes and 500 ms of silence passes.
+    #[tokio::test]
+    async fn test_network_idle_after_requests_complete() {
+        let (tx, mut rx) = broadcast::channel::<CdpEvent>(16);
+        let session = "s1";
+
+        let _keep_alive = tx.clone();
+        tokio::spawn(async move {
+            sleep(Duration::from_millis(50)).await;
+            let _ = tx.send(cdp_event(
+                "Network.requestWillBeSent",
+                session,
+                json!({ "requestId": "r1" }),
+            ));
+            sleep(Duration::from_millis(100)).await;
+            let _ = tx.send(cdp_event(
+                "Network.loadingFinished",
+                session,
+                json!({ "requestId": "r1" }),
+            ));
+        });
+
+        let start = tokio::time::Instant::now();
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            poll_network_idle(session, &mut rx, Duration::from_secs(5)),
+        )
+        .await
+        .expect("outer timeout should not fire");
+
+        assert!(result.is_ok());
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(500),
+            "should wait >= 500ms after last request finishes, got {:?}",
+            elapsed
+        );
+    }
+
+    /// A new request arriving during the idle window resets the timer.
+    #[tokio::test]
+    async fn test_network_idle_resets_on_new_request() {
+        let (tx, mut rx) = broadcast::channel::<CdpEvent>(16);
+        let session = "s1";
+
+        let _keep_alive = tx.clone();
+        tokio::spawn(async move {
+            sleep(Duration::from_millis(50)).await;
+            let _ = tx.send(cdp_event(
+                "Network.requestWillBeSent",
+                session,
+                json!({ "requestId": "r1" }),
+            ));
+            sleep(Duration::from_millis(50)).await;
+            let _ = tx.send(cdp_event(
+                "Network.loadingFinished",
+                session,
+                json!({ "requestId": "r1" }),
+            ));
+            // Wait 200ms (< 500ms idle window), then fire another request
+            sleep(Duration::from_millis(200)).await;
+            let _ = tx.send(cdp_event(
+                "Network.requestWillBeSent",
+                session,
+                json!({ "requestId": "r2" }),
+            ));
+            sleep(Duration::from_millis(100)).await;
+            let _ = tx.send(cdp_event(
+                "Network.loadingFinished",
+                session,
+                json!({ "requestId": "r2" }),
+            ));
+        });
+
+        let start = tokio::time::Instant::now();
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            poll_network_idle(session, &mut rx, Duration::from_secs(5)),
+        )
+        .await
+        .expect("outer timeout should not fire");
+
+        assert!(result.is_ok());
+        let elapsed = start.elapsed();
+        // r2 finishes at ~400ms; idle should be detected at ~900ms
+        assert!(
+            elapsed >= Duration::from_millis(800),
+            "should wait for idle after second request, got {:?}",
+            elapsed
+        );
+    }
+
+    /// When the overall timeout expires before idle is reached, the function
+    /// returns an error.
+    #[tokio::test]
+    async fn test_network_idle_overall_timeout() {
+        let (tx, mut rx) = broadcast::channel::<CdpEvent>(16);
+        let session = "s1";
+
+        // Keep sending requests so idle is never reached
+        tokio::spawn(async move {
+            for i in 0u64.. {
+                let _ = tx.send(cdp_event(
+                    "Network.requestWillBeSent",
+                    session,
+                    json!({ "requestId": format!("r{}", i) }),
+                ));
+                sleep(Duration::from_millis(100)).await;
+            }
+        });
+
+        let result = poll_network_idle(session, &mut rx, Duration::from_millis(800)).await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .contains("Timeout waiting for networkidle"));
     }
 }

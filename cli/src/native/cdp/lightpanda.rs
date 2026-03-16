@@ -6,7 +6,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use super::discovery::discover_cdp_url_with_request_timeout;
+use super::discovery::discover_cdp_url_with_timeout;
 
 const LIGHTPANDA_STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 const LIGHTPANDA_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -257,7 +257,7 @@ async fn wait_for_lightpanda_ready(
             ));
         }
 
-        match discover_cdp_url_with_request_timeout(port, LIGHTPANDA_DISCOVERY_TIMEOUT).await {
+        match discover_cdp_url_with_timeout("127.0.0.1", port, LIGHTPANDA_DISCOVERY_TIMEOUT).await {
             Ok(ws_url) => return Ok(ws_url),
             Err(err) => last_probe_error = Some(err),
         }
@@ -365,7 +365,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(ws_url, "ws://127.0.0.1:9222/");
+        assert_eq!(ws_url, format!("ws://127.0.0.1:{}/", port));
         let _ = child.kill();
         let _ = child.wait();
     }

@@ -4,8 +4,7 @@ use serde_json::Value;
 
 use super::cdp::client::CdpClient;
 use super::cdp::types::{
-    AXNode, AXProperty, AXValue, CallFunctionOnParams, EvaluateParams, EvaluateResult,
-    GetFullAXTreeResult,
+    AXNode, AXProperty, AXValue, EvaluateParams, EvaluateResult, GetFullAXTreeResult,
 };
 use super::element::RefMap;
 
@@ -90,6 +89,15 @@ struct TreeNode {
     has_ref: bool,
     ref_id: Option<String>,
     depth: usize,
+    /// Cursor-interactive information (only set when options.cursor is true)
+    cursor_info: Option<CursorElementInfo>,
+}
+
+/// Information about a cursor-interactive element (elements with cursor:pointer, onclick, tabindex, etc.)
+#[derive(Clone)]
+struct CursorElementInfo {
+    kind: String, // "clickable", "focusable", "editable"
+    hints: Vec<String>,
 }
 
 struct RoleNameTracker {
@@ -239,12 +247,26 @@ pub async fn take_snapshot(
 
     let mut nodes_with_refs: Vec<(usize, usize)> = Vec::new();
 
+    // When cursor mode is enabled, pre-collect cursor-interactive elements
+    // so we can mark them with refs during tree building
+    let cursor_elements: HashMap<i64, CursorElementInfo> = if options.cursor {
+        find_cursor_interactive_elements(client, session_id)
+            .await
+            .unwrap_or_default()
+    } else {
+        HashMap::new()
+    };
+
     for (idx, node) in tree_nodes.iter().enumerate() {
         let role = node.role.as_str();
         let should_ref = if INTERACTIVE_ROLES.contains(&role) {
             true
         } else if CONTENT_ROLES.contains(&role) {
             !node.name.is_empty()
+        } else if options.cursor {
+            // In cursor mode, also ref elements that are cursor-interactive
+            node.backend_node_id
+                .is_some_and(|bid| cursor_elements.contains_key(&bid))
         } else {
             false
         };
@@ -282,6 +304,17 @@ pub async fn take_snapshot(
         tree_nodes[*idx].ref_id = Some(ref_id);
     }
 
+    // Populate cursor_info for ref-bearing nodes when cursor mode is enabled
+    if options.cursor {
+        for (idx, _) in &nodes_with_refs {
+            if let Some(bid) = tree_nodes[*idx].backend_node_id {
+                if let Some(cursor_info) = cursor_elements.get(&bid) {
+                    tree_nodes[*idx].cursor_info = Some((*cursor_info).clone());
+                }
+            }
+        }
+    }
+
     ref_map.set_next_ref_num(next_ref);
 
     let mut output = String::new();
@@ -293,20 +326,13 @@ pub async fn take_snapshot(
         output = compact_tree(&output, options.interactive);
     }
 
-    let mut trimmed = output.trim().to_string();
+    let trimmed = output.trim().to_string();
+
     if trimmed.is_empty() {
         if options.interactive {
             return Ok("(no interactive elements)".to_string());
         }
         return Ok("(empty page)".to_string());
-    }
-
-    if options.cursor {
-        let cursor_section = find_cursor_interactive_elements(client, session_id, ref_map).await?;
-        if !cursor_section.is_empty() {
-            trimmed.push_str("\n# Cursor-interactive elements:\n");
-            trimmed.push_str(&cursor_section);
-        }
     }
 
     Ok(trimmed)
@@ -315,32 +341,74 @@ pub async fn take_snapshot(
 async fn find_cursor_interactive_elements(
     client: &CdpClient,
     session_id: &str,
-    ref_map: &mut RefMap,
-) -> Result<String, String> {
+) -> Result<HashMap<i64, CursorElementInfo>, String> {
+    // Single JS evaluation that matches the v0.19.0 Node.js findCursorInteractiveElements():
+    // - Uses querySelectorAll('*') to walk all elements
+    // - Checks getComputedStyle(el).cursor === 'pointer'
+    // - Checks onclick attribute/handler and tabindex
+    // - Skips interactiveTags (a, button, input, select, textarea, details, summary)
+    // - Skips elements with interactive ARIA roles
+    // - Deduplicates inherited cursor:pointer from parent
+    // - Skips empty text and zero-size elements
+    // - Tags each matched element with data-__ab-ci for batch backendNodeId resolution
     let js = r#"
 (function() {
-    const elements = [];
-    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
-    let node;
-    while (node = walker.nextNode()) {
-        if (node.closest && node.closest('[hidden], [aria-hidden="true"]')) continue;
-        const explicitRole = node.getAttribute ? node.getAttribute('role') : null;
-        if (explicitRole) continue;
-        const tag = node.tagName ? node.tagName.toLowerCase() : '';
-        const hasClick = node.onclick || (node.attributes && node.attributes.getNamedItem('onclick'));
-        const tabindex = node.getAttribute ? node.getAttribute('tabindex') : null;
-        const contentEditable = node.getAttribute ? node.getAttribute('contenteditable') : null;
-        const isInherentlyClickable =
-            (tag === 'a' && node.href) || tag === 'button' ||
-            (tag === 'input' && ['submit','button','image','reset'].indexOf((node.type||'').toLowerCase()) >= 0) ||
-            tag === 'summary';
-        const isFocusable = tabindex !== null && parseInt(tabindex, 10) >= 0;
-        const isEditable = contentEditable === '' || contentEditable === 'true';
-        if (hasClick || isInherentlyClickable || isFocusable || isEditable) {
-            elements.push(node);
+    var results = [];
+    if (!document.body) return results;
+
+    var interactiveRoles = {
+        'button':1, 'link':1, 'textbox':1, 'checkbox':1, 'radio':1, 'combobox':1, 'listbox':1,
+        'menuitem':1, 'menuitemcheckbox':1, 'menuitemradio':1, 'option':1, 'searchbox':1,
+        'slider':1, 'spinbutton':1, 'switch':1, 'tab':1, 'treeitem':1
+    };
+    var interactiveTags = {
+        'a':1, 'button':1, 'input':1, 'select':1, 'textarea':1, 'details':1, 'summary':1
+    };
+
+    var allElements = document.body.querySelectorAll('*');
+    for (var i = 0; i < allElements.length; i++) {
+        var el = allElements[i];
+
+        if (el.closest && el.closest('[hidden], [aria-hidden="true"]')) continue;
+
+        var tagName = el.tagName.toLowerCase();
+        if (interactiveTags[tagName]) continue;
+
+        var role = el.getAttribute('role');
+        if (role && interactiveRoles[role.toLowerCase()]) continue;
+
+        var computedStyle = getComputedStyle(el);
+        var hasCursorPointer = computedStyle.cursor === 'pointer';
+        var hasOnClick = el.hasAttribute('onclick') || el.onclick !== null;
+        var tabIndex = el.getAttribute('tabindex');
+        var hasTabIndex = tabIndex !== null && tabIndex !== '-1';
+        var ce = el.getAttribute('contenteditable');
+        var isEditable = ce === '' || ce === 'true';
+
+        if (!hasCursorPointer && !hasOnClick && !hasTabIndex && !isEditable) continue;
+
+        // Skip elements that only inherit cursor:pointer from an ancestor
+        if (hasCursorPointer && !hasOnClick && !hasTabIndex && !isEditable) {
+            var parent = el.parentElement;
+            if (parent && getComputedStyle(parent).cursor === 'pointer') continue;
         }
+
+        var text = (el.textContent || '').trim().slice(0, 100);
+
+        var rect = el.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) continue;
+
+        el.setAttribute('data-__ab-ci', String(results.length));
+        results.push({
+            text: text,
+            tagName: tagName,
+            hasOnClick: hasOnClick,
+            hasCursorPointer: hasCursorPointer,
+            hasTabIndex: hasTabIndex,
+            isEditable: isEditable
+        });
     }
-    return elements;
+    return results;
 })()
 "#;
 
@@ -349,106 +417,172 @@ async fn find_cursor_interactive_elements(
             "Runtime.evaluate",
             &EvaluateParams {
                 expression: js.to_string(),
-                return_by_value: Some(false),
+                return_by_value: Some(true),
                 await_promise: Some(false),
             },
             Some(session_id),
         )
         .await?;
 
-    let array_object_id = match result.result.object_id {
-        Some(id) => id,
-        None => return Ok(String::new()),
-    };
+    let elements: Vec<Value> = result
+        .result
+        .value
+        .and_then(|v| serde_json::from_value::<Vec<Value>>(v).ok())
+        .unwrap_or_default();
 
-    let props_result: Value = client
+    if elements.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    // Batch-resolve backendNodeIds: use DOM.getDocument to get the root nodeId,
+    // then DOM.querySelectorAll to get all tagged elements in a single call.
+    let doc: Value = client
         .send_command(
-            "Runtime.getProperties",
-            Some(serde_json::json!({ "objectId": array_object_id })),
+            "DOM.getDocument",
+            Some(serde_json::json!({ "depth": 0 })),
             Some(session_id),
         )
         .await?;
 
-    let empty: Vec<Value> = Vec::new();
-    let result_array = props_result
-        .get("result")
+    let root_node_id = doc
+        .get("root")
+        .and_then(|r| r.get("nodeId"))
+        .and_then(|v| v.as_i64())
+        .ok_or("DOM.getDocument did not return root nodeId")?;
+
+    let query_result: Value = client
+        .send_command(
+            "DOM.querySelectorAll",
+            Some(serde_json::json!({
+                "nodeId": root_node_id,
+                "selector": "[data-__ab-ci]"
+            })),
+            Some(session_id),
+        )
+        .await?;
+
+    let node_ids: Vec<i64> = query_result
+        .get("nodeIds")
         .and_then(|v| v.as_array())
-        .unwrap_or(&empty);
+        .map(|arr| arr.iter().filter_map(|v| v.as_i64()).collect())
+        .unwrap_or_default();
 
-    let mut indexed: Vec<(usize, String)> = Vec::new();
-    for prop in result_array {
-        let name = prop.get("name").and_then(|v| v.as_str()).unwrap_or("");
-        if let Ok(idx) = name.parse::<usize>() {
-            if let Some(obj_id) = prop
-                .get("value")
-                .and_then(|v| v.get("objectId"))
-                .and_then(|v| v.as_str())
-            {
-                indexed.push((idx, obj_id.to_string()));
-            }
-        }
-    }
-    indexed.sort_by_key(|(idx, _)| *idx);
-    let element_object_ids: Vec<String> = indexed.into_iter().map(|(_, id)| id).collect();
-
-    let mut next_ref = ref_map.next_ref_num();
-    let mut lines: Vec<String> = Vec::new();
-    let get_text_js =
-        r#"function(){ return (this.innerText || this.textContent || '').trim().slice(0, 100) }"#;
-
-    for object_id in &element_object_ids {
-        let describe: Value = client
-            .send_command(
+    // Resolve backendNodeIds for each DOM node using concurrent CDP calls.
+    let describe_futures: Vec<_> = node_ids
+        .iter()
+        .map(|&node_id| {
+            client.send_command(
                 "DOM.describeNode",
-                Some(serde_json::json!({ "objectId": object_id })),
+                Some(serde_json::json!({ "nodeId": node_id })),
                 Some(session_id),
             )
-            .await?;
+        })
+        .collect();
 
-        let backend_node_id = describe
+    let describe_results = futures_util::future::join_all(describe_futures).await;
+
+    // Build a map from data-__ab-ci index to backendNodeId.
+    let mut idx_to_backend: HashMap<usize, i64> = HashMap::new();
+    for desc in describe_results.into_iter().flatten() {
+        let backend_id = desc
             .get("node")
             .and_then(|n| n.get("backendNodeId"))
             .and_then(|v| v.as_i64());
-
-        let text_result: EvaluateResult = client
-            .send_command_typed(
-                "Runtime.callFunctionOn",
-                &CallFunctionOnParams {
-                    function_declaration: get_text_js.to_string(),
-                    object_id: Some(object_id.clone()),
-                    arguments: None,
-                    return_by_value: Some(true),
-                    await_promise: Some(false),
-                },
-                Some(session_id),
-            )
-            .await?;
-
-        let text = text_result
-            .result
-            .value
-            .as_ref()
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .trim()
-            .to_string();
-
-        let kind = "clickable";
-        let ref_id = format!("e{}", next_ref);
-        next_ref += 1;
-
-        ref_map.add(ref_id.clone(), backend_node_id, kind, &text, None);
-
-        let escaped = text
-            .replace('\\', "\\\\")
-            .replace('"', "\\\"")
-            .replace(['\n', '\r'], " ");
-        lines.push(format!("[ref={}] ({}) \"{}\"", ref_id, kind, escaped));
+        let ci_attr = desc
+            .get("node")
+            .and_then(|n| n.get("attributes"))
+            .and_then(|a| a.as_array())
+            .and_then(|attrs| {
+                // attributes is a flat array: [name, value, name, value, ...]
+                attrs
+                    .iter()
+                    .enumerate()
+                    .find(|(_, v)| v.as_str() == Some("data-__ab-ci"))
+                    .and_then(|(i, _)| attrs.get(i + 1))
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| s.parse::<usize>().ok())
+            });
+        if let (Some(bid), Some(idx)) = (backend_id, ci_attr) {
+            idx_to_backend.insert(idx, bid);
+        }
     }
 
-    ref_map.set_next_ref_num(next_ref);
+    // Clean up the data attributes we injected for backendNodeId resolution.
+    let cleanup_js =
+        r#"(function(){ var els = document.querySelectorAll('[data-__ab-ci]'); for (var i = 0; i < els.length; i++) els[i].removeAttribute('data-__ab-ci'); return els.length; })()"#.to_string();
+    if let Err(e) = client
+        .send_command_typed::<EvaluateParams, EvaluateResult>(
+            "Runtime.evaluate",
+            &EvaluateParams {
+                expression: cleanup_js,
+                return_by_value: Some(true),
+                await_promise: Some(false),
+            },
+            Some(session_id),
+        )
+        .await
+    {
+        eprintln!("[agent-browser] Warning: failed to clean up data-__ab-ci attributes: {e}");
+    }
 
-    Ok(lines.join("\n"))
+    // Build the map
+    let mut map: HashMap<i64, CursorElementInfo> = HashMap::new();
+    for (i, elem) in elements.iter().enumerate() {
+        let backend_node_id = idx_to_backend.get(&i).copied();
+
+        // Role differentiation: v0.19.0 uses 'clickable' for cursor:pointer or onclick,
+        // 'focusable' for tabindex-only elements.
+        let has_cursor_pointer = elem
+            .get("hasCursorPointer")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let has_on_click = elem
+            .get("hasOnClick")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let has_tab_index = elem
+            .get("hasTabIndex")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let is_editable = elem
+            .get("isEditable")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        let kind = if has_cursor_pointer || has_on_click {
+            "clickable"
+        } else if is_editable {
+            "editable"
+        } else {
+            "focusable"
+        };
+
+        let mut hints: Vec<String> = Vec::new();
+        if has_cursor_pointer {
+            hints.push("cursor:pointer".to_string());
+        }
+        if has_on_click {
+            hints.push("onclick".to_string());
+        }
+        if has_tab_index {
+            hints.push("tabindex".to_string());
+        }
+        if is_editable {
+            hints.push("contenteditable".to_string());
+        }
+
+        if let Some(bid) = backend_node_id {
+            map.insert(
+                bid,
+                CursorElementInfo {
+                    kind: kind.to_string(),
+                    hints,
+                },
+            );
+        }
+    }
+
+    Ok(map)
 }
 
 fn build_tree(nodes: &[AXNode]) -> (Vec<TreeNode>, Vec<usize>) {
@@ -480,6 +614,7 @@ fn build_tree(nodes: &[AXNode]) -> (Vec<TreeNode>, Vec<usize>) {
                 has_ref: false,
                 ref_id: None,
                 depth: 0,
+                cursor_info: None,
             });
             id_to_idx.insert(node.node_id.clone(), i);
             continue;
@@ -501,6 +636,7 @@ fn build_tree(nodes: &[AXNode]) -> (Vec<TreeNode>, Vec<usize>) {
             has_ref: false,
             ref_id: None,
             depth: 0,
+            cursor_info: None,
         });
         id_to_idx.insert(node.node_id.clone(), i);
     }
@@ -629,6 +765,15 @@ fn render_tree(
 
     if !attrs.is_empty() {
         line.push_str(&format!(" [{}]", attrs.join(", ")));
+    }
+
+    // Add cursor-interactive kind & hints
+    if let Some(ref cursor_info) = node.cursor_info {
+        line.push_str(&format!(
+            " {} [{}]",
+            &cursor_info.kind,
+            &cursor_info.hints.join(", ")
+        ));
     }
 
     // Value
@@ -763,6 +908,20 @@ fn extract_properties(props: &Option<Vec<AXProperty>>) -> NodeProperties {
     (level, checked, expanded, selected, disabled, required)
 }
 
+/// Build the set of texts to de-duplicate cursor-interactive elements against.
+///
+/// All ref-bearing ARIA tree nodes have their names stored in `ref_map` during
+/// tree construction, so the ref-map entries are the single source of truth.
+/// This avoids fragile parsing of the rendered tree text.
+fn build_dedup_set(ref_map: &RefMap) -> std::collections::HashSet<String> {
+    ref_map
+        .entries_sorted()
+        .into_iter()
+        .filter(|(_, entry)| !entry.name.is_empty())
+        .map(|(_, entry)| entry.name.to_lowercase())
+        .collect()
+}
+
 /// Recursively collect all `backendNodeId` values from a CDP DOM node tree
 /// (as returned by `DOM.describeNode` with `depth: -1`).
 fn collect_backend_node_ids(node: &Value, ids: &mut std::collections::HashSet<i64>) {
@@ -834,5 +993,49 @@ mod tests {
         let dups = tracker.get_duplicates();
         assert!(dups.contains_key("button:Submit"));
         assert!(!dups.contains_key("button:Cancel"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Cursor-interactive text dedup (Issue #841 regression guard)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_dedup_set_from_ref_map_names() {
+        let mut ref_map = RefMap::new();
+        ref_map.add("e1".to_string(), Some(1), "link", "Example Link", None);
+        ref_map.add("e2".to_string(), Some(2), "button", "Submit", None);
+
+        let set = build_dedup_set(&ref_map);
+        assert!(set.contains("example link"));
+        assert!(set.contains("submit"));
+        assert!(!set.contains("other text"));
+    }
+
+    #[test]
+    fn test_dedup_set_case_insensitive() {
+        let mut ref_map = RefMap::new();
+        ref_map.add("e1".to_string(), Some(1), "button", "Submit Form", None);
+
+        let set = build_dedup_set(&ref_map);
+        assert!(set.contains("submit form"));
+        assert!(!set.contains("Submit Form"));
+    }
+
+    #[test]
+    fn test_dedup_set_empty_inputs() {
+        let ref_map = RefMap::new();
+        let set = build_dedup_set(&ref_map);
+        assert!(set.is_empty());
+    }
+
+    #[test]
+    fn test_dedup_set_skips_empty_names() {
+        let mut ref_map = RefMap::new();
+        ref_map.add("e1".to_string(), Some(1), "generic", "", None);
+        ref_map.add("e2".to_string(), Some(2), "button", "OK", None);
+
+        let set = build_dedup_set(&ref_map);
+        assert_eq!(set.len(), 1);
+        assert!(set.contains("ok"));
     }
 }
