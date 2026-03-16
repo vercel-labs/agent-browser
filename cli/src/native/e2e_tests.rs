@@ -732,12 +732,13 @@ async fn e2e_tabs() {
     .await;
     assert_success(&resp);
 
-    // Tab list should show 1 tab
+    // Tab list should show 1 tab with tabId 1
     let resp = execute_command(&json!({ "id": "3", "action": "tab_list" }), &mut state).await;
     assert_success(&resp);
     let tabs = get_data(&resp)["tabs"].as_array().unwrap();
     assert_eq!(tabs.len(), 1);
     assert_eq!(tabs[0]["active"], true);
+    assert_eq!(tabs[0]["tabId"], 1, "First tab should have tabId 1");
 
     // Open new tab
     let resp = execute_command(
@@ -746,18 +747,21 @@ async fn e2e_tabs() {
     )
     .await;
     assert_success(&resp);
-    assert_eq!(get_data(&resp)["index"], 1);
+    assert_eq!(get_data(&resp)["tabId"], 2, "New tab should have tabId 2");
+    assert_eq!(get_data(&resp)["total"], 2);
 
-    // Tab list should show 2 tabs
+    // Tab list should show 2 tabs with distinct, incrementing tabIds
     let resp = execute_command(&json!({ "id": "5", "action": "tab_list" }), &mut state).await;
     assert_success(&resp);
     let tabs = get_data(&resp)["tabs"].as_array().unwrap();
     assert_eq!(tabs.len(), 2);
     assert_eq!(tabs[1]["active"], true);
+    assert_eq!(tabs[0]["tabId"], 1, "First tab should keep tabId 1");
+    assert_eq!(tabs[1]["tabId"], 2, "Second tab should have tabId 2");
 
     // Switch to first tab
     let resp = execute_command(
-        &json!({ "id": "6", "action": "tab_switch", "index": 0 }),
+        &json!({ "id": "6", "action": "tab_switch", "tabId": 1 }),
         &mut state,
     )
     .await;
@@ -773,7 +777,7 @@ async fn e2e_tabs() {
 
     // Close second tab
     let resp = execute_command(
-        &json!({ "id": "8", "action": "tab_close", "index": 1 }),
+        &json!({ "id": "8", "action": "tab_close", "tabId": 2 }),
         &mut state,
     )
     .await;
