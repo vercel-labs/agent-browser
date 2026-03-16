@@ -480,11 +480,7 @@ pub async fn auto_connect_cdp() -> Result<String, String> {
 fn is_port_reachable(port: u16) -> bool {
     use std::net::TcpStream;
     let addr = format!("127.0.0.1:{}", port);
-    TcpStream::connect_timeout(
-        &addr.parse().unwrap(),
-        Duration::from_millis(500),
-    )
-    .is_ok()
+    TcpStream::connect_timeout(&addr.parse().unwrap(), Duration::from_millis(500)).is_ok()
 }
 
 fn get_chrome_user_data_dirs() -> Vec<PathBuf> {

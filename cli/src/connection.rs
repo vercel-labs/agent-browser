@@ -707,6 +707,20 @@ mod tests {
     }
 
     #[test]
+    fn test_is_transient_error_connection_refused_windows() {
+        assert!(is_transient_error(
+            "Failed to connect: No connection could be made because the target machine actively refused it. (os error 10061)"
+        ));
+    }
+
+    #[test]
+    fn test_is_transient_error_connection_reset_windows() {
+        assert!(is_transient_error(
+            "Failed to send: An existing connection was forcibly closed by the remote host. (os error 10054)"
+        ));
+    }
+
+    #[test]
     fn test_is_transient_error_non_transient() {
         // These should NOT be considered transient
         assert!(!is_transient_error("Unknown command: foo"));
