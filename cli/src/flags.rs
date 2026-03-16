@@ -8,6 +8,38 @@ const CONFIG_DIR: &str = ".agent-browser";
 const CONFIG_FILENAME: &str = "config.json";
 const PROJECT_CONFIG_FILENAME: &str = "agent-browser.json";
 
+/// Parse idle timeout from user-friendly format.
+/// Supports: "10s" (seconds), "3m" (minutes), "1h" (hours), or raw milliseconds.
+fn parse_idle_timeout(s: &str) -> Result<String, String> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Err("Empty idle timeout".to_string());
+    }
+    
+    // Check if it ends with a time unit
+    if s.len() > 1 {
+        let (num_str, unit) = s.split_at(s.len() - 1);
+        let num: u64 = num_str.parse().map_err(|_| "Invalid number")?;
+        
+        let ms = match unit {
+            "s" => num * 1000,
+            "m" => num * 60 * 1000,
+            "h" => num * 60 * 60 * 1000,
+            "M" => num * 60 * 1000, // alias for minutes
+            _ => {
+                // Not a recognized unit - check if it's raw milliseconds
+                s.parse::<u64>().map_err(|_| "Invalid idle timeout format")?;
+                return Ok(s.to_string());
+            }
+        };
+        return Ok(ms.to_string());
+    }
+    
+    // Single character or pure number
+    s.parse::<u64>().map_err(|_| "Invalid idle timeout")?;
+    Ok(s.to_string())
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Config {
@@ -45,6 +77,7 @@ pub struct Config {
     pub screenshot_dir: Option<String>,
     pub screenshot_quality: Option<u32>,
     pub screenshot_format: Option<String>,
+    pub idle_timeout: Option<String>,
 }
 
 impl Config {
@@ -90,6 +123,7 @@ impl Config {
             screenshot_dir: other.screenshot_dir.or(self.screenshot_dir),
             screenshot_quality: other.screenshot_quality.or(self.screenshot_quality),
             screenshot_format: other.screenshot_format.or(self.screenshot_format),
+            idle_timeout: other.idle_timeout.or(self.idle_timeout),
         }
     }
 }
@@ -168,6 +202,7 @@ fn extract_config_path(args: &[String]) -> Option<Option<String>> {
         "--screenshot-dir",
         "--screenshot-quality",
         "--screenshot-format",
+        "--idle-timeout",
     ];
     let mut i = 0;
     while i < args.len() {
@@ -249,6 +284,7 @@ pub struct Flags {
     pub screenshot_dir: Option<String>,
     pub screenshot_quality: Option<u32>,
     pub screenshot_format: Option<String>,
+    pub idle_timeout: Option<String>, // User-friendly format: "10s", "3m", "1h", or raw ms
 
     // Track which launch-time options were explicitly passed via CLI
     // (as opposed to being set only via environment variables)
@@ -366,6 +402,10 @@ pub fn parse_flags(args: &[String]) -> Flags {
             .ok()
             .or(config.screenshot_format)
             .filter(|s| s == "png" || s == "jpeg"),
+        idle_timeout: env::var("AGENT_BROWSER_IDLE_TIMEOUT_MS")
+            .ok()
+            .and_then(|s| parse_idle_timeout(&s).ok())
+            .or(config.idle_timeout),
         cli_executable_path: false,
         cli_extensions: false,
         cli_profile: false,
@@ -415,6 +455,15 @@ pub fn parse_flags(args: &[String]) -> Flags {
             "--session" => {
                 if let Some(s) = args.get(i + 1) {
                     flags.session = s.clone();
+                    i += 1;
+                }
+            }
+            "--idle-timeout" => {
+                if let Some(s) = args.get(i + 1) {
+                    match parse_idle_timeout(s) {
+                        Ok(ms) => flags.idle_timeout = Some(ms),
+                        Err(e) => eprintln!("{} Invalid --idle-timeout: {}", color::warning_indicator(), e),
+                    }
                     i += 1;
                 }
             }

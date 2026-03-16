@@ -234,6 +234,7 @@ pub struct DaemonOptions<'a> {
     pub action_policy: Option<&'a str>,
     pub confirm_actions: Option<&'a str>,
     pub engine: Option<&'a str>,
+    pub idle_timeout: Option<&'a str>,
 }
 
 fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
@@ -299,6 +300,9 @@ fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
     }
     if let Some(engine) = opts.engine {
         cmd.env("AGENT_BROWSER_ENGINE", engine);
+    }
+    if let Some(idle) = opts.idle_timeout {
+        cmd.env("AGENT_BROWSER_IDLE_TIMEOUT_MS", idle);
     }
 }
 
