@@ -759,6 +759,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         "route" => handle_route(cmd, state).await,
         "unroute" => handle_unroute(cmd, state).await,
         "requests" => handle_requests(cmd, state).await,
+        "network_wait" => handle_network_wait(cmd, state).await,
         "credentials" => handle_http_credentials(cmd, state).await,
         "emulatemedia" => handle_set_media(cmd, state).await,
         "auth_save" => handle_auth_save(cmd).await,
@@ -4762,6 +4763,127 @@ async fn handle_requests(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     };
 
     Ok(json!({ "requests": requests }))
+}
+
+async fn handle_network_wait(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?.to_string();
+    let url_pattern = cmd
+        .get("urlPattern")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'urlPattern' parameter")?;
+    let status_filter = cmd.get("status").and_then(|v| v.as_u64()).map(|v| v as i64);
+    let method_filter = cmd.get("method").and_then(|v| v.as_str());
+    let timeout_ms = cmd.get("timeout").and_then(|v| v.as_u64()).unwrap_or(30000);
+
+    // Enable network tracking if not already active
+    if !state.request_tracking {
+        state.request_tracking = true;
+        let _ = mgr
+            .client
+            .send_command_no_params("Network.enable", Some(&session_id))
+            .await;
+    }
+
+    let mut rx = mgr.client.subscribe();
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
+
+    // Track request methods from requestWillBeSent events so we have a
+    // reliable method for both HTTP/1.1 and HTTP/2 (the `:method`
+    // pseudo-header in response.requestHeaders only exists for HTTP/2).
+    let mut request_methods: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(format!(
+                "Timeout waiting for network response matching '{}'",
+                url_pattern
+            ));
+        }
+
+        match tokio::time::timeout(remaining, rx.recv()).await {
+            Ok(Ok(event)) => {
+                if event.method == "Network.requestWillBeSent"
+                    && event.session_id.as_deref() == Some(&session_id)
+                {
+                    if let (Some(request_id), Some(request)) = (
+                        event.params.get("requestId").and_then(|v| v.as_str()),
+                        event.params.get("request"),
+                    ) {
+                        let method = request
+                            .get("method")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("GET")
+                            .to_string();
+                        request_methods.insert(request_id.to_string(), method);
+                    }
+                }
+
+                if event.method == "Network.responseReceived"
+                    && event.session_id.as_deref() == Some(&session_id)
+                {
+                    let response = match event.params.get("response") {
+                        Some(r) => r,
+                        None => continue,
+                    };
+                    let resp_url = match response.get("url").and_then(|u| u.as_str()) {
+                        Some(u) => u,
+                        None => continue,
+                    };
+
+                    if !resp_url.contains(url_pattern) {
+                        continue;
+                    }
+
+                    let status = response.get("status").and_then(|v| v.as_i64()).unwrap_or(0);
+                    if let Some(expected) = status_filter {
+                        if status != expected {
+                            continue;
+                        }
+                    }
+
+                    let request_id = event
+                        .params
+                        .get("requestId")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let resp_method = request_methods
+                        .get(request_id)
+                        .map(|s| s.as_str())
+                        .unwrap_or("GET");
+                    if let Some(expected_method) = method_filter {
+                        if !resp_method.eq_ignore_ascii_case(expected_method) {
+                            continue;
+                        }
+                    }
+
+                    let resource_type = event
+                        .params
+                        .get("type")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("Other");
+
+                    return Ok(json!({
+                        "url": resp_url,
+                        "method": resp_method,
+                        "status": status,
+                        "resourceType": resource_type,
+                    }));
+                }
+            }
+            Ok(Err(_)) => {
+                return Err("Event channel closed".to_string());
+            }
+            Err(_) => {
+                return Err(format!(
+                    "Timeout waiting for network response matching '{}'",
+                    url_pattern
+                ));
+            }
+        }
+    }
 }
 
 async fn handle_http_credentials(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
