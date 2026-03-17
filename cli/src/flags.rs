@@ -55,7 +55,6 @@ fn parse_idle_timeout_value(value: Option<String>, source: &str) -> Option<Strin
 pub struct Config {
     pub headed: Option<bool>,
     pub json: Option<bool>,
-    pub full: Option<bool>,
     pub debug: Option<bool>,
     pub session: Option<String>,
     pub session_name: Option<String>,
@@ -95,7 +94,6 @@ impl Config {
         Config {
             headed: other.headed.or(self.headed),
             json: other.json.or(self.json),
-            full: other.full.or(self.full),
             debug: other.debug.or(self.debug),
             session: other.session.or(self.session),
             session_name: other.session_name.or(self.session_name),
@@ -267,7 +265,6 @@ pub fn load_config(args: &[String]) -> Result<Config, String> {
 
 pub struct Flags {
     pub json: bool,
-    pub full: bool,
     pub headed: bool,
     pub debug: bool,
     pub session: String,
@@ -342,7 +339,6 @@ pub fn parse_flags(args: &[String]) -> Flags {
 
     let mut flags = Flags {
         json: env_var_is_truthy("AGENT_BROWSER_JSON") || config.json.unwrap_or(false),
-        full: env_var_is_truthy("AGENT_BROWSER_FULL") || config.full.unwrap_or(false),
         headed: env_var_is_truthy("AGENT_BROWSER_HEADED") || config.headed.unwrap_or(false),
         debug: env_var_is_truthy("AGENT_BROWSER_DEBUG") || config.debug.unwrap_or(false),
         session: env::var("AGENT_BROWSER_SESSION")
@@ -443,13 +439,6 @@ pub fn parse_flags(args: &[String]) -> Flags {
             "--json" => {
                 let (val, consumed) = parse_bool_arg(args, i);
                 flags.json = val;
-                if consumed {
-                    i += 1;
-                }
-            }
-            "--full" | "-f" => {
-                let (val, consumed) = parse_bool_arg(args, i);
-                flags.full = val;
                 if consumed {
                     i += 1;
                 }
@@ -722,7 +711,6 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
     // Boolean flags that optionally take true/false
     const GLOBAL_BOOL_FLAGS: &[&str] = &[
         "--json",
-        "--full",
         "--headed",
         "--debug",
         "--ignore-https-errors",
@@ -776,7 +764,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
             i += 1;
             continue;
         }
-        if GLOBAL_BOOL_FLAGS.contains(&arg.as_str()) || arg == "-f" {
+        if GLOBAL_BOOL_FLAGS.contains(&arg.as_str()) {
             if let Some(v) = args.get(i + 1) {
                 if matches!(v.as_str(), "true" | "false") {
                     i += 1;
@@ -1024,7 +1012,6 @@ mod tests {
         let json = r#"{
             "headed": true,
             "json": true,
-            "full": true,
             "debug": true,
             "session": "test-session",
             "sessionName": "my-app",
@@ -1047,7 +1034,6 @@ mod tests {
         let config: Config = serde_json::from_str(json).unwrap();
         assert_eq!(config.headed, Some(true));
         assert_eq!(config.json, Some(true));
-        assert_eq!(config.full, Some(true));
         assert_eq!(config.debug, Some(true));
         assert_eq!(config.session.as_deref(), Some("test-session"));
         assert_eq!(config.session_name.as_deref(), Some("my-app"));
@@ -1321,36 +1307,6 @@ mod tests {
     fn test_auto_connect_false() {
         let flags = parse_flags(&args("--auto-connect false open"));
         assert!(!flags.auto_connect);
-    }
-
-    #[test]
-    fn test_full_bare_defaults_true() {
-        let flags = parse_flags(&args("--full open example.com"));
-        assert!(flags.full);
-    }
-
-    #[test]
-    fn test_full_false() {
-        let flags = parse_flags(&args("--full false open example.com"));
-        assert!(!flags.full);
-    }
-
-    #[test]
-    fn test_full_short_flag() {
-        let flags = parse_flags(&args("-f open example.com"));
-        assert!(flags.full);
-    }
-
-    #[test]
-    fn test_clean_args_removes_full_with_value() {
-        let cleaned = clean_args(&args("--full false open example.com"));
-        assert_eq!(cleaned, vec!["open", "example.com"]);
-    }
-
-    #[test]
-    fn test_clean_args_removes_short_full() {
-        let cleaned = clean_args(&args("-f open example.com"));
-        assert_eq!(cleaned, vec!["open", "example.com"]);
     }
 
     #[test]
