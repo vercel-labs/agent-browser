@@ -319,6 +319,52 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
             }
             return;
         }
+        // Media elements
+        if let Some(media) = data.get("media").and_then(|v| v.as_array()) {
+            if media.is_empty() {
+                println!("No media elements found");
+            } else {
+                for el in media {
+                    let idx = el.get("index").and_then(|v| v.as_i64()).unwrap_or(0);
+                    let tag = el
+                        .get("tagName")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
+                    let paused = el.get("paused").and_then(|v| v.as_bool()).unwrap_or(true);
+                    let state_str = if paused { "paused" } else { "playing" };
+                    let current = el
+                        .get("currentTime")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0);
+                    let duration = el.get("duration").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let src = el.get("src").and_then(|v| v.as_str()).unwrap_or("");
+                    println!(
+                        "[{}] <{}> {} {:.1}s/{:.1}s {}",
+                        idx, tag, state_str, current, duration, src
+                    );
+                }
+            }
+            return;
+        }
+        // Media pause/play result
+        if let Some(count) = data.get("paused").and_then(|v| v.as_i64()) {
+            println!(
+                "{} Paused {} media element{}",
+                color::success_indicator(),
+                count,
+                if count == 1 { "" } else { "s" }
+            );
+            return;
+        }
+        if let Some(count) = data.get("played").and_then(|v| v.as_i64()) {
+            println!(
+                "{} Resumed {} media element{}",
+                color::success_indicator(),
+                count,
+                if count == 1 { "" } else { "s" }
+            );
+            return;
+        }
         // Console logs
         if let Some(logs) = data.get("messages").and_then(|v| v.as_array()) {
             if opts.content_boundaries {
@@ -2459,6 +2505,32 @@ Examples:
 "##
         }
 
+        // === Media ===
+        "media" => {
+            r##"
+agent-browser media - Control audio/video playback
+
+Usage: agent-browser media [operation]
+
+Detect and control audio/video media elements on the page.
+
+Operations:
+  status               List all media elements with playback state (default)
+  pause                Pause all playing media
+  play                 Resume all paused media
+
+Global Options:
+  --json               Output as JSON
+  --session <name>     Use specific session
+
+Examples:
+  agent-browser media
+  agent-browser media status
+  agent-browser media pause
+  agent-browser media play
+"##
+        }
+
         _ => return false,
     };
     println!("{}", help.trim());
@@ -2533,6 +2605,9 @@ Storage:
 
 Tabs:
   tab [new|list|close|<n>]   Manage tabs
+
+Media:
+  media [status|pause|play]  Control audio/video playback
 
 Diff:
   diff snapshot              Compare current vs last snapshot

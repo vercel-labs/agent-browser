@@ -856,6 +856,9 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         "mousemove" => handle_mousemove(cmd, state).await,
         "mousedown" => handle_mousedown(cmd, state).await,
         "mouseup" => handle_mouseup(cmd, state).await,
+        "media_status" => handle_media_status(state).await,
+        "media_pause" => handle_media_pause(state).await,
+        "media_play" => handle_media_play(state).await,
         _ => Err(format!("Not yet implemented: {}", action)),
     };
 
@@ -2562,6 +2565,109 @@ async fn handle_keyboard(cmd: &Value, state: &DaemonState) -> Result<Value, Stri
         .await?;
 
     Ok(json!({ "dispatched": event_type }))
+}
+
+// ---------------------------------------------------------------------------
+// Media playback handlers
+// ---------------------------------------------------------------------------
+
+async fn handle_media_status(state: &DaemonState) -> Result<Value, String> {
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?.to_string();
+
+    let js = r#"(() => {
+        const elements = [...document.querySelectorAll('audio, video')];
+        return elements.map((el, i) => ({
+            index: i,
+            tagName: el.tagName.toLowerCase(),
+            src: el.currentSrc || el.src || '',
+            paused: el.paused,
+            currentTime: el.currentTime,
+            duration: el.duration,
+            muted: el.muted,
+            volume: el.volume,
+            loop: el.loop,
+        }));
+    })()"#;
+
+    let result = mgr
+        .client
+        .send_command(
+            "Runtime.evaluate",
+            Some(json!({ "expression": js, "returnByValue": true })),
+            Some(&session_id),
+        )
+        .await?;
+
+    let media = result
+        .get("result")
+        .and_then(|r| r.get("value"))
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+
+    Ok(json!({ "media": media }))
+}
+
+async fn handle_media_pause(state: &DaemonState) -> Result<Value, String> {
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?.to_string();
+
+    let js = r#"(() => {
+        const elements = [...document.querySelectorAll('audio, video')];
+        let count = 0;
+        elements.forEach(el => { if (!el.paused) { el.pause(); count++; } });
+        return count;
+    })()"#;
+
+    let result = mgr
+        .client
+        .send_command(
+            "Runtime.evaluate",
+            Some(json!({ "expression": js, "returnByValue": true })),
+            Some(&session_id),
+        )
+        .await?;
+
+    let paused_count = result
+        .get("result")
+        .and_then(|r| r.get("value"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+
+    Ok(json!({ "paused": paused_count }))
+}
+
+async fn handle_media_play(state: &DaemonState) -> Result<Value, String> {
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?.to_string();
+
+    let js = r#"(async () => {
+        const elements = [...document.querySelectorAll('audio, video')];
+        let count = 0;
+        for (const el of elements) {
+            if (el.paused) {
+                try { await el.play(); count++; } catch(e) {}
+            }
+        }
+        return count;
+    })()"#;
+
+    let result = mgr
+        .client
+        .send_command(
+            "Runtime.evaluate",
+            Some(json!({ "expression": js, "returnByValue": true, "awaitPromise": true })),
+            Some(&session_id),
+        )
+        .await?;
+
+    let played_count = result
+        .get("result")
+        .and_then(|r| r.get("value"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+
+    Ok(json!({ "played": played_count }))
 }
 
 // ---------------------------------------------------------------------------
