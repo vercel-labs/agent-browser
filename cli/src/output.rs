@@ -320,11 +320,11 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
             return;
         }
         // Console logs
-        if let Some(logs) = data.get("messages").and_then(|v| v.as_array()) {
+        if let Some(logs) = data.get("entries").and_then(|v| v.as_array()) {
             if opts.content_boundaries {
                 let mut console_output = String::new();
                 for log in logs {
-                    let level = log.get("type").and_then(|v| v.as_str()).unwrap_or("log");
+                    let level = log.get("level").and_then(|v| v.as_str()).unwrap_or("log");
                     let text = log.get("text").and_then(|v| v.as_str()).unwrap_or("");
                     console_output.push_str(&format!(
                         "{} {}\n",
@@ -338,7 +338,7 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
                 print_with_boundaries(&console_output, origin, opts);
             } else {
                 for log in logs {
-                    let level = log.get("type").and_then(|v| v.as_str()).unwrap_or("log");
+                    let level = log.get("level").and_then(|v| v.as_str()).unwrap_or("log");
                     let text = log.get("text").and_then(|v| v.as_str()).unwrap_or("");
                     println!("{} {}", color::console_level_prefix(level), text);
                 }
@@ -2086,12 +2086,13 @@ Examples:
             r##"
 agent-browser console - View console logs
 
-Usage: agent-browser console [--clear]
+Usage: agent-browser console [--clear] [--follow]
 
 View browser console output (log, warn, error, info).
 
 Options:
   --clear              Clear console log buffer
+  --follow, -f         Stream console logs in real-time (until Ctrl+C)
 
 Global Options:
   --json               Output as JSON
@@ -2100,18 +2101,21 @@ Global Options:
 Examples:
   agent-browser console
   agent-browser console --clear
+  agent-browser console --follow
+  agent-browser console --follow --json
 "##
         }
         "errors" => {
             r##"
 agent-browser errors - View page errors
 
-Usage: agent-browser errors [--clear]
+Usage: agent-browser errors [--clear] [--follow]
 
 View JavaScript errors and uncaught exceptions.
 
 Options:
   --clear              Clear error buffer
+  --follow, -f         Stream page errors in real-time (until Ctrl+C)
 
 Global Options:
   --json               Output as JSON
@@ -2120,6 +2124,7 @@ Global Options:
 Examples:
   agent-browser errors
   agent-browser errors --clear
+  agent-browser errors --follow
 "##
         }
 
@@ -2502,8 +2507,8 @@ Debug:
   profiler start|stop [path] Record Chrome DevTools profile
   record start <path> [url]  Start video recording (WebM)
   record stop                Stop and save video
-  console [--clear]          View console logs
-  errors [--clear]           View page errors
+  console [--clear] [-f]     View console logs (--follow to stream)
+  errors [--clear] [-f]      View page errors (--follow to stream)
   highlight <sel>            Highlight element
   inspect                    Open Chrome DevTools for the active page
   clipboard <op> [text]      Read/write clipboard (read, write, copy, paste)

@@ -291,8 +291,10 @@ agent-browser profiler start          # Start Chrome DevTools profiling
 agent-browser profiler stop [path]    # Stop and save profile (.json)
 agent-browser console                 # View console messages (log, error, warn, info)
 agent-browser console --clear         # Clear console
+agent-browser console --follow        # Stream console logs in real-time (Ctrl+C to stop)
 agent-browser errors                  # View page errors (uncaught JavaScript exceptions)
 agent-browser errors --clear          # Clear errors
+agent-browser errors --follow         # Stream page errors in real-time (Ctrl+C to stop)
 agent-browser highlight <sel>         # Highlight element
 agent-browser inspect                 # Open Chrome DevTools for the active page
 agent-browser state save <path>       # Save auth state
