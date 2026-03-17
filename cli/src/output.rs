@@ -320,11 +320,11 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
             return;
         }
         // Console logs
-        if let Some(logs) = data.get("messages").and_then(|v| v.as_array()) {
+        if let Some(logs) = data.get("entries").and_then(|v| v.as_array()) {
             if opts.content_boundaries {
                 let mut console_output = String::new();
                 for log in logs {
-                    let level = log.get("type").and_then(|v| v.as_str()).unwrap_or("log");
+                    let level = log.get("level").and_then(|v| v.as_str()).unwrap_or("log");
                     let text = log.get("text").and_then(|v| v.as_str()).unwrap_or("");
                     console_output.push_str(&format!(
                         "{} {}\n",
@@ -338,7 +338,7 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
                 print_with_boundaries(&console_output, origin, opts);
             } else {
                 for log in logs {
-                    let level = log.get("type").and_then(|v| v.as_str()).unwrap_or("log");
+                    let level = log.get("level").and_then(|v| v.as_str()).unwrap_or("log");
                     let text = log.get("text").and_then(|v| v.as_str()).unwrap_or("");
                     println!("{} {}", color::console_level_prefix(level), text);
                 }

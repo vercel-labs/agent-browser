@@ -200,13 +200,13 @@ fn run_console_follow(flags: &flags::Flags, is_errors: bool) {
                             }
                             last_seen = errors.len();
                         }
-                    } else if let Some(entries) = data.get("messages").and_then(|v| v.as_array()) {
+                    } else if let Some(entries) = data.get("entries").and_then(|v| v.as_array()) {
                         for entry in entries.iter().skip(last_seen) {
                             if flags.json {
                                 println!("{}", serde_json::to_string(entry).unwrap_or_default());
                             } else {
                                 let level =
-                                    entry.get("type").and_then(|v| v.as_str()).unwrap_or("log");
+                                    entry.get("level").and_then(|v| v.as_str()).unwrap_or("log");
                                 let text = entry.get("text").and_then(|v| v.as_str()).unwrap_or("");
                                 println!("[{}] {}", level, text);
                             }
