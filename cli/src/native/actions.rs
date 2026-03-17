@@ -4788,6 +4788,12 @@ async fn handle_network_wait(cmd: &Value, state: &mut DaemonState) -> Result<Val
     let mut rx = mgr.client.subscribe();
     let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
 
+    // Track request methods from requestWillBeSent events so we have a
+    // reliable method for both HTTP/1.1 and HTTP/2 (the `:method`
+    // pseudo-header in response.requestHeaders only exists for HTTP/2).
+    let mut request_methods: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
@@ -4799,6 +4805,22 @@ async fn handle_network_wait(cmd: &Value, state: &mut DaemonState) -> Result<Val
 
         match tokio::time::timeout(remaining, rx.recv()).await {
             Ok(Ok(event)) => {
+                if event.method == "Network.requestWillBeSent"
+                    && event.session_id.as_deref() == Some(&session_id)
+                {
+                    if let (Some(request_id), Some(request)) = (
+                        event.params.get("requestId").and_then(|v| v.as_str()),
+                        event.params.get("request"),
+                    ) {
+                        let method = request
+                            .get("method")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("GET")
+                            .to_string();
+                        request_methods.insert(request_id.to_string(), method);
+                    }
+                }
+
                 if event.method == "Network.responseReceived"
                     && event.session_id.as_deref() == Some(&session_id)
                 {
@@ -4822,10 +4844,14 @@ async fn handle_network_wait(cmd: &Value, state: &mut DaemonState) -> Result<Val
                         }
                     }
 
-                    let resp_method = response
-                        .get("requestHeaders")
-                        .and_then(|h| h.get(":method"))
+                    let request_id = event
+                        .params
+                        .get("requestId")
                         .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let resp_method = request_methods
+                        .get(request_id)
+                        .map(|s| s.as_str())
                         .unwrap_or("GET");
                     if let Some(expected_method) = method_filter {
                         if !resp_method.eq_ignore_ascii_case(expected_method) {
