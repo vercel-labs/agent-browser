@@ -1,4 +1,5 @@
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::env;
 use std::io::Write;
 use std::path::PathBuf;
@@ -79,7 +80,7 @@ pub struct RouteResponse {
     pub status: Option<u16>,
     pub body: Option<String>,
     pub content_type: Option<String>,
-    pub headers: Option<std::collections::HashMap<String, String>>,
+    pub headers: Option<HashMap<String, String>>,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -97,6 +98,9 @@ pub struct FetchPausedRequest {
     pub url: String,
     pub resource_type: String,
     pub session_id: String,
+    /// Original request headers from the Fetch.requestPaused event, needed
+    /// because Fetch.continueRequest replaces (not merges) headers.
+    pub request_headers: Option<serde_json::Map<String, Value>>,
 }
 
 pub enum BackendType {
@@ -111,7 +115,7 @@ pub struct DaemonState {
     pub webdriver_backend: Option<super::webdriver::backend::WebDriverBackend>,
     pub backend_type: BackendType,
     pub ref_map: RefMap,
-    pub domain_filter: Option<DomainFilter>,
+    pub domain_filter: Arc<RwLock<Option<DomainFilter>>>,
     pub event_tracker: EventTracker,
     pub session_name: Option<String>,
     pub session_id: String,
@@ -125,10 +129,18 @@ pub struct DaemonState {
     pub har_entries: Vec<HarEntry>,
     pub confirm_actions: Option<ConfirmActions>,
     pub inspect_server: Option<InspectServer>,
-    pub routes: Vec<RouteEntry>,
+    pub routes: Arc<RwLock<Vec<RouteEntry>>>,
     pub tracked_requests: Vec<TrackedRequest>,
     pub request_tracking: bool,
     pub active_frame_id: Option<String>,
+    /// Origin-scoped extra HTTP headers set via `--headers` on navigate.
+    /// Key is the origin (scheme + host + port), value is the headers map.
+    /// Wrapped in Arc<RwLock<>> so the background Fetch handler can read it.
+    pub origin_headers: Arc<RwLock<HashMap<String, HashMap<String, String>>>>,
+    /// Background task that processes Fetch.requestPaused events in real-time,
+    /// handling domain filtering, route interception, and origin-scoped headers
+    /// without deadlocking navigation/evaluate.
+    fetch_handler_task: Option<tokio::task::JoinHandle<()>>,
     /// Shared slot for stream server to receive CDP client when browser launches.
     pub stream_client: Option<Arc<RwLock<Option<Arc<CdpClient>>>>>,
     /// Stream server instance kept alive so the broadcast channel remains open.
@@ -144,10 +156,12 @@ impl DaemonState {
             webdriver_backend: None,
             backend_type: BackendType::Cdp,
             ref_map: RefMap::new(),
-            domain_filter: env::var("AGENT_BROWSER_ALLOWED_DOMAINS")
-                .ok()
-                .filter(|s| !s.is_empty())
-                .map(|s| DomainFilter::new(&s)),
+            domain_filter: Arc::new(RwLock::new(
+                env::var("AGENT_BROWSER_ALLOWED_DOMAINS")
+                    .ok()
+                    .filter(|s| !s.is_empty())
+                    .map(|s| DomainFilter::new(&s)),
+            )),
             event_tracker: EventTracker::new(),
             session_name: env::var("AGENT_BROWSER_SESSION_NAME").ok(),
             session_id: env::var("AGENT_BROWSER_SESSION").unwrap_or_else(|_| "default".to_string()),
@@ -161,10 +175,12 @@ impl DaemonState {
             har_entries: Vec::new(),
             confirm_actions: ConfirmActions::from_env(),
             inspect_server: None,
-            routes: Vec::new(),
+            routes: Arc::new(RwLock::new(Vec::new())),
             tracked_requests: Vec::new(),
             request_tracking: false,
             active_frame_id: None,
+            origin_headers: Arc::new(RwLock::new(HashMap::new())),
+            fetch_handler_task: None,
             stream_client: None,
             stream_server: None,
         }
@@ -186,6 +202,85 @@ impl DaemonState {
         if let Some(ref browser) = self.browser {
             self.event_rx = Some(browser.client.subscribe());
         }
+    }
+
+    /// Start the background task that processes all Fetch.requestPaused events
+    /// in real-time (domain filtering, route interception, origin-scoped headers).
+    /// Must be called after the browser is set and events are subscribed.
+    fn start_fetch_handler(&mut self) {
+        // Abort any existing handler.
+        if let Some(task) = self.fetch_handler_task.take() {
+            task.abort();
+        }
+
+        let Some(ref browser) = self.browser else {
+            return;
+        };
+
+        let client = browser.client.clone();
+        let mut rx = browser.client.subscribe();
+        let domain_filter = self.domain_filter.clone();
+        let routes = self.routes.clone();
+        let origin_headers = self.origin_headers.clone();
+
+        self.fetch_handler_task = Some(tokio::spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(event) if event.method == "Fetch.requestPaused" => {
+                        let request_id = event
+                            .params
+                            .get("requestId")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let request_url = event
+                            .params
+                            .get("request")
+                            .and_then(|r| r.get("url"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let resource_type = event
+                            .params
+                            .get("resourceType")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let request_headers = event
+                            .params
+                            .get("request")
+                            .and_then(|r| r.get("headers"))
+                            .and_then(|h| h.as_object())
+                            .cloned();
+                        let sid = event.session_id.clone().unwrap_or_default();
+
+                        let paused = FetchPausedRequest {
+                            request_id,
+                            url: request_url,
+                            resource_type,
+                            session_id: sid,
+                            request_headers,
+                        };
+
+                        let df = domain_filter.read().await;
+                        let rt = routes.read().await;
+                        let oh = origin_headers.read().await;
+
+                        resolve_fetch_paused(
+                            &client,
+                            df.as_ref(),
+                            &rt,
+                            &oh,
+                            &paused,
+                        )
+                        .await;
+                    }
+                    Ok(_) => continue,
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(_) => break,
+                }
+            }
+        }));
     }
 
     /// Update the stream server's CDP client slot when browser is set or cleared.
@@ -238,21 +333,15 @@ impl DaemonState {
 
     fn drain_cdp_events(
         &mut self,
-    ) -> (
-        Vec<i64>,
-        Vec<TargetCreatedEvent>,
-        Vec<String>,
-        Vec<FetchPausedRequest>,
-    ) {
+    ) -> (Vec<i64>, Vec<TargetCreatedEvent>, Vec<String>) {
         let rx = match self.event_rx.as_mut() {
             Some(rx) => rx,
-            None => return (Vec::new(), Vec::new(), Vec::new(), Vec::new()),
+            None => return (Vec::new(), Vec::new(), Vec::new()),
         };
 
         let mut pending_acks: Vec<i64> = Vec::new();
         let mut new_targets: Vec<TargetCreatedEvent> = Vec::new();
         let mut destroyed_targets: Vec<String> = Vec::new();
-        let mut fetch_paused: Vec<FetchPausedRequest> = Vec::new();
 
         loop {
             match rx.try_recv() {
@@ -511,35 +600,8 @@ impl DaemonState {
                                 }
                             }
                         }
-                        "Fetch.requestPaused" => {
-                            let request_id = event
-                                .params
-                                .get("requestId")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .to_string();
-                            let request_url = event
-                                .params
-                                .get("request")
-                                .and_then(|r| r.get("url"))
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .to_string();
-                            let resource_type = event
-                                .params
-                                .get("resourceType")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .to_string();
-                            let sid = event.session_id.clone().unwrap_or_default();
-
-                            fetch_paused.push(FetchPausedRequest {
-                                request_id,
-                                url: request_url,
-                                resource_type,
-                                session_id: sid,
-                            });
-                        }
+                        // Fetch.requestPaused is handled by the background
+                        // fetch_handler_task — no need to collect here.
                         _ => {}
                     }
                 }
@@ -552,7 +614,17 @@ impl DaemonState {
             }
         }
 
-        (pending_acks, new_targets, destroyed_targets, fetch_paused)
+        (pending_acks, new_targets, destroyed_targets)
+    }
+}
+
+impl Drop for DaemonState {
+    fn drop(&mut self) {
+        // The background fetch handler sits in rx.recv().await indefinitely.
+        // Without aborting it, the tokio runtime won't shut down (tests hang).
+        if let Some(task) = self.fetch_handler_task.take() {
+            task.abort();
+        }
     }
 }
 
@@ -564,8 +636,8 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         .unwrap_or("")
         .to_string();
 
-    // Drain pending CDP events (console, errors, screencast frames, target lifecycle, fetch)
-    let (pending_acks, new_targets, destroyed_targets, fetch_paused) = state.drain_cdp_events();
+    // Drain pending CDP events (console, errors, screencast frames, target lifecycle)
+    let (pending_acks, new_targets, destroyed_targets) = state.drain_cdp_events();
     if !pending_acks.is_empty() {
         if let Some(ref browser) = state.browser {
             if let Ok(session_id) = browser.active_session_id() {
@@ -600,7 +672,8 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
                 let _ = mgr.enable_domains_pub(&attach.session_id).await;
 
                 // Install domain filter on new pages
-                if let Some(ref filter) = state.domain_filter {
+                let df = state.domain_filter.read().await;
+                if let Some(ref filter) = *df {
                     let _ = network::install_domain_filter(
                         &mgr.client,
                         &attach.session_id,
@@ -617,14 +690,6 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
                     target_type: te.target_info.target_type.clone(),
                 });
             }
-        }
-    }
-
-    // Handle Fetch.requestPaused events (route interception + domain filter)
-    for paused in &fetch_paused {
-        if let Some(ref browser) = state.browser {
-            resolve_fetch_paused(browser, state.domain_filter.as_ref(), &state.routes, paused)
-                .await;
         }
     }
 
@@ -921,6 +986,7 @@ async fn auto_launch(state: &mut DaemonState) -> Result<(), String> {
         let mgr = BrowserManager::connect_cdp(&cdp).await?;
         state.browser = Some(mgr);
         state.subscribe_to_browser_events();
+        state.start_fetch_handler();
         state.update_stream_client().await;
         try_auto_restore_state(state).await;
         return Ok(());
@@ -929,6 +995,7 @@ async fn auto_launch(state: &mut DaemonState) -> Result<(), String> {
     if env::var("AGENT_BROWSER_AUTO_CONNECT").is_ok() {
         state.browser = Some(connect_auto_with_fresh_tab().await?);
         state.subscribe_to_browser_events();
+        state.start_fetch_handler();
         state.update_stream_client().await;
         try_auto_restore_state(state).await;
         return Ok(());
@@ -937,6 +1004,7 @@ async fn auto_launch(state: &mut DaemonState) -> Result<(), String> {
     let mgr = BrowserManager::launch(options, engine.as_deref()).await?;
     state.browser = Some(mgr);
     state.subscribe_to_browser_events();
+    state.start_fetch_handler();
     state.update_stream_client().await;
     try_auto_restore_state(state).await;
     Ok(())
@@ -982,7 +1050,7 @@ fn launch_options_from_env() -> LaunchOptions {
     }
 }
 
-fn daemon_state_from_env(state: &mut DaemonState) {
+async fn daemon_state_from_env(state: &mut DaemonState) {
     if let Ok(name) = env::var("AGENT_BROWSER_SESSION_NAME") {
         if !name.is_empty() {
             state.session_name = Some(name);
@@ -990,7 +1058,8 @@ fn daemon_state_from_env(state: &mut DaemonState) {
     }
     if let Ok(domains) = env::var("AGENT_BROWSER_ALLOWED_DOMAINS") {
         if !domains.is_empty() {
-            state.domain_filter = Some(DomainFilter::new(&domains));
+            let mut df = state.domain_filter.write().await;
+            *df = Some(DomainFilter::new(&domains));
         }
     }
     if state.policy.is_none() {
@@ -1079,6 +1148,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     if let Some(url) = cdp_url {
         state.browser = Some(BrowserManager::connect_cdp(url).await?);
         state.subscribe_to_browser_events();
+        state.start_fetch_handler();
         state.update_stream_client().await;
         return Ok(json!({ "launched": true }));
     }
@@ -1086,6 +1156,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     if let Some(port) = cdp_port {
         state.browser = Some(BrowserManager::connect_cdp(&port.to_string()).await?);
         state.subscribe_to_browser_events();
+        state.start_fetch_handler();
         state.update_stream_client().await;
         return Ok(json!({ "launched": true }));
     }
@@ -1093,6 +1164,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     if auto_connect {
         state.browser = Some(connect_auto_with_fresh_tab().await?);
         state.subscribe_to_browser_events();
+        state.start_fetch_handler();
         state.update_stream_client().await;
         return Ok(json!({ "launched": true }));
     }
@@ -1111,6 +1183,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
                     Ok(mgr) => {
                         state.browser = Some(mgr);
                         state.subscribe_to_browser_events();
+                        state.start_fetch_handler();
                         state.update_stream_client().await;
                         return Ok(json!({ "launched": true, "provider": provider }));
                     }
@@ -1192,23 +1265,29 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         .and_then(|v| v.as_str())
         .map(String::from)
     {
-        state.domain_filter = Some(DomainFilter::new(domains));
+        let mut df = state.domain_filter.write().await;
+        *df = Some(DomainFilter::new(domains));
     }
 
     state.browser = Some(BrowserManager::launch(options, engine.as_deref()).await?);
     state.subscribe_to_browser_events();
+    state.start_fetch_handler();
     state.update_stream_client().await;
 
-    if let Some(ref filter) = state.domain_filter {
-        if let Some(ref mgr) = state.browser {
-            if let Ok(session_id) = mgr.active_session_id() {
-                let _ = network::install_domain_filter(
-                    &mgr.client,
-                    session_id,
-                    &filter.allowed_domains,
-                )
-                .await;
-                network::sanitize_existing_pages(&mgr.client, &mgr.pages_list(), filter).await;
+    {
+        let df = state.domain_filter.read().await;
+        if let Some(ref filter) = *df {
+            if let Some(ref mgr) = state.browser {
+                if let Ok(session_id) = mgr.active_session_id() {
+                    let _ = network::install_domain_filter(
+                        &mgr.client,
+                        session_id,
+                        &filter.allowed_domains,
+                    )
+                    .await;
+                    network::sanitize_existing_pages(&mgr.client, &mgr.pages_list(), filter)
+                        .await;
+                }
             }
         }
     }
@@ -1303,8 +1382,11 @@ async fn handle_navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         .and_then(|v| v.as_str())
         .ok_or("Missing 'url' parameter")?;
 
-    if let Some(ref filter) = state.domain_filter {
-        filter.check_url(url)?;
+    {
+        let df = state.domain_filter.read().await;
+        if let Some(ref filter) = *df {
+            filter.check_url(url)?;
+        }
     }
 
     // WebDriver backend path
@@ -1326,31 +1408,49 @@ async fn handle_navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         .map(WaitUntil::from_str)
         .unwrap_or(WaitUntil::Load);
 
+    // If --headers was passed, store them keyed by origin and enable Fetch
+    // interception. The background fetch_handler_task (started on launch)
+    // injects them into matching requests in real-time.
     let scoped_headers = cmd
         .get("headers")
         .and_then(|v| v.as_object())
         .filter(|m| !m.is_empty());
 
     if let Some(headers_map) = scoped_headers {
-        let session_id = mgr.active_session_id()?.to_string();
-        let headers: std::collections::HashMap<String, String> = headers_map
-            .iter()
-            .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-            .collect();
-        network::set_extra_headers(&mgr.client, &session_id, &headers).await?;
-    }
+        if let Some(origin) = url::Url::parse(url)
+            .ok()
+            .map(|u| u.origin().ascii_serialization())
+        {
+            let headers: HashMap<String, String> = headers_map
+                .iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect();
 
-    state.ref_map.clear();
-    let result = mgr.navigate(url, wait_until).await;
+            let first_origin_header = {
+                let mut map = state.origin_headers.write().await;
+                let first = map.is_empty();
+                map.insert(origin, headers);
+                first
+            };
 
-    if scoped_headers.is_some() {
-        if let Ok(session_id) = mgr.active_session_id() {
-            let empty: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-            let _ = network::set_extra_headers(&mgr.client, session_id, &empty).await;
+            // Enable Fetch interception the first time --headers is used.
+            // Fetch.enable is idempotent — safe even if domain filter or
+            // routes already enabled it. Wildcard ensures we see all requests.
+            if first_origin_header {
+                let session_id = mgr.active_session_id()?.to_string();
+                mgr.client
+                    .send_command(
+                        "Fetch.enable",
+                        Some(json!({ "patterns": [{ "urlPattern": "*" }] })),
+                        Some(&session_id),
+                    )
+                    .await?;
+            }
         }
     }
 
-    result
+    state.ref_map.clear();
+    mgr.navigate(url, wait_until).await
 }
 
 async fn handle_url(state: &DaemonState) -> Result<Value, String> {
@@ -1478,6 +1578,15 @@ async fn handle_close(state: &mut DaemonState) -> Result<Value, String> {
     }
     state.browser = None;
     state.update_stream_client().await;
+
+    // Stop background Fetch handler
+    if let Some(task) = state.fetch_handler_task.take() {
+        task.abort();
+    }
+    {
+        let mut map = state.origin_headers.write().await;
+        map.clear();
+    }
 
     // Close WebDriver sessions
     if let Some(ref mut wb) = state.webdriver_backend {
@@ -2314,7 +2423,7 @@ async fn handle_headers(cmd: &Value, state: &DaemonState) -> Result<Value, Strin
 
     let headers_value = cmd.get("headers").ok_or("Missing 'headers' parameter")?;
 
-    let headers: std::collections::HashMap<String, String> = headers_value
+    let headers: HashMap<String, String> = headers_value
         .as_object()
         .map(|m| {
             m.iter()
@@ -4951,25 +5060,25 @@ fn browser_metadata_from_version(version: &Value) -> Option<Value> {
 }
 
 // ---------------------------------------------------------------------------
-// Fetch interception resolver (routes + domain filter)
+// Fetch interception resolver (domain filter + routes + origin headers)
 // ---------------------------------------------------------------------------
 
 async fn resolve_fetch_paused(
-    browser: &BrowserManager,
+    client: &CdpClient,
     domain_filter: Option<&DomainFilter>,
     routes: &[RouteEntry],
+    origin_headers: &HashMap<String, HashMap<String, String>>,
     paused: &FetchPausedRequest,
 ) {
     let session_id = &paused.session_id;
 
-    // Domain filter check (takes priority over routes)
+    // Domain filter check (takes priority over routes and origin headers)
     if let Some(filter) = domain_filter {
         if let Ok(parsed) = url::Url::parse(&paused.url) {
             let scheme = parsed.scheme();
             if scheme != "http" && scheme != "https" {
                 if paused.resource_type.eq_ignore_ascii_case("document") {
-                    let _ = browser
-                        .client
+                    let _ = client
                         .send_command(
                             "Fetch.failRequest",
                             Some(json!({
@@ -4980,8 +5089,7 @@ async fn resolve_fetch_paused(
                         )
                         .await;
                 } else {
-                    let _ = browser
-                        .client
+                    let _ = client
                         .send_command(
                             "Fetch.continueRequest",
                             Some(json!({ "requestId": paused.request_id })),
@@ -5003,8 +5111,7 @@ async fn resolve_fetch_paused(
                             &base64::engine::general_purpose::STANDARD,
                             error_body.as_bytes(),
                         );
-                        let _ = browser
-                            .client
+                        let _ = client
                             .send_command(
                                 "Fetch.fulfillRequest",
                                 Some(json!({
@@ -5019,8 +5126,7 @@ async fn resolve_fetch_paused(
                             )
                             .await;
                     } else {
-                        let _ = browser
-                            .client
+                        let _ = client
                             .send_command(
                                 "Fetch.failRequest",
                                 Some(json!({
@@ -5054,8 +5160,7 @@ async fn resolve_fetch_paused(
 
         if matches {
             if route.abort {
-                let _ = browser
-                    .client
+                let _ = client
                     .send_command(
                         "Fetch.failRequest",
                         Some(json!({
@@ -5085,8 +5190,7 @@ async fn resolve_fetch_paused(
                     }
                 }
 
-                let _ = browser
-                    .client
+                let _ = client
                     .send_command(
                         "Fetch.fulfillRequest",
                         Some(json!({
@@ -5103,20 +5207,68 @@ async fn resolve_fetch_paused(
         }
     }
 
-    // No matching route -- continue the request
-    let _ = browser
-        .client
-        .send_command(
-            "Fetch.continueRequest",
-            Some(json!({ "requestId": paused.request_id })),
-            Some(session_id),
-        )
-        .await;
+    // No matching route — continue, injecting origin-scoped headers if applicable.
+    let extra = url::Url::parse(&paused.url)
+        .ok()
+        .map(|u| u.origin().ascii_serialization())
+        .and_then(|o| origin_headers.get(&o));
+
+    if let Some(extra_headers) = extra {
+        // Merge original request headers with extra headers.
+        // Fetch.continueRequest replaces (not merges), so include originals.
+        let mut combined: Vec<Value> = Vec::new();
+        if let Some(ref orig) = paused.request_headers {
+            for (k, v) in orig {
+                if !extra_headers.keys().any(|ek| ek.eq_ignore_ascii_case(k)) {
+                    if let Some(s) = v.as_str() {
+                        combined.push(json!({ "name": k, "value": s }));
+                    }
+                }
+            }
+        }
+        for (k, v) in extra_headers {
+            combined.push(json!({ "name": k, "value": v }));
+        }
+        let _ = client
+            .send_command(
+                "Fetch.continueRequest",
+                Some(json!({ "requestId": paused.request_id, "headers": combined })),
+                Some(session_id),
+            )
+            .await;
+    } else {
+        let _ = client
+            .send_command(
+                "Fetch.continueRequest",
+                Some(json!({ "requestId": paused.request_id })),
+                Some(session_id),
+            )
+            .await;
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Route handlers
 // ---------------------------------------------------------------------------
+
+/// Build the Fetch.enable patterns list from current routes, domain filter,
+/// and origin headers state.  When domain filtering or origin-scoped headers
+/// are active a wildcard pattern is included so all requests are intercepted.
+async fn build_fetch_patterns(state: &DaemonState) -> Vec<Value> {
+    let routes = state.routes.read().await;
+    let mut patterns: Vec<Value> = routes
+        .iter()
+        .map(|r| json!({ "urlPattern": r.url_pattern }))
+        .collect();
+    let has_domain_filter = state.domain_filter.read().await.is_some();
+    let has_origin_headers = !state.origin_headers.read().await.is_empty();
+    if (has_domain_filter || has_origin_headers)
+        && !patterns.iter().any(|p| p["urlPattern"] == "*")
+    {
+        patterns.push(json!({ "urlPattern": "*" }));
+    }
+    patterns
+}
 
 async fn handle_route(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
@@ -5149,24 +5301,16 @@ async fn handle_route(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         })
     });
 
-    state.routes.push(RouteEntry {
-        url_pattern: url_pattern.clone(),
-        response,
-        abort,
-    });
-
-    // Re-enable Fetch with all route patterns combined.
-    // When domain filtering is active, include a wildcard so all requests
-    // continue to be intercepted for domain checks.
-    let mut patterns: Vec<Value> = state
-        .routes
-        .iter()
-        .map(|r| json!({ "urlPattern": r.url_pattern }))
-        .collect();
-    if state.domain_filter.is_some() && !patterns.iter().any(|p| p["urlPattern"] == "*") {
-        patterns.push(json!({ "urlPattern": "*" }));
+    {
+        let mut routes = state.routes.write().await;
+        routes.push(RouteEntry {
+            url_pattern: url_pattern.clone(),
+            response,
+            abort,
+        });
     }
 
+    let patterns = build_fetch_patterns(state).await;
     mgr.client
         .send_command(
             "Fetch.enable",
@@ -5184,36 +5328,24 @@ async fn handle_unroute(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
 
     let url = cmd.get("url").and_then(|v| v.as_str());
 
-    match url {
-        Some(pattern) => {
-            state.routes.retain(|r| r.url_pattern != pattern);
-        }
-        None => {
-            state.routes.clear();
+    {
+        let mut routes = state.routes.write().await;
+        match url {
+            Some(pattern) => {
+                routes.retain(|r| r.url_pattern != pattern);
+            }
+            None => {
+                routes.clear();
+            }
         }
     }
 
-    if state.routes.is_empty() {
-        if state.domain_filter.is_some() {
-            // Domain filtering still needs Fetch interception; reset to wildcard
-            mgr.client
-                .send_command(
-                    "Fetch.enable",
-                    Some(json!({ "patterns": [{ "urlPattern": "*" }] })),
-                    Some(&session_id),
-                )
-                .await?;
-        } else {
-            mgr.client
-                .send_command("Fetch.disable", None, Some(&session_id))
-                .await?;
-        }
+    let patterns = build_fetch_patterns(state).await;
+    if patterns.is_empty() {
+        mgr.client
+            .send_command("Fetch.disable", None, Some(&session_id))
+            .await?;
     } else {
-        let patterns: Vec<Value> = state
-            .routes
-            .iter()
-            .map(|r| json!({ "urlPattern": r.url_pattern }))
-            .collect();
         mgr.client
             .send_command(
                 "Fetch.enable",
@@ -5276,7 +5408,7 @@ async fn handle_http_credentials(cmd: &Value, state: &DaemonState) -> Result<Val
         format!("{}:{}", username, password),
     );
 
-    let mut headers = std::collections::HashMap::new();
+    let mut headers = HashMap::new();
     headers.insert("Authorization".to_string(), format!("Basic {}", encoded));
     network::set_extra_headers(&mgr.client, &session_id, &headers).await?;
 
@@ -5854,11 +5986,11 @@ mod tests {
         assert_eq!(resp["error"], "Something went wrong");
     }
 
-    #[test]
-    fn test_daemon_state_new() {
+    #[tokio::test]
+    async fn test_daemon_state_new() {
         let state = DaemonState::new();
         assert!(state.browser.is_none());
-        assert!(state.domain_filter.is_none());
+        assert!(state.domain_filter.read().await.is_none());
         assert_eq!(state.session_id, "default");
         assert!(!state.tracing_state.active);
         assert!(!state.recording_state.active);
@@ -6166,7 +6298,10 @@ mod tests {
     #[tokio::test]
     async fn test_navigate_without_browser() {
         let mut state = DaemonState::new();
-        state.domain_filter = Some(DomainFilter::new("example.com"));
+        {
+            let mut df = state.domain_filter.write().await;
+            *df = Some(DomainFilter::new("example.com"));
+        }
         let cmd = json!({
             "action": "navigate",
             "url": "https://blocked.com",
@@ -6233,5 +6368,77 @@ mod tests {
         let result = execute_command(&cmd, &mut state).await;
         assert_eq!(result["success"], true);
         assert!(result["data"]["files"].is_array());
+    }
+
+    #[tokio::test]
+    async fn test_build_fetch_patterns_empty_state() {
+        let state = DaemonState::new();
+        let patterns = build_fetch_patterns(&state).await;
+        assert!(patterns.is_empty(), "No routes/filters/headers → no patterns");
+    }
+
+    #[tokio::test]
+    async fn test_build_fetch_patterns_with_routes() {
+        let state = DaemonState::new();
+        {
+            let mut routes = state.routes.write().await;
+            routes.push(super::RouteEntry {
+                url_pattern: "https://example.com/*".to_string(),
+                response: None,
+                abort: true,
+            });
+        }
+        let patterns = build_fetch_patterns(&state).await;
+        assert_eq!(patterns.len(), 1);
+        assert_eq!(patterns[0]["urlPattern"], "https://example.com/*");
+    }
+
+    #[tokio::test]
+    async fn test_build_fetch_patterns_adds_wildcard_for_domain_filter() {
+        let state = DaemonState::new();
+        {
+            let mut df = state.domain_filter.write().await;
+            *df = Some(super::super::network::DomainFilter::new("example.com"));
+        }
+        let patterns = build_fetch_patterns(&state).await;
+        assert_eq!(patterns.len(), 1);
+        assert_eq!(patterns[0]["urlPattern"], "*");
+    }
+
+    #[tokio::test]
+    async fn test_build_fetch_patterns_adds_wildcard_for_origin_headers() {
+        let state = DaemonState::new();
+        {
+            let mut oh = state.origin_headers.write().await;
+            let mut headers = HashMap::new();
+            headers.insert("Authorization".to_string(), "Bearer xxx".to_string());
+            oh.insert("http://example.com".to_string(), headers);
+        }
+        let patterns = build_fetch_patterns(&state).await;
+        assert_eq!(patterns.len(), 1);
+        assert_eq!(patterns[0]["urlPattern"], "*");
+    }
+
+    #[tokio::test]
+    async fn test_build_fetch_patterns_no_duplicate_wildcard() {
+        let state = DaemonState::new();
+        {
+            let mut routes = state.routes.write().await;
+            routes.push(super::RouteEntry {
+                url_pattern: "*".to_string(),
+                response: None,
+                abort: false,
+            });
+        }
+        {
+            let mut df = state.domain_filter.write().await;
+            *df = Some(super::super::network::DomainFilter::new("example.com"));
+        }
+        let patterns = build_fetch_patterns(&state).await;
+        assert_eq!(
+            patterns.len(),
+            1,
+            "Should not add a second wildcard when routes already contain one"
+        );
     }
 }

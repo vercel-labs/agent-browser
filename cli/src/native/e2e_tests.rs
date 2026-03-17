@@ -8,6 +8,7 @@
 //!   cargo test e2e -- --ignored --test-threads=1
 
 use serde_json::{json, Value};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::actions::{execute_command, DaemonState};
 
@@ -1227,15 +1228,19 @@ async fn e2e_state_management() {
 async fn e2e_domain_filter() {
     let mut state = DaemonState::new();
 
+    // Set domain filter BEFORE launch so Fetch.enable is called during
+    // launch and the background fetch handler intercepts from the start.
+    {
+        let mut df = state.domain_filter.write().await;
+        *df = Some(super::network::DomainFilter::new("example.com"));
+    }
+
     let resp = execute_command(
         &json!({ "id": "1", "action": "launch", "headless": true }),
         &mut state,
     )
     .await;
     assert_success(&resp);
-
-    // Set domain filter after launch to avoid Fetch.enable deadlock in tests.
-    state.domain_filter = Some(super::network::DomainFilter::new("example.com"));
 
     // Allowed domain
     let resp = execute_command(
@@ -1245,7 +1250,7 @@ async fn e2e_domain_filter() {
     .await;
     assert_success(&resp);
 
-    // Blocked domain
+    // Blocked domain (rejected by synchronous URL check in handle_navigate)
     let resp = execute_command(
         &json!({ "id": "3", "action": "navigate", "url": "https://blocked.com" }),
         &mut state,
@@ -1257,6 +1262,34 @@ async fn e2e_domain_filter() {
         error.contains("blocked") || error.contains("not allowed"),
         "Should reject blocked domain, got: {}",
         error
+    );
+
+    // Verify that in-page fetch to a blocked domain is also blocked by
+    // the Fetch interception layer (not just the navigate-level check).
+    // First navigate to the allowed domain.
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "navigate", "url": "https://example.com" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Attempt a cross-origin fetch to a blocked domain from the page.
+    let resp = execute_command(
+        &json!({
+            "id": "5", "action": "evaluate",
+            "script": "fetch('https://blocked.com/data').then(() => 'ok').catch(e => 'blocked:' + e.message)",
+            "await": true,
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let result = get_data(&resp)["result"].as_str().unwrap_or("");
+    assert!(
+        result.starts_with("blocked:"),
+        "Fetch to blocked domain should fail, got: {}",
+        result,
     );
 
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
@@ -2205,6 +2238,646 @@ async fn e2e_snapshot_cursor_many_elements() {
         elapsed.as_secs() < 10,
         "snapshot -C with 100 cursor elements took {:?}, expected < 10s (Issue #841)",
         elapsed,
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+// ---------------------------------------------------------------------------
+// Helper: tiny HTTP server that echoes request headers as JSON
+// ---------------------------------------------------------------------------
+
+/// Starts a TCP listener on localhost:0 and spawns a task that accepts
+/// connections, reads the HTTP request, and responds with a JSON body
+/// containing all received request headers. Returns the server's base URL.
+async fn start_echo_server() -> (String, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let base_url = format!("http://127.0.0.1:{}", port);
+
+    let handle = tokio::spawn(async move {
+        // Serve up to 20 requests then exit (enough for all tests).
+        for _ in 0..20 {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 8192];
+                let n = stream.read(&mut buf).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..n]);
+
+                // Parse headers from the HTTP request.
+                let mut headers = serde_json::Map::new();
+                for line in request.lines().skip(1) {
+                    if line.is_empty() {
+                        break;
+                    }
+                    if let Some((key, value)) = line.split_once(": ") {
+                        headers.insert(
+                            key.to_string(),
+                            Value::String(value.to_string()),
+                        );
+                    }
+                }
+
+                let body = serde_json::to_string(&json!({ "headers": headers })).unwrap();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                     Access-Control-Allow-Origin: *\r\nContent-Length: {}\r\n\
+                     Connection: close\r\n\r\n{}",
+                    body.len(),
+                    body,
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.flush().await;
+            });
+        }
+    });
+
+    (base_url, handle)
+}
+
+// ---------------------------------------------------------------------------
+// Origin-scoped --headers tests
+// ---------------------------------------------------------------------------
+
+/// Headers passed via --headers on open persist for subsequent same-origin
+/// navigations (the core regression from the Rust rewrite).
+#[tokio::test]
+#[ignore]
+async fn e2e_headers_persist_same_origin_navigation() {
+    let (base_url, _server) = start_echo_server().await;
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Navigate with --headers.
+    let resp = execute_command(
+        &json!({
+            "id": "2", "action": "navigate",
+            "url": format!("{}/first", base_url),
+            "headers": { "X-Test": "scoped" },
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Navigate to the same origin WITHOUT --headers.
+    let resp = execute_command(
+        &json!({
+            "id": "3", "action": "navigate",
+            "url": format!("{}/second", base_url),
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // The page body is the echo JSON. Read it via evaluate.
+    let resp = execute_command(
+        &json!({
+            "id": "4", "action": "evaluate",
+            "script": "JSON.parse(document.body.innerText)",
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let result = &get_data(&resp)["result"];
+    assert_eq!(
+        result["headers"]["X-Test"], "scoped",
+        "X-Test header should persist on same-origin navigation without --headers"
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+/// Headers passed via --headers on open persist for in-page fetch/XHR to
+/// the same origin.
+#[tokio::test]
+#[ignore]
+async fn e2e_headers_persist_same_origin_fetch() {
+    let (base_url, _server) = start_echo_server().await;
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Navigate with --headers.
+    let resp = execute_command(
+        &json!({
+            "id": "2", "action": "navigate",
+            "url": format!("{}/page", base_url),
+            "headers": { "X-Test": "fetched" },
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // In-page fetch to the same origin (relative URL).
+    let resp = execute_command(
+        &json!({
+            "id": "3", "action": "evaluate",
+            "script": "fetch('/echo').then(r => r.json())",
+            "await": true,
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let result = &get_data(&resp)["result"];
+    assert_eq!(
+        result["headers"]["X-Test"], "fetched",
+        "X-Test header should be present on in-page fetch to same origin"
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+/// Headers set via --headers do NOT leak to a different origin.
+#[tokio::test]
+#[ignore]
+async fn e2e_headers_do_not_leak_cross_origin() {
+    let (server_a, _ha) = start_echo_server().await;
+    let (server_b, _hb) = start_echo_server().await;
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Navigate to server A with --headers.
+    let resp = execute_command(
+        &json!({
+            "id": "2", "action": "navigate",
+            "url": format!("{}/page", server_a),
+            "headers": { "X-Secret": "a-only" },
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Navigate to server B (different origin) without --headers.
+    let resp = execute_command(
+        &json!({
+            "id": "3", "action": "navigate",
+            "url": format!("{}/page", server_b),
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "4", "action": "evaluate",
+            "script": "JSON.parse(document.body.innerText)",
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let result = &get_data(&resp)["result"];
+    assert!(
+        result["headers"].get("X-Secret").is_none(),
+        "X-Secret header must NOT leak to a different origin, got: {}",
+        result["headers"],
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+/// In-page fetch to a cross-origin URL must NOT include the origin-scoped
+/// headers (sub-resource isolation).
+#[tokio::test]
+#[ignore]
+async fn e2e_headers_do_not_leak_cross_origin_fetch() {
+    let (server_a, _ha) = start_echo_server().await;
+    let (server_b, _hb) = start_echo_server().await;
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Navigate to server A with --headers.
+    let resp = execute_command(
+        &json!({
+            "id": "2", "action": "navigate",
+            "url": format!("{}/page", server_a),
+            "headers": { "X-Secret": "a-only" },
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Fetch from the page to server B (cross-origin sub-resource).
+    let resp = execute_command(
+        &json!({
+            "id": "3", "action": "evaluate",
+            "script": format!("fetch('{}/echo').then(r => r.json())", server_b),
+            "await": true,
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let result = &get_data(&resp)["result"];
+    assert!(
+        result["headers"].get("X-Secret").is_none(),
+        "X-Secret header must NOT leak to cross-origin fetch, got: {}",
+        result["headers"],
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+/// `set headers` (global headers via the headers action) must not be
+/// regressed — they should persist across navigations without being
+/// cleared by the origin-scoped header logic.
+#[tokio::test]
+#[ignore]
+async fn e2e_set_headers_not_regressed() {
+    let (base_url, _server) = start_echo_server().await;
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Set global headers via the `headers` action (not --headers on navigate).
+    let resp = execute_command(
+        &json!({
+            "id": "2", "action": "headers",
+            "headers": { "X-Global": "everywhere" },
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Navigate — global headers should be present.
+    let resp = execute_command(
+        &json!({
+            "id": "3", "action": "navigate",
+            "url": format!("{}/page", base_url),
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "4", "action": "evaluate",
+            "script": "JSON.parse(document.body.innerText)",
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let result = &get_data(&resp)["result"];
+    assert_eq!(
+        result["headers"]["X-Global"], "everywhere",
+        "Global headers set via `set headers` must persist across navigations"
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+/// Multiple origins each get their own independent headers.
+#[tokio::test]
+#[ignore]
+async fn e2e_headers_multiple_origins_independent() {
+    let (server_a, _ha) = start_echo_server().await;
+    let (server_b, _hb) = start_echo_server().await;
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Set headers for origin A.
+    let resp = execute_command(
+        &json!({
+            "id": "2", "action": "navigate",
+            "url": format!("{}/page", server_a),
+            "headers": { "X-From": "alpha" },
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Set different headers for origin B.
+    let resp = execute_command(
+        &json!({
+            "id": "3", "action": "navigate",
+            "url": format!("{}/page", server_b),
+            "headers": { "X-From": "beta" },
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Verify B got its own header.
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "evaluate", "script": "JSON.parse(document.body.innerText)" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"]["headers"]["X-From"], "beta");
+
+    // Navigate back to A — should get A's header, not B's.
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "navigate", "url": format!("{}/check", server_a) }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "evaluate", "script": "JSON.parse(document.body.innerText)" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"]["headers"]["X-From"], "alpha");
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+/// Headers persist when navigating away to a different origin and back.
+#[tokio::test]
+#[ignore]
+async fn e2e_headers_persist_after_roundtrip() {
+    let (server_a, _ha) = start_echo_server().await;
+    let (server_b, _hb) = start_echo_server().await;
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Set headers for origin A.
+    let resp = execute_command(
+        &json!({
+            "id": "2", "action": "navigate",
+            "url": format!("{}/page", server_a),
+            "headers": { "X-Persist": "roundtrip" },
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Navigate away to B (no headers).
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "navigate", "url": format!("{}/page", server_b) }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Navigate back to A without --headers.
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "navigate", "url": format!("{}/back", server_a) }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "evaluate", "script": "JSON.parse(document.body.innerText)" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["result"]["headers"]["X-Persist"], "roundtrip",
+        "Headers should persist after navigating away and back to the same origin"
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+/// Passing --headers a second time to the same origin replaces the previous headers.
+#[tokio::test]
+#[ignore]
+async fn e2e_headers_override_same_origin() {
+    let (base_url, _server) = start_echo_server().await;
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Set initial headers.
+    let resp = execute_command(
+        &json!({
+            "id": "2", "action": "navigate",
+            "url": format!("{}/first", base_url),
+            "headers": { "X-Version": "v1" },
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Override with new headers.
+    let resp = execute_command(
+        &json!({
+            "id": "3", "action": "navigate",
+            "url": format!("{}/second", base_url),
+            "headers": { "X-Version": "v2" },
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "evaluate", "script": "JSON.parse(document.body.innerText)" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["result"]["headers"]["X-Version"], "v2",
+        "Second --headers should replace the first for the same origin"
+    );
+
+    // Subsequent navigation without --headers should use v2.
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "navigate", "url": format!("{}/third", base_url) }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "evaluate", "script": "JSON.parse(document.body.innerText)" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"]["headers"]["X-Version"], "v2");
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+/// `set headers` (global) and `--headers` (origin-scoped) stack together.
+#[tokio::test]
+#[ignore]
+async fn e2e_global_and_scoped_headers_stack() {
+    let (base_url, _server) = start_echo_server().await;
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Set global headers via `set headers`.
+    let resp = execute_command(
+        &json!({
+            "id": "2", "action": "headers",
+            "headers": { "X-Global": "everywhere" },
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Set origin-scoped headers via --headers.
+    let resp = execute_command(
+        &json!({
+            "id": "3", "action": "navigate",
+            "url": format!("{}/page", base_url),
+            "headers": { "X-Scoped": "this-origin" },
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "evaluate", "script": "JSON.parse(document.body.innerText)" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let headers = &get_data(&resp)["result"]["headers"];
+    assert_eq!(
+        headers["X-Global"], "everywhere",
+        "Global header should be present alongside scoped header"
+    );
+    assert_eq!(
+        headers["X-Scoped"], "this-origin",
+        "Scoped header should be present alongside global header"
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+/// Origin-scoped headers with different casing than the browser's original
+/// request headers must not produce duplicates (HTTP headers are
+/// case-insensitive per RFC 7230).
+#[tokio::test]
+#[ignore]
+async fn e2e_headers_case_insensitive_no_duplicates() {
+    let (base_url, _server) = start_echo_server().await;
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Chrome sends "Accept: ..." by default on navigations. Pass "accept"
+    // (lowercase) via --headers to verify the merge is case-insensitive
+    // and doesn't produce a duplicate Accept header.
+    let resp = execute_command(
+        &json!({
+            "id": "2", "action": "navigate",
+            "url": format!("{}/page", base_url),
+            "headers": { "accept": "application/test" },
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "3", "action": "evaluate",
+            "script": "JSON.parse(document.body.innerText)",
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let result = &get_data(&resp)["result"]["headers"];
+
+    // The echo server stores headers keyed by name as received on the wire.
+    // If deduplication works, only our custom "accept" value should appear
+    // (Chrome's original "Accept: text/html,..." should be suppressed).
+    let accept_val = result
+        .get("accept")
+        .or_else(|| result.get("Accept"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    assert_eq!(
+        accept_val, "application/test",
+        "Case-insensitive merge should replace Chrome's Accept header, got headers: {}",
+        result,
     );
 
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
