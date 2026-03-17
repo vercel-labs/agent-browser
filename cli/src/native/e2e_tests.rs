@@ -7,6 +7,7 @@
 //! Run serially to avoid Chrome instance contention:
 //!   cargo test e2e -- --ignored --test-threads=1
 
+use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::{json, Value};
 
 use super::actions::{execute_command, DaemonState};
@@ -22,6 +23,22 @@ fn assert_success(resp: &Value) {
 
 fn get_data(resp: &Value) -> &Value {
     resp.get("data").expect("Missing 'data' in response")
+}
+
+fn native_test_fixture_html(name: &str) -> &'static str {
+    match name {
+        "drag_probe" => include_str!("test_fixtures/drag_probe.html"),
+        "html5_drag_probe" => include_str!("test_fixtures/html5_drag_probe.html"),
+        "pointer_capture_probe" => include_str!("test_fixtures/pointer_capture_probe.html"),
+        _ => panic!("Unknown native test fixture: {}", name),
+    }
+}
+
+fn native_test_fixture_url(name: &str) -> String {
+    format!(
+        "data:text/html;base64,{}",
+        STANDARD.encode(native_test_fixture_html(name))
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1147,6 +1164,245 @@ async fn e2e_hover_scroll_press() {
     .await;
     assert_success(&resp);
     assert_eq!(get_data(&resp)["pressed"], "Enter");
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+// ---------------------------------------------------------------------------
+// Raw mouse regressions
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore]
+async fn e2e_mouse_down_move_up_preserves_drag_state() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "2",
+            "action": "navigate",
+            "url": native_test_fixture_url("drag_probe")
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "3",
+            "action": "evaluate",
+            "script": r#"(() => {
+                const rect = document.getElementById('target').getBoundingClientRect();
+                return {
+                    left: Math.round(rect.left),
+                    top: Math.round(rect.top),
+                    x: Math.round(rect.left + rect.width / 2),
+                    y: Math.round(rect.top + rect.height / 2)
+                };
+            })()"#
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let start = &get_data(&resp)["result"];
+    let initial_left = start["left"]
+        .as_i64()
+        .expect("target left should be numeric");
+    let initial_top = start["top"].as_i64().expect("target top should be numeric");
+    let start_x = start["x"].as_i64().expect("target x should be numeric");
+    let start_y = start["y"].as_i64().expect("target y should be numeric");
+    let end_x = start_x + 80;
+    let end_y = start_y + 60;
+
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "mousemove", "x": start_x, "y": start_y }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "mousedown", "button": "left" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "mousemove", "x": end_x, "y": end_y }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "7", "action": "mouseup", "button": "left" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "8", "action": "evaluate", "script": "window.__dragProbe" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let probe = &get_data(&resp)["result"];
+    assert_eq!(probe["finalLeft"].as_i64(), Some(initial_left + 80));
+    assert_eq!(probe["finalTop"].as_i64(), Some(initial_top + 60));
+
+    let events = probe["events"]
+        .as_array()
+        .expect("drag probe should expose events");
+    assert!(
+        events.iter().any(|event| {
+            event["type"] == "mousedown"
+                && event["x"].as_f64() == Some(start_x as f64)
+                && event["y"].as_f64() == Some(start_y as f64)
+                && event["buttons"].as_i64() == Some(1)
+        }),
+        "Expected a non-zero mousedown event in drag probe"
+    );
+    assert!(
+        events.iter().any(|event| {
+            event["type"] == "mousemove"
+                && event["x"].as_f64() == Some(end_x as f64)
+                && event["y"].as_f64() == Some(end_y as f64)
+                && event["buttons"].as_i64() == Some(1)
+        }),
+        "Expected a drag mousemove with the button still pressed"
+    );
+    assert!(
+        events.iter().any(|event| {
+            event["type"] == "mouseup"
+                && event["x"].as_f64() == Some(end_x as f64)
+                && event["y"].as_f64() == Some(end_y as f64)
+                && event["buttons"].as_i64() == Some(0)
+        }),
+        "Expected mouseup at the last drag position"
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_mouse_drag_reaches_pointer_capture_target() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "2",
+            "action": "navigate",
+            "url": native_test_fixture_url("pointer_capture_probe")
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "3",
+            "action": "evaluate",
+            "script": r#"(() => {
+                const rect = document.getElementById('handle').getBoundingClientRect();
+                return {
+                    x: Math.round(rect.left + rect.width / 2),
+                    y: Math.round(rect.top + rect.height / 2)
+                };
+            })()"#
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let start = &get_data(&resp)["result"];
+    let start_x = start["x"].as_i64().expect("handle x should be numeric");
+    let start_y = start["y"].as_i64().expect("handle y should be numeric");
+    let end_x = start_x + 80;
+    let end_y = start_y + 60;
+
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "mousemove", "x": start_x, "y": start_y }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "mousedown", "button": "left" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "mousemove", "x": end_x, "y": end_y }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "7", "action": "mouseup", "button": "left" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "8", "action": "evaluate", "script": "window.__pointerCaptureProbe" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let probe = &get_data(&resp)["result"];
+    assert_eq!(probe["moved"].as_bool(), Some(true));
+
+    let events = probe["events"]
+        .as_array()
+        .expect("pointer capture probe should expose events");
+    assert!(
+        events.iter().any(|event| {
+            event["type"] == "pointermove"
+                && event["phase"] == "drag"
+                && event["hasCapture"].as_bool() == Some(true)
+                && event["x"].as_f64() == Some(end_x as f64)
+                && event["y"].as_f64() == Some(end_y as f64)
+        }),
+        "Expected pointermove with capture during the drag"
+    );
+    assert!(
+        events.iter().any(|event| {
+            event["type"] == "pointerup"
+                && event["phase"] == "up"
+                && event["hadCapture"].as_bool() == Some(true)
+        }),
+        "Expected pointerup to observe an active pointer capture"
+    );
 
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     assert_success(&resp);
