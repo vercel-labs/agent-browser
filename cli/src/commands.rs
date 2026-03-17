@@ -1708,13 +1708,11 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
         }
         "console" => {
             let clear = rest.contains(&"--clear");
-            let follow = rest.contains(&"--follow") || rest.contains(&"-f");
-            Ok(json!({ "id": id, "action": "console", "clear": clear, "follow": follow }))
+            Ok(json!({ "id": id, "action": "console", "clear": clear }))
         }
         "errors" => {
             let clear = rest.contains(&"--clear");
-            let follow = rest.contains(&"--follow") || rest.contains(&"-f");
-            Ok(json!({ "id": id, "action": "errors", "clear": clear, "follow": follow }))
+            Ok(json!({ "id": id, "action": "errors", "clear": clear }))
         }
         "highlight" => {
             let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
@@ -3065,6 +3063,7 @@ fn parse_network(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                     usage: "network har <start|stop> [path]",
                 }),
             }
+        }
         Some("wait") => {
             let url_pattern = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
                 context: "network wait".to_string(),

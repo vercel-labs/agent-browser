@@ -10531,6 +10531,8 @@ async fn handle_request_detail(cmd: &Value, state: &mut DaemonState) -> Result<V
     }
 
     Ok(result)
+}
+
 async fn handle_network_wait(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
