@@ -8,6 +8,8 @@ allowed-tools: Bash(npx agent-browser:*), Bash(agent-browser:*)
 
 The CLI uses Chrome/Chromium via CDP directly. Install via `npm i -g agent-browser`, `brew install agent-browser`, or `cargo install agent-browser`. Run `agent-browser install` to download Chrome.
 
+If `agent-browser install` needs a mirror, set `AGENT_BROWSER_CHROME_LAST_KNOWN_GOOD_URL` to a CfT `last-known-good-versions.json` URL and `AGENT_BROWSER_CHROME_DOWNLOAD_BASE_URL` to a ZIP download base URL so they stay in sync. HTTPS is recommended. HTTP is supported for trusted internal mirrors and prints a warning at install time.
+
 ## Core Workflow
 
 Every browser automation follows this pattern:

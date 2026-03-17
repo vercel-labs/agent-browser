@@ -58,9 +58,27 @@ On Linux, install system dependencies:
 agent-browser install --with-deps
 ```
 
+### Chrome Mirrors
+
+For reliable mirror installs, set both `AGENT_BROWSER_CHROME_LAST_KNOWN_GOOD_URL` and `AGENT_BROWSER_CHROME_DOWNLOAD_BASE_URL` so the Stable manifest and ZIP download base stay in sync.
+
+```bash
+# Recommended: override both the Stable manifest and ZIP download base
+AGENT_BROWSER_CHROME_LAST_KNOWN_GOOD_URL=https://mirror.example.com/chrome-for-testing/last-known-good-versions.json \
+AGENT_BROWSER_CHROME_DOWNLOAD_BASE_URL=https://mirror.example.com/chrome-for-testing \
+agent-browser install
+
+# Trusted internal network only: HTTP overrides are allowed but print a warning
+AGENT_BROWSER_CHROME_LAST_KNOWN_GOOD_URL=http://mirror.internal/chrome-for-testing/last-known-good-versions.json \
+AGENT_BROWSER_CHROME_DOWNLOAD_BASE_URL=http://mirror.internal/chrome-for-testing \
+agent-browser install
+```
+
+`AGENT_BROWSER_CHROME_LAST_KNOWN_GOOD_URL` must point to a Chrome for Testing `last-known-good-versions.json` file. `AGENT_BROWSER_CHROME_DOWNLOAD_BASE_URL` must point to a base URL that serves archives under `/{version}/{platform}/{archive}`. For mirror installs, set both together so the manifest version and downloadable archives stay aligned. HTTPS is recommended. HTTP is supported for trusted internal mirrors and prints a warning at install time.
+
 ### Requirements
 
-- **Chrome** - Run `agent-browser install` to download Chrome from [Chrome for Testing](https://developer.chrome.com/blog/chrome-for-testing/) (Google's official automation channel). No Playwright or Node.js required for the daemon.
+- **Chrome** - Run `agent-browser install` to download Chrome from [Chrome for Testing](https://developer.chrome.com/blog/chrome-for-testing/) (Google's official automation channel), or configure a mirror via the environment variables above. No Playwright or Node.js required for the daemon.
 - **Rust** - Only needed when building from source (see From Source above).
 
 ## Quick Start
@@ -318,6 +336,7 @@ agent-browser reload                  # Reload page
 ```bash
 agent-browser install                 # Download Chrome from Chrome for Testing (Google's official automation channel)
 agent-browser install --with-deps     # Also install system deps (Linux)
+AGENT_BROWSER_CHROME_LAST_KNOWN_GOOD_URL=https://mirror.example.com/chrome-for-testing/last-known-good-versions.json AGENT_BROWSER_CHROME_DOWNLOAD_BASE_URL=https://mirror.example.com/chrome-for-testing agent-browser install
 ```
 
 ## Authentication
