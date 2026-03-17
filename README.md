@@ -319,6 +319,8 @@ agent-browser network har start                # Start HAR recording (embeds tex
 agent-browser network har start --content all  # Embed all response bodies (binary as base64)
 agent-browser network har start --content none # Metadata only, no bodies
 agent-browser network har stop [output.har]    # Stop and save HAR (temp path if omitted)
+agent-browser network wait "/api/login" --status 200  # Wait for specific response
+agent-browser network wait "/api/data" --method POST   # Wait for POST response
 ```
 
 ### Tabs & Windows
@@ -392,8 +394,10 @@ agent-browser profiler stop [path]    # Stop and save profile (.json)
 agent-browser console                 # View console messages (log, error, warn, info)
 agent-browser console --json          # JSON output with raw CDP args for programmatic access
 agent-browser console --clear         # Clear console
+agent-browser console --follow        # Stream console logs in real-time (Ctrl+C to stop)
 agent-browser errors                  # View page errors (uncaught JavaScript exceptions)
 agent-browser errors --clear          # Clear errors
+agent-browser errors --follow         # Stream page errors in real-time (Ctrl+C to stop)
 agent-browser highlight <sel>         # Highlight element
 agent-browser inspect                 # Open Chrome DevTools for the active page
 agent-browser state save <path>       # Save auth state
