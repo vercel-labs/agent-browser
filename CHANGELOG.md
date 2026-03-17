@@ -1,5 +1,15 @@
 # agent-browser
 
+## 0.21.0
+
+### Minor Changes
+
+- 7734bb2: Add `batch` command for executing multiple commands from stdin in a single invocation. Accepts a JSON array of string arrays and returns results sequentially. Supports `--bail` to stop on first error and `--json` for structured output.
+
+### Patch Changes
+
+- f8eb38c: Fix daemon detection for PID namespace isolation (e.g. `unshare`). Use socket connectivity as the sole liveness check instead of `kill(pid, 0)`, which fails when the caller cannot see the daemon's PID.
+
 ## 0.20.14
 
 ### Patch Changes
