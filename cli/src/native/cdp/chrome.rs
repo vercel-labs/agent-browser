@@ -346,31 +346,6 @@ fn wait_for_ws_url_until(
     ))
 }
 
-fn wait_for_ws_url(reader: BufReader<std::process::ChildStderr>) -> Result<String, String> {
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
-    let prefix = "DevTools listening on ";
-    let mut stderr_lines: Vec<String> = Vec::new();
-
-    for line in reader.lines() {
-        if std::time::Instant::now() > deadline {
-            return Err(chrome_launch_error(
-                "Timeout waiting for Chrome DevTools URL",
-                &stderr_lines,
-            ));
-        }
-        let line = line.map_err(|e| format!("Failed to read Chrome stderr: {}", e))?;
-        if let Some(url) = line.strip_prefix(prefix) {
-            return Ok(url.trim().to_string());
-        }
-        stderr_lines.push(line);
-    }
-
-    Err(chrome_launch_error(
-        "Chrome exited before providing DevTools URL",
-        &stderr_lines,
-    ))
-}
-
 fn chrome_launch_error(message: &str, stderr_lines: &[String]) -> String {
     let relevant: Vec<&String> = stderr_lines
         .iter()
