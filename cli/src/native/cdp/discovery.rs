@@ -132,7 +132,6 @@ async fn fetch_cdp_list(host: &str, port: u16, timeout: Duration) -> Result<Stri
 async fn discover_cdp_ws(host: &str, port: u16, timeout: Duration) -> Result<String, String> {
     let ws_url = format!("ws://{}:{}/devtools/browser", bracket_ipv6(host), port);
 
-    // Single timeout budget covers connect + send + receive + close.
     tokio::time::timeout(timeout, async {
         let (mut ws_stream, _) = tokio_tungstenite::connect_async(&ws_url)
             .await
