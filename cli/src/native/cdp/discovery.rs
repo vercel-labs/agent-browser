@@ -24,19 +24,26 @@ pub async fn discover_cdp_url_with_timeout(
     timeout: Duration,
 ) -> Result<String, String> {
     // Primary: /json/version (standard path)
-    if let Ok(info) = fetch_cdp_info(host, port, timeout).await {
-        if let Some(ws_url) = info.web_socket_debugger_url {
-            return Ok(rewrite_ws_host(&ws_url, host, port));
+    let version_err = match fetch_cdp_info(host, port, timeout).await {
+        Ok(info) => {
+            if let Some(ws_url) = info.web_socket_debugger_url {
+                return Ok(rewrite_ws_host(&ws_url, host, port));
+            }
+            format!(
+                "No webSocketDebuggerUrl in /json/version at {}:{}",
+                host, port
+            )
         }
-    }
+        Err(e) => e,
+    };
 
     // Fallback: /json/list (returns target list; look for the browser target)
     match fetch_cdp_list(host, port, timeout).await {
         Ok(ws_url) => Ok(rewrite_ws_host(&ws_url, host, port)),
-        Err(list_err) => Err(format!(
-            "CDP discovery failed at {}:{}: /json/version unavailable and /json/list fallback failed: {}",
-            host, port, list_err
-        )),
+        Err(_) => {
+            // Return the original /json/version error since that's the primary path
+            Err(version_err)
+        }
     }
 }
 
@@ -154,9 +161,9 @@ mod tests {
         let (port, server) = spawn_json_server("not-json").await;
 
         let err = discover_cdp_url("127.0.0.1", port).await.unwrap_err();
-        // /json/version returns invalid JSON, so discovery falls through to
-        // /json/list which also fails (server closed after one request)
-        assert!(err.contains("CDP discovery failed"));
+        // /json/version returns invalid JSON; /json/list also fails (server
+        // closed), so the original /json/version error is returned
+        assert!(err.contains("Invalid /json/version response"));
         server.await.unwrap();
     }
 
