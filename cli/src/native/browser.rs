@@ -174,6 +174,11 @@ pub struct BrowserManager {
     pages: Vec<PageInfo>,
     active_page_index: usize,
     default_timeout_ms: u64,
+    /// Whether the browser was launched with extensions.  Extensions only run
+    /// in the default browser context, so callers that create new contexts
+    /// (e.g. recording, window_new) must skip `Target.createBrowserContext`
+    /// when this is `true`.
+    pub has_extensions: bool,
 }
 
 const LIGHTPANDA_CDP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -210,6 +215,11 @@ impl BrowserManager {
         let user_agent = options.user_agent.clone();
         let color_scheme = options.color_scheme.clone();
         let download_path = options.download_path.clone();
+        let has_extensions = options
+            .extensions
+            .as_ref()
+            .map(|e| !e.is_empty())
+            .unwrap_or(false);
 
         let (ws_url, process) = match engine {
             "lightpanda" => {
@@ -242,6 +252,7 @@ impl BrowserManager {
                 pages: Vec::new(),
                 active_page_index: 0,
                 default_timeout_ms: 25_000,
+                has_extensions,
             };
             manager.discover_and_attach_targets().await?;
             manager
@@ -306,6 +317,7 @@ impl BrowserManager {
             pages: Vec::new(),
             active_page_index: 0,
             default_timeout_ms: 10_000,
+            has_extensions: false,
         };
 
         manager.discover_and_attach_targets().await?;
@@ -1218,6 +1230,7 @@ async fn initialize_lightpanda_manager(
             pages: Vec::new(),
             active_page_index: 0,
             default_timeout_ms: 25_000,
+            has_extensions: false,
         };
 
         match discover_and_attach_lightpanda_targets(&mut manager, deadline).await {

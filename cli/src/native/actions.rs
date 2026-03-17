@@ -2886,32 +2886,38 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
                 .unwrap_or_else(|_| "about:blank".to_string())
         };
 
-        // Capture current cookies
-        let cookies_result = mgr
-            .client
-            .send_command_no_params("Network.getAllCookies", Some(&old_session_id))
-            .await
-            .ok();
+        // Extensions only run in the default browser context, so skip creating
+        // an isolated context when extensions are loaded.
+        let (create_target_params, cookies_result) = if mgr.has_extensions {
+            (json!({ "url": "about:blank" }), None)
+        } else {
+            // Capture current cookies for transfer to the new context
+            let cookies = mgr
+                .client
+                .send_command_no_params("Network.getAllCookies", Some(&old_session_id))
+                .await
+                .ok();
 
-        // Create new browser context
-        let ctx_result = mgr
-            .client
-            .send_command_no_params("Target.createBrowserContext", None)
-            .await?;
-        let context_id = ctx_result
-            .get("browserContextId")
-            .and_then(|v| v.as_str())
-            .ok_or("Failed to get browserContextId")?
-            .to_string();
+            // Create new browser context for isolation
+            let ctx_result = mgr
+                .client
+                .send_command_no_params("Target.createBrowserContext", None)
+                .await?;
+            let context_id = ctx_result
+                .get("browserContextId")
+                .and_then(|v| v.as_str())
+                .ok_or("Failed to get browserContextId")?
+                .to_string();
 
-        // Create page in new context
+            (
+                json!({ "url": "about:blank", "browserContextId": context_id }),
+                cookies,
+            )
+        };
+
         let create_result: CreateTargetResult = mgr
             .client
-            .send_command_typed(
-                "Target.createTarget",
-                &json!({ "url": "about:blank", "browserContextId": context_id }),
-                None,
-            )
+            .send_command_typed("Target.createTarget", &create_target_params, None)
             .await?;
 
         let attach_result: AttachToTargetResult = mgr
@@ -2929,7 +2935,7 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
         let new_session_id = attach_result.session_id.clone();
         mgr.enable_domains_pub(&new_session_id).await?;
 
-        // Transfer cookies to new context
+        // Transfer cookies to new context (not needed when using default context)
         if let Some(ref cr) = cookies_result {
             if let Some(cookie_arr) = cr.get("cookies").and_then(|v| v.as_array()) {
                 if !cookie_arr.is_empty() {
@@ -4564,22 +4570,28 @@ async fn handle_waitfordownload(cmd: &Value, state: &DaemonState) -> Result<Valu
 async fn handle_window_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
 
-    // Create a new browser context
-    let context_result = mgr
-        .client
-        .send_command_no_params("Target.createBrowserContext", None)
-        .await?;
-    let context_id = context_result
-        .get("browserContextId")
-        .and_then(|v| v.as_str())
-        .ok_or("Failed to create browser context")?
-        .to_string();
+    // Extensions only run in the default browser context, so skip creating
+    // an isolated context when extensions are loaded.
+    let create_target_params = if mgr.has_extensions {
+        json!({ "url": "about:blank" })
+    } else {
+        let context_result = mgr
+            .client
+            .send_command_no_params("Target.createBrowserContext", None)
+            .await?;
+        let context_id = context_result
+            .get("browserContextId")
+            .and_then(|v| v.as_str())
+            .ok_or("Failed to create browser context")?
+            .to_string();
+        json!({ "url": "about:blank", "browserContextId": context_id })
+    };
 
     let create_result: super::cdp::types::CreateTargetResult = mgr
         .client
         .send_command_typed(
             "Target.createTarget",
-            &json!({ "url": "about:blank", "browserContextId": context_id }),
+            &create_target_params,
             None,
         )
         .await?;
