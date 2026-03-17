@@ -182,6 +182,7 @@ fn should_send_local_launch_config(flags: &Flags) -> bool {
         || flags.color_scheme.is_some()
         || flags.download_path.is_some()
         || flags.engine.is_some()
+        || flags.ignore_default_args.is_some()
         || flags.allowed_domains.is_some()
         || !flags.init_scripts.is_empty()
         || !flags.enable.is_empty()
@@ -1602,6 +1603,10 @@ fn main() {
 
         if let Some(ref engine) = flags.engine {
             launch_cmd["engine"] = json!(engine);
+        }
+
+        if let Some(ref ida) = flags.ignore_default_args {
+            launch_cmd["ignoreDefaultArgs"] = json!(ida);
         }
 
         match send_command(launch_cmd, &flags.session) {
