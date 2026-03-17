@@ -102,6 +102,7 @@ pub struct Config {
     pub no_auto_dialog: Option<bool>,
     pub model: Option<String>,
     pub plugins: Option<Vec<PluginConfig>>,
+    pub ignore_default_args: Option<String>,
 }
 
 impl Config {
@@ -179,6 +180,7 @@ impl Config {
                 }
                 (a, b) => b.or(a),
             },
+            ignore_default_args: other.ignore_default_args.or(self.ignore_default_args),
         }
     }
 }
@@ -278,6 +280,7 @@ fn extract_config_path(args: &[String]) -> Option<Option<String>> {
         "--screenshot-format",
         "--idle-timeout",
         "--model",
+        "--ignore-default-args",
     ];
     let mut i = 0;
     while i < args.len() {
@@ -380,6 +383,7 @@ pub struct Flags {
     pub plugins: Vec<PluginConfig>,
     pub verbose: bool,
     pub quiet: bool,
+    pub ignore_default_args: Option<Vec<String>>,
 
     // Track which launch-time options were explicitly passed via CLI
     // (as opposed to being set only via environment variables)
@@ -603,6 +607,15 @@ pub fn parse_flags(args: &[String]) -> Flags {
         plugins,
         verbose: false,
         quiet: false,
+        ignore_default_args: env::var("AGENT_BROWSER_IGNORE_DEFAULT_ARGS")
+            .ok()
+            .or(config.ignore_default_args)
+            .map(|s| {
+                s.split(',')
+                    .map(|a| a.trim().to_string())
+                    .filter(|a| !a.is_empty())
+                    .collect()
+            }),
         cli_executable_path: false,
         cli_extensions: false,
         cli_init_scripts: false,
@@ -734,6 +747,17 @@ pub fn parse_flags(args: &[String]) -> Flags {
                             e
                         ),
                     }
+                    i += 1;
+                }
+            }
+            "--ignore-default-args" => {
+                if let Some(s) = args.get(i + 1) {
+                    flags.ignore_default_args = Some(
+                        s.split(',')
+                            .map(|a| a.trim().to_string())
+                            .filter(|a| !a.is_empty())
+                            .collect(),
+                    );
                     i += 1;
                 }
             }

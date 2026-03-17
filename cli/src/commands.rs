@@ -3235,6 +3235,7 @@ mod tests {
             plugins: Vec::new(),
             verbose: false,
             quiet: false,
+            ignore_default_args: None,
         }
     }
 

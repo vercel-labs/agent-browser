@@ -3725,6 +3725,12 @@ fn launch_options_from_env() -> LaunchOptions {
         no_xvfb: no_xvfb_from_env(),
         restrict_webrtc: env::var("AGENT_BROWSER_ALLOWED_DOMAINS")
             .is_ok_and(|domains| !domains.trim().is_empty()),
+        ignore_default_args: env::var("AGENT_BROWSER_IGNORE_DEFAULT_ARGS").ok().map(|s| {
+            s.split(',')
+                .map(|a| a.trim().to_string())
+                .filter(|a| !a.is_empty())
+                .collect()
+        }),
     }
 }
 
@@ -4186,6 +4192,14 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         webgpu: webgpu_from_launch_cmd(cmd),
         no_xvfb: no_xvfb_from_launch_cmd(cmd),
         restrict_webrtc,
+        ignore_default_args: cmd
+            .get("ignoreDefaultArgs")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            }),
     };
 
     state.plugin_init_scripts.clear();

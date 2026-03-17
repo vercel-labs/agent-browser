@@ -339,6 +339,7 @@ impl LaunchOptions {
                 .as_ref()
                 .is_some_and(|exts| !exts.is_empty())
     }
+    pub ignore_default_args: Option<Vec<String>>,
 }
 
 impl Default for LaunchOptions {
@@ -365,6 +366,7 @@ impl Default for LaunchOptions {
             webgpu: false,
             no_xvfb: false,
             restrict_webrtc: false,
+            ignore_default_args: None,
         }
     }
 }
@@ -444,6 +446,18 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
     }
 
     let effectively_headless = options.effectively_headless();
+    // Remove any default args the user asked to exclude
+    if let Some(ref excluded) = options.ignore_default_args {
+        args.retain(|arg| {
+            let flag = arg.split('=').next().unwrap_or(arg);
+            !excluded.iter().any(|e| e == flag)
+        });
+    }
+
+    let has_extensions = options
+        .extensions
+        .as_ref()
+        .is_some_and(|exts| !exts.is_empty());
 
     // Extensions require headed mode in native Chrome (content scripts are not
     // injected in headless mode).  Skip --headless when extensions are loaded.
