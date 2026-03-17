@@ -379,6 +379,24 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
             }
             return;
         }
+        // Network wait result
+        if action == Some("network_wait") {
+            if let (Some(method), Some(url), Some(status)) = (
+                data.get("method").and_then(|v| v.as_str()),
+                data.get("url").and_then(|v| v.as_str()),
+                data.get("status").and_then(|v| v.as_i64()),
+            ) {
+                let resource_type = data
+                    .get("resourceType")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Other");
+                println!(
+                    "Matched: {} {} -> {} ({})",
+                    method, url, status, resource_type
+                );
+                return;
+            }
+        }
         // Cleared (cookies or request log)
         if let Some(cleared) = data.get("cleared").and_then(|v| v.as_bool()) {
             if cleared {
@@ -1721,6 +1739,10 @@ Subcommands:
   requests [options]         List captured requests
     --clear                  Clear request log
     --filter <pattern>       Filter by URL pattern
+  wait <url-pattern>         Wait for a response matching URL pattern
+    --status <code>          Match only this HTTP status code
+    --method <method>        Match only this HTTP method (GET, POST, etc.)
+    --timeout <ms>           Timeout in milliseconds (default: 30000)
 
 Global Options:
   --json               Output as JSON
@@ -1733,6 +1755,8 @@ Examples:
   agent-browser network requests
   agent-browser network requests --filter "api"
   agent-browser network requests --clear
+  agent-browser network wait "/api/login" --status 200
+  agent-browser network wait "/api/data" --method POST --timeout 10000
 "##
         }
 
@@ -2086,12 +2110,13 @@ Examples:
             r##"
 agent-browser console - View console logs
 
-Usage: agent-browser console [--clear]
+Usage: agent-browser console [--clear] [--follow]
 
 View browser console output (log, warn, error, info).
 
 Options:
   --clear              Clear console log buffer
+  --follow, -f         Stream console logs in real-time (until Ctrl+C)
 
 Global Options:
   --json               Output as JSON
@@ -2100,18 +2125,21 @@ Global Options:
 Examples:
   agent-browser console
   agent-browser console --clear
+  agent-browser console --follow
+  agent-browser console --follow --json
 "##
         }
         "errors" => {
             r##"
 agent-browser errors - View page errors
 
-Usage: agent-browser errors [--clear]
+Usage: agent-browser errors [--clear] [--follow]
 
 View JavaScript errors and uncaught exceptions.
 
 Options:
   --clear              Clear error buffer
+  --follow, -f         Stream page errors in real-time (until Ctrl+C)
 
 Global Options:
   --json               Output as JSON
@@ -2120,6 +2148,7 @@ Global Options:
 Examples:
   agent-browser errors
   agent-browser errors --clear
+  agent-browser errors --follow
 "##
         }
 
@@ -2484,6 +2513,7 @@ Network:  agent-browser network <action>
   route <url> [--abort|--body <json>]
   unroute [url]
   requests [--clear] [--filter <pattern>]
+  wait <url-pattern> [--status <code>] [--method <method>] [--timeout <ms>]
 
 Storage:
   cookies [get|set|clear]    Manage cookies (set supports --url, --domain, --path, --httpOnly, --secure, --sameSite, --expires)
@@ -2502,8 +2532,8 @@ Debug:
   profiler start|stop [path] Record Chrome DevTools profile
   record start <path> [url]  Start video recording (WebM)
   record stop                Stop and save video
-  console [--clear]          View console logs
-  errors [--clear]           View page errors
+  console [--clear] [-f]     View console logs (--follow to stream)
+  errors [--clear] [-f]      View page errors (--follow to stream)
   highlight <sel>            Highlight element
   inspect                    Open Chrome DevTools for the active page
   clipboard <op> [text]      Read/write clipboard (read, write, copy, paste)
