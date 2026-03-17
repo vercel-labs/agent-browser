@@ -131,6 +131,14 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
                 return;
             }
         }
+        // Response body (network response)
+        if action == Some("responsebody") {
+            if let Some(body) = data.get("body").and_then(|v| v.as_str()) {
+                let origin = data.get("origin").and_then(|v| v.as_str());
+                print_with_boundaries(body, origin, opts);
+                return;
+            }
+        }
         // Inspect response (check before generic URL handler since it also has a "url" field)
         if action == Some("inspect") {
             let opened = data
@@ -1727,6 +1735,8 @@ Subcommands:
   requests [options]         List captured requests
     --clear                  Clear request log
     --filter <pattern>       Filter by URL pattern
+  response <url-pattern>     Wait for and return matching response body
+    --timeout <ms>           Timeout in milliseconds (default: 30000)
   har <start|stop> [path]    Record and export a HAR file
 
 Global Options:
@@ -1740,6 +1750,8 @@ Examples:
   agent-browser network requests
   agent-browser network requests --filter "api"
   agent-browser network requests --clear
+  agent-browser network response "/api/products"
+  agent-browser network response "/api/data" --timeout 10000
   agent-browser network har start
   agent-browser network har stop ./capture.har
 "##
@@ -2525,6 +2537,7 @@ Network:  agent-browser network <action>
   route <url> [--abort|--body <json>]
   unroute [url]
   requests [--clear] [--filter <pattern>]
+  response <url-pattern> [--timeout <ms>]
   har <start|stop> [path]
 
 Storage:
