@@ -2092,7 +2092,7 @@ View browser console output (log, warn, error, info).
 
 Options:
   --clear              Clear console log buffer
-  --follow, -f         Stream console logs in real-time (until Ctrl+C)
+  --follow             Stream console logs in real-time (until Ctrl+C)
 
 Global Options:
   --json               Output as JSON
@@ -2115,7 +2115,7 @@ View JavaScript errors and uncaught exceptions.
 
 Options:
   --clear              Clear error buffer
-  --follow, -f         Stream page errors in real-time (until Ctrl+C)
+  --follow             Stream page errors in real-time (until Ctrl+C)
 
 Global Options:
   --json               Output as JSON
@@ -2507,8 +2507,8 @@ Debug:
   profiler start|stop [path] Record Chrome DevTools profile
   record start <path> [url]  Start video recording (WebM)
   record stop                Stop and save video
-  console [--clear] [-f]     View console logs (--follow to stream)
-  errors [--clear] [-f]      View page errors (--follow to stream)
+  console [--clear] [--follow]  View console logs (--follow to stream)
+  errors [--clear] [--follow]   View page errors (--follow to stream)
   highlight <sel>            Highlight element
   inspect                    Open Chrome DevTools for the active page
   clipboard <op> [text]      Read/write clipboard (read, write, copy, paste)
