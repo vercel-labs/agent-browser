@@ -42,19 +42,31 @@ pub struct PendingConfirmation {
 
 /// Captured request/response metadata used to export HAR 1.2 files.
 pub struct HarEntry {
+    pub request_id: String,
+    /// Seconds since Unix epoch (CDP `wallTime`), with sub-second precision.
+    pub wall_time: f64,
+    // Request fields
     pub method: String,
     pub url: String,
-    pub status: Option<i64>,
-    pub status_text: Option<String>,
-    pub mime_type: Option<String>,
-    pub request_id: String,
-    pub request_headers: Value,
+    pub request_headers: Vec<(String, String)>,
+    pub post_data: Option<String>,
     pub request_body_size: i64,
-    pub response_headers: Value,
-    pub started_date_time: String,
     pub resource_type: String,
-    pub http_version: Option<String>,
-    pub response_body_size: Option<i64>,
+    // Response fields — populated by `Network.responseReceived`
+    pub status: Option<i64>,
+    pub status_text: String,
+    /// Normalised from CDP `response.protocol` (e.g. `"h2"` → `"HTTP/2.0"`).
+    pub http_version: String,
+    pub response_headers: Vec<(String, String)>,
+    pub mime_type: String,
+    pub redirect_url: String,
+    /// Updated by `Network.loadingFinished` for final accuracy.
+    pub response_body_size: i64,
+    /// Raw CDP `ResourceTiming` object from `Network.responseReceived`.
+    pub cdp_timing: Option<Value>,
+    /// Monotonic timestamp (seconds) from `Network.loadingFinished`; used to
+    /// compute the `receive` timing phase.
+    pub loading_finished_timestamp: Option<f64>,
 }
 
 pub struct RouteEntry {
@@ -349,12 +361,20 @@ impl DaemonState {
                                     .unwrap_or("")
                                     .to_string();
                                 if self.har_recording {
-                                    let headers =
-                                        request.get("headers").cloned().unwrap_or(json!({}));
-                                    let request_body_size = request
+                                    let wall_time = event
+                                        .params
+                                        .get("wallTime")
+                                        .and_then(|v| v.as_f64())
+                                        .unwrap_or(0.0);
+                                    let request_headers =
+                                        har_extract_headers(request.get("headers"));
+                                    let post_data = request
                                         .get("postData")
                                         .and_then(|v| v.as_str())
-                                        .map(|body| body.len() as i64)
+                                        .map(String::from);
+                                    let request_body_size = post_data
+                                        .as_ref()
+                                        .map(|s| s.len() as i64)
                                         .unwrap_or(0);
                                     let resource_type = event
                                         .params
@@ -362,23 +382,24 @@ impl DaemonState {
                                         .and_then(|v| v.as_str())
                                         .unwrap_or("Other")
                                         .to_string();
-                                    let started_date_time = har_started_date_time(
-                                        event.params.get("wallTime").and_then(|v| v.as_f64()),
-                                    );
                                     self.har_entries.push(HarEntry {
+                                        request_id,
+                                        wall_time,
                                         method: method.clone(),
                                         url: url.clone(),
-                                        status: None,
-                                        status_text: None,
-                                        mime_type: None,
-                                        request_id,
-                                        request_headers: headers,
+                                        request_headers,
+                                        post_data,
                                         request_body_size,
-                                        response_headers: json!({}),
-                                        started_date_time,
                                         resource_type,
-                                        http_version: None,
-                                        response_body_size: None,
+                                        status: None,
+                                        status_text: String::new(),
+                                        http_version: "HTTP/1.1".to_string(),
+                                        response_headers: Vec::new(),
+                                        mime_type: String::new(),
+                                        redirect_url: String::new(),
+                                        response_body_size: -1,
+                                        cdp_timing: None,
+                                        loading_finished_timestamp: None,
                                     });
                                 }
                                 if self.request_tracking {
@@ -412,23 +433,33 @@ impl DaemonState {
                                     .and_then(|v| v.as_str())
                                     .unwrap_or("");
                                 let status = response.get("status").and_then(|v| v.as_i64());
-                                let mime_type = response
-                                    .get("mimeType")
-                                    .and_then(|v| v.as_str())
-                                    .map(String::from);
                                 let status_text = response
                                     .get("statusText")
                                     .and_then(|v| v.as_str())
-                                    .map(String::from);
-                                let headers = response.get("headers").cloned().unwrap_or(json!({}));
+                                    .unwrap_or("")
+                                    .to_string();
+                                let mime_type = response
+                                    .get("mimeType")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
                                 let http_version = response
                                     .get("protocol")
                                     .and_then(|v| v.as_str())
-                                    .map(String::from);
-                                let response_body_size = response
+                                    .map(har_cdp_protocol_to_http_version)
+                                    .unwrap_or_else(|| "HTTP/1.1".to_string());
+                                let response_headers =
+                                    har_extract_headers(response.get("headers"));
+                                let redirect_url = response_headers
+                                    .iter()
+                                    .find(|(k, _)| k.eq_ignore_ascii_case("location"))
+                                    .map(|(_, v)| v.clone())
+                                    .unwrap_or_default();
+                                let encoded_data_length = response
                                     .get("encodedDataLength")
-                                    .and_then(|v| v.as_f64())
-                                    .map(|size| size.max(0.0) as i64);
+                                    .and_then(|v| v.as_i64())
+                                    .unwrap_or(-1);
+                                let cdp_timing = response.get("timing").cloned();
                                 if let Some(entry) = self
                                     .har_entries
                                     .iter_mut()
@@ -438,11 +469,11 @@ impl DaemonState {
                                     entry.status = status;
                                     entry.status_text = status_text;
                                     entry.mime_type = mime_type;
-                                    entry.response_headers = headers;
                                     entry.http_version = http_version;
-                                    if response_body_size.is_some() {
-                                        entry.response_body_size = response_body_size;
-                                    }
+                                    entry.response_headers = response_headers;
+                                    entry.redirect_url = redirect_url;
+                                    entry.response_body_size = encoded_data_length;
+                                    entry.cdp_timing = cdp_timing;
                                 }
                             }
                         }
@@ -452,19 +483,21 @@ impl DaemonState {
                                 .get("requestId")
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("");
-                            let encoded_data_length = event
-                                .params
-                                .get("encodedDataLength")
-                                .and_then(|v| v.as_f64())
-                                .map(|size| size.max(0.0) as i64);
+                            let timestamp =
+                                event.params.get("timestamp").and_then(|v| v.as_f64());
+                            let encoded_data_length =
+                                event.params.get("encodedDataLength").and_then(|v| v.as_i64());
                             if let Some(entry) = self
                                 .har_entries
                                 .iter_mut()
                                 .rev()
                                 .find(|e| e.request_id == request_id)
                             {
-                                if encoded_data_length.is_some() {
-                                    entry.response_body_size = encoded_data_length;
+                                if let Some(ts) = timestamp {
+                                    entry.loading_finished_timestamp = Some(ts);
+                                }
+                                if let Some(len) = encoded_data_length {
+                                    entry.response_body_size = len;
                                 }
                             }
                         }
@@ -4577,7 +4610,7 @@ async fn handle_har_stop(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
 
     state.har_recording = false;
 
-    let entries: Vec<Value> = state.har_entries.drain(..).map(har_entry_json).collect();
+    let entries: Vec<Value> = state.har_entries.drain(..).map(har_entry_to_json).collect();
     let request_count = entries.len();
     let browser = har_browser_metadata(state).await;
 
@@ -4601,114 +4634,252 @@ async fn handle_har_stop(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     Ok(json!({ "path": path, "requestCount": request_count }))
 }
 
-fn har_entry_json(entry: HarEntry) -> Value {
-    let query_string = har_query_string(&entry.url);
-    let request_headers = har_headers(&entry.request_headers);
-    let response_headers = har_headers(&entry.response_headers);
-    let http_version = entry.http_version.unwrap_or_default();
-    let body_size = entry.response_body_size.unwrap_or(-1);
-    let content_size = entry.response_body_size.unwrap_or(0);
+// ---------------------------------------------------------------------------
+// HAR serialization helpers
+// ---------------------------------------------------------------------------
+
+/// Convert a `HarEntry` (collected from CDP events) into a HAR 1.2 entry object.
+fn har_entry_to_json(e: HarEntry) -> Value {
+    let started_date_time = har_wall_time_to_rfc3339(e.wall_time);
+
+    let request_cookies = e
+        .request_headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("cookie"))
+        .map(|(_, v)| har_parse_request_cookies(v))
+        .unwrap_or_default();
+
+    let query_string = har_parse_query_string(&e.url);
+
+    let req_headers: Vec<Value> = e
+        .request_headers
+        .iter()
+        .map(|(k, v)| json!({ "name": k, "value": v }))
+        .collect();
+
+    let resp_cookies: Vec<Value> = e
+        .response_headers
+        .iter()
+        .filter(|(k, _)| k.eq_ignore_ascii_case("set-cookie"))
+        .map(|(_, v)| {
+            // Split on ';' first to discard attributes (Path, HttpOnly, etc.),
+            // then split on '=' once to separate name from value.
+            let name_value = v.split(';').next().unwrap_or("");
+            let (name, value) = name_value.split_once('=').unwrap_or((name_value, ""));
+            json!({ "name": name.trim(), "value": value.trim() })
+        })
+        .collect();
+
+    let resp_headers: Vec<Value> = e
+        .response_headers
+        .iter()
+        .map(|(k, v)| json!({ "name": k, "value": v }))
+        .collect();
+
+    let (timings, total_time) =
+        har_compute_timings(e.cdp_timing.as_ref(), e.loading_finished_timestamp);
+
+    let mime_type = if e.mime_type.is_empty() {
+        "application/octet-stream".to_string()
+    } else {
+        e.mime_type
+    };
+
+    let post_content_type = e
+        .request_headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+        .map(|(_, v)| v.as_str())
+        .unwrap_or("text/plain")
+        .to_string();
+
+    let mut request = json!({
+        "method": e.method,
+        "url": e.url,
+        "httpVersion": e.http_version,
+        "cookies": request_cookies,
+        "headers": req_headers,
+        "queryString": query_string,
+        "headersSize": -1,
+        "bodySize": e.request_body_size,
+    });
+    if let Some(body) = e.post_data {
+        request["postData"] = json!({ "mimeType": post_content_type, "text": body });
+    }
 
     json!({
-        "startedDateTime": entry.started_date_time,
-        "time": 0,
-        "request": {
-            "method": entry.method,
-            "url": entry.url,
-            "httpVersion": http_version.clone(),
-            "cookies": [],
-            "headers": request_headers,
-            "queryString": query_string,
-            "headersSize": -1,
-            "bodySize": entry.request_body_size,
-        },
+        "startedDateTime": started_date_time,
+        "time": total_time,
+        "request": request,
         "response": {
-            "status": entry.status.unwrap_or(0),
-            "statusText": entry.status_text.unwrap_or_default(),
-            "httpVersion": http_version,
-            "cookies": [],
-            "headers": response_headers,
+            "status": e.status.unwrap_or(0),
+            "statusText": e.status_text,
+            "httpVersion": e.http_version,
+            "cookies": resp_cookies,
+            "headers": resp_headers,
             "content": {
-                "size": content_size,
-                "mimeType": entry.mime_type.unwrap_or_default(),
+                "size": e.response_body_size,
+                "mimeType": mime_type,
             },
-            "redirectURL": har_redirect_url(&entry.response_headers),
+            "redirectURL": e.redirect_url,
             "headersSize": -1,
-            "bodySize": body_size,
+            "bodySize": e.response_body_size,
         },
         "cache": {},
-        "timings": {
-            "blocked": -1,
-            "dns": -1,
-            "connect": -1,
-            "send": -1,
-            "wait": -1,
-            "receive": -1,
-            "ssl": -1,
-        },
-        "_resourceType": entry.resource_type,
+        "timings": timings,
+        "_resourceType": e.resource_type,
     })
 }
 
-/// Convert the raw CDP header object into HAR header items.
-fn har_headers(headers: &Value) -> Vec<Value> {
-    let Some(obj) = headers.as_object() else {
-        return Vec::new();
-    };
-
-    let mut entries: Vec<(&String, &Value)> = obj.iter().collect();
-    entries.sort_by(|(a, _), (b, _)| a.cmp(b));
-    entries
-        .into_iter()
-        .map(|(name, value)| {
-            json!({
-                "name": name,
-                "value": har_header_value(value),
-            })
+/// Convert a CDP headers object (`{ "Name": "value", ... }`) into a flat
+/// `Vec<(name, value)>` preserving insertion order.
+fn har_extract_headers(headers_val: Option<&Value>) -> Vec<(String, String)> {
+    headers_val
+        .and_then(|v| v.as_object())
+        .map(|obj| {
+            obj.iter()
+                .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
+                .collect()
         })
-        .collect()
+        .unwrap_or_default()
 }
 
-fn har_header_value(value: &Value) -> String {
-    match value {
-        Value::Null => String::new(),
-        Value::String(s) => s.clone(),
-        Value::Number(n) => n.to_string(),
-        Value::Bool(b) => b.to_string(),
-        Value::Array(values) => values
-            .iter()
-            .map(har_header_value)
-            .collect::<Vec<_>>()
-            .join(", "),
-        Value::Object(_) => value.to_string(),
+/// Map a CDP `response.protocol` value to an HTTP-version string as required
+/// by the HAR spec (e.g. `"h2"` → `"HTTP/2.0"`).
+fn har_cdp_protocol_to_http_version(protocol: &str) -> String {
+    match protocol.to_ascii_lowercase().as_str() {
+        "h2" => "HTTP/2.0".to_string(),
+        "h3" => "HTTP/3.0".to_string(),
+        "http/1.0" => "HTTP/1.0".to_string(),
+        _ => "HTTP/1.1".to_string(),
     }
 }
 
-fn har_query_string(raw_url: &str) -> Vec<Value> {
-    let Ok(url) = url::Url::parse(raw_url) else {
-        return Vec::new();
-    };
+/// Parse query-string parameters from a URL into a HAR `queryString` array.
+fn har_parse_query_string(url_str: &str) -> Vec<Value> {
+    url::Url::parse(url_str)
+        .map(|u| {
+            u.query_pairs()
+                .map(|(k, v)| json!({ "name": k.as_ref(), "value": v.as_ref() }))
+                .collect()
+        })
+        .unwrap_or_default()
+}
 
-    url.query_pairs()
-        .map(|(name, value)| {
-            json!({
-                "name": name.into_owned(),
-                "value": value.into_owned(),
-            })
+/// Parse a `Cookie: name1=val1; name2=val2` header value into HAR cookie objects.
+fn har_parse_request_cookies(cookie_header: &str) -> Vec<Value> {
+    cookie_header
+        .split(';')
+        .filter_map(|pair| {
+            let pair = pair.trim();
+            if pair.is_empty() {
+                return None;
+            }
+            let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
+            Some(json!({ "name": name.trim(), "value": value.trim() }))
         })
         .collect()
 }
 
-fn har_redirect_url(headers: &Value) -> String {
-    har_header_lookup(headers, "location").unwrap_or_default()
+/// Compute HAR `timings` and total `time` (ms) from a CDP `ResourceTiming`
+/// object and the optional `Network.loadingFinished` monotonic timestamp.
+///
+/// CDP timing values are milliseconds relative to `requestTime` (seconds since
+/// browser start). A value of `-1` means the phase did not occur.
+fn har_compute_timings(
+    cdp_timing: Option<&Value>,
+    loading_finished_ts: Option<f64>,
+) -> (Value, f64) {
+    let Some(t) = cdp_timing else {
+        return (json!({ "send": 0, "wait": 0, "receive": 0 }), 0.0);
+    };
+
+    let get = |key: &str| t.get(key).and_then(|v| v.as_f64()).unwrap_or(-1.0);
+
+    let request_time = get("requestTime");
+    let dns_start = get("dnsStart");
+    let dns_end = get("dnsEnd");
+    let connect_start = get("connectStart");
+    let connect_end = get("connectEnd");
+    let ssl_start = get("sslStart");
+    let ssl_end = get("sslEnd");
+    let send_start = get("sendStart");
+    let send_end = get("sendEnd");
+    let recv_headers_start = get("receiveHeadersStart");
+    let recv_headers_end = get("receiveHeadersEnd");
+
+    let dns = if dns_start >= 0.0 && dns_end >= 0.0 { dns_end - dns_start } else { -1.0 };
+    let connect =
+        if connect_start >= 0.0 && connect_end >= 0.0 { connect_end - connect_start } else { -1.0 };
+    let ssl = if ssl_start >= 0.0 && ssl_end >= 0.0 { ssl_end - ssl_start } else { -1.0 };
+    let send = (send_end - send_start).max(0.0);
+
+    // wait: end of sending → first byte of response headers.
+    let wait_end = if recv_headers_start >= 0.0 { recv_headers_start } else { recv_headers_end };
+    let wait = if send_end >= 0.0 && wait_end >= send_end { wait_end - send_end } else { 0.0 };
+
+    // receive: first response byte → loading complete.
+    // requestTime (seconds) + recv_headers_end (ms) / 1000 = absolute headers-end timestamp.
+    let receive = loading_finished_ts
+        .filter(|_| request_time >= 0.0 && recv_headers_end >= 0.0)
+        .map(|lf_ts| {
+            let recv_start_abs = request_time + recv_headers_end / 1000.0;
+            ((lf_ts - recv_start_abs) * 1000.0).max(0.0)
+        })
+        .unwrap_or(0.0);
+
+    let blocked = if dns_start > 0.0 {
+        dns_start
+    } else if connect_start > 0.0 {
+        connect_start
+    } else if send_start > 0.0 {
+        send_start
+    } else {
+        -1.0
+    };
+
+    let total: f64 = [
+        if blocked > 0.0 { blocked } else { 0.0 },
+        if dns >= 0.0 { dns } else { 0.0 },
+        if connect >= 0.0 { connect } else { 0.0 },
+        send,
+        wait,
+        receive,
+    ]
+    .iter()
+    .sum();
+
+    let mut timings = json!({ "send": send, "wait": wait, "receive": receive });
+    if blocked > 0.0 {
+        timings["blocked"] = json!(blocked);
+    }
+    if dns >= 0.0 {
+        timings["dns"] = json!(dns);
+    }
+    if connect >= 0.0 {
+        timings["connect"] = json!(connect);
+    }
+    if ssl >= 0.0 {
+        timings["ssl"] = json!(ssl);
+    }
+
+    (timings, total)
 }
 
-fn har_header_lookup(headers: &Value, expected_name: &str) -> Option<String> {
-    headers.as_object().and_then(|obj| {
-        obj.iter()
-            .find(|(name, _)| name.eq_ignore_ascii_case(expected_name))
-            .map(|(_, value)| har_header_value(value))
-    })
+/// Format a Unix epoch timestamp (seconds, fractional) as RFC 3339 using the
+/// `time` crate, e.g. `"2024-03-17T10:30:00.456Z"`.
+fn har_wall_time_to_rfc3339(wall_time: f64) -> String {
+    if wall_time > 0.0 {
+        let nanos = (wall_time * 1_000_000_000.0).round() as i128;
+        if let Ok(dt) = OffsetDateTime::from_unix_timestamp_nanos(nanos) {
+            if let Ok(s) = dt.format(&Rfc3339) {
+                return s;
+            }
+        }
+    }
+    OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
 }
 
 fn har_output_path(explicit_path: Option<&str>) -> String {
@@ -4739,22 +4910,8 @@ fn unix_timestamp_millis() -> u128 {
         .as_millis()
 }
 
-fn har_started_date_time(wall_time: Option<f64>) -> String {
-    wall_time
-        .and_then(offset_date_time_from_epoch_seconds)
-        .unwrap_or_else(OffsetDateTime::now_utc)
-        .format(&Rfc3339)
-        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
-}
 
-fn offset_date_time_from_epoch_seconds(seconds: f64) -> Option<OffsetDateTime> {
-    if !seconds.is_finite() || seconds < 0.0 {
-        return None;
-    }
 
-    let nanos = (seconds * 1_000_000_000.0).round() as i128;
-    OffsetDateTime::from_unix_timestamp_nanos(nanos).ok()
-}
 
 async fn har_browser_metadata(state: &DaemonState) -> Option<Value> {
     let mgr = state.browser.as_ref()?;
@@ -5714,47 +5871,147 @@ mod tests {
     }
 
     #[test]
-    fn test_har_entry_json_enriches_request_and_response() {
+    fn test_har_entry_to_json_enriches_request_and_response() {
+        // wall_time: 2026-03-15T12:00:00Z = 1_773_576_000
         let entry = HarEntry {
+            request_id: "req-1".to_string(),
+            wall_time: 1773576000.0,
             method: "POST".to_string(),
             url: "https://example.com/api?foo=bar&baz=qux".to_string(),
-            status: Some(201),
-            status_text: Some("Created".to_string()),
-            mime_type: Some("application/json".to_string()),
-            request_id: "req-1".to_string(),
-            request_headers: json!({
-                "Accept": "application/json",
-                "X-Trace": ["a", "b"],
-            }),
-            request_body_size: 17,
-            response_headers: json!({
-                "Content-Type": "application/json",
-                "Location": "https://example.com/api/1",
-            }),
-            started_date_time: "2026-03-15T12:00:00Z".to_string(),
+            request_headers: vec![
+                ("Accept".to_string(), "application/json".to_string()),
+                ("Content-Type".to_string(), "application/json".to_string()),
+                ("Cookie".to_string(), "session=abc; theme=dark".to_string()),
+            ],
+            post_data: Some(r#"{"x":1}"#.to_string()),
+            request_body_size: 7,
             resource_type: "XHR".to_string(),
-            http_version: Some("h2".to_string()),
-            response_body_size: Some(42),
+            status: Some(201),
+            status_text: "Created".to_string(),
+            http_version: "HTTP/2.0".to_string(),
+            response_headers: vec![
+                ("content-type".to_string(), "application/json".to_string()),
+                ("location".to_string(), "https://example.com/api/1".to_string()),
+                ("set-cookie".to_string(), "token=xyz; Path=/; HttpOnly".to_string()),
+            ],
+            mime_type: "application/json".to_string(),
+            redirect_url: "https://example.com/api/1".to_string(),
+            response_body_size: 42,
+            cdp_timing: None,
+            loading_finished_timestamp: None,
         };
 
-        let har = har_entry_json(entry);
+        let har = har_entry_to_json(entry);
         assert_eq!(har["startedDateTime"], "2026-03-15T12:00:00Z");
         assert_eq!(har["request"]["method"], "POST");
-        assert_eq!(har["request"]["httpVersion"], "h2");
+        assert_eq!(har["request"]["httpVersion"], "HTTP/2.0");
         assert_eq!(har["request"]["queryString"][0]["name"], "foo");
         assert_eq!(har["request"]["queryString"][0]["value"], "bar");
-        assert_eq!(har["request"]["bodySize"], 17);
+        assert_eq!(har["request"]["bodySize"], 7);
+        assert_eq!(har["request"]["postData"]["mimeType"], "application/json");
+        assert_eq!(har["request"]["postData"]["text"], r#"{"x":1}"#);
+        assert_eq!(har["request"]["cookies"][0]["name"], "session");
+        assert_eq!(har["request"]["cookies"][0]["value"], "abc");
+        assert_eq!(har["request"]["cookies"][1]["name"], "theme");
+        assert_eq!(har["request"]["cookies"][1]["value"], "dark");
         assert_eq!(har["response"]["status"], 201);
         assert_eq!(har["response"]["statusText"], "Created");
         assert_eq!(har["response"]["content"]["mimeType"], "application/json");
         assert_eq!(har["response"]["content"]["size"], 42);
         assert_eq!(har["response"]["redirectURL"], "https://example.com/api/1");
+        assert_eq!(har["response"]["cookies"][0]["name"], "token");
+        assert_eq!(har["response"]["cookies"][0]["value"], "xyz");
         assert_eq!(har["_resourceType"], "XHR");
     }
 
     #[test]
-    fn test_har_started_date_time_uses_rfc3339() {
-        assert_eq!(har_started_date_time(Some(0.0)), "1970-01-01T00:00:00Z");
+    fn test_har_wall_time_to_rfc3339_epoch() {
+        // Known timestamp: 2026-03-15T12:00:00Z = 1_773_576_000
+        let result = har_wall_time_to_rfc3339(1773576000.0);
+        assert!(result.starts_with("2026-03-15T12:00:00"));
+    }
+
+    #[test]
+    fn test_har_wall_time_to_rfc3339_fractional_seconds() {
+        let result = har_wall_time_to_rfc3339(1773576000.456);
+        assert!(result.contains(".456") || result.contains("456"));
+    }
+
+    #[test]
+    fn test_har_cdp_protocol_to_http_version() {
+        assert_eq!(har_cdp_protocol_to_http_version("h2"), "HTTP/2.0");
+        assert_eq!(har_cdp_protocol_to_http_version("h3"), "HTTP/3.0");
+        assert_eq!(har_cdp_protocol_to_http_version("http/1.0"), "HTTP/1.0");
+        assert_eq!(har_cdp_protocol_to_http_version("http/1.1"), "HTTP/1.1");
+        assert_eq!(har_cdp_protocol_to_http_version("unknown"), "HTTP/1.1");
+    }
+
+    #[test]
+    fn test_har_parse_request_cookies() {
+        let cookies = har_parse_request_cookies("session=abc; theme=dark; empty=");
+        assert_eq!(cookies.len(), 3);
+        assert_eq!(cookies[0]["name"], "session");
+        assert_eq!(cookies[0]["value"], "abc");
+        assert_eq!(cookies[1]["name"], "theme");
+        assert_eq!(cookies[1]["value"], "dark");
+        assert_eq!(cookies[2]["name"], "empty");
+        assert_eq!(cookies[2]["value"], "");
+    }
+
+    #[test]
+    fn test_har_set_cookie_strips_attributes_before_equal_split() {
+        let entry = HarEntry {
+            request_id: "r".to_string(),
+            wall_time: 1773576000.0,
+            method: "GET".to_string(),
+            url: "https://example.com/".to_string(),
+            request_headers: vec![],
+            post_data: None,
+            request_body_size: 0,
+            resource_type: "Document".to_string(),
+            status: Some(200),
+            status_text: "OK".to_string(),
+            http_version: "HTTP/1.1".to_string(),
+            response_headers: vec![(
+                "set-cookie".to_string(),
+                "token=abc; Path=/; HttpOnly".to_string(),
+            )],
+            mime_type: "text/html".to_string(),
+            redirect_url: String::new(),
+            response_body_size: 0,
+            cdp_timing: None,
+            loading_finished_timestamp: None,
+        };
+        let har = har_entry_to_json(entry);
+        assert_eq!(har["response"]["cookies"][0]["name"], "token");
+        assert_eq!(har["response"]["cookies"][0]["value"], "abc");
+    }
+
+    #[test]
+    fn test_har_compute_timings_no_cdp_timing() {
+        let (timings, total) = har_compute_timings(None, None);
+        assert_eq!(timings["send"], 0);
+        assert_eq!(timings["wait"], 0);
+        assert_eq!(timings["receive"], 0);
+        assert_eq!(total, 0.0);
+    }
+
+    #[test]
+    fn test_har_compute_timings_with_cdp_timing() {
+        let cdp = json!({
+            "requestTime": 1000.0,
+            "dnsStart": 0.0, "dnsEnd": 5.0,
+            "connectStart": 5.0, "connectEnd": 15.0,
+            "sslStart": 8.0, "sslEnd": 15.0,
+            "sendStart": 15.0, "sendEnd": 16.0,
+            "receiveHeadersStart": 16.0, "receiveHeadersEnd": 50.0,
+        });
+        let (timings, total) = har_compute_timings(Some(&cdp), Some(1000.1));
+        assert_eq!(timings["dns"], 5.0);
+        assert_eq!(timings["connect"], 10.0);
+        assert_eq!(timings["ssl"], 7.0);
+        assert_eq!(timings["send"], 1.0);
+        assert!(total > 0.0);
     }
 
     #[tokio::test]
@@ -5762,19 +6019,23 @@ mod tests {
         let mut state = DaemonState::new();
         state.har_recording = true;
         state.har_entries.push(HarEntry {
+            request_id: "req-2".to_string(),
+            wall_time: 1773576000.0,
             method: "GET".to_string(),
             url: "https://example.com/".to_string(),
-            status: Some(200),
-            status_text: Some("OK".to_string()),
-            mime_type: Some("text/html".to_string()),
-            request_id: "req-2".to_string(),
-            request_headers: json!({ "Accept": "text/html" }),
+            request_headers: vec![("Accept".to_string(), "text/html".to_string())],
+            post_data: None,
             request_body_size: 0,
-            response_headers: json!({ "Content-Type": "text/html" }),
-            started_date_time: "2026-03-15T12:00:00Z".to_string(),
             resource_type: "Document".to_string(),
-            http_version: Some("h2".to_string()),
-            response_body_size: Some(128),
+            status: Some(200),
+            status_text: "OK".to_string(),
+            http_version: "HTTP/2.0".to_string(),
+            response_headers: vec![("content-type".to_string(), "text/html".to_string())],
+            mime_type: "text/html".to_string(),
+            redirect_url: String::new(),
+            response_body_size: 128,
+            cdp_timing: None,
+            loading_finished_timestamp: None,
         });
 
         let result = handle_har_stop(&json!({ "action": "har_stop" }), &mut state)
@@ -5805,19 +6066,23 @@ mod tests {
         ));
         let mut state = DaemonState::new();
         state.har_entries.push(HarEntry {
+            request_id: "req-3".to_string(),
+            wall_time: 1773576000.0,
             method: "GET".to_string(),
             url: "https://example.com/".to_string(),
-            status: Some(200),
-            status_text: Some("OK".to_string()),
-            mime_type: Some("text/html".to_string()),
-            request_id: "req-3".to_string(),
-            request_headers: json!({}),
+            request_headers: vec![],
+            post_data: None,
             request_body_size: 0,
-            response_headers: json!({}),
-            started_date_time: "2026-03-15T12:00:00Z".to_string(),
             resource_type: "Document".to_string(),
-            http_version: Some("h2".to_string()),
-            response_body_size: Some(64),
+            status: Some(200),
+            status_text: "OK".to_string(),
+            http_version: "HTTP/1.1".to_string(),
+            response_headers: vec![],
+            mime_type: "text/html".to_string(),
+            redirect_url: String::new(),
+            response_body_size: 64,
+            cdp_timing: None,
+            loading_finished_timestamp: None,
         });
 
         let result = execute_command(
