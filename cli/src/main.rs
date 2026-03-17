@@ -282,6 +282,11 @@ fn main() {
         }
     }
 
+    // Inject --tab index into command JSON if specified
+    if let Some(tab_idx) = flags.tab_index {
+        cmd["tabIndex"] = json!(tab_idx);
+    }
+
     // Validate session name before starting daemon
     if let Some(ref name) = flags.session_name {
         if !validation::is_valid_session_name(name) {

@@ -704,6 +704,21 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         );
     }
 
+    // If --tab N was specified, temporarily override the active page index
+    let tab_override = cmd
+        .get("tabIndex")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize);
+    let prev_page_index = tab_override.and_then(|idx| {
+        state.browser.as_mut().map(|mgr| {
+            let prev = mgr.active_page();
+            if let Err(e) = mgr.set_active_page(idx) {
+                eprintln!("Warning: --tab override failed: {}", e);
+            }
+            prev
+        })
+    });
+
     let result = match action {
         "launch" => handle_launch(cmd, state).await,
         "navigate" => handle_navigate(cmd, state).await,
@@ -858,6 +873,13 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         "mouseup" => handle_mouseup(cmd, state).await,
         _ => Err(format!("Not yet implemented: {}", action)),
     };
+
+    // Restore original active page index after --tab override
+    if let Some(prev) = prev_page_index {
+        if let Some(ref mut mgr) = state.browser {
+            let _ = mgr.set_active_page(prev);
+        }
+    }
 
     match result {
         Ok(data) => success_response(&id, data),

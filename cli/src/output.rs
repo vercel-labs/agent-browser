@@ -2621,6 +2621,7 @@ Options:
   --action-policy <path>     Action policy JSON file (or AGENT_BROWSER_ACTION_POLICY)
   --confirm-actions <list>   Categories requiring confirmation (or AGENT_BROWSER_CONFIRM_ACTIONS)
   --confirm-interactive      Interactive confirmation prompts; auto-denies if stdin is not a TTY (or AGENT_BROWSER_CONFIRM_INTERACTIVE)
+  --tab <index>              Run command against a specific tab without switching
   --engine <name>            Browser engine: chrome (default), lightpanda (or AGENT_BROWSER_ENGINE)
   --config <path>            Use a custom config file (or AGENT_BROWSER_CONFIG env)
   --debug                    Debug output
