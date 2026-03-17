@@ -372,10 +372,8 @@ impl DaemonState {
                                         .get("postData")
                                         .and_then(|v| v.as_str())
                                         .map(String::from);
-                                    let request_body_size = post_data
-                                        .as_ref()
-                                        .map(|s| s.len() as i64)
-                                        .unwrap_or(0);
+                                    let request_body_size =
+                                        post_data.as_ref().map(|s| s.len() as i64).unwrap_or(0);
                                     let resource_type = event
                                         .params
                                         .get("type")
@@ -448,8 +446,7 @@ impl DaemonState {
                                     .and_then(|v| v.as_str())
                                     .map(har_cdp_protocol_to_http_version)
                                     .unwrap_or_else(|| "HTTP/1.1".to_string());
-                                let response_headers =
-                                    har_extract_headers(response.get("headers"));
+                                let response_headers = har_extract_headers(response.get("headers"));
                                 let redirect_url = response_headers
                                     .iter()
                                     .find(|(k, _)| k.eq_ignore_ascii_case("location"))
@@ -483,10 +480,11 @@ impl DaemonState {
                                 .get("requestId")
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("");
-                            let timestamp =
-                                event.params.get("timestamp").and_then(|v| v.as_f64());
-                            let encoded_data_length =
-                                event.params.get("encodedDataLength").and_then(|v| v.as_i64());
+                            let timestamp = event.params.get("timestamp").and_then(|v| v.as_f64());
+                            let encoded_data_length = event
+                                .params
+                                .get("encodedDataLength")
+                                .and_then(|v| v.as_i64());
                             if let Some(entry) = self
                                 .har_entries
                                 .iter_mut()
@@ -4808,15 +4806,34 @@ fn har_compute_timings(
     let recv_headers_start = get("receiveHeadersStart");
     let recv_headers_end = get("receiveHeadersEnd");
 
-    let dns = if dns_start >= 0.0 && dns_end >= 0.0 { dns_end - dns_start } else { -1.0 };
-    let connect =
-        if connect_start >= 0.0 && connect_end >= 0.0 { connect_end - connect_start } else { -1.0 };
-    let ssl = if ssl_start >= 0.0 && ssl_end >= 0.0 { ssl_end - ssl_start } else { -1.0 };
+    let dns = if dns_start >= 0.0 && dns_end >= 0.0 {
+        dns_end - dns_start
+    } else {
+        -1.0
+    };
+    let connect = if connect_start >= 0.0 && connect_end >= 0.0 {
+        connect_end - connect_start
+    } else {
+        -1.0
+    };
+    let ssl = if ssl_start >= 0.0 && ssl_end >= 0.0 {
+        ssl_end - ssl_start
+    } else {
+        -1.0
+    };
     let send = (send_end - send_start).max(0.0);
 
     // wait: end of sending → first byte of response headers.
-    let wait_end = if recv_headers_start >= 0.0 { recv_headers_start } else { recv_headers_end };
-    let wait = if send_end >= 0.0 && wait_end >= send_end { wait_end - send_end } else { 0.0 };
+    let wait_end = if recv_headers_start >= 0.0 {
+        recv_headers_start
+    } else {
+        recv_headers_end
+    };
+    let wait = if send_end >= 0.0 && wait_end >= send_end {
+        wait_end - send_end
+    } else {
+        0.0
+    };
 
     // receive: first response byte → loading complete.
     // requestTime (seconds) + recv_headers_end (ms) / 1000 = absolute headers-end timestamp.
@@ -4909,9 +4926,6 @@ fn unix_timestamp_millis() -> u128 {
         .unwrap_or_default()
         .as_millis()
 }
-
-
-
 
 async fn har_browser_metadata(state: &DaemonState) -> Option<Value> {
     let mgr = state.browser.as_ref()?;
@@ -5891,8 +5905,14 @@ mod tests {
             http_version: "HTTP/2.0".to_string(),
             response_headers: vec![
                 ("content-type".to_string(), "application/json".to_string()),
-                ("location".to_string(), "https://example.com/api/1".to_string()),
-                ("set-cookie".to_string(), "token=xyz; Path=/; HttpOnly".to_string()),
+                (
+                    "location".to_string(),
+                    "https://example.com/api/1".to_string(),
+                ),
+                (
+                    "set-cookie".to_string(),
+                    "token=xyz; Path=/; HttpOnly".to_string(),
+                ),
             ],
             mime_type: "application/json".to_string(),
             redirect_url: "https://example.com/api/1".to_string(),
