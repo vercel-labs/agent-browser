@@ -1501,6 +1501,58 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // has_extensions field tests
+    // -----------------------------------------------------------------------
+
+    /// Extensions present → has_extensions must be true so that recording and
+    /// window_new skip creating isolated (incognito-like) browser contexts
+    /// where extensions are not injected.
+    #[test]
+    fn test_has_extensions_true_when_extensions_present() {
+        let opts = LaunchOptions {
+            extensions: Some(vec!["/tmp/my-ext".to_string()]),
+            ..Default::default()
+        };
+        let has = opts
+            .extensions
+            .as_ref()
+            .map(|e| !e.is_empty())
+            .unwrap_or(false);
+        assert!(
+            has,
+            "has_extensions should be true when extensions are provided"
+        );
+    }
+
+    #[test]
+    fn test_has_extensions_false_when_no_extensions() {
+        let opts = LaunchOptions::default();
+        let has = opts
+            .extensions
+            .as_ref()
+            .map(|e| !e.is_empty())
+            .unwrap_or(false);
+        assert!(!has, "has_extensions should be false when no extensions");
+    }
+
+    #[test]
+    fn test_has_extensions_false_when_empty_vec() {
+        let opts = LaunchOptions {
+            extensions: Some(vec![]),
+            ..Default::default()
+        };
+        let has = opts
+            .extensions
+            .as_ref()
+            .map(|e| !e.is_empty())
+            .unwrap_or(false);
+        assert!(
+            !has,
+            "has_extensions should be false for empty extensions vec"
+        );
+    }
+
+    // -----------------------------------------------------------------------
     // poll_network_idle tests
     // -----------------------------------------------------------------------
 

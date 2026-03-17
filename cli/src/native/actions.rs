@@ -4589,11 +4589,7 @@ async fn handle_window_new(cmd: &Value, state: &mut DaemonState) -> Result<Value
 
     let create_result: super::cdp::types::CreateTargetResult = mgr
         .client
-        .send_command_typed(
-            "Target.createTarget",
-            &create_target_params,
-            None,
-        )
+        .send_command_typed("Target.createTarget", &create_target_params, None)
         .await?;
 
     let attach: super::cdp::types::AttachToTargetResult = mgr
