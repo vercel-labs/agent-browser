@@ -785,6 +785,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--screenshot-quality",
         "--screenshot-format",
         "--idle-timeout",
+        "--ignore-default-args",
     ];
 
     let mut i = 0;
@@ -1432,5 +1433,54 @@ mod tests {
         };
         let merged = user.merge(project);
         assert_eq!(merged.extensions, Some(vec!["/ext2".to_string()]));
+    }
+
+    // === --ignore-default-args tests ===
+
+    #[test]
+    fn test_parse_ignore_default_args_flag() {
+        let flags = parse_flags(&args(
+            "--ignore-default-args --disable-gpu,--no-sandbox open example.com",
+        ));
+        assert_eq!(
+            flags.ignore_default_args,
+            Some(vec![
+                "--disable-gpu".to_string(),
+                "--no-sandbox".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn test_parse_ignore_default_args_single_value() {
+        let flags = parse_flags(&args(
+            "--ignore-default-args --disable-gpu open example.com",
+        ));
+        assert_eq!(
+            flags.ignore_default_args,
+            Some(vec!["--disable-gpu".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_parse_ignore_default_args_not_set() {
+        let flags = parse_flags(&args("open example.com"));
+        assert!(flags.ignore_default_args.is_none());
+    }
+
+    #[test]
+    fn test_clean_args_removes_ignore_default_args() {
+        let cleaned = clean_args(&args(
+            "--ignore-default-args --disable-gpu,--no-sandbox open example.com",
+        ));
+        assert_eq!(cleaned, vec!["open", "example.com"]);
+    }
+
+    #[test]
+    fn test_clean_args_removes_ignore_default_args_with_other_flags() {
+        let cleaned = clean_args(&args(
+            "--json --ignore-default-args --disable-gpu --headed open example.com",
+        ));
+        assert_eq!(cleaned, vec!["open", "example.com"]);
     }
 }

@@ -615,6 +615,7 @@ fn main() {
         || flags.color_scheme.is_some()
         || flags.download_path.is_some()
         || flags.engine.is_some()
+        || flags.ignore_default_args.is_some()
         || !flags.extensions.is_empty())
         && flags.cdp.is_none()
         && flags.provider.is_none()
@@ -696,6 +697,10 @@ fn main() {
 
         if let Some(ref engine) = flags.engine {
             launch_cmd["engine"] = json!(engine);
+        }
+
+        if let Some(ref ida) = flags.ignore_default_args {
+            launch_cmd["ignoreDefaultArgs"] = json!(ida);
         }
 
         match send_command(launch_cmd, &flags.session) {
