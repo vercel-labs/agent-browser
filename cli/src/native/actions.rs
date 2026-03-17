@@ -709,15 +709,20 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         .get("tabIndex")
         .and_then(|v| v.as_u64())
         .map(|v| v as usize);
-    let prev_page_index = tab_override.and_then(|idx| {
-        state.browser.as_mut().map(|mgr| {
-            let prev = mgr.active_page();
-            if let Err(e) = mgr.set_active_page(idx) {
-                eprintln!("Warning: --tab override failed: {}", e);
+    let prev_page_index = if let Some(idx) = tab_override {
+        match state.browser.as_mut() {
+            Some(mgr) => {
+                let prev = mgr.active_page();
+                if let Err(e) = mgr.set_active_page(idx) {
+                    return error_response(&id, &format!("--tab override failed: {}", e));
+                }
+                Some(prev)
             }
-            prev
-        })
-    });
+            None => None,
+        }
+    } else {
+        None
+    };
 
     let result = match action {
         "launch" => handle_launch(cmd, state).await,
@@ -874,10 +879,16 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         _ => Err(format!("Not yet implemented: {}", action)),
     };
 
-    // Restore original active page index after --tab override
-    if let Some(prev) = prev_page_index {
-        if let Some(ref mut mgr) = state.browser {
-            let _ = mgr.set_active_page(prev);
+    // Restore original active page index after --tab override.
+    // Skip restore for tab-mutating commands: after tab_close the saved
+    // index may be out of range (or point to the wrong tab), and tab_new /
+    // tab_switch intentionally change the active tab.
+    let is_tab_mutating = matches!(action, "tab_close" | "tab_new" | "tab_switch");
+    if !is_tab_mutating {
+        if let Some(prev) = prev_page_index {
+            if let Some(ref mut mgr) = state.browser {
+                let _ = mgr.set_active_page(prev);
+            }
         }
     }
 
