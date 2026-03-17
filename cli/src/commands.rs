@@ -1116,12 +1116,12 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
         }
         "console" => {
             let clear = rest.contains(&"--clear");
-            let follow = rest.contains(&"--follow");
+            let follow = rest.contains(&"--follow") || rest.contains(&"-f");
             Ok(json!({ "id": id, "action": "console", "clear": clear, "follow": follow }))
         }
         "errors" => {
             let clear = rest.contains(&"--clear");
-            let follow = rest.contains(&"--follow");
+            let follow = rest.contains(&"--follow") || rest.contains(&"-f");
             Ok(json!({ "id": id, "action": "errors", "clear": clear, "follow": follow }))
         }
         "highlight" => {
