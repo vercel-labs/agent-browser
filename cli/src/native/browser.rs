@@ -524,7 +524,36 @@ impl BrowserManager {
         Ok(result.as_str().unwrap_or("").to_string())
     }
 
+    /// Resolve a CDP frame ID to an execution context ID via `Page.createIsolatedWorld`.
+    pub async fn get_frame_context_id(&self, frame_id: &str) -> Result<i64, String> {
+        let session_id = self.active_session_id()?.to_string();
+        let result = self
+            .client
+            .send_command(
+                "Page.createIsolatedWorld",
+                Some(serde_json::json!({
+                    "frameId": frame_id,
+                    "worldName": "agent-browser-frame",
+                    "grantUniversalAccess": true
+                })),
+                Some(&session_id),
+            )
+            .await?;
+        result["executionContextId"]
+            .as_i64()
+            .ok_or_else(|| "Failed to get execution context for frame".to_string())
+    }
+
     pub async fn evaluate(&self, script: &str, _args: Option<Value>) -> Result<Value, String> {
+        self.evaluate_in_context(script, None).await
+    }
+
+    /// Evaluate JS, optionally scoped to a specific frame via its context ID.
+    pub async fn evaluate_in_context(
+        &self,
+        script: &str,
+        context_id: Option<i64>,
+    ) -> Result<Value, String> {
         let session_id = self.active_session_id()?.to_string();
 
         let result: EvaluateResult = self
@@ -535,6 +564,7 @@ impl BrowserManager {
                     expression: script.to_string(),
                     return_by_value: Some(true),
                     await_promise: Some(true),
+                    context_id,
                 },
                 Some(&session_id),
             )
@@ -987,6 +1017,7 @@ impl BrowserManager {
                     ),
                     return_by_value: Some(false),
                     await_promise: Some(false),
+                    context_id: None,
                 },
                 Some(session_id),
             )

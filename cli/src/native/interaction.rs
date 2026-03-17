@@ -317,6 +317,7 @@ pub async fn scroll(
                     expression: js,
                     return_by_value: Some(true),
                     await_promise: Some(false),
+                    context_id: None,
                 },
                 Some(session_id),
             )
@@ -686,7 +687,7 @@ pub async fn tap_touch(
     Ok(())
 }
 
-async fn dispatch_click(
+pub async fn dispatch_click(
     client: &CdpClient,
     session_id: &str,
     x: f64,

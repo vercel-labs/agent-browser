@@ -246,6 +246,7 @@ pub async fn resolve_element_object_id(
                 expression: js,
                 return_by_value: Some(false),
                 await_promise: Some(false),
+                context_id: None,
             },
             Some(session_id),
         )
@@ -338,6 +339,7 @@ async fn resolve_by_selector(
                 expression: js,
                 return_by_value: Some(true),
                 await_promise: Some(false),
+                context_id: None,
             },
             Some(session_id),
         )
@@ -720,6 +722,7 @@ pub async fn get_element_count(
                 expression: js,
                 return_by_value: Some(true),
                 await_promise: Some(false),
+                context_id: None,
             },
             Some(session_id),
         )

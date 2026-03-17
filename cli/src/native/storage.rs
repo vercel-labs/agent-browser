@@ -81,6 +81,7 @@ async fn eval_simple(client: &CdpClient, session_id: &str, js: &str) -> Result<V
                 expression: js.to_string(),
                 return_by_value: Some(true),
                 await_promise: Some(false),
+                context_id: None,
             },
             Some(session_id),
         )

@@ -161,6 +161,7 @@ pub async fn take_snapshot(
                         expression: js,
                         return_by_value: Some(false),
                         await_promise: Some(false),
+                        context_id: None,
                     },
                     Some(session_id),
                 )
@@ -420,6 +421,7 @@ async fn find_cursor_interactive_elements(
                 expression: js.to_string(),
                 return_by_value: Some(true),
                 await_promise: Some(false),
+                context_id: None,
             },
             Some(session_id),
         )
