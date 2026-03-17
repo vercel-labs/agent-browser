@@ -1317,6 +1317,12 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
 
         "diff" => parse_diff(&rest, &id, flags),
 
+        // === Batch ===
+        "batch" => {
+            let bail = rest.contains(&"--bail");
+            Ok(json!({ "id": id, "action": "batch", "bail": bail }))
+        }
+
         _ => Err(ParseError::UnknownCommand {
             command: cmd.to_string(),
         }),
@@ -3960,5 +3966,21 @@ mod tests {
     fn test_get_cdp_url() {
         let cmd = parse_command(&args("get cdp-url"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "cdp_url");
+    }
+
+    // === Batch Tests ===
+
+    #[test]
+    fn test_batch_default() {
+        let cmd = parse_command(&args("batch"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "batch");
+        assert_eq!(cmd["bail"], false);
+    }
+
+    #[test]
+    fn test_batch_with_bail() {
+        let cmd = parse_command(&args("batch --bail"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "batch");
+        assert_eq!(cmd["bail"], true);
     }
 }

@@ -2418,6 +2418,38 @@ Examples:
 "##
         }
 
+        "batch" => {
+            r##"
+agent-browser batch - Execute multiple commands from stdin
+
+Usage: echo '<json>' | agent-browser batch [options]
+
+Reads a JSON array of commands from stdin and executes them sequentially.
+Each command is an array of strings matching normal CLI arguments.
+Results are printed in order, separated by blank lines (or as a JSON array
+with --json).
+
+Options:
+  --bail               Stop on first error (default: continue all commands)
+  --json               Output results as a JSON array
+
+Input Format:
+  A JSON array of string arrays. Each inner array is one command:
+  [
+    ["open", "https://example.com"],
+    ["snapshot", "-i"],
+    ["click", "@e1"],
+    ["fill", "@e2", "test@example.com"],
+    ["screenshot", "result.png"]
+  ]
+
+Examples:
+  echo '[["open", "https://example.com"], ["snapshot"]]' | agent-browser batch
+  echo '[["open", "https://example.com"], ["get", "title"]]' | agent-browser batch --json
+  agent-browser batch --bail < commands.json
+"##
+        }
+
         _ => return false,
     };
     println!("{}", help.trim());
@@ -2507,6 +2539,10 @@ Debug:
   highlight <sel>            Highlight element
   inspect                    Open Chrome DevTools for the active page
   clipboard <op> [text]      Read/write clipboard (read, write, copy, paste)
+
+Batch:
+  batch [--bail]             Execute commands from stdin (JSON array of string arrays)
+                             --bail stops on first error (default: continue all)
 
 Auth Vault:
   auth save <name> [opts]    Save auth profile (--url, --username, --password/--password-stdin)
