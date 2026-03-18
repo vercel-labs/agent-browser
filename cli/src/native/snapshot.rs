@@ -271,7 +271,11 @@ pub async fn take_snapshot(
             false
         };
 
-        if options.cursor && node.backend_node_id.is_some_and(|bid| cursor_elements.contains_key(&bid)) {
+        if options.cursor
+            && node
+                .backend_node_id
+                .is_some_and(|bid| cursor_elements.contains_key(&bid))
+        {
             // In cursor mode, also ref elements that are cursor-interactive
             should_ref = true;
         }
