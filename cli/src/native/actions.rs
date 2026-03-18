@@ -5202,6 +5202,7 @@ fn primary_button_from_mask(buttons: i32) -> &'static str {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_mouse_event_params(
     mouse_state: &mut MouseState,
     event_type: &str,
