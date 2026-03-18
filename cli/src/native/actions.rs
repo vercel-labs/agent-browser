@@ -698,6 +698,9 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         // Check if existing connection is stale and needs re-launch
         let needs_launch = if let Some(ref mgr) = state.browser {
             !mgr.is_connection_alive().await
+        } else if state.webdriver_backend.is_some() {
+            // WebDriver backend (e.g. Safari) is active — skip CDP auto-launch
+            false
         } else {
             true
         };
@@ -932,6 +935,23 @@ async fn auto_launch(state: &mut DaemonState) -> Result<(), String> {
         state.update_stream_client().await;
         try_auto_restore_state(state).await;
         return Ok(());
+    }
+
+    // Check provider — e.g. Safari uses WebDriver, not CDP/Chrome
+    if let Ok(provider) = env::var("AGENT_BROWSER_PROVIDER") {
+        match provider.to_lowercase().as_str() {
+            "safari" => {
+                let cmd = serde_json::json!({ "provider": "safari" });
+                launch_safari(&cmd, state).await?;
+                return Ok(());
+            }
+            "ios" => {
+                let cmd = serde_json::json!({ "provider": "ios" });
+                launch_ios(&cmd, state).await?;
+                return Ok(());
+            }
+            _ => {} // Fall through to default Chrome launch
+        }
     }
 
     let mgr = BrowserManager::launch(options, engine.as_deref()).await?;
