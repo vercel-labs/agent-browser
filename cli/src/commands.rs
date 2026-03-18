@@ -2925,7 +2925,7 @@ mod tests {
     #[test]
     fn test_network_har_requires_subcommand() {
         let result = parse_command(&args("network har"), &default_flags());
-        assert!(matches!(result, Err(ParseError::MissingArguments { .. }));
+        assert!(matches!(result, Err(ParseError::MissingArguments { .. })));
     }
 
     #[test]
