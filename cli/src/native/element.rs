@@ -755,10 +755,17 @@ pub async fn get_element_count(
     session_id: &str,
     selector: &str,
 ) -> Result<i64, String> {
-    let js = format!(
-        "document.querySelectorAll({}).length",
-        serde_json::to_string(selector).unwrap_or_default()
-    );
+    let js = if let Some(xpath) = selector.strip_prefix("xpath=") {
+        format!(
+            "document.evaluate({}, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null).snapshotLength",
+            serde_json::to_string(xpath).unwrap_or_default()
+        )
+    } else {
+        format!(
+            "document.querySelectorAll({}).length",
+            serde_json::to_string(selector).unwrap_or_default()
+        )
+    };
 
     let result: EvaluateResult = client
         .send_command_typed(
