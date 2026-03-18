@@ -323,6 +323,26 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
             }
             return;
         }
+        // Tab switch
+        if action == Some("tab_switch") {
+            if let Some(tab_id) = data.get("tabId").and_then(|v| v.as_i64()) {
+                if let Some(url) = data.get("url").and_then(|v| v.as_str()) {
+                    println!(
+                        "{} Switched to tab [{}] ({})",
+                        color::success_indicator(),
+                        tab_id,
+                        url
+                    );
+                } else {
+                    println!(
+                        "{} Switched to tab [{}]",
+                        color::success_indicator(),
+                        tab_id
+                    );
+                }
+                return;
+            }
+        }
         // New tab/window
         if let Some(tab_id) = data.get("tabId").and_then(|v| v.as_i64()) {
             if let Some(total) = data.get("total").and_then(|v| v.as_i64()) {
@@ -469,7 +489,7 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
             return;
         }
         // Closed (browser or tab)
-        if data.get("closed").is_some() || data.get("tabId").is_some() {
+        if data.get("closed").is_some() {
             let label = match action {
                 Some("tab_close") => {
                     if let Some(closed_id) = data.get("tabId").and_then(|v| v.as_i64()) {
