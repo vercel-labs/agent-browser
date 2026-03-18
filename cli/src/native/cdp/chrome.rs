@@ -189,6 +189,20 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
         args.push("--disable-dev-shm-usage".to_string());
     }
 
+    // Prevent chrome://newtab (filtered by is_internal_chrome_target) from being
+    // the only page target — forces discover_and_attach_targets to create extra tabs.
+    // Matches Puppeteer's ChromeLauncher.ts approach.
+    let has_url_arg = options.args.iter().any(|a| {
+        !a.starts_with("--")
+            && (a.starts_with("http")
+                || a.starts_with("about:")
+                || a.starts_with("file:")
+                || a.starts_with("data:"))
+    });
+    if !has_url_arg {
+        args.push("about:blank".to_string());
+    }
+
     Ok(ChromeArgs {
         args,
         user_data_dir,
@@ -994,5 +1008,48 @@ mod tests {
         }
 
         assert!(!dir.exists(), "Temp dir should be cleaned up on drop");
+    }
+
+    #[test]
+    fn test_build_args_includes_about_blank_by_default() {
+        let opts = LaunchOptions::default();
+        let result = build_chrome_args(&opts).unwrap();
+        assert!(
+            result.args.iter().any(|a| a == "about:blank"),
+            "should include about:blank as default initial URL"
+        );
+        if let Some(ref dir) = result.temp_user_data_dir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn test_build_args_no_about_blank_when_url_in_args() {
+        let opts = LaunchOptions {
+            args: vec!["https://example.com".to_string()],
+            ..Default::default()
+        };
+        let result = build_chrome_args(&opts).unwrap();
+        assert!(
+            !result.args.iter().any(|a| a == "about:blank"),
+            "should not add about:blank when user provides a URL"
+        );
+        if let Some(ref dir) = result.temp_user_data_dir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn test_build_args_no_about_blank_when_about_blank_in_args() {
+        let opts = LaunchOptions {
+            args: vec!["about:blank".to_string()],
+            ..Default::default()
+        };
+        let result = build_chrome_args(&opts).unwrap();
+        let blank_count = result.args.iter().filter(|a| *a == "about:blank").count();
+        assert_eq!(blank_count, 1, "should not duplicate about:blank");
+        if let Some(ref dir) = result.temp_user_data_dir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 }
