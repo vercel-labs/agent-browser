@@ -150,42 +150,6 @@ fn get_port_for_session(session: &str) -> u16 {
     49152 + ((hash.unsigned_abs() as u32 % 16383) as u16)
 }
 
-#[cfg(unix)]
-fn is_daemon_running(session: &str) -> bool {
-    let pid_path = get_pid_path(session);
-    if !pid_path.exists() {
-        return false;
-    }
-    if let Ok(pid_str) = fs::read_to_string(&pid_path) {
-        if let Ok(pid) = pid_str.trim().parse::<i32>() {
-            unsafe {
-                if libc::kill(pid, 0) == 0 {
-                    return true;
-                }
-                // EPERM means the process exists but we lack permission to
-                // signal it (e.g. inside a macOS sandbox). Only ESRCH means
-                // the process is genuinely gone.
-                return std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH);
-            }
-        }
-    }
-    false
-}
-
-#[cfg(windows)]
-fn is_daemon_running(session: &str) -> bool {
-    let pid_path = get_pid_path(session);
-    if !pid_path.exists() {
-        return false;
-    }
-    let port = get_port_for_session(session);
-    TcpStream::connect_timeout(
-        &format!("127.0.0.1:{}", port).parse().unwrap(),
-        Duration::from_millis(100),
-    )
-    .is_ok()
-}
-
 fn daemon_ready(session: &str) -> bool {
     #[cfg(unix)]
     {
@@ -233,7 +197,10 @@ pub struct DaemonOptions<'a> {
     pub allowed_domains: Option<&'a [String]>,
     pub action_policy: Option<&'a str>,
     pub confirm_actions: Option<&'a str>,
-    pub native: bool,
+    pub engine: Option<&'a str>,
+    pub auto_connect: bool,
+    pub idle_timeout: Option<&'a str>,
+    pub cdp: Option<&'a str>,
 }
 
 fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
@@ -297,11 +264,25 @@ fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
     if let Some(ca) = opts.confirm_actions {
         cmd.env("AGENT_BROWSER_CONFIRM_ACTIONS", ca);
     }
+    if let Some(engine) = opts.engine {
+        cmd.env("AGENT_BROWSER_ENGINE", engine);
+    }
+    if opts.auto_connect {
+        cmd.env("AGENT_BROWSER_AUTO_CONNECT", "1");
+    }
+    if let Some(idle) = opts.idle_timeout {
+        cmd.env("AGENT_BROWSER_IDLE_TIMEOUT_MS", idle);
+    }
+    if let Some(cdp) = opts.cdp {
+        cmd.env("AGENT_BROWSER_CDP", cdp);
+    }
 }
 
 pub fn ensure_daemon(session: &str, opts: &DaemonOptions) -> Result<DaemonResult, String> {
-    // Check if daemon is running AND responsive
-    if is_daemon_running(session) && daemon_ready(session) {
+    // Socket connectivity is the sole liveness check — no PID check — so
+    // callers in a different PID namespace (e.g. unshare) can still reuse
+    // an existing daemon they can reach over the socket.
+    if daemon_ready(session) {
         // Double-check it's actually responsive by waiting and checking again
         // This handles the race condition where daemon is shutting down
         // (daemon has a 100ms shutdown delay, so we wait longer)
@@ -355,137 +336,54 @@ pub fn ensure_daemon(session: &str, opts: &DaemonOptions) -> Result<DaemonResult
     }
 
     let exe_path = env::current_exe().map_err(|e| e.to_string())?;
-    // Canonicalize to resolve symlinks (e.g., npm global bin symlink -> actual binary)
     let exe_path = exe_path.canonicalize().unwrap_or(exe_path);
-    // On Windows, canonicalize() returns \\?\ prefixed extended-length paths.
-    // Node.js cannot handle these, so strip the prefix.
-    #[cfg(windows)]
-    let exe_path = {
-        let p = exe_path.to_string_lossy();
-        if let Some(stripped) = p.strip_prefix(r"\\?\") {
-            PathBuf::from(stripped)
-        } else {
-            exe_path
-        }
-    };
 
     #[allow(unused_assignments)]
     let mut daemon_child: Option<std::process::Child> = None;
 
-    if opts.native {
-        // Native mode: spawn self as daemon (Rust/CDP, no Node.js needed)
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
 
-            let mut cmd = Command::new(&exe_path);
-            cmd.env("AGENT_BROWSER_DAEMON", "1");
-            apply_daemon_env(&mut cmd, session, opts);
+        let mut cmd = Command::new(&exe_path);
+        cmd.env("AGENT_BROWSER_DAEMON", "1");
+        apply_daemon_env(&mut cmd, session, opts);
 
-            unsafe {
-                cmd.pre_exec(|| {
-                    libc::setsid();
-                    Ok(())
-                });
-            }
-
-            daemon_child = Some(
-                cmd.stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::piped())
-                    .spawn()
-                    .map_err(|e| format!("Failed to start native daemon: {}", e))?,
-            );
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
         }
 
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
+        daemon_child = Some(
+            cmd.stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|e| format!("Failed to start daemon: {}", e))?,
+        );
+    }
 
-            let mut cmd = Command::new(&exe_path);
-            cmd.env("AGENT_BROWSER_DAEMON", "1");
-            apply_daemon_env(&mut cmd, session, opts);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
 
-            const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
-            const DETACHED_PROCESS: u32 = 0x00000008;
+        let mut cmd = Command::new(&exe_path);
+        cmd.env("AGENT_BROWSER_DAEMON", "1");
+        apply_daemon_env(&mut cmd, session, opts);
 
-            daemon_child = Some(
-                cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS)
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::piped())
-                    .spawn()
-                    .map_err(|e| format!("Failed to start native daemon: {}", e))?,
-            );
-        }
-    } else {
-        // Default mode: spawn Node.js daemon (Playwright)
-        let exe_dir = exe_path.parent().unwrap();
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
+        const DETACHED_PROCESS: u32 = 0x00000008;
 
-        let mut daemon_paths = vec![
-            exe_dir.join("daemon.js"),
-            exe_dir.join("../dist/daemon.js"),
-            PathBuf::from("dist/daemon.js"),
-        ];
-
-        if let Ok(home) = env::var("AGENT_BROWSER_HOME") {
-            let home_path = PathBuf::from(&home);
-            daemon_paths.insert(0, home_path.join("dist/daemon.js"));
-            daemon_paths.insert(1, home_path.join("daemon.js"));
-        }
-
-        let daemon_path = daemon_paths
-            .iter()
-            .find(|p| p.exists())
-            .ok_or("Daemon not found. Set AGENT_BROWSER_HOME environment variable or run from project directory.")?;
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-
-            let mut cmd = Command::new("node");
-            cmd.arg(daemon_path);
-            apply_daemon_env(&mut cmd, session, opts);
-
-            unsafe {
-                cmd.pre_exec(|| {
-                    libc::setsid();
-                    Ok(())
-                });
-            }
-
-            daemon_child = Some(
-                cmd.stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::piped())
-                    .spawn()
-                    .map_err(|e| format!("Failed to start daemon: {}", e))?,
-            );
-        }
-
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-
-            // Use node.exe explicitly to avoid Git Bash/MSYS2 shell wrapper resolution
-            let mut cmd = Command::new("node.exe");
-            cmd.arg(daemon_path)
-                .env("MSYS_NO_PATHCONV", "1")
-                .env("MSYS2_ARG_CONV_EXCL", "*");
-            apply_daemon_env(&mut cmd, session, opts);
-
-            const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
-            const DETACHED_PROCESS: u32 = 0x00000008;
-
-            daemon_child = Some(
-                cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS)
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::piped())
-                    .spawn()
-                    .map_err(|e| format!("Failed to start daemon: {}", e))?,
-            );
-        }
+        daemon_child = Some(
+            cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|e| format!("Failed to start daemon: {}", e))?,
+        );
     }
 
     for _ in 0..50 {
@@ -529,15 +427,10 @@ pub fn ensure_daemon(session: &str, opts: &DaemonOptions) -> Result<DaemonResult
     #[cfg(unix)]
     let endpoint_info = format!(
         "socket: {}",
-        get_socket_dir()
-            .join(format!("{}.sock", session))
-            .display()
+        get_socket_dir().join(format!("{}.sock", session)).display()
     );
     #[cfg(windows)]
-    let endpoint_info = format!(
-        "port: 127.0.0.1:{}",
-        get_port_for_session(session)
-    );
+    let endpoint_info = format!("port: 127.0.0.1:{}", get_port_for_session(session));
 
     Err(format!("Daemon failed to start ({})", endpoint_info))
 }
@@ -610,6 +503,8 @@ fn is_transient_error(error: &str) -> bool {
         || error.contains("os error 2") // No such file or directory (socket gone)
         || error.contains("os error 61") // Connection refused (macOS)
         || error.contains("os error 111") // Connection refused (Linux)
+        || error.contains("os error 10061") // Connection refused (Windows)
+        || error.contains("os error 10054") // Connection reset by peer (Windows)
 }
 
 fn send_command_once(cmd: &Value, session: &str) -> Result<Response, String> {
@@ -786,11 +681,34 @@ mod tests {
     }
 
     #[test]
+    fn test_is_transient_error_connection_refused_windows() {
+        assert!(is_transient_error(
+            "Failed to connect: No connection could be made because the target machine actively refused it. (os error 10061)"
+        ));
+    }
+
+    #[test]
+    fn test_is_transient_error_connection_reset_windows() {
+        assert!(is_transient_error(
+            "Failed to send: An existing connection was forcibly closed by the remote host. (os error 10054)"
+        ));
+    }
+
+    #[test]
     fn test_is_transient_error_non_transient() {
         // These should NOT be considered transient
         assert!(!is_transient_error("Unknown command: foo"));
         assert!(!is_transient_error("Invalid JSON syntax"));
         assert!(!is_transient_error("Permission denied"));
         assert!(!is_transient_error("Daemon not found"));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_get_port_for_session() {
+        assert_eq!(get_port_for_session("default"), 50838);
+        assert_eq!(get_port_for_session("my-session"), 63105);
+        assert_eq!(get_port_for_session("work"), 51184);
+        assert_eq!(get_port_for_session(""), 49152);
     }
 }

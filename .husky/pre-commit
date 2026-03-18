@@ -1,3 +1,2 @@
-pnpm lint-staged
 node scripts/sync-version.js
 git add cli/Cargo.toml cli/Cargo.lock

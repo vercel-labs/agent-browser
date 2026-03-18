@@ -4,11 +4,12 @@ export const metadata = pageMetadata("")
 
 # agent-browser
 
-Browser automation CLI designed for AI agents. Compact text output minimizes context usage. Fast Rust CLI with Node.js fallback.
+Browser automation CLI designed for AI agents. Compact text output minimizes context usage. 100% native Rust.
 
 ```bash
-npm install -g agent-browser      # all platforms (fastest, native Rust CLI)
+npm install -g agent-browser      # all platforms
 brew install agent-browser        # macOS
+agent-browser install             # Download Chrome (first time)
 
 # or try without installing
 npx agent-browser open example.com
@@ -59,8 +60,7 @@ has a unique ref like `@e1`, `@e2`. This provides:
 Client-daemon architecture for optimal performance:
 
 1. **Rust CLI** - Parses commands, communicates with daemon
-2. **Node.js Daemon** (default) - Manages Playwright browser instance
-3. **Native Daemon** (experimental, `--native`) - Pure Rust daemon using direct CDP, no Node.js required
+2. **Native Daemon** - Pure Rust daemon using direct CDP, manages Chrome via Chrome DevTools Protocol
 
 Daemon starts automatically and persists between commands.
 

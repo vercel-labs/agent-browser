@@ -64,6 +64,31 @@ fn print_with_boundaries(content: &str, origin: Option<&str>, opts: &OutputOptio
     }
 }
 
+fn format_storage_value(value: &serde_json::Value) -> String {
+    value
+        .as_str()
+        .map(ToString::to_string)
+        .unwrap_or_else(|| serde_json::to_string(value).unwrap_or_default())
+}
+
+fn format_storage_text(data: &serde_json::Value) -> Option<String> {
+    if let Some(entries) = data.get("data").and_then(|v| v.as_object()) {
+        if entries.is_empty() {
+            return Some("No storage entries".to_string());
+        }
+
+        let lines = entries
+            .iter()
+            .map(|(key, value)| format!("{}: {}", key, format_storage_value(value)))
+            .collect::<Vec<_>>();
+        return Some(lines.join("\n"));
+    }
+
+    let key = data.get("key").and_then(|v| v.as_str())?;
+    let value = data.get("value")?;
+    Some(format!("{}: {}", key, format_storage_value(value)))
+}
+
 pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &OutputOptions) {
     if opts.json {
         if opts.content_boundaries {
@@ -100,6 +125,29 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
     }
 
     if let Some(data) = &resp.data {
+        if action == Some("storage_get") {
+            if let Some(output) = format_storage_text(data) {
+                println!("{}", output);
+                return;
+            }
+        }
+        // Inspect response (check before generic URL handler since it also has a "url" field)
+        if action == Some("inspect") {
+            let opened = data
+                .get("opened")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if opened {
+                if let Some(url) = data.get("url").and_then(|v| v.as_str()) {
+                    println!("{} Opened DevTools: {}", color::success_indicator(), url);
+                } else {
+                    println!("{} Opened DevTools", color::success_indicator());
+                }
+            } else if let Some(err) = data.get("error").and_then(|v| v.as_str()) {
+                eprintln!("Could not open DevTools: {}", err);
+            }
+            return;
+        }
         // Navigation response
         if let Some(url) = data.get("url").and_then(|v| v.as_str()) {
             if let Some(title) = data.get("title").and_then(|v| v.as_str()) {
@@ -108,6 +156,10 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
                 return;
             }
             println!("{}", url);
+            return;
+        }
+        if let Some(cdp_url) = data.get("cdpUrl").and_then(|v| v.as_str()) {
+            println!("{}", cdp_url);
             return;
         }
         // Diff responses -- route by action to avoid fragile shape probing
@@ -404,12 +456,15 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
             println!("{} {}", color::success_indicator(), label);
             return;
         }
-        // Recording start (has "started" field)
+        // Started actions (profiling, HAR, recording)
         if let Some(started) = data.get("started").and_then(|v| v.as_bool()) {
             if started {
                 match action {
                     Some("profiler_start") => {
                         println!("{} Profiling started", color::success_indicator());
+                    }
+                    Some("har_start") => {
+                        println!("{} HAR recording started", color::success_indicator());
                     }
                     _ => {
                         if let Some(path) = data.get("path").and_then(|v| v.as_str()) {
@@ -539,9 +594,12 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
                     data.get("eventCount").and_then(|c| c.as_u64()).unwrap_or(0)
                 ),
                 "har_stop" => println!(
-                    "{} HAR saved to {}",
+                    "{} HAR saved to {} ({} requests)",
                     color::success_indicator(),
-                    color::green(path)
+                    color::green(path),
+                    data.get("requestCount")
+                        .and_then(|c| c.as_u64())
+                        .unwrap_or(0)
                 ),
                 "download" | "waitfordownload" => println!(
                     "{} Download saved to {}",
@@ -1292,11 +1350,17 @@ Modes:
   --url <pattern>      Wait for URL to match pattern
   --load <state>       Wait for load state (load, domcontentloaded, networkidle)
   --fn <expression>    Wait for JavaScript expression to be truthy
-  --text <text>        Wait for text to appear on page
+  --text <text>        Wait for text to appear on page (substring match)
   --download [path]    Wait for a download to complete (optionally save to path)
 
 Download Options (with --download):
   --timeout <ms>       Timeout in milliseconds for download to start
+
+Wait for text to disappear:
+  Use --fn or --state hidden to wait for text or elements to go away:
+  wait --fn "!document.body.innerText.includes('Loading...')"
+  wait "#spinner" --state hidden
+  wait @e5 --state detached
 
 Global Options:
   --json               Output as JSON
@@ -1311,6 +1375,7 @@ Examples:
   agent-browser wait --text "Welcome back"
   agent-browser wait --download ./file.pdf
   agent-browser wait --download ./report.xlsx --timeout 30000
+  agent-browser wait --fn "!document.body.innerText.includes('Loading...')"
 "##
         }
 
@@ -1319,7 +1384,7 @@ Examples:
             r##"
 agent-browser screenshot - Take a screenshot
 
-Usage: agent-browser screenshot [path]
+Usage: agent-browser screenshot [selector] [path]
 
 Captures a screenshot of the current page. If no path is provided,
 saves to a temporary directory with a generated filename.
@@ -1330,6 +1395,13 @@ Options:
                        Each label [N] corresponds to ref @eN from snapshot.
                        Prints a legend mapping labels to element roles/names.
                        With --json, annotations are included in the response.
+                       Supported on Chromium and Lightpanda.
+  --screenshot-dir <path>  Default output directory for screenshots
+                       (or AGENT_BROWSER_SCREENSHOT_DIR env)
+  --screenshot-quality <0-100>  JPEG quality (0-100, only applies to jpeg format)
+                       (or AGENT_BROWSER_SCREENSHOT_QUALITY env)
+  --screenshot-format <fmt>  Image format: png (default) or jpeg
+                       (or AGENT_BROWSER_SCREENSHOT_FORMAT env)
 
 Global Options:
   --json               Output as JSON
@@ -1342,6 +1414,8 @@ Examples:
   agent-browser screenshot --annotate              # Labeled screenshot + legend
   agent-browser screenshot --annotate ./page.png   # Save annotated screenshot
   agent-browser screenshot --annotate --json       # JSON output with annotations
+  agent-browser screenshot --screenshot-dir ./shots # Save to custom directory
+  agent-browser screenshot --screenshot-format jpeg --screenshot-quality 80
 "##
         }
         "pdf" => {
@@ -1445,6 +1519,25 @@ Examples:
 "##
         }
 
+        // === Inspect ===
+        "inspect" => {
+            r##"
+agent-browser inspect - Open Chrome DevTools for the active page
+
+Starts a local WebSocket proxy and opens Chrome's DevTools frontend in your
+default browser. The proxy routes DevTools traffic through the daemon's
+existing CDP connection, so both DevTools and agent-browser commands work
+simultaneously.
+
+Usage: agent-browser inspect
+
+Examples:
+  agent-browser open example.com
+  agent-browser inspect          # opens DevTools in your browser
+  agent-browser click "Submit"   # commands still work while DevTools is open
+"##
+        }
+
         // === Get ===
         "get" => {
             r##"
@@ -1464,6 +1557,7 @@ Subcommands:
   count <selector>           Count matching elements
   box <selector>             Get bounding box (x, y, width, height)
   styles <selector>          Get computed styles of elements
+  cdp-url                    Get Chrome DevTools Protocol WebSocket URL
 
 Global Options:
   --json               Output as JSON
@@ -1590,7 +1684,7 @@ Usage: agent-browser set <setting> [args]
 Configures various browser settings and emulation options.
 
 Settings:
-  viewport <w> <h>           Set viewport size
+  viewport <w> <h> [scale]   Set viewport size (scale = deviceScaleFactor, e.g. 2 for retina)
   device <name>              Emulate device (e.g., "iPhone 12")
   geo <lat> <lng>            Set geolocation
   offline [on|off]           Toggle offline mode
@@ -1605,6 +1699,7 @@ Global Options:
 
 Examples:
   agent-browser set viewport 1920 1080
+  agent-browser set viewport 1920 1080 2    # 2x retina
   agent-browser set device "iPhone 12"
   agent-browser set geo 37.7749 -122.4194
   agent-browser set offline on
@@ -1632,6 +1727,7 @@ Subcommands:
   requests [options]         List captured requests
     --clear                  Clear request log
     --filter <pattern>       Filter by URL pattern
+  har <start|stop> [path]    Record and export a HAR file
 
 Global Options:
   --json               Output as JSON
@@ -1644,6 +1740,8 @@ Examples:
   agent-browser network requests
   agent-browser network requests --filter "api"
   agent-browser network requests --clear
+  agent-browser network har start
+  agent-browser network har stop ./capture.har
 "##
         }
 
@@ -1896,7 +1994,7 @@ agent-browser trace - Record execution trace
 
 Usage: agent-browser trace <operation> [path]
 
-Record a trace for debugging with Playwright Trace Viewer.
+Record a Chrome DevTools trace for debugging.
 
 Operations:
   start [path]         Start recording trace
@@ -1963,7 +2061,7 @@ Usage: agent-browser record start <path.webm> [url]
        agent-browser record stop
        agent-browser record restart <path.webm> [url]
 
-Record the browser to a WebM video file using Playwright's native recording.
+Record the browser to a WebM video file.
 Creates a fresh browser context but preserves cookies and localStorage.
 If no URL is provided, automatically navigates to your current page.
 
@@ -2053,6 +2151,33 @@ Examples:
 "##
         }
 
+        // === Clipboard ===
+        "clipboard" => {
+            r##"
+agent-browser clipboard - Read and write clipboard
+
+Usage: agent-browser clipboard <operation> [text]
+
+Read from or write to the browser clipboard.
+
+Operations:
+  read                 Read text from clipboard
+  write <text>         Write text to clipboard
+  copy                 Copy current selection (simulates Ctrl+C)
+  paste                Paste from clipboard (simulates Ctrl+V)
+
+Global Options:
+  --json               Output as JSON
+  --session <name>     Use specific session
+
+Examples:
+  agent-browser clipboard read
+  agent-browser clipboard write "Hello, World!"
+  agent-browser clipboard copy
+  agent-browser clipboard paste
+"##
+        }
+
         // === State ===
         "state" => {
             r##"
@@ -2138,6 +2263,22 @@ Options:
 Examples:
   agent-browser install
   agent-browser install --with-deps
+"##
+        }
+
+        // === Upgrade ===
+        "upgrade" => {
+            r##"
+agent-browser upgrade - Upgrade to the latest version
+
+Usage: agent-browser upgrade
+
+Detects the current installation method (npm, Homebrew, or Cargo) and runs
+the appropriate update command. Displays the version change on success, or
+informs you if you are already on the latest version.
+
+Examples:
+  agent-browser upgrade
 "##
         }
 
@@ -2302,6 +2443,38 @@ Examples:
 "##
         }
 
+        "batch" => {
+            r##"
+agent-browser batch - Execute multiple commands from stdin
+
+Usage: echo '<json>' | agent-browser batch [options]
+
+Reads a JSON array of commands from stdin and executes them sequentially.
+Each command is an array of strings matching normal CLI arguments.
+Results are printed in order, separated by blank lines (or as a JSON array
+with --json).
+
+Options:
+  --bail               Stop on first error (default: continue all commands)
+  --json               Output results as a JSON array
+
+Input Format:
+  A JSON array of string arrays. Each inner array is one command:
+  [
+    ["open", "https://example.com"],
+    ["snapshot", "-i"],
+    ["click", "@e1"],
+    ["fill", "@e2", "test@example.com"],
+    ["screenshot", "result.png"]
+  ]
+
+Examples:
+  echo '[["open", "https://example.com"], ["snapshot"]]' | agent-browser batch
+  echo '[["open", "https://example.com"], ["get", "title"]]' | agent-browser batch --json
+  agent-browser batch --bail < commands.json
+"##
+        }
+
         _ => return false,
     };
     println!("{}", help.trim());
@@ -2348,7 +2521,7 @@ Navigation:
   reload                     Reload page
 
 Get Info:  agent-browser get <what> [selector]
-  text, html, value, attr <name>, title, url, count, box, styles
+  text, html, value, attr <name>, title, url, count, box, styles, cdp-url
 
 Check State:  agent-browser is <what> <selector>
   visible, enabled, checked
@@ -2368,6 +2541,7 @@ Network:  agent-browser network <action>
   route <url> [--abort|--body <json>]
   unroute [url]
   requests [--clear] [--filter <pattern>]
+  har <start|stop> [path]
 
 Storage:
   cookies [get|set|clear]    Manage cookies (set supports --url, --domain, --path, --httpOnly, --secure, --sameSite, --expires)
@@ -2382,13 +2556,19 @@ Diff:
   diff url <u1> <u2>         Compare two pages
 
 Debug:
-  trace start|stop [path]    Record Playwright trace
+  trace start|stop [path]    Record Chrome DevTools trace
   profiler start|stop [path] Record Chrome DevTools profile
   record start <path> [url]  Start video recording (WebM)
   record stop                Stop and save video
   console [--clear]          View console logs
   errors [--clear]           View page errors
   highlight <sel>            Highlight element
+  inspect                    Open Chrome DevTools for the active page
+  clipboard <op> [text]      Read/write clipboard (read, write, copy, paste)
+
+Batch:
+  batch [--bail]             Execute commands from stdin (JSON array of string arrays)
+                             --bail stops on first error (default: continue all)
 
 Auth Vault:
   auth save <name> [opts]    Save auth profile (--url, --username, --password/--password-stdin)
@@ -2408,6 +2588,7 @@ Sessions:
 Setup:
   install                    Install browser binaries
   install --with-deps        Also install system dependencies (Linux)
+  upgrade                    Upgrade to the latest version
 
 Snapshot Options:
   -i, --interactive          Only interactive elements
@@ -2415,11 +2596,19 @@ Snapshot Options:
   -d, --depth <n>            Limit tree depth
   -s, --selector <sel>       Scope to CSS selector
 
+Authentication:
+  --profile <path>           Persist login sessions across restarts (cookies, IndexedDB, cache)
+                             (or AGENT_BROWSER_PROFILE env)
+  --session-name <name>      Auto-save/restore cookies and localStorage by name
+                             (or AGENT_BROWSER_SESSION_NAME env)
+  --state <path>             Load saved auth state (cookies + storage) from JSON file
+                             (or AGENT_BROWSER_STATE env)
+  --auto-connect             Connect to a running Chrome to reuse its auth state
+                             Tip: agent-browser --auto-connect state save ./auth.json
+  --headers <json>           HTTP headers scoped to URL's origin (e.g., Authorization bearer token)
+
 Options:
   --session <name>           Isolated session (or AGENT_BROWSER_SESSION env)
-  --profile <path>           Persistent browser profile (or AGENT_BROWSER_PROFILE env)
-  --state <path>             Load storage state from JSON file (or AGENT_BROWSER_STATE env)
-  --headers <json>           HTTP headers scoped to URL's origin (for auth)
   --executable-path <path>   Custom browser executable (or AGENT_BROWSER_EXECUTABLE_PATH)
   --extension <path>         Load browser extensions (repeatable)
   --args <args>              Browser launch args, comma or newline separated (or AGENT_BROWSER_ARGS)
@@ -2431,24 +2620,24 @@ Options:
                              e.g., --proxy-bypass "localhost,*.internal.com"
   --ignore-https-errors      Ignore HTTPS certificate errors
   --allow-file-access        Allow file:// URLs to access local files (Chromium only)
-  -p, --provider <name>      Browser provider: ios, browserbase, kernel, browseruse
+  -p, --provider <name>      Browser provider: ios, browserbase, kernel, browseruse, browserless
   --device <name>            iOS device name (e.g., "iPhone 15 Pro")
   --json                     JSON output
-  --full, -f                 Full page screenshot
   --annotate                 Annotated screenshot with numbered labels and legend
+  --screenshot-dir <path>    Default screenshot output directory (or AGENT_BROWSER_SCREENSHOT_DIR)
+  --screenshot-quality <n>   JPEG quality 0-100; ignored for PNG (or AGENT_BROWSER_SCREENSHOT_QUALITY)
+  --screenshot-format <fmt>  Screenshot format: png, jpeg (or AGENT_BROWSER_SCREENSHOT_FORMAT)
   --headed                   Show browser window (not headless) (or AGENT_BROWSER_HEADED env)
   --cdp <port>               Connect via CDP (Chrome DevTools Protocol)
-  --auto-connect             Auto-discover and connect to running Chrome
   --color-scheme <scheme>    Color scheme: dark, light, no-preference (or AGENT_BROWSER_COLOR_SCHEME)
   --download-path <path>     Default download directory (or AGENT_BROWSER_DOWNLOAD_PATH)
-  --session-name <name>      Auto-save/restore session state (cookies, localStorage)
   --content-boundaries       Wrap page output in boundary markers (or AGENT_BROWSER_CONTENT_BOUNDARIES)
   --max-output <chars>       Truncate page output to N chars (or AGENT_BROWSER_MAX_OUTPUT)
   --allowed-domains <list>   Restrict navigation domains (or AGENT_BROWSER_ALLOWED_DOMAINS)
   --action-policy <path>     Action policy JSON file (or AGENT_BROWSER_ACTION_POLICY)
   --confirm-actions <list>   Categories requiring confirmation (or AGENT_BROWSER_CONFIRM_ACTIONS)
   --confirm-interactive      Interactive confirmation prompts; auto-denies if stdin is not a TTY (or AGENT_BROWSER_CONFIRM_INTERACTIVE)
-  --native                   [Experimental] Use native Rust daemon instead of Node.js (or AGENT_BROWSER_NATIVE)
+  --engine <name>            Browser engine: chrome (default), lightpanda (or AGENT_BROWSER_ENGINE)
   --config <path>            Use a custom config file (or AGENT_BROWSER_CONFIG env)
   --debug                    Debug output
   --version, -V              Show version
@@ -2482,20 +2671,20 @@ Environment:
   AGENT_BROWSER_EXTENSIONS       Comma-separated browser extension paths
   AGENT_BROWSER_HEADED           Show browser window (not headless)
   AGENT_BROWSER_JSON             JSON output
-  AGENT_BROWSER_FULL             Full page screenshot
   AGENT_BROWSER_ANNOTATE         Annotated screenshot with numbered labels and legend
   AGENT_BROWSER_DEBUG            Debug output
   AGENT_BROWSER_IGNORE_HTTPS_ERRORS Ignore HTTPS certificate errors
-  AGENT_BROWSER_PROVIDER         Browser provider (ios, browserbase, kernel, browseruse)
+  AGENT_BROWSER_PROVIDER         Browser provider (ios, browserbase, kernel, browseruse, browserless)
   AGENT_BROWSER_AUTO_CONNECT     Auto-discover and connect to running Chrome
   AGENT_BROWSER_ALLOW_FILE_ACCESS Allow file:// URLs to access local files
   AGENT_BROWSER_COLOR_SCHEME     Color scheme preference (dark, light, no-preference)
   AGENT_BROWSER_DOWNLOAD_PATH    Default download directory for browser downloads
-  AGENT_BROWSER_DEFAULT_TIMEOUT  Default Playwright timeout in ms (default: 25000)
+  AGENT_BROWSER_DEFAULT_TIMEOUT  Default action timeout in ms (default: 25000)
   AGENT_BROWSER_SESSION_NAME     Auto-save/load state persistence name
   AGENT_BROWSER_STATE_EXPIRE_DAYS Auto-delete saved states older than N days (default: 30)
   AGENT_BROWSER_ENCRYPTION_KEY   64-char hex key for AES-256-GCM session encryption
   AGENT_BROWSER_STREAM_PORT      Enable WebSocket streaming on port (e.g., 9223)
+  AGENT_BROWSER_IDLE_TIMEOUT_MS  Auto-shutdown daemon after N ms of inactivity (disabled by default)
   AGENT_BROWSER_IOS_DEVICE       Default iOS device name
   AGENT_BROWSER_IOS_UDID         Default iOS device UDID
   AGENT_BROWSER_CONTENT_BOUNDARIES Wrap page output in boundary markers
@@ -2504,14 +2693,16 @@ Environment:
   AGENT_BROWSER_ACTION_POLICY    Path to action policy JSON file
   AGENT_BROWSER_CONFIRM_ACTIONS  Action categories requiring confirmation
   AGENT_BROWSER_CONFIRM_INTERACTIVE Enable interactive confirmation prompts
-  AGENT_BROWSER_NATIVE           Use native Rust daemon (experimental, no Node.js/Playwright)
+  AGENT_BROWSER_ENGINE           Browser engine: chrome (default), lightpanda
+  AGENT_BROWSER_SCREENSHOT_DIR   Default screenshot output directory
+  AGENT_BROWSER_SCREENSHOT_QUALITY JPEG quality 0-100
+  AGENT_BROWSER_SCREENSHOT_FORMAT Screenshot format: png, jpeg
 
-Install (recommended, fastest - native Rust CLI):
-  npm install -g agent-browser
-  agent-browser install                  # Download Chromium (first time)
-
-Try without installing (slower, routes through Node.js):
-  npx agent-browser open example.com
+Install:
+  npm install -g agent-browser           # npm
+  brew install agent-browser             # Homebrew
+  cargo install agent-browser            # Cargo
+  agent-browser install                  # Download Chrome (first time)
 
 Examples:
   agent-browser open example.com
@@ -2624,4 +2815,47 @@ fn print_screenshot_diff(data: &serde_json::Map<String, serde_json::Value>) {
 
 pub fn print_version() {
     println!("agent-browser {}", env!("CARGO_PKG_VERSION"));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_storage_text;
+    use serde_json::json;
+
+    #[test]
+    fn test_format_storage_text_for_all_entries() {
+        let data = json!({
+            "data": {
+                "token": "abc123",
+                "user": "alice"
+            }
+        });
+
+        let rendered = format_storage_text(&data).unwrap();
+
+        assert_eq!(rendered, "token: abc123\nuser: alice");
+    }
+
+    #[test]
+    fn test_format_storage_text_for_key_lookup() {
+        let data = json!({
+            "key": "token",
+            "value": "abc123"
+        });
+
+        let rendered = format_storage_text(&data).unwrap();
+
+        assert_eq!(rendered, "token: abc123");
+    }
+
+    #[test]
+    fn test_format_storage_text_for_empty_store() {
+        let data = json!({
+            "data": {}
+        });
+
+        let rendered = format_storage_text(&data).unwrap();
+
+        assert_eq!(rendered, "No storage entries");
+    }
 }

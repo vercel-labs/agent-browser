@@ -12,6 +12,7 @@ agent-browser ships with skills that teach AI coding agents how to use it for sp
 - **dogfood** — Systematic exploratory testing. Navigates an app like a real user, finds bugs and UX issues, and produces a structured report with screenshots and repro videos.
 - **electron** — Automate any Electron app (VS Code, Slack, Discord, Figma, etc.) by connecting to its built-in Chrome DevTools Protocol port. This is how agent-browser drives native desktop apps like the Slack macOS app.
 - **slack** — Browser-based Slack automation. Check unreads, navigate channels, search conversations, send messages, and extract data — no API tokens needed.
+- **vercel-sandbox** — Run agent-browser + headless Chrome inside ephemeral Vercel Sandbox microVMs. Works with any Vercel-deployed framework (Next.js, SvelteKit, Nuxt, Remix, Astro, etc.).
 
 ## Installation
 
@@ -20,6 +21,7 @@ npx skills add vercel-labs/agent-browser --skill agent-browser
 npx skills add vercel-labs/agent-browser --skill dogfood
 npx skills add vercel-labs/agent-browser --skill electron
 npx skills add vercel-labs/agent-browser --skill slack
+npx skills add vercel-labs/agent-browser --skill vercel-sandbox
 ```
 
 After installing, your AI agent will automatically activate the right skill when it encounters a matching request.
@@ -47,13 +49,24 @@ The output is a markdown report in an output directory, ready to hand to the res
 
 ## electron
 
-Electron apps (VS Code, Slack, Discord, Figma, Notion, Spotify, etc.) are built on Chromium and expose a Chrome DevTools Protocol (CDP) port that agent-browser can connect to. This skill teaches agents how to launch or connect to any Electron app, then use the standard snapshot-interact workflow to automate it.
-
-Electron apps are built on Chromium, so they expose a Chrome DevTools Protocol (CDP) port that agent-browser can connect to. Launch the app with `--remote-debugging-port`, connect, and use the standard snapshot-interact workflow. This is the foundation that the **slack** skill builds on.
+Electron apps (VS Code, Slack, Discord, Figma, Notion, Spotify, etc.) are built on Chromium and expose a Chrome DevTools Protocol (CDP) port that agent-browser can connect to. This skill teaches agents how to launch or connect to any Electron app, then use the standard snapshot-interact workflow to automate it. Launch the app with `--remote-debugging-port`, connect, and use the standard snapshot-interact workflow. This is the foundation that the **slack** skill builds on.
 
 ## slack
 
 Browser-based Slack automation. Connects to an existing Slack session (via `agent-browser connect 9222`) or opens Slack in a new browser, then uses snapshots and element refs to navigate the UI. Covers checking unreads, navigating channels and DMs, searching conversations, extracting message data, and taking screenshots — all without needing Slack API tokens or bot setup.
+
+## vercel-sandbox
+
+Run agent-browser + headless Chrome inside ephemeral Vercel Sandbox microVMs. A Linux VM spins up on demand, executes browser commands, and shuts down automatically. Works with any Vercel-deployed framework (Next.js, SvelteKit, Nuxt, Remix, Astro, etc.).
+
+Key features:
+
+- Sandbox snapshots for sub-second startup (pre-install system deps, agent-browser, and Chromium)
+- Multi-step workflows with persistent state between commands
+- Automatic OIDC authentication on Vercel, or explicit credentials for local dev
+- Scheduled workflows via Vercel Cron Jobs
+
+Get started with the `@vercel/sandbox` package and the `withBrowser` helper pattern. See the `examples/environments/` directory in the repo for a working demo app.
 
 ## Source
 
