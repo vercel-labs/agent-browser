@@ -2281,8 +2281,10 @@ async fn e2e_getbyplaceholder_custom_inputs() {
         .await;
         assert_success(&resp);
         assert_eq!(
-            get_data(&resp)["result"], *fill_value,
-            "Failed for case: {}", placeholder
+            get_data(&resp)["result"],
+            *fill_value,
+            "Failed for case: {}",
+            placeholder
         );
     }
 
