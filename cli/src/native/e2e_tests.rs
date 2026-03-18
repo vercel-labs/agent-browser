@@ -2226,8 +2226,9 @@ async fn e2e_snapshot_inline_text_box_filtered() {
     assert_success(&resp);
 
     // Simple HTML with text content that would generate InlineTextBox nodes
-    let html = "data:text/html,<html><body><div><span>Hello</span> <span>World</span></div></body></html>";
-    
+    let html =
+        "data:text/html,<html><body><div><span>Hello</span> <span>World</span></div></body></html>";
+
     let resp = execute_command(
         &json!({ "id": "2", "action": "navigate", "url": html }),
         &mut state,
@@ -2237,26 +2238,31 @@ async fn e2e_snapshot_inline_text_box_filtered() {
 
     // Take snapshot to capture full output and verify InlineTextBox filtering
     let start = std::time::Instant::now();
-    let resp = execute_command(
-        &json!({ "id": "3", "action": "snapshot" }),
-        &mut state,
-    )
-    .await;
+    let resp = execute_command(&json!({ "id": "3", "action": "snapshot" }), &mut state).await;
     assert_success(&resp);
     let elapsed = start.elapsed();
 
     let snapshot_output = get_data(&resp)["snapshot"].as_str().unwrap();
-    
+
     // Verify that InlineTextBox does not appear in the output
-    assert!(!snapshot_output.contains("InlineTextBox"), 
-            "Snapshot output should not contain InlineTextBox: {}", snapshot_output);
-    
+    assert!(
+        !snapshot_output.contains("InlineTextBox"),
+        "Snapshot output should not contain InlineTextBox: {}",
+        snapshot_output
+    );
+
     // Verify that the actual text content is preserved
-    assert!(snapshot_output.contains("Hello"), 
-            "Snapshot should contain 'Hello': {}", snapshot_output);
-    assert!(snapshot_output.contains("World"), 
-            "Snapshot should contain 'World': {}", snapshot_output);
-    
+    assert!(
+        snapshot_output.contains("Hello"),
+        "Snapshot should contain 'Hello': {}",
+        snapshot_output
+    );
+    assert!(
+        snapshot_output.contains("World"),
+        "Snapshot should contain 'World': {}",
+        snapshot_output
+    );
+
     // Must complete quickly
     assert!(
         elapsed.as_secs() < 5,
