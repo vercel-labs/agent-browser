@@ -58,6 +58,16 @@ On Linux, install system dependencies:
 agent-browser install --with-deps
 ```
 
+### Updating
+
+Upgrade to the latest version:
+
+```bash
+agent-browser upgrade
+```
+
+Detects your installation method (npm, Homebrew, or Cargo) and runs the appropriate update command automatically.
+
 ### Requirements
 
 - **Chrome** - Run `agent-browser install` to download Chrome from [Chrome for Testing](https://developer.chrome.com/blog/chrome-for-testing/) (Google's official automation channel). No Playwright or Node.js required for the daemon.
@@ -339,6 +349,7 @@ agent-browser reload                  # Reload page
 ```bash
 agent-browser install                 # Download Chrome from Chrome for Testing (Google's official automation channel)
 agent-browser install --with-deps     # Also install system deps (Linux)
+agent-browser upgrade                 # Upgrade agent-browser to the latest version
 ```
 
 ## Authentication

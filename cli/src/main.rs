@@ -7,6 +7,7 @@ mod native;
 mod output;
 #[cfg(test)]
 mod test_utils;
+mod upgrade;
 mod validation;
 
 use serde_json::json;
@@ -26,6 +27,7 @@ use install::run_install;
 use output::{
     print_command_help, print_help, print_response_with_opts, print_version, OutputOptions,
 };
+use upgrade::run_upgrade;
 
 fn serialize_json_value(value: &serde_json::Value) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| {
@@ -223,6 +225,12 @@ fn main() {
     if clean.first().map(|s| s.as_str()) == Some("install") {
         let with_deps = args.iter().any(|a| a == "--with-deps" || a == "-d");
         run_install(with_deps);
+        return;
+    }
+
+    // Handle upgrade separately
+    if clean.first().map(|s| s.as_str()) == Some("upgrade") {
+        run_upgrade();
         return;
     }
 

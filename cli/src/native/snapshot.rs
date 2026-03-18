@@ -712,7 +712,7 @@ fn build_tree(nodes: &[AXNode]) -> (Vec<TreeNode>, Vec<usize>) {
         let (level, checked, expanded, selected, disabled, required) =
             extract_properties(&node.properties);
 
-        if node.ignored.unwrap_or(false) && role != "RootWebArea" {
+        if (node.ignored.unwrap_or(false) && role != "RootWebArea") || role == "InlineTextBox" {
             tree_nodes.push(TreeNode {
                 role: String::new(),
                 name: String::new(),

@@ -2266,6 +2266,22 @@ Examples:
 "##
         }
 
+        // === Upgrade ===
+        "upgrade" => {
+            r##"
+agent-browser upgrade - Upgrade to the latest version
+
+Usage: agent-browser upgrade
+
+Detects the current installation method (npm, Homebrew, or Cargo) and runs
+the appropriate update command. Displays the version change on success, or
+informs you if you are already on the latest version.
+
+Examples:
+  agent-browser upgrade
+"##
+        }
+
         // === Connect ===
         "connect" => {
             r##"
@@ -2572,6 +2588,7 @@ Sessions:
 Setup:
   install                    Install browser binaries
   install --with-deps        Also install system dependencies (Linux)
+  upgrade                    Upgrade to the latest version
 
 Snapshot Options:
   -i, --interactive          Only interactive elements
