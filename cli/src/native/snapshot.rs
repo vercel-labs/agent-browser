@@ -844,14 +844,14 @@ fn render_tree(
 
     // Use ARIA name if available, otherwise fall back to cursor-interactive textContent
     let display_name = if !node.name.is_empty() {
-        &node.name
+        node.name.clone()
     } else if let Some(ref ci) = node.cursor_info {
-        &ci.text
+        ci.text
             .replace('\\', "\\\\")
             .replace('"', "\\\"")
             .replace(['\n', '\r'], " ")
     } else {
-        &node.name
+        node.name.clone()
     };
     if !display_name.is_empty() {
         line.push_str(&format!(" \"{}\"", display_name));
