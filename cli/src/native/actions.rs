@@ -266,14 +266,7 @@ impl DaemonState {
                         let rt = routes.read().await;
                         let oh = origin_headers.read().await;
 
-                        resolve_fetch_paused(
-                            &client,
-                            df.as_ref(),
-                            &rt,
-                            &oh,
-                            &paused,
-                        )
-                        .await;
+                        resolve_fetch_paused(&client, df.as_ref(), &rt, &oh, &paused).await;
                     }
                     Ok(_) => continue,
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,
@@ -331,9 +324,7 @@ impl DaemonState {
         recording::stop_recording_task(&mut self.recording_state).await
     }
 
-    fn drain_cdp_events(
-        &mut self,
-    ) -> (Vec<i64>, Vec<TargetCreatedEvent>, Vec<String>) {
+    fn drain_cdp_events(&mut self) -> (Vec<i64>, Vec<TargetCreatedEvent>, Vec<String>) {
         let rx = match self.event_rx.as_mut() {
             Some(rx) => rx,
             None => return (Vec::new(), Vec::new(), Vec::new()),
@@ -1285,8 +1276,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
                         &filter.allowed_domains,
                     )
                     .await;
-                    network::sanitize_existing_pages(&mgr.client, &mgr.pages_list(), filter)
-                        .await;
+                    network::sanitize_existing_pages(&mgr.client, &mgr.pages_list(), filter).await;
                 }
             }
         }
@@ -5262,8 +5252,7 @@ async fn build_fetch_patterns(state: &DaemonState) -> Vec<Value> {
         .collect();
     let has_domain_filter = state.domain_filter.read().await.is_some();
     let has_origin_headers = !state.origin_headers.read().await.is_empty();
-    if (has_domain_filter || has_origin_headers)
-        && !patterns.iter().any(|p| p["urlPattern"] == "*")
+    if (has_domain_filter || has_origin_headers) && !patterns.iter().any(|p| p["urlPattern"] == "*")
     {
         patterns.push(json!({ "urlPattern": "*" }));
     }
@@ -6374,7 +6363,10 @@ mod tests {
     async fn test_build_fetch_patterns_empty_state() {
         let state = DaemonState::new();
         let patterns = build_fetch_patterns(&state).await;
-        assert!(patterns.is_empty(), "No routes/filters/headers → no patterns");
+        assert!(
+            patterns.is_empty(),
+            "No routes/filters/headers → no patterns"
+        );
     }
 
     #[tokio::test]

@@ -2274,10 +2274,7 @@ async fn start_echo_server() -> (String, tokio::task::JoinHandle<()>) {
                         break;
                     }
                     if let Some((key, value)) = line.split_once(": ") {
-                        headers.insert(
-                            key.to_string(),
-                            Value::String(value.to_string()),
-                        );
+                        headers.insert(key.to_string(), Value::String(value.to_string()));
                     }
                 }
 
@@ -2691,7 +2688,8 @@ async fn e2e_headers_persist_after_roundtrip() {
     .await;
     assert_success(&resp);
     assert_eq!(
-        get_data(&resp)["result"]["headers"]["X-Persist"], "roundtrip",
+        get_data(&resp)["result"]["headers"]["X-Persist"],
+        "roundtrip",
         "Headers should persist after navigating away and back to the same origin"
     );
 
@@ -2744,7 +2742,8 @@ async fn e2e_headers_override_same_origin() {
     .await;
     assert_success(&resp);
     assert_eq!(
-        get_data(&resp)["result"]["headers"]["X-Version"], "v2",
+        get_data(&resp)["result"]["headers"]["X-Version"],
+        "v2",
         "Second --headers should replace the first for the same origin"
     );
 
