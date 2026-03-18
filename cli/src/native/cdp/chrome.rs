@@ -189,9 +189,7 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
         args.push("--disable-dev-shm-usage".to_string());
     }
 
-    // Prevent chrome://newtab (filtered by is_internal_chrome_target) from being
-    // the only page target — forces discover_and_attach_targets to create extra tabs.
-    // Matches Puppeteer's ChromeLauncher.ts approach.
+    // Avoid chrome://newtab as the initial page — Puppeteer does the same.
     let has_url_arg = options.args.iter().any(|a| {
         !a.starts_with("--")
             && (a.starts_with("http")
