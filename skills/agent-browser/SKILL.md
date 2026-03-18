@@ -6,6 +6,8 @@ allowed-tools: Bash(npx agent-browser:*), Bash(agent-browser:*)
 
 # Browser Automation with agent-browser
 
+The CLI uses Chrome/Chromium via CDP directly. Install via `npm i -g agent-browser`, `brew install agent-browser`, or `cargo install agent-browser`. Run `agent-browser install` to download Chrome. Run `agent-browser upgrade` to update to the latest version.
+
 ## Core Workflow
 
 Every browser automation follows this pattern:
@@ -129,17 +131,27 @@ agent-browser scroll down 500 --selector "div.content"  # Scroll within a specif
 agent-browser get text @e1            # Get element text
 agent-browser get url                 # Get current URL
 agent-browser get title               # Get page title
+agent-browser get cdp-url             # Get CDP WebSocket URL
 
 # Wait
 agent-browser wait @e1                # Wait for element
 agent-browser wait --load networkidle # Wait for network idle
 agent-browser wait --url "**/page"    # Wait for URL pattern
 agent-browser wait 2000               # Wait milliseconds
+agent-browser wait --text "Welcome"    # Wait for text to appear (substring match)
+agent-browser wait --fn "!document.body.innerText.includes('Loading...')"  # Wait for text to disappear
+agent-browser wait "#spinner" --state hidden  # Wait for element to disappear
 
 # Downloads
 agent-browser download @e1 ./file.pdf          # Click element to trigger download
 agent-browser wait --download ./output.zip     # Wait for any download to complete
 agent-browser --download-path ./downloads open <url>  # Set default download directory
+
+# Network
+agent-browser network requests                 # Inspect tracked requests
+agent-browser network route "**/api/*" --abort  # Block matching requests
+agent-browser network har start                # Start HAR recording
+agent-browser network har stop ./capture.har   # Stop and save HAR file
 
 # Viewport & Device Emulation
 agent-browser set viewport 1920 1080          # Set viewport size (default: 1280x720)
@@ -150,7 +162,15 @@ agent-browser set device "iPhone 14"          # Emulate device (viewport + user 
 agent-browser screenshot              # Screenshot to temp dir
 agent-browser screenshot --full       # Full page screenshot
 agent-browser screenshot --annotate   # Annotated screenshot with numbered element labels
+agent-browser screenshot --screenshot-dir ./shots  # Save to custom directory
+agent-browser screenshot --screenshot-format jpeg --screenshot-quality 80
 agent-browser pdf output.pdf          # Save as PDF
+
+# Clipboard
+agent-browser clipboard read                      # Read text from clipboard
+agent-browser clipboard write "Hello, World!"     # Write text to clipboard
+agent-browser clipboard copy                      # Copy current selection
+agent-browser clipboard paste                     # Paste from clipboard
 
 # Diff (compare page states)
 agent-browser diff snapshot                          # Compare current vs last snapshot
@@ -160,6 +180,24 @@ agent-browser diff url <url1> <url2>                 # Compare two pages
 agent-browser diff url <url1> <url2> --wait-until networkidle  # Custom wait strategy
 agent-browser diff url <url1> <url2> --selector "#main"  # Scope to element
 ```
+
+## Batch Execution
+
+Execute multiple commands in a single invocation by piping a JSON array of string arrays to `batch`. This avoids per-command process startup overhead when running multi-step workflows.
+
+```bash
+echo '[
+  ["open", "https://example.com"],
+  ["snapshot", "-i"],
+  ["click", "@e1"],
+  ["screenshot", "result.png"]
+]' | agent-browser batch --json
+
+# Stop on first error
+agent-browser batch --bail < commands.json
+```
+
+Use `batch` when you have a known sequence of commands that don't depend on intermediate output. Use separate commands or `&&` chaining when you need to parse output between steps (e.g., snapshot to discover refs, then interact).
 
 ## Common Patterns
 
@@ -231,6 +269,30 @@ agent-browser state clear myapp
 agent-browser state clean --older-than 7
 ```
 
+### Working with Iframes
+
+Iframe content is automatically inlined in snapshots. Refs inside iframes carry frame context, so you can interact with them directly.
+
+```bash
+agent-browser open https://example.com/checkout
+agent-browser snapshot -i
+# @e1 [heading] "Checkout"
+# @e2 [Iframe] "payment-frame"
+#   @e3 [input] "Card number"
+#   @e4 [input] "Expiry"
+#   @e5 [button] "Pay"
+
+# Interact directly — no frame switch needed
+agent-browser fill @e3 "4111111111111111"
+agent-browser fill @e4 "12/28"
+agent-browser click @e5
+
+# To scope a snapshot to one iframe:
+agent-browser frame @e2
+agent-browser snapshot -i         # Only iframe content
+agent-browser frame main          # Return to main frame
+```
+
 ### Data Extraction
 
 ```bash
@@ -266,6 +328,8 @@ agent-browser --auto-connect snapshot
 # Or with explicit CDP port
 agent-browser --cdp 9222 snapshot
 ```
+
+Auto-connect discovers Chrome via `DevToolsActivePort`, common debugging ports (9222, 9229), and falls back to a direct WebSocket connection if HTTP-based CDP discovery fails.
 
 ### Color Scheme (Dark Mode)
 
@@ -308,6 +372,7 @@ The `scale` parameter (3rd argument) sets `window.devicePixelRatio` without chan
 ```bash
 agent-browser --headed open https://example.com
 agent-browser highlight @e1          # Highlight element
+agent-browser inspect                # Open Chrome DevTools for the active page
 agent-browser record start demo.webm # Record session
 agent-browser profiler start         # Start Chrome DevTools profiling
 agent-browser profiler stop trace.json # Stop and save profile (path optional)
@@ -386,8 +451,9 @@ export AGENT_BROWSER_ACTION_POLICY=./policy.json
 ```
 
 Example `policy.json`:
+
 ```json
-{"default": "deny", "allow": ["navigate", "snapshot", "click", "scroll", "wait", "get"]}
+{ "default": "deny", "allow": ["navigate", "snapshot", "click", "scroll", "wait", "get"] }
 ```
 
 Auth vault operations (`auth login`, etc.) bypass action policy but domain allowlist still applies.
@@ -427,7 +493,7 @@ agent-browser diff url https://staging.example.com https://prod.example.com --sc
 
 ## Timeouts and Slow Pages
 
-The default Playwright timeout is 25 seconds for local browsers. This can be overridden with the `AGENT_BROWSER_DEFAULT_TIMEOUT` environment variable (value in milliseconds). For slow websites or large pages, use explicit waits instead of relying on the default timeout:
+The default timeout is 25 seconds. This can be overridden with the `AGENT_BROWSER_DEFAULT_TIMEOUT` environment variable (value in milliseconds). For slow websites or large pages, use explicit waits instead of relying on the default timeout:
 
 ```bash
 # Wait for network activity to settle (best for slow pages)
@@ -471,6 +537,12 @@ agent-browser --session agent1 close   # Close specific session
 
 If a previous session was not closed properly, the daemon may still be running. Use `agent-browser close` to clean it up before starting new work.
 
+To auto-shutdown the daemon after a period of inactivity (useful for ephemeral/CI environments):
+
+```bash
+AGENT_BROWSER_IDLE_TIMEOUT_MS=60000 agent-browser open example.com
+```
+
 ## Ref Lifecycle (Important)
 
 Refs (`@e1`, `@e2`, etc.) are invalidated when the page changes. Always re-snapshot after:
@@ -489,8 +561,6 @@ agent-browser click @e1              # Use new refs
 
 Use `--annotate` to take a screenshot with numbered labels overlaid on interactive elements. Each label `[N]` maps to ref `@eN`. This also caches refs, so you can interact with elements immediately without a separate snapshot.
 
-In native mode, this currently works on the CDP-backed browser path (Chromium/Lightpanda). The Safari/WebDriver backend does not yet support `--annotate`.
-
 ```bash
 agent-browser screenshot --annotate
 # Output includes the image path and a legend:
@@ -501,6 +571,7 @@ agent-browser click @e2              # Click using ref from annotated screenshot
 ```
 
 Use annotated screenshots when:
+
 - The page has unlabeled icon buttons or visual-only elements
 - You need to verify visual layout or styling
 - Canvas or chart elements are present (invisible to text snapshots)
@@ -543,6 +614,7 @@ agent-browser eval -b "$(echo -n 'Array.from(document.querySelectorAll("a")).map
 **Why this matters:** When the shell processes your command, inner double quotes, `!` characters (history expansion), backticks, and `$()` can all corrupt the JavaScript before it reaches agent-browser. The `--stdin` and `-b` flags bypass shell interpretation entirely.
 
 **Rules of thumb:**
+
 - Single-line, no nested quotes -> regular `eval 'expression'` with single quotes is fine
 - Nested quotes, arrow functions, template literals, or multiline -> use `eval --stdin <<'EVALEOF'`
 - Programmatic/generated scripts -> use `eval -b` with base64
@@ -563,30 +635,15 @@ Priority (lowest to highest): `~/.agent-browser/config.json` < `./agent-browser.
 
 ## Deep-Dive Documentation
 
-| Reference | When to Use |
-|-----------|-------------|
-| [references/commands.md](references/commands.md) | Full command reference with all options |
-| [references/snapshot-refs.md](references/snapshot-refs.md) | Ref lifecycle, invalidation rules, troubleshooting |
+| Reference                                                            | When to Use                                               |
+| -------------------------------------------------------------------- | --------------------------------------------------------- |
+| [references/commands.md](references/commands.md)                     | Full command reference with all options                   |
+| [references/snapshot-refs.md](references/snapshot-refs.md)           | Ref lifecycle, invalidation rules, troubleshooting        |
 | [references/session-management.md](references/session-management.md) | Parallel sessions, state persistence, concurrent scraping |
-| [references/authentication.md](references/authentication.md) | Login flows, OAuth, 2FA handling, state reuse |
-| [references/video-recording.md](references/video-recording.md) | Recording workflows for debugging and documentation |
-| [references/profiling.md](references/profiling.md) | Chrome DevTools profiling for performance analysis |
-| [references/proxy-support.md](references/proxy-support.md) | Proxy configuration, geo-testing, rotating proxies |
-
-## Experimental: Native Mode
-
-agent-browser has an experimental native Rust daemon that communicates with Chrome directly via CDP, bypassing Node.js and Playwright entirely. It is opt-in and not recommended for production use yet.
-
-```bash
-# Enable via flag
-agent-browser --native open example.com
-
-# Enable via environment variable (avoids passing --native every time)
-export AGENT_BROWSER_NATIVE=1
-agent-browser open example.com
-```
-
-The native daemon supports Chromium and Safari (via WebDriver). Firefox and WebKit are not yet supported. All core commands (navigate, snapshot, click, fill, screenshot, cookies, storage, tabs, eval, etc.) work identically in native mode. Use `agent-browser close` before switching between native and default mode within the same session.
+| [references/authentication.md](references/authentication.md)         | Login flows, OAuth, 2FA handling, state reuse             |
+| [references/video-recording.md](references/video-recording.md)       | Recording workflows for debugging and documentation       |
+| [references/profiling.md](references/profiling.md)                   | Chrome DevTools profiling for performance analysis        |
+| [references/proxy-support.md](references/proxy-support.md)           | Proxy configuration, geo-testing, rotating proxies        |
 
 ## Browser Engine Selection
 
@@ -612,11 +669,11 @@ Lightpanda does not support `--extension`, `--profile`, `--state`, or `--allow-f
 
 ## Ready-to-Use Templates
 
-| Template | Description |
-|----------|-------------|
-| [templates/form-automation.sh](templates/form-automation.sh) | Form filling with validation |
-| [templates/authenticated-session.sh](templates/authenticated-session.sh) | Login once, reuse state |
-| [templates/capture-workflow.sh](templates/capture-workflow.sh) | Content extraction with screenshots |
+| Template                                                                 | Description                         |
+| ------------------------------------------------------------------------ | ----------------------------------- |
+| [templates/form-automation.sh](templates/form-automation.sh)             | Form filling with validation        |
+| [templates/authenticated-session.sh](templates/authenticated-session.sh) | Login once, reuse state             |
+| [templates/capture-workflow.sh](templates/capture-workflow.sh)           | Content extraction with screenshots |
 
 ```bash
 ./templates/form-automation.sh https://example.com/form

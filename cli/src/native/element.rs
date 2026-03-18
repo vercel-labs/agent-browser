@@ -12,6 +12,7 @@ pub struct RefEntry {
     pub name: String,
     pub nth: Option<usize>,
     pub selector: Option<String>,
+    pub frame_id: Option<String>,
 }
 
 pub struct RefMap {
@@ -35,6 +36,18 @@ impl RefMap {
         name: &str,
         nth: Option<usize>,
     ) {
+        self.add_with_frame(ref_id, backend_node_id, role, name, nth, None);
+    }
+
+    pub fn add_with_frame(
+        &mut self,
+        ref_id: String,
+        backend_node_id: Option<i64>,
+        role: &str,
+        name: &str,
+        nth: Option<usize>,
+        frame_id: Option<&str>,
+    ) {
         self.map.insert(
             ref_id,
             RefEntry {
@@ -43,6 +56,7 @@ impl RefMap {
                 name: name.to_string(),
                 nth,
                 selector: None,
+                frame_id: frame_id.map(|s| s.to_string()),
             },
         );
     }
@@ -63,6 +77,7 @@ impl RefMap {
                 name: name.to_string(),
                 nth,
                 selector: Some(selector),
+                frame_id: None,
             },
         );
     }
@@ -138,8 +153,9 @@ pub async fn resolve_element_center(
             .get(&ref_id)
             .ok_or_else(|| format!("Unknown ref: {}", ref_id))?;
 
+        // Try cached backend_node_id first (fast path)
         if let Some(backend_node_id) = entry.backend_node_id {
-            let result: DomGetBoxModelResult = client
+            let result: Result<DomGetBoxModelResult, String> = client
                 .send_command_typed(
                     "DOM.getBoxModel",
                     &DomGetBoxModelParams {
@@ -149,13 +165,37 @@ pub async fn resolve_element_center(
                     },
                     Some(session_id),
                 )
-                .await?;
+                .await;
 
-            return Ok(box_model_center(&result.model));
+            if let Ok(r) = result {
+                return Ok(box_model_center(&r.model));
+            }
+            // backend_node_id is stale; re-query the accessibility tree below
         }
 
-        // Fallback: use role/name to find via JS
-        return resolve_by_role_name(client, session_id, &entry.role, &entry.name, entry.nth).await;
+        // Fallback: re-query the accessibility tree to find a fresh node by role/name
+        let ref_frame_id = entry.frame_id.clone();
+        let fresh_id = find_node_id_by_role_name(
+            client,
+            session_id,
+            &entry.role,
+            &entry.name,
+            entry.nth,
+            ref_frame_id.as_deref(),
+        )
+        .await?;
+        let result: DomGetBoxModelResult = client
+            .send_command_typed(
+                "DOM.getBoxModel",
+                &DomGetBoxModelParams {
+                    backend_node_id: Some(fresh_id),
+                    node_id: None,
+                    object_id: None,
+                },
+                Some(session_id),
+            )
+            .await?;
+        return Ok(box_model_center(&result.model));
     }
 
     // CSS selector
@@ -173,8 +213,9 @@ pub async fn resolve_element_object_id(
             .get(&ref_id)
             .ok_or_else(|| format!("Unknown ref: {}", ref_id))?;
 
+        // Try cached backend_node_id first (fast path)
         if let Some(backend_node_id) = entry.backend_node_id {
-            let result: DomResolveNodeResult = client
+            let result: Result<DomResolveNodeResult, String> = client
                 .send_command_typed(
                     "DOM.resolveNode",
                     &DomResolveNodeParams {
@@ -184,13 +225,42 @@ pub async fn resolve_element_object_id(
                     },
                     Some(session_id),
                 )
-                .await?;
+                .await;
 
-            return result
-                .object
-                .object_id
-                .ok_or_else(|| format!("No objectId for ref {}", ref_id));
+            if let Ok(r) = result {
+                if let Some(oid) = r.object.object_id {
+                    return Ok(oid);
+                }
+            }
+            // backend_node_id is stale; re-query the accessibility tree below
         }
+
+        // Fallback: re-query the accessibility tree to find a fresh node by role/name
+        let ref_frame_id = entry.frame_id.clone();
+        let fresh_id = find_node_id_by_role_name(
+            client,
+            session_id,
+            &entry.role,
+            &entry.name,
+            entry.nth,
+            ref_frame_id.as_deref(),
+        )
+        .await?;
+        let result: DomResolveNodeResult = client
+            .send_command_typed(
+                "DOM.resolveNode",
+                &DomResolveNodeParams {
+                    backend_node_id: Some(fresh_id),
+                    node_id: None,
+                    object_group: Some("agent-browser".to_string()),
+                },
+                Some(session_id),
+            )
+            .await?;
+        return result
+            .object
+            .object_id
+            .ok_or_else(|| format!("No objectId for ref {}", ref_id));
     }
 
     // CSS selector fallback
@@ -216,56 +286,64 @@ pub async fn resolve_element_object_id(
         .ok_or_else(|| format!("Element not found: {}", selector_or_ref))
 }
 
-async fn resolve_by_role_name(
+/// Re-query the accessibility tree to find a node matching role+name+nth,
+/// returning its fresh backendDOMNodeId. This uses the same data source
+/// (Accessibility.getFullAXTree) that built the ref map during snapshot,
+/// so role/name matching is guaranteed to be consistent.
+async fn find_node_id_by_role_name(
     client: &CdpClient,
     session_id: &str,
     role: &str,
     name: &str,
     nth: Option<usize>,
-) -> Result<(f64, f64), String> {
-    let nth_index = nth.unwrap_or(0);
-    let js = format!(
-        r#"(() => {{
-            const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
-            const matches = [];
-            let node;
-            while (node = walker.nextNode()) {{
-                const r = node.getAttribute('role') || node.tagName.toLowerCase();
-                const n = node.getAttribute('aria-label') || node.textContent.trim().slice(0, 100);
-                if (r === {role} && n === {name}) matches.push(node);
-            }}
-            const el = matches[{nth}];
-            if (!el) return null;
-            const rect = el.getBoundingClientRect();
-            return {{ x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 }};
-        }})()"#,
-        role = serde_json::to_string(role).unwrap_or_default(),
-        name = serde_json::to_string(name).unwrap_or_default(),
-        nth = nth_index,
-    );
-
-    let result: EvaluateResult = client
-        .send_command_typed(
-            "Runtime.evaluate",
-            &EvaluateParams {
-                expression: js,
-                return_by_value: Some(true),
-                await_promise: Some(false),
-            },
-            Some(session_id),
-        )
+    frame_id: Option<&str>,
+) -> Result<i64, String> {
+    let ax_params = if let Some(fid) = frame_id {
+        serde_json::json!({ "frameId": fid })
+    } else {
+        serde_json::json!({})
+    };
+    let ax_tree: GetFullAXTreeResult = client
+        .send_command_typed("Accessibility.getFullAXTree", &ax_params, Some(session_id))
         .await?;
 
-    let val = result.result.value.unwrap_or(Value::Null);
-    let x = val.get("x").and_then(|v| v.as_f64());
-    let y = val.get("y").and_then(|v| v.as_f64());
+    let nth_index = nth.unwrap_or(0);
+    let mut match_count: usize = 0;
 
-    match (x, y) {
-        (Some(x), Some(y)) => Ok((x, y)),
-        _ => Err(format!(
-            "Could not locate element with role={} name={}",
-            role, name
-        )),
+    for node in &ax_tree.nodes {
+        if node.ignored.unwrap_or(false) {
+            continue;
+        }
+        let node_role = extract_ax_string(&node.role);
+        let node_name = extract_ax_string(&node.name);
+        if node_role == role && node_name == name {
+            if match_count == nth_index {
+                return node.backend_d_o_m_node_id.ok_or_else(|| {
+                    format!(
+                        "AX node has no backendDOMNodeId for role={} name={}",
+                        role, name
+                    )
+                });
+            }
+            match_count += 1;
+        }
+    }
+
+    Err(format!(
+        "Could not locate element with role={} name={}",
+        role, name
+    ))
+}
+
+fn extract_ax_string(value: &Option<AXValue>) -> String {
+    match value {
+        Some(v) => match &v.value {
+            Some(Value::String(s)) => s.clone(),
+            Some(Value::Number(n)) => n.to_string(),
+            Some(Value::Bool(b)) => b.to_string(),
+            _ => String::new(),
+        },
+        None => String::new(),
     }
 }
 
@@ -450,11 +528,44 @@ pub async fn is_element_checked(
 ) -> Result<bool, String> {
     let object_id = resolve_element_object_id(client, session_id, ref_map, selector_or_ref).await?;
 
+    // Mirrors Playwright's getChecked() with follow-label retargeting:
+    // 1. If element is a native checkbox/radio input, return .checked
+    // 2. If element has an ARIA checked role, return aria-checked
+    // 3. Follow label → input association (label.control)
+    // 4. Check for nested checkbox/radio input as last resort
     let result: EvaluateResult = client
         .send_command_typed(
             "Runtime.callFunctionOn",
             &CallFunctionOnParams {
-                function_declaration: "function() { return !!this.checked; }".to_string(),
+                function_declaration: r#"function() {
+                    var el = this;
+                    // Native checkbox/radio input
+                    var tag = el.tagName && el.tagName.toUpperCase();
+                    if (tag === 'INPUT' && (el.type === 'checkbox' || el.type === 'radio')) {
+                        return el.checked;
+                    }
+                    // ARIA role-based checked state
+                    var role = el.getAttribute && el.getAttribute('role');
+                    var ariaCheckedRoles = ['checkbox','radio','switch','menuitemcheckbox','menuitemradio','option','treeitem'];
+                    if (role && ariaCheckedRoles.indexOf(role) !== -1) {
+                        return el.getAttribute('aria-checked') === 'true';
+                    }
+                    // Follow label association (Playwright follow-label retarget)
+                    var label = el;
+                    if (tag !== 'LABEL') {
+                        label = el.closest && el.closest('label');
+                    }
+                    if (label && label.tagName && label.tagName.toUpperCase() === 'LABEL' && label.control) {
+                        var ctrl = label.control;
+                        if (ctrl.type === 'checkbox' || ctrl.type === 'radio') {
+                            return ctrl.checked;
+                        }
+                    }
+                    // Check for nested native input
+                    var input = el.querySelector && el.querySelector('input[type="checkbox"], input[type="radio"]');
+                    if (input) return input.checked;
+                    return false;
+                }"#.to_string(),
                 object_id: Some(object_id),
                 arguments: None,
                 return_by_value: Some(true),

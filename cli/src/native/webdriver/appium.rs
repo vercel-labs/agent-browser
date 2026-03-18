@@ -40,32 +40,45 @@ impl AppiumManager {
         })
     }
 
+    pub fn build_ios_capabilities(
+        device_udid: Option<&str>,
+        device_name: Option<&str>,
+        platform_version: Option<&str>,
+    ) -> Value {
+        let mut caps = json!({
+            "platformName": "iOS",
+            "appium:automationName": "XCUITest",
+            "browserName": "Safari",
+            "appium:noReset": true,
+        });
+
+        if let Some(name) = device_name {
+            caps["appium:deviceName"] = json!(name);
+        } else {
+            caps["appium:deviceName"] = json!("iPhone");
+        }
+
+        if let Some(ver) = platform_version {
+            caps["appium:platformVersion"] = json!(ver);
+        }
+
+        if let Some(udid) = device_udid {
+            caps["appium:udid"] = json!(udid);
+        }
+
+        caps
+    }
+
     pub async fn create_ios_session(
         &mut self,
         device_name: Option<&str>,
         platform_version: Option<&str>,
     ) -> Result<Value, String> {
-        let mut caps = json!({
-            "platformName": "iOS",
-            "automationName": "XCUITest",
-            "browserName": "Safari",
-            "noReset": true,
-        });
-
-        if let Some(name) = device_name {
-            caps["deviceName"] = json!(name);
-        } else {
-            caps["deviceName"] = json!("iPhone");
-        }
-
-        if let Some(ver) = platform_version {
-            caps["platformVersion"] = json!(ver);
-        }
-
-        if let Some(ref udid) = self.device_udid {
-            caps["udid"] = json!(udid);
-        }
-
+        let caps = Self::build_ios_capabilities(
+            self.device_udid.as_deref(),
+            device_name,
+            platform_version,
+        );
         self.client.create_session(caps).await
     }
 
@@ -197,5 +210,31 @@ mod tests {
     fn test_appium_constants() {
         assert_eq!(APPIUM_DEFAULT_PORT, 4723);
         assert_eq!(APPIUM_STARTUP_TIMEOUT_SECS, 30);
+    }
+
+    #[test]
+    fn test_ios_capabilities_use_vendor_prefix() {
+        let caps = AppiumManager::build_ios_capabilities(
+            Some("TEST-UDID-123"),
+            Some("iPhone 16 Pro"),
+            Some("18.5"),
+        );
+
+        // W3C standard capabilities must NOT have vendor prefix
+        assert!(caps.get("platformName").is_some());
+        assert!(caps.get("browserName").is_some());
+
+        // Non-standard capabilities MUST have appium: vendor prefix
+        assert!(caps.get("appium:automationName").is_some());
+        assert!(caps.get("appium:noReset").is_some());
+        assert!(caps.get("appium:deviceName").is_some());
+        assert!(caps.get("appium:platformVersion").is_some());
+        assert!(caps.get("appium:udid").is_some());
+
+        // Must NOT have unprefixed non-standard capabilities
+        assert!(caps.get("automationName").is_none());
+        assert!(caps.get("noReset").is_none());
+        assert!(caps.get("deviceName").is_none());
+        assert!(caps.get("udid").is_none());
     }
 }

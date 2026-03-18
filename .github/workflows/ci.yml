@@ -18,43 +18,6 @@ jobs:
       - name: Check version sync
         run: node scripts/check-version-sync.js
 
-  typescript:
-    name: TypeScript (Node ${{ matrix.node-version }})
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        node-version: [20, 22]
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 9
-
-      - name: Setup Node.js ${{ matrix.node-version }}
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ matrix.node-version }}
-          cache: pnpm
-
-      - name: Install dependencies
-        run: pnpm install
-
-      - name: Typecheck
-        run: pnpm typecheck
-
-      - name: Format check
-        run: pnpm format:check
-
-      - name: Install Playwright browsers
-        run: pnpm exec playwright install --with-deps chromium
-
-      - name: Run tests
-        run: pnpm test
-
   rust:
     name: Rust
     runs-on: ubuntu-latest
@@ -92,7 +55,7 @@ jobs:
             target: aarch64-apple-darwin
           - os: macos-latest
             target: x86_64-apple-darwin
-          - os: windows-latest-8-cores
+          - os: windows-latest
             target: x86_64-pc-windows-msvc
 
     steps:
@@ -112,26 +75,39 @@ jobs:
       - name: Run Rust tests
         run: cargo test --profile ci --manifest-path cli/Cargo.toml --target ${{ matrix.target }}
 
+  native-e2e:
+    name: Native E2E Tests
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    needs: rust
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: cli
+
+      - name: Install Chrome
+        run: |
+          cargo run --manifest-path cli/Cargo.toml -- install --with-deps
+
+      - name: Run e2e tests
+        run: cargo test --profile ci --manifest-path cli/Cargo.toml e2e -- --ignored --test-threads=1
+
   windows-integration:
     name: Windows Integration Test
     if: github.event_name != 'pull_request'
-    runs-on: windows-latest-8-cores
+    runs-on: windows-latest
     needs: rust-cross
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 9
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -145,12 +121,6 @@ jobs:
 
       - name: Build Rust CLI
         run: cargo build --release --manifest-path cli/Cargo.toml --target x86_64-pc-windows-msvc
-
-      - name: Install npm dependencies
-        run: pnpm install
-
-      - name: Build TypeScript
-        run: pnpm build
 
       - name: Copy CLI binary to bin directory
         run: |
@@ -169,18 +139,6 @@ jobs:
         shell: pwsh
         timeout-minutes: 10
 
-      - name: Verify Chromium was installed
-        run: |
-          $playwrightPath = "$env:LOCALAPPDATA\ms-playwright"
-          if (Test-Path $playwrightPath) {
-            Write-Host "Playwright browsers installed at: $playwrightPath"
-            Get-ChildItem $playwrightPath -Recurse -Depth 2 | Select-Object -First 20
-          } else {
-            Write-Error "Playwright browsers not found!"
-            exit 1
-          }
-        shell: pwsh
-
       - name: Test daemon lifecycle (open, snapshot, close)
         run: |
           $env:PATH = "$pwd\bin;$env:PATH"
@@ -198,37 +156,6 @@ jobs:
         shell: pwsh
         timeout-minutes: 5
 
-  serverless-chromium:
-    name: Serverless Chromium (@sparticuz/chromium)
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 9
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-
-      - name: Install dependencies
-        run: pnpm install
-
-      - name: Install @sparticuz/chromium
-        run: pnpm add -D @sparticuz/chromium
-
-      - name: Build TypeScript
-        run: pnpm build
-
-      - name: Run serverless integration test
-        run: pnpm exec vitest run test/serverless.test.ts
-
   global-install:
     name: Global Install (${{ matrix.os }})
     if: github.event_name != 'pull_request'
@@ -243,7 +170,7 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
             binary: agent-browser-darwin-arm64
-          - os: windows-latest-8-cores
+          - os: windows-latest
             target: x86_64-pc-windows-msvc
             binary: agent-browser-win32-x64.exe
 
@@ -251,16 +178,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 9
-
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: pnpm
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -274,12 +195,6 @@ jobs:
 
       - name: Build Rust CLI
         run: cargo build --release --manifest-path cli/Cargo.toml --target ${{ matrix.target }}
-
-      - name: Install npm dependencies
-        run: pnpm install
-
-      - name: Build TypeScript
-        run: pnpm build
 
       - name: Copy CLI binary to bin directory (Unix)
         if: runner.os != 'Windows'
@@ -307,7 +222,7 @@ jobs:
             echo "ERROR: Symlink should point to native binary, not JS wrapper"
             exit 1
           fi
-          echo "✓ Symlink correctly points to native binary"
+          echo "Symlink correctly points to native binary"
         shell: bash
 
       - name: Verify shim points to native binary (Windows)
@@ -322,5 +237,5 @@ jobs:
             echo "ERROR: Shim should point to native .exe, not JS wrapper"
             exit 1
           }
-          echo "✓ Shim correctly points to native binary"
+          echo "Shim correctly points to native binary"
         shell: pwsh

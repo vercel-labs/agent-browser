@@ -21,7 +21,7 @@ When no `--executable-path` is provided, agent-browser searches for Chrome in th
         <code>/Applications/Google Chrome.app</code>,
         <code>/Applications/Google Chrome Canary.app</code>,
         <code>/Applications/Chromium.app</code>,
-        Playwright Chromium cache
+        Chrome for Testing cache
       </td>
     </tr>
     <tr>
@@ -31,7 +31,7 @@ When no `--executable-path` is provided, agent-browser searches for Chrome in th
         <code>google-chrome-stable</code>,
         <code>chromium-browser</code>,
         <code>chromium</code> in PATH,
-        Playwright Chromium cache
+        Chrome for Testing cache
       </td>
     </tr>
     <tr>
@@ -45,7 +45,7 @@ When no `--executable-path` is provided, agent-browser searches for Chrome in th
   </tbody>
 </table>
 
-If Chrome is not found, run `agent-browser install` to download Chromium via Playwright.
+If Chrome is not found, run `agent-browser install` to download Chrome from Chrome for Testing.
 
 ## Usage
 
@@ -86,7 +86,7 @@ These features are available only with Chrome:
   </thead>
   <tbody>
     <tr><td>Browser extensions</td><td><code>--extension &lt;path&gt;</code></td></tr>
-    <tr><td>Persistent profiles</td><td><code>--profile &lt;path&gt;</code></td></tr>
+    <tr><td>Persistent profiles</td><td><code>--profile &lt;path&gt;</code> (sets Chrome's <code>--user-data-dir</code>)</td></tr>
     <tr><td>Storage state</td><td><code>--state &lt;path&gt;</code></td></tr>
     <tr><td>File URL access</td><td><code>--allow-file-access</code></td></tr>
     <tr><td>Headed mode</td><td><code>--headed</code></td></tr>

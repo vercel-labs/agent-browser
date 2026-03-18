@@ -7,6 +7,7 @@ mod native;
 mod output;
 #[cfg(test)]
 mod test_utils;
+mod upgrade;
 mod validation;
 
 use serde_json::json;
@@ -21,14 +22,12 @@ use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_I
 
 use commands::{gen_id, parse_command, ParseError};
 use connection::{ensure_daemon, get_socket_dir, send_command, DaemonOptions};
-use flags::{clean_args, parse_flags};
+use flags::{clean_args, parse_flags, Flags};
 use install::run_install;
 use output::{
     print_command_help, print_help, print_response_with_opts, print_version, OutputOptions,
 };
-
-use std::path::PathBuf;
-use std::process::Command as ProcessCommand;
+use upgrade::run_upgrade;
 
 fn serialize_json_value(value: &serde_json::Value) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| {
@@ -53,110 +52,6 @@ fn print_json_error_with_type(message: impl AsRef<str>, error_type: &str) {
         "error": message.as_ref(),
         "type": error_type,
     }));
-}
-
-/// Run a local auth command (auth_save/list/show/delete) via node auth-cli.js.
-/// These commands don't need a browser, so we handle them directly to avoid
-/// sending passwords through the daemon's Unix socket channel.
-fn run_auth_cli(cmd: &serde_json::Value, json_mode: bool) -> ! {
-    let exe_path = env::current_exe().unwrap_or_default();
-    let exe_path = exe_path.canonicalize().unwrap_or(exe_path);
-    #[cfg(windows)]
-    let exe_path = {
-        let p = exe_path.to_string_lossy();
-        if let Some(stripped) = p.strip_prefix(r"\\?\") {
-            PathBuf::from(stripped)
-        } else {
-            exe_path
-        }
-    };
-    let exe_dir = exe_path.parent().unwrap_or(std::path::Path::new("."));
-
-    let mut script_paths = vec![
-        exe_dir.join("auth-cli.js"),
-        exe_dir.join("../dist/auth-cli.js"),
-        PathBuf::from("dist/auth-cli.js"),
-    ];
-
-    if let Ok(home) = env::var("AGENT_BROWSER_HOME") {
-        let home_path = PathBuf::from(&home);
-        script_paths.insert(0, home_path.join("dist/auth-cli.js"));
-        script_paths.insert(1, home_path.join("auth-cli.js"));
-    }
-
-    let script_path = match script_paths.iter().find(|p| p.exists()) {
-        Some(p) => p.clone(),
-        None => {
-            if json_mode {
-                print_json_error("auth-cli.js not found");
-            } else {
-                eprintln!(
-                    "{} auth-cli.js not found. Set AGENT_BROWSER_HOME or run from project directory.",
-                    color::error_indicator()
-                );
-            }
-            exit(1);
-        }
-    };
-
-    let cmd_json = serde_json::to_string(cmd).unwrap_or_default();
-
-    match ProcessCommand::new("node")
-        .arg(&script_path)
-        .arg(&cmd_json)
-        .output()
-    {
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            if !stderr.is_empty() {
-                eprint!("{}", stderr);
-            }
-
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stdout = stdout.trim();
-
-            if stdout.is_empty() {
-                if json_mode {
-                    print_json_error("No response from auth-cli");
-                } else {
-                    eprintln!("{} No response from auth-cli", color::error_indicator());
-                }
-                exit(1);
-            }
-
-            if json_mode {
-                println!("{}", stdout);
-            } else {
-                // Parse the JSON response and use the standard output formatter
-                match serde_json::from_str::<connection::Response>(stdout) {
-                    Ok(resp) => {
-                        let action = cmd.get("action").and_then(|v| v.as_str());
-                        let opts = OutputOptions {
-                            json: false,
-                            content_boundaries: false,
-                            max_output: None,
-                        };
-                        print_response_with_opts(&resp, action, &opts);
-                        if !resp.success {
-                            exit(1);
-                        }
-                    }
-                    Err(_) => {
-                        println!("{}", stdout);
-                    }
-                }
-            }
-            exit(output.status.code().unwrap_or(0));
-        }
-        Err(e) => {
-            if json_mode {
-                print_json_error(format!("Failed to run auth-cli: {}", e));
-            } else {
-                eprintln!("{} Failed to run auth-cli: {}", color::error_indicator(), e);
-            }
-            exit(1);
-        }
-    }
 }
 
 fn parse_proxy(proxy_str: &str) -> serde_json::Value {
@@ -271,7 +166,8 @@ fn run_session(args: &[String], session: &str, json_mode: bool) {
 }
 
 fn main() {
-    // Ignore SIGPIPE to prevent panic when piping to head/tail
+    // Rust ignores SIGPIPE by default, causing println! to panic on broken pipes.
+    // Reset to SIG_DFL so the OS terminates the process cleanly instead.
     #[cfg(unix)]
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
@@ -299,12 +195,8 @@ fn main() {
     }
 
     let args: Vec<String> = env::args().skip(1).collect();
-    let mut flags = parse_flags(&args);
+    let flags = parse_flags(&args);
     let clean = clean_args(&args);
-
-    if flags.engine.is_some() && !flags.native {
-        flags.native = true;
-    }
 
     let has_help = args.iter().any(|a| a == "--help" || a == "-h");
     let has_version = args.iter().any(|a| a == "--version" || a == "-V");
@@ -333,6 +225,12 @@ fn main() {
     if clean.first().map(|s| s.as_str()) == Some("install") {
         let with_deps = args.iter().any(|a| a == "--with-deps" || a == "-d");
         run_install(with_deps);
+        return;
+    }
+
+    // Handle upgrade separately
+    if clean.first().map(|s| s.as_str()) == Some("upgrade") {
+        run_upgrade();
         return;
     }
 
@@ -392,17 +290,6 @@ fn main() {
         }
     }
 
-    // Handle local auth commands without starting the daemon.
-    // These don't need a browser, so we avoid sending passwords through the socket.
-    if let Some(action) = cmd.get("action").and_then(|v| v.as_str()) {
-        if matches!(
-            action,
-            "auth_save" | "auth_list" | "auth_show" | "auth_delete"
-        ) {
-            run_auth_cli(&cmd, flags.json);
-        }
-    }
-
     // Validate session name before starting daemon
     if let Some(ref name) = flags.session_name {
         if !validation::is_valid_session_name(name) {
@@ -436,8 +323,10 @@ fn main() {
         allowed_domains: flags.allowed_domains.as_deref(),
         action_policy: flags.action_policy.as_deref(),
         confirm_actions: flags.confirm_actions.as_deref(),
-        native: flags.native,
         engine: flags.engine.as_deref(),
+        auto_connect: flags.auto_connect,
+        idle_timeout: flags.idle_timeout.as_deref(),
+        cdp: flags.cdp.as_deref(),
     };
     let daemon_result = match ensure_daemon(&flags.session, &daemon_opts) {
         Ok(result) => result,
@@ -495,7 +384,7 @@ fn main() {
             flags.ignore_https_errors.then_some("--ignore-https-errors"),
             flags.cli_allow_file_access.then_some("--allow-file-access"),
             flags.cli_download_path.then_some("--download-path"),
-            flags.cli_native.then_some("--native"),
+            flags.cli_headed.then_some("--headed"),
         ]
         .into_iter()
         .flatten()
@@ -723,6 +612,7 @@ fn main() {
 
     // Launch headed browser or configure browser options (without CDP or provider)
     if (flags.headed
+        || flags.cli_headed  // User explicitly set --headed (even if false)
         || flags.executable_path.is_some()
         || flags.profile.is_some()
         || flags.state.is_some()
@@ -732,9 +622,11 @@ fn main() {
         || flags.allow_file_access
         || flags.color_scheme.is_some()
         || flags.download_path.is_some()
-        || flags.engine.is_some())
+        || flags.engine.is_some()
+        || !flags.extensions.is_empty())
         && flags.cdp.is_none()
         && flags.provider.is_none()
+        && !flags.auto_connect
     {
         let mut launch_cmd = json!({
             "id": gen_id(),
@@ -784,6 +676,10 @@ fn main() {
                 .filter(|s| !s.is_empty())
                 .collect();
             cmd_obj.insert("args".to_string(), json!(args_vec));
+        }
+
+        if !flags.extensions.is_empty() {
+            cmd_obj.insert("extensions".to_string(), json!(&flags.extensions));
         }
 
         if flags.ignore_https_errors {
@@ -839,6 +735,13 @@ fn main() {
                 // Launch succeeded
             }
         }
+    }
+
+    // Handle batch command: read commands from stdin, execute sequentially
+    if cmd.get("action").and_then(|v| v.as_str()) == Some("batch") {
+        let bail = cmd.get("bail").and_then(|v| v.as_bool()).unwrap_or(false);
+        run_batch(&flags, bail);
+        return;
     }
 
     let output_opts = OutputOptions {
@@ -918,6 +821,150 @@ fn main() {
             }
             exit(1);
         }
+    }
+}
+
+fn run_batch(flags: &Flags, bail: bool) {
+    use std::io::Read as _;
+
+    let mut input = String::new();
+    if let Err(e) = std::io::stdin().read_to_string(&mut input) {
+        if flags.json {
+            print_json_error(format!("Failed to read stdin: {}", e));
+        } else {
+            eprintln!("{} Failed to read stdin: {}", color::error_indicator(), e);
+        }
+        exit(1);
+    }
+
+    let commands: Vec<Vec<String>> = match serde_json::from_str(&input) {
+        Ok(c) => c,
+        Err(e) => {
+            if flags.json {
+                print_json_error(format!(
+                    "Invalid JSON input: {}. Expected an array of string arrays, e.g. [[\"open\", \"https://example.com\"], [\"snapshot\"]]",
+                    e
+                ));
+            } else {
+                eprintln!(
+                    "{} Invalid JSON input: {}. Expected an array of string arrays.",
+                    color::error_indicator(),
+                    e
+                );
+            }
+            exit(1);
+        }
+    };
+
+    if commands.is_empty() {
+        if flags.json {
+            println!("[]");
+        }
+        return;
+    }
+
+    let output_opts = OutputOptions {
+        json: flags.json,
+        content_boundaries: flags.content_boundaries,
+        max_output: flags.max_output,
+    };
+
+    let mut results: Vec<serde_json::Value> = Vec::new();
+    let mut had_error = false;
+
+    for (i, cmd_args) in commands.iter().enumerate() {
+        if cmd_args.is_empty() {
+            continue;
+        }
+
+        let parsed = match parse_command(cmd_args, flags) {
+            Ok(c) => c,
+            Err(e) => {
+                had_error = true;
+                if flags.json {
+                    results.push(json!({
+                        "command": cmd_args,
+                        "success": false,
+                        "error": e.format(),
+                    }));
+                    if bail {
+                        break;
+                    }
+                } else {
+                    eprintln!(
+                        "{} Command {}: {}",
+                        color::error_indicator(),
+                        i + 1,
+                        e.format()
+                    );
+                    if bail {
+                        exit(1);
+                    }
+                }
+                continue;
+            }
+        };
+
+        let action = parsed
+            .get("action")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        match send_command(parsed, &flags.session) {
+            Ok(resp) => {
+                if flags.json {
+                    results.push(json!({
+                        "command": cmd_args,
+                        "success": resp.success,
+                        "result": resp.data,
+                        "error": resp.error,
+                    }));
+                } else {
+                    if i > 0 {
+                        println!();
+                    }
+                    print_response_with_opts(&resp, action.as_deref(), &output_opts);
+                }
+                if !resp.success {
+                    had_error = true;
+                    if bail {
+                        if !flags.json {
+                            exit(1);
+                        }
+                        break;
+                    }
+                }
+            }
+            Err(e) => {
+                had_error = true;
+                if flags.json {
+                    results.push(json!({
+                        "command": cmd_args,
+                        "success": false,
+                        "error": e.to_string(),
+                    }));
+                    if bail {
+                        break;
+                    }
+                } else {
+                    eprintln!("{} Command {}: {}", color::error_indicator(), i + 1, e);
+                    if bail {
+                        exit(1);
+                    }
+                }
+            }
+        }
+    }
+
+    if flags.json {
+        println!(
+            "{}",
+            serde_json::to_string(&results).unwrap_or_else(|_| "[]".to_string())
+        );
+    }
+
+    if had_error {
+        exit(1);
     }
 }
 

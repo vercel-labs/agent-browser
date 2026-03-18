@@ -58,6 +58,7 @@ agent-browser get value @e1       # Get input value
 agent-browser get attr @e1 href   # Get attribute
 agent-browser get title           # Get page title
 agent-browser get url             # Get current URL
+agent-browser get cdp-url         # Get CDP WebSocket URL
 agent-browser get count ".item"   # Count matching elements
 agent-browser get box @e1         # Get bounding box
 agent-browser get styles @e1      # Get computed styles (font, color, bg, etc.)
@@ -176,9 +177,35 @@ agent-browser window new          # New window
 ## Frames
 
 ```bash
-agent-browser frame "#iframe"     # Switch to iframe
+agent-browser frame "#iframe"     # Switch to iframe by CSS selector
+agent-browser frame @e3           # Switch to iframe by element ref
 agent-browser frame main          # Back to main frame
 ```
+
+### Iframe support
+
+Iframes are detected automatically during snapshots. When the main-frame snapshot runs, `Iframe` nodes are resolved and their content is inlined beneath the iframe element in the output (one level of nesting; iframes within iframes are not expanded).
+
+```bash
+agent-browser snapshot -i
+# @e3 [Iframe] "payment-frame"
+#   @e4 [input] "Card number"
+#   @e5 [button] "Pay"
+
+# Interact directly — refs inside iframes already work
+agent-browser fill @e4 "4111111111111111"
+agent-browser click @e5
+
+# Or switch frame context for scoped snapshots
+agent-browser frame @e3               # Switch using element ref
+agent-browser snapshot -i             # Snapshot scoped to that iframe
+agent-browser frame main              # Return to main frame
+```
+
+The `frame` command accepts:
+- **Element refs** — `frame @e3` resolves the ref to an iframe element
+- **CSS selectors** — `frame "#payment-iframe"` finds the iframe by selector
+- **Frame name/URL** — matches against the browser's frame tree
 
 ## Dialogs
 
@@ -246,6 +273,7 @@ agent-browser console --clear             # Clear console
 agent-browser errors                      # View page errors
 agent-browser errors --clear              # Clear errors
 agent-browser highlight @e1               # Highlight element
+agent-browser inspect                     # Open Chrome DevTools for this session
 agent-browser trace start                 # Start recording trace
 agent-browser trace stop trace.zip        # Stop and save trace
 agent-browser profiler start              # Start Chrome DevTools profiling

@@ -1,9 +1,9 @@
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
-use super::types::BrowserVersionInfo;
+use super::discovery::discover_cdp_url;
 
 pub struct ChromeProcess {
     child: Child,
@@ -47,7 +47,10 @@ impl Drop for ChromeProcess {
                         std::thread::sleep(Duration::from_millis(100));
                     }
                     Err(e) => {
-                        eprintln!(
+                        // Use write! instead of eprintln! to avoid panicking
+                        // if the daemon's stderr pipe is broken (parent dropped it).
+                        let _ = writeln!(
+                            std::io::stderr(),
                             "Warning: failed to clean up temp profile {}: {}",
                             dir.display(),
                             e
@@ -97,6 +100,7 @@ impl Default for LaunchOptions {
 
 struct ChromeArgs {
     args: Vec<String>,
+    user_data_dir: PathBuf,
     temp_user_data_dir: Option<PathBuf>,
 }
 
@@ -139,17 +143,18 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
         args.push(format!("--proxy-bypass-list={}", bypass));
     }
 
-    let temp_user_data_dir = if let Some(ref profile) = options.profile {
+    let (user_data_dir, temp_user_data_dir) = if let Some(ref profile) = options.profile {
         let expanded = expand_tilde(profile);
+        let dir = PathBuf::from(&expanded);
         args.push(format!("--user-data-dir={}", expanded));
-        None
+        (dir, None)
     } else {
         let dir =
             std::env::temp_dir().join(format!("agent-browser-chrome-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir)
             .map_err(|e| format!("Failed to create temp profile dir: {}", e))?;
         args.push(format!("--user-data-dir={}", dir.display()));
-        Some(dir)
+        (dir.clone(), Some(dir))
     };
 
     if options.allow_file_access {
@@ -180,8 +185,13 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
         args.push("--no-sandbox".to_string());
     }
 
+    if should_disable_dev_shm(&args) {
+        args.push("--disable-dev-shm-usage".to_string());
+    }
+
     Ok(ChromeArgs {
         args,
+        user_data_dir,
         temp_user_data_dir,
     })
 }
@@ -190,14 +200,46 @@ pub fn launch_chrome(options: &LaunchOptions) -> Result<ChromeProcess, String> {
     let chrome_path = match &options.executable_path {
         Some(p) => PathBuf::from(p),
         None => {
-            find_chrome().ok_or("Chrome not found. Install Chrome or use --executable-path.")?
+            find_chrome().ok_or("Chrome not found. Run `agent-browser install` to download Chrome, or use --executable-path.")?
         }
     };
 
+    let max_attempts = 3;
+    let mut last_err = String::new();
+
+    for attempt in 1..=max_attempts {
+        match try_launch_chrome(&chrome_path, options) {
+            Ok(process) => return Ok(process),
+            Err(e) => {
+                last_err = e;
+                if attempt < max_attempts {
+                    // Use write! instead of eprintln! to avoid panicking
+                    // if the daemon's stderr pipe is broken (parent dropped it).
+                    let _ = writeln!(
+                        std::io::stderr(),
+                        "[chrome] Launch attempt {}/{} failed, retrying in 500ms...",
+                        attempt,
+                        max_attempts
+                    );
+                    std::thread::sleep(Duration::from_millis(500));
+                }
+            }
+        }
+    }
+
+    Err(last_err)
+}
+
+fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<ChromeProcess, String> {
     let ChromeArgs {
         args,
+        user_data_dir,
         temp_user_data_dir,
     } = build_chrome_args(options)?;
+
+    // Mitigate stale DevToolsActivePort risk (e.g., previous crash left it behind).
+    // Puppeteer does similar cleanup before spawning.
+    let _ = std::fs::remove_file(user_data_dir.join("DevToolsActivePort"));
 
     let cleanup_temp_dir = |dir: &Option<PathBuf>| {
         if let Some(ref d) = dir {
@@ -205,7 +247,7 @@ pub fn launch_chrome(options: &LaunchOptions) -> Result<ChromeProcess, String> {
         }
     };
 
-    let mut child = Command::new(&chrome_path)
+    let mut child = Command::new(chrome_path)
         .args(&args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -216,19 +258,33 @@ pub fn launch_chrome(options: &LaunchOptions) -> Result<ChromeProcess, String> {
             format!("Failed to launch Chrome at {:?}: {}", chrome_path, e)
         })?;
 
-    let stderr = child.stderr.take().ok_or_else(|| {
-        let _ = child.kill();
-        cleanup_temp_dir(&temp_user_data_dir);
-        "Failed to capture Chrome stderr".to_string()
-    })?;
-    let reader = BufReader::new(stderr);
+    // Shared overall deadline so we don't double-wait (poll + stderr fallback).
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
 
-    let ws_url = match wait_for_ws_url(reader) {
+    // Primary path: use DevToolsActivePort written into user-data-dir.
+    // This is more reliable on Windows than scraping stderr for "DevTools listening on ...",
+    // which can be missing/empty depending on how Chrome is launched.
+    let ws_url = match wait_for_devtools_active_port(&mut child, &user_data_dir, deadline) {
         Ok(url) => url,
-        Err(e) => {
-            let _ = child.kill();
-            cleanup_temp_dir(&temp_user_data_dir);
-            return Err(e);
+        Err(primary_err) => {
+            // Fallback: scrape stderr (legacy behavior) for better diagnostics.
+            let stderr = child.stderr.take().ok_or_else(|| {
+                let _ = child.kill();
+                cleanup_temp_dir(&temp_user_data_dir);
+                "Failed to capture Chrome stderr".to_string()
+            })?;
+            let reader = BufReader::new(stderr);
+            match wait_for_ws_url_until(reader, deadline) {
+                Ok(url) => url,
+                Err(fallback_err) => {
+                    let _ = child.kill();
+                    cleanup_temp_dir(&temp_user_data_dir);
+                    return Err(format!(
+                        "{}\n(also tried parsing stderr) {}",
+                        primary_err, fallback_err
+                    ));
+                }
+            }
         }
     };
 
@@ -239,8 +295,34 @@ pub fn launch_chrome(options: &LaunchOptions) -> Result<ChromeProcess, String> {
     })
 }
 
-fn wait_for_ws_url(reader: BufReader<std::process::ChildStderr>) -> Result<String, String> {
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+fn wait_for_devtools_active_port(
+    child: &mut Child,
+    user_data_dir: &Path,
+    deadline: std::time::Instant,
+) -> Result<String, String> {
+    let poll_interval = Duration::from_millis(50);
+
+    while std::time::Instant::now() <= deadline {
+        if let Ok(Some(_status)) = child.try_wait() {
+            // If Chrome already exited, stop waiting.
+            break;
+        }
+
+        if let Some((port, ws_path)) = read_devtools_active_port(user_data_dir) {
+            let ws_url = format!("ws://127.0.0.1:{}{}", port, ws_path);
+            return Ok(ws_url);
+        }
+
+        std::thread::sleep(poll_interval);
+    }
+
+    Err("Timeout waiting for DevToolsActivePort".to_string())
+}
+
+fn wait_for_ws_url_until(
+    reader: BufReader<std::process::ChildStderr>,
+    deadline: std::time::Instant,
+) -> Result<String, String> {
     let prefix = "DevTools listening on ";
     let mut stderr_lines: Vec<String> = Vec::new();
 
@@ -320,22 +402,25 @@ fn chrome_launch_error(message: &str, stderr_lines: &[String]) -> String {
 }
 
 pub fn find_chrome() -> Option<PathBuf> {
+    // 1. Check Chrome downloaded by `agent-browser install`
+    if let Some(p) = crate::install::find_installed_chrome() {
+        return Some(p);
+    }
+
+    // 2. Check system-installed Chrome
     #[cfg(target_os = "macos")]
     {
         let candidates = [
             "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
             "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
             "/Applications/Chromium.app/Contents/MacOS/Chromium",
+            "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
         ];
         for c in &candidates {
             let p = PathBuf::from(c);
             if p.exists() {
                 return Some(p);
             }
-        }
-
-        if let Some(p) = find_playwright_chromium() {
-            return Some(p);
         }
     }
 
@@ -346,6 +431,8 @@ pub fn find_chrome() -> Option<PathBuf> {
             "google-chrome-stable",
             "chromium-browser",
             "chromium",
+            "brave-browser",
+            "brave-browser-stable",
         ];
         for name in &candidates {
             if let Ok(output) = Command::new("which").arg(name).output() {
@@ -357,10 +444,6 @@ pub fn find_chrome() -> Option<PathBuf> {
                 }
             }
         }
-
-        if let Some(p) = find_playwright_chromium() {
-            return Some(p);
-        }
     }
 
     #[cfg(target_os = "windows")]
@@ -370,9 +453,14 @@ pub fn find_chrome() -> Option<PathBuf> {
             r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
         ];
         if let Ok(local) = std::env::var("LOCALAPPDATA") {
-            let p = PathBuf::from(&local).join(r"Google\Chrome\Application\chrome.exe");
-            if p.exists() {
-                return Some(p);
+            let chrome = PathBuf::from(&local).join(r"Google\Chrome\Application\chrome.exe");
+            if chrome.exists() {
+                return Some(chrome);
+            }
+            let brave =
+                PathBuf::from(&local).join(r"BraveSoftware\Brave-Browser\Application\brave.exe");
+            if brave.exists() {
+                return Some(brave);
             }
         }
         for c in &candidates {
@@ -383,29 +471,12 @@ pub fn find_chrome() -> Option<PathBuf> {
         }
     }
 
+    // 3. Fallback: check Playwright's browser cache (for existing installs)
+    if let Some(p) = find_playwright_chromium() {
+        return Some(p);
+    }
+
     None
-}
-
-pub async fn discover_cdp_url(port: u16) -> Result<String, String> {
-    let url = format!("http://127.0.0.1:{}/json/version", port);
-
-    let body = tokio::time::timeout(Duration::from_secs(2), async {
-        reqwest_get_string(&url).await
-    })
-    .await
-    .map_err(|_| format!("Timeout connecting to CDP on port {}", port))?
-    .map_err(|e| format!("Failed to connect to CDP on port {}: {}", port, e))?;
-
-    let info: BrowserVersionInfo = serde_json::from_str(&body)
-        .map_err(|e| format!("Invalid /json/version response: {}", e))?;
-
-    info.web_socket_debugger_url
-        .ok_or_else(|| format!("No webSocketDebuggerUrl in /json/version on port {}", port))
-}
-
-async fn reqwest_get_string(url: &str) -> Result<String, String> {
-    let resp = reqwest::get(url).await.map_err(|e| e.to_string())?;
-    resp.text().await.map_err(|e| e.to_string())
 }
 
 pub fn read_devtools_active_port(user_data_dir: &Path) -> Option<(u16, String)> {
@@ -427,23 +498,37 @@ pub async fn auto_connect_cdp() -> Result<String, String> {
     for dir in &user_data_dirs {
         if let Some((port, ws_path)) = read_devtools_active_port(dir) {
             // Try HTTP endpoint first (pre-M144)
-            if let Ok(ws_url) = discover_cdp_url(port).await {
+            if let Ok(ws_url) = discover_cdp_url("127.0.0.1", port).await {
                 return Ok(ws_url);
             }
-            // M144+: direct WebSocket
-            let ws_url = format!("ws://127.0.0.1:{}{}", port, ws_path);
-            return Ok(ws_url);
+            // M144+: direct WebSocket — verify the port is actually listening
+            // before returning, otherwise a stale DevToolsActivePort file
+            // (left behind after Chrome exits/crashes) produces a confusing
+            // "connection refused" error instead of falling through.
+            if is_port_reachable(port) {
+                let ws_url = format!("ws://127.0.0.1:{}{}", port, ws_path);
+                return Ok(ws_url);
+            }
+            // Port is dead — remove the stale file so future runs skip it.
+            let stale = dir.join("DevToolsActivePort");
+            let _ = std::fs::remove_file(&stale);
         }
     }
 
     // Fallback: probe common ports
     for port in [9222u16, 9229] {
-        if let Ok(ws_url) = discover_cdp_url(port).await {
+        if let Ok(ws_url) = discover_cdp_url("127.0.0.1", port).await {
             return Ok(ws_url);
         }
     }
 
     Err("No running Chrome instance found. Launch Chrome with --remote-debugging-port or use --cdp.".to_string())
+}
+
+fn is_port_reachable(port: u16) -> bool {
+    use std::net::TcpStream;
+    let addr = format!("127.0.0.1:{}", port);
+    TcpStream::connect_timeout(&addr.parse().unwrap(), Duration::from_millis(500)).is_ok()
 }
 
 fn get_chrome_user_data_dirs() -> Vec<PathBuf> {
@@ -453,7 +538,12 @@ fn get_chrome_user_data_dirs() -> Vec<PathBuf> {
     {
         if let Some(home) = dirs::home_dir() {
             let base = home.join("Library/Application Support");
-            for name in ["Google/Chrome", "Google/Chrome Canary", "Chromium"] {
+            for name in [
+                "Google/Chrome",
+                "Google/Chrome Canary",
+                "Chromium",
+                "BraveSoftware/Brave-Browser",
+            ] {
                 dirs.push(base.join(name));
             }
         }
@@ -463,7 +553,12 @@ fn get_chrome_user_data_dirs() -> Vec<PathBuf> {
     {
         if let Some(home) = dirs::home_dir() {
             let config = home.join(".config");
-            for name in ["google-chrome", "google-chrome-unstable", "chromium"] {
+            for name in [
+                "google-chrome",
+                "google-chrome-unstable",
+                "chromium",
+                "BraveSoftware/Brave-Browser",
+            ] {
                 dirs.push(config.join(name));
             }
         }
@@ -477,6 +572,7 @@ fn get_chrome_user_data_dirs() -> Vec<PathBuf> {
                 r"Google\Chrome\User Data",
                 r"Google\Chrome SxS\User Data",
                 r"Chromium\User Data",
+                r"BraveSoftware\Brave-Browser\User Data",
             ] {
                 dirs.push(base.join(name));
             }
@@ -487,10 +583,16 @@ fn get_chrome_user_data_dirs() -> Vec<PathBuf> {
 }
 
 /// Returns true if Chrome's sandbox should be disabled because the environment
-/// doesn't support it (containers, VMs, running as root).
+/// doesn't support it (containers, VMs, CI runners, running as root).
 fn should_disable_sandbox(existing_args: &[String]) -> bool {
     if existing_args.iter().any(|a| a == "--no-sandbox") {
         return false; // already set by user
+    }
+
+    // CI environments (GitHub Actions, GitLab CI, etc.) often lack user namespace
+    // support due to AppArmor or kernel restrictions.
+    if std::env::var("CI").is_ok() {
+        return true;
     }
 
     #[cfg(unix)]
@@ -521,8 +623,38 @@ fn should_disable_sandbox(existing_args: &[String]) -> bool {
     false
 }
 
+/// Returns true if Chrome should use disk instead of /dev/shm for shared memory.
+/// On CI runners and containers, /dev/shm is often too small (64MB default),
+/// which causes Chrome to crash mid-session.
+fn should_disable_dev_shm(existing_args: &[String]) -> bool {
+    if existing_args.iter().any(|a| a == "--disable-dev-shm-usage") {
+        return false;
+    }
+
+    if std::env::var("CI").is_ok() {
+        return true;
+    }
+
+    #[cfg(unix)]
+    {
+        if unsafe { libc::geteuid() } == 0 {
+            return true;
+        }
+        if Path::new("/.dockerenv").exists() || Path::new("/run/.containerenv").exists() {
+            return true;
+        }
+        if let Ok(cgroup) = std::fs::read_to_string("/proc/1/cgroup") {
+            if cgroup.contains("docker") || cgroup.contains("kubepods") || cgroup.contains("lxc") {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
 /// Search Playwright's browser cache for a Chromium binary.
-/// This is where `agent-browser install` (via `npx playwright install chromium`) puts it.
+/// Legacy fallback for users who previously installed Chromium via Playwright.
 fn find_playwright_chromium() -> Option<PathBuf> {
     let mut search_dirs = Vec::new();
 
@@ -599,6 +731,28 @@ fn expand_tilde(path: &str) -> String {
 mod tests {
     use super::*;
     use crate::test_utils::EnvGuard;
+
+    #[cfg(unix)]
+    fn spawn_noop_child() -> Child {
+        Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap()
+    }
+
+    #[cfg(windows)]
+    fn spawn_noop_child() -> Child {
+        Command::new("cmd.exe")
+            .args(["/C", "exit 0"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap()
+    }
 
     #[test]
     fn test_find_chrome_returns_some_on_host() {
@@ -830,13 +984,7 @@ mod tests {
             // Simulate a ChromeProcess with a temp dir but a dummy child.
             // We can't actually spawn Chrome here, but we can verify the Drop
             // logic by creating a small helper process.
-            let child = Command::new("echo")
-                .arg("test")
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .unwrap();
+            let child = spawn_noop_child();
             let _process = ChromeProcess {
                 child,
                 ws_url: String::new(),

@@ -26,25 +26,9 @@ This applies to changes that either human users or AI agents would need to know 
 
 In the `docs/src/app/` MDX files, always use HTML `<table>` syntax for tables (not markdown pipe tables). This matches the existing convention across the docs site.
 
-## Dual Architecture (Node.js + Native)
+## Architecture
 
-The codebase has two daemon implementations:
-
-- **Node.js/Playwright** (default) -- `src/daemon.ts`, `src/actions.ts`, `src/browser.ts`, and the rest of `src/`
-- **Rust/Native** (experimental, `--native` or `AGENT_BROWSER_NATIVE=1`) -- `cli/src/native/daemon.rs`, `cli/src/native/actions.rs`, `cli/src/native/browser.rs`, and the rest of `cli/src/native/`
-
-When modifying browser automation logic (commands, actions, protocol handling), changes **must** be made in **both** paths:
-
-| Node.js Path | Native Path |
-|---|---|
-| `src/actions.ts` | `cli/src/native/actions.rs` |
-| `src/browser.ts` | `cli/src/native/browser.rs` |
-| `src/daemon.ts` | `cli/src/native/daemon.rs` |
-| `src/protocol.ts` | `cli/src/native/cdp/client.rs` |
-| `src/snapshot.ts` | `cli/src/native/snapshot.rs` |
-| `src/state-utils.ts` | `cli/src/native/state.rs` |
-
-New commands must be implemented in both paths, or explicitly stubbed in the native path with a clear `"Not yet implemented: {action}"` error. The goal is eventual full migration to native, but until then both paths must stay in sync.
+This is a Rust codebase. The browser automation daemon lives in `cli/src/native/` (daemon, actions, browser, CDP client, snapshot, state). The `--engine` flag selects Chrome vs Lightpanda. The `install` command downloads Chrome from Chrome for Testing directly.
 
 ## Testing
 

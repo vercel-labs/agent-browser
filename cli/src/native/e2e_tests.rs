@@ -86,6 +86,92 @@ async fn e2e_launch_navigate_evaluate_close() {
     assert_eq!(get_data(&resp)["closed"], true);
 }
 
+#[tokio::test]
+#[ignore]
+async fn e2e_lightpanda_launch_can_open_page() {
+    let lightpanda_bin = match std::env::var("LIGHTPANDA_BIN") {
+        Ok(path) if !path.is_empty() => path,
+        _ => return,
+    };
+
+    let mut state = DaemonState::new();
+
+    let resp = tokio::time::timeout(
+        tokio::time::Duration::from_secs(20),
+        execute_command(
+            &json!({
+                "id": "1",
+                "action": "launch",
+                "headless": true,
+                "engine": "lightpanda",
+                "executablePath": lightpanda_bin,
+            }),
+            &mut state,
+        ),
+    )
+    .await
+    .expect("Lightpanda launch should not hang");
+
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["launched"], true);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": "https://example.com" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["url"], "https://example.com/");
+    assert_eq!(get_data(&resp)["title"], "Example Domain");
+
+    let resp = execute_command(&json!({ "id": "3", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["closed"], true);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_lightpanda_auto_launch_can_open_page() {
+    let lightpanda_bin = match std::env::var("LIGHTPANDA_BIN") {
+        Ok(path) if !path.is_empty() => path,
+        _ => return,
+    };
+
+    let prev_engine = std::env::var("AGENT_BROWSER_ENGINE").ok();
+    let prev_path = std::env::var("AGENT_BROWSER_EXECUTABLE_PATH").ok();
+    std::env::set_var("AGENT_BROWSER_ENGINE", "lightpanda");
+    std::env::set_var("AGENT_BROWSER_EXECUTABLE_PATH", &lightpanda_bin);
+
+    let mut state = DaemonState::new();
+
+    let resp = tokio::time::timeout(
+        tokio::time::Duration::from_secs(20),
+        execute_command(
+            &json!({ "id": "1", "action": "navigate", "url": "https://example.com" }),
+            &mut state,
+        ),
+    )
+    .await
+    .expect("Lightpanda auto-launch should not hang");
+
+    match prev_engine {
+        Some(value) => std::env::set_var("AGENT_BROWSER_ENGINE", value),
+        None => std::env::remove_var("AGENT_BROWSER_ENGINE"),
+    }
+    match prev_path {
+        Some(value) => std::env::set_var("AGENT_BROWSER_EXECUTABLE_PATH", value),
+        None => std::env::remove_var("AGENT_BROWSER_EXECUTABLE_PATH"),
+    }
+
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["url"], "https://example.com/");
+    assert_eq!(get_data(&resp)["title"], "Example Domain");
+
+    let resp = execute_command(&json!({ "id": "2", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["closed"], true);
+}
+
 // ---------------------------------------------------------------------------
 // Snapshot with refs and ref-based click
 // ---------------------------------------------------------------------------
@@ -320,9 +406,9 @@ async fn e2e_form_interaction() {
     assert_success(&resp);
     assert_eq!(get_data(&resp)["result"], "John Doe");
 
-    // Fill email (use fill instead of type to avoid key dispatch issues with '.')
+    // Type email – the type action now correctly handles punctuation like '.'
     let resp = execute_command(
-        &json!({ "id": "12", "action": "fill", "selector": "#email", "value": "john@example.com" }),
+        &json!({ "id": "12", "action": "type", "selector": "#email", "text": "john@example.com" }),
         &mut state,
     )
     .await;
@@ -1140,7 +1226,6 @@ async fn e2e_state_management() {
 #[ignore]
 async fn e2e_domain_filter() {
     let mut state = DaemonState::new();
-    state.domain_filter = Some(super::network::DomainFilter::new("example.com"));
 
     let resp = execute_command(
         &json!({ "id": "1", "action": "launch", "headless": true }),
@@ -1148,6 +1233,9 @@ async fn e2e_domain_filter() {
     )
     .await;
     assert_success(&resp);
+
+    // Set domain filter after launch to avoid Fetch.enable deadlock in tests.
+    state.domain_filter = Some(super::network::DomainFilter::new("example.com"));
 
     // Allowed domain
     let resp = execute_command(
@@ -1218,12 +1306,8 @@ async fn e2e_diff_snapshot() {
     )
     .await;
     assert_success(&resp);
-    let diff = &get_data(&resp)["diff"];
-    assert_eq!(diff["identical"], false, "Diff should detect the h1 change");
-    assert!(
-        diff["additions"].as_i64().unwrap() > 0 || diff["deletions"].as_i64().unwrap() > 0,
-        "Should have additions or deletions"
-    );
+    let data = get_data(&resp);
+    assert_eq!(data["changed"], true, "Diff should detect the h1 change");
 
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     assert_success(&resp);
@@ -1543,4 +1627,586 @@ async fn e2e_profile_cookie_persistence() {
     }
 
     let _ = std::fs::remove_dir_all(&profile_dir);
+}
+
+// ---------------------------------------------------------------------------
+// Inspect / CDP URL
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore]
+async fn e2e_get_cdp_url() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(&json!({ "id": "2", "action": "cdp_url" }), &mut state).await;
+    assert_success(&resp);
+    let cdp_url = get_data(&resp)["cdpUrl"]
+        .as_str()
+        .expect("cdpUrl should be a string");
+    assert!(
+        cdp_url.starts_with("ws://"),
+        "CDP URL should start with ws://, got: {}",
+        cdp_url
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_inspect() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": "https://example.com" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(&json!({ "id": "3", "action": "inspect" }), &mut state).await;
+    assert_success(&resp);
+    let data = get_data(&resp);
+    assert_eq!(data["opened"], true);
+    let url = data["url"]
+        .as_str()
+        .expect("inspect url should be a string");
+    assert!(
+        url.starts_with("http://127.0.0.1:"),
+        "Inspect URL should be http://127.0.0.1:<port>, got: {}",
+        url
+    );
+
+    // Verify the HTTP redirect serves a 302 to the DevTools frontend
+    let http_resp = reqwest::get(url).await;
+    match http_resp {
+        Ok(r) => {
+            let final_url = r.url().to_string();
+            assert!(
+                final_url.contains("devtools/devtools_app.html"),
+                "Redirect should point to DevTools frontend, got: {}",
+                final_url
+            );
+        }
+        Err(e) => {
+            panic!("HTTP GET to inspect URL failed: {}", e);
+        }
+    }
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+// ---------------------------------------------------------------------------
+// Stale ref fallback (#805): clicking a ref after the DOM has been replaced
+// should fall back to role/name lookup instead of failing.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore]
+async fn e2e_click_stale_ref_falls_back_to_role_name() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Navigate to a page with a button that replaces the DOM when clicked.
+    let html = r#"data:text/html,<body>
+        <div id="c">
+            <button onclick="
+                var c = document.getElementById('c');
+                c.innerHTML = '';
+                var b = document.createElement('button');
+                b.textContent = 'Target';
+                b.onclick = function() { document.title = 'clicked'; };
+                c.appendChild(b);
+                document.title = 'replaced';
+            ">Replace</button>
+            <button>Target</button>
+        </div>
+    </body>"#;
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Snapshot to populate the ref_map with backend_node_ids.
+    let resp = execute_command(&json!({ "id": "3", "action": "snapshot" }), &mut state).await;
+    assert_success(&resp);
+    let snapshot = get_data(&resp)["snapshot"].as_str().unwrap();
+    assert!(
+        snapshot.contains("Replace"),
+        "Snapshot should contain Replace button"
+    );
+    assert!(
+        snapshot.contains("Target"),
+        "Snapshot should contain Target button"
+    );
+
+    // Click "Replace" — this removes all DOM nodes and recreates them,
+    // making the backend_node_id for "Target" stale.
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "click", "selector": "e1" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
+    // Verify the DOM was actually replaced.
+    let resp = execute_command(&json!({ "id": "5", "action": "title" }), &mut state).await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["title"], "replaced");
+
+    // Now click the stale "Target" ref. Before the fix this returned:
+    //   "CDP error (DOM.getBoxModel): Could not compute box model."
+    // After the fix it falls back to role/name lookup and succeeds.
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "click", "selector": "e2" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
+    // Verify the fallback click hit the right (recreated) button.
+    let resp = execute_command(&json!({ "id": "7", "action": "title" }), &mut state).await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["title"],
+        "clicked",
+        "Stale ref should have been resolved via role/name fallback"
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+// ---------------------------------------------------------------------------
+// Regression: Material Design checkbox/radio (#832)
+//
+// Material Design controls hide the native <input> off-screen and place
+// overlay elements (ripple, touch-target) on top.  Coordinate-based CDP
+// clicks may therefore miss the actual input.  The check/uncheck actions
+// must detect this and fall back to a JS .click() — matching the behaviour
+// that Playwright provided in v0.19.0.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore]
+async fn e2e_material_checkbox_check_uncheck() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Inline HTML that reproduces the Material Design DOM pattern:
+    // - Native <input> is visually hidden (position:absolute, opacity:0, off-screen)
+    // - A ripple overlay sits on top with pointer-events:all, intercepting coordinate clicks
+    // - An ARIA-only checkbox uses role="checkbox" + aria-checked (no native input)
+    let html = concat!(
+        "data:text/html,<html><body>",
+        // -- Native baseline --
+        "<input id='native' type='checkbox'>",
+        // -- Material-style hidden-input checkbox --
+        "<div id='mat' style='position:relative;padding:12px'>",
+          "<input id='mat-input' type='checkbox' style='position:absolute;opacity:0;width:1px;height:1px;top:-9999px;left:-9999px;pointer-events:none'>",
+          "<div style='position:absolute;top:0;left:0;width:48px;height:48px;pointer-events:all;z-index:10'></div>",
+          "<span>Material CB</span>",
+        "</div>",
+        // -- ARIA-only checkbox (no native input) --
+        "<div id='aria' role='checkbox' aria-checked='false' tabindex='0'>ARIA CB</div>",
+        "<script>",
+          "document.getElementById('aria').addEventListener('click',function(){",
+            "var c=this.getAttribute('aria-checked')==='true';",
+            "this.setAttribute('aria-checked',String(!c));",
+          "});",
+        "</script>",
+        "</body></html>"
+    );
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // ---- Native checkbox (sanity baseline) ----
+    let resp = execute_command(
+        &json!({ "id": "10", "action": "ischecked", "selector": "#native" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["checked"], false);
+
+    let resp = execute_command(
+        &json!({ "id": "11", "action": "check", "selector": "#native" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "12", "action": "ischecked", "selector": "#native" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["checked"], true, "native check failed");
+
+    // ---- Material checkbox (hidden input + overlay) ----
+    // ischecked on the wrapper should detect the nested hidden input's state
+    let resp = execute_command(
+        &json!({ "id": "20", "action": "ischecked", "selector": "#mat" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["checked"], false);
+
+    let resp = execute_command(
+        &json!({ "id": "21", "action": "check", "selector": "#mat" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "22", "action": "ischecked", "selector": "#mat" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["checked"],
+        true,
+        "Material checkbox should be checked after check action (#832)"
+    );
+
+    // Idempotency: check again should be a no-op
+    let resp = execute_command(
+        &json!({ "id": "23", "action": "check", "selector": "#mat" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "24", "action": "ischecked", "selector": "#mat" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["checked"],
+        true,
+        "Material checkbox should stay checked on redundant check"
+    );
+
+    // Uncheck
+    let resp = execute_command(
+        &json!({ "id": "25", "action": "uncheck", "selector": "#mat" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "26", "action": "ischecked", "selector": "#mat" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["checked"],
+        false,
+        "Material checkbox should be unchecked after uncheck action"
+    );
+
+    // ---- ARIA-only checkbox ----
+    let resp = execute_command(
+        &json!({ "id": "30", "action": "ischecked", "selector": "#aria" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["checked"], false);
+
+    let resp = execute_command(
+        &json!({ "id": "31", "action": "check", "selector": "#aria" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "32", "action": "ischecked", "selector": "#aria" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["checked"],
+        true,
+        "ARIA checkbox should be checked after check action"
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+// ---------------------------------------------------------------------------
+// Issue #841 – snapshot -C and screenshot --annotate must not hang over WSS
+// ---------------------------------------------------------------------------
+
+/// Verifies that `snapshot -C` (cursor-interactive mode) detects elements with
+/// cursor:pointer / onclick / tabindex, produces the correct v0.19.0-compatible
+/// output format, deduplicates against the ARIA tree, and completes in bounded
+/// time (no sequential CDP round-trip explosion).
+#[tokio::test]
+#[ignore]
+async fn e2e_snapshot_cursor_interactive() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Page with:
+    //  - <button> and <a> (standard interactive – ARIA tree, NOT in cursor section)
+    //  - <div cursor:pointer onclick> (clickable – cursor section)
+    //  - <div tabindex=0> (focusable – cursor section)
+    //  - <span cursor:pointer> (clickable – cursor section)
+    //  - <span cursor:pointer> child of <div cursor:pointer> (inherited – skip)
+    let html = concat!(
+        "<html><body>",
+        "<a href='#'>Link</a>",
+        "<button>Btn</button>",
+        "<div style='cursor:pointer' onclick='x()'>ClickDiv</div>",
+        "<div tabindex='0'>FocusDiv</div>",
+        "<span style='cursor:pointer'>PointerSpan</span>",
+        "<div style='cursor:pointer'><span>InheritChild</span></div>",
+        "</body></html>",
+    );
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "setcontent", "html": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // snapshot -i -C: interactive tree + cursor section
+    let start = std::time::Instant::now();
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "snapshot", "interactive": true, "cursor": true }),
+        &mut state,
+    )
+    .await;
+    let elapsed = start.elapsed();
+    assert_success(&resp);
+
+    let snapshot = get_data(&resp)["snapshot"].as_str().unwrap();
+
+    // v0.19.0 output format: role + hints
+    assert!(
+        snapshot.contains("clickable") && snapshot.contains("[cursor:pointer"),
+        "Expected v0.19.0-format cursor output with hints:\n{}",
+        snapshot,
+    );
+
+    // Role differentiation: tabindex-only → focusable
+    assert!(
+        snapshot.contains("focusable") && snapshot.contains("[tabindex]"),
+        "Expected focusable role for tabindex-only element:\n{}",
+        snapshot,
+    );
+
+    // Text dedup: "Link" and "Btn" are in the ARIA tree, so must NOT suffix
+    // with cursor-interactive info. Verify line by line.
+    for line in snapshot.lines() {
+        assert!(
+            !(line.contains("\"Link\"")
+                && (line.contains("clickable")
+                    || line.contains("focusable")
+                    || line.contains("editable"))),
+            "Standard <a> element should not have cursor-interactive info:\n{}",
+            line
+        );
+        assert!(
+            !(line.contains("\"Btn\"")
+                && (line.contains("clickable")
+                    || line.contains("focusable")
+                    || line.contains("editable"))),
+            "Standard <button> element should not have cursor-interactive info:\n{}",
+            line
+        );
+    }
+
+    // Must complete quickly (< 5s), not hit the 30s CDP timeout
+    assert!(
+        elapsed.as_secs() < 5,
+        "snapshot -C took {:?}, expected < 5s (Issue #841 regression)",
+        elapsed,
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+/// Verifies that `screenshot --annotate` completes in bounded time even with
+/// many interactive elements. Guards against the sequential CDP round-trip
+/// regression that caused hangs over high-latency WSS (Issue #841).
+#[tokio::test]
+#[ignore]
+async fn e2e_screenshot_annotate_many_elements() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // 50 buttons: old sequential code would do 50×2×200ms ≈ 20s over WSS.
+    let mut html = String::from("<html><body>");
+    for i in 1..=50 {
+        html.push_str(&format!("<button>Button {}</button>", i));
+    }
+    html.push_str("</body></html>");
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "setcontent", "html": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let start = std::time::Instant::now();
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "screenshot", "annotate": true }),
+        &mut state,
+    )
+    .await;
+    let elapsed = start.elapsed();
+    assert_success(&resp);
+
+    let annotations = get_data(&resp)["annotations"]
+        .as_array()
+        .expect("Annotated screenshot should return annotations");
+
+    assert!(
+        annotations.len() >= 50,
+        "Expected at least 50 annotations, got {}",
+        annotations.len(),
+    );
+
+    // Must complete quickly (< 10s), not hit the 30s CDP timeout
+    assert!(
+        elapsed.as_secs() < 10,
+        "screenshot --annotate with 50 elements took {:?}, expected < 10s (Issue #841)",
+        elapsed,
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+/// Verifies `snapshot -C` with many cursor-interactive elements completes in
+/// bounded time. Direct regression test for Issue #841's root cause: N×2
+/// sequential CDP round-trips per cursor-interactive element.
+#[tokio::test]
+#[ignore]
+async fn e2e_snapshot_cursor_many_elements() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // 100 cursor-interactive divs: old code = 200 sequential CDP calls,
+    // at 200ms WSS latency = 40s timeout. New code must finish in seconds.
+    let mut html = String::from("<html><body>");
+    for i in 1..=100 {
+        html.push_str(&format!(
+            "<div style='cursor:pointer' onclick='x()'>Item {}</div>",
+            i,
+        ));
+    }
+    html.push_str("</body></html>");
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "setcontent", "html": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let start = std::time::Instant::now();
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "snapshot", "interactive": true, "cursor": true }),
+        &mut state,
+    )
+    .await;
+    let elapsed = start.elapsed();
+    assert_success(&resp);
+
+    let snapshot = get_data(&resp)["snapshot"].as_str().unwrap();
+
+    // All 100 items should appear
+    assert!(
+        snapshot.contains("Item 1") && snapshot.contains("Item 100"),
+        "Expected all 100 cursor-interactive items in output",
+    );
+
+    // All should have v0.19.0-format hints
+    assert!(
+        snapshot.contains("[cursor:pointer, onclick]"),
+        "Expected v0.19.0-format hints",
+    );
+
+    // Must complete quickly
+    assert!(
+        elapsed.as_secs() < 10,
+        "snapshot -C with 100 cursor elements took {:?}, expected < 10s (Issue #841)",
+        elapsed,
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
 }
