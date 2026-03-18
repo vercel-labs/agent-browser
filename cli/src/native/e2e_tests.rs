@@ -1250,7 +1250,7 @@ async fn e2e_domain_filter() {
     .await;
     assert_success(&resp);
 
-    // Blocked domain (rejected by synchronous URL check in handle_navigate)
+    // Blocked domain
     let resp = execute_command(
         &json!({ "id": "3", "action": "navigate", "url": "https://blocked.com" }),
         &mut state,
