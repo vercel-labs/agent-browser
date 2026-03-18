@@ -57,6 +57,16 @@ The profile directory stores:
 - Browser cache
 - Login sessions
 
+**Using `--profile` with `--session`**: When combining `--profile` with `--session`, each session stores its Chrome data in a separate subdirectory (`<profile>/<session>/`). This ensures that concurrent sessions sharing the same base profile path each launch their own independent Chrome instance. For example:
+
+```bash
+# Two independent Chrome instances, each with their own persisted data
+agent-browser --profile ~/.myapp-profile --session work open app.example.com
+agent-browser --profile ~/.myapp-profile --session personal open app.example.com
+# work data -> ~/.myapp-profile/work/
+# personal data -> ~/.myapp-profile/personal/
+```
+
 ## Import auth from your browser
 
 If you are already logged in to a site in Chrome, you can grab that auth state and reuse it in agent-browser. This is the fastest way to bypass login flows, OAuth, SSO, or 2FA.

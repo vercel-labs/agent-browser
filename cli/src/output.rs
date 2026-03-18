@@ -2266,22 +2266,6 @@ Examples:
 "##
         }
 
-        // === Upgrade ===
-        "upgrade" => {
-            r##"
-agent-browser upgrade - Upgrade to the latest version
-
-Usage: agent-browser upgrade
-
-Detects the current installation method (npm, Homebrew, or Cargo) and runs
-the appropriate update command. Displays the version change on success, or
-informs you if you are already on the latest version.
-
-Examples:
-  agent-browser upgrade
-"##
-        }
-
         // === Connect ===
         "connect" => {
             r##"
@@ -2588,7 +2572,6 @@ Sessions:
 Setup:
   install                    Install browser binaries
   install --with-deps        Also install system dependencies (Linux)
-  upgrade                    Upgrade to the latest version
 
 Snapshot Options:
   -i, --interactive          Only interactive elements
@@ -2599,6 +2582,7 @@ Snapshot Options:
 Authentication:
   --profile <path>           Persist login sessions across restarts (cookies, IndexedDB, cache)
                              (or AGENT_BROWSER_PROFILE env)
+                             When used with --session, data is stored in <path>/<session>/
   --session-name <name>      Auto-save/restore cookies and localStorage by name
                              (or AGENT_BROWSER_SESSION_NAME env)
   --state <path>             Load saved auth state (cookies + storage) from JSON file

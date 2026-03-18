@@ -6,7 +6,7 @@ allowed-tools: Bash(npx agent-browser:*), Bash(agent-browser:*)
 
 # Browser Automation with agent-browser
 
-The CLI uses Chrome/Chromium via CDP directly. Install via `npm i -g agent-browser`, `brew install agent-browser`, or `cargo install agent-browser`. Run `agent-browser install` to download Chrome. Run `agent-browser upgrade` to update to the latest version.
+The CLI uses Chrome/Chromium via CDP directly. Install via `npm i -g agent-browser`, `brew install agent-browser`, or `cargo install agent-browser`. Run `agent-browser install` to download Chrome.
 
 ## Core Workflow
 
@@ -71,6 +71,8 @@ agent-browser --profile ~/.myapp open https://app.example.com/login
 # All future runs: already authenticated
 agent-browser --profile ~/.myapp open https://app.example.com/dashboard
 ```
+
+When using `--profile` with `--session`, each session stores its Chrome data in a separate subdirectory (`<profile>/<session>/`) so that concurrent sessions with the same base profile path run independent Chrome instances without conflict.
 
 **Option 3: Session name (auto-save/restore cookies + localStorage)**
 
