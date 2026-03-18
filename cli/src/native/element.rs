@@ -263,11 +263,18 @@ pub async fn resolve_element_object_id(
             .ok_or_else(|| format!("No objectId for ref {}", ref_id));
     }
 
-    // CSS selector fallback
-    let js = format!(
-        "document.querySelector({})",
-        serde_json::to_string(selector_or_ref).unwrap_or_default()
-    );
+    // Selector fallback (CSS or XPath)
+    let js = if let Some(xpath) = selector_or_ref.strip_prefix("xpath=") {
+        format!(
+            "document.evaluate({}, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue",
+            serde_json::to_string(xpath).unwrap_or_default()
+        )
+    } else {
+        format!(
+            "document.querySelector({})",
+            serde_json::to_string(selector_or_ref).unwrap_or_default()
+        )
+    };
     let result: EvaluateResult = client
         .send_command_typed(
             "Runtime.evaluate",
