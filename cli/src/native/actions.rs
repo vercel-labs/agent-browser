@@ -1112,6 +1112,43 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
                         state.browser = Some(mgr);
                         state.subscribe_to_browser_events();
                         state.update_stream_client().await;
+
+                        // Block image loading when BROWSERBASE_BLOCK_IMAGES=1
+                        if env::var("BROWSERBASE_BLOCK_IMAGES")
+                            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                            .unwrap_or(false)
+                        {
+                            let image_exts = [
+                                "**/*.png", "**/*.jpg", "**/*.jpeg", "**/*.gif",
+                                "**/*.webp", "**/*.svg", "**/*.ico", "**/*.avif",
+                            ];
+                            for ext in &image_exts {
+                                state.routes.push(RouteEntry {
+                                    url_pattern: ext.to_string(),
+                                    response: None,
+                                    abort: true,
+                                });
+                            }
+                            // Sync routes to Fetch interception
+                            if let Some(ref browser) = state.browser {
+                                if let Ok(session_id) = browser.active_session_id() {
+                                    let patterns: Vec<Value> = state
+                                        .routes
+                                        .iter()
+                                        .map(|r| json!({ "urlPattern": r.url_pattern }))
+                                        .collect();
+                                    let _ = browser
+                                        .client
+                                        .send_command(
+                                            "Fetch.enable",
+                                            Some(json!({ "patterns": patterns })),
+                                            Some(session_id),
+                                        )
+                                        .await;
+                                }
+                            }
+                        }
+
                         return Ok(json!({ "launched": true, "provider": provider }));
                     }
                     Err(e) => {
