@@ -87,13 +87,23 @@ pub fn diff_screenshot(
                 let current_diff_rate = different as f64 / checked as f64;
                 if current_diff_rate >= EARLY_EXIT_THRESHOLD {
                     // Early exit -- images are clearly different.
-                    // The final mismatch will be at least current_diff_rate percent.
-                    // Return early without encoding the partial diff image.
-                    let mismatch = (different as f64 / total as f64) * 100.0;
+                    // IMPORTANT: `different` here is only the count within the sampled pixels
+                    // (up to `checked`), but our output fields are expected to be expressed
+                    // relative to the *full* image pixel count.
+                    //
+                    // So we estimate the overall diff rate using the sample rate and scale it
+                    // up to the full image size.
+                    let sample_diff_rate = current_diff_rate; // fraction in [0, 1]
+                    let mut estimated_different = (sample_diff_rate * total as f64).round();
+                    if estimated_different > total as f64 {
+                        estimated_different = total as f64;
+                    }
+                    let mismatch_percentage = (sample_diff_rate * 100.0).min(100.0);
+
                     return Ok(ScreenshotDiffResult {
                         total_pixels: total,
-                        different_pixels: different,
-                        mismatch_percentage: mismatch,
+                        different_pixels: estimated_different as u64,
+                        mismatch_percentage,
                         matched: false,
                         diff_image: None,
                         dimension_mismatch: None,
@@ -260,15 +270,26 @@ mod tests {
 
     #[test]
     fn test_screenshot_diff_totally_different() {
-        // Two completely different solid colors -- early exit should fire
-        let png_a = make_png(100, 100, 120, 130, 140);
-        let png_b = make_png(100, 100, 80, 200, 90);
+        // Two completely different solid colors -- early exit should fire.
+        // Use an image larger than EARLY_EXIT_MIN_PIXELS so the early-exit path
+        // has to extrapolate from the sampled pixels to the full image.
+        let png_a = make_png(200, 200, 120, 130, 140);
+        let png_b = make_png(200, 200, 80, 200, 90);
         let result = diff_screenshot(&png_a, &png_b, 0.1).unwrap();
+
         assert!(!result.matched);
-        assert!(result.different_pixels > 0);
-        assert!(result.mismatch_percentage > 0.0);
-        // Early exit should skip diff image encoding for clearly-different images
         assert!(result.diff_image.is_none());
+
+        let total = result.total_pixels;
+        assert_eq!(total, 200u64 * 200u64);
+
+        // For totally-different solid colors, the estimated diff rate should be 100%.
+        assert_eq!(result.different_pixels, total);
+        assert!((result.mismatch_percentage - 100.0).abs() < 0.0001);
+
+        // And the reported mismatch percentage must be consistent with the pixel counts.
+        let expected = (result.different_pixels as f64 / result.total_pixels as f64) * 100.0;
+        assert!((result.mismatch_percentage - expected).abs() < 0.0001);
     }
 
     #[test]
@@ -279,6 +300,59 @@ mod tests {
         assert!(!result.matched);
         assert!(result.dimension_mismatch.is_some());
         assert!(result.diff_image.is_none());
+    }
+
+    #[test]
+    fn test_screenshot_diff_early_exit_mismatch_scaling() {
+        // Construct images where the *first* sampled pixels have ~20% diffs.
+        // With the current diff implementation, early-exit will trigger once
+        // checked >= 10_000.
+        //
+        // The key regression fixed in this PR is that the early-exit path must
+        // scale the sampled diff rate to the full image pixel count when
+        // reporting different_pixels / mismatch_percentage.
+        let w = 200u32;
+        let h = 200u32;
+        let total = (w as u64) * (h as u64);
+
+        let baseline_png = make_png(w, h, 10, 10, 10);
+
+        // Build current image by copying baseline, then changing exactly 20%
+        // of pixels within the first 10_000 scan-order pixels.
+        let img_a: image::RgbaImage = image::load_from_memory(&baseline_png).unwrap().to_rgba8();
+        let mut img_b = img_a.clone();
+
+        for i in 0..10_000u32 {
+            if i % 5 != 0 {
+                continue; // ~80% same
+            }
+            let x = i % w;
+            let y = i / w;
+            // Big color change to guarantee dist > threshold
+            img_b.put_pixel(x, y, image::Rgba([200, 200, 200, 255]));
+        }
+
+        let mut buf = std::io::Cursor::new(Vec::new());
+        img_b.write_to(&mut buf, image::ImageFormat::Png).unwrap();
+        let current_png = buf.into_inner();
+
+        let result = diff_screenshot(&baseline_png, &current_png, 0.1).unwrap();
+
+        assert!(!result.matched);
+        assert!(result.diff_image.is_none());
+        assert_eq!(result.total_pixels, total);
+
+        let expected_diff_rate = 0.20f64;
+        let expected_different_pixels = (expected_diff_rate * total as f64).round() as u64;
+        let expected_mismatch = expected_diff_rate * 100.0;
+
+        assert_eq!(result.different_pixels, expected_different_pixels);
+        assert!((result.mismatch_percentage - expected_mismatch).abs() < 0.0001);
+
+        // And the mismatch must be consistent with the counts.
+        let expected_from_counts =
+            (result.different_pixels as f64 / result.total_pixels as f64) * 100.0;
+        assert!((result.mismatch_percentage - expected_from_counts).abs() < 0.0001);
     }
 
     #[test]
