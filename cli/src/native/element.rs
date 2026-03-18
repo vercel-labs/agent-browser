@@ -360,10 +360,10 @@ fn build_find_element_js(selector: &str) -> String {
 }
 
 fn build_selector_js(selector: &str) -> String {
-    let find = build_find_element_js(selector);
+    let find_expr = build_find_element_js(selector);
     format!(
         r#"(() => {{
-            const el = {find};
+            const el = {find_expr};
             if (!el) return null;
             const rect = el.getBoundingClientRect();
             return {{ x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 }};
