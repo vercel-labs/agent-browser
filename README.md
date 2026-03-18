@@ -76,6 +76,16 @@ agent-browser install
 
 `AGENT_BROWSER_CHROME_LAST_KNOWN_GOOD_URL` must point to a Chrome for Testing `last-known-good-versions.json` file. `AGENT_BROWSER_CHROME_DOWNLOAD_BASE_URL` must point to a base URL that serves archives under `/{version}/{platform}/{archive}`. For mirror installs, set both together so the manifest version and downloadable archives stay aligned. HTTPS is recommended. HTTP is supported for trusted internal mirrors and prints a warning at install time.
 
+### Updating
+
+Upgrade to the latest version:
+
+```bash
+agent-browser upgrade
+```
+
+Detects your installation method (npm, Homebrew, or Cargo) and runs the appropriate update command automatically.
+
 ### Requirements
 
 - **Chrome** - Run `agent-browser install` to download Chrome from [Chrome for Testing](https://developer.chrome.com/blog/chrome-for-testing/) (Google's official automation channel), or configure a mirror via the environment variables above. No Playwright or Node.js required for the daemon.
@@ -205,6 +215,25 @@ agent-browser wait "#spinner" --state hidden
 
 **Load states:** `load`, `domcontentloaded`, `networkidle`
 
+### Batch Execution
+
+Execute multiple commands in a single invocation by piping a JSON array of
+string arrays to `batch`. This avoids per-command process startup overhead
+when running multi-step workflows.
+
+```bash
+# Pipe commands as JSON
+echo '[
+  ["open", "https://example.com"],
+  ["snapshot", "-i"],
+  ["click", "@e1"],
+  ["screenshot", "result.png"]
+]' | agent-browser batch --json
+
+# Stop on first error
+agent-browser batch --bail < commands.json
+```
+
 ### Clipboard
 
 ```bash
@@ -259,6 +288,8 @@ agent-browser network route <url> --body <json>  # Mock response
 agent-browser network unroute [url]            # Remove routes
 agent-browser network requests                 # View tracked requests
 agent-browser network requests --filter api    # Filter requests
+agent-browser network har start                # Start HAR recording
+agent-browser network har stop [output.har]    # Stop and save HAR (temp path if omitted)
 ```
 
 ### Tabs & Windows
@@ -337,6 +368,7 @@ agent-browser reload                  # Reload page
 agent-browser install                 # Download Chrome from Chrome for Testing (Google's official automation channel)
 agent-browser install --with-deps     # Also install system deps (Linux)
 AGENT_BROWSER_CHROME_LAST_KNOWN_GOOD_URL=https://mirror.example.com/chrome-for-testing/last-known-good-versions.json AGENT_BROWSER_CHROME_DOWNLOAD_BASE_URL=https://mirror.example.com/chrome-for-testing agent-browser install
+agent-browser upgrade                 # Upgrade agent-browser to the latest version
 ```
 
 ## Authentication
@@ -558,7 +590,6 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 | `-p, --provider <name>` | Cloud browser provider (or `AGENT_BROWSER_PROVIDER` env) |
 | `--device <name>` | iOS device name, e.g. "iPhone 15 Pro" (or `AGENT_BROWSER_IOS_DEVICE` env) |
 | `--json` | JSON output (for agents) |
-| `--full, -f` | Full page screenshot |
 | `--annotate` | Annotated screenshot with numbered element labels (or `AGENT_BROWSER_ANNOTATE` env) |
 | `--screenshot-dir <path>` | Default screenshot output directory (or `AGENT_BROWSER_SCREENSHOT_DIR` env) |
 | `--screenshot-quality <n>` | JPEG quality 0-100 (or `AGENT_BROWSER_SCREENSHOT_QUALITY` env) |
@@ -896,6 +927,7 @@ Auto-connect discovers Chrome by:
 
 1. Reading Chrome's `DevToolsActivePort` file from the default user data directory
 2. Falling back to probing common debugging ports (9222, 9229)
+3. If HTTP-based discovery (`/json/version`, `/json/list`) fails, falling back to a direct WebSocket connection
 
 This is useful when:
 

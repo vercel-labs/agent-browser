@@ -100,6 +100,7 @@ impl Default for LaunchOptions {
 
 struct ChromeArgs {
     args: Vec<String>,
+    user_data_dir: PathBuf,
     temp_user_data_dir: Option<PathBuf>,
 }
 
@@ -142,17 +143,18 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
         args.push(format!("--proxy-bypass-list={}", bypass));
     }
 
-    let temp_user_data_dir = if let Some(ref profile) = options.profile {
+    let (user_data_dir, temp_user_data_dir) = if let Some(ref profile) = options.profile {
         let expanded = expand_tilde(profile);
+        let dir = PathBuf::from(&expanded);
         args.push(format!("--user-data-dir={}", expanded));
-        None
+        (dir, None)
     } else {
         let dir =
             std::env::temp_dir().join(format!("agent-browser-chrome-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir)
             .map_err(|e| format!("Failed to create temp profile dir: {}", e))?;
         args.push(format!("--user-data-dir={}", dir.display()));
-        Some(dir)
+        (dir.clone(), Some(dir))
     };
 
     if options.allow_file_access {
@@ -189,6 +191,7 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
 
     Ok(ChromeArgs {
         args,
+        user_data_dir,
         temp_user_data_dir,
     })
 }
@@ -230,8 +233,13 @@ pub fn launch_chrome(options: &LaunchOptions) -> Result<ChromeProcess, String> {
 fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<ChromeProcess, String> {
     let ChromeArgs {
         args,
+        user_data_dir,
         temp_user_data_dir,
     } = build_chrome_args(options)?;
+
+    // Mitigate stale DevToolsActivePort risk (e.g., previous crash left it behind).
+    // Puppeteer does similar cleanup before spawning.
+    let _ = std::fs::remove_file(user_data_dir.join("DevToolsActivePort"));
 
     let cleanup_temp_dir = |dir: &Option<PathBuf>| {
         if let Some(ref d) = dir {
@@ -250,19 +258,33 @@ fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<Chro
             format!("Failed to launch Chrome at {:?}: {}", chrome_path, e)
         })?;
 
-    let stderr = child.stderr.take().ok_or_else(|| {
-        let _ = child.kill();
-        cleanup_temp_dir(&temp_user_data_dir);
-        "Failed to capture Chrome stderr".to_string()
-    })?;
-    let reader = BufReader::new(stderr);
+    // Shared overall deadline so we don't double-wait (poll + stderr fallback).
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
 
-    let ws_url = match wait_for_ws_url(reader) {
+    // Primary path: use DevToolsActivePort written into user-data-dir.
+    // This is more reliable on Windows than scraping stderr for "DevTools listening on ...",
+    // which can be missing/empty depending on how Chrome is launched.
+    let ws_url = match wait_for_devtools_active_port(&mut child, &user_data_dir, deadline) {
         Ok(url) => url,
-        Err(e) => {
-            let _ = child.kill();
-            cleanup_temp_dir(&temp_user_data_dir);
-            return Err(e);
+        Err(primary_err) => {
+            // Fallback: scrape stderr (legacy behavior) for better diagnostics.
+            let stderr = child.stderr.take().ok_or_else(|| {
+                let _ = child.kill();
+                cleanup_temp_dir(&temp_user_data_dir);
+                "Failed to capture Chrome stderr".to_string()
+            })?;
+            let reader = BufReader::new(stderr);
+            match wait_for_ws_url_until(reader, deadline) {
+                Ok(url) => url,
+                Err(fallback_err) => {
+                    let _ = child.kill();
+                    cleanup_temp_dir(&temp_user_data_dir);
+                    return Err(format!(
+                        "{}\n(also tried parsing stderr) {}",
+                        primary_err, fallback_err
+                    ));
+                }
+            }
         }
     };
 
@@ -273,8 +295,34 @@ fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<Chro
     })
 }
 
-fn wait_for_ws_url(reader: BufReader<std::process::ChildStderr>) -> Result<String, String> {
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+fn wait_for_devtools_active_port(
+    child: &mut Child,
+    user_data_dir: &Path,
+    deadline: std::time::Instant,
+) -> Result<String, String> {
+    let poll_interval = Duration::from_millis(50);
+
+    while std::time::Instant::now() <= deadline {
+        if let Ok(Some(_status)) = child.try_wait() {
+            // If Chrome already exited, stop waiting.
+            break;
+        }
+
+        if let Some((port, ws_path)) = read_devtools_active_port(user_data_dir) {
+            let ws_url = format!("ws://127.0.0.1:{}{}", port, ws_path);
+            return Ok(ws_url);
+        }
+
+        std::thread::sleep(poll_interval);
+    }
+
+    Err("Timeout waiting for DevToolsActivePort".to_string())
+}
+
+fn wait_for_ws_url_until(
+    reader: BufReader<std::process::ChildStderr>,
+    deadline: std::time::Instant,
+) -> Result<String, String> {
     let prefix = "DevTools listening on ";
     let mut stderr_lines: Vec<String> = Vec::new();
 

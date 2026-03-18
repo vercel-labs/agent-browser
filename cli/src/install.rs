@@ -520,53 +520,80 @@ pub fn run_install(with_deps: bool) {
     }
 }
 
+fn report_install_status(status: io::Result<std::process::ExitStatus>) {
+    match status {
+        Ok(s) if s.success() => {
+            println!(
+                "{} System dependencies installed",
+                color::success_indicator()
+            )
+        }
+        Ok(_) => eprintln!(
+            "{} Failed to install some dependencies. You may need to run manually with sudo.",
+            color::warning_indicator()
+        ),
+        Err(e) => eprintln!(
+            "{} Could not run install command: {}",
+            color::warning_indicator(),
+            e
+        ),
+    }
+}
+
 fn install_linux_deps() {
     println!("{}", color::cyan("Installing system dependencies..."));
 
     let (pkg_mgr, deps) = if which_exists("apt-get") {
-        let libasound = if package_exists_apt("libasound2t64") {
-            "libasound2t64"
-        } else {
-            "libasound2"
-        };
+        // On Ubuntu 24.04+, many libraries were renamed with a t64 suffix as
+        // part of the 64-bit time_t transition. Using the old names can cause
+        // apt to propose removing hundreds of system packages to resolve
+        // conflicts. We check for the t64 variant first to avoid this.
+        let apt_deps: Vec<&str> = vec![
+            ("libxcb-shm0", None),
+            ("libx11-xcb1", None),
+            ("libx11-6", None),
+            ("libxcb1", None),
+            ("libxext6", None),
+            ("libxrandr2", None),
+            ("libxcomposite1", None),
+            ("libxcursor1", None),
+            ("libxdamage1", None),
+            ("libxfixes3", None),
+            ("libxi6", None),
+            ("libgtk-3-0", Some("libgtk-3-0t64")),
+            ("libpangocairo-1.0-0", Some("libpangocairo-1.0-0t64")),
+            ("libpango-1.0-0", Some("libpango-1.0-0t64")),
+            ("libatk1.0-0", Some("libatk1.0-0t64")),
+            ("libcairo-gobject2", Some("libcairo-gobject2t64")),
+            ("libcairo2", Some("libcairo2t64")),
+            ("libgdk-pixbuf-2.0-0", Some("libgdk-pixbuf-2.0-0t64")),
+            ("libxrender1", None),
+            ("libasound2", Some("libasound2t64")),
+            ("libfreetype6", None),
+            ("libfontconfig1", None),
+            ("libdbus-1-3", Some("libdbus-1-3t64")),
+            ("libnss3", None),
+            ("libnspr4", None),
+            ("libatk-bridge2.0-0", Some("libatk-bridge2.0-0t64")),
+            ("libdrm2", None),
+            ("libxkbcommon0", None),
+            ("libatspi2.0-0", Some("libatspi2.0-0t64")),
+            ("libcups2", Some("libcups2t64")),
+            ("libxshmfence1", None),
+            ("libgbm1", None),
+        ]
+        .into_iter()
+        .map(|(base, t64_variant)| {
+            if let Some(t64) = t64_variant {
+                if package_exists_apt(t64) {
+                    return t64;
+                }
+            }
+            base
+        })
+        .collect();
 
-        (
-            "apt-get",
-            vec![
-                "libxcb-shm0",
-                "libx11-xcb1",
-                "libx11-6",
-                "libxcb1",
-                "libxext6",
-                "libxrandr2",
-                "libxcomposite1",
-                "libxcursor1",
-                "libxdamage1",
-                "libxfixes3",
-                "libxi6",
-                "libgtk-3-0",
-                "libpangocairo-1.0-0",
-                "libpango-1.0-0",
-                "libatk1.0-0",
-                "libcairo-gobject2",
-                "libcairo2",
-                "libgdk-pixbuf-2.0-0",
-                "libxrender1",
-                libasound,
-                "libfreetype6",
-                "libfontconfig1",
-                "libdbus-1-3",
-                "libnss3",
-                "libnspr4",
-                "libatk-bridge2.0-0",
-                "libdrm2",
-                "libxkbcommon0",
-                "libatspi2.0-0",
-                "libcups2",
-                "libxshmfence1",
-                "libgbm1",
-            ],
-        )
+        ("apt-get", apt_deps)
     } else if which_exists("dnf") {
         (
             "dnf",
@@ -622,35 +649,103 @@ fn install_linux_deps() {
         exit(1);
     };
 
-    let install_cmd = match pkg_mgr {
-        "apt-get" => {
-            format!(
-                "sudo apt-get update && sudo apt-get install -y {}",
-                deps.join(" ")
-            )
-        }
-        _ => format!("sudo {} install -y {}", pkg_mgr, deps.join(" ")),
-    };
+    if pkg_mgr == "apt-get" {
+        // Run apt-get update first
+        println!("Running: sudo apt-get update");
+        let update_status = Command::new("sudo").args(["apt-get", "update"]).status();
 
-    println!("Running: {}", install_cmd);
-    let status = Command::new("sh").arg("-c").arg(&install_cmd).status();
-
-    match status {
-        Ok(s) if s.success() => {
-            println!(
-                "{} System dependencies installed",
-                color::success_indicator()
-            )
+        match update_status {
+            Ok(s) if !s.success() => {
+                eprintln!(
+                    "{} apt-get update failed. Continuing with existing package lists.",
+                    color::warning_indicator()
+                );
+            }
+            Err(e) => {
+                eprintln!(
+                    "{} Could not run apt-get update: {}",
+                    color::warning_indicator(),
+                    e
+                );
+            }
+            _ => {}
         }
-        Ok(_) => eprintln!(
-            "{} Failed to install some dependencies. You may need to run manually with sudo.",
-            color::warning_indicator()
-        ),
-        Err(e) => eprintln!(
-            "{} Could not run install command: {}",
-            color::warning_indicator(),
-            e
-        ),
+
+        // Simulate the install first to detect if apt would remove any
+        // packages. This prevents the catastrophic scenario where installing
+        // these libraries triggers removal of hundreds of system packages
+        // due to dependency conflicts (e.g. on Ubuntu 24.04 with the
+        // t64 transition).
+        println!("Checking for conflicts...");
+        let sim_output = Command::new("sudo")
+            .args(["apt-get", "install", "--simulate"])
+            .args(&deps)
+            .output();
+
+        match sim_output {
+            Ok(output) => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let combined = format!("{}\n{}", stdout, stderr);
+
+                // Count packages that would be removed
+                let removals: Vec<&str> = combined
+                    .lines()
+                    .filter(|line| line.starts_with("Remv "))
+                    .collect();
+
+                if !removals.is_empty() {
+                    eprintln!(
+                        "{} Aborting: apt would remove {} package(s) to install these dependencies.",
+                        color::error_indicator(),
+                        removals.len()
+                    );
+                    eprintln!(
+                        "  This usually means some package names have changed on your system"
+                    );
+                    eprintln!("  (e.g. Ubuntu 24.04 renamed libraries with a t64 suffix).");
+                    eprintln!();
+                    eprintln!("  Packages that would be removed:");
+                    for line in removals.iter().take(20) {
+                        eprintln!("    {}", line);
+                    }
+                    if removals.len() > 20 {
+                        eprintln!("    ... and {} more", removals.len() - 20);
+                    }
+                    eprintln!();
+                    eprintln!("  To install dependencies manually, run:");
+                    eprintln!("    sudo apt-get install {}", deps.join(" "));
+                    eprintln!();
+                    eprintln!("  Review the apt output carefully before confirming.");
+                    exit(1);
+                }
+            }
+            Err(e) => {
+                eprintln!(
+                    "{} Could not simulate install ({}). Proceeding with caution.",
+                    color::warning_indicator(),
+                    e
+                );
+            }
+        }
+
+        // Safe to proceed: no removals detected
+        let install_cmd = format!("sudo apt-get install -y {}", deps.join(" "));
+        println!("Running: {}", install_cmd);
+        let status = Command::new("sudo")
+            .args(["apt-get", "install", "-y"])
+            .args(&deps)
+            .status();
+
+        report_install_status(status);
+    } else {
+        // dnf / yum path — these package managers do not remove packages
+        // during install, so the simulate-first guard is not needed.
+        let install_cmd = format!("sudo {} install -y {}", pkg_mgr, deps.join(" "));
+        println!("Running: {}", install_cmd);
+        let status = Command::new("sh").arg("-c").arg(&install_cmd).status();
+
+        report_install_status(status);
     }
 }
 

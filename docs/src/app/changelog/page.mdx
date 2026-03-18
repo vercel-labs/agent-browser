@@ -4,6 +4,58 @@ export const metadata = pageMetadata("changelog")
 
 # Changelog
 
+## v0.21.0
+
+<p className="text-[#888] text-sm">March 2026</p>
+
+### New Commands
+
+- **`batch`** -- Execute multiple commands in a single invocation. Pipe a JSON array of string arrays to stdin and receive results sequentially. Supports `--bail` to stop on first error and `--json` for structured output.
+
+```bash
+echo '[["open","example.com"],["snapshot"]]' | agent-browser batch --json
+```
+
+- **`network har start/stop`** -- Capture and export network traffic in HAR 1.2 format.
+
+```bash
+agent-browser network har start
+# ... interact with the page ...
+agent-browser network har stop ./trace.har
+```
+
+### New Features
+
+- **iframe support** -- CLI interactions and snapshots now traverse into iframe content, enabling automation of cross-frame pages.
+- **`--idle-timeout` flag** -- Automatically shut down the daemon after a period of inactivity. Accepts human-friendly formats such as `10s`, `3m`, `1h`, or raw milliseconds. Also available as `AGENT_BROWSER_IDLE_TIMEOUT_MS`.
+- **Cursor-interactive elements in snapshots** -- Cursor-interactive elements are now embedded directly into the snapshot tree for richer context.
+- **Brave Browser auto-connect** -- Auto-discovery of Brave Browser for CDP connections on macOS, Linux, and Windows.
+- **linux-musl (Alpine) builds** -- Pre-built binaries for linux-musl targeting both x64 and arm64, enabling native support for Alpine Linux and other musl-based distributions.
+- **WebSocket fallback for CDP discovery** -- When HTTP-based CDP endpoint discovery fails, the CLI now falls back to a WebSocket connection automatically.
+
+### Improvements
+
+- **`--full`/`-f` refactored to command-level flag** -- Moved from a global flag to a per-command flag for clearer scoping.
+- **Enhanced Chrome launch** -- Added `--user-data-dir` support and configurable launch timeout for more reliable browser startup. Chrome now retries launching up to 3 times on transient startup failures.
+- **Consecutive `--auto-connect` commands** -- Multiple consecutive auto-connect commands no longer require a full browser relaunch; external connections are correctly identified and reused.
+- **Batched CDP calls** -- `snapshot -C` and `screenshot --annotate` now batch CDP calls instead of issuing sequential round-trips per element, preventing timeouts on high-latency WSS connections.
+
+### Bug Fixes
+
+- Fixed remote CDP (WSS) snapshot and screenshot hangs by removing WebSocket message/frame size limits
+- Fixed Material Design `check`/`uncheck` falling back to JS `.click()` for overlay-based controls
+- Fixed punctuation characters being dropped in the `type` command
+- Fixed WebSocket streaming by keeping the StreamServer instance alive
+- Filtered internal Chrome targets (`chrome://`, `devtools://`) from auto-connect discovery
+- Fixed `snapshot --selector` scoping to the matched element's subtree
+- Fixed network idle detection returning prematurely for cached pages
+- Fixed daemon panic on broken stderr pipe during Chrome launch
+- Fixed broadcast channel lag being treated as stream closure
+- Fixed daemon liveness detection for PID namespace isolation (e.g. `unshare`)
+- Fixed Ubuntu dependency install accidentally removing system packages
+
+---
+
 ## v0.20.0
 
 <p className="text-[#888] text-sm">March 2026</p>

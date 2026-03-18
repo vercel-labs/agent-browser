@@ -26,6 +26,7 @@ const INTERACTIVE_ROLES: &[&str] = &[
     "switch",
     "tab",
     "treeitem",
+    "Iframe",
 ];
 
 const CONTENT_ROLES: &[&str] = &[
@@ -137,6 +138,7 @@ pub async fn take_snapshot(
     session_id: &str,
     options: &SnapshotOptions,
     ref_map: &mut RefMap,
+    frame_id: Option<&str>,
 ) -> Result<String, String> {
     client
         .send_command_no_params("DOM.enable", Some(session_id))
@@ -200,12 +202,13 @@ pub async fn take_snapshot(
             None
         };
 
+    let ax_params = if let Some(fid) = frame_id {
+        serde_json::json!({ "frameId": fid })
+    } else {
+        serde_json::json!({})
+    };
     let ax_tree: GetFullAXTreeResult = client
-        .send_command_typed(
-            "Accessibility.getFullAXTree",
-            &serde_json::json!({}),
-            Some(session_id),
-        )
+        .send_command_typed("Accessibility.getFullAXTree", &ax_params, Some(session_id))
         .await?;
 
     let (tree_nodes, root_indices) = build_tree(&ax_tree.nodes);
@@ -293,12 +296,13 @@ pub async fn take_snapshot(
         let ref_id = format!("e{}", next_ref);
         next_ref += 1;
 
-        ref_map.add(
+        ref_map.add_with_frame(
             ref_id.clone(),
             tree_nodes[*idx].backend_node_id,
             &tree_nodes[*idx].role,
             &tree_nodes[*idx].name,
             actual_nth,
+            frame_id,
         );
 
         tree_nodes[*idx].has_ref = true;
@@ -323,6 +327,74 @@ pub async fn take_snapshot(
         render_tree(&tree_nodes, root_idx, 0, &mut output, options);
     }
 
+    // Recurse into child iframes: for each Iframe node with a backend_node_id,
+    // resolve the child frame ID and take a snapshot of its content.
+    // We only recurse from the main frame (frame_id == None) to avoid
+    // unbounded depth; nested iframes within iframes are not expanded.
+    if frame_id.is_none() {
+        let mut iframe_snapshots: Vec<(String, String)> = Vec::new(); // (ref_id, child_snapshot)
+        for node in tree_nodes.iter() {
+            if node.role != "Iframe" || !node.has_ref {
+                continue;
+            }
+            let Some(bid) = node.backend_node_id else {
+                continue;
+            };
+            let ref_id = node.ref_id.as_deref().unwrap_or("");
+            if let Ok(child_fid) = resolve_iframe_frame_id(client, session_id, bid).await {
+                // Snapshot the child frame; errors are silently ignored
+                // (e.g. cross-origin iframes)
+                if let Ok(child_text) = Box::pin(take_snapshot(
+                    client,
+                    session_id,
+                    options,
+                    ref_map,
+                    Some(&child_fid),
+                ))
+                .await
+                {
+                    if !child_text.is_empty()
+                        && child_text != "(empty page)"
+                        && child_text != "(no interactive elements)"
+                    {
+                        iframe_snapshots.push((ref_id.to_string(), child_text));
+                    }
+                }
+            }
+        }
+
+        // Insert each child snapshot after its Iframe line in the output
+        for (ref_id, child_text) in iframe_snapshots {
+            let marker = format!("[ref={}]", ref_id);
+            if let Some(pos) = output.find(&marker) {
+                // Find the end of the Iframe line
+                let line_end = output[pos..]
+                    .find('\n')
+                    .map(|i| pos + i)
+                    .unwrap_or(output.len());
+                // Determine the indent of the Iframe line
+                let line_start = output[..pos].rfind('\n').map(|i| i + 1).unwrap_or(0);
+                let iframe_line = &output[line_start..line_end];
+                let iframe_indent = iframe_line.len() - iframe_line.trim_start().len();
+                let child_indent = iframe_indent + 2; // one level deeper
+                let prefix = " ".repeat(child_indent);
+
+                let indented_child: String = child_text
+                    .lines()
+                    .map(|line| format!("{}{}\n", prefix, line))
+                    .collect();
+
+                // Ensure there's a newline to insert after
+                if line_end == output.len() {
+                    output.push('\n');
+                    output.push_str(&indented_child);
+                } else {
+                    output.insert_str(line_end + 1, &indented_child);
+                }
+            }
+        }
+    }
+
     if options.compact {
         output = compact_tree(&output, options.interactive);
     }
@@ -337,6 +409,40 @@ pub async fn take_snapshot(
     }
 
     Ok(trimmed)
+}
+
+/// Resolve the child frame ID for an iframe element given its backendNodeId.
+async fn resolve_iframe_frame_id(
+    client: &CdpClient,
+    session_id: &str,
+    backend_node_id: i64,
+) -> Result<String, String> {
+    // depth: 1 ensures contentDocument is included in the response
+    let describe: Value = client
+        .send_command(
+            "DOM.describeNode",
+            Some(serde_json::json!({ "backendNodeId": backend_node_id, "depth": 1 })),
+            Some(session_id),
+        )
+        .await?;
+
+    // Try contentDocument.frameId first (standard for iframes)
+    if let Some(frame_id) = describe
+        .get("node")
+        .and_then(|n| n.get("contentDocument"))
+        .and_then(|cd| cd.get("frameId"))
+        .and_then(|v| v.as_str())
+    {
+        return Ok(frame_id.to_string());
+    }
+
+    // Fallback: the node itself may have a frameId
+    describe
+        .get("node")
+        .and_then(|n| n.get("frameId"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| "Could not resolve iframe frame ID".to_string())
 }
 
 async fn find_cursor_interactive_elements(

@@ -87,6 +87,16 @@ agent-browser install
 
 `AGENT_BROWSER_CHROME_LAST_KNOWN_GOOD_URL` must point to a Chrome for Testing `last-known-good-versions.json` file. `AGENT_BROWSER_CHROME_DOWNLOAD_BASE_URL` must point to a base URL that serves archives under `/{version}/{platform}/{archive}`. For mirror installs, set both together so the manifest version and downloadable archives stay aligned. HTTPS is recommended. HTTP is supported for trusted internal mirrors and prints a warning at install time.
 
+## Updating
+
+Upgrade to the latest version:
+
+```bash
+agent-browser upgrade
+```
+
+Detects your installation method (npm, Homebrew, or Cargo) and runs the appropriate update command automatically. Displays the version change on success, or informs you if you are already on the latest version.
+
 ## Custom browser
 
 Use a custom browser executable instead of bundled Chromium:

@@ -53,6 +53,7 @@ Auto-connect discovers Chrome by:
 
 1. Reading Chrome's `DevToolsActivePort` file from the default user data directory
 2. Falling back to probing common debugging ports (9222, 9229)
+3. If HTTP-based discovery (`/json/version`, `/json/list`) fails, falling back to a direct WebSocket connection
 
 This is useful when:
 
@@ -102,7 +103,6 @@ This enables control of:
     <tr><td><code>--proxy &lt;url&gt;</code></td><td>Proxy server URL</td></tr>
     <tr><td><code>--proxy-bypass &lt;hosts&gt;</code></td><td>Hosts to bypass proxy</td></tr>
     <tr><td><code>--json</code></td><td>JSON output for scripts</td></tr>
-    <tr><td><code>--full, -f</code></td><td>Full page screenshot</td></tr>
     <tr><td><code>--name, -n</code></td><td>Locator name filter</td></tr>
     <tr><td><code>--exact</code></td><td>Exact text match</td></tr>
     <tr><td><code>--headed</code></td><td>Show browser window</td></tr>

@@ -456,12 +456,15 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
             println!("{} {}", color::success_indicator(), label);
             return;
         }
-        // Recording start (has "started" field)
+        // Started actions (profiling, HAR, recording)
         if let Some(started) = data.get("started").and_then(|v| v.as_bool()) {
             if started {
                 match action {
                     Some("profiler_start") => {
                         println!("{} Profiling started", color::success_indicator());
+                    }
+                    Some("har_start") => {
+                        println!("{} HAR recording started", color::success_indicator());
                     }
                     _ => {
                         if let Some(path) = data.get("path").and_then(|v| v.as_str()) {
@@ -591,9 +594,12 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
                     data.get("eventCount").and_then(|c| c.as_u64()).unwrap_or(0)
                 ),
                 "har_stop" => println!(
-                    "{} HAR saved to {}",
+                    "{} HAR saved to {} ({} requests)",
                     color::success_indicator(),
-                    color::green(path)
+                    color::green(path),
+                    data.get("requestCount")
+                        .and_then(|c| c.as_u64())
+                        .unwrap_or(0)
                 ),
                 "download" | "waitfordownload" => println!(
                     "{} Download saved to {}",
@@ -1721,6 +1727,7 @@ Subcommands:
   requests [options]         List captured requests
     --clear                  Clear request log
     --filter <pattern>       Filter by URL pattern
+  har <start|stop> [path]    Record and export a HAR file
 
 Global Options:
   --json               Output as JSON
@@ -1733,6 +1740,8 @@ Examples:
   agent-browser network requests
   agent-browser network requests --filter "api"
   agent-browser network requests --clear
+  agent-browser network har start
+  agent-browser network har stop ./capture.har
 "##
         }
 
@@ -2267,6 +2276,22 @@ Examples:
 "##
         }
 
+        // === Upgrade ===
+        "upgrade" => {
+            r##"
+agent-browser upgrade - Upgrade to the latest version
+
+Usage: agent-browser upgrade
+
+Detects the current installation method (npm, Homebrew, or Cargo) and runs
+the appropriate update command. Displays the version change on success, or
+informs you if you are already on the latest version.
+
+Examples:
+  agent-browser upgrade
+"##
+        }
+
         // === Connect ===
         "connect" => {
             r##"
@@ -2428,6 +2453,38 @@ Examples:
 "##
         }
 
+        "batch" => {
+            r##"
+agent-browser batch - Execute multiple commands from stdin
+
+Usage: echo '<json>' | agent-browser batch [options]
+
+Reads a JSON array of commands from stdin and executes them sequentially.
+Each command is an array of strings matching normal CLI arguments.
+Results are printed in order, separated by blank lines (or as a JSON array
+with --json).
+
+Options:
+  --bail               Stop on first error (default: continue all commands)
+  --json               Output results as a JSON array
+
+Input Format:
+  A JSON array of string arrays. Each inner array is one command:
+  [
+    ["open", "https://example.com"],
+    ["snapshot", "-i"],
+    ["click", "@e1"],
+    ["fill", "@e2", "test@example.com"],
+    ["screenshot", "result.png"]
+  ]
+
+Examples:
+  echo '[["open", "https://example.com"], ["snapshot"]]' | agent-browser batch
+  echo '[["open", "https://example.com"], ["get", "title"]]' | agent-browser batch --json
+  agent-browser batch --bail < commands.json
+"##
+        }
+
         _ => return false,
     };
     println!("{}", help.trim());
@@ -2494,6 +2551,7 @@ Network:  agent-browser network <action>
   route <url> [--abort|--body <json>]
   unroute [url]
   requests [--clear] [--filter <pattern>]
+  har <start|stop> [path]
 
 Storage:
   cookies [get|set|clear]    Manage cookies (set supports --url, --domain, --path, --httpOnly, --secure, --sameSite, --expires)
@@ -2518,6 +2576,10 @@ Debug:
   inspect                    Open Chrome DevTools for the active page
   clipboard <op> [text]      Read/write clipboard (read, write, copy, paste)
 
+Batch:
+  batch [--bail]             Execute commands from stdin (JSON array of string arrays)
+                             --bail stops on first error (default: continue all)
+
 Auth Vault:
   auth save <name> [opts]    Save auth profile (--url, --username, --password/--password-stdin)
   auth login <name>          Login using saved credentials
@@ -2536,6 +2598,7 @@ Sessions:
 Setup:
   install                    Install browser binaries
   install --with-deps        Also install system dependencies (Linux)
+  upgrade                    Upgrade to the latest version
 
 Snapshot Options:
   -i, --interactive          Only interactive elements
@@ -2570,7 +2633,6 @@ Options:
   -p, --provider <name>      Browser provider: ios, browserbase, kernel, browseruse, browserless
   --device <name>            iOS device name (e.g., "iPhone 15 Pro")
   --json                     JSON output
-  --full, -f                 Full page screenshot
   --annotate                 Annotated screenshot with numbered labels and legend
   --screenshot-dir <path>    Default screenshot output directory (or AGENT_BROWSER_SCREENSHOT_DIR)
   --screenshot-quality <n>   JPEG quality 0-100; ignored for PNG (or AGENT_BROWSER_SCREENSHOT_QUALITY)
@@ -2619,7 +2681,6 @@ Environment:
   AGENT_BROWSER_EXTENSIONS       Comma-separated browser extension paths
   AGENT_BROWSER_HEADED           Show browser window (not headless)
   AGENT_BROWSER_JSON             JSON output
-  AGENT_BROWSER_FULL             Full page screenshot
   AGENT_BROWSER_ANNOTATE         Annotated screenshot with numbered labels and legend
   AGENT_BROWSER_DEBUG            Debug output
   AGENT_BROWSER_IGNORE_HTTPS_ERRORS Ignore HTTPS certificate errors

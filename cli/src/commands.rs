@@ -449,10 +449,22 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
 
         // === Screenshot/PDF ===
         "screenshot" => {
-            // screenshot [selector] [path]
+            // screenshot [selector] [path] [--full/-f]
             // selector: @ref or CSS selector
             // path: file path (contains / or . or ends with known extension)
-            let (selector, path) = match (rest.first(), rest.get(1)) {
+            let mut full_page = false;
+            let positional: Vec<&str> = rest
+                .iter()
+                .filter(|arg| match **arg {
+                    "--full" | "-f" => {
+                        full_page = true;
+                        false
+                    }
+                    _ => true,
+                })
+                .copied()
+                .collect();
+            let (selector, path) = match (positional.first(), positional.get(1)) {
                 (Some(first), Some(second)) => {
                     // Two args: first is selector, second is path
                     (Some(*first), Some(*second))
@@ -480,7 +492,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
             let mut cmd = json!({
                 "id": id, "action": "screenshot",
                 "path": path, "selector": selector,
-                "fullPage": flags.full, "annotate": flags.annotate
+                "fullPage": full_page, "annotate": flags.annotate
             });
             if let Some(ref fmt) = flags.screenshot_format {
                 cmd["format"] = json!(fmt);
@@ -1315,7 +1327,13 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
             }
         }
 
-        "diff" => parse_diff(&rest, &id, flags),
+        "diff" => parse_diff(&rest, &id),
+
+        // === Batch ===
+        "batch" => {
+            let bail = rest.contains(&"--bail");
+            Ok(json!({ "id": id, "action": "batch", "bail": bail }))
+        }
 
         _ => Err(ParseError::UnknownCommand {
             command: cmd.to_string(),
@@ -1323,7 +1341,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
     }
 }
 
-fn parse_diff(rest: &[&str], id: &str, flags: &Flags) -> Result<Value, ParseError> {
+fn parse_diff(rest: &[&str], id: &str) -> Result<Value, ParseError> {
     const VALID: &[&str] = &["snapshot", "screenshot", "url"];
 
     match rest.first().copied() {
@@ -1468,26 +1486,23 @@ fn parse_diff(rest: &[&str], id: &str, flags: &Flags) -> Result<Value, ParseErro
                             });
                         }
                     }
-                    "--full" => {
+                    "--full" | "-f" => {
                         obj.insert("fullPage".to_string(), json!(true));
                     }
                     other if other.starts_with('-') => {
                         return Err(ParseError::InvalidValue {
                             message: format!("Unknown flag: {}", other),
-                            usage: "diff screenshot --baseline <file> [--output <file>] [--threshold <0-1>] [--selector <sel>] [--full]",
+                            usage: "diff screenshot --baseline <file> [--output <file>] [--threshold <0-1>] [--selector <sel>] [--full/-f]",
                         });
                     }
                     other => {
                         return Err(ParseError::InvalidValue {
                             message: format!("Unexpected argument: {}", other),
-                            usage: "diff screenshot --baseline <file> [--output <file>] [--threshold <0-1>] [--selector <sel>] [--full]",
+                            usage: "diff screenshot --baseline <file> [--output <file>] [--threshold <0-1>] [--selector <sel>] [--full/-f]",
                         });
                     }
                 }
                 i += 1;
-            }
-            if flags.full {
-                obj.insert("fullPage".to_string(), json!(true));
             }
             if !obj.contains_key("baseline") {
                 return Err(ParseError::MissingArguments {
@@ -1519,7 +1534,7 @@ fn parse_diff(rest: &[&str], id: &str, flags: &Flags) -> Result<Value, ParseErro
                     "--screenshot" => {
                         obj.insert("screenshot".to_string(), json!(true));
                     }
-                    "--full" => {
+                    "--full" | "-f" => {
                         obj.insert("fullPage".to_string(), json!(true));
                     }
                     "--wait-until" => {
@@ -1574,20 +1589,17 @@ fn parse_diff(rest: &[&str], id: &str, flags: &Flags) -> Result<Value, ParseErro
                     other if other.starts_with('-') => {
                         return Err(ParseError::InvalidValue {
                             message: format!("Unknown flag: {}", other),
-                            usage: "diff url <url1> <url2> [--screenshot] [--full] [--wait-until <strategy>] [--selector <sel>] [--compact] [--depth <n>]",
+                            usage: "diff url <url1> <url2> [--screenshot] [--full/-f] [--wait-until <strategy>] [--selector <sel>] [--compact] [--depth <n>]",
                         });
                     }
                     other => {
                         return Err(ParseError::InvalidValue {
                             message: format!("Unexpected argument: {}", other),
-                            usage: "diff url <url1> <url2> [--screenshot] [--full] [--wait-until <strategy>] [--selector <sel>] [--compact] [--depth <n>]",
+                            usage: "diff url <url1> <url2> [--screenshot] [--full/-f] [--wait-until <strategy>] [--selector <sel>] [--compact] [--depth <n>]",
                         });
                     }
                 }
                 i += 1;
-            }
-            if flags.full {
-                obj.insert("fullPage".to_string(), json!(true));
             }
             Ok(cmd)
         }
@@ -2036,8 +2048,9 @@ fn parse_set(rest: &[&str], id: &str) -> Result<Value, ParseError> {
     }
 }
 
+/// Parse network interception, request inspection, and HAR recording commands.
 fn parse_network(rest: &[&str], id: &str) -> Result<Value, ParseError> {
-    const VALID: &[&str] = &["route", "unroute", "requests"];
+    const VALID: &[&str] = &["route", "unroute", "requests", "har"];
 
     match rest.first().copied() {
         Some("route") => {
@@ -2067,13 +2080,34 @@ fn parse_network(rest: &[&str], id: &str) -> Result<Value, ParseError> {
             }
             Ok(cmd)
         }
+        Some("har") => {
+            const HAR_VALID: &[&str] = &["start", "stop"];
+            match rest.get(1).copied() {
+                Some("start") => Ok(json!({ "id": id, "action": "har_start" })),
+                Some("stop") => {
+                    let mut cmd = json!({ "id": id, "action": "har_stop" });
+                    if let Some(path) = rest.get(2) {
+                        cmd["path"] = json!(path);
+                    }
+                    Ok(cmd)
+                }
+                Some(sub) => Err(ParseError::UnknownSubcommand {
+                    subcommand: sub.to_string(),
+                    valid_options: HAR_VALID,
+                }),
+                None => Err(ParseError::MissingArguments {
+                    context: "network har".to_string(),
+                    usage: "network har <start|stop> [path]",
+                }),
+            }
+        }
         Some(sub) => Err(ParseError::UnknownSubcommand {
             subcommand: sub.to_string(),
             valid_options: VALID,
         }),
         None => Err(ParseError::MissingArguments {
             context: "network".to_string(),
-            usage: "network <route|unroute|requests> [args...]",
+            usage: "network <route|unroute|requests|har> [args...]",
         }),
     }
 }
@@ -2137,7 +2171,6 @@ mod tests {
         Flags {
             session: "test".to_string(),
             json: false,
-            full: false,
             headed: false,
             debug: false,
             headers: None,
@@ -2653,6 +2686,34 @@ mod tests {
         assert_eq!(cmd["action"], "tab_close");
     }
 
+    // === Network ===
+
+    #[test]
+    fn test_network_har_start() {
+        let cmd = parse_command(&args("network har start"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "har_start");
+    }
+
+    #[test]
+    fn test_network_har_stop_with_path() {
+        let cmd = parse_command(&args("network har stop ./capture.har"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "har_stop");
+        assert_eq!(cmd["path"], "./capture.har");
+    }
+
+    #[test]
+    fn test_network_har_stop_without_path() {
+        let cmd = parse_command(&args("network har stop"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "har_stop");
+        assert!(cmd.get("path").is_none());
+    }
+
+    #[test]
+    fn test_network_har_requires_subcommand() {
+        let result = parse_command(&args("network har"), &default_flags());
+        assert!(matches!(result, Err(ParseError::MissingArguments { .. })));
+    }
+
     // === Screenshot ===
 
     #[test]
@@ -2672,9 +2733,14 @@ mod tests {
 
     #[test]
     fn test_screenshot_full_page() {
-        let mut flags = default_flags();
-        flags.full = true;
-        let cmd = parse_command(&args("screenshot"), &flags).unwrap();
+        let cmd = parse_command(&args("screenshot --full"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "screenshot");
+        assert_eq!(cmd["fullPage"], true);
+    }
+
+    #[test]
+    fn test_screenshot_full_page_shorthand() {
+        let cmd = parse_command(&args("screenshot -f"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "screenshot");
         assert_eq!(cmd["fullPage"], true);
     }
@@ -3542,10 +3608,23 @@ mod tests {
     }
 
     #[test]
-    fn test_diff_screenshot_global_full_flag() {
-        let mut flags = default_flags();
-        flags.full = true;
-        let cmd = parse_command(&args("diff screenshot --baseline b.png"), &flags).unwrap();
+    fn test_diff_screenshot_command_full_flag() {
+        let cmd = parse_command(
+            &args("diff screenshot --baseline b.png --full"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "diff_screenshot");
+        assert_eq!(cmd["fullPage"], true);
+    }
+
+    #[test]
+    fn test_diff_screenshot_command_full_flag_shorthand() {
+        let cmd = parse_command(
+            &args("diff screenshot --baseline b.png -f"),
+            &default_flags(),
+        )
+        .unwrap();
         assert_eq!(cmd["action"], "diff_screenshot");
         assert_eq!(cmd["fullPage"], true);
     }
@@ -3586,10 +3665,12 @@ mod tests {
     }
 
     #[test]
-    fn test_diff_url_global_full_flag() {
-        let mut flags = default_flags();
-        flags.full = true;
-        let cmd = parse_command(&args("diff url https://a.com https://b.com"), &flags).unwrap();
+    fn test_diff_url_command_full_flag() {
+        let cmd = parse_command(
+            &args("diff url https://a.com https://b.com --full"),
+            &default_flags(),
+        )
+        .unwrap();
         assert_eq!(cmd["fullPage"], true);
     }
 
@@ -3960,5 +4041,21 @@ mod tests {
     fn test_get_cdp_url() {
         let cmd = parse_command(&args("get cdp-url"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "cdp_url");
+    }
+
+    // === Batch Tests ===
+
+    #[test]
+    fn test_batch_default() {
+        let cmd = parse_command(&args("batch"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "batch");
+        assert_eq!(cmd["bail"], false);
+    }
+
+    #[test]
+    fn test_batch_with_bail() {
+        let cmd = parse_command(&args("batch --bail"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "batch");
+        assert_eq!(cmd["bail"], true);
     }
 }

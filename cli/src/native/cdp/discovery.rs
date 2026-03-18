@@ -1,23 +1,23 @@
 use std::time::Duration;
 
+use futures_util::{SinkExt, StreamExt};
+use tokio_tungstenite::tungstenite::Message;
+
 use super::types::BrowserVersionInfo;
 
 /// Default timeout for CDP discovery HTTP requests.
 const DEFAULT_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// Discover the CDP WebSocket URL by querying `/json/version` at the given host and port.
-/// The returned `webSocketDebuggerUrl` has its host/port rewritten to match
-/// the requested target, since Chrome always reports `127.0.0.1` regardless
-/// of the interface it was reached through.
+/// Discover the CDP WebSocket URL for the given host and port.
+///
+/// Tries three methods in order: `/json/version`, `/json/list`, and a direct
+/// WebSocket connection to `/devtools/browser`. The returned URL has its
+/// host/port rewritten to match the requested target.
 pub async fn discover_cdp_url(host: &str, port: u16) -> Result<String, String> {
     discover_cdp_url_with_timeout(host, port, DEFAULT_DISCOVERY_TIMEOUT).await
 }
 
 /// Like [`discover_cdp_url`] but with a custom request timeout.
-///
-/// Tries `/json/version` first (standard CDP HTTP endpoint). If that fails
-/// (e.g., Chrome's UI-based remote debugging only exposes a WebSocket
-/// endpoint), falls back to `/json/list` to discover the browser target.
 pub async fn discover_cdp_url_with_timeout(
     host: &str,
     port: u16,
@@ -38,12 +38,20 @@ pub async fn discover_cdp_url_with_timeout(
     };
 
     // Fallback: /json/list (returns target list; look for the browser target)
-    match fetch_cdp_list(host, port, timeout).await {
-        Ok(ws_url) => Ok(rewrite_ws_host(&ws_url, host, port)),
-        Err(_) => {
-            // Return the original /json/version error since that's the primary path
-            Err(version_err)
-        }
+    let list_err = match fetch_cdp_list(host, port, timeout).await {
+        Ok(ws_url) => return Ok(rewrite_ws_host(&ws_url, host, port)),
+        Err(e) => e,
+    };
+
+    // Final fallback: direct WebSocket at /devtools/browser.
+    // Chrome 136+ with UI-based remote debugging (chrome://inspect) exposes
+    // CDP over WebSocket but does not serve HTTP discovery endpoints.
+    match discover_cdp_ws(host, port, timeout).await {
+        Ok(ws_url) => Ok(ws_url),
+        Err(ws_err) => Err(format!(
+            "All CDP discovery methods failed for {}:{}: /json/version: {}; /json/list: {}; WebSocket: {}",
+            host, port, version_err, list_err, ws_err
+        )),
     }
 }
 
@@ -118,6 +126,50 @@ async fn fetch_cdp_list(host: &str, port: u16, timeout: Duration) -> Result<Stri
         .ok_or_else(|| "No webSocketDebuggerUrl found in /json/list targets".to_string())
 }
 
+/// Discover a CDP endpoint by connecting directly to `ws://host:port/devtools/browser`
+/// and verifying it responds to `Browser.getVersion`.
+/// Returns the WebSocket URL on success.
+async fn discover_cdp_ws(host: &str, port: u16, timeout: Duration) -> Result<String, String> {
+    let ws_url = format!("ws://{}:{}/devtools/browser", bracket_ipv6(host), port);
+
+    tokio::time::timeout(timeout, async {
+        let (mut ws_stream, _) = tokio_tungstenite::connect_async(&ws_url)
+            .await
+            .map_err(|e| format!("WebSocket connect failed at {}: {}", ws_url, e))?;
+
+        let cmd = r#"{"id":1,"method":"Browser.getVersion"}"#;
+        ws_stream
+            .send(Message::Text(cmd.into()))
+            .await
+            .map_err(|e| format!("Failed to send command: {}", e))?;
+
+        #[derive(serde::Deserialize)]
+        struct CdpReply {
+            id: u64,
+        }
+
+        let mut result: Result<(), String> = Err("No valid CDP response received".to_string());
+        while let Some(msg) = ws_stream.next().await {
+            match msg {
+                Ok(Message::Text(text)) => {
+                    if serde_json::from_str::<CdpReply>(&text).is_ok_and(|r| r.id == 1) {
+                        result = Ok(());
+                        break;
+                    }
+                }
+                Ok(Message::Close(_)) | Err(_) => break,
+                _ => continue,
+            }
+        }
+
+        let _ = ws_stream.close(None).await;
+        result
+    })
+    .await
+    .map_err(|_| format!("Timeout connecting to WebSocket at {}", ws_url))?
+    .map(|()| ws_url)
+}
+
 async fn reqwest_get_string(url: &str) -> Result<String, String> {
     let resp = reqwest::get(url).await.map_err(|e| e.to_string())?;
     resp.text().await.map_err(|e| e.to_string())
@@ -129,27 +181,34 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
-    async fn spawn_json_server(body: &'static str) -> (u16, tokio::task::JoinHandle<()>) {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let handle = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let mut buf = [0u8; 1024];
-            let _ = socket.read(&mut buf).await;
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\nContent-Type: application/json\r\n\r\n{}",
-                body.len(),
-                body
-            );
-            socket.write_all(response.as_bytes()).await.unwrap();
-        });
-        (port, handle)
+    const HTTP_404: &str =
+        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+
+    fn http_200(body: &str) -> String {
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\nContent-Type: application/json\r\n\r\n{}",
+            body.len(), body
+        )
+    }
+
+    async fn accept_http(listener: &TcpListener, response: &str) {
+        let (mut s, _) = listener.accept().await.unwrap();
+        let mut buf = [0u8; 1024];
+        let _ = s.read(&mut buf).await;
+        s.write_all(response.as_bytes()).await.unwrap();
     }
 
     #[tokio::test]
     async fn discovers_ws_url_from_json_version() {
-        let (port, server) =
-            spawn_json_server(r#"{"webSocketDebuggerUrl":"ws://127.0.0.1:1234/"}"#).await;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            accept_http(
+                &listener,
+                &http_200(r#"{"webSocketDebuggerUrl":"ws://127.0.0.1:1234/"}"#),
+            )
+            .await;
+        });
 
         let ws_url = discover_cdp_url("127.0.0.1", port).await.unwrap();
         assert_eq!(ws_url, format!("ws://127.0.0.1:{}/", port));
@@ -157,52 +216,63 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invalid_json_falls_through_to_list_fallback() {
-        let (port, server) = spawn_json_server("not-json").await;
+    async fn returns_error_when_version_returns_invalid_json() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            accept_http(&listener, &http_200("not-json")).await;
+            // /json/list and ws fallback both fail (server closes)
+        });
 
         let err = discover_cdp_url("127.0.0.1", port).await.unwrap_err();
-        // /json/version returns invalid JSON; /json/list also fails (server
-        // closed), so the original /json/version error is returned
         assert!(err.contains("Invalid /json/version response"));
         server.await.unwrap();
     }
 
-    async fn spawn_json_list_server(body: &'static str) -> (u16, tokio::task::JoinHandle<()>) {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let handle = tokio::spawn(async move {
-            // First request: /json/version -> 404
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let mut buf = [0u8; 1024];
-            let _ = socket.read(&mut buf).await;
-            let not_found =
-                "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-            socket.write_all(not_found.as_bytes()).await.unwrap();
-            drop(socket);
-
-            // Second request: /json/list -> 200
-            let (mut socket2, _) = listener.accept().await.unwrap();
-            let _ = socket2.read(&mut buf).await;
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\nContent-Type: application/json\r\n\r\n{}",
-                body.len(),
-                body
-            );
-            socket2.write_all(response.as_bytes()).await.unwrap();
-        });
-        (port, handle)
-    }
-
     #[tokio::test]
     async fn falls_back_to_json_list_on_version_404() {
-        let (port, server) = spawn_json_list_server(
-            r#"[{"type":"browser","webSocketDebuggerUrl":"ws://127.0.0.1:1234/devtools/browser/abc"}]"#,
-        )
-        .await;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            accept_http(&listener, HTTP_404).await;
+            accept_http(
+                &listener,
+                &http_200(r#"[{"type":"browser","webSocketDebuggerUrl":"ws://127.0.0.1:1234/devtools/browser/abc"}]"#),
+            ).await;
+        });
 
         let ws_url = discover_cdp_url("127.0.0.1", port).await.unwrap();
         assert!(ws_url.contains("/devtools/browser/abc"));
         assert!(ws_url.contains(&port.to_string()));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn falls_back_to_ws_when_http_returns_404() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            // /json/version -> 404, /json/list -> 404
+            accept_http(&listener, HTTP_404).await;
+            accept_http(&listener, HTTP_404).await;
+
+            // WebSocket handshake + respond to Browser.getVersion
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            if let Some(Ok(Message::Text(text))) = ws.next().await {
+                let req: serde_json::Value = serde_json::from_str(&text).unwrap();
+                let id = req.get("id").unwrap();
+                let reply = format!(
+                    r#"{{"id":{},"result":{{"protocolVersion":"1.3","product":"Chrome/136"}}}}"#,
+                    id
+                );
+                ws.send(Message::Text(reply)).await.unwrap();
+            }
+            let _ = ws.close(None).await;
+        });
+
+        let ws_url = discover_cdp_url("127.0.0.1", port).await.unwrap();
+        assert_eq!(ws_url, format!("ws://127.0.0.1:{}/devtools/browser", port));
         server.await.unwrap();
     }
 

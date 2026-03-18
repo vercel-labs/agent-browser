@@ -12,6 +12,7 @@ pub struct RefEntry {
     pub name: String,
     pub nth: Option<usize>,
     pub selector: Option<String>,
+    pub frame_id: Option<String>,
 }
 
 pub struct RefMap {
@@ -35,6 +36,18 @@ impl RefMap {
         name: &str,
         nth: Option<usize>,
     ) {
+        self.add_with_frame(ref_id, backend_node_id, role, name, nth, None);
+    }
+
+    pub fn add_with_frame(
+        &mut self,
+        ref_id: String,
+        backend_node_id: Option<i64>,
+        role: &str,
+        name: &str,
+        nth: Option<usize>,
+        frame_id: Option<&str>,
+    ) {
         self.map.insert(
             ref_id,
             RefEntry {
@@ -43,6 +56,7 @@ impl RefMap {
                 name: name.to_string(),
                 nth,
                 selector: None,
+                frame_id: frame_id.map(|s| s.to_string()),
             },
         );
     }
@@ -63,6 +77,7 @@ impl RefMap {
                 name: name.to_string(),
                 nth,
                 selector: Some(selector),
+                frame_id: None,
             },
         );
     }
@@ -159,9 +174,16 @@ pub async fn resolve_element_center(
         }
 
         // Fallback: re-query the accessibility tree to find a fresh node by role/name
-        let fresh_id =
-            find_node_id_by_role_name(client, session_id, &entry.role, &entry.name, entry.nth)
-                .await?;
+        let ref_frame_id = entry.frame_id.clone();
+        let fresh_id = find_node_id_by_role_name(
+            client,
+            session_id,
+            &entry.role,
+            &entry.name,
+            entry.nth,
+            ref_frame_id.as_deref(),
+        )
+        .await?;
         let result: DomGetBoxModelResult = client
             .send_command_typed(
                 "DOM.getBoxModel",
@@ -214,9 +236,16 @@ pub async fn resolve_element_object_id(
         }
 
         // Fallback: re-query the accessibility tree to find a fresh node by role/name
-        let fresh_id =
-            find_node_id_by_role_name(client, session_id, &entry.role, &entry.name, entry.nth)
-                .await?;
+        let ref_frame_id = entry.frame_id.clone();
+        let fresh_id = find_node_id_by_role_name(
+            client,
+            session_id,
+            &entry.role,
+            &entry.name,
+            entry.nth,
+            ref_frame_id.as_deref(),
+        )
+        .await?;
         let result: DomResolveNodeResult = client
             .send_command_typed(
                 "DOM.resolveNode",
@@ -267,13 +296,15 @@ async fn find_node_id_by_role_name(
     role: &str,
     name: &str,
     nth: Option<usize>,
+    frame_id: Option<&str>,
 ) -> Result<i64, String> {
+    let ax_params = if let Some(fid) = frame_id {
+        serde_json::json!({ "frameId": fid })
+    } else {
+        serde_json::json!({})
+    };
     let ax_tree: GetFullAXTreeResult = client
-        .send_command_typed(
-            "Accessibility.getFullAXTree",
-            &serde_json::json!({}),
-            Some(session_id),
-        )
+        .send_command_typed("Accessibility.getFullAXTree", &ax_params, Some(session_id))
         .await?;
 
     let nth_index = nth.unwrap_or(0);

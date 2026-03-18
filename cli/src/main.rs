@@ -7,6 +7,7 @@ mod native;
 mod output;
 #[cfg(test)]
 mod test_utils;
+mod upgrade;
 mod validation;
 
 use serde_json::json;
@@ -21,11 +22,12 @@ use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_I
 
 use commands::{gen_id, parse_command, ParseError};
 use connection::{ensure_daemon, get_socket_dir, send_command, DaemonOptions};
-use flags::{clean_args, parse_flags};
+use flags::{clean_args, parse_flags, Flags};
 use install::run_install;
 use output::{
     print_command_help, print_help, print_response_with_opts, print_version, OutputOptions,
 };
+use upgrade::run_upgrade;
 
 fn serialize_json_value(value: &serde_json::Value) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| {
@@ -223,6 +225,12 @@ fn main() {
     if clean.first().map(|s| s.as_str()) == Some("install") {
         let with_deps = args.iter().any(|a| a == "--with-deps" || a == "-d");
         run_install(with_deps);
+        return;
+    }
+
+    // Handle upgrade separately
+    if clean.first().map(|s| s.as_str()) == Some("upgrade") {
+        run_upgrade();
         return;
     }
 
@@ -729,6 +737,13 @@ fn main() {
         }
     }
 
+    // Handle batch command: read commands from stdin, execute sequentially
+    if cmd.get("action").and_then(|v| v.as_str()) == Some("batch") {
+        let bail = cmd.get("bail").and_then(|v| v.as_bool()).unwrap_or(false);
+        run_batch(&flags, bail);
+        return;
+    }
+
     let output_opts = OutputOptions {
         json: flags.json,
         content_boundaries: flags.content_boundaries,
@@ -806,6 +821,150 @@ fn main() {
             }
             exit(1);
         }
+    }
+}
+
+fn run_batch(flags: &Flags, bail: bool) {
+    use std::io::Read as _;
+
+    let mut input = String::new();
+    if let Err(e) = std::io::stdin().read_to_string(&mut input) {
+        if flags.json {
+            print_json_error(format!("Failed to read stdin: {}", e));
+        } else {
+            eprintln!("{} Failed to read stdin: {}", color::error_indicator(), e);
+        }
+        exit(1);
+    }
+
+    let commands: Vec<Vec<String>> = match serde_json::from_str(&input) {
+        Ok(c) => c,
+        Err(e) => {
+            if flags.json {
+                print_json_error(format!(
+                    "Invalid JSON input: {}. Expected an array of string arrays, e.g. [[\"open\", \"https://example.com\"], [\"snapshot\"]]",
+                    e
+                ));
+            } else {
+                eprintln!(
+                    "{} Invalid JSON input: {}. Expected an array of string arrays.",
+                    color::error_indicator(),
+                    e
+                );
+            }
+            exit(1);
+        }
+    };
+
+    if commands.is_empty() {
+        if flags.json {
+            println!("[]");
+        }
+        return;
+    }
+
+    let output_opts = OutputOptions {
+        json: flags.json,
+        content_boundaries: flags.content_boundaries,
+        max_output: flags.max_output,
+    };
+
+    let mut results: Vec<serde_json::Value> = Vec::new();
+    let mut had_error = false;
+
+    for (i, cmd_args) in commands.iter().enumerate() {
+        if cmd_args.is_empty() {
+            continue;
+        }
+
+        let parsed = match parse_command(cmd_args, flags) {
+            Ok(c) => c,
+            Err(e) => {
+                had_error = true;
+                if flags.json {
+                    results.push(json!({
+                        "command": cmd_args,
+                        "success": false,
+                        "error": e.format(),
+                    }));
+                    if bail {
+                        break;
+                    }
+                } else {
+                    eprintln!(
+                        "{} Command {}: {}",
+                        color::error_indicator(),
+                        i + 1,
+                        e.format()
+                    );
+                    if bail {
+                        exit(1);
+                    }
+                }
+                continue;
+            }
+        };
+
+        let action = parsed
+            .get("action")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        match send_command(parsed, &flags.session) {
+            Ok(resp) => {
+                if flags.json {
+                    results.push(json!({
+                        "command": cmd_args,
+                        "success": resp.success,
+                        "result": resp.data,
+                        "error": resp.error,
+                    }));
+                } else {
+                    if i > 0 {
+                        println!();
+                    }
+                    print_response_with_opts(&resp, action.as_deref(), &output_opts);
+                }
+                if !resp.success {
+                    had_error = true;
+                    if bail {
+                        if !flags.json {
+                            exit(1);
+                        }
+                        break;
+                    }
+                }
+            }
+            Err(e) => {
+                had_error = true;
+                if flags.json {
+                    results.push(json!({
+                        "command": cmd_args,
+                        "success": false,
+                        "error": e.to_string(),
+                    }));
+                    if bail {
+                        break;
+                    }
+                } else {
+                    eprintln!("{} Command {}: {}", color::error_indicator(), i + 1, e);
+                    if bail {
+                        exit(1);
+                    }
+                }
+            }
+        }
+    }
+
+    if flags.json {
+        println!(
+            "{}",
+            serde_json::to_string(&results).unwrap_or_else(|_| "[]".to_string())
+        );
+    }
+
+    if had_error {
+        exit(1);
     }
 }
 

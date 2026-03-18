@@ -177,9 +177,35 @@ agent-browser window new          # New window
 ## Frames
 
 ```bash
-agent-browser frame "#iframe"     # Switch to iframe
+agent-browser frame "#iframe"     # Switch to iframe by CSS selector
+agent-browser frame @e3           # Switch to iframe by element ref
 agent-browser frame main          # Back to main frame
 ```
+
+### Iframe support
+
+Iframes are detected automatically during snapshots. When the main-frame snapshot runs, `Iframe` nodes are resolved and their content is inlined beneath the iframe element in the output (one level of nesting; iframes within iframes are not expanded).
+
+```bash
+agent-browser snapshot -i
+# @e3 [Iframe] "payment-frame"
+#   @e4 [input] "Card number"
+#   @e5 [button] "Pay"
+
+# Interact directly — refs inside iframes already work
+agent-browser fill @e4 "4111111111111111"
+agent-browser click @e5
+
+# Or switch frame context for scoped snapshots
+agent-browser frame @e3               # Switch using element ref
+agent-browser snapshot -i             # Snapshot scoped to that iframe
+agent-browser frame main              # Return to main frame
+```
+
+The `frame` command accepts:
+- **Element refs** — `frame @e3` resolves the ref to an iframe element
+- **CSS selectors** — `frame "#payment-iframe"` finds the iframe by selector
+- **Frame name/URL** — matches against the browser's frame tree
 
 ## Dialogs
 

@@ -110,6 +110,7 @@ pub async fn fill(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn type_text(
     client: &CdpClient,
     session_id: &str,
