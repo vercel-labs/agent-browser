@@ -122,6 +122,9 @@ pub const TAURI_UNSUPPORTED_ACTIONS: &[&str] = &[
     "check",
     "uncheck",
     "wait",
+    "type",
+    "press",
+    "evaluate",
     "gettext",
     "getattribute",
     "isvisible",
@@ -243,42 +246,55 @@ impl TauriBackend {
             params,
         };
 
-        let mut session = self.session.lock().await;
-        let sess = session
-            .as_mut()
-            .ok_or("Not connected — call connect() first")?;
+        // Lock scope 1: get the POST URL and send the request.
+        let post_url = {
+            let session = self.session.lock().await;
+            let sess = session
+                .as_ref()
+                .ok_or("Not connected — call connect() first")?;
+            sess.post_url.clone()
+        };
 
         self.client
-            .post(&sess.post_url)
+            .post(&post_url)
             .json(&request)
             .send()
             .await
             .map_err(|e| format!("HTTP error: {e}"))?;
 
-        // Wait for the matching response on SSE
-        let response_value = tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            async {
-                let expected_id = serde_json::json!(id);
-                loop {
-                    match sess.event_rx.recv().await {
-                        Some(ev) if ev.event_type == "message" => {
-                            if let Ok(v) = serde_json::from_str::<Value>(&ev.data) {
-                                if v.get("id") == Some(&expected_id) {
-                                    return Ok(v);
+        // Lock scope 2: read the SSE stream for the matching response.
+        let response_value = {
+            let mut session = self.session.lock().await;
+            let sess = session
+                .as_mut()
+                .ok_or("Not connected — session dropped")?;
+
+            tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                async {
+                    let expected_id = serde_json::json!(id);
+                    loop {
+                        match sess.event_rx.recv().await {
+                            Some(ev) if ev.event_type == "message" => {
+                                if let Ok(v) = serde_json::from_str::<Value>(&ev.data) {
+                                    if v.get("id") == Some(&expected_id) {
+                                        return Ok(v);
+                                    }
                                 }
                             }
-                        }
-                        Some(_) => continue,
-                        None => {
-                            return Err("SSE stream closed while waiting for response".to_string());
+                            Some(_) => continue,
+                            None => {
+                                return Err(
+                                    "SSE stream closed while waiting for response".to_string(),
+                                );
+                            }
                         }
                     }
-                }
-            },
-        )
-        .await
-        .map_err(|_| format!("Timeout waiting for response to '{method}'"))??;
+                },
+            )
+            .await
+            .map_err(|_| format!("Timeout waiting for response to '{method}'"))??
+        };
 
         Ok(response_value)
     }

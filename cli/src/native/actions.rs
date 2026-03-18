@@ -1709,8 +1709,10 @@ async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
             .get("interactive")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
-        let tree = tb.snapshot(interactive).await?;
-        return Ok(json!({ "snapshot": tree, "origin": "", "refs": {} }));
+        let tree_str = tb.snapshot(interactive).await?;
+        let tree_value: Value = serde_json::from_str(&tree_str)
+            .unwrap_or(Value::String(tree_str));
+        return Ok(json!({ "snapshot": tree_value, "origin": "", "refs": {} }));
     }
 
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
