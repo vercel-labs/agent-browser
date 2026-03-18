@@ -847,6 +847,9 @@ fn render_tree(
         &node.name
     } else if let Some(ref ci) = node.cursor_info {
         &ci.text
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace(['\n', '\r'], " ")
     } else {
         &node.name
     };
