@@ -350,12 +350,17 @@ fn main() {
             } else {
                 None
             },
+            if flags.cli_launch_command {
+                Some("--launch-command")
+            } else {
+                None
+            },
             if flags.cli_extensions {
                 Some("--extension")
             } else {
                 None
             },
-            if flags.cli_profile {
+            if flags.cli_profile && !flags.auto_connect {
                 Some("--profile")
             } else {
                 None
@@ -457,6 +462,10 @@ fn main() {
             "action": "launch",
             "autoConnect": true
         });
+
+        if let Some(ref profile_path) = flags.profile {
+            launch_cmd["profile"] = json!(profile_path);
+        }
 
         if flags.ignore_https_errors {
             launch_cmd["ignoreHTTPSErrors"] = json!(true);
@@ -614,6 +623,7 @@ fn main() {
     if (flags.headed
         || flags.cli_headed  // User explicitly set --headed (even if false)
         || flags.executable_path.is_some()
+        || flags.launch_command.is_some()
         || flags.profile.is_some()
         || flags.state.is_some()
         || flags.proxy.is_some()
@@ -641,6 +651,10 @@ fn main() {
         // Add executable path if specified
         if let Some(ref exec_path) = flags.executable_path {
             cmd_obj.insert("executablePath".to_string(), json!(exec_path));
+        }
+
+        if let Some(ref launch_command) = flags.launch_command {
+            cmd_obj.insert("launchCommand".to_string(), json!(launch_command));
         }
 
         // Add profile path if specified

@@ -59,6 +59,7 @@ pub struct Config {
     pub session: Option<String>,
     pub session_name: Option<String>,
     pub executable_path: Option<String>,
+    pub launch_command: Option<String>,
     pub extensions: Option<Vec<String>>,
     pub profile: Option<String>,
     pub state: Option<String>,
@@ -98,6 +99,7 @@ impl Config {
             session: other.session.or(self.session),
             session_name: other.session_name.or(self.session_name),
             executable_path: other.executable_path.or(self.executable_path),
+            launch_command: other.launch_command.or(self.launch_command),
             extensions: match (self.extensions, other.extensions) {
                 (Some(mut a), Some(b)) => {
                     a.extend(b);
@@ -270,6 +272,7 @@ pub struct Flags {
     pub session: String,
     pub headers: Option<String>,
     pub executable_path: Option<String>,
+    pub launch_command: Option<String>,
     pub cdp: Option<String>,
     pub extensions: Vec<String>,
     pub profile: Option<String>,
@@ -302,6 +305,7 @@ pub struct Flags {
     // Track which launch-time options were explicitly passed via CLI
     // (as opposed to being set only via environment variables)
     pub cli_executable_path: bool,
+    pub cli_launch_command: bool,
     pub cli_extensions: bool,
     pub cli_profile: bool,
     pub cli_state: bool,
@@ -349,6 +353,9 @@ pub fn parse_flags(args: &[String]) -> Flags {
         executable_path: env::var("AGENT_BROWSER_EXECUTABLE_PATH")
             .ok()
             .or(config.executable_path),
+        launch_command: env::var("AGENT_BROWSER_LAUNCH_COMMAND")
+            .ok()
+            .or(config.launch_command),
         cdp: config.cdp,
         extensions,
         profile: env::var("AGENT_BROWSER_PROFILE").ok().or(config.profile),
@@ -420,6 +427,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
         )
         .or(config.idle_timeout),
         cli_executable_path: false,
+        cli_launch_command: false,
         cli_extensions: false,
         cli_profile: false,
         cli_state: false,
@@ -487,6 +495,13 @@ pub fn parse_flags(args: &[String]) -> Flags {
                 if let Some(s) = args.get(i + 1) {
                     flags.executable_path = Some(s.clone());
                     flags.cli_executable_path = true;
+                    i += 1;
+                }
+            }
+            "--launch-command" => {
+                if let Some(s) = args.get(i + 1) {
+                    flags.launch_command = Some(s.clone());
+                    flags.cli_launch_command = true;
                     i += 1;
                 }
             }
@@ -725,6 +740,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--session",
         "--headers",
         "--executable-path",
+        "--launch-command",
         "--cdp",
         "--extension",
         "--profile",
@@ -903,6 +919,13 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_launch_command_flag() {
+        let flags = parse_flags(&args("--launch-command /tmp/pwsh-wrapper open example.com"));
+        assert_eq!(flags.launch_command, Some("/tmp/pwsh-wrapper".to_string()));
+        assert!(flags.cli_launch_command);
+    }
+
+    #[test]
     fn test_clean_args_removes_executable_path() {
         let cleaned = clean_args(&args(
             "--executable-path /path/to/chromium open example.com",
@@ -1016,6 +1039,7 @@ mod tests {
             "session": "test-session",
             "sessionName": "my-app",
             "executablePath": "/usr/bin/chromium",
+            "launchCommand": "/tmp/pwsh-wrapper",
             "extensions": ["/ext1", "/ext2"],
             "profile": "/tmp/profile",
             "state": "/tmp/state.json",
@@ -1038,6 +1062,7 @@ mod tests {
         assert_eq!(config.session.as_deref(), Some("test-session"));
         assert_eq!(config.session_name.as_deref(), Some("my-app"));
         assert_eq!(config.executable_path.as_deref(), Some("/usr/bin/chromium"));
+        assert_eq!(config.launch_command.as_deref(), Some("/tmp/pwsh-wrapper"));
         assert_eq!(
             config.extensions,
             Some(vec!["/ext1".to_string(), "/ext2".to_string()])

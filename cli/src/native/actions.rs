@@ -917,8 +917,8 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
 
 /// Connect to a running Chrome via auto-discovery and open a fresh tab so
 /// subsequent navigations don't hijack the user's existing tabs.
-async fn connect_auto_with_fresh_tab() -> Result<BrowserManager, String> {
-    let mut mgr = BrowserManager::connect_auto().await?;
+async fn connect_auto_with_fresh_tab(profile: Option<&str>) -> Result<BrowserManager, String> {
+    let mut mgr = BrowserManager::connect_auto(profile).await?;
     mgr.tab_new(None).await?;
     let session_id = mgr.active_session_id()?.to_string();
     let _ = mgr
@@ -944,7 +944,7 @@ async fn auto_launch(state: &mut DaemonState) -> Result<(), String> {
 
     if env::var("AGENT_BROWSER_AUTO_CONNECT").is_ok() {
         state.reset_input_state();
-        state.browser = Some(connect_auto_with_fresh_tab().await?);
+        state.browser = Some(connect_auto_with_fresh_tab(options.profile.as_deref()).await?);
         state.subscribe_to_browser_events();
         state.update_stream_client().await;
         try_auto_restore_state(state).await;
@@ -975,6 +975,7 @@ fn launch_options_from_env() -> LaunchOptions {
     LaunchOptions {
         headless: !headed,
         executable_path: env::var("AGENT_BROWSER_EXECUTABLE_PATH").ok(),
+        launch_command: env::var("AGENT_BROWSER_LAUNCH_COMMAND").ok(),
         proxy: env::var("AGENT_BROWSER_PROXY").ok(),
         proxy_bypass: env::var("AGENT_BROWSER_PROXY_BYPASS").ok(),
         profile: env::var("AGENT_BROWSER_PROFILE").ok(),
@@ -1084,6 +1085,11 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         .and_then(|v| v.as_str())
         .map(String::from)
         .or_else(|| std::env::var("AGENT_BROWSER_EXECUTABLE_PATH").ok());
+    let launch_command: Option<String> = cmd
+        .get("launchCommand")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .or_else(|| std::env::var("AGENT_BROWSER_LAUNCH_COMMAND").ok());
 
     let has_cdp = cdp_url.is_some() || cdp_port.is_some();
     super::browser::validate_launch_options(
@@ -1113,7 +1119,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
 
     if auto_connect {
         state.reset_input_state();
-        state.browser = Some(connect_auto_with_fresh_tab().await?);
+        state.browser = Some(connect_auto_with_fresh_tab(profile).await?);
         state.subscribe_to_browser_events();
         state.update_stream_client().await;
         return Ok(json!({ "launched": true }));
@@ -1161,6 +1167,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
             .or_else(|| env::var("AGENT_BROWSER_EXECUTABLE_PATH").ok()),
+        launch_command,
         proxy: cmd.get("proxy").and_then(|v| {
             v.as_str().map(|s| s.to_string()).or_else(|| {
                 v.get("server")

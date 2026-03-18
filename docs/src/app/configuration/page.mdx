@@ -43,6 +43,16 @@ AGENT_BROWSER_CONFIG=./ci-config.json agent-browser open example.com
 }
 ```
 
+For wrapper launches (for example, WSL -> Windows Chromium), `launchCommand` can wrap the browser launch while `profile` still points at the browser user-data directory used for auto-connect discovery:
+
+```json
+{
+  "executablePath": "/mnt/c/Users/mysol/AppData/Local/Chromium/Application/chrome.exe",
+  "launchCommand": "'/mnt/c/Program Files/PowerShell/7/pwsh.exe' -NoProfile -Command \"& {executablePath} {arguments}\"",
+  "profile": "/mnt/c/Users/mysol/AppData/Local/Chromium/User Data"
+}
+```
+
 ## All Options
 
 Every CLI flag can be set in the config file using its camelCase equivalent:
@@ -59,6 +69,7 @@ Every CLI flag can be set in the config file using its camelCase equivalent:
     <tr><td><code>session</code></td><td><code>--session</code></td><td>string</td></tr>
     <tr><td><code>sessionName</code></td><td><code>--session-name</code></td><td>string</td></tr>
     <tr><td><code>executablePath</code></td><td><code>--executable-path</code></td><td>string</td></tr>
+    <tr><td><code>launchCommand</code></td><td><code>--launch-command</code></td><td>string</td></tr>
     <tr><td><code>extensions</code></td><td><code>--extension</code></td><td>string[]</td></tr>
     <tr><td><code>profile</code></td><td><code>--profile</code></td><td>string</td></tr>
     <tr><td><code>state</code></td><td><code>--state</code></td><td>string</td></tr>
@@ -167,7 +178,7 @@ These environment variables configure additional daemon and runtime behavior:
     <tr><th>Variable</th><th>Description</th><th>Default</th></tr>
   </thead>
   <tbody>
-    <tr><td><code>AGENT_BROWSER_AUTO_CONNECT</code></td><td>Auto-discover and connect to a running Chrome instance.</td><td>(disabled)</td></tr>
+    <tr><td><code>AGENT_BROWSER_AUTO_CONNECT</code></td><td>Auto-discover and connect to a running Chrome instance. If <code>AGENT_BROWSER_PROFILE</code> is set, checks <code>&lt;profile&gt;/DevToolsActivePort</code> first.</td><td>(disabled)</td></tr>
     <tr><td><code>AGENT_BROWSER_ALLOW_FILE_ACCESS</code></td><td>Allow <code>file://</code> URLs to access local files.</td><td>(disabled)</td></tr>
     <tr><td><code>AGENT_BROWSER_COLOR_SCHEME</code></td><td>Color scheme preference (<code>dark</code>, <code>light</code>, <code>no-preference</code>).</td><td>(none)</td></tr>
     <tr><td><code>AGENT_BROWSER_DOWNLOAD_PATH</code></td><td>Default directory for browser downloads.</td><td>(temp directory)</td></tr>
@@ -175,6 +186,8 @@ These environment variables configure additional daemon and runtime behavior:
     <tr><td><code>AGENT_BROWSER_SESSION_NAME</code></td><td>Auto-save/load state persistence name.</td><td>(none)</td></tr>
     <tr><td><code>AGENT_BROWSER_STATE_EXPIRE_DAYS</code></td><td>Auto-delete saved session states older than N days.</td><td><code>30</code></td></tr>
     <tr><td><code>AGENT_BROWSER_ENCRYPTION_KEY</code></td><td>64-char hex key for AES-256-GCM session encryption.</td><td>(none)</td></tr>
+    <tr><td><code>AGENT_BROWSER_EXECUTABLE_PATH</code></td><td>Custom browser executable path.</td><td>(auto-detected)</td></tr>
+    <tr><td><code>AGENT_BROWSER_LAUNCH_COMMAND</code></td><td>Shell command template used to launch the browser. Supports <code>&#123;executablePath&#125;</code> and <code>&#123;arguments&#125;</code>.</td><td>(none)</td></tr>
     <tr><td><code>AGENT_BROWSER_EXTENSIONS</code></td><td>Comma-separated browser extension paths. Extensions work in both headed and headless mode.</td><td>(none)</td></tr>
     <tr><td><code>AGENT_BROWSER_HEADED</code></td><td>Show browser window instead of running headless (<code>1</code> to enable).</td><td>(disabled)</td></tr>
     <tr><td><code>AGENT_BROWSER_STREAM_PORT</code></td><td>Enable WebSocket streaming on the specified port (e.g., <code>9223</code>).</td><td>(disabled)</td></tr>

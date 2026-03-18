@@ -51,9 +51,10 @@ AGENT_BROWSER_AUTO_CONNECT=1 agent-browser snapshot
 
 Auto-connect discovers Chrome by:
 
-1. Reading Chrome's `DevToolsActivePort` file from the default user data directory
-2. Falling back to probing common debugging ports (9222, 9229)
-3. If HTTP-based discovery (`/json/version`, `/json/list`) fails, falling back to a direct WebSocket connection
+1. Reading `<profile>/DevToolsActivePort` first when `--profile` / `AGENT_BROWSER_PROFILE` is set
+2. Reading Chrome's `DevToolsActivePort` file from the default user data directory
+3. Falling back to probing common debugging ports (9222, 9229)
+4. If HTTP-based discovery (`/json/version`, `/json/list`) fails, falling back to a direct WebSocket connection
 
 This is useful when:
 
@@ -94,10 +95,11 @@ This enables control of:
   </thead>
   <tbody>
     <tr><td><code>--session &lt;name&gt;</code></td><td>Use isolated session</td></tr>
-    <tr><td><code>--profile &lt;path&gt;</code></td><td>Persistent browser profile directory</td></tr>
+    <tr><td><code>--profile &lt;path&gt;</code></td><td>Persistent browser profile directory. When auto-connect is enabled, checks <code>&lt;profile&gt;/DevToolsActivePort</code> first.</td></tr>
     <tr><td><code>-p &lt;provider&gt;</code></td><td>Cloud browser provider (<code>browserbase</code>, <code>browseruse</code>, <code>kernel</code>, <code>browserless</code>)</td></tr>
     <tr><td><code>--headers &lt;json&gt;</code></td><td>HTTP headers scoped to origin</td></tr>
     <tr><td><code>--executable-path</code></td><td>Custom browser executable</td></tr>
+    <tr><td><code>--launch-command</code></td><td>Shell command template used to launch the browser. Supports <code>&#123;executablePath&#125;</code> and <code>&#123;arguments&#125;</code>.</td></tr>
     <tr><td><code>--args &lt;args&gt;</code></td><td>Browser launch args (comma-separated)</td></tr>
     <tr><td><code>--user-agent &lt;ua&gt;</code></td><td>Custom User-Agent string</td></tr>
     <tr><td><code>--proxy &lt;url&gt;</code></td><td>Proxy server URL</td></tr>

@@ -561,6 +561,7 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 | `--state <path>` | Load storage state from JSON file (or `AGENT_BROWSER_STATE` env) |
 | `--headers <json>` | Set HTTP headers scoped to the URL's origin |
 | `--executable-path <path>` | Custom browser executable (or `AGENT_BROWSER_EXECUTABLE_PATH` env) |
+| `--launch-command <cmd>` | Shell command template used to launch the browser. Supports `{executablePath}` and `{arguments}` (or `AGENT_BROWSER_LAUNCH_COMMAND` env) |
 | `--extension <path>` | Load browser extension (repeatable; or `AGENT_BROWSER_EXTENSIONS` env) |
 | `--args <args>` | Browser launch args, comma or newline separated (or `AGENT_BROWSER_ARGS` env) |
 | `--user-agent <ua>` | Custom User-Agent string (or `AGENT_BROWSER_USER_AGENT` env) |
@@ -610,6 +611,16 @@ Create an `agent-browser.json` file to set persistent defaults instead of repeat
   "profile": "./browser-data",
   "userAgent": "my-agent/1.0",
   "ignoreHttpsErrors": true
+}
+```
+
+For WSL wrapper launches (for example, launching Windows Chromium from WSL), `launchCommand` can wrap the browser launch while `profile` continues to point at the browser user-data directory:
+
+```json
+{
+  "executablePath": "/mnt/c/Users/mysol/AppData/Local/Chromium/Application/chrome.exe",
+  "launchCommand": "'/mnt/c/Program Files/PowerShell/7/pwsh.exe' -NoProfile -Command \"& {executablePath} {arguments}\"",
+  "profile": "/mnt/c/Users/mysol/AppData/Local/Chromium/User Data"
 }
 ```
 
@@ -906,9 +917,10 @@ AGENT_BROWSER_AUTO_CONNECT=1 agent-browser snapshot
 
 Auto-connect discovers Chrome by:
 
-1. Reading Chrome's `DevToolsActivePort` file from the default user data directory
-2. Falling back to probing common debugging ports (9222, 9229)
-3. If HTTP-based discovery (`/json/version`, `/json/list`) fails, falling back to a direct WebSocket connection
+1. Reading `<profile>/DevToolsActivePort` first when `--profile` / `AGENT_BROWSER_PROFILE` is set
+2. Reading Chrome's `DevToolsActivePort` file from the default user data directory
+3. Falling back to probing common debugging ports (9222, 9229)
+4. If HTTP-based discovery (`/json/version`, `/json/list`) fails, falling back to a direct WebSocket connection
 
 This is useful when:
 

@@ -2604,12 +2604,16 @@ Authentication:
   --state <path>             Load saved auth state (cookies + storage) from JSON file
                              (or AGENT_BROWSER_STATE env)
   --auto-connect             Connect to a running Chrome to reuse its auth state
+                             If --profile is set, checks <profile>/DevToolsActivePort first
                              Tip: agent-browser --auto-connect state save ./auth.json
   --headers <json>           HTTP headers scoped to URL's origin (e.g., Authorization bearer token)
 
 Options:
   --session <name>           Isolated session (or AGENT_BROWSER_SESSION env)
   --executable-path <path>   Custom browser executable (or AGENT_BROWSER_EXECUTABLE_PATH)
+  --launch-command <cmd>     Shell command template used to launch the browser
+                             Supports {{executablePath}} and {{arguments}}
+                             (or AGENT_BROWSER_LAUNCH_COMMAND)
   --extension <path>         Load browser extensions (repeatable)
   --args <args>              Browser launch args, comma or newline separated (or AGENT_BROWSER_ARGS)
                              e.g., --args "--no-sandbox,--disable-blink-features=AutomationControlled"
@@ -2661,6 +2665,9 @@ Configuration:
   Example agent-browser.json:
     {{"headed": true, "proxy": "http://localhost:8080", "profile": "./browser-data"}}
 
+  launchCommand is useful for wrapper launches (for example WSL -> Windows Chrome):
+    {{"executablePath": "/mnt/c/.../chrome.exe", "launchCommand": "'/mnt/c/Program Files/PowerShell/7/pwsh.exe' -NoProfile -Command \"& {{executablePath}} {{arguments}}\""}}
+
 Environment:
   AGENT_BROWSER_CONFIG           Path to config file (or use --config)
   AGENT_BROWSER_SESSION          Session name (default: "default")
@@ -2668,6 +2675,7 @@ Environment:
   AGENT_BROWSER_ENCRYPTION_KEY   64-char hex key for AES-256-GCM state encryption
   AGENT_BROWSER_STATE_EXPIRE_DAYS Auto-delete states older than N days (default: 30)
   AGENT_BROWSER_EXECUTABLE_PATH  Custom browser executable path
+  AGENT_BROWSER_LAUNCH_COMMAND   Shell command template used to launch the browser
   AGENT_BROWSER_EXTENSIONS       Comma-separated browser extension paths
   AGENT_BROWSER_HEADED           Show browser window (not headless)
   AGENT_BROWSER_JSON             JSON output
