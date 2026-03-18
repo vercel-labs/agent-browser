@@ -14,7 +14,8 @@ use super::cdp::chrome::LaunchOptions;
 use super::cdp::client::CdpClient;
 use super::cdp::types::{
     AttachToTargetParams, AttachToTargetResult, CdpEvent, ConsoleApiCalledEvent,
-    CreateTargetResult, ExceptionThrownEvent, TargetCreatedEvent, TargetDestroyedEvent,
+    CreateTargetResult, DispatchMouseEventParams, ExceptionThrownEvent, TargetCreatedEvent,
+    TargetDestroyedEvent,
 };
 use super::cookies;
 use super::diff;
@@ -108,6 +109,13 @@ pub enum BackendType {
     WebDriver,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MouseState {
+    pub x: f64,
+    pub y: f64,
+    pub buttons: i32,
+}
+
 pub struct DaemonState {
     pub browser: Option<BrowserManager>,
     pub appium: Option<AppiumManager>,
@@ -141,6 +149,7 @@ pub struct DaemonState {
     /// handling domain filtering, route interception, and origin-scoped headers
     /// without deadlocking navigation/evaluate.
     fetch_handler_task: Option<tokio::task::JoinHandle<()>>,
+    pub mouse_state: MouseState,
     /// Shared slot for stream server to receive CDP client when browser launches.
     pub stream_client: Option<Arc<RwLock<Option<Arc<CdpClient>>>>>,
     /// Stream server instance kept alive so the broadcast channel remains open.
@@ -181,9 +190,14 @@ impl DaemonState {
             active_frame_id: None,
             origin_headers: Arc::new(RwLock::new(HashMap::new())),
             fetch_handler_task: None,
+            mouse_state: MouseState::default(),
             stream_client: None,
             stream_server: None,
         }
+    }
+
+    fn reset_input_state(&mut self) {
+        self.mouse_state = MouseState::default();
     }
 
     /// Create state with an optional stream client slot and server instance
@@ -764,6 +778,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
                     let _ = mgr.close().await;
                 }
                 state.browser = None;
+                state.reset_input_state();
                 state.update_stream_client().await;
             }
             if let Err(e) = auto_launch(state).await {
@@ -975,6 +990,7 @@ async fn auto_launch(state: &mut DaemonState) -> Result<(), String> {
 
     if let Ok(cdp) = env::var("AGENT_BROWSER_CDP") {
         let mgr = BrowserManager::connect_cdp(&cdp).await?;
+        state.reset_input_state();
         state.browser = Some(mgr);
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
@@ -984,6 +1000,7 @@ async fn auto_launch(state: &mut DaemonState) -> Result<(), String> {
     }
 
     if env::var("AGENT_BROWSER_AUTO_CONNECT").is_ok() {
+        state.reset_input_state();
         state.browser = Some(connect_auto_with_fresh_tab().await?);
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
@@ -993,6 +1010,7 @@ async fn auto_launch(state: &mut DaemonState) -> Result<(), String> {
     }
 
     let mgr = BrowserManager::launch(options, engine.as_deref()).await?;
+    state.reset_input_state();
     state.browser = Some(mgr);
     state.subscribe_to_browser_events();
     state.start_fetch_handler();
@@ -1101,6 +1119,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         if let Some(ref mut b) = state.browser {
             b.close().await?;
             state.browser = None;
+            state.reset_input_state();
             state.update_stream_client().await;
         }
     } else {
@@ -1137,6 +1156,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     )?;
 
     if let Some(url) = cdp_url {
+        state.reset_input_state();
         state.browser = Some(BrowserManager::connect_cdp(url).await?);
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
@@ -1145,6 +1165,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     }
 
     if let Some(port) = cdp_port {
+        state.reset_input_state();
         state.browser = Some(BrowserManager::connect_cdp(&port.to_string()).await?);
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
@@ -1153,6 +1174,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     }
 
     if auto_connect {
+        state.reset_input_state();
         state.browser = Some(connect_auto_with_fresh_tab().await?);
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
@@ -1172,6 +1194,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
                 let (ws_url, provider_session) = providers::connect_provider(provider).await?;
                 match BrowserManager::connect_cdp(&ws_url).await {
                     Ok(mgr) => {
+                        state.reset_input_state();
                         state.browser = Some(mgr);
                         state.subscribe_to_browser_events();
                         state.start_fetch_handler();
@@ -1260,6 +1283,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         *df = Some(DomainFilter::new(domains));
     }
 
+    state.reset_input_state();
     state.browser = Some(BrowserManager::launch(options, engine.as_deref()).await?);
     state.subscribe_to_browser_events();
     state.start_fetch_handler();
@@ -1314,6 +1338,7 @@ async fn launch_ios(cmd: &Value, state: &mut DaemonState) -> Result<Value, Strin
 
     state.appium = Some(appium);
     state.backend_type = BackendType::WebDriver;
+    state.reset_input_state();
 
     Ok(json!({
         "launched": true,
@@ -1357,6 +1382,7 @@ async fn launch_safari(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     state.safari_driver = Some(driver);
     state.webdriver_backend = Some(WebDriverBackend::new(client));
     state.backend_type = BackendType::WebDriver;
+    state.reset_input_state();
 
     Ok(json!({
         "launched": true,
@@ -1567,6 +1593,7 @@ async fn handle_close(state: &mut DaemonState) -> Result<Value, String> {
         mgr.close().await?;
     }
     state.browser = None;
+    state.reset_input_state();
     state.update_stream_client().await;
 
     // Stop background Fetch handler
@@ -5764,28 +5791,110 @@ async fn handle_device_list() -> Result<Value, String> {
 // Input event handlers
 // ---------------------------------------------------------------------------
 
-async fn handle_input_mouse(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+fn mouse_button_mask(button: &str) -> i32 {
+    match button {
+        "left" => 1,
+        "right" => 2,
+        "middle" => 4,
+        "back" => 8,
+        "forward" => 16,
+        _ => 0,
+    }
+}
+
+fn primary_button_from_mask(buttons: i32) -> &'static str {
+    if buttons & 1 != 0 {
+        "left"
+    } else if buttons & 2 != 0 {
+        "right"
+    } else if buttons & 4 != 0 {
+        "middle"
+    } else if buttons & 8 != 0 {
+        "back"
+    } else if buttons & 16 != 0 {
+        "forward"
+    } else {
+        "none"
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_mouse_event_params(
+    mouse_state: &mut MouseState,
+    event_type: &str,
+    x: Option<f64>,
+    y: Option<f64>,
+    button: Option<&str>,
+    buttons: Option<i32>,
+    click_count: Option<i32>,
+    delta_x: Option<f64>,
+    delta_y: Option<f64>,
+    modifiers: Option<i32>,
+) -> DispatchMouseEventParams {
+    let x = x.unwrap_or(mouse_state.x);
+    let y = y.unwrap_or(mouse_state.y);
+    mouse_state.x = x;
+    mouse_state.y = y;
+
+    let mut next_buttons = buttons.unwrap_or(mouse_state.buttons);
+    if buttons.is_none() {
+        match event_type {
+            "mousePressed" => {
+                next_buttons |= mouse_button_mask(button.unwrap_or("left"));
+            }
+            "mouseReleased" => {
+                next_buttons &= !mouse_button_mask(button.unwrap_or("left"));
+            }
+            _ => {}
+        }
+    }
+    mouse_state.buttons = next_buttons;
+
+    DispatchMouseEventParams {
+        event_type: event_type.to_string(),
+        x,
+        y,
+        button: Some(
+            button
+                .unwrap_or(primary_button_from_mask(next_buttons))
+                .to_string(),
+        ),
+        buttons: Some(next_buttons),
+        click_count,
+        delta_x,
+        delta_y,
+        modifiers,
+    }
+}
+
+async fn handle_input_mouse(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
     let event_type = cmd
         .get("type")
         .and_then(|v| v.as_str())
         .unwrap_or("mouseMoved");
-    let x = cmd.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
-    let y = cmd.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let params = build_mouse_event_params(
+        &mut state.mouse_state,
+        event_type,
+        cmd.get("x").and_then(|v| v.as_f64()),
+        cmd.get("y").and_then(|v| v.as_f64()),
+        cmd.get("button").and_then(|v| v.as_str()),
+        cmd.get("buttons")
+            .and_then(|v| v.as_i64())
+            .map(|v| v as i32),
+        cmd.get("clickCount")
+            .and_then(|v| v.as_i64())
+            .map(|v| v as i32),
+        cmd.get("deltaX").and_then(|v| v.as_f64()),
+        cmd.get("deltaY").and_then(|v| v.as_f64()),
+        cmd.get("modifiers")
+            .and_then(|v| v.as_i64())
+            .map(|v| v as i32),
+    );
 
     mgr.client
-        .send_command(
-            "Input.dispatchMouseEvent",
-            Some(json!({
-                "type": event_type, "x": x, "y": y,
-                "button": cmd.get("button").and_then(|v| v.as_str()).unwrap_or("none"),
-                "clickCount": cmd.get("clickCount").and_then(|v| v.as_i64()).unwrap_or(0),
-                "deltaX": cmd.get("deltaX").and_then(|v| v.as_f64()).unwrap_or(0.0),
-                "deltaY": cmd.get("deltaY").and_then(|v| v.as_f64()).unwrap_or(0.0),
-            })),
-            Some(&session_id),
-        )
+        .send_command_typed::<_, Value>("Input.dispatchMouseEvent", &params, Some(&session_id))
         .await?;
     Ok(json!({ "dispatched": event_type }))
 }
@@ -5886,48 +5995,72 @@ async fn handle_inserttext(cmd: &Value, state: &DaemonState) -> Result<Value, St
     Ok(json!({ "inserted": true }))
 }
 
-async fn handle_mousemove(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+async fn handle_mousemove(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
     let x = cmd.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
     let y = cmd.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let params = build_mouse_event_params(
+        &mut state.mouse_state,
+        "mouseMoved",
+        Some(x),
+        Some(y),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
 
     mgr.client
-        .send_command(
-            "Input.dispatchMouseEvent",
-            Some(json!({ "type": "mouseMoved", "x": x, "y": y })),
-            Some(&session_id),
-        )
+        .send_command_typed::<_, Value>("Input.dispatchMouseEvent", &params, Some(&session_id))
         .await?;
     Ok(json!({ "moved": true }))
 }
 
-async fn handle_mousedown(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+async fn handle_mousedown(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
     let button = cmd.get("button").and_then(|v| v.as_str()).unwrap_or("left");
+    let params = build_mouse_event_params(
+        &mut state.mouse_state,
+        "mousePressed",
+        None,
+        None,
+        Some(button),
+        None,
+        Some(1),
+        None,
+        None,
+        None,
+    );
 
     mgr.client
-        .send_command(
-            "Input.dispatchMouseEvent",
-            Some(json!({ "type": "mousePressed", "x": 0, "y": 0, "button": button, "clickCount": 1 })),
-            Some(&session_id),
-        )
+        .send_command_typed::<_, Value>("Input.dispatchMouseEvent", &params, Some(&session_id))
         .await?;
     Ok(json!({ "pressed": true }))
 }
 
-async fn handle_mouseup(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+async fn handle_mouseup(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
     let button = cmd.get("button").and_then(|v| v.as_str()).unwrap_or("left");
+    let params = build_mouse_event_params(
+        &mut state.mouse_state,
+        "mouseReleased",
+        None,
+        None,
+        Some(button),
+        None,
+        Some(1),
+        None,
+        None,
+        None,
+    );
 
     mgr.client
-        .send_command(
-            "Input.dispatchMouseEvent",
-            Some(json!({ "type": "mouseReleased", "x": 0, "y": 0, "button": button, "clickCount": 1 })),
-            Some(&session_id),
-        )
+        .send_command_typed::<_, Value>("Input.dispatchMouseEvent", &params, Some(&session_id))
         .await?;
     Ok(json!({ "released": true }))
 }
@@ -5983,6 +6116,96 @@ mod tests {
         assert_eq!(state.session_id, "default");
         assert!(!state.tracing_state.active);
         assert!(!state.recording_state.active);
+        assert_eq!(state.mouse_state.x, 0.0);
+        assert_eq!(state.mouse_state.y, 0.0);
+        assert_eq!(state.mouse_state.buttons, 0);
+    }
+
+    #[test]
+    fn test_mouse_event_params_preserve_position_and_buttons() {
+        let mut mouse_state = MouseState::default();
+
+        let move_params = build_mouse_event_params(
+            &mut mouse_state,
+            "mouseMoved",
+            Some(120.0),
+            Some(240.0),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(move_params.x, 120.0);
+        assert_eq!(move_params.y, 240.0);
+        assert_eq!(move_params.buttons, Some(0));
+
+        let down_params = build_mouse_event_params(
+            &mut mouse_state,
+            "mousePressed",
+            None,
+            None,
+            Some("left"),
+            None,
+            Some(1),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(down_params.x, 120.0);
+        assert_eq!(down_params.y, 240.0);
+        assert_eq!(down_params.button.as_deref(), Some("left"));
+        assert_eq!(down_params.buttons, Some(1));
+        assert_eq!(mouse_state.buttons, 1);
+
+        let drag_move_params = build_mouse_event_params(
+            &mut mouse_state,
+            "mouseMoved",
+            Some(150.0),
+            Some(260.0),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(drag_move_params.buttons, Some(1));
+        assert_eq!(drag_move_params.button.as_deref(), Some("left"));
+        assert_eq!(mouse_state.x, 150.0);
+        assert_eq!(mouse_state.y, 260.0);
+
+        let up_params = build_mouse_event_params(
+            &mut mouse_state,
+            "mouseReleased",
+            None,
+            None,
+            Some("left"),
+            None,
+            Some(1),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(up_params.x, 150.0);
+        assert_eq!(up_params.y, 260.0);
+        assert_eq!(up_params.buttons, Some(0));
+        assert_eq!(mouse_state.buttons, 0);
+    }
+
+    #[test]
+    fn test_reset_input_state_clears_mouse_state() {
+        let mut state = DaemonState::new();
+        state.mouse_state.x = 12.0;
+        state.mouse_state.y = 34.0;
+        state.mouse_state.buttons = 1;
+
+        state.reset_input_state();
+
+        assert_eq!(state.mouse_state.x, 0.0);
+        assert_eq!(state.mouse_state.y, 0.0);
+        assert_eq!(state.mouse_state.buttons, 0);
     }
 
     #[test]

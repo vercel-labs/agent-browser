@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Pointer Capture Probe</title>
+  <style>
+    body {
+      margin: 24px;
+      font: 14px/1.4 sans-serif;
+    }
+    #crop {
+      position: relative;
+      width: 240px;
+      height: 180px;
+      border: 2px solid #fff;
+      outline: 1px solid #555;
+      background: rgba(0, 0, 0, 0.2);
+    }
+    #handle {
+      position: absolute;
+      width: 20px;
+      height: 20px;
+      top: -16px;
+      left: -16px;
+      padding-top: 13px;
+      padding-left: 13px;
+      box-sizing: content-box;
+      background: rgba(255, 0, 0, 0.25);
+    }
+    #handle::after {
+      content: "";
+      display: block;
+      width: 20px;
+      height: 20px;
+      border-top: 2px solid white;
+      border-left: 2px solid white;
+    }
+    pre {
+      margin-top: 24px;
+      white-space: pre-wrap;
+      font-family: ui-monospace, monospace;
+    }
+  </style>
+</head>
+<body>
+  <div id="crop" aria-label="crop area">
+    <div id="handle" aria-label="crop handle topLeft" data-anchor="topLeft"></div>
+  </div>
+  <pre id="log"></pre>
+  <script>
+    const crop = document.getElementById("crop");
+    const handle = document.getElementById("handle");
+    const logEl = document.getElementById("log");
+
+    const state = {
+      targetAnchor: null,
+      dragging: false,
+      moved: false,
+      events: [],
+    };
+    window.__pointerCaptureProbe = state;
+
+    function sync() {
+      logEl.textContent = JSON.stringify(state, null, 2);
+    }
+
+    function push(event, extra = {}) {
+      state.events.push({
+        type: event.type,
+        target: event.target.id || event.target.tagName,
+        currentTarget: event.currentTarget.id || event.currentTarget.tagName,
+        pointerId: event.pointerId,
+        button: event.button,
+        buttons: event.buttons,
+        hasCapture: event.currentTarget.hasPointerCapture?.(event.pointerId) ?? false,
+        x: event.clientX,
+        y: event.clientY,
+        ...extra,
+      });
+      sync();
+    }
+
+    crop.addEventListener("pointerdown", (event) => {
+      state.targetAnchor = event.target.getAttribute("data-anchor");
+      crop.setPointerCapture(event.pointerId);
+      event.preventDefault();
+      push(event, { phase: "down", targetAnchor: state.targetAnchor });
+    });
+
+    crop.addEventListener("pointermove", (event) => {
+      const hasCapture = crop.hasPointerCapture(event.pointerId);
+      if (hasCapture && state.targetAnchor) {
+        state.dragging = true;
+        state.moved = true;
+      }
+      push(event, { phase: hasCapture ? "drag" : "hover", targetAnchor: state.targetAnchor });
+    });
+
+    crop.addEventListener("pointerup", (event) => {
+      const hadCapture = crop.hasPointerCapture(event.pointerId);
+      state.dragging = false;
+      push(event, { phase: "up", targetAnchor: state.targetAnchor, hadCapture });
+      state.targetAnchor = null;
+    });
+
+    handle.addEventListener("pointerdown", (event) => push(event, { listener: "handle" }));
+    handle.addEventListener("pointermove", (event) => push(event, { listener: "handle" }));
+    handle.addEventListener("pointerup", (event) => push(event, { listener: "handle" }));
+
+    sync();
+  </script>
+</body>
+</html>

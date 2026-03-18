@@ -133,6 +133,11 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
     // injected in headless mode).  Skip --headless when extensions are loaded.
     if options.headless && !has_extensions {
         args.push("--headless=new".to_string());
+        // Enable SwiftShader software rendering in headless mode.  This
+        // prevents silent crashes in environments where GPU drivers are
+        // missing or restricted (VMs, containers, some cloud machines)
+        // while preserving WebGL support.  Playwright uses the same flag.
+        args.push("--enable-unsafe-swiftshader".to_string());
     }
 
     if let Some(ref proxy) = options.proxy {
@@ -303,9 +308,17 @@ fn wait_for_devtools_active_port(
     let poll_interval = Duration::from_millis(50);
 
     while std::time::Instant::now() <= deadline {
-        if let Ok(Some(_status)) = child.try_wait() {
-            // If Chrome already exited, stop waiting.
-            break;
+        if let Ok(Some(status)) = child.try_wait() {
+            // Chrome exited before writing DevToolsActivePort -- report the
+            // exit code so the caller can surface it alongside stderr output.
+            let code = status
+                .code()
+                .map(|c| format!("{}", c))
+                .unwrap_or_else(|| "unknown".to_string());
+            return Err(format!(
+                "Chrome exited early (exit code: {}) without writing DevToolsActivePort",
+                code
+            ));
         }
 
         if let Some((port, ws_path)) = read_devtools_active_port(user_data_dir) {
@@ -364,7 +377,10 @@ fn chrome_launch_error(message: &str, stderr_lines: &[String]) -> String {
 
     if relevant.is_empty() {
         if stderr_lines.is_empty() {
-            return format!("{} (no stderr output from Chrome)", message);
+            return format!(
+                "{} (no stderr output from Chrome)\nHint: try passing --args \"--no-sandbox\" if Chrome crashes silently in your environment",
+                message
+            );
         }
         let last_lines: Vec<&String> = stderr_lines.iter().rev().take(5).collect();
         return format!(
@@ -794,6 +810,8 @@ mod tests {
     fn test_chrome_launch_error_no_stderr() {
         let msg = chrome_launch_error("Chrome exited", &[]);
         assert!(msg.contains("no stderr output"));
+        assert!(msg.contains("Hint:"));
+        assert!(msg.contains("--no-sandbox"));
     }
 
     #[test]
@@ -831,6 +849,10 @@ mod tests {
         };
         let result = build_chrome_args(&opts).unwrap();
         assert!(result.args.iter().any(|a| a == "--headless=new"));
+        assert!(result
+            .args
+            .iter()
+            .any(|a| a == "--enable-unsafe-swiftshader"));
         assert!(result.args.iter().any(|a| a == "--window-size=1280,720"));
         // Temp dir created when no profile
         assert!(result.temp_user_data_dir.is_some());
@@ -847,6 +869,10 @@ mod tests {
         };
         let result = build_chrome_args(&opts).unwrap();
         assert!(!result.args.iter().any(|a| a.contains("--headless")));
+        assert!(!result
+            .args
+            .iter()
+            .any(|a| a == "--enable-unsafe-swiftshader"));
         assert!(!result.args.iter().any(|a| a.starts_with("--window-size=")));
         // Temp dir created when no profile
         assert!(result.temp_user_data_dir.is_some());
