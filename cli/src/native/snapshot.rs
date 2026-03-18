@@ -263,17 +263,18 @@ pub async fn take_snapshot(
 
     for (idx, node) in tree_nodes.iter().enumerate() {
         let role = node.role.as_str();
-        let should_ref = if INTERACTIVE_ROLES.contains(&role) {
+        let mut should_ref = if INTERACTIVE_ROLES.contains(&role) {
             true
         } else if CONTENT_ROLES.contains(&role) {
             !node.name.is_empty()
-        } else if options.cursor {
-            // In cursor mode, also ref elements that are cursor-interactive
-            node.backend_node_id
-                .is_some_and(|bid| cursor_elements.contains_key(&bid))
         } else {
             false
         };
+
+        if options.cursor && node.backend_node_id.is_some_and(|bid| cursor_elements.contains_key(&bid)) {
+            // In cursor mode, also ref elements that are cursor-interactive
+            should_ref = true;
+        }
 
         if should_ref {
             let nth = tracker.track(role, &node.name, idx);
