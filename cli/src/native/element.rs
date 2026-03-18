@@ -359,6 +359,21 @@ fn build_find_element_js(selector: &str) -> String {
     }
 }
 
+/// Build a JS expression that counts matching DOM elements by CSS selector or XPath.
+fn build_count_elements_js(selector: &str) -> String {
+    if let Some(xpath) = selector.strip_prefix("xpath=") {
+        format!(
+            "document.evaluate({}, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null).snapshotLength",
+            serde_json::to_string(xpath).unwrap_or_default()
+        )
+    } else {
+        format!(
+            "document.querySelectorAll({}).length",
+            serde_json::to_string(selector).unwrap_or_default()
+        )
+    }
+}
+
 fn build_selector_js(selector: &str) -> String {
     let find_expr = build_find_element_js(selector);
     format!(
@@ -755,17 +770,7 @@ pub async fn get_element_count(
     session_id: &str,
     selector: &str,
 ) -> Result<i64, String> {
-    let js = if let Some(xpath) = selector.strip_prefix("xpath=") {
-        format!(
-            "document.evaluate({}, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null).snapshotLength",
-            serde_json::to_string(xpath).unwrap_or_default()
-        )
-    } else {
-        format!(
-            "document.querySelectorAll({}).length",
-            serde_json::to_string(selector).unwrap_or_default()
-        )
-    };
+    let js = build_count_elements_js(selector);
 
     let result: EvaluateResult = client
         .send_command_typed(
@@ -897,6 +902,20 @@ mod tests {
         // "xpath" without "=" should be treated as CSS selector
         let js = build_selector_js("xpath//div");
         assert!(js.contains("document.querySelector"));
+    }
+
+    #[test]
+    fn test_build_count_elements_js_css() {
+        let js = build_count_elements_js(".item");
+        assert!(js.contains("document.querySelectorAll(\".item\").length"));
+        assert!(!js.contains("document.evaluate"));
+    }
+
+    #[test]
+    fn test_build_count_elements_js_xpath() {
+        let js = build_count_elements_js("xpath=//li");
+        assert!(js.contains("document.evaluate(\"//li\", document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null).snapshotLength"));
+        assert!(!js.contains("querySelectorAll"));
     }
 
     #[test]
