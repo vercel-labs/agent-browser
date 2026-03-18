@@ -1,4 +1,5 @@
 use aes_gcm::{aead::Aead, aead::KeyInit, Aes256Gcm};
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -30,6 +31,97 @@ pub struct OriginStorage {
 pub struct StorageEntry {
     pub name: String,
     pub value: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PersistedTabAssignment {
+    pub agent_session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tab_id: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window_id: Option<usize>,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lease_version: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connection_id: Option<String>,
+    pub assigned_at: String,
+    pub updated_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_known_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_known_title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback_index: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_ordinal: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PersistedTabInfo {
+    pub tab_id: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_session_id: Option<String>,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_known_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_known_title: Option<String>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TabAssignmentsProfile {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_data_dir: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile_directory: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TabAssignmentsTransport {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relay_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extension_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TabAssignmentsFile {
+    pub version: u8,
+    pub revision: u64,
+    pub session_name: String,
+    pub updated_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile: Option<TabAssignmentsProfile>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transport: Option<TabAssignmentsTransport>,
+    pub assignments: std::collections::HashMap<String, PersistedTabAssignment>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tabs: Option<std::collections::HashMap<String, PersistedTabInfo>>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct JsonEncryptedPayload {
+    version: u8,
+    encrypted: bool,
+    iv: String,
+    auth_tag: String,
+    data: String,
 }
 
 pub async fn save_state(
@@ -481,6 +573,159 @@ pub fn get_sessions_dir() -> PathBuf {
     } else {
         std::env::temp_dir().join("agent-browser").join("sessions")
     }
+}
+
+pub fn get_session_dir(session_name: &str) -> PathBuf {
+    get_sessions_dir().join(session_name)
+}
+
+pub fn get_tab_assignments_file_path(session_name: &str) -> PathBuf {
+    get_session_dir(session_name).join("tab-assignments.json")
+}
+
+pub fn read_tab_assignments(session_name: &str) -> Result<Option<TabAssignmentsFile>, String> {
+    let path = get_tab_assignments_file_path(session_name);
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let json_str = read_json_state_file(&path)?;
+    let data: TabAssignmentsFile =
+        serde_json::from_str(&json_str).map_err(|e| format!("Invalid tab assignments: {}", e))?;
+    Ok(Some(data))
+}
+
+pub fn write_tab_assignments(session_name: &str, data: &TabAssignmentsFile) -> Result<(), String> {
+    let path = get_tab_assignments_file_path(session_name);
+    let json_str = serde_json::to_string_pretty(data)
+        .map_err(|e| format!("Failed to serialize tab assignments: {}", e))?;
+    write_json_state_file(&path, &json_str)
+}
+
+fn read_json_state_file(path: &std::path::Path) -> Result<String, String> {
+    let content = fs::read_to_string(path)
+        .map_err(|e| format!("Failed to read state file {}: {}", path.display(), e))?;
+    let parsed: Value =
+        serde_json::from_str(&content).map_err(|e| format!("Invalid JSON state file: {}", e))?;
+
+    if let Ok(payload) = serde_json::from_value::<JsonEncryptedPayload>(parsed.clone()) {
+        if payload.encrypted {
+            let key = std::env::var("AGENT_BROWSER_ENCRYPTION_KEY").map_err(|_| {
+                "Encrypted state file requires AGENT_BROWSER_ENCRYPTION_KEY".to_string()
+            })?;
+            return decrypt_json_payload(&payload, &key);
+        }
+    }
+
+    Ok(content)
+}
+
+fn write_json_state_file(path: &std::path::Path, content: &str) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| {
+            format!(
+                "Failed to create state directory {}: {}",
+                parent.display(),
+                e
+            )
+        })?;
+    }
+
+    let serialized = if let Ok(key) = std::env::var("AGENT_BROWSER_ENCRYPTION_KEY") {
+        let payload = encrypt_json_payload(content, &key)?;
+        serde_json::to_string_pretty(&payload)
+            .map_err(|e| format!("Failed to serialize encrypted payload: {}", e))?
+    } else {
+        content.to_string()
+    };
+
+    let tmp_path = path.with_extension(format!(
+        "{}tmp-{}",
+        path.extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| format!("{}.", ext))
+            .unwrap_or_default(),
+        std::process::id()
+    ));
+
+    fs::write(&tmp_path, serialized).map_err(|e| {
+        format!(
+            "Failed to write temp state file {}: {}",
+            tmp_path.display(),
+            e
+        )
+    })?;
+    fs::rename(&tmp_path, path)
+        .map_err(|e| format!("Failed to persist state file {}: {}", path.display(), e))?;
+    Ok(())
+}
+
+fn encrypt_json_payload(plaintext: &str, key_str: &str) -> Result<JsonEncryptedPayload, String> {
+    let key_bytes = parse_hex_key(key_str)?;
+    let cipher =
+        Aes256Gcm::new_from_slice(&key_bytes).map_err(|e| format!("Invalid key: {}", e))?;
+
+    let mut nonce = [0u8; 12];
+    getrandom::getrandom(&mut nonce).map_err(|e| format!("Failed to generate nonce: {}", e))?;
+    let ciphertext = cipher
+        .encrypt(aes_gcm::Nonce::from_slice(&nonce), plaintext.as_bytes())
+        .map_err(|e| format!("Encryption failed: {}", e))?;
+
+    if ciphertext.len() < 16 {
+        return Err("Ciphertext too short".to_string());
+    }
+
+    let split_at = ciphertext.len() - 16;
+    let (data, auth_tag) = ciphertext.split_at(split_at);
+    Ok(JsonEncryptedPayload {
+        version: 1,
+        encrypted: true,
+        iv: base64::engine::general_purpose::STANDARD.encode(nonce),
+        auth_tag: base64::engine::general_purpose::STANDARD.encode(auth_tag),
+        data: base64::engine::general_purpose::STANDARD.encode(data),
+    })
+}
+
+fn decrypt_json_payload(payload: &JsonEncryptedPayload, key_str: &str) -> Result<String, String> {
+    let key_bytes = parse_hex_key(key_str)?;
+    let cipher =
+        Aes256Gcm::new_from_slice(&key_bytes).map_err(|e| format!("Invalid key: {}", e))?;
+
+    let nonce = base64::engine::general_purpose::STANDARD
+        .decode(&payload.iv)
+        .map_err(|e| format!("Invalid IV encoding: {}", e))?;
+    let auth_tag = base64::engine::general_purpose::STANDARD
+        .decode(&payload.auth_tag)
+        .map_err(|e| format!("Invalid authTag encoding: {}", e))?;
+    let data = base64::engine::general_purpose::STANDARD
+        .decode(&payload.data)
+        .map_err(|e| format!("Invalid encrypted data encoding: {}", e))?;
+
+    if nonce.len() != 12 {
+        return Err("Invalid IV length".to_string());
+    }
+
+    let mut combined = data;
+    combined.extend_from_slice(&auth_tag);
+    let decrypted = cipher
+        .decrypt(aes_gcm::Nonce::from_slice(&nonce), combined.as_ref())
+        .map_err(|e| format!("Decryption failed: {}", e))?;
+    String::from_utf8(decrypted).map_err(|e| format!("Decrypted state is not valid UTF-8: {}", e))
+}
+
+fn parse_hex_key(key_str: &str) -> Result<Vec<u8>, String> {
+    let trimmed = key_str.trim();
+    if trimmed.len() != 64 || !trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err("AGENT_BROWSER_ENCRYPTION_KEY must be a 64-character hex string".to_string());
+    }
+
+    let mut bytes = Vec::with_capacity(32);
+    for chunk in trimmed.as_bytes().chunks(2) {
+        let pair = std::str::from_utf8(chunk).map_err(|e| format!("Invalid hex key: {}", e))?;
+        let byte = u8::from_str_radix(pair, 16).map_err(|e| format!("Invalid hex key: {}", e))?;
+        bytes.push(byte);
+    }
+    Ok(bytes)
 }
 
 #[cfg(test)]

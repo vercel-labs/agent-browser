@@ -17,6 +17,10 @@ use super::state;
 use super::stream::StreamServer;
 
 pub async fn run_daemon(session: &str) {
+    let session_id = session.to_string();
+    let session_name = env::var("AGENT_BROWSER_SESSION_NAME")
+        .ok()
+        .filter(|value| !value.is_empty());
     let socket_dir = get_daemon_socket_dir();
     if !socket_dir.exists() {
         let _ = fs::create_dir_all(&socket_dir);
@@ -72,6 +76,8 @@ pub async fn run_daemon(session: &str) {
     let result = run_socket_server(
         &socket_path,
         session,
+        &session_id,
+        session_name.as_deref(),
         stream_client,
         stream_server_instance,
         idle_timeout_ms,
@@ -93,6 +99,8 @@ pub async fn run_daemon(session: &str) {
 async fn run_socket_server(
     socket_path: &PathBuf,
     _session: &str,
+    session_id: &str,
+    session_name: Option<&str>,
     stream_client: Option<Arc<RwLock<Option<Arc<CdpClient>>>>>,
     stream_server: Option<Arc<StreamServer>>,
     idle_timeout_ms: Option<u64>,
@@ -102,9 +110,13 @@ async fn run_socket_server(
     let listener =
         UnixListener::bind(socket_path).map_err(|e| format!("Failed to bind socket: {}", e))?;
 
-    let state: std::sync::Arc<tokio::sync::Mutex<DaemonState>> = std::sync::Arc::new(
-        tokio::sync::Mutex::new(DaemonState::new_with_stream(stream_client, stream_server)),
-    );
+    let state: std::sync::Arc<tokio::sync::Mutex<DaemonState>> =
+        std::sync::Arc::new(tokio::sync::Mutex::new(DaemonState::new_with_stream(
+            session_id.to_string(),
+            session_name.map(str::to_string),
+            stream_client,
+            stream_server,
+        )));
 
     let (reset_tx, mut reset_rx) = mpsc::channel::<()>(64);
     let reset_tx = idle_timeout_ms.map(|_| Arc::new(reset_tx));
@@ -136,6 +148,7 @@ async fn run_socket_server(
                 }
             }, if idle_timeout_ms.is_some() => {
                 let mut s = state.lock().await;
+                let _ = s.flush_tab_assignments();
                 if let Some(ref mut mgr) = s.browser {
                     let _ = mgr.close().await;
                 }
@@ -146,6 +159,7 @@ async fn run_socket_server(
             }
             _ = shutdown_signal() => {
                 let mut s = state.lock().await;
+                let _ = s.flush_tab_assignments();
                 if let Some(ref mut mgr) = s.browser {
                     let _ = mgr.close().await;
                 }
@@ -161,6 +175,8 @@ async fn run_socket_server(
 async fn run_socket_server(
     socket_path: &PathBuf,
     session: &str,
+    session_id: &str,
+    session_name: Option<&str>,
     stream_client: Option<Arc<RwLock<Option<Arc<CdpClient>>>>>,
     stream_server: Option<Arc<StreamServer>>,
     idle_timeout_ms: Option<u64>,
@@ -176,9 +192,13 @@ async fn run_socket_server(
     let port_path = socket_dir.join(format!("{}.port", session));
     let _ = fs::write(&port_path, port.to_string());
 
-    let state: std::sync::Arc<tokio::sync::Mutex<DaemonState>> = std::sync::Arc::new(
-        tokio::sync::Mutex::new(DaemonState::new_with_stream(stream_client, stream_server)),
-    );
+    let state: std::sync::Arc<tokio::sync::Mutex<DaemonState>> =
+        std::sync::Arc::new(tokio::sync::Mutex::new(DaemonState::new_with_stream(
+            session_id.to_string(),
+            session_name.map(str::to_string),
+            stream_client,
+            stream_server,
+        )));
 
     let (reset_tx, mut reset_rx) = mpsc::channel::<()>(64);
     let reset_tx = idle_timeout_ms.map(|_| Arc::new(reset_tx));
@@ -210,6 +230,7 @@ async fn run_socket_server(
                 }
             }, if idle_timeout_ms.is_some() => {
                 let mut s = state.lock().await;
+                let _ = s.flush_tab_assignments();
                 if let Some(ref mut mgr) = s.browser {
                     let _ = mgr.close().await;
                 }
@@ -221,6 +242,7 @@ async fn run_socket_server(
             }
             _ = shutdown_signal() => {
                 let mut s = state.lock().await;
+                let _ = s.flush_tab_assignments();
                 if let Some(ref mut mgr) = s.browser {
                     let _ = mgr.close().await;
                 }
@@ -290,6 +312,10 @@ async fn handle_connection<S>(
                 }
 
                 if is_close {
+                    {
+                        let mut s = state.lock().await;
+                        let _ = s.flush_tab_assignments();
+                    }
                     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
                     process::exit(0);
                 }

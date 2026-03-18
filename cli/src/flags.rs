@@ -71,6 +71,12 @@ pub struct Config {
     pub ignore_https_errors: Option<bool>,
     pub allow_file_access: Option<bool>,
     pub cdp: Option<String>,
+    pub connection_mode: Option<String>,
+    pub relay_url: Option<String>,
+    pub profile_id: Option<String>,
+    pub profile_directory: Option<String>,
+    pub persist_tab_assignment: Option<bool>,
+    pub agent_id: Option<String>,
     pub auto_connect: Option<bool>,
     pub headers: Option<String>,
     pub annotate: Option<bool>,
@@ -116,6 +122,12 @@ impl Config {
             ignore_https_errors: other.ignore_https_errors.or(self.ignore_https_errors),
             allow_file_access: other.allow_file_access.or(self.allow_file_access),
             cdp: other.cdp.or(self.cdp),
+            connection_mode: other.connection_mode.or(self.connection_mode),
+            relay_url: other.relay_url.or(self.relay_url),
+            profile_id: other.profile_id.or(self.profile_id),
+            profile_directory: other.profile_directory.or(self.profile_directory),
+            persist_tab_assignment: other.persist_tab_assignment.or(self.persist_tab_assignment),
+            agent_id: other.agent_id.or(self.agent_id),
             auto_connect: other.auto_connect.or(self.auto_connect),
             headers: other.headers.or(self.headers),
             annotate: other.annotate.or(self.annotate),
@@ -195,6 +207,10 @@ fn extract_config_path(args: &[String]) -> Option<Option<String>> {
         "--headers",
         "--executable-path",
         "--cdp",
+        "--connection-mode",
+        "--relay-url",
+        "--profile-id",
+        "--profile-directory",
         "--extension",
         "--profile",
         "--state",
@@ -206,6 +222,7 @@ fn extract_config_path(args: &[String]) -> Option<Option<String>> {
         "--provider",
         "--device",
         "--session-name",
+        "--agent-id",
         "--color-scheme",
         "--download-path",
         "--max-output",
@@ -271,6 +288,12 @@ pub struct Flags {
     pub headers: Option<String>,
     pub executable_path: Option<String>,
     pub cdp: Option<String>,
+    pub connection_mode: Option<String>,
+    pub relay_url: Option<String>,
+    pub profile_id: Option<String>,
+    pub profile_directory: Option<String>,
+    pub persist_tab_assignment: bool,
+    pub agent_id: Option<String>,
     pub extensions: Vec<String>,
     pub profile: Option<String>,
     pub state: Option<String>,
@@ -350,6 +373,21 @@ pub fn parse_flags(args: &[String]) -> Flags {
             .ok()
             .or(config.executable_path),
         cdp: config.cdp,
+        connection_mode: env::var("AGENT_BROWSER_CONNECTION_MODE")
+            .ok()
+            .or(config.connection_mode),
+        relay_url: env::var("AGENT_BROWSER_RELAY_URL")
+            .ok()
+            .or(config.relay_url),
+        profile_id: env::var("AGENT_BROWSER_PROFILE_ID")
+            .ok()
+            .or(config.profile_id),
+        profile_directory: env::var("AGENT_BROWSER_PROFILE_DIRECTORY")
+            .ok()
+            .or(config.profile_directory),
+        persist_tab_assignment: env_var_is_truthy("AGENT_BROWSER_PERSIST_TAB_ASSIGNMENT")
+            || config.persist_tab_assignment.unwrap_or(false),
+        agent_id: env::var("AGENT_BROWSER_AGENT_ID").ok().or(config.agent_id),
         extensions,
         profile: env::var("AGENT_BROWSER_PROFILE").ok().or(config.profile),
         state: env::var("AGENT_BROWSER_STATE").ok().or(config.state),
@@ -503,6 +541,30 @@ pub fn parse_flags(args: &[String]) -> Flags {
                     i += 1;
                 }
             }
+            "--connection-mode" => {
+                if let Some(s) = args.get(i + 1) {
+                    flags.connection_mode = Some(s.clone());
+                    i += 1;
+                }
+            }
+            "--relay-url" => {
+                if let Some(s) = args.get(i + 1) {
+                    flags.relay_url = Some(s.clone());
+                    i += 1;
+                }
+            }
+            "--profile-id" => {
+                if let Some(s) = args.get(i + 1) {
+                    flags.profile_id = Some(s.clone());
+                    i += 1;
+                }
+            }
+            "--profile-directory" => {
+                if let Some(s) = args.get(i + 1) {
+                    flags.profile_directory = Some(s.clone());
+                    i += 1;
+                }
+            }
             "--profile" => {
                 if let Some(s) = args.get(i + 1) {
                     flags.profile = Some(s.clone());
@@ -576,6 +638,19 @@ pub fn parse_flags(args: &[String]) -> Flags {
                 let (val, consumed) = parse_bool_arg(args, i);
                 flags.auto_connect = val;
                 if consumed {
+                    i += 1;
+                }
+            }
+            "--persist-tab-assignment" => {
+                let (val, consumed) = parse_bool_arg(args, i);
+                flags.persist_tab_assignment = val;
+                if consumed {
+                    i += 1;
+                }
+            }
+            "--agent-id" => {
+                if let Some(s) = args.get(i + 1) {
+                    flags.agent_id = Some(s.clone());
                     i += 1;
                 }
             }
@@ -716,6 +791,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--ignore-https-errors",
         "--allow-file-access",
         "--auto-connect",
+        "--persist-tab-assignment",
         "--annotate",
         "--content-boundaries",
         "--confirm-interactive",
@@ -726,6 +802,10 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--headers",
         "--executable-path",
         "--cdp",
+        "--connection-mode",
+        "--relay-url",
+        "--profile-id",
+        "--profile-directory",
         "--extension",
         "--profile",
         "--state",
@@ -736,6 +816,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "-p",
         "--provider",
         "--device",
+        "--agent-id",
         "--session-name",
         "--color-scheme",
         "--download-path",

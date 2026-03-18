@@ -1,15 +1,19 @@
+use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use tokio::sync::{broadcast, Mutex};
+use tokio_tungstenite::tungstenite::Message;
 
 use super::cdp::chrome::{auto_connect_cdp, launch_chrome, ChromeProcess, LaunchOptions};
 use super::cdp::client::CdpClient;
 use super::cdp::discovery::discover_cdp_url;
 use super::cdp::lightpanda::{launch_lightpanda, LightpandaLaunchOptions, LightpandaProcess};
 use super::cdp::types::*;
+use super::state;
 
 // ---------------------------------------------------------------------------
 // Launch validation
@@ -19,7 +23,7 @@ use super::cdp::types::*;
 /// Returns `Ok(())` if valid, or `Err(msg)` with a user-friendly error.
 pub fn validate_launch_options(
     extensions: Option<&[String]>,
-    has_cdp: bool,
+    connection_mode: ConnectionMode,
     profile: Option<&str>,
     storage_state: Option<&str>,
     allow_file_access: bool,
@@ -27,13 +31,13 @@ pub fn validate_launch_options(
 ) -> Result<(), String> {
     let has_extensions = extensions.map(|e| !e.is_empty()).unwrap_or(false);
 
-    if has_extensions && has_cdp {
+    if has_extensions && matches!(connection_mode, ConnectionMode::Cdp) {
         return Err(
             "Cannot use extensions with cdp_url (extensions require local browser launch)"
                 .to_string(),
         );
     }
-    if profile.is_some() && has_cdp {
+    if profile.is_some() && matches!(connection_mode, ConnectionMode::Cdp) {
         return Err(
             "Cannot use profile with cdp_url (profile requires local browser launch)".to_string(),
         );
@@ -127,6 +131,16 @@ pub struct PageInfo {
     pub url: String,
     pub title: String,
     pub target_type: String, // "page" or "webview"
+    pub assigned_tab: AssignedTabMetadata,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AssignedTabMetadata {
+    pub target_id: Option<String>,
+    pub last_known_url: Option<String>,
+    pub last_known_title: Option<String>,
+    pub fallback_index: Option<usize>,
+    pub context_ordinal: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -151,6 +165,86 @@ pub enum BrowserProcess {
     Lightpanda(LightpandaProcess),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionMode {
+    Local,
+    Cdp,
+    ExtensionRelay,
+}
+
+impl ConnectionMode {
+    pub fn from_str(value: &str) -> Result<Self, String> {
+        match value {
+            "local" => Ok(Self::Local),
+            "cdp" => Ok(Self::Cdp),
+            "extension-relay" => Ok(Self::ExtensionRelay),
+            other => Err(format!(
+                "Invalid connection mode '{}'. Expected one of: local, cdp, extension-relay",
+                other
+            )),
+        }
+    }
+
+    pub fn resolve(
+        explicit: Option<&str>,
+        has_cdp: bool,
+        auto_connect: bool,
+        has_relay: bool,
+        has_provider: bool,
+    ) -> Result<Self, String> {
+        if let Some(mode) = explicit {
+            let mode = Self::from_str(mode)?;
+            if matches!(mode, Self::Local) && (has_cdp || auto_connect || has_relay || has_provider)
+            {
+                return Err(
+                    "connectionMode=local cannot be combined with cdpUrl, cdpPort, autoConnect, relayUrl, or provider"
+                        .to_string(),
+                );
+            }
+            if matches!(mode, Self::Cdp) && has_relay {
+                return Err(
+                    "connectionMode=cdp cannot be combined with relayUrl; use connectionMode=extension-relay"
+                        .to_string(),
+                );
+            }
+            if matches!(mode, Self::ExtensionRelay) && (has_cdp || auto_connect || has_provider) {
+                return Err(
+                    "connectionMode=extension-relay cannot be combined with cdpUrl, cdpPort, autoConnect, or provider"
+                        .to_string(),
+                );
+            }
+            return Ok(mode);
+        }
+
+        if has_relay {
+            return Ok(Self::ExtensionRelay);
+        }
+        if has_cdp || auto_connect || has_provider {
+            return Ok(Self::Cdp);
+        }
+        Ok(Self::Local)
+    }
+
+    pub fn is_external(self) -> bool {
+        !matches!(self, Self::Local)
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RelayHandshakeMetadata {
+    pub tab_id: Option<usize>,
+    pub connection_id: Option<String>,
+    pub target_id: Option<String>,
+}
+
+pub struct ExtensionRelayConnectOptions<'a> {
+    pub relay_url: &'a str,
+    pub profile_id: Option<&'a str>,
+    pub profile_directory: Option<&'a str>,
+    pub persist_tab_assignment: bool,
+    pub agent_id: Option<&'a str>,
+}
+
 impl BrowserProcess {
     pub fn kill(&mut self) {
         match self {
@@ -170,10 +264,18 @@ impl BrowserProcess {
 pub struct BrowserManager {
     pub client: Arc<CdpClient>,
     browser_process: Option<BrowserProcess>,
+    connection_mode: ConnectionMode,
     ws_url: String,
+    relay_tab_id: Option<usize>,
+    relay_connection_id: Option<String>,
+    relay_target_id: Option<String>,
     pages: Vec<PageInfo>,
     active_page_index: usize,
     default_timeout_ms: u64,
+    session_id: Option<String>,
+    session_name: Option<String>,
+    tab_assignment_store: Option<state::TabAssignmentsFile>,
+    is_shutting_down: bool,
 }
 
 const LIGHTPANDA_CDP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -188,7 +290,7 @@ impl BrowserManager {
             "chrome" => {
                 validate_launch_options(
                     options.extensions.as_deref(),
-                    false,
+                    ConnectionMode::Local,
                     options.profile.as_deref(),
                     options.storage_state.as_deref(),
                     options.allow_file_access,
@@ -238,10 +340,18 @@ impl BrowserManager {
             let mut manager = Self {
                 client,
                 browser_process: Some(process),
+                connection_mode: ConnectionMode::Local,
                 ws_url,
+                relay_tab_id: None,
+                relay_connection_id: None,
+                relay_target_id: None,
                 pages: Vec::new(),
                 active_page_index: 0,
                 default_timeout_ms: 25_000,
+                session_id: None,
+                session_name: None,
+                tab_assignment_store: None,
+                is_shutting_down: false,
             };
             manager.discover_and_attach_targets().await?;
             manager
@@ -298,23 +408,156 @@ impl BrowserManager {
 
     pub async fn connect_cdp(url: &str) -> Result<Self, String> {
         let ws_url = resolve_cdp_url(url).await?;
-        let client = Arc::new(CdpClient::connect(&ws_url).await?);
-        let mut manager = Self {
-            client,
-            browser_process: None,
+        Self::attach_connected_browser(
             ws_url,
-            pages: Vec::new(),
-            active_page_index: 0,
-            default_timeout_ms: 10_000,
-        };
-
-        manager.discover_and_attach_targets().await?;
-        Ok(manager)
+            ConnectionMode::Cdp,
+            RelayHandshakeMetadata::default(),
+        )
+        .await
     }
 
     pub async fn connect_auto() -> Result<Self, String> {
         let ws_url = auto_connect_cdp().await?;
-        Self::connect_cdp(&ws_url).await
+        Self::attach_connected_browser(
+            ws_url,
+            ConnectionMode::Cdp,
+            RelayHandshakeMetadata::default(),
+        )
+        .await
+    }
+
+    pub async fn connect_via_extension_relay(
+        options: ExtensionRelayConnectOptions<'_>,
+    ) -> Result<Self, String> {
+        let (mut relay_ws, _) = tokio_tungstenite::connect_async(options.relay_url)
+            .await
+            .map_err(|e| format!("Extension relay WebSocket connect failed: {}", e))?;
+
+        let handshake = json!({
+            "type": "connect",
+            "connectionMode": "extension-relay",
+            "profileId": options.profile_id,
+            "profileDirectory": options.profile_directory,
+            "persistTabAssignment": options.persist_tab_assignment,
+            "agentId": options.agent_id,
+        });
+
+        relay_ws
+            .send(Message::Text(handshake.to_string().into()))
+            .await
+            .map_err(|e| format!("Failed to send extension relay handshake: {}", e))?;
+
+        let response_text = loop {
+            let next = relay_ws.next().await.ok_or_else(|| {
+                "Extension relay closed before returning a scoped CDP endpoint".to_string()
+            })?;
+            match next {
+                Ok(Message::Text(text)) => break text.to_string(),
+                Ok(Message::Binary(data)) => {
+                    break String::from_utf8(data.to_vec()).map_err(|e| {
+                        format!(
+                            "Extension relay returned non-UTF8 binary handshake data: {}",
+                            e
+                        )
+                    })?
+                }
+                Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => continue,
+                Ok(Message::Close(frame)) => {
+                    let reason = frame
+                        .map(|f| f.reason.to_string())
+                        .unwrap_or_else(|| "no close reason".to_string());
+                    return Err(format!(
+                        "Extension relay closed before returning a scoped CDP endpoint: {}",
+                        reason
+                    ));
+                }
+                Ok(_) => continue,
+                Err(e) => return Err(format!("Extension relay receive failed: {}", e)),
+            }
+        };
+
+        let _ = relay_ws.close(None).await;
+
+        let response: Value = serde_json::from_str(&response_text)
+            .map_err(|e| format!("Invalid extension relay handshake response: {}", e))?;
+
+        if relay_response_bool(&response, &["success"]).is_some_and(|success| !success)
+            || relay_response_bool(&response, &["ok"]).is_some_and(|ok| !ok)
+        {
+            return Err(extract_relay_error(&response).unwrap_or_else(|| {
+                "Extension relay handshake failed without an error message".to_string()
+            }));
+        }
+
+        let scoped_endpoint = extract_relay_string(
+            &response,
+            &[
+                &["scopedCdpUrl"],
+                &["cdpUrl"],
+                &["wsUrl"],
+                &["endpoint"],
+                &["data", "scopedCdpUrl"],
+                &["data", "cdpUrl"],
+                &["data", "wsUrl"],
+                &["data", "endpoint"],
+            ],
+        )
+        .ok_or_else(|| {
+            "Extension relay handshake response did not include a scoped CDP endpoint".to_string()
+        })?;
+
+        let ws_url = resolve_cdp_url(&scoped_endpoint).await?;
+        let relay_metadata = RelayHandshakeMetadata {
+            tab_id: extract_relay_usize(
+                &response,
+                &[&["tabId"], &["data", "tabId"], &["assignment", "tabId"]],
+            ),
+            connection_id: extract_relay_string(
+                &response,
+                &[
+                    &["connectionId"],
+                    &["data", "connectionId"],
+                    &["assignment", "connectionId"],
+                ],
+            ),
+            target_id: extract_relay_string(
+                &response,
+                &[
+                    &["targetId"],
+                    &["data", "targetId"],
+                    &["assignment", "targetId"],
+                ],
+            ),
+        };
+
+        Self::attach_connected_browser(ws_url, ConnectionMode::ExtensionRelay, relay_metadata).await
+    }
+
+    async fn attach_connected_browser(
+        ws_url: String,
+        connection_mode: ConnectionMode,
+        relay_metadata: RelayHandshakeMetadata,
+    ) -> Result<Self, String> {
+        let client = Arc::new(CdpClient::connect(&ws_url).await?);
+        let mut manager = Self {
+            client,
+            browser_process: None,
+            connection_mode,
+            ws_url,
+            relay_tab_id: relay_metadata.tab_id,
+            relay_connection_id: relay_metadata.connection_id,
+            relay_target_id: relay_metadata.target_id,
+            pages: Vec::new(),
+            active_page_index: 0,
+            default_timeout_ms: 10_000,
+            session_id: None,
+            session_name: None,
+            tab_assignment_store: None,
+            is_shutting_down: false,
+        };
+
+        manager.discover_and_attach_targets().await?;
+        Ok(manager)
     }
 
     async fn discover_and_attach_targets(&mut self) -> Result<(), String> {
@@ -372,6 +615,7 @@ impl BrowserManager {
                 url: "about:blank".to_string(),
                 title: String::new(),
                 target_type: "page".to_string(),
+                assigned_tab: AssignedTabMetadata::default(),
             });
             self.active_page_index = 0;
             self.enable_domains(&attach_result.session_id).await?;
@@ -395,12 +639,46 @@ impl BrowserManager {
                     url: target.url.clone(),
                     title: target.title.clone(),
                     target_type: target.target_type.clone(),
+                    assigned_tab: AssignedTabMetadata::default(),
                 });
             }
 
             self.active_page_index = 0;
             let session_id = self.pages[0].session_id.clone();
             self.enable_domains(&session_id).await?;
+        }
+
+        self.sync_all_assignment_metadata();
+        let restored = self.restore_persisted_tab_assignment().await?;
+        if self.tab_assignment_store.is_some() && !self.pages.is_empty() {
+            if !restored {
+                self.active_page_index = 0;
+            }
+            self.flush_tab_assignments_if_active("attached", None)
+                .await?;
+        }
+
+        Ok(())
+    }
+
+    pub async fn configure_tab_assignment_persistence(
+        &mut self,
+        session_id: String,
+        session_name: String,
+    ) -> Result<(), String> {
+        self.session_id = Some(session_id);
+        self.session_name = Some(session_name.clone());
+        self.tab_assignment_store = state::read_tab_assignments(&session_name)?;
+        self.sync_all_assignment_metadata();
+
+        let restored = self.restore_persisted_tab_assignment().await?;
+        if !restored && !self.pages.is_empty() {
+            self.active_page_index = self.active_page_index.min(self.pages.len() - 1);
+        }
+
+        if !self.pages.is_empty() {
+            self.flush_tab_assignments_if_active("attached", None)
+                .await?;
         }
 
         Ok(())
@@ -567,6 +845,12 @@ impl BrowserManager {
     }
 
     pub async fn close(&mut self) -> Result<(), String> {
+        if self.is_shutting_down {
+            return Ok(());
+        }
+        self.is_shutting_down = true;
+        let runtime_fallback = self.capture_page_runtime(self.active_page_index).await.ok();
+
         if self.browser_process.is_some() {
             // Only send Browser.close when we launched the browser ourselves.
             // For external connections (--auto-connect, --cdp) we just disconnect
@@ -584,6 +868,12 @@ impl BrowserManager {
             })
             .await;
         }
+
+        self.pages.clear();
+        self.active_page_index = 0;
+        self.flush_tab_assignments("detached", runtime_fallback.as_ref())
+            .await?;
+        self.is_shutting_down = false;
 
         Ok(())
     }
@@ -611,6 +901,22 @@ impl BrowserManager {
 
     pub fn get_cdp_url(&self) -> &str {
         &self.ws_url
+    }
+
+    pub fn connection_mode(&self) -> ConnectionMode {
+        self.connection_mode
+    }
+
+    pub fn relay_tab_id(&self) -> Option<usize> {
+        self.relay_tab_id
+    }
+
+    pub fn relay_connection_id(&self) -> Option<&str> {
+        self.relay_connection_id.as_deref()
+    }
+
+    pub fn relay_target_id(&self) -> Option<&str> {
+        self.relay_target_id.as_deref()
     }
 
     /// Returns the Chrome debug server address as "host:port".
@@ -671,6 +977,7 @@ impl BrowserManager {
             url: "about:blank".to_string(),
             title: String::new(),
             target_type: "page".to_string(),
+            assigned_tab: AssignedTabMetadata::default(),
         });
         self.active_page_index = 0;
         self.enable_domains(&attach_result.session_id).await?;
@@ -745,8 +1052,12 @@ impl BrowserManager {
             url: target_url.to_string(),
             title: String::new(),
             target_type: "page".to_string(),
+            assigned_tab: AssignedTabMetadata::default(),
         });
         self.active_page_index = index;
+        self.sync_all_assignment_metadata();
+        self.flush_tab_assignments_if_active("attached", None)
+            .await?;
 
         Ok(json!({ "index": index, "url": target_url }))
     }
@@ -777,6 +1088,9 @@ impl BrowserManager {
             page.url = url.clone();
             page.title = title.clone();
         }
+        self.sync_all_assignment_metadata();
+        self.flush_tab_assignments_if_active("attached", None)
+            .await?;
 
         Ok(json!({ "index": index, "url": url, "title": title }))
     }
@@ -792,6 +1106,7 @@ impl BrowserManager {
             return Err("Cannot close the last tab".to_string());
         }
 
+        let runtime_fallback = self.capture_page_runtime(target_index).await.ok();
         let page = self.pages.remove(target_index);
         let _ = self
             .client
@@ -810,6 +1125,9 @@ impl BrowserManager {
 
         let session_id = self.pages[self.active_page_index].session_id.clone();
         self.enable_domains(&session_id).await?;
+        self.sync_all_assignment_metadata();
+        self.flush_tab_assignments_if_active("attached", runtime_fallback.as_ref())
+            .await?;
 
         Ok(json!({ "closed": target_index, "activeIndex": self.active_page_index }))
     }
@@ -1047,17 +1365,57 @@ impl BrowserManager {
             .to_string())
     }
 
-    pub fn add_page(&mut self, page: PageInfo) {
+    pub async fn add_page(&mut self, mut page: PageInfo) -> Result<(), String> {
+        page.assigned_tab = AssignedTabMetadata {
+            target_id: Some(page.target_id.clone()),
+            last_known_url: if page.url.is_empty() {
+                None
+            } else {
+                Some(page.url.clone())
+            },
+            last_known_title: if page.title.is_empty() {
+                None
+            } else {
+                Some(page.title.clone())
+            },
+            fallback_index: None,
+            context_ordinal: None,
+        };
         let index = self.pages.len();
         self.pages.push(page);
         self.active_page_index = index;
+        self.sync_all_assignment_metadata();
+        self.flush_tab_assignments_if_active("attached", None).await
     }
 
-    pub fn remove_page_by_target_id(&mut self, target_id: &str) {
+    pub async fn remove_page_by_target_id(&mut self, target_id: &str) -> Result<(), String> {
         if let Some(pos) = self.pages.iter().position(|p| p.target_id == target_id) {
+            let runtime_fallback = self.capture_page_runtime(pos).await.ok();
+            let removed_active = pos == self.active_page_index;
             self.pages.remove(pos);
-            self.update_active_page_if_needed();
+            if self.pages.is_empty() {
+                self.active_page_index = 0;
+            } else if self.active_page_index > pos {
+                self.active_page_index -= 1;
+            } else {
+                self.update_active_page_if_needed();
+            }
+            self.sync_all_assignment_metadata();
+
+            if removed_active && !self.pages.is_empty() {
+                let session_id = self.pages[self.active_page_index].session_id.clone();
+                self.enable_domains(&session_id).await?;
+            }
+
+            let status = if self.pages.is_empty() {
+                "detached"
+            } else {
+                "attached"
+            };
+            self.flush_tab_assignments_if_active(status, runtime_fallback.as_ref())
+                .await?;
         }
+        Ok(())
     }
 
     pub fn has_target(&self, target_id: &str) -> bool {
@@ -1214,10 +1572,18 @@ async fn initialize_lightpanda_manager(
         let mut manager = BrowserManager {
             client: Arc::new(client),
             browser_process: None,
+            connection_mode: ConnectionMode::Local,
             ws_url: ws_url.clone(),
+            relay_tab_id: None,
+            relay_connection_id: None,
+            relay_target_id: None,
             pages: Vec::new(),
             active_page_index: 0,
             default_timeout_ms: 25_000,
+            session_id: None,
+            session_name: None,
+            tab_assignment_store: None,
+            is_shutting_down: false,
         };
 
         match discover_and_attach_lightpanda_targets(&mut manager, deadline).await {
@@ -1279,6 +1645,310 @@ fn lightpanda_target_init_timeout(last_error: Option<&str>) -> String {
     message
 }
 
+impl BrowserManager {
+    fn sync_all_assignment_metadata(&mut self) {
+        for index in 0..self.pages.len() {
+            if let Some(page) = self.pages.get_mut(index) {
+                page.assigned_tab.target_id = Some(page.target_id.clone());
+                page.assigned_tab.fallback_index = Some(index);
+                page.assigned_tab.context_ordinal = Some(0);
+                if !page.url.is_empty() {
+                    page.assigned_tab.last_known_url = Some(page.url.clone());
+                }
+                if !page.title.is_empty() {
+                    page.assigned_tab.last_known_title = Some(page.title.clone());
+                }
+            }
+        }
+    }
+
+    async fn capture_page_runtime(&mut self, index: usize) -> Result<AssignedTabMetadata, String> {
+        if index >= self.pages.len() {
+            return Err("Tab index out of range".to_string());
+        }
+
+        self.sync_all_assignment_metadata();
+        if index == self.active_page_index {
+            if let Ok(url) = self.get_url().await {
+                if let Some(page) = self.pages.get_mut(index) {
+                    page.url = url.clone();
+                    page.assigned_tab.last_known_url = Some(url);
+                }
+            }
+            if let Ok(title) = self.get_title().await {
+                if let Some(page) = self.pages.get_mut(index) {
+                    page.title = title.clone();
+                    if !title.is_empty() {
+                        page.assigned_tab.last_known_title = Some(title);
+                    }
+                }
+            }
+        }
+
+        self.pages
+            .get(index)
+            .map(|page| page.assigned_tab.clone())
+            .ok_or_else(|| "Tab index out of range".to_string())
+    }
+
+    async fn restore_persisted_tab_assignment(&mut self) -> Result<bool, String> {
+        let session_id = match self.session_id.as_deref() {
+            Some(session_id) if !session_id.is_empty() => session_id,
+            _ => return Ok(false),
+        };
+        let Some(store) = self.tab_assignment_store.as_ref() else {
+            return Ok(false);
+        };
+        let Some(assignment) = store.assignments.get(session_id).cloned() else {
+            return Ok(false);
+        };
+        if self.pages.is_empty() {
+            return Ok(false);
+        }
+
+        self.sync_all_assignment_metadata();
+
+        let by_target = assignment.target_id.as_ref().and_then(|target_id| {
+            self.pages
+                .iter()
+                .position(|page| page.target_id == *target_id)
+        });
+        let by_url = assignment.last_known_url.as_ref().and_then(|url| {
+            self.pages.iter().position(|page| {
+                page.assigned_tab.last_known_url.as_deref() == Some(url.as_str())
+                    || page.url == *url
+            })
+        });
+        let by_title = assignment.last_known_title.as_ref().and_then(|title| {
+            self.pages.iter().position(|page| {
+                page.assigned_tab.last_known_title.as_deref() == Some(title.as_str())
+                    || page.title == *title
+            })
+        });
+        let by_index = assignment
+            .fallback_index
+            .filter(|index| *index < self.pages.len());
+
+        let matched = by_target.or(by_url).or(by_title).or(by_index);
+        if let Some(index) = matched {
+            self.active_page_index = index;
+            let session_id = self.pages[index].session_id.clone();
+            self.enable_domains(&session_id).await?;
+            return Ok(true);
+        }
+
+        Ok(false)
+    }
+
+    pub async fn flush_tab_assignments(
+        &mut self,
+        status: &str,
+        runtime_fallback: Option<&AssignedTabMetadata>,
+    ) -> Result<(), String> {
+        let session_id = match self.session_id.clone() {
+            Some(session_id) if !session_id.is_empty() => session_id,
+            _ => return Ok(()),
+        };
+        let session_name = match self.session_name.clone() {
+            Some(session_name) if !session_name.is_empty() => session_name,
+            _ => return Ok(()),
+        };
+
+        for _ in 0..3 {
+            let existing =
+                state::read_tab_assignments(&session_name)?.unwrap_or(state::TabAssignmentsFile {
+                    version: 1,
+                    revision: 0,
+                    session_name: session_name.clone(),
+                    updated_at: String::new(),
+                    profile: None,
+                    transport: None,
+                    assignments: std::collections::HashMap::new(),
+                    tabs: None,
+                });
+            let expected_revision = existing.revision;
+            let previous_assignment = existing.assignments.get(&session_id).cloned();
+            let relay_tab_id = self.relay_tab_id;
+            let relay_connection_id = self.relay_connection_id.clone();
+            let relay_target_id = self.relay_target_id.clone();
+            let now = OffsetDateTime::now_utc()
+                .format(&Rfc3339)
+                .map_err(|e| format!("Failed to format timestamp: {}", e))?;
+
+            let active_runtime =
+                if !self.pages.is_empty() && self.active_page_index < self.pages.len() {
+                    Some(self.capture_page_runtime(self.active_page_index).await?)
+                } else {
+                    None
+                };
+
+            let assignment = if let Some(runtime) = active_runtime.as_ref() {
+                let page = &self.pages[self.active_page_index];
+                state::PersistedTabAssignment {
+                    agent_session_id: session_id.clone(),
+                    tab_id: relay_tab_id.or(Some(self.active_page_index)),
+                    target_id: runtime
+                        .target_id
+                        .clone()
+                        .or_else(|| Some(page.target_id.clone()))
+                        .or_else(|| relay_target_id.clone()),
+                    window_id: previous_assignment.as_ref().and_then(|a| a.window_id),
+                    status: status.to_string(),
+                    lease_version: previous_assignment.as_ref().and_then(|a| a.lease_version),
+                    connection_id: previous_assignment
+                        .as_ref()
+                        .and_then(|a| a.connection_id.clone())
+                        .or_else(|| relay_connection_id.clone()),
+                    assigned_at: previous_assignment
+                        .as_ref()
+                        .map(|a| a.assigned_at.clone())
+                        .unwrap_or_else(|| now.clone()),
+                    updated_at: now.clone(),
+                    last_known_url: runtime.last_known_url.clone().or_else(|| {
+                        previous_assignment
+                            .as_ref()
+                            .and_then(|a| a.last_known_url.clone())
+                    }),
+                    last_known_title: runtime.last_known_title.clone().or_else(|| {
+                        previous_assignment
+                            .as_ref()
+                            .and_then(|a| a.last_known_title.clone())
+                    }),
+                    fallback_index: runtime.fallback_index.or(Some(self.active_page_index)),
+                    context_ordinal: runtime
+                        .context_ordinal
+                        .or_else(|| previous_assignment.as_ref().and_then(|a| a.context_ordinal)),
+                }
+            } else if let Some(runtime) = runtime_fallback {
+                state::PersistedTabAssignment {
+                    agent_session_id: session_id.clone(),
+                    tab_id: runtime.fallback_index.or(relay_tab_id),
+                    target_id: runtime
+                        .target_id
+                        .clone()
+                        .or_else(|| {
+                            previous_assignment
+                                .as_ref()
+                                .and_then(|a| a.target_id.clone())
+                        })
+                        .or_else(|| relay_target_id.clone()),
+                    window_id: previous_assignment.as_ref().and_then(|a| a.window_id),
+                    status: status.to_string(),
+                    lease_version: previous_assignment.as_ref().and_then(|a| a.lease_version),
+                    connection_id: previous_assignment
+                        .as_ref()
+                        .and_then(|a| a.connection_id.clone())
+                        .or_else(|| relay_connection_id.clone()),
+                    assigned_at: previous_assignment
+                        .as_ref()
+                        .map(|a| a.assigned_at.clone())
+                        .unwrap_or_else(|| now.clone()),
+                    updated_at: now.clone(),
+                    last_known_url: runtime.last_known_url.clone().or_else(|| {
+                        previous_assignment
+                            .as_ref()
+                            .and_then(|a| a.last_known_url.clone())
+                    }),
+                    last_known_title: runtime.last_known_title.clone().or_else(|| {
+                        previous_assignment
+                            .as_ref()
+                            .and_then(|a| a.last_known_title.clone())
+                    }),
+                    fallback_index: runtime
+                        .fallback_index
+                        .or_else(|| previous_assignment.as_ref().and_then(|a| a.fallback_index)),
+                    context_ordinal: runtime
+                        .context_ordinal
+                        .or_else(|| previous_assignment.as_ref().and_then(|a| a.context_ordinal)),
+                }
+            } else if let Some(previous) = previous_assignment.clone() {
+                state::PersistedTabAssignment {
+                    status: status.to_string(),
+                    updated_at: now.clone(),
+                    ..previous
+                }
+            } else {
+                state::PersistedTabAssignment {
+                    agent_session_id: session_id.clone(),
+                    tab_id: relay_tab_id,
+                    target_id: relay_target_id.clone(),
+                    window_id: None,
+                    status: status.to_string(),
+                    lease_version: None,
+                    connection_id: relay_connection_id.clone(),
+                    assigned_at: now.clone(),
+                    updated_at: now.clone(),
+                    last_known_url: None,
+                    last_known_title: None,
+                    fallback_index: None,
+                    context_ordinal: None,
+                }
+            };
+
+            let mut assignments = existing.assignments.clone();
+            assignments.insert(session_id.clone(), assignment.clone());
+
+            let mut tabs = existing.tabs.clone().unwrap_or_default();
+            if let Some(tab_id) = assignment.tab_id {
+                tabs.insert(
+                    tab_id.to_string(),
+                    state::PersistedTabInfo {
+                        tab_id,
+                        target_id: assignment.target_id.clone(),
+                        owner_session_id: Some(session_id.clone()),
+                        status: match status {
+                            "closed" => "closed".to_string(),
+                            "orphaned" => "orphaned".to_string(),
+                            _ => "open".to_string(),
+                        },
+                        last_known_url: assignment.last_known_url.clone(),
+                        last_known_title: assignment.last_known_title.clone(),
+                        updated_at: now.clone(),
+                    },
+                );
+            }
+
+            let next_data = state::TabAssignmentsFile {
+                version: 1,
+                revision: expected_revision + 1,
+                session_name: session_name.clone(),
+                updated_at: now,
+                profile: existing.profile.clone(),
+                transport: existing.transport.clone(),
+                assignments,
+                tabs: if tabs.is_empty() { None } else { Some(tabs) },
+            };
+
+            let latest_revision = state::read_tab_assignments(&session_name)?
+                .map(|data| data.revision)
+                .unwrap_or(0);
+            if latest_revision != expected_revision {
+                continue;
+            }
+
+            state::write_tab_assignments(&session_name, &next_data)?;
+            self.tab_assignment_store = Some(next_data);
+            return Ok(());
+        }
+
+        Err(format!(
+            "Failed to flush tab assignments for session '{}' after 3 CAS attempts",
+            session_id
+        ))
+    }
+
+    pub async fn flush_tab_assignments_if_active(
+        &mut self,
+        status: &str,
+        runtime_fallback: Option<&AssignedTabMetadata>,
+    ) -> Result<(), String> {
+        if self.is_shutting_down {
+            return Ok(());
+        }
+        self.flush_tab_assignments(status, runtime_fallback).await
+    }
+}
+
 async fn resolve_cdp_url(input: &str) -> Result<String, String> {
     if input.starts_with("ws://") || input.starts_with("wss://") {
         return Ok(input.to_string());
@@ -1304,6 +1974,53 @@ async fn resolve_cdp_url(input: &str) -> Result<String, String> {
     ))
 }
 
+fn relay_response_bool(response: &Value, path: &[&str]) -> Option<bool> {
+    let mut current = response;
+    for key in path {
+        current = current.get(*key)?;
+    }
+    current.as_bool()
+}
+
+fn extract_relay_string(response: &Value, paths: &[&[&str]]) -> Option<String> {
+    paths.iter().find_map(|path| {
+        let mut current = response;
+        for key in *path {
+            current = current.get(*key)?;
+        }
+        current.as_str().map(ToString::to_string)
+    })
+}
+
+fn extract_relay_usize(response: &Value, paths: &[&[&str]]) -> Option<usize> {
+    paths.iter().find_map(|path| {
+        let mut current = response;
+        for key in *path {
+            current = current.get(*key)?;
+        }
+        current
+            .as_u64()
+            .and_then(|value| usize::try_from(value).ok())
+            .or_else(|| {
+                current
+                    .as_str()
+                    .and_then(|value| value.parse::<usize>().ok())
+            })
+    })
+}
+
+fn extract_relay_error(response: &Value) -> Option<String> {
+    extract_relay_string(
+        response,
+        &[
+            &["error"],
+            &["message"],
+            &["data", "error"],
+            &["data", "message"],
+        ],
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1312,19 +2029,30 @@ mod tests {
     #[test]
     fn test_validate_launch_options_extensions_and_cdp() {
         let ext = vec!["/path/to/ext".to_string()];
-        assert!(validate_launch_options(Some(&ext), true, None, None, false, None,).is_err());
+        assert!(
+            validate_launch_options(Some(&ext), ConnectionMode::Cdp, None, None, false, None,)
+                .is_err()
+        );
     }
 
     #[test]
     fn test_validate_launch_options_profile_and_cdp() {
-        assert!(validate_launch_options(None, true, Some("/path"), None, false, None,).is_err());
+        assert!(validate_launch_options(
+            None,
+            ConnectionMode::Cdp,
+            Some("/path"),
+            None,
+            false,
+            None,
+        )
+        .is_err());
     }
 
     #[test]
     fn test_validate_launch_options_storage_state_and_profile() {
         assert!(validate_launch_options(
             None,
-            false,
+            ConnectionMode::Local,
             Some("/profile"),
             Some("/state.json"),
             false,
@@ -1336,23 +2064,48 @@ mod tests {
     #[test]
     fn test_validate_launch_options_storage_state_and_extensions() {
         let ext = vec!["/ext".to_string()];
-        assert!(
-            validate_launch_options(Some(&ext), false, None, Some("/state.json"), false, None,)
-                .is_err()
-        );
+        assert!(validate_launch_options(
+            Some(&ext),
+            ConnectionMode::Local,
+            None,
+            Some("/state.json"),
+            false,
+            None,
+        )
+        .is_err());
     }
 
     #[test]
     fn test_validate_launch_options_allow_file_access_firefox() {
-        assert!(
-            validate_launch_options(None, false, None, None, true, Some("/usr/bin/firefox"),)
-                .is_err()
-        );
+        assert!(validate_launch_options(
+            None,
+            ConnectionMode::Local,
+            None,
+            None,
+            true,
+            Some("/usr/bin/firefox"),
+        )
+        .is_err());
     }
 
     #[test]
     fn test_validate_launch_options_valid() {
-        assert!(validate_launch_options(None, false, None, None, false, None,).is_ok());
+        assert!(
+            validate_launch_options(None, ConnectionMode::Local, None, None, false, None,).is_ok()
+        );
+    }
+
+    #[test]
+    fn test_validate_launch_options_profile_with_extension_relay_is_allowed() {
+        assert!(validate_launch_options(
+            None,
+            ConnectionMode::ExtensionRelay,
+            Some("/profile"),
+            None,
+            false,
+            None,
+        )
+        .is_ok());
     }
 
     #[test]

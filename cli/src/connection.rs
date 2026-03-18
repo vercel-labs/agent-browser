@@ -182,6 +182,12 @@ pub struct DaemonOptions<'a> {
     pub debug: bool,
     pub executable_path: Option<&'a str>,
     pub extensions: &'a [String],
+    pub connection_mode: Option<&'a str>,
+    pub relay_url: Option<&'a str>,
+    pub profile_id: Option<&'a str>,
+    pub profile_directory: Option<&'a str>,
+    pub persist_tab_assignment: bool,
+    pub agent_id: Option<&'a str>,
     pub args: Option<&'a str>,
     pub user_agent: Option<&'a str>,
     pub proxy: Option<&'a str>,
@@ -218,6 +224,24 @@ fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
     }
     if !opts.extensions.is_empty() {
         cmd.env("AGENT_BROWSER_EXTENSIONS", opts.extensions.join(","));
+    }
+    if let Some(mode) = opts.connection_mode {
+        cmd.env("AGENT_BROWSER_CONNECTION_MODE", mode);
+    }
+    if let Some(relay_url) = opts.relay_url {
+        cmd.env("AGENT_BROWSER_RELAY_URL", relay_url);
+    }
+    if let Some(profile_id) = opts.profile_id {
+        cmd.env("AGENT_BROWSER_PROFILE_ID", profile_id);
+    }
+    if let Some(profile_directory) = opts.profile_directory {
+        cmd.env("AGENT_BROWSER_PROFILE_DIRECTORY", profile_directory);
+    }
+    if opts.persist_tab_assignment {
+        cmd.env("AGENT_BROWSER_PERSIST_TAB_ASSIGNMENT", "1");
+    }
+    if let Some(agent_id) = opts.agent_id {
+        cmd.env("AGENT_BROWSER_AGENT_ID", agent_id);
     }
     if let Some(a) = opts.args {
         cmd.env("AGENT_BROWSER_ARGS", a);
