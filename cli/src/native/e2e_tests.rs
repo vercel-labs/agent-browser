@@ -2210,3 +2210,106 @@ async fn e2e_snapshot_cursor_many_elements() {
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     assert_success(&resp);
 }
+
+// ---------------------------------------------------------------------------
+// Regression: find placeholder on div-based custom inputs (Issue #900)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore]
+async fn e2e_getbyplaceholder_custom_inputs() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let cases = [
+        // (html_element, placeholder_text, fill_value, element_id)
+        (
+            "<div id='t1' contenteditable='true' data-placeholder='Type a message...'></div>",
+            "Type a message...",
+            "hello world",
+            "t1",
+        ),
+        (
+            "<div id='t2' contenteditable='true' aria-placeholder='Enter your name'></div>",
+            "Enter your name",
+            "Alice",
+            "t2",
+        ),
+        (
+            "<div id='t3' contenteditable='true' placeholder='Write something...'></div>",
+            "Write something...",
+            "draft",
+            "t3",
+        ),
+    ];
+
+    for (i, (html_el, placeholder, fill_value, el_id)) in cases.iter().enumerate() {
+        let html = format!("data:text/html,<html><body>{}</body></html>", html_el);
+        let id = |n: u8| format!("{}{}", i, n);
+
+        let resp = execute_command(
+            &json!({ "id": id(1), "action": "navigate", "url": html }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        let resp = execute_command(
+            &json!({
+                "id": id(2),
+                "action": "getbyplaceholder",
+                "placeholder": placeholder,
+                "subaction": "fill",
+                "value": fill_value
+            }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        let script = format!("document.getElementById('{}').textContent", el_id);
+        let resp = execute_command(
+            &json!({ "id": id(3), "action": "evaluate", "script": script }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+        assert_eq!(
+            get_data(&resp)["result"], *fill_value,
+            "Failed for case: {}", placeholder
+        );
+    }
+
+    // Not-found case: should fail gracefully
+    let resp = execute_command(
+        &json!({ "id": "90", "action": "navigate", "url": "data:text/html,<html><body><p>No inputs</p></body></html>" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "91",
+            "action": "getbyplaceholder",
+            "placeholder": "Nonexistent",
+            "subaction": "click"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(
+        resp.get("success").and_then(|v| v.as_bool()),
+        Some(false),
+        "Expected failure for nonexistent placeholder"
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}

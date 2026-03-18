@@ -3967,7 +3967,8 @@ async fn handle_semantic_locator(
         ),
         "placeholder" => format!(
             r#"(() => {{
-                const el = document.querySelector('input[placeholder={val}], textarea[placeholder={val}]');
+                const q = JSON.stringify({val});
+                const el = document.querySelector('input[placeholder=' + q + '],textarea[placeholder=' + q + '],[contenteditable][placeholder=' + q + '],[contenteditable][data-placeholder=' + q + '],[aria-placeholder=' + q + ']');
                 if (el) {{ el.setAttribute('data-agent-browser-located', 'true'); return true; }}
                 return false;
             }})()"#,
