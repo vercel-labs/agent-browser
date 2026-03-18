@@ -35,6 +35,8 @@ pub mod state;
 #[allow(dead_code)]
 pub mod storage;
 #[allow(dead_code)]
+pub mod tauri_backend;
+#[allow(dead_code)]
 pub mod stream;
 #[allow(dead_code)]
 pub mod tracing;
