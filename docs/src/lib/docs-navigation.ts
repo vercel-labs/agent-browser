@@ -42,6 +42,15 @@ export const navigation: NavSection[] = [
     ],
   },
   {
+    title: "Providers",
+    items: [
+      { name: "Browser Use", href: "/providers/browser-use" },
+      { name: "Browserbase", href: "/providers/browserbase" },
+      { name: "Browserless", href: "/providers/browserless" },
+      { name: "Kernel", href: "/providers/kernel" },
+    ],
+  },
+  {
     title: "Engines",
     items: [
       { name: "Chrome", href: "/engines/chrome" },

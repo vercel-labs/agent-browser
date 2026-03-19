@@ -18,6 +18,10 @@ export const PAGE_TITLES: Record<string, string> = {
   "engines/lightpanda": "Lightpanda",
   next: "Next.js + Vercel",
   "native-mode": "Native Mode",
+  "providers/browser-use": "Browser Use",
+  "providers/browserbase": "Browserbase",
+  "providers/browserless": "Browserless",
+  "providers/kernel": "Kernel",
   changelog: "Changelog",
 };
 

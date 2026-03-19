@@ -111,28 +111,10 @@ This enables control of:
 
 ## Cloud providers
 
-Use cloud browser infrastructure when local browsers aren't available:
+Use the `-p` flag to connect to a cloud browser provider instead of launching a local browser:
 
 ```bash
-# Browserbase
-export BROWSERBASE_API_KEY="your-api-key"
 agent-browser -p browserbase open https://example.com
-
-# Browser Use
-export BROWSER_USE_API_KEY="your-api-key"
-agent-browser -p browseruse open https://example.com
-
-# Kernel
-export KERNEL_API_KEY="your-api-key"
-agent-browser -p kernel open https://example.com
-
-# Browserless
-export BROWSERLESS_API_KEY="your-api-key"
-agent-browser -p browserless open https://example.com
-
-# Or via environment variable
-export AGENT_BROWSER_PROVIDER=browserbase
-agent-browser open https://example.com
 ```
 
-The `-p` flag takes precedence over `AGENT_BROWSER_PROVIDER`.
+See the [Providers](/providers/browser-use) section for setup and configuration of each supported provider: [Browser Use](/providers/browser-use), [Browserbase](/providers/browserbase), [Browserless](/providers/browserless), and [Kernel](/providers/kernel).
