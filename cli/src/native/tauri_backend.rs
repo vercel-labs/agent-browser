@@ -100,7 +100,12 @@ pub struct TauriBackend {
 }
 
 /// Actions not supported by the Tauri MCP backend.
+/// Actions not supported by the Tauri MCP backend.
+///
+/// These must match the action names used in `execute_command`'s match arms
+/// in `actions.rs` — NOT abbreviated aliases.
 pub const TAURI_UNSUPPORTED_ACTIONS: &[&str] = &[
+    // CDP-only features
     "screencast_start",
     "screencast_stop",
     "trace_start",
@@ -115,6 +120,7 @@ pub const TAURI_UNSUPPORTED_ACTIONS: &[&str] = &[
     "network",
     "har_start",
     "har_stop",
+    // Interaction actions not yet supported via MCP
     "dblclick",
     "hover",
     "scroll",
@@ -125,13 +131,26 @@ pub const TAURI_UNSUPPORTED_ACTIONS: &[&str] = &[
     "type",
     "press",
     "evaluate",
+    // Query actions not yet supported via MCP
     "gettext",
     "getattribute",
     "isvisible",
     "isenabled",
     "ischecked",
-    "cookies",
-    "storage",
+    // Navigation actions the MCP plugin doesn't implement
+    "back",
+    "forward",
+    "reload",
+    // Storage/cookie actions — use the dispatcher's actual action names
+    "cookies_get",
+    "cookies_set",
+    "cookies_clear",
+    "storage_get",
+    "storage_set",
+    "storage_clear",
+    // CDP introspection
+    "cdp_url",
+    "inspect",
 ];
 
 impl TauriBackend {
@@ -260,6 +279,7 @@ impl TauriBackend {
             .json(&request)
             .send()
             .await
+            .and_then(|r| r.error_for_status())
             .map_err(|e| format!("HTTP error: {e}"))?;
 
         // Lock scope 2: read the SSE stream for the matching response.
@@ -480,20 +500,37 @@ mod tests {
     }
 
     #[test]
-    fn test_tauri_unsupported_actions_includes_screencast() {
+    fn test_tauri_unsupported_actions_includes_cdp_only() {
         assert!(TAURI_UNSUPPORTED_ACTIONS.contains(&"screencast_start"));
         assert!(TAURI_UNSUPPORTED_ACTIONS.contains(&"har_start"));
+        assert!(TAURI_UNSUPPORTED_ACTIONS.contains(&"cdp_url"));
+        assert!(TAURI_UNSUPPORTED_ACTIONS.contains(&"inspect"));
+    }
+
+    #[test]
+    fn test_tauri_unsupported_actions_uses_dispatcher_names() {
+        // Must match execute_command's match arms, not abbreviated names
+        assert!(TAURI_UNSUPPORTED_ACTIONS.contains(&"cookies_get"));
+        assert!(TAURI_UNSUPPORTED_ACTIONS.contains(&"cookies_set"));
+        assert!(TAURI_UNSUPPORTED_ACTIONS.contains(&"storage_get"));
+        assert!(TAURI_UNSUPPORTED_ACTIONS.contains(&"back"));
+        assert!(TAURI_UNSUPPORTED_ACTIONS.contains(&"forward"));
+        assert!(TAURI_UNSUPPORTED_ACTIONS.contains(&"reload"));
     }
 
     #[test]
     fn test_tauri_unsupported_actions_excludes_core() {
-        // Core actions should NOT be in the unsupported list
+        // Core actions supported by the Tauri MCP plugin
         assert!(!TAURI_UNSUPPORTED_ACTIONS.contains(&"snapshot"));
         assert!(!TAURI_UNSUPPORTED_ACTIONS.contains(&"click"));
         assert!(!TAURI_UNSUPPORTED_ACTIONS.contains(&"fill"));
         assert!(!TAURI_UNSUPPORTED_ACTIONS.contains(&"screenshot"));
         assert!(!TAURI_UNSUPPORTED_ACTIONS.contains(&"navigate"));
         assert!(!TAURI_UNSUPPORTED_ACTIONS.contains(&"close"));
+        assert!(!TAURI_UNSUPPORTED_ACTIONS.contains(&"launch"));
+        assert!(!TAURI_UNSUPPORTED_ACTIONS.contains(&"url"));
+        assert!(!TAURI_UNSUPPORTED_ACTIONS.contains(&"title"));
+        assert!(!TAURI_UNSUPPORTED_ACTIONS.contains(&"content"));
     }
 
     #[test]

@@ -1431,6 +1431,14 @@ async fn launch_tauri(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         .and_then(|v| v.as_str())
         .unwrap_or("127.0.0.1");
 
+    // Security: only allow loopback hosts — Tauri MCP uses plaintext HTTP
+    // and may transmit sensitive page content / form values.
+    if host != "127.0.0.1" && host != "localhost" && host != "::1" {
+        return Err(format!(
+            "Tauri provider only allows loopback hosts (127.0.0.1, localhost, ::1); got: {host}"
+        ));
+    }
+
     let backend = TauriBackend::new(host, port);
     backend.connect().await?;
 
@@ -1532,6 +1540,10 @@ async fn handle_navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
 }
 
 async fn handle_url(state: &DaemonState) -> Result<Value, String> {
+    if state.tauri_backend.is_some() {
+        // Tauri MCP plugin doesn't expose a "get current URL" tool
+        return Ok(json!({ "url": "" }));
+    }
     if let Some(ref wb) = state.webdriver_backend {
         if state.browser.is_none() {
             let url = wb.get_url().await?;
@@ -1588,6 +1600,9 @@ fn open_url_in_browser(url: &str) {
 }
 
 async fn handle_title(state: &DaemonState) -> Result<Value, String> {
+    if state.tauri_backend.is_some() {
+        return Ok(json!({ "title": "" }));
+    }
     if let Some(ref wb) = state.webdriver_backend {
         if state.browser.is_none() {
             let title = wb.get_title().await?;
@@ -1600,6 +1615,10 @@ async fn handle_title(state: &DaemonState) -> Result<Value, String> {
 }
 
 async fn handle_content(state: &DaemonState) -> Result<Value, String> {
+    if let Some(ref tb) = state.tauri_backend {
+        let tree = tb.snapshot(false).await?;
+        return Ok(json!({ "html": tree, "origin": "" }));
+    }
     if let Some(ref wb) = state.webdriver_backend {
         if state.browser.is_none() {
             let html = wb.get_content().await?;
