@@ -704,52 +704,55 @@ pub fn parse_flags(args: &[String]) -> Flags {
     flags
 }
 
+// Boolean flags that optionally take true/false.
+// Used by clean_args() and completion tests — keep in sync with parse_flags().
+pub(crate) const GLOBAL_BOOL_FLAGS: &[&str] = &[
+    "--json",
+    "--headed",
+    "--debug",
+    "--ignore-https-errors",
+    "--allow-file-access",
+    "--auto-connect",
+    "--annotate",
+    "--content-boundaries",
+    "--confirm-interactive",
+];
+
+// Global flags that always take a value (need to skip the next arg too).
+// Used by clean_args() and completion tests — keep in sync with parse_flags().
+pub(crate) const GLOBAL_FLAGS_WITH_VALUE: &[&str] = &[
+    "--session",
+    "--headers",
+    "--executable-path",
+    "--cdp",
+    "--extension",
+    "--profile",
+    "--state",
+    "--proxy",
+    "--proxy-bypass",
+    "--args",
+    "--user-agent",
+    "-p",
+    "--provider",
+    "--device",
+    "--session-name",
+    "--color-scheme",
+    "--download-path",
+    "--max-output",
+    "--allowed-domains",
+    "--action-policy",
+    "--confirm-actions",
+    "--config",
+    "--engine",
+    "--screenshot-dir",
+    "--screenshot-quality",
+    "--screenshot-format",
+    "--idle-timeout",
+];
+
 pub fn clean_args(args: &[String]) -> Vec<String> {
     let mut result = Vec::new();
     let mut skip_next = false;
-
-    // Boolean flags that optionally take true/false
-    const GLOBAL_BOOL_FLAGS: &[&str] = &[
-        "--json",
-        "--headed",
-        "--debug",
-        "--ignore-https-errors",
-        "--allow-file-access",
-        "--auto-connect",
-        "--annotate",
-        "--content-boundaries",
-        "--confirm-interactive",
-    ];
-    // Global flags that always take a value (need to skip the next arg too)
-    const GLOBAL_FLAGS_WITH_VALUE: &[&str] = &[
-        "--session",
-        "--headers",
-        "--executable-path",
-        "--cdp",
-        "--extension",
-        "--profile",
-        "--state",
-        "--proxy",
-        "--proxy-bypass",
-        "--args",
-        "--user-agent",
-        "-p",
-        "--provider",
-        "--device",
-        "--session-name",
-        "--color-scheme",
-        "--download-path",
-        "--max-output",
-        "--allowed-domains",
-        "--action-policy",
-        "--confirm-actions",
-        "--config",
-        "--engine",
-        "--screenshot-dir",
-        "--screenshot-quality",
-        "--screenshot-format",
-        "--idle-timeout",
-    ];
 
     let mut i = 0;
     while i < args.len() {

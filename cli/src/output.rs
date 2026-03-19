@@ -2475,6 +2475,25 @@ Examples:
 "##
         }
 
+        // === Completion ===
+        "completion" => {
+            r##"
+agent-browser completion - Generate shell completion scripts
+
+Usage: agent-browser completion <shell>
+
+Supported shells: bash, zsh
+
+To activate, add one of these lines to your shell config file:
+
+  bash (~/.bashrc or ~/.bash_profile):
+    eval "$(agent-browser completion bash)"
+
+  zsh (~/.zshrc):
+    eval "$(agent-browser completion zsh)"
+"##
+        }
+
         _ => return false,
     };
     println!("{}", help.trim());
@@ -2589,6 +2608,7 @@ Setup:
   install                    Install browser binaries
   install --with-deps        Also install system dependencies (Linux)
   upgrade                    Upgrade to the latest version
+  completion <shell>         Generate shell completion script (bash, zsh)
 
 Snapshot Options:
   -i, --interactive          Only interactive elements

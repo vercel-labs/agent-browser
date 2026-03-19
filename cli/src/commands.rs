@@ -71,6 +71,121 @@ pub fn gen_id() -> String {
     )
 }
 
+pub(crate) const AUTH_SUBCOMMANDS: &[&str] = &["save", "login", "list", "delete", "show"];
+pub(crate) const KEYBOARD_SUBCOMMANDS: &[&str] = &["type", "inserttext"];
+pub(crate) const WINDOW_SUBCOMMANDS: &[&str] = &["new"];
+pub(crate) const DIALOG_SUBCOMMANDS: &[&str] = &["accept", "dismiss"];
+pub(crate) const TRACE_SUBCOMMANDS: &[&str] = &["start", "stop"];
+pub(crate) const PROFILER_SUBCOMMANDS: &[&str] = &["start", "stop"];
+pub(crate) const RECORD_SUBCOMMANDS: &[&str] = &["start", "stop", "restart"];
+pub(crate) const CLIPBOARD_SUBCOMMANDS: &[&str] = &["read", "write", "copy", "paste"];
+pub(crate) const STATE_SUBCOMMANDS: &[&str] =
+    &["save", "load", "list", "clear", "show", "clean", "rename"];
+pub(crate) const SESSION_SUBCOMMANDS: &[&str] = &["list"];
+pub(crate) const DIFF_SUBCOMMANDS: &[&str] = &["snapshot", "screenshot", "url"];
+pub(crate) const GET_SUBCOMMANDS: &[&str] = &[
+    "text", "html", "value", "attr", "url", "title", "count", "box", "styles", "cdp-url",
+];
+pub(crate) const IS_SUBCOMMANDS: &[&str] = &["visible", "enabled", "checked"];
+pub(crate) const FIND_SUBCOMMANDS: &[&str] = &[
+    "role",
+    "text",
+    "label",
+    "placeholder",
+    "alt",
+    "title",
+    "testid",
+    "first",
+    "last",
+    "nth",
+];
+pub(crate) const MOUSE_SUBCOMMANDS: &[&str] = &["move", "down", "up", "wheel"];
+pub(crate) const SET_SUBCOMMANDS: &[&str] = &[
+    "viewport",
+    "device",
+    "geo",
+    "geolocation",
+    "offline",
+    "headers",
+    "credentials",
+    "auth",
+    "media",
+];
+pub(crate) const NETWORK_SUBCOMMANDS: &[&str] = &["route", "unroute", "requests", "har"];
+pub(crate) const HAR_SUBCOMMANDS: &[&str] = &["start", "stop"];
+pub(crate) const STORAGE_SUBCOMMANDS: &[&str] = &["local", "session"];
+
+/// Returns all recognized top-level command names.
+/// Used by completion tests to verify coverage stays complete.
+/// Update this list whenever a new command is added to parse_command's match arms
+/// or handled before parse_command in main.rs.
+#[cfg(test)]
+pub(crate) fn all_known_commands() -> &'static [&'static str] {
+    &[
+        "open",
+        "goto",
+        "navigate",
+        "back",
+        "forward",
+        "reload",
+        "click",
+        "dblclick",
+        "fill",
+        "type",
+        "hover",
+        "focus",
+        "check",
+        "uncheck",
+        "select",
+        "drag",
+        "upload",
+        "download",
+        "scroll",
+        "scrollintoview",
+        "press",
+        "key",
+        "keyboard",
+        "get",
+        "is",
+        "find",
+        "screenshot",
+        "pdf",
+        "snapshot",
+        "eval",
+        "connect",
+        "wait",
+        "inspect",
+        "batch",
+        "cookies",
+        "storage",
+        "state",
+        "network",
+        "trace",
+        "profiler",
+        "record",
+        "set",
+        "mouse",
+        "tab",
+        "window",
+        "frame",
+        "dialog",
+        "console",
+        "errors",
+        "highlight",
+        "clipboard",
+        "diff",
+        "auth",
+        "close",
+        "confirm",
+        "deny",
+        // pre-dispatch (handled in main.rs before parse_command)
+        "install",
+        "upgrade",
+        "session",
+        "completion",
+    ]
+}
+
 pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError> {
     if args.is_empty() {
         return Err(ParseError::MissingArguments {
@@ -298,7 +413,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                 }
                 _ => Err(ParseError::UnknownSubcommand {
                     subcommand: sub.to_string(),
-                    valid_options: &["type", "inserttext"],
+                    valid_options: KEYBOARD_SUBCOMMANDS,
                 }),
             }
         }
@@ -728,7 +843,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                 }
                 _ => Err(ParseError::UnknownSubcommand {
                     subcommand: sub.unwrap_or("(none)").to_string(),
-                    valid_options: &["save", "login", "list", "delete", "show"],
+                    valid_options: AUTH_SUBCOMMANDS,
                 }),
             }
         }
@@ -956,20 +1071,17 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
         },
 
         // === Window ===
-        "window" => {
-            const VALID: &[&str] = &["new"];
-            match rest.first().copied() {
-                Some("new") => Ok(json!({ "id": id, "action": "window_new" })),
-                Some(sub) => Err(ParseError::UnknownSubcommand {
-                    subcommand: sub.to_string(),
-                    valid_options: VALID,
-                }),
-                None => Err(ParseError::MissingArguments {
-                    context: "window".to_string(),
-                    usage: "window <new>",
-                }),
-            }
-        }
+        "window" => match rest.first().copied() {
+            Some("new") => Ok(json!({ "id": id, "action": "window_new" })),
+            Some(sub) => Err(ParseError::UnknownSubcommand {
+                subcommand: sub.to_string(),
+                valid_options: WINDOW_SUBCOMMANDS,
+            }),
+            None => Err(ParseError::MissingArguments {
+                context: "window".to_string(),
+                usage: "window <new>",
+            }),
+        },
 
         // === Frame ===
         "frame" => {
@@ -985,97 +1097,87 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
         }
 
         // === Dialog ===
-        "dialog" => {
-            const VALID: &[&str] = &["accept", "dismiss"];
-            match rest.first().copied() {
-                Some("accept") => {
-                    let mut cmd = json!({ "id": id, "action": "dialog", "response": "accept" });
-                    if let Some(prompt_text) = rest.get(1) {
-                        cmd["promptText"] = json!(prompt_text);
-                    }
-                    Ok(cmd)
+        "dialog" => match rest.first().copied() {
+            Some("accept") => {
+                let mut cmd = json!({ "id": id, "action": "dialog", "response": "accept" });
+                if let Some(prompt_text) = rest.get(1) {
+                    cmd["promptText"] = json!(prompt_text);
                 }
-                Some("dismiss") => {
-                    let mut cmd = json!({ "id": id, "action": "dialog", "response": "dismiss" });
-                    if let Some(prompt_text) = rest.get(1) {
-                        cmd["promptText"] = json!(prompt_text);
-                    }
-                    Ok(cmd)
-                }
-                Some(sub) => Err(ParseError::UnknownSubcommand {
-                    subcommand: sub.to_string(),
-                    valid_options: VALID,
-                }),
-                None => Err(ParseError::MissingArguments {
-                    context: "dialog".to_string(),
-                    usage: "dialog <accept|dismiss> [text]",
-                }),
+                Ok(cmd)
             }
-        }
+            Some("dismiss") => {
+                let mut cmd = json!({ "id": id, "action": "dialog", "response": "dismiss" });
+                if let Some(prompt_text) = rest.get(1) {
+                    cmd["promptText"] = json!(prompt_text);
+                }
+                Ok(cmd)
+            }
+            Some(sub) => Err(ParseError::UnknownSubcommand {
+                subcommand: sub.to_string(),
+                valid_options: DIALOG_SUBCOMMANDS,
+            }),
+            None => Err(ParseError::MissingArguments {
+                context: "dialog".to_string(),
+                usage: "dialog <accept|dismiss> [text]",
+            }),
+        },
 
         // === Debug ===
-        "trace" => {
-            const VALID: &[&str] = &["start", "stop"];
-            match rest.first().copied() {
-                Some("start") => Ok(json!({ "id": id, "action": "trace_start" })),
-                Some("stop") => {
-                    let mut cmd = json!({ "id": id, "action": "trace_stop" });
-                    if let Some(path) = rest.get(1) {
-                        cmd["path"] = json!(path);
-                    }
-                    Ok(cmd)
+        "trace" => match rest.first().copied() {
+            Some("start") => Ok(json!({ "id": id, "action": "trace_start" })),
+            Some("stop") => {
+                let mut cmd = json!({ "id": id, "action": "trace_stop" });
+                if let Some(path) = rest.get(1) {
+                    cmd["path"] = json!(path);
                 }
-                Some(sub) => Err(ParseError::UnknownSubcommand {
-                    subcommand: sub.to_string(),
-                    valid_options: VALID,
-                }),
-                None => Err(ParseError::MissingArguments {
-                    context: "trace".to_string(),
-                    usage: "trace <start|stop> [path]",
-                }),
+                Ok(cmd)
             }
-        }
+            Some(sub) => Err(ParseError::UnknownSubcommand {
+                subcommand: sub.to_string(),
+                valid_options: TRACE_SUBCOMMANDS,
+            }),
+            None => Err(ParseError::MissingArguments {
+                context: "trace".to_string(),
+                usage: "trace <start|stop> [path]",
+            }),
+        },
 
         // === Profiler (CDP Tracing / Chromium profiling) ===
-        "profiler" => {
-            const VALID: &[&str] = &["start", "stop"];
-            match rest.first().copied() {
-                Some("start") => {
-                    let mut cmd = json!({ "id": id, "action": "profiler_start" });
-                    if let Some(idx) = rest.iter().position(|s| *s == "--categories") {
-                        if let Some(cats) = rest.get(idx + 1) {
-                            let categories: Vec<&str> = cats.split(',').collect();
-                            cmd["categories"] = json!(categories);
-                        } else {
-                            return Err(ParseError::MissingArguments {
-                                context: "profiler start --categories".to_string(),
-                                usage: "--categories <list>",
-                            });
-                        }
+        "profiler" => match rest.first().copied() {
+            Some("start") => {
+                let mut cmd = json!({ "id": id, "action": "profiler_start" });
+                if let Some(idx) = rest.iter().position(|s| *s == "--categories") {
+                    if let Some(cats) = rest.get(idx + 1) {
+                        let categories: Vec<&str> = cats.split(',').collect();
+                        cmd["categories"] = json!(categories);
+                    } else {
+                        return Err(ParseError::MissingArguments {
+                            context: "profiler start --categories".to_string(),
+                            usage: "--categories <list>",
+                        });
                     }
-                    Ok(cmd)
                 }
-                Some("stop") => {
-                    let mut cmd = json!({ "id": id, "action": "profiler_stop" });
-                    if let Some(path) = rest.get(1) {
-                        cmd["path"] = json!(path);
-                    }
-                    Ok(cmd)
-                }
-                Some(sub) => Err(ParseError::UnknownSubcommand {
-                    subcommand: sub.to_string(),
-                    valid_options: VALID,
-                }),
-                None => Err(ParseError::MissingArguments {
-                    context: "profiler".to_string(),
-                    usage: "profiler <start|stop> [options]",
-                }),
+                Ok(cmd)
             }
-        }
+            Some("stop") => {
+                let mut cmd = json!({ "id": id, "action": "profiler_stop" });
+                if let Some(path) = rest.get(1) {
+                    cmd["path"] = json!(path);
+                }
+                Ok(cmd)
+            }
+            Some(sub) => Err(ParseError::UnknownSubcommand {
+                subcommand: sub.to_string(),
+                valid_options: PROFILER_SUBCOMMANDS,
+            }),
+            None => Err(ParseError::MissingArguments {
+                context: "profiler".to_string(),
+                usage: "profiler <start|stop> [options]",
+            }),
+        },
 
         // === Recording (browser video recording) ===
         "record" => {
-            const VALID: &[&str] = &["start", "stop", "restart"];
             match rest.first().copied() {
                 Some("start") => {
                     let path = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
@@ -1118,7 +1220,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                 }
                 Some(sub) => Err(ParseError::UnknownSubcommand {
                     subcommand: sub.to_string(),
-                    valid_options: VALID,
+                    valid_options: RECORD_SUBCOMMANDS,
                 }),
                 None => Err(ParseError::MissingArguments {
                     context: "record".to_string(),
@@ -1159,129 +1261,126 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
             Some("paste") => Ok(json!({ "id": id, "action": "clipboard", "operation": "paste" })),
             Some(sub) => Err(ParseError::UnknownSubcommand {
                 subcommand: sub.to_string(),
-                valid_options: &["read", "write", "copy", "paste"],
+                valid_options: CLIPBOARD_SUBCOMMANDS,
             }),
         },
 
         // === State ===
-        "state" => {
-            const VALID: &[&str] = &["save", "load", "list", "clear", "show", "clean", "rename"];
-            match rest.first().copied() {
-                Some("save") => {
-                    let path = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
-                        context: "state save".to_string(),
-                        usage: "state save <path>",
-                    })?;
-                    Ok(json!({ "id": id, "action": "state_save", "path": path }))
-                }
-                Some("load") => {
-                    let path = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
-                        context: "state load".to_string(),
-                        usage: "state load <path>",
-                    })?;
-                    Ok(json!({ "id": id, "action": "state_load", "path": path }))
-                }
-                Some("list") => Ok(json!({ "id": id, "action": "state_list" })),
-                Some("clear") => {
-                    let mut session_name: Option<&str> = None;
-                    let mut all = false;
-
-                    let mut i = 1;
-                    while i < rest.len() {
-                        match rest[i] {
-                            "--all" | "-a" => {
-                                all = true;
-                            }
-                            arg if !arg.starts_with('-') => {
-                                session_name = Some(arg);
-                            }
-                            _ => {}
-                        }
-                        i += 1;
-                    }
-
-                    if let Some(name) = session_name {
-                        if !is_valid_session_name(name) {
-                            return Err(ParseError::InvalidSessionName {
-                                name: name.to_string(),
-                            });
-                        }
-                    }
-
-                    let mut cmd = json!({ "id": id, "action": "state_clear" });
-                    if all {
-                        cmd["all"] = json!(true);
-                    }
-                    if let Some(name) = session_name {
-                        cmd["sessionName"] = json!(name);
-                    }
-                    Ok(cmd)
-                }
-                Some("show") => {
-                    let filename = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
-                        context: "state show".to_string(),
-                        usage: "state show <filename>",
-                    })?;
-                    Ok(json!({ "id": id, "action": "state_show", "filename": filename }))
-                }
-                Some("clean") => {
-                    let mut days: Option<i64> = None;
-
-                    let mut i = 1;
-                    while i < rest.len() {
-                        if rest[i] == "--older-than" {
-                            if let Some(d) = rest.get(i + 1) {
-                                days = d.parse().ok();
-                                i += 1;
-                            }
-                        }
-                        i += 1;
-                    }
-
-                    let days = days.ok_or_else(|| ParseError::MissingArguments {
-                        context: "state clean".to_string(),
-                        usage: "state clean --older-than <days>",
-                    })?;
-
-                    Ok(json!({ "id": id, "action": "state_clean", "days": days }))
-                }
-                Some("rename") => {
-                    let old_name = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
-                        context: "state rename".to_string(),
-                        usage: "state rename <old-name> <new-name>",
-                    })?;
-                    let new_name = rest.get(2).ok_or_else(|| ParseError::MissingArguments {
-                        context: "state rename".to_string(),
-                        usage: "state rename <old-name> <new-name>",
-                    })?;
-                    let old_name = old_name.trim_end_matches(".json");
-                    let new_name = new_name.trim_end_matches(".json");
-
-                    if !is_valid_session_name(old_name) {
-                        return Err(ParseError::InvalidSessionName {
-                            name: old_name.to_string(),
-                        });
-                    }
-                    if !is_valid_session_name(new_name) {
-                        return Err(ParseError::InvalidSessionName {
-                            name: new_name.to_string(),
-                        });
-                    }
-
-                    Ok(
-                        json!({ "id": id, "action": "state_rename", "oldName": old_name, "newName": new_name }),
-                    )
-                }
-                Some(sub) => Err(ParseError::UnknownSubcommand {
-                    subcommand: sub.to_string(),
-                    valid_options: VALID,
-                }),
-                None => Err(ParseError::MissingArguments {
-                    context: "state".to_string(),
-                    usage: "state <save|load|list|clear|show|clean|rename> ...",
-                }),
+        "state" => match rest.first().copied() {
+            Some("save") => {
+                let path = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
+                    context: "state save".to_string(),
+                    usage: "state save <path>",
+                })?;
+                Ok(json!({ "id": id, "action": "state_save", "path": path }))
             }
-        }
+            Some("load") => {
+                let path = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
+                    context: "state load".to_string(),
+                    usage: "state load <path>",
+                })?;
+                Ok(json!({ "id": id, "action": "state_load", "path": path }))
+            }
+            Some("list") => Ok(json!({ "id": id, "action": "state_list" })),
+            Some("clear") => {
+                let mut session_name: Option<&str> = None;
+                let mut all = false;
+
+                let mut i = 1;
+                while i < rest.len() {
+                    match rest[i] {
+                        "--all" | "-a" => {
+                            all = true;
+                        }
+                        arg if !arg.starts_with('-') => {
+                            session_name = Some(arg);
+                        }
+                        _ => {}
+                    }
+                    i += 1;
+                }
+
+                if let Some(name) = session_name {
+                    if !is_valid_session_name(name) {
+                        return Err(ParseError::InvalidSessionName {
+                            name: name.to_string(),
+                        });
+                    }
+                }
+
+                let mut cmd = json!({ "id": id, "action": "state_clear" });
+                if all {
+                    cmd["all"] = json!(true);
+                }
+                if let Some(name) = session_name {
+                    cmd["sessionName"] = json!(name);
+                }
+                Ok(cmd)
+            }
+            Some("show") => {
+                let filename = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
+                    context: "state show".to_string(),
+                    usage: "state show <filename>",
+                })?;
+                Ok(json!({ "id": id, "action": "state_show", "filename": filename }))
+            }
+            Some("clean") => {
+                let mut days: Option<i64> = None;
+
+                let mut i = 1;
+                while i < rest.len() {
+                    if rest[i] == "--older-than" {
+                        if let Some(d) = rest.get(i + 1) {
+                            days = d.parse().ok();
+                            i += 1;
+                        }
+                    }
+                    i += 1;
+                }
+
+                let days = days.ok_or_else(|| ParseError::MissingArguments {
+                    context: "state clean".to_string(),
+                    usage: "state clean --older-than <days>",
+                })?;
+
+                Ok(json!({ "id": id, "action": "state_clean", "days": days }))
+            }
+            Some("rename") => {
+                let old_name = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
+                    context: "state rename".to_string(),
+                    usage: "state rename <old-name> <new-name>",
+                })?;
+                let new_name = rest.get(2).ok_or_else(|| ParseError::MissingArguments {
+                    context: "state rename".to_string(),
+                    usage: "state rename <old-name> <new-name>",
+                })?;
+                let old_name = old_name.trim_end_matches(".json");
+                let new_name = new_name.trim_end_matches(".json");
+
+                if !is_valid_session_name(old_name) {
+                    return Err(ParseError::InvalidSessionName {
+                        name: old_name.to_string(),
+                    });
+                }
+                if !is_valid_session_name(new_name) {
+                    return Err(ParseError::InvalidSessionName {
+                        name: new_name.to_string(),
+                    });
+                }
+
+                Ok(
+                    json!({ "id": id, "action": "state_rename", "oldName": old_name, "newName": new_name }),
+                )
+            }
+            Some(sub) => Err(ParseError::UnknownSubcommand {
+                subcommand: sub.to_string(),
+                valid_options: STATE_SUBCOMMANDS,
+            }),
+            None => Err(ParseError::MissingArguments {
+                context: "state".to_string(),
+                usage: "state <save|load|list|clear|show|clean|rename> ...",
+            }),
+        },
 
         // === iOS-specific commands ===
         "tap" => {
@@ -1322,7 +1421,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                 }
                 Some(sub) => Err(ParseError::UnknownSubcommand {
                     subcommand: sub.to_string(),
-                    valid_options: &["list"],
+                    valid_options: SESSION_SUBCOMMANDS,
                 }),
             }
         }
@@ -1342,8 +1441,6 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
 }
 
 fn parse_diff(rest: &[&str], id: &str) -> Result<Value, ParseError> {
-    const VALID: &[&str] = &["snapshot", "screenshot", "url"];
-
     match rest.first().copied() {
         Some("snapshot") => {
             let mut cmd = json!({ "id": id, "action": "diff_snapshot" });
@@ -1605,7 +1702,7 @@ fn parse_diff(rest: &[&str], id: &str) -> Result<Value, ParseError> {
         }
         Some(sub) => Err(ParseError::UnknownSubcommand {
             subcommand: sub.to_string(),
-            valid_options: VALID,
+            valid_options: DIFF_SUBCOMMANDS,
         }),
         None => Err(ParseError::MissingArguments {
             context: "diff".to_string(),
@@ -1615,10 +1712,6 @@ fn parse_diff(rest: &[&str], id: &str) -> Result<Value, ParseError> {
 }
 
 fn parse_get(rest: &[&str], id: &str) -> Result<Value, ParseError> {
-    const VALID: &[&str] = &[
-        "text", "html", "value", "attr", "url", "title", "count", "box", "styles", "cdp-url",
-    ];
-
     match rest.first().copied() {
         Some("text") => {
             let sel = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
@@ -1678,7 +1771,7 @@ fn parse_get(rest: &[&str], id: &str) -> Result<Value, ParseError> {
         }
         Some(sub) => Err(ParseError::UnknownSubcommand {
             subcommand: sub.to_string(),
-            valid_options: VALID,
+            valid_options: GET_SUBCOMMANDS,
         }),
         None => Err(ParseError::MissingArguments {
             context: "get".to_string(),
@@ -1688,8 +1781,6 @@ fn parse_get(rest: &[&str], id: &str) -> Result<Value, ParseError> {
 }
 
 fn parse_is(rest: &[&str], id: &str) -> Result<Value, ParseError> {
-    const VALID: &[&str] = &["visible", "enabled", "checked"];
-
     match rest.first().copied() {
         Some("visible") => {
             let sel = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
@@ -1714,7 +1805,7 @@ fn parse_is(rest: &[&str], id: &str) -> Result<Value, ParseError> {
         }
         Some(sub) => Err(ParseError::UnknownSubcommand {
             subcommand: sub.to_string(),
-            valid_options: VALID,
+            valid_options: IS_SUBCOMMANDS,
         }),
         None => Err(ParseError::MissingArguments {
             context: "is".to_string(),
@@ -1724,19 +1815,6 @@ fn parse_is(rest: &[&str], id: &str) -> Result<Value, ParseError> {
 }
 
 fn parse_find(rest: &[&str], id: &str) -> Result<Value, ParseError> {
-    const VALID: &[&str] = &[
-        "role",
-        "text",
-        "label",
-        "placeholder",
-        "alt",
-        "title",
-        "testid",
-        "first",
-        "last",
-        "nth",
-    ];
-
     let locator = rest.first().ok_or_else(|| ParseError::MissingArguments {
         context: "find".to_string(),
         usage: "find <locator> <value> [action] [text]",
@@ -1855,14 +1933,12 @@ fn parse_find(rest: &[&str], id: &str) -> Result<Value, ParseError> {
         }
         _ => Err(ParseError::UnknownSubcommand {
             subcommand: locator.to_string(),
-            valid_options: VALID,
+            valid_options: FIND_SUBCOMMANDS,
         }),
     }
 }
 
 fn parse_mouse(rest: &[&str], id: &str) -> Result<Value, ParseError> {
-    const VALID: &[&str] = &["move", "down", "up", "wheel"];
-
     match rest.first().copied() {
         Some("move") => {
             let x_str = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
@@ -1903,7 +1979,7 @@ fn parse_mouse(rest: &[&str], id: &str) -> Result<Value, ParseError> {
         }
         Some(sub) => Err(ParseError::UnknownSubcommand {
             subcommand: sub.to_string(),
-            valid_options: VALID,
+            valid_options: MOUSE_SUBCOMMANDS,
         }),
         None => Err(ParseError::MissingArguments {
             context: "mouse".to_string(),
@@ -1913,18 +1989,6 @@ fn parse_mouse(rest: &[&str], id: &str) -> Result<Value, ParseError> {
 }
 
 fn parse_set(rest: &[&str], id: &str) -> Result<Value, ParseError> {
-    const VALID: &[&str] = &[
-        "viewport",
-        "device",
-        "geo",
-        "geolocation",
-        "offline",
-        "headers",
-        "credentials",
-        "auth",
-        "media",
-    ];
-
     match rest.first().copied() {
         Some("viewport") => {
             let w_str = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
@@ -2039,7 +2103,7 @@ fn parse_set(rest: &[&str], id: &str) -> Result<Value, ParseError> {
         }
         Some(sub) => Err(ParseError::UnknownSubcommand {
             subcommand: sub.to_string(),
-            valid_options: VALID,
+            valid_options: SET_SUBCOMMANDS,
         }),
         None => Err(ParseError::MissingArguments {
             context: "set".to_string(),
@@ -2050,8 +2114,6 @@ fn parse_set(rest: &[&str], id: &str) -> Result<Value, ParseError> {
 
 /// Parse network interception, request inspection, and HAR recording commands.
 fn parse_network(rest: &[&str], id: &str) -> Result<Value, ParseError> {
-    const VALID: &[&str] = &["route", "unroute", "requests", "har"];
-
     match rest.first().copied() {
         Some("route") => {
             let url = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
@@ -2080,30 +2142,27 @@ fn parse_network(rest: &[&str], id: &str) -> Result<Value, ParseError> {
             }
             Ok(cmd)
         }
-        Some("har") => {
-            const HAR_VALID: &[&str] = &["start", "stop"];
-            match rest.get(1).copied() {
-                Some("start") => Ok(json!({ "id": id, "action": "har_start" })),
-                Some("stop") => {
-                    let mut cmd = json!({ "id": id, "action": "har_stop" });
-                    if let Some(path) = rest.get(2) {
-                        cmd["path"] = json!(path);
-                    }
-                    Ok(cmd)
+        Some("har") => match rest.get(1).copied() {
+            Some("start") => Ok(json!({ "id": id, "action": "har_start" })),
+            Some("stop") => {
+                let mut cmd = json!({ "id": id, "action": "har_stop" });
+                if let Some(path) = rest.get(2) {
+                    cmd["path"] = json!(path);
                 }
-                Some(sub) => Err(ParseError::UnknownSubcommand {
-                    subcommand: sub.to_string(),
-                    valid_options: HAR_VALID,
-                }),
-                None => Err(ParseError::MissingArguments {
-                    context: "network har".to_string(),
-                    usage: "network har <start|stop> [path]",
-                }),
+                Ok(cmd)
             }
-        }
+            Some(sub) => Err(ParseError::UnknownSubcommand {
+                subcommand: sub.to_string(),
+                valid_options: HAR_SUBCOMMANDS,
+            }),
+            None => Err(ParseError::MissingArguments {
+                context: "network har".to_string(),
+                usage: "network har <start|stop> [path]",
+            }),
+        },
         Some(sub) => Err(ParseError::UnknownSubcommand {
             subcommand: sub.to_string(),
-            valid_options: VALID,
+            valid_options: NETWORK_SUBCOMMANDS,
         }),
         None => Err(ParseError::MissingArguments {
             context: "network".to_string(),
@@ -2113,8 +2172,6 @@ fn parse_network(rest: &[&str], id: &str) -> Result<Value, ParseError> {
 }
 
 fn parse_storage(rest: &[&str], id: &str) -> Result<Value, ParseError> {
-    const VALID: &[&str] = &["local", "session"];
-
     match rest.first().copied() {
         Some("local") | Some("session") => {
             let storage_type = rest.first().unwrap();
@@ -2154,7 +2211,7 @@ fn parse_storage(rest: &[&str], id: &str) -> Result<Value, ParseError> {
         }
         Some(sub) => Err(ParseError::UnknownSubcommand {
             subcommand: sub.to_string(),
-            valid_options: VALID,
+            valid_options: STORAGE_SUBCOMMANDS,
         }),
         None => Err(ParseError::MissingArguments {
             context: "storage".to_string(),
