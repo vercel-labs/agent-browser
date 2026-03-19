@@ -29,7 +29,6 @@ use super::snapshot::{self, SnapshotOptions};
 use super::state;
 use super::storage;
 use super::stream::{self, StreamServer};
-use super::tab_assignments::{self, TabAssignmentsFile};
 use super::tracing::{self as native_tracing, TracingState};
 use super::webdriver::appium::AppiumManager;
 use super::webdriver::backend::{BrowserBackend, WebDriverBackend, WEBDRIVER_UNSUPPORTED_ACTIONS};
@@ -116,7 +115,6 @@ pub struct DaemonState {
     pub event_tracker: EventTracker,
     pub session_name: Option<String>,
     pub session_id: String,
-    pub tab_assignments: TabAssignmentsFile,
     pub tracing_state: TracingState,
     pub recording_state: RecordingState,
     event_rx: Option<broadcast::Receiver<CdpEvent>>,
@@ -148,17 +146,6 @@ impl DaemonState {
     }
 
     pub fn new_for_session(session_id: String, session_name: Option<String>) -> Self {
-        let tab_assignments =
-            tab_assignments::read_tab_assignments(&session_id, session_name.as_deref())
-                .unwrap_or_else(|_| {
-                    TabAssignmentsFile::new(
-                        session_name
-                            .as_deref()
-                            .filter(|name| !name.is_empty())
-                            .unwrap_or(&session_id),
-                    )
-                });
-
         Self {
             browser: None,
             appium: None,
@@ -173,7 +160,6 @@ impl DaemonState {
             event_tracker: EventTracker::new(),
             session_name,
             session_id,
-            tab_assignments,
             tracing_state: TracingState::new(),
             recording_state: RecordingState::new(),
             event_rx: None,
@@ -207,12 +193,12 @@ impl DaemonState {
         s
     }
 
-    pub fn flush_tab_assignments(&mut self) -> Result<(), String> {
-        self.tab_assignments = tab_assignments::write_tab_assignments(
-            &self.session_id,
-            self.session_name.as_deref(),
-            &self.tab_assignments,
-        )?;
+    pub async fn flush_tab_assignments(&mut self) -> Result<(), String> {
+        if let Some(browser) = self.browser.as_mut() {
+            browser
+                .flush_tab_assignments_if_active("attached", None)
+                .await?;
+        }
         Ok(())
     }
 
@@ -650,6 +636,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
                         url: te.target_info.url.clone(),
                         title: te.target_info.title.clone(),
                         target_type: te.target_info.target_type.clone(),
+                        browser_context_id: te.target_info.browser_context_id.clone(),
                         assigned_tab: super::browser::AssignedTabMetadata::default(),
                     })
                     .await;
@@ -2973,6 +2960,7 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
             url: nav_url.clone(),
             title: String::new(),
             target_type: "page".to_string(),
+            browser_context_id: None,
             assigned_tab: super::browser::AssignedTabMetadata::default(),
         })
         .await?;
@@ -4625,6 +4613,7 @@ async fn handle_window_new(cmd: &Value, state: &mut DaemonState) -> Result<Value
         url: "about:blank".to_string(),
         title: String::new(),
         target_type: "page".to_string(),
+        browser_context_id: None,
         assigned_tab: super::browser::AssignedTabMetadata::default(),
     })
     .await?;

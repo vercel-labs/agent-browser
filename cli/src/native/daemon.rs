@@ -148,7 +148,7 @@ async fn run_socket_server(
                 }
             }, if idle_timeout_ms.is_some() => {
                 let mut s = state.lock().await;
-                let _ = s.flush_tab_assignments();
+                let _ = s.flush_tab_assignments().await;
                 if let Some(ref mut mgr) = s.browser {
                     let _ = mgr.close().await;
                 }
@@ -159,7 +159,7 @@ async fn run_socket_server(
             }
             _ = shutdown_signal() => {
                 let mut s = state.lock().await;
-                let _ = s.flush_tab_assignments();
+                let _ = s.flush_tab_assignments().await;
                 if let Some(ref mut mgr) = s.browser {
                     let _ = mgr.close().await;
                 }
@@ -230,7 +230,7 @@ async fn run_socket_server(
                 }
             }, if idle_timeout_ms.is_some() => {
                 let mut s = state.lock().await;
-                let _ = s.flush_tab_assignments();
+                let _ = s.flush_tab_assignments().await;
                 if let Some(ref mut mgr) = s.browser {
                     let _ = mgr.close().await;
                 }
@@ -242,7 +242,7 @@ async fn run_socket_server(
             }
             _ = shutdown_signal() => {
                 let mut s = state.lock().await;
-                let _ = s.flush_tab_assignments();
+                let _ = s.flush_tab_assignments().await;
                 if let Some(ref mut mgr) = s.browser {
                     let _ = mgr.close().await;
                 }
@@ -314,7 +314,7 @@ async fn handle_connection<S>(
                 if is_close {
                     {
                         let mut s = state.lock().await;
-                        let _ = s.flush_tab_assignments();
+                        let _ = s.flush_tab_assignments().await;
                     }
                     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
                     process::exit(0);

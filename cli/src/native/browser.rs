@@ -1,7 +1,8 @@
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::future::Future;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
@@ -13,7 +14,9 @@ use super::cdp::client::CdpClient;
 use super::cdp::discovery::discover_cdp_url;
 use super::cdp::lightpanda::{launch_lightpanda, LightpandaLaunchOptions, LightpandaProcess};
 use super::cdp::types::*;
-use super::state;
+use super::tab_assignments::{
+    self, TabAssignment, TabAssignmentStatus, TabAssignmentsFile, TabInfo,
+};
 
 // ---------------------------------------------------------------------------
 // Launch validation
@@ -131,6 +134,7 @@ pub struct PageInfo {
     pub url: String,
     pub title: String,
     pub target_type: String, // "page" or "webview"
+    pub browser_context_id: Option<String>,
     pub assigned_tab: AssignedTabMetadata,
 }
 
@@ -141,6 +145,16 @@ pub struct AssignedTabMetadata {
     pub last_known_title: Option<String>,
     pub fallback_index: Option<usize>,
     pub context_ordinal: Option<usize>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct TabAssignmentSeed {
+    tab_id: Option<usize>,
+    target_id: Option<String>,
+    last_known_url: Option<String>,
+    last_known_title: Option<String>,
+    fallback_index: Option<usize>,
+    context_ordinal: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -173,18 +187,6 @@ pub enum ConnectionMode {
 }
 
 impl ConnectionMode {
-    pub fn from_str(value: &str) -> Result<Self, String> {
-        match value {
-            "local" => Ok(Self::Local),
-            "cdp" => Ok(Self::Cdp),
-            "extension-relay" => Ok(Self::ExtensionRelay),
-            other => Err(format!(
-                "Invalid connection mode '{}'. Expected one of: local, cdp, extension-relay",
-                other
-            )),
-        }
-    }
-
     pub fn resolve(
         explicit: Option<&str>,
         has_cdp: bool,
@@ -193,7 +195,7 @@ impl ConnectionMode {
         has_provider: bool,
     ) -> Result<Self, String> {
         if let Some(mode) = explicit {
-            let mode = Self::from_str(mode)?;
+            let mode = mode.parse::<Self>()?;
             if matches!(mode, Self::Local) && (has_cdp || auto_connect || has_relay || has_provider)
             {
                 return Err(
@@ -227,6 +229,22 @@ impl ConnectionMode {
 
     pub fn is_external(self) -> bool {
         !matches!(self, Self::Local)
+    }
+}
+
+impl FromStr for ConnectionMode {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "local" => Ok(Self::Local),
+            "cdp" => Ok(Self::Cdp),
+            "extension-relay" => Ok(Self::ExtensionRelay),
+            other => Err(format!(
+                "Invalid connection mode '{}'. Expected one of: local, cdp, extension-relay",
+                other
+            )),
+        }
     }
 }
 
@@ -276,7 +294,7 @@ pub struct BrowserManager {
     default_timeout_ms: u64,
     session_id: Option<String>,
     session_name: Option<String>,
-    tab_assignment_store: Option<state::TabAssignmentsFile>,
+    tab_assignment_store: Option<TabAssignmentsFile>,
     is_shutting_down: bool,
 }
 
@@ -626,6 +644,7 @@ impl BrowserManager {
                 url: "about:blank".to_string(),
                 title: String::new(),
                 target_type: "page".to_string(),
+                browser_context_id: None,
                 assigned_tab: AssignedTabMetadata::default(),
             });
             self.active_page_index = 0;
@@ -650,6 +669,7 @@ impl BrowserManager {
                     url: target.url.clone(),
                     title: target.title.clone(),
                     target_type: target.target_type.clone(),
+                    browser_context_id: target.browser_context_id.clone(),
                     assigned_tab: AssignedTabMetadata::default(),
                 });
             }
@@ -677,9 +697,12 @@ impl BrowserManager {
         session_id: String,
         session_name: String,
     ) -> Result<(), String> {
-        self.session_id = Some(session_id);
+        self.session_id = Some(session_id.clone());
         self.session_name = Some(session_name.clone());
-        self.tab_assignment_store = state::read_tab_assignments(&session_name)?;
+        self.tab_assignment_store = Some(tab_assignments::read_tab_assignments(
+            &session_id,
+            Some(&session_name),
+        )?);
         self.sync_all_assignment_metadata();
 
         let restored = self.restore_persisted_tab_assignment().await?;
@@ -988,6 +1011,10 @@ impl BrowserManager {
             url: "about:blank".to_string(),
             title: String::new(),
             target_type: "page".to_string(),
+            browser_context_id: self
+                .pages
+                .get(self.active_page_index)
+                .and_then(|page| page.browser_context_id.clone()),
             assigned_tab: AssignedTabMetadata::default(),
         });
         self.active_page_index = 0;
@@ -1063,6 +1090,10 @@ impl BrowserManager {
             url: target_url.to_string(),
             title: String::new(),
             target_type: "page".to_string(),
+            browser_context_id: self
+                .pages
+                .get(self.active_page_index)
+                .and_then(|page| page.browser_context_id.clone()),
             assigned_tab: AssignedTabMetadata::default(),
         });
         self.active_page_index = index;
@@ -1658,11 +1689,24 @@ fn lightpanda_target_init_timeout(last_error: Option<&str>) -> String {
 
 impl BrowserManager {
     fn sync_all_assignment_metadata(&mut self) {
+        let mut context_ordinals = BTreeMap::<String, usize>::new();
+        for page in &self.pages {
+            if let Some(context_id) = page.browser_context_id.as_ref() {
+                let next_ordinal = context_ordinals.len();
+                context_ordinals
+                    .entry(context_id.clone())
+                    .or_insert(next_ordinal);
+            }
+        }
+
         for index in 0..self.pages.len() {
             if let Some(page) = self.pages.get_mut(index) {
                 page.assigned_tab.target_id = Some(page.target_id.clone());
                 page.assigned_tab.fallback_index = Some(index);
-                page.assigned_tab.context_ordinal = Some(0);
+                page.assigned_tab.context_ordinal = page
+                    .browser_context_id
+                    .as_ref()
+                    .and_then(|context_id| context_ordinals.get(context_id).copied());
                 if !page.url.is_empty() {
                     page.assigned_tab.last_known_url = Some(page.url.clone());
                 }
@@ -1707,11 +1751,14 @@ impl BrowserManager {
             Some(session_id) if !session_id.is_empty() => session_id,
             _ => return Ok(false),
         };
-        let Some(store) = self.tab_assignment_store.as_ref() else {
-            return Ok(false);
-        };
-        let Some(assignment) = store.assignments.get(session_id).cloned() else {
-            return Ok(false);
+        let assignment = {
+            let Some(store) = self.tab_assignment_store.as_ref() else {
+                return Ok(false);
+            };
+            let Some(assignment) = store.assignments.get(session_id).cloned() else {
+                return Ok(false);
+            };
+            assignment
         };
         if self.pages.is_empty() {
             return Ok(false);
@@ -1724,18 +1771,21 @@ impl BrowserManager {
                 .iter()
                 .position(|page| page.target_id == *target_id)
         });
-        let by_url = assignment.last_known_url.as_ref().and_then(|url| {
+        let by_url = assignment.last_known_url.as_ref().and_then(|url: &String| {
             self.pages.iter().position(|page| {
                 page.assigned_tab.last_known_url.as_deref() == Some(url.as_str())
                     || page.url == *url
             })
         });
-        let by_title = assignment.last_known_title.as_ref().and_then(|title| {
-            self.pages.iter().position(|page| {
-                page.assigned_tab.last_known_title.as_deref() == Some(title.as_str())
-                    || page.title == *title
-            })
-        });
+        let by_title = assignment
+            .last_known_title
+            .as_ref()
+            .and_then(|title: &String| {
+                self.pages.iter().position(|page| {
+                    page.assigned_tab.last_known_title.as_deref() == Some(title.as_str())
+                        || page.title == *title
+                })
+            });
         let by_index = assignment
             .fallback_index
             .filter(|index| *index < self.pages.len());
@@ -1749,6 +1799,51 @@ impl BrowserManager {
         }
 
         Ok(false)
+    }
+
+    fn build_tab_assignment(
+        &self,
+        session_id: &str,
+        status: TabAssignmentStatus,
+        now: &str,
+        previous_assignment: Option<&TabAssignment>,
+        seed: Option<TabAssignmentSeed>,
+    ) -> TabAssignment {
+        let relay_tab_id = self.relay_tab_id;
+        let relay_connection_id = self.relay_connection_id.clone();
+        let relay_target_id = self.relay_target_id.clone();
+        let seed = seed.unwrap_or_default();
+
+        TabAssignment {
+            agent_session_id: session_id.to_string(),
+            tab_id: seed.tab_id.or(relay_tab_id),
+            target_id: seed
+                .target_id
+                .or_else(|| previous_assignment.and_then(|a| a.target_id.clone()))
+                .or(relay_target_id),
+            window_id: previous_assignment.and_then(|a| a.window_id),
+            status,
+            lease_version: previous_assignment.and_then(|a| a.lease_version),
+            connection_id: previous_assignment
+                .and_then(|a| a.connection_id.clone())
+                .or(relay_connection_id),
+            assigned_at: previous_assignment
+                .map(|a| a.assigned_at.clone())
+                .unwrap_or_else(|| now.to_string()),
+            updated_at: now.to_string(),
+            last_known_url: seed
+                .last_known_url
+                .or_else(|| previous_assignment.and_then(|a| a.last_known_url.clone())),
+            last_known_title: seed
+                .last_known_title
+                .or_else(|| previous_assignment.and_then(|a| a.last_known_title.clone())),
+            fallback_index: seed
+                .fallback_index
+                .or_else(|| previous_assignment.and_then(|a| a.fallback_index)),
+            context_ordinal: seed
+                .context_ordinal
+                .or_else(|| previous_assignment.and_then(|a| a.context_ordinal)),
+        }
     }
 
     pub async fn flush_tab_assignments(
@@ -1766,25 +1861,13 @@ impl BrowserManager {
         };
 
         for _ in 0..3 {
-            let existing =
-                state::read_tab_assignments(&session_name)?.unwrap_or(state::TabAssignmentsFile {
-                    version: 1,
-                    revision: 0,
-                    session_name: session_name.clone(),
-                    updated_at: String::new(),
-                    profile: None,
-                    transport: None,
-                    assignments: std::collections::HashMap::new(),
-                    tabs: None,
-                });
+            let existing = tab_assignments::read_tab_assignments(&session_id, Some(&session_name))?;
             let expected_revision = existing.revision;
             let previous_assignment = existing.assignments.get(&session_id).cloned();
-            let relay_tab_id = self.relay_tab_id;
-            let relay_connection_id = self.relay_connection_id.clone();
-            let relay_target_id = self.relay_target_id.clone();
             let now = OffsetDateTime::now_utc()
                 .format(&Rfc3339)
                 .map_err(|e| format!("Failed to format timestamp: {}", e))?;
+            let assignment_status = TabAssignmentStatus::from_str(status)?;
 
             let active_runtime =
                 if !self.pages.is_empty() && self.active_page_index < self.pages.len() {
@@ -1793,108 +1876,37 @@ impl BrowserManager {
                     None
                 };
 
-            let assignment = if let Some(runtime) = active_runtime.as_ref() {
+            let seed = if let Some(runtime) = active_runtime.as_ref() {
                 let page = &self.pages[self.active_page_index];
-                state::PersistedTabAssignment {
-                    agent_session_id: session_id.clone(),
-                    tab_id: relay_tab_id.or(Some(self.active_page_index)),
+                Some(TabAssignmentSeed {
+                    tab_id: Some(self.active_page_index),
                     target_id: runtime
                         .target_id
                         .clone()
-                        .or_else(|| Some(page.target_id.clone()))
-                        .or_else(|| relay_target_id.clone()),
-                    window_id: previous_assignment.as_ref().and_then(|a| a.window_id),
-                    status: status.to_string(),
-                    lease_version: previous_assignment.as_ref().and_then(|a| a.lease_version),
-                    connection_id: previous_assignment
-                        .as_ref()
-                        .and_then(|a| a.connection_id.clone())
-                        .or_else(|| relay_connection_id.clone()),
-                    assigned_at: previous_assignment
-                        .as_ref()
-                        .map(|a| a.assigned_at.clone())
-                        .unwrap_or_else(|| now.clone()),
-                    updated_at: now.clone(),
-                    last_known_url: runtime.last_known_url.clone().or_else(|| {
-                        previous_assignment
-                            .as_ref()
-                            .and_then(|a| a.last_known_url.clone())
-                    }),
-                    last_known_title: runtime.last_known_title.clone().or_else(|| {
-                        previous_assignment
-                            .as_ref()
-                            .and_then(|a| a.last_known_title.clone())
-                    }),
+                        .or_else(|| Some(page.target_id.clone())),
+                    last_known_url: runtime.last_known_url.clone(),
+                    last_known_title: runtime.last_known_title.clone(),
                     fallback_index: runtime.fallback_index.or(Some(self.active_page_index)),
-                    context_ordinal: runtime
-                        .context_ordinal
-                        .or_else(|| previous_assignment.as_ref().and_then(|a| a.context_ordinal)),
-                }
-            } else if let Some(runtime) = runtime_fallback {
-                state::PersistedTabAssignment {
-                    agent_session_id: session_id.clone(),
-                    tab_id: runtime.fallback_index.or(relay_tab_id),
-                    target_id: runtime
-                        .target_id
-                        .clone()
-                        .or_else(|| {
-                            previous_assignment
-                                .as_ref()
-                                .and_then(|a| a.target_id.clone())
-                        })
-                        .or_else(|| relay_target_id.clone()),
-                    window_id: previous_assignment.as_ref().and_then(|a| a.window_id),
-                    status: status.to_string(),
-                    lease_version: previous_assignment.as_ref().and_then(|a| a.lease_version),
-                    connection_id: previous_assignment
-                        .as_ref()
-                        .and_then(|a| a.connection_id.clone())
-                        .or_else(|| relay_connection_id.clone()),
-                    assigned_at: previous_assignment
-                        .as_ref()
-                        .map(|a| a.assigned_at.clone())
-                        .unwrap_or_else(|| now.clone()),
-                    updated_at: now.clone(),
-                    last_known_url: runtime.last_known_url.clone().or_else(|| {
-                        previous_assignment
-                            .as_ref()
-                            .and_then(|a| a.last_known_url.clone())
-                    }),
-                    last_known_title: runtime.last_known_title.clone().or_else(|| {
-                        previous_assignment
-                            .as_ref()
-                            .and_then(|a| a.last_known_title.clone())
-                    }),
-                    fallback_index: runtime
-                        .fallback_index
-                        .or_else(|| previous_assignment.as_ref().and_then(|a| a.fallback_index)),
-                    context_ordinal: runtime
-                        .context_ordinal
-                        .or_else(|| previous_assignment.as_ref().and_then(|a| a.context_ordinal)),
-                }
-            } else if let Some(previous) = previous_assignment.clone() {
-                state::PersistedTabAssignment {
-                    status: status.to_string(),
-                    updated_at: now.clone(),
-                    ..previous
-                }
+                    context_ordinal: runtime.context_ordinal,
+                })
             } else {
-                state::PersistedTabAssignment {
-                    agent_session_id: session_id.clone(),
-                    tab_id: relay_tab_id,
-                    target_id: relay_target_id.clone(),
-                    window_id: None,
-                    status: status.to_string(),
-                    lease_version: None,
-                    connection_id: relay_connection_id.clone(),
-                    assigned_at: now.clone(),
-                    updated_at: now.clone(),
-                    last_known_url: None,
-                    last_known_title: None,
-                    fallback_index: None,
-                    context_ordinal: None,
-                }
+                runtime_fallback.map(|runtime| TabAssignmentSeed {
+                    tab_id: runtime.fallback_index,
+                    target_id: runtime.target_id.clone(),
+                    last_known_url: runtime.last_known_url.clone(),
+                    last_known_title: runtime.last_known_title.clone(),
+                    fallback_index: runtime.fallback_index,
+                    context_ordinal: runtime.context_ordinal,
+                })
             };
+
+            let assignment = self.build_tab_assignment(
+                &session_id,
+                assignment_status,
+                &now,
+                previous_assignment.as_ref(),
+                seed,
+            );
 
             let mut assignments = existing.assignments.clone();
             assignments.insert(session_id.clone(), assignment.clone());
@@ -1903,15 +1915,11 @@ impl BrowserManager {
             if let Some(tab_id) = assignment.tab_id {
                 tabs.insert(
                     tab_id.to_string(),
-                    state::PersistedTabInfo {
+                    TabInfo {
                         tab_id,
                         target_id: assignment.target_id.clone(),
                         owner_session_id: Some(session_id.clone()),
-                        status: match status {
-                            "closed" => "closed".to_string(),
-                            "orphaned" => "orphaned".to_string(),
-                            _ => "open".to_string(),
-                        },
+                        status: assignment_status,
                         last_known_url: assignment.last_known_url.clone(),
                         last_known_title: assignment.last_known_title.clone(),
                         updated_at: now.clone(),
@@ -1919,9 +1927,9 @@ impl BrowserManager {
                 );
             }
 
-            let next_data = state::TabAssignmentsFile {
+            let next_data = TabAssignmentsFile {
                 version: 1,
-                revision: expected_revision + 1,
+                revision: expected_revision,
                 session_name: session_name.clone(),
                 updated_at: now,
                 profile: existing.profile.clone(),
@@ -1930,16 +1938,18 @@ impl BrowserManager {
                 tabs: if tabs.is_empty() { None } else { Some(tabs) },
             };
 
-            let latest_revision = state::read_tab_assignments(&session_name)?
-                .map(|data| data.revision)
-                .unwrap_or(0);
-            if latest_revision != expected_revision {
-                continue;
+            match tab_assignments::write_tab_assignments(
+                &session_id,
+                Some(&session_name),
+                &next_data,
+            ) {
+                Ok(written) => {
+                    self.tab_assignment_store = Some(written);
+                    return Ok(());
+                }
+                Err(err) if err.contains("revision mismatch") => continue,
+                Err(err) => return Err(err),
             }
-
-            state::write_tab_assignments(&session_name, &next_data)?;
-            self.tab_assignment_store = Some(next_data);
-            return Ok(());
         }
 
         Err(format!(
