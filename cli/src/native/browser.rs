@@ -239,6 +239,8 @@ pub struct RelayHandshakeMetadata {
 
 pub struct ExtensionRelayConnectOptions<'a> {
     pub relay_url: &'a str,
+    pub session_id: &'a str,
+    pub session_name: Option<&'a str>,
     pub profile_id: Option<&'a str>,
     pub profile_directory: Option<&'a str>,
     pub persist_tab_assignment: bool,
@@ -436,6 +438,10 @@ impl BrowserManager {
         let handshake = json!({
             "type": "connect",
             "connectionMode": "extension-relay",
+            "sessionId": options.session_id,
+            "sessionName": options.session_name,
+            "session_id": options.session_id,
+            "session_name": options.session_name,
             "profileId": options.profile_id,
             "profileDirectory": options.profile_directory,
             "persistTabAssignment": options.persist_tab_assignment,
@@ -448,9 +454,14 @@ impl BrowserManager {
             .map_err(|e| format!("Failed to send extension relay handshake: {}", e))?;
 
         let response_text = loop {
-            let next = relay_ws.next().await.ok_or_else(|| {
-                "Extension relay closed before returning a scoped CDP endpoint".to_string()
-            })?;
+            let next = tokio::time::timeout(Duration::from_secs(10), relay_ws.next())
+                .await
+                .map_err(|_| {
+                    "Timed out after 10s waiting for extension relay handshake response".to_string()
+                })?
+                .ok_or_else(|| {
+                    "Extension relay closed before returning a scoped CDP endpoint".to_string()
+                })?;
             match next {
                 Ok(Message::Text(text)) => break text.to_string(),
                 Ok(Message::Binary(data)) => {

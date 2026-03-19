@@ -971,6 +971,8 @@ async fn auto_launch(state: &mut DaemonState) -> Result<(), String> {
         let agent_id = env::var("AGENT_BROWSER_AGENT_ID").ok();
         let mgr = BrowserManager::connect_via_extension_relay(ExtensionRelayConnectOptions {
             relay_url: &relay_url,
+            session_id: &state.session_id,
+            session_name: state.session_name.as_deref(),
             profile_id: profile_id.as_deref(),
             profile_directory: profile_directory.as_deref(),
             persist_tab_assignment: env::var("AGENT_BROWSER_PERSIST_TAB_ASSIGNMENT")
@@ -1185,6 +1187,8 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         state.browser = Some(
             BrowserManager::connect_via_extension_relay(ExtensionRelayConnectOptions {
                 relay_url: &relay_url,
+                session_id: &state.session_id,
+                session_name: state.session_name.as_deref(),
                 profile_id: cmd
                     .get("profileId")
                     .and_then(|v| v.as_str())
