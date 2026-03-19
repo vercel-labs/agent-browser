@@ -92,6 +92,16 @@ pub struct TrackedRequest {
     pub timestamp: u64,
     #[serde(rename = "resourceType")]
     pub resource_type: String,
+    #[serde(rename = "requestId")]
+    pub request_id: String,
+    #[serde(rename = "postData", skip_serializing_if = "Option::is_none")]
+    pub post_data: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<i64>,
+    #[serde(rename = "responseHeaders", skip_serializing_if = "Option::is_none")]
+    pub response_headers: Option<Value>,
+    #[serde(rename = "mimeType", skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
 }
 
 pub struct FetchPausedRequest {
@@ -475,7 +485,7 @@ impl DaemonState {
                                         .unwrap_or("Other")
                                         .to_string();
                                     self.har_entries.push(HarEntry {
-                                        request_id,
+                                        request_id: request_id.clone(),
                                         wall_time,
                                         method: method.clone(),
                                         url: url.clone(),
@@ -513,11 +523,21 @@ impl DaemonState {
                                         headers,
                                         timestamp,
                                         resource_type,
+                                        request_id,
+                                        post_data: request
+                                            .get("postData")
+                                            .and_then(|v| v.as_str())
+                                            .map(String::from),
+                                        status: None,
+                                        response_headers: None,
+                                        mime_type: None,
                                     });
                                 }
                             }
                         }
-                        "Network.responseReceived" if self.har_recording => {
+                        "Network.responseReceived"
+                            if self.har_recording || self.request_tracking =>
+                        {
                             if let Some(response) = event.params.get("response") {
                                 let request_id = event
                                     .params
@@ -551,20 +571,39 @@ impl DaemonState {
                                     .and_then(|v| v.as_i64())
                                     .unwrap_or(-1);
                                 let cdp_timing = response.get("timing").cloned();
-                                if let Some(entry) = self
-                                    .har_entries
-                                    .iter_mut()
-                                    .rev()
-                                    .find(|e| e.request_id == request_id)
-                                {
-                                    entry.status = status;
-                                    entry.status_text = status_text;
-                                    entry.mime_type = mime_type;
-                                    entry.http_version = http_version;
-                                    entry.response_headers = response_headers;
-                                    entry.redirect_url = redirect_url;
-                                    entry.response_body_size = encoded_data_length;
-                                    entry.cdp_timing = cdp_timing;
+                                if self.har_recording {
+                                    if let Some(entry) = self
+                                        .har_entries
+                                        .iter_mut()
+                                        .rev()
+                                        .find(|e| e.request_id == request_id)
+                                    {
+                                        entry.status = status;
+                                        entry.status_text = status_text;
+                                        entry.mime_type = mime_type;
+                                        entry.http_version = http_version;
+                                        entry.response_headers = response_headers;
+                                        entry.redirect_url = redirect_url;
+                                        entry.response_body_size = encoded_data_length;
+                                        entry.cdp_timing = cdp_timing;
+                                    }
+                                }
+                                if self.request_tracking {
+                                    let resp_headers = response.get("headers").cloned();
+                                    let resp_mime = response
+                                        .get("mimeType")
+                                        .and_then(|v| v.as_str())
+                                        .map(String::from);
+                                    if let Some(entry) = self
+                                        .tracked_requests
+                                        .iter_mut()
+                                        .rev()
+                                        .find(|e| e.request_id == request_id)
+                                    {
+                                        entry.status = status;
+                                        entry.mime_type = resp_mime;
+                                        entry.response_headers = resp_headers;
+                                    }
                                 }
                             }
                         }
@@ -938,6 +977,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         "route" => handle_route(cmd, state).await,
         "unroute" => handle_unroute(cmd, state).await,
         "requests" => handle_requests(cmd, state).await,
+        "request_detail" => handle_request_detail(cmd, state).await,
         "credentials" => handle_http_credentials(cmd, state).await,
         "emulatemedia" => handle_set_media(cmd, state).await,
         "auth_save" => handle_auth_save(cmd).await,
@@ -5375,6 +5415,25 @@ async fn handle_unroute(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
     Ok(json!({ "unrouted": label }))
 }
 
+pub fn matches_status_filter(status: Option<i64>, filter: &str) -> bool {
+    let Some(code) = status else { return false };
+    let f = filter.to_lowercase();
+    if let Ok(exact) = f.parse::<i64>() {
+        return code == exact;
+    }
+    if f.len() == 3 && f.ends_with("xx") {
+        if let Ok(prefix) = f[..1].parse::<i64>() {
+            return code / 100 == prefix;
+        }
+    }
+    if let Some((lo, hi)) = f.split_once('-') {
+        if let (Ok(lo), Ok(hi)) = (lo.parse::<i64>(), hi.parse::<i64>()) {
+            return code >= lo && code <= hi;
+        }
+    }
+    false
+}
+
 async fn handle_requests(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     if cmd.get("clear").and_then(|v| v.as_bool()).unwrap_or(false) {
         state.tracked_requests.clear();
@@ -5394,17 +5453,86 @@ async fn handle_requests(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     }
 
     let filter = cmd.get("filter").and_then(|v| v.as_str());
-    let requests: Vec<&TrackedRequest> = if let Some(f) = filter {
-        state
-            .tracked_requests
-            .iter()
-            .filter(|r| r.url.contains(f))
-            .collect()
-    } else {
-        state.tracked_requests.iter().collect()
-    };
+    let type_filter = cmd.get("type").and_then(|v| v.as_str());
+    let method_filter = cmd.get("method").and_then(|v| v.as_str());
+    let status_filter = cmd.get("status").and_then(|v| v.as_str());
+
+    let type_list: Vec<String> = type_filter
+        .map(|t| t.split(',').map(|s| s.trim().to_lowercase()).collect())
+        .unwrap_or_default();
+
+    let requests: Vec<&TrackedRequest> = state
+        .tracked_requests
+        .iter()
+        .filter(|r| {
+            if let Some(f) = filter {
+                if !r.url.contains(f) {
+                    return false;
+                }
+            }
+            if !type_list.is_empty() && !type_list.contains(&r.resource_type.to_lowercase()) {
+                return false;
+            }
+            if let Some(m) = method_filter {
+                if !r.method.eq_ignore_ascii_case(m) {
+                    return false;
+                }
+            }
+            if let Some(s) = status_filter {
+                if !matches_status_filter(r.status, s) {
+                    return false;
+                }
+            }
+            true
+        })
+        .collect();
 
     Ok(json!({ "requests": requests }))
+}
+
+async fn handle_request_detail(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let request_id = cmd
+        .get("requestId")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'requestId' parameter")?;
+
+    let entry = state
+        .tracked_requests
+        .iter()
+        .find(|r| r.request_id == request_id)
+        .ok_or("Request not found")?;
+
+    let mut result = serde_json::to_value(entry).unwrap_or(json!({}));
+
+    if let Some(ref mgr) = state.browser {
+        if let Ok(session_id) = mgr.active_session_id() {
+            if let Ok(body_result) = mgr
+                .client
+                .send_command(
+                    "Network.getResponseBody",
+                    Some(json!({ "requestId": request_id })),
+                    Some(session_id),
+                )
+                .await
+            {
+                let base64_encoded = body_result
+                    .get("base64Encoded")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let body = body_result
+                    .get("body")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if base64_encoded {
+                    result["responseBody"] = json!(format!("[base64, {} chars]", body.len()));
+                } else {
+                    result["responseBody"] = json!(body);
+                }
+            }
+        }
+    }
+
+    Ok(result)
 }
 
 async fn handle_http_credentials(cmd: &Value, state: &DaemonState) -> Result<Value, String> {

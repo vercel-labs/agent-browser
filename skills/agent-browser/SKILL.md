@@ -149,6 +149,10 @@ agent-browser --download-path ./downloads open <url>  # Set default download dir
 
 # Network
 agent-browser network requests                 # Inspect tracked requests
+agent-browser network requests --type xhr,fetch  # Filter by resource type
+agent-browser network requests --method POST   # Filter by HTTP method
+agent-browser network requests --status 2xx    # Filter by status (200, 2xx, 400-499)
+agent-browser network request <requestId>      # View full request/response detail
 agent-browser network route "**/api/*" --abort  # Block matching requests
 agent-browser network har start                # Start HAR recording
 agent-browser network har stop ./capture.har   # Stop and save HAR file
