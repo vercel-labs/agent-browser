@@ -533,6 +533,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                         obj.insert("compact".to_string(), json!(true));
                     }
                     "-C" | "--cursor" => {
+                        // deprecated, cursor-interactive elements are referred by default now
                         obj.insert("cursor".to_string(), json!(true));
                     }
                     "-d" | "--depth" => {

@@ -2274,12 +2274,12 @@ async fn e2e_material_checkbox_check_uncheck() {
 
 // ---------------------------------------------------------------------------
 // Issue #841 – snapshot -C and screenshot --annotate must not hang over WSS
+// (PS: -C is deprecated, cursor-interactive elements are referred by default now)
 // ---------------------------------------------------------------------------
 
-/// Verifies that `snapshot -C` (cursor-interactive mode) detects elements with
-/// cursor:pointer / onclick / tabindex, produces the correct v0.19.0-compatible
-/// output format, deduplicates against the ARIA tree, and completes in bounded
-/// time (no sequential CDP round-trip explosion).
+/// Verifies that `snapshot` detects elements with cursor:pointer / onclick / tabindex,
+/// produces the correct v0.19.0-compatible output format, deduplicates against the ARIA
+/// tree, and completes in bounded time (no sequential CDP round-trip explosion).
 #[tokio::test]
 #[ignore]
 async fn e2e_snapshot_cursor_interactive() {
@@ -2293,7 +2293,7 @@ async fn e2e_snapshot_cursor_interactive() {
     assert_success(&resp);
 
     // Page with:
-    //  - <button> and <a> (standard interactive – ARIA tree, NOT in cursor section)
+    //  - <button> and <a> (standard interactive – ARIA tree)
     //  - <div cursor:pointer onclick> (clickable – cursor section)
     //  - <div tabindex=0> (focusable – cursor section)
     //  - <span cursor:pointer> (clickable – cursor section)
@@ -2316,10 +2316,10 @@ async fn e2e_snapshot_cursor_interactive() {
     .await;
     assert_success(&resp);
 
-    // snapshot -i -C: interactive tree + cursor section
+    // snapshot -i: interactive tree
     let start = std::time::Instant::now();
     let resp = execute_command(
-        &json!({ "id": "3", "action": "snapshot", "interactive": true, "cursor": true }),
+        &json!({ "id": "3", "action": "snapshot", "interactive": true }),
         &mut state,
     )
     .await;
@@ -2366,7 +2366,7 @@ async fn e2e_snapshot_cursor_interactive() {
     // Must complete quickly (< 5s), not hit the 30s CDP timeout
     assert!(
         elapsed.as_secs() < 5,
-        "snapshot -C took {:?}, expected < 5s (Issue #841 regression)",
+        "snapshot took {:?}, expected < 5s (Issue #841 regression)",
         elapsed,
     );
 
@@ -2433,7 +2433,7 @@ async fn e2e_screenshot_annotate_many_elements() {
     assert_success(&resp);
 }
 
-/// Verifies `snapshot -C` with many cursor-interactive elements completes in
+/// Verifies `snapshot` with many cursor-interactive elements completes in
 /// bounded time. Direct regression test for Issue #841's root cause: N×2
 /// sequential CDP round-trips per cursor-interactive element.
 #[tokio::test]
@@ -2468,7 +2468,7 @@ async fn e2e_snapshot_cursor_many_elements() {
 
     let start = std::time::Instant::now();
     let resp = execute_command(
-        &json!({ "id": "3", "action": "snapshot", "interactive": true, "cursor": true }),
+        &json!({ "id": "3", "action": "snapshot", "interactive": true }),
         &mut state,
     )
     .await;
@@ -2492,7 +2492,7 @@ async fn e2e_snapshot_cursor_many_elements() {
     // Must complete quickly
     assert!(
         elapsed.as_secs() < 10,
-        "snapshot -C with 100 cursor elements took {:?}, expected < 10s (Issue #841)",
+        "snapshot with 100 cursor elements took {:?}, expected < 10s (Issue #841)",
         elapsed,
     );
 

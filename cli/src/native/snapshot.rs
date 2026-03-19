@@ -71,7 +71,6 @@ pub struct SnapshotOptions {
     pub interactive: bool,
     pub compact: bool,
     pub depth: Option<usize>,
-    pub cursor: bool,
 }
 
 struct TreeNode {
@@ -90,8 +89,7 @@ struct TreeNode {
     has_ref: bool,
     ref_id: Option<String>,
     depth: usize,
-    /// Cursor-interactive information (only set when options.cursor is true)
-    cursor_info: Option<CursorElementInfo>,
+    cursor_info: Option<CursorElementInfo>, // cursor-interactive information
 }
 
 /// Information about a cursor-interactive element (elements with cursor:pointer, onclick, tabindex, etc.)
@@ -251,15 +249,11 @@ pub async fn take_snapshot(
 
     let mut nodes_with_refs: Vec<(usize, usize)> = Vec::new();
 
-    // When cursor mode is enabled, pre-collect cursor-interactive elements
-    // so we can mark them with refs during tree building
-    let cursor_elements: HashMap<i64, CursorElementInfo> = if options.cursor {
+    // Pre-collect cursor-interactive elements so we can mark them with refs during tree building
+    let cursor_elements: HashMap<i64, CursorElementInfo> =
         find_cursor_interactive_elements(client, session_id)
             .await
-            .unwrap_or_default()
-    } else {
-        HashMap::new()
-    };
+            .unwrap_or_default();
 
     for (idx, node) in tree_nodes.iter().enumerate() {
         let role = node.role.as_str();
@@ -271,12 +265,11 @@ pub async fn take_snapshot(
             false
         };
 
-        if options.cursor
-            && node
-                .backend_node_id
-                .is_some_and(|bid| cursor_elements.contains_key(&bid))
+        if node
+            .backend_node_id
+            .is_some_and(|bid| cursor_elements.contains_key(&bid))
         {
-            // In cursor mode, also ref elements that are cursor-interactive
+            // ref elements that are cursor-interactive
             should_ref = true;
         }
 
@@ -314,13 +307,11 @@ pub async fn take_snapshot(
         tree_nodes[*idx].ref_id = Some(ref_id);
     }
 
-    // Populate cursor_info for ref-bearing nodes when cursor mode is enabled
-    if options.cursor {
-        for (idx, _) in &nodes_with_refs {
-            if let Some(bid) = tree_nodes[*idx].backend_node_id {
-                if let Some(cursor_info) = cursor_elements.get(&bid) {
-                    tree_nodes[*idx].cursor_info = Some((*cursor_info).clone());
-                }
+    // Populate cursor_info for ref-bearing nodes
+    for (idx, _) in &nodes_with_refs {
+        if let Some(bid) = tree_nodes[*idx].backend_node_id {
+            if let Some(cursor_info) = cursor_elements.get(&bid) {
+                tree_nodes[*idx].cursor_info = Some((*cursor_info).clone());
             }
         }
     }
@@ -847,11 +838,15 @@ fn render_tree(
     let prefix = "  ".repeat(indent);
     let mut line = format!("{}- {}", prefix, role);
 
-    // Use ARIA name if available, otherwise fall back to cursor-interactive textContent
+    // Use ARIA name if available, only fall back to cursor-interactive textContent in interactive mode since their visible text in child nodes is filtered out
     let display_name = if !node.name.is_empty() {
         &node.name
-    } else if let Some(ref ci) = node.cursor_info {
-        &ci.text
+    } else if options.interactive {
+        if let Some(ref ci) = node.cursor_info {
+            &ci.text
+        } else {
+            &node.name
+        }
     } else {
         &node.name
     };
