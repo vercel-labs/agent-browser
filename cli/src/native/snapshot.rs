@@ -843,16 +843,17 @@ fn render_tree(
     let mut line = format!("{}- {}", prefix, role);
 
     // Use ARIA name if available, otherwise fall back to cursor-interactive textContent
-    let display_name = if !node.name.is_empty() {
-        node.name.clone()
+    let unescaped_display_name = if !node.name.is_empty() {
+        &node.name
     } else if let Some(ref ci) = node.cursor_info {
-        ci.text
-            .replace('\\', "\\\\")
-            .replace('"', "\\\"")
-            .replace(['\n', '\r'], " ")
+        &ci.text
     } else {
-        node.name.clone()
+        &node.name
     };
+    let display_name = unescaped_display_name
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace(['\n', '\r'], " ");
     if !display_name.is_empty() {
         line.push_str(&format!(" \"{}\"", display_name));
     }
