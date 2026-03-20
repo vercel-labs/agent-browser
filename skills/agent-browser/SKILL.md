@@ -90,6 +90,8 @@ echo "$PASSWORD" | agent-browser auth save myapp --url https://app.example.com/l
 agent-browser auth login myapp
 ```
 
+`auth login` navigates with `load` and then waits for login form selectors to appear before filling/clicking, which is more reliable on delayed SPA login screens.
+
 **Option 5: State file (manual save/load)**
 
 ```bash
@@ -229,6 +231,8 @@ agent-browser auth list
 agent-browser auth show github
 agent-browser auth delete github
 ```
+
+`auth login` waits for username/password/submit selectors before interacting, with a timeout tied to the default action timeout.
 
 ### Authentication with State Persistence
 

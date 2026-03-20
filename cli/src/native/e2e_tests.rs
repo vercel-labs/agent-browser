@@ -2614,6 +2614,149 @@ async fn start_echo_server() -> (String, tokio::task::JoinHandle<()>) {
     (base_url, handle)
 }
 
+/// Starts a tiny HTTP server that serves a delayed-render login form.
+///
+/// The page continuously fetches `/ping` so `networkidle` is hard to reach,
+/// while the login form itself appears after `render_delay_ms`.
+async fn start_delayed_login_server(
+    render_delay_ms: u64,
+    ping_interval_ms: u64,
+) -> (String, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let base_url = format!("http://127.0.0.1:{}", port);
+
+    let handle = tokio::spawn(async move {
+        // Serve enough requests for navigation + many background /ping calls.
+        for _ in 0..1000 {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
+            };
+
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 8192];
+                let n = stream.read(&mut buf).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..n]);
+                let request_line = request.lines().next().unwrap_or_default();
+                let path = request_line.split_whitespace().nth(1).unwrap_or("/");
+
+                let (status, content_type, body) = if path.starts_with("/ping") {
+                    ("204 No Content", "text/plain", String::new())
+                } else {
+                    let html = format!(
+                        r#"<!doctype html>
+<html>
+  <head><meta charset="utf-8"><title>Delayed Login</title></head>
+  <body>
+    <input id="search" type="text" name="search" />
+    <div id="root">loading...</div>
+    <script>
+      setInterval(() => {{
+        fetch('/ping?ts=' + Date.now()).catch(() => {{}});
+      }}, {ping_interval_ms});
+
+      setTimeout(() => {{
+        const root = document.getElementById('root');
+        root.innerHTML = `
+          <form id="login-form" onsubmit="event.preventDefault(); window.__submitted = true;">
+            <input type="email" name="email" />
+            <input type="password" name="password" />
+            <button type="submit">Sign in</button>
+          </form>
+        `;
+      }}, {render_delay_ms});
+    </script>
+  </body>
+</html>"#,
+                    );
+                    ("200 OK", "text/html", html)
+                };
+
+                let response = format!(
+                    "HTTP/1.1 {}\r\nContent-Type: {}\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    status,
+                    content_type,
+                    body.len(),
+                    body,
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.flush().await;
+            });
+        }
+    });
+
+    (base_url, handle)
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_auth_login_waits_for_delayed_spa_form_render() {
+    let (base_url, _server) = start_delayed_login_server(1200, 100).await;
+    let mut state = DaemonState::new();
+
+    let profile_name = format!(
+        "e2e-auth-login-spa-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_else(|_| std::time::Duration::from_secs(0))
+            .as_millis()
+    );
+
+    let launch = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&launch);
+
+    let save = execute_command(
+        &json!({
+            "id": "2",
+            "action": "auth_save",
+            "name": profile_name.clone(),
+            "url": format!("{}/login", base_url),
+            "username": "user@example.com",
+            "password": "super-secret",
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&save);
+
+    let login = execute_command(
+        &json!({ "id": "3", "action": "auth_login", "name": profile_name.clone() }),
+        &mut state,
+    )
+    .await;
+    assert_success(&login);
+    assert_eq!(get_data(&login)["loggedIn"], true);
+
+    let verify = execute_command(
+        &json!({
+            "id": "4",
+            "action": "evaluate",
+            "script": "({ user: document.querySelector('input[type=email]')?.value ?? '', pass: document.querySelector('input[type=password]')?.value ?? '', search: document.querySelector('#search')?.value ?? '', submitted: !!window.__submitted })",
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&verify);
+    let result = &get_data(&verify)["result"];
+    assert_eq!(result["user"], "user@example.com");
+    assert_eq!(result["pass"], "super-secret");
+    assert_eq!(result["search"], "");
+    assert_eq!(result["submitted"], true);
+
+    let _ = execute_command(
+        &json!({ "id": "5", "action": "auth_delete", "name": profile_name }),
+        &mut state,
+    )
+    .await;
+
+    let close = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&close);
+}
+
 // ---------------------------------------------------------------------------
 // Origin-scoped --headers tests
 // ---------------------------------------------------------------------------

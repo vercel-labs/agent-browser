@@ -129,7 +129,7 @@ pub struct PageInfo {
     pub target_type: String, // "page" or "webview"
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WaitUntil {
     Load,
     DomContentLoaded,
@@ -590,6 +590,10 @@ impl BrowserManager {
 
     pub fn has_pages(&self) -> bool {
         !self.pages.is_empty()
+    }
+
+    pub fn default_timeout_ms(&self) -> u64 {
+        self.default_timeout_ms
     }
 
     /// Checks if the CDP connection is alive by sending a simple command.

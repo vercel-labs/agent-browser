@@ -47,6 +47,8 @@ agent-browser auth show github
 agent-browser auth delete github
 ```
 
+`auth login` navigates with the `load` lifecycle event and then waits for form selectors to appear before filling/clicking. This makes delayed SPA login pages more reliable while avoiding `networkidle` hangs on pages with long-lived background requests.
+
 Custom selectors can be specified if auto-detection fails:
 
 ```bash

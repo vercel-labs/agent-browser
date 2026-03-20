@@ -259,6 +259,8 @@ Save options:
 - `--password-selector <sel>` -- custom CSS selector for password field
 - `--submit-selector <sel>` -- custom CSS selector for submit button
 
+`auth login` navigates with `load` and then waits for the username/password/submit selectors to appear before interacting. This improves reliability on SPA login pages where fields render after initial page load.
+
 ```bash
 echo "pass" | agent-browser auth save github --url https://github.com/login --username user --password-stdin
 agent-browser auth login github
