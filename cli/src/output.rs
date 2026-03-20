@@ -374,7 +374,15 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
                         .get("resourceType")
                         .and_then(|v| v.as_str())
                         .unwrap_or("");
-                    println!("{} {} ({})", method, url, resource_type);
+                    let request_id = req.get("requestId").and_then(|v| v.as_str()).unwrap_or("");
+                    let status = req.get("status").and_then(|v| v.as_i64());
+                    match status {
+                        Some(s) => println!(
+                            "[{}] {} {} ({}) {}",
+                            request_id, method, url, resource_type, s
+                        ),
+                        None => println!("[{}] {} {} ({})", request_id, method, url, resource_type),
+                    }
                 }
             }
             return;
