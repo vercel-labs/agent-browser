@@ -129,7 +129,7 @@ pub struct PageInfo {
     pub target_type: String, // "page" or "webview"
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WaitUntil {
     Load,
     DomContentLoaded,

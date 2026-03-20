@@ -37,6 +37,11 @@ use super::webdriver::backend::{BrowserBackend, WebDriverBackend, WEBDRIVER_UNSU
 use super::webdriver::ios;
 use super::webdriver::safari;
 
+/// Wait strategy used by `auth_login` when navigating to the login page.
+/// NetworkIdle ensures all async JS (bundles, SPAs) has finished loading
+/// before we attempt to locate and fill form fields.
+pub const AUTH_LOGIN_WAIT_UNTIL: WaitUntil = WaitUntil::NetworkIdle;
+
 pub struct PendingConfirmation {
     pub action: String,
     pub cmd: Value,
@@ -5480,7 +5485,7 @@ async fn handle_auth_login(cmd: &Value, state: &mut DaemonState) -> Result<Value
     let password = cred.password;
 
     let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
-    mgr.navigate(&url, WaitUntil::Load).await?;
+    mgr.navigate(&url, AUTH_LOGIN_WAIT_UNTIL).await?;
 
     let session_id = mgr.active_session_id()?.to_string();
 
@@ -6654,6 +6659,17 @@ mod tests {
             patterns.len(),
             1,
             "Should not add a second wildcard when routes already contain one"
+        );
+    }
+
+    #[test]
+    fn test_auth_login_waits_for_network_idle() {
+        use super::super::browser::WaitUntil;
+        assert_eq!(
+            super::AUTH_LOGIN_WAIT_UNTIL,
+            WaitUntil::NetworkIdle,
+            "auth_login must wait for NetworkIdle so async login pages \
+             finish loading before form fields are filled"
         );
     }
 }
