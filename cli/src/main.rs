@@ -27,6 +27,74 @@ use output::{
     print_command_help, print_help, print_response_with_opts, print_version, OutputOptions,
 };
 
+/// Simple glob matching: `*` matches any sequence of non-`/` chars,
+/// `**` matches any sequence including `/`.  Everything else is literal.
+fn glob_match(pattern: &str, text: &str) -> bool {
+    // Tokenize pattern into segments split by ** and *
+    glob_match_impl(pattern.as_bytes(), text.as_bytes())
+}
+
+fn glob_match_impl(pattern: &[u8], text: &[u8]) -> bool {
+    let mut pi = 0;
+    let mut ti = 0;
+    let mut star_pi = usize::MAX; // position after last single *
+    let mut star_ti = 0;
+    let mut dstar_pi = usize::MAX; // position after last **
+    let mut dstar_ti = 0;
+
+    while ti < text.len() {
+        if pi < pattern.len() && pattern[pi] == b'*' {
+            if pi + 1 < pattern.len() && pattern[pi + 1] == b'*' {
+                // ** - matches anything including /
+                dstar_pi = pi + 2;
+                dstar_ti = ti;
+                pi += 2;
+                // Reset single star
+                star_pi = usize::MAX;
+                continue;
+            }
+            // Single * - matches anything except /
+            star_pi = pi + 1;
+            star_ti = ti;
+            pi += 1;
+            continue;
+        }
+
+        if pi < pattern.len() && pattern[pi] == text[ti] {
+            pi += 1;
+            ti += 1;
+            continue;
+        }
+
+        // Mismatch - try backtracking to single * first (can't cross /)
+        if star_pi != usize::MAX && text[star_ti] != b'/' {
+            star_ti += 1;
+            ti = star_ti;
+            pi = star_pi;
+            continue;
+        }
+
+        // Backtrack to ** (can cross /)
+        if dstar_pi != usize::MAX {
+            dstar_ti += 1;
+            ti = dstar_ti;
+            pi = dstar_pi;
+            // Reset single star since we're backtracking past it
+            star_pi = usize::MAX;
+            continue;
+        }
+
+        return false;
+    }
+
+    // Consume trailing *s and **s
+    while pi < pattern.len() && pattern[pi] == b'*' {
+        pi += 1;
+    }
+
+    pi == pattern.len()
+}
+
 fn serialize_json_value(value: &serde_json::Value) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| {
         r#"{"success":false,"error":"Failed to serialize JSON response"}"#.to_string()
@@ -787,6 +855,115 @@ fn main() {
                     }
                 }
             }
+            // Handle assert commands
+            if cmd.get("assert").and_then(|v| v.as_bool()).unwrap_or(false) {
+                let assert_type = cmd.get("assert_type").and_then(|v| v.as_str()).unwrap_or("");
+                let expected = cmd.get("assert_expected");
+
+                if !success {
+                    let error_msg = resp.error.as_deref().unwrap_or("command failed");
+                    if flags.json {
+                        print_json_value(json!({
+                            "success": false,
+                            "assert": assert_type,
+                            "pass": false,
+                            "error": error_msg,
+                        }));
+                    } else {
+                        println!("FAIL: assert {} ({})", assert_type, error_msg);
+                    }
+                    exit(1);
+                }
+
+                let data = resp.data.as_ref();
+                let (pass, description) = match assert_type {
+                    "visible" => {
+                        let visible = data.and_then(|d| d.get("visible")).and_then(|v| v.as_bool()).unwrap_or(false);
+                        let sel = cmd.get("selector").and_then(|v| v.as_str()).unwrap_or("?");
+                        if visible {
+                            (true, format!("assert visible {} - element is visible", sel))
+                        } else {
+                            (false, format!("assert visible {} (expected: visible, got: hidden)", sel))
+                        }
+                    }
+                    "hidden" => {
+                        let visible = data.and_then(|d| d.get("visible")).and_then(|v| v.as_bool()).unwrap_or(false);
+                        let sel = cmd.get("selector").and_then(|v| v.as_str()).unwrap_or("?");
+                        if !visible {
+                            (true, format!("assert hidden {} - element is hidden", sel))
+                        } else {
+                            (false, format!("assert hidden {} (expected: hidden, got: visible)", sel))
+                        }
+                    }
+                    "enabled" => {
+                        let enabled = data.and_then(|d| d.get("enabled")).and_then(|v| v.as_bool()).unwrap_or(false);
+                        let sel = cmd.get("selector").and_then(|v| v.as_str()).unwrap_or("?");
+                        if enabled {
+                            (true, format!("assert enabled {} - element is enabled", sel))
+                        } else {
+                            (false, format!("assert enabled {} (expected: enabled, got: disabled)", sel))
+                        }
+                    }
+                    "checked" => {
+                        let checked = data.and_then(|d| d.get("checked")).and_then(|v| v.as_bool()).unwrap_or(false);
+                        let sel = cmd.get("selector").and_then(|v| v.as_str()).unwrap_or("?");
+                        if checked {
+                            (true, format!("assert checked {} - element is checked", sel))
+                        } else {
+                            (false, format!("assert checked {} (expected: checked, got: unchecked)", sel))
+                        }
+                    }
+                    "text" => {
+                        let actual = data.and_then(|d| d.get("text")).and_then(|v| v.as_str()).unwrap_or("");
+                        let expected_str = expected.and_then(|v| v.as_str()).unwrap_or("");
+                        let sel = cmd.get("selector").and_then(|v| v.as_str()).unwrap_or("?");
+                        if actual.contains(expected_str) {
+                            (true, format!("assert text {} contains \"{}\"", sel, expected_str))
+                        } else {
+                            (false, format!("assert text {} (expected to contain: \"{}\", got: \"{}\")", sel, expected_str, actual))
+                        }
+                    }
+                    "url" => {
+                        let actual = data.and_then(|d| d.get("url")).and_then(|v| v.as_str()).unwrap_or("");
+                        let pattern = expected.and_then(|v| v.as_str()).unwrap_or("");
+                        let matched = glob_match(pattern, actual);
+                        if matched {
+                            (true, format!("assert url matches \"{}\"", pattern))
+                        } else {
+                            (false, format!("assert url (expected: \"{}\", got: \"{}\")", pattern, actual))
+                        }
+                    }
+                    "title" => {
+                        let actual = data.and_then(|d| d.get("title")).and_then(|v| v.as_str()).unwrap_or("");
+                        let expected_str = expected.and_then(|v| v.as_str()).unwrap_or("");
+                        if actual == expected_str {
+                            (true, format!("assert title equals \"{}\"", expected_str))
+                        } else {
+                            (false, format!("assert title (expected: \"{}\", got: \"{}\")", expected_str, actual))
+                        }
+                    }
+                    _ => (false, format!("unknown assert type: {}", assert_type)),
+                };
+
+                if flags.json {
+                    print_json_value(json!({
+                        "success": pass,
+                        "assert": assert_type,
+                        "pass": pass,
+                        "description": description,
+                    }));
+                } else if pass {
+                    println!("{} PASS: {}", color::success_indicator(), description);
+                } else {
+                    println!("{} FAIL: {}", color::error_indicator(), description);
+                }
+
+                if !pass {
+                    exit(1);
+                }
+                return;
+            }
+
             // Extract action for context-specific output handling
             let action = cmd.get("action").and_then(|v| v.as_str());
             print_response_with_opts(&resp, action, &output_opts);
@@ -861,6 +1038,38 @@ mod tests {
         assert_eq!(result["server"], "http://proxy.com:8080");
         assert_eq!(result["username"], "user");
         assert_eq!(result["password"], "p@ss:w0rd");
+    }
+
+    #[test]
+    fn test_glob_match_exact() {
+        assert!(glob_match("hello", "hello"));
+        assert!(!glob_match("hello", "world"));
+    }
+
+    #[test]
+    fn test_glob_match_single_star() {
+        assert!(glob_match("*.com", "example.com"));
+        assert!(glob_match("https://*.com", "https://example.com"));
+        assert!(!glob_match("*.com", "example.com/path"));
+    }
+
+    #[test]
+    fn test_glob_match_double_star() {
+        assert!(glob_match("**/dashboard", "https://example.com/dashboard"));
+        assert!(glob_match("**/dashboard", "https://example.com/app/dashboard"));
+        assert!(glob_match("https://example.com/**", "https://example.com/a/b/c"));
+    }
+
+    #[test]
+    fn test_glob_match_mixed() {
+        assert!(glob_match(
+            "https://*.example.com/**/settings",
+            "https://app.example.com/user/settings"
+        ));
+        assert!(!glob_match(
+            "https://*.example.com/**/settings",
+            "https://app.example.com/user/profile"
+        ));
     }
 
     #[test]

@@ -2418,6 +2418,45 @@ Examples:
 "##
         }
 
+        // === Assert ===
+        "assert" => {
+            r##"
+agent-browser assert - Test assertions with exit codes
+
+Usage: agent-browser assert <subcommand> [args] [--timeout <ms>]
+
+Verifies expected state and exits with code 1 on failure.
+Prints PASS/FAIL with details. Useful in batch mode and CI pipelines.
+
+Subcommands:
+  visible <selector>          Assert element is visible
+  hidden <selector>           Assert element is NOT visible
+  text <selector> <expected>  Assert element text contains expected string
+  url <pattern>               Assert current URL matches pattern (glob: * and **)
+  title <expected>            Assert page title equals expected string
+  enabled <selector>          Assert element is enabled (not disabled)
+  checked <selector>          Assert checkbox/radio is checked
+
+Options:
+  --timeout <ms>              Poll until condition is true or timeout expires
+
+Global Options:
+  --json                      Output as JSON
+  --session <name>            Use specific session
+
+Examples:
+  agent-browser assert visible @e3
+  agent-browser assert hidden "#loading-spinner"
+  agent-browser assert text @e5 "Welcome back"
+  agent-browser assert url "**/dashboard"
+  agent-browser assert url "https://example.com/*"
+  agent-browser assert title "My App - Dashboard"
+  agent-browser assert enabled "#submit-btn"
+  agent-browser assert checked "#agree-checkbox"
+  agent-browser assert visible @e3 --timeout 5000
+"##
+        }
+
         _ => return false,
     };
     println!("{}", help.trim());
@@ -2468,6 +2507,10 @@ Get Info:  agent-browser get <what> [selector]
 
 Check State:  agent-browser is <what> <selector>
   visible, enabled, checked
+
+Assert:  agent-browser assert <what> [args] [--timeout <ms>]
+  visible, hidden, text, url, title, enabled, checked
+  Exits with code 1 on failure. Use in batch mode and CI.
 
 Find Elements:  agent-browser find <locator> <value> <action> [text]
   role, text, label, placeholder, alt, title, testid, first, last, nth

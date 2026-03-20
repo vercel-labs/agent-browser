@@ -1317,6 +1317,9 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
 
         "diff" => parse_diff(&rest, &id, flags),
 
+        // === Assert (test assertions) ===
+        "assert" => parse_assert(&rest, &id),
+
         _ => Err(ParseError::UnknownCommand {
             command: cmd.to_string(),
         }),
@@ -1709,6 +1712,154 @@ fn parse_is(rest: &[&str], id: &str) -> Result<Value, ParseError> {
             usage: "is <visible|enabled|checked> <selector>",
         }),
     }
+}
+
+fn parse_assert(rest: &[&str], id: &str) -> Result<Value, ParseError> {
+    const VALID: &[&str] = &["visible", "hidden", "text", "url", "title", "enabled", "checked"];
+
+    // Extract optional --timeout <ms> from anywhere in the args
+    let timeout_idx = rest.iter().position(|&s| s == "--timeout");
+    let timeout: Option<u64> = timeout_idx.and_then(|i| rest.get(i + 1).and_then(|s| s.parse().ok()));
+
+    // Filter out --timeout and its value for subcommand parsing
+    let filtered: Vec<&str> = rest
+        .iter()
+        .copied()
+        .enumerate()
+        .filter(|(i, _)| {
+            if let Some(t_idx) = timeout_idx {
+                *i != t_idx && *i != t_idx + 1
+            } else {
+                true
+            }
+        })
+        .map(|(_, s)| s)
+        .collect();
+
+    let sub = filtered.first().copied();
+
+    let mut cmd = match sub {
+        Some("visible") => {
+            let sel = filtered.get(1).ok_or_else(|| ParseError::MissingArguments {
+                context: "assert visible".to_string(),
+                usage: "assert visible <selector> [--timeout <ms>]",
+            })?;
+            json!({
+                "id": id,
+                "action": "isvisible",
+                "selector": sel,
+                "assert": true,
+                "assert_type": "visible",
+                "assert_expected": true
+            })
+        }
+        Some("hidden") => {
+            let sel = filtered.get(1).ok_or_else(|| ParseError::MissingArguments {
+                context: "assert hidden".to_string(),
+                usage: "assert hidden <selector> [--timeout <ms>]",
+            })?;
+            json!({
+                "id": id,
+                "action": "isvisible",
+                "selector": sel,
+                "assert": true,
+                "assert_type": "hidden",
+                "assert_expected": false
+            })
+        }
+        Some("enabled") => {
+            let sel = filtered.get(1).ok_or_else(|| ParseError::MissingArguments {
+                context: "assert enabled".to_string(),
+                usage: "assert enabled <selector> [--timeout <ms>]",
+            })?;
+            json!({
+                "id": id,
+                "action": "isenabled",
+                "selector": sel,
+                "assert": true,
+                "assert_type": "enabled",
+                "assert_expected": true
+            })
+        }
+        Some("checked") => {
+            let sel = filtered.get(1).ok_or_else(|| ParseError::MissingArguments {
+                context: "assert checked".to_string(),
+                usage: "assert checked <selector> [--timeout <ms>]",
+            })?;
+            json!({
+                "id": id,
+                "action": "ischecked",
+                "selector": sel,
+                "assert": true,
+                "assert_type": "checked",
+                "assert_expected": true
+            })
+        }
+        Some("text") => {
+            let sel = filtered.get(1).ok_or_else(|| ParseError::MissingArguments {
+                context: "assert text".to_string(),
+                usage: "assert text <selector> <expected> [--timeout <ms>]",
+            })?;
+            let _expected = filtered.get(2).ok_or_else(|| ParseError::MissingArguments {
+                context: "assert text".to_string(),
+                usage: "assert text <selector> <expected> [--timeout <ms>]",
+            })?;
+            let expected_text = filtered[2..].join(" ");
+            json!({
+                "id": id,
+                "action": "gettext",
+                "selector": sel,
+                "assert": true,
+                "assert_type": "text",
+                "assert_expected": expected_text
+            })
+        }
+        Some("url") => {
+            let pattern = filtered.get(1).ok_or_else(|| ParseError::MissingArguments {
+                context: "assert url".to_string(),
+                usage: "assert url <pattern> [--timeout <ms>]",
+            })?;
+            json!({
+                "id": id,
+                "action": "url",
+                "assert": true,
+                "assert_type": "url",
+                "assert_expected": pattern
+            })
+        }
+        Some("title") => {
+            let _expected = filtered.get(1).ok_or_else(|| ParseError::MissingArguments {
+                context: "assert title".to_string(),
+                usage: "assert title <expected> [--timeout <ms>]",
+            })?;
+            let expected_text = filtered[1..].join(" ");
+            json!({
+                "id": id,
+                "action": "title",
+                "assert": true,
+                "assert_type": "title",
+                "assert_expected": expected_text
+            })
+        }
+        Some(sub) => {
+            return Err(ParseError::UnknownSubcommand {
+                subcommand: sub.to_string(),
+                valid_options: VALID,
+            });
+        }
+        None => {
+            return Err(ParseError::MissingArguments {
+                context: "assert".to_string(),
+                usage: "assert <visible|hidden|text|url|title|enabled|checked> [args...] [--timeout <ms>]",
+            });
+        }
+    };
+
+    if let Some(ms) = timeout {
+        cmd["assert_timeout"] = json!(ms);
+    }
+
+    Ok(cmd)
 }
 
 fn parse_find(rest: &[&str], id: &str) -> Result<Value, ParseError> {
@@ -3959,5 +4110,118 @@ mod tests {
     fn test_get_cdp_url() {
         let cmd = parse_command(&args("get cdp-url"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "cdp_url");
+    }
+
+    // === Assert ===
+
+    #[test]
+    fn test_assert_visible() {
+        let cmd = parse_command(&args("assert visible @e3"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "isvisible");
+        assert_eq!(cmd["selector"], "@e3");
+        assert_eq!(cmd["assert"], true);
+        assert_eq!(cmd["assert_type"], "visible");
+        assert_eq!(cmd["assert_expected"], true);
+    }
+
+    #[test]
+    fn test_assert_hidden() {
+        let cmd = parse_command(&args("assert hidden @e5"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "isvisible");
+        assert_eq!(cmd["selector"], "@e5");
+        assert_eq!(cmd["assert_type"], "hidden");
+        assert_eq!(cmd["assert_expected"], false);
+    }
+
+    #[test]
+    fn test_assert_enabled() {
+        let cmd = parse_command(&args("assert enabled #btn"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "isenabled");
+        assert_eq!(cmd["selector"], "#btn");
+        assert_eq!(cmd["assert_type"], "enabled");
+    }
+
+    #[test]
+    fn test_assert_checked() {
+        let cmd = parse_command(&args("assert checked #cb"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "ischecked");
+        assert_eq!(cmd["selector"], "#cb");
+        assert_eq!(cmd["assert_type"], "checked");
+    }
+
+    #[test]
+    fn test_assert_text() {
+        let cmd = parse_command(&args("assert text @e3 Welcome back"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "gettext");
+        assert_eq!(cmd["selector"], "@e3");
+        assert_eq!(cmd["assert_type"], "text");
+        assert_eq!(cmd["assert_expected"], "Welcome back");
+    }
+
+    #[test]
+    fn test_assert_url() {
+        let cmd =
+            parse_command(&args("assert url **/dashboard"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "url");
+        assert_eq!(cmd["assert_type"], "url");
+        assert_eq!(cmd["assert_expected"], "**/dashboard");
+    }
+
+    #[test]
+    fn test_assert_title() {
+        let cmd =
+            parse_command(&args("assert title My App"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "title");
+        assert_eq!(cmd["assert_type"], "title");
+        assert_eq!(cmd["assert_expected"], "My App");
+    }
+
+    #[test]
+    fn test_assert_with_timeout() {
+        let cmd =
+            parse_command(&args("assert visible @e3 --timeout 5000"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "isvisible");
+        assert_eq!(cmd["assert"], true);
+        assert_eq!(cmd["assert_timeout"], 5000);
+    }
+
+    #[test]
+    fn test_assert_missing_subcommand() {
+        let result = parse_command(&args("assert"), &default_flags());
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::MissingArguments { .. }
+        ));
+    }
+
+    #[test]
+    fn test_assert_unknown_subcommand() {
+        let result = parse_command(&args("assert foo @e3"), &default_flags());
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::UnknownSubcommand { .. }
+        ));
+    }
+
+    #[test]
+    fn test_assert_visible_missing_selector() {
+        let result = parse_command(&args("assert visible"), &default_flags());
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::MissingArguments { .. }
+        ));
+    }
+
+    #[test]
+    fn test_assert_text_missing_expected() {
+        let result = parse_command(&args("assert text @e3"), &default_flags());
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::MissingArguments { .. }
+        ));
     }
 }
