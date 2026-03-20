@@ -3961,10 +3961,9 @@ async fn handle_stream_disable(state: &mut DaemonState) -> Result<Value, String>
     };
 
     server.shutdown().await;
-    remove_stream_file(&state.session_id)?;
-    state.screencasting = false;
     state.stream_server = None;
     state.stream_client = None;
+    remove_stream_file(&state.session_id)?;
 
     Ok(json!({ "disabled": true }))
 }
@@ -6768,6 +6767,71 @@ mod tests {
             .await
             .expect_err("duplicate disable should fail");
         assert!(disable_err.contains("not enabled"));
+
+        let _ = fs::remove_dir_all(&socket_dir);
+    }
+
+    #[tokio::test]
+    async fn test_stream_disable_preserves_existing_screencast_state() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "AGENT_BROWSER_SESSION"]);
+        let socket_dir = unique_socket_dir("stream-preserve-screencast");
+        fs::create_dir_all(&socket_dir).expect("socket dir should be created");
+        guard.set(
+            "AGENT_BROWSER_SOCKET_DIR",
+            socket_dir.to_str().expect("socket dir should be utf-8"),
+        );
+        guard.set("AGENT_BROWSER_SESSION", "stream-preserve-screencast-session");
+
+        let mut state = DaemonState::new();
+        handle_stream_enable(&json!({ "port": 0 }), &mut state)
+            .await
+            .expect("stream enable should succeed");
+        state.screencasting = true;
+
+        let disabled = handle_stream_disable(&mut state)
+            .await
+            .expect("stream disable should succeed");
+        assert_eq!(disabled["disabled"], true);
+        assert!(
+            state.screencasting,
+            "stream disable should not clear an independently managed screencast state"
+        );
+
+        let _ = fs::remove_dir_all(&socket_dir);
+    }
+
+    #[tokio::test]
+    async fn test_stream_disable_clears_state_when_stream_file_removal_fails() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "AGENT_BROWSER_SESSION"]);
+        let socket_dir = unique_socket_dir("stream-disable-cleanup");
+        fs::create_dir_all(&socket_dir).expect("socket dir should be created");
+        guard.set(
+            "AGENT_BROWSER_SOCKET_DIR",
+            socket_dir.to_str().expect("socket dir should be utf-8"),
+        );
+        guard.set("AGENT_BROWSER_SESSION", "stream-disable-cleanup-session");
+
+        let mut state = DaemonState::new();
+        handle_stream_enable(&json!({ "port": 0 }), &mut state)
+            .await
+            .expect("stream enable should succeed");
+
+        let stream_path = socket_dir.join("stream-disable-cleanup-session.stream");
+        fs::remove_file(&stream_path).expect("stream metadata file should exist");
+        fs::create_dir(&stream_path).expect("directory should force remove_stream_file failure");
+
+        let err = handle_stream_disable(&mut state)
+            .await
+            .expect_err("stream disable should surface file removal failure");
+        assert!(err.contains("Failed to remove stream metadata"));
+        assert!(
+            state.stream_server.is_none(),
+            "stream disable should clear stream_server even when metadata cleanup fails"
+        );
+        assert!(
+            state.stream_client.is_none(),
+            "stream disable should clear stream_client even when metadata cleanup fails"
+        );
 
         let _ = fs::remove_dir_all(&socket_dir);
     }
