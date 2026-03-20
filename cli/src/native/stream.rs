@@ -44,6 +44,8 @@ pub struct StreamServer {
     cdp_session_id: Arc<RwLock<Option<String>>>,
     client_notify: Arc<Notify>,
     screencasting: Arc<Mutex<bool>>,
+    viewport_width: Arc<Mutex<u32>>,
+    viewport_height: Arc<Mutex<u32>>,
 }
 
 impl StreamServer {
@@ -84,6 +86,19 @@ impl StreamServer {
         *self.screencasting.lock().await
     }
 
+    /// Update the stored viewport dimensions used by status messages and screencast.
+    pub async fn set_viewport(&self, width: u32, height: u32) {
+        *self.viewport_width.lock().await = width;
+        *self.viewport_height.lock().await = height;
+    }
+
+    /// Get the current viewport dimensions.
+    pub async fn viewport(&self) -> (u32, u32) {
+        let w = *self.viewport_width.lock().await;
+        let h = *self.viewport_height.lock().await;
+        (w, h)
+    }
+
     async fn start_inner(
         preferred_port: u16,
         client_slot: Arc<RwLock<Option<Arc<CdpClient>>>>,
@@ -104,6 +119,8 @@ impl StreamServer {
         let client_notify = Arc::new(Notify::new());
         let screencasting = Arc::new(Mutex::new(false));
         let cdp_session_id = Arc::new(RwLock::new(None::<String>));
+        let viewport_width = Arc::new(Mutex::new(1280u32));
+        let viewport_height = Arc::new(Mutex::new(720u32));
 
         let frame_tx_clone = frame_tx.clone();
         let client_count_clone = client_count.clone();
@@ -113,6 +130,8 @@ impl StreamServer {
         let cdp_session_clone = cdp_session_id.clone();
 
         // WebSocket accept loop
+        let vw_clone = viewport_width.clone();
+        let vh_clone = viewport_height.clone();
         tokio::spawn(async move {
             accept_loop(
                 listener,
@@ -122,6 +141,8 @@ impl StreamServer {
                 notify_clone,
                 screencasting_clone,
                 cdp_session_clone,
+                vw_clone,
+                vh_clone,
             )
             .await;
         });
@@ -133,6 +154,8 @@ impl StreamServer {
         let screencasting_bg = screencasting.clone();
         let client_count_bg = client_count.clone();
         let cdp_session_bg = cdp_session_id.clone();
+        let vw_bg = viewport_width.clone();
+        let vh_bg = viewport_height.clone();
         tokio::spawn(async move {
             cdp_event_loop(
                 frame_tx_bg,
@@ -141,6 +164,8 @@ impl StreamServer {
                 screencasting_bg,
                 client_count_bg,
                 cdp_session_bg,
+                vw_bg,
+                vh_bg,
             )
             .await;
         });
@@ -154,6 +179,8 @@ impl StreamServer {
                 cdp_session_id,
                 client_notify,
                 screencasting,
+                viewport_width,
+                viewport_height,
             },
             client_slot,
         ))
@@ -223,6 +250,8 @@ async fn accept_loop(
     client_notify: Arc<Notify>,
     screencasting: Arc<Mutex<bool>>,
     cdp_session_id: Arc<RwLock<Option<String>>>,
+    viewport_width: Arc<Mutex<u32>>,
+    viewport_height: Arc<Mutex<u32>>,
 ) {
     while let Ok((stream, addr)) = listener.accept().await {
         let frame_rx = frame_tx.subscribe();
@@ -231,6 +260,8 @@ async fn accept_loop(
         let client_notify = client_notify.clone();
         let screencasting = screencasting.clone();
         let cdp_session_id = cdp_session_id.clone();
+        let vw = viewport_width.clone();
+        let vh = viewport_height.clone();
 
         tokio::spawn(async move {
             handle_ws_client(
@@ -242,6 +273,8 @@ async fn accept_loop(
                 client_notify,
                 screencasting,
                 cdp_session_id,
+                vw,
+                vh,
             )
             .await;
         });
@@ -258,6 +291,8 @@ async fn handle_ws_client(
     client_notify: Arc<Notify>,
     screencasting: Arc<Mutex<bool>>,
     cdp_session_id: Arc<RwLock<Option<String>>>,
+    viewport_width: Arc<Mutex<u32>>,
+    viewport_height: Arc<Mutex<u32>>,
 ) {
     let callback =
         |req: &tokio_tungstenite::tungstenite::handshake::server::Request,
@@ -290,17 +325,19 @@ async fn handle_ws_client(
 
     let (mut ws_tx, mut ws_rx) = ws_stream.split();
 
-    // Send initial status (screencasting:false initially, matching 0.19.0)
+    // Send initial status with current viewport dimensions
     {
         let guard = client_slot.read().await;
         let connected = guard.is_some();
         let sc = *screencasting.lock().await;
+        let vw = *viewport_width.lock().await;
+        let vh = *viewport_height.lock().await;
         let status = json!({
             "type": "status",
             "connected": connected,
             "screencasting": sc,
-            "viewportWidth": 1280,
-            "viewportHeight": 720,
+            "viewportWidth": vw,
+            "viewportHeight": vh,
         });
         let _ = ws_tx.send(Message::Text(status.to_string())).await;
     }
@@ -351,6 +388,7 @@ async fn handle_ws_client(
 
 /// Background task that subscribes to CDP events and broadcasts screencast frames in real-time.
 /// Also handles auto-start/stop of screencast based on WebSocket client count.
+#[allow(clippy::too_many_arguments)]
 async fn cdp_event_loop(
     frame_tx: broadcast::Sender<String>,
     client_slot: Arc<RwLock<Option<Arc<CdpClient>>>>,
@@ -358,6 +396,8 @@ async fn cdp_event_loop(
     screencasting: Arc<Mutex<bool>>,
     client_count: Arc<Mutex<usize>>,
     cdp_session_id: Arc<RwLock<Option<String>>>,
+    viewport_width: Arc<Mutex<u32>>,
+    viewport_height: Arc<Mutex<u32>>,
 ) {
     loop {
         // Wait until we're notified of a client/connection change
@@ -377,14 +417,18 @@ async fn cdp_event_loop(
                 // Get the CDP page session ID for targeted commands
                 let session_id = cdp_session_id.read().await.clone();
 
+                // Use the current viewport dimensions for screencast
+                let vw = *viewport_width.lock().await;
+                let vh = *viewport_height.lock().await;
+
                 let _ = client_arc
                     .send_command(
                         "Page.startScreencast",
                         Some(json!({
                             "format": "jpeg",
                             "quality": 80,
-                            "maxWidth": 1280,
-                            "maxHeight": 720,
+                            "maxWidth": vw,
+                            "maxHeight": vh,
                             "everyNthFrame": 1,
                         })),
                         session_id.as_deref(),
@@ -396,13 +440,13 @@ async fn cdp_event_loop(
                     *sc = true;
                 }
 
-                // Broadcast screencasting:true status (matching 0.19.0 two-status sequence)
+                // Broadcast screencasting:true status with current viewport
                 let status = json!({
                     "type": "status",
                     "connected": true,
                     "screencasting": true,
-                    "viewportWidth": 1280,
-                    "viewportHeight": 720,
+                    "viewportWidth": vw,
+                    "viewportHeight": vh,
                 });
                 let _ = frame_tx.send(status.to_string());
 
