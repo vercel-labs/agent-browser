@@ -4633,7 +4633,7 @@ async fn handle_drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
         .and_then(|v| v.as_str())
         .ok_or("Missing 'target' parameter")?;
 
-    let (sx, sy, source_session) = super::element::resolve_element_center(
+    let (sx, sy, source_session_id) = super::element::resolve_element_center(
         &mgr.client,
         &session_id,
         &state.ref_map,
@@ -4641,7 +4641,7 @@ async fn handle_drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
         &state.iframe_sessions,
     )
     .await?;
-    let (tx, ty, target_session) = super::element::resolve_element_center(
+    let (tx, ty, target_session_id) = super::element::resolve_element_center(
         &mgr.client,
         &session_id,
         &state.ref_map,
@@ -4655,14 +4655,14 @@ async fn handle_drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
         .send_command(
             "Input.dispatchMouseEvent",
             Some(json!({ "type": "mouseMoved", "x": sx, "y": sy })),
-            Some(&source_session),
+            Some(&source_session_id),
         )
         .await?;
     mgr.client
         .send_command(
             "Input.dispatchMouseEvent",
             Some(json!({ "type": "mousePressed", "x": sx, "y": sy, "button": "left", "clickCount": 1 })),
-            Some(&source_session),
+            Some(&source_session_id),
         )
         .await?;
 
@@ -4675,7 +4675,7 @@ async fn handle_drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
             .send_command(
                 "Input.dispatchMouseEvent",
                 Some(json!({ "type": "mouseMoved", "x": cx, "y": cy })),
-                Some(&target_session),
+                Some(&target_session_id),
             )
             .await?;
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
@@ -4686,7 +4686,7 @@ async fn handle_drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
         .send_command(
             "Input.dispatchMouseEvent",
             Some(json!({ "type": "mouseReleased", "x": tx, "y": ty, "button": "left", "clickCount": 1 })),
-            Some(&target_session),
+            Some(&target_session_id),
         )
         .await?;
 
