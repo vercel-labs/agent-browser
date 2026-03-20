@@ -801,7 +801,7 @@ fn build_tree(nodes: &[AXNode]) -> (Vec<TreeNode>, Vec<usize>) {
         }
     }
 
-    // Process StaticText aggregation and deduplication.
+    // Process StaticText aggregation
     for i in 0..tree_nodes.len() {
         if tree_nodes[i].role.is_empty() || tree_nodes[i].children.is_empty() {
             continue;
@@ -909,6 +909,7 @@ fn render_tree(
 ) {
     let node = &nodes[idx];
 
+    // Reduce unnecessary indentation and rendering
     if node.role.is_empty()
         || (node.role == "generic" && !node.has_ref && node.children.len() <= 1)
         || (node.role == "StaticText" && node.name.replace(&INVISIBLE_CHARS[..], "").is_empty())

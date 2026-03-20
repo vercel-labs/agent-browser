@@ -2504,7 +2504,7 @@ async fn e2e_snapshot_cursor_many_elements() {
 /// the actual text content from parent elements.
 #[tokio::test]
 #[ignore]
-async fn e2e_snapshot_inline_text_box_filtered() {
+async fn e2e_snapshot_continuous_static_text() {
     let mut state = DaemonState::new();
 
     let resp = execute_command(
@@ -2514,7 +2514,7 @@ async fn e2e_snapshot_inline_text_box_filtered() {
     .await;
     assert_success(&resp);
 
-    // Simple HTML with text content that would generate InlineTextBox nodes
+    // Simple HTML with text content that would generate InlineTextBox nodes and sperate to multiple StaticText nodes
     let html =
         "data:text/html,<html><body><div><span>Hello</span> <span>World</span></div></body></html>";
 
@@ -2525,7 +2525,7 @@ async fn e2e_snapshot_inline_text_box_filtered() {
     .await;
     assert_success(&resp);
 
-    // Take snapshot to capture full output and verify InlineTextBox filtering
+    // Take snapshot to capture full output and verify InlineTextBox filtering and StaticText aggregation
     let start = std::time::Instant::now();
     let resp = execute_command(&json!({ "id": "3", "action": "snapshot" }), &mut state).await;
     assert_success(&resp);
@@ -2542,13 +2542,8 @@ async fn e2e_snapshot_inline_text_box_filtered() {
 
     // Verify that the actual text content is preserved
     assert!(
-        snapshot_output.contains("Hello"),
-        "Snapshot should contain 'Hello': {}",
-        snapshot_output
-    );
-    assert!(
-        snapshot_output.contains("World"),
-        "Snapshot should contain 'World': {}",
+        snapshot_output.contains("Hello World"),
+        "Snapshot should contain 'Hello World': {}",
         snapshot_output
     );
 
