@@ -2688,6 +2688,10 @@ Environment:
   AGENT_BROWSER_STATE_EXPIRE_DAYS Auto-delete saved states older than N days (default: 30)
   AGENT_BROWSER_ENCRYPTION_KEY   64-char hex key for AES-256-GCM session encryption
   AGENT_BROWSER_STREAM_PORT      Enable WebSocket streaming on port (e.g., 9223)
+  AGENT_BROWSER_STREAM_MAX_WIDTH Max screencast width in px (default: 1280)
+  AGENT_BROWSER_STREAM_MAX_HEIGHT Max screencast height in px (default: 720)
+  AGENT_BROWSER_STREAM_QUALITY   Screencast JPEG quality 0-100 (default: 80)
+  AGENT_BROWSER_STREAM_FORMAT    Screencast format: jpeg or png (default: jpeg)
   AGENT_BROWSER_IDLE_TIMEOUT_MS  Auto-shutdown daemon after N ms of inactivity (disabled by default)
   AGENT_BROWSER_IOS_DEVICE       Default iOS device name
   AGENT_BROWSER_IOS_UDID         Default iOS device UDID

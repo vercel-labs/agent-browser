@@ -35,6 +35,38 @@ impl Default for FrameMetadata {
     }
 }
 
+/// Screencast configuration read from AGENT_BROWSER_STREAM_* environment variables.
+#[derive(Debug, Clone)]
+pub struct ScreencastConfig {
+    pub format: String,
+    pub quality: i32,
+    pub max_width: i32,
+    pub max_height: i32,
+}
+
+impl Default for ScreencastConfig {
+    fn default() -> Self {
+        Self {
+            format: std::env::var("AGENT_BROWSER_STREAM_FORMAT")
+                .ok()
+                .filter(|s| s == "jpeg" || s == "png")
+                .unwrap_or_else(|| "jpeg".to_string()),
+            quality: std::env::var("AGENT_BROWSER_STREAM_QUALITY")
+                .ok()
+                .and_then(|s| s.parse::<i32>().ok())
+                .unwrap_or(80),
+            max_width: std::env::var("AGENT_BROWSER_STREAM_MAX_WIDTH")
+                .ok()
+                .and_then(|s| s.parse::<i32>().ok())
+                .unwrap_or(1280),
+            max_height: std::env::var("AGENT_BROWSER_STREAM_MAX_HEIGHT")
+                .ok()
+                .and_then(|s| s.parse::<i32>().ok())
+                .unwrap_or(720),
+        }
+    }
+}
+
 pub struct StreamServer {
     port: u16,
     frame_tx: broadcast::Sender<String>,
@@ -44,6 +76,7 @@ pub struct StreamServer {
     cdp_session_id: Arc<RwLock<Option<String>>>,
     client_notify: Arc<Notify>,
     screencasting: Arc<Mutex<bool>>,
+    screencast_config: Arc<ScreencastConfig>,
 }
 
 impl StreamServer {
@@ -104,6 +137,7 @@ impl StreamServer {
         let client_notify = Arc::new(Notify::new());
         let screencasting = Arc::new(Mutex::new(false));
         let cdp_session_id = Arc::new(RwLock::new(None::<String>));
+        let screencast_config = Arc::new(ScreencastConfig::default());
 
         let frame_tx_clone = frame_tx.clone();
         let client_count_clone = client_count.clone();
@@ -111,6 +145,7 @@ impl StreamServer {
         let notify_clone = client_notify.clone();
         let screencasting_clone = screencasting.clone();
         let cdp_session_clone = cdp_session_id.clone();
+        let config_clone = screencast_config.clone();
 
         // WebSocket accept loop
         tokio::spawn(async move {
@@ -122,6 +157,7 @@ impl StreamServer {
                 notify_clone,
                 screencasting_clone,
                 cdp_session_clone,
+                config_clone,
             )
             .await;
         });
@@ -133,6 +169,7 @@ impl StreamServer {
         let screencasting_bg = screencasting.clone();
         let client_count_bg = client_count.clone();
         let cdp_session_bg = cdp_session_id.clone();
+        let config_bg = screencast_config.clone();
         tokio::spawn(async move {
             cdp_event_loop(
                 frame_tx_bg,
@@ -141,6 +178,7 @@ impl StreamServer {
                 screencasting_bg,
                 client_count_bg,
                 cdp_session_bg,
+                config_bg,
             )
             .await;
         });
@@ -154,6 +192,7 @@ impl StreamServer {
                 cdp_session_id,
                 client_notify,
                 screencasting,
+                screencast_config,
             },
             client_slot,
         ))
@@ -223,6 +262,7 @@ async fn accept_loop(
     client_notify: Arc<Notify>,
     screencasting: Arc<Mutex<bool>>,
     cdp_session_id: Arc<RwLock<Option<String>>>,
+    screencast_config: Arc<ScreencastConfig>,
 ) {
     while let Ok((stream, addr)) = listener.accept().await {
         let frame_rx = frame_tx.subscribe();
@@ -231,6 +271,7 @@ async fn accept_loop(
         let client_notify = client_notify.clone();
         let screencasting = screencasting.clone();
         let cdp_session_id = cdp_session_id.clone();
+        let screencast_config = screencast_config.clone();
 
         tokio::spawn(async move {
             handle_ws_client(
@@ -242,6 +283,7 @@ async fn accept_loop(
                 client_notify,
                 screencasting,
                 cdp_session_id,
+                screencast_config,
             )
             .await;
         });
@@ -258,6 +300,7 @@ async fn handle_ws_client(
     client_notify: Arc<Notify>,
     screencasting: Arc<Mutex<bool>>,
     cdp_session_id: Arc<RwLock<Option<String>>>,
+    screencast_config: Arc<ScreencastConfig>,
 ) {
     let callback =
         |req: &tokio_tungstenite::tungstenite::handshake::server::Request,
@@ -299,8 +342,8 @@ async fn handle_ws_client(
             "type": "status",
             "connected": connected,
             "screencasting": sc,
-            "viewportWidth": 1280,
-            "viewportHeight": 720,
+            "viewportWidth": screencast_config.max_width,
+            "viewportHeight": screencast_config.max_height,
         });
         let _ = ws_tx.send(Message::Text(status.to_string())).await;
     }
@@ -358,6 +401,7 @@ async fn cdp_event_loop(
     screencasting: Arc<Mutex<bool>>,
     client_count: Arc<Mutex<usize>>,
     cdp_session_id: Arc<RwLock<Option<String>>>,
+    screencast_config: Arc<ScreencastConfig>,
 ) {
     loop {
         // Wait until we're notified of a client/connection change
@@ -381,10 +425,10 @@ async fn cdp_event_loop(
                     .send_command(
                         "Page.startScreencast",
                         Some(json!({
-                            "format": "jpeg",
-                            "quality": 80,
-                            "maxWidth": 1280,
-                            "maxHeight": 720,
+                            "format": screencast_config.format,
+                            "quality": screencast_config.quality,
+                            "maxWidth": screencast_config.max_width,
+                            "maxHeight": screencast_config.max_height,
                             "everyNthFrame": 1,
                         })),
                         session_id.as_deref(),
@@ -401,8 +445,8 @@ async fn cdp_event_loop(
                     "type": "status",
                     "connected": true,
                     "screencasting": true,
-                    "viewportWidth": 1280,
-                    "viewportHeight": 720,
+                    "viewportWidth": screencast_config.max_width,
+                    "viewportHeight": screencast_config.max_height,
                 });
                 let _ = frame_tx.send(status.to_string());
 
