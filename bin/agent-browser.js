@@ -106,4 +106,23 @@ function main() {
   });
 }
 
-main();
+// Intercept Node.js-handled subcommands before reaching the Rust binary
+const subcommand = process.argv[2];
+if (subcommand === 'license') {
+  const { createRequire } = await import('module');
+  const { fileURLToPath: ftu } = await import('url');
+  const { dirname: dn, join: pj } = await import('path');
+  const __dir = dn(ftu(import.meta.url));
+  const distDir = pj(__dir, '..', 'dist');
+  try {
+    const { runLicenseCli } = await import(pj(distDir, 'license-cli.js'));
+    runLicenseCli(process.argv.slice(3));
+  } catch (err) {
+    // Fallback: dist not built yet
+    console.error('License CLI not available (run `npm run build` first).');
+    console.error(err?.message ?? err);
+    process.exit(1);
+  }
+} else {
+  main();
+}

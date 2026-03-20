@@ -8,6 +8,7 @@ import { parseCommand, serializeResponse, errorResponse } from './protocol.js';
 import { executeCommand, initActionPolicy } from './actions.js';
 import { executeIOSCommand } from './ios-actions.js';
 import { StreamServer } from './stream-server.js';
+import { validateLicense, getLimits, formatLicenseStatus } from './license.js';
 import {
   getSessionsDir,
   ensureSessionsDir,
@@ -334,6 +335,51 @@ export async function startDaemon(options?: {
 
   // Clean up any stale socket
   cleanupSocket();
+
+  // ── License & concurrency check ───────────────────────────────────────────
+  const license = validateLicense();
+  const limits = getLimits(license);
+
+  if (!license.valid) {
+    console.warn(`[license] ${formatLicenseStatus(license)}`);
+    // Fall through to free-tier limits
+  } else if (license.tier !== 'free') {
+    console.log(`[license] ${formatLicenseStatus(license)}`);
+  }
+
+  if (limits.maxConcurrentSessions > 0) {
+    // Count currently active daemon sessions
+    const socketDir = getSocketDir();
+    let activeSessions = 0;
+    if (fs.existsSync(socketDir)) {
+      const pidFiles = fs.readdirSync(socketDir).filter((f) => f.endsWith('.pid'));
+      for (const pidFile of pidFiles) {
+        try {
+          const pid = parseInt(fs.readFileSync(path.join(socketDir, pidFile), 'utf8').trim(), 10);
+          if (!isNaN(pid)) {
+            try {
+              process.kill(pid, 0); // 0 = just check if process exists
+              activeSessions++;
+            } catch {
+              // Process not running — stale PID file, skip
+            }
+          }
+        } catch {}
+      }
+    }
+
+    if (activeSessions >= limits.maxConcurrentSessions) {
+      console.error(
+        `[license] Free tier allows ${limits.maxConcurrentSessions} concurrent browser session.\n` +
+        `          ${activeSessions} session(s) already active.\n` +
+        `          Upgrade to Pro for unlimited concurrent sessions:\n` +
+        `          https://authichain.com/license\n` +
+        `          Set your license key: AGENT_BROWSER_LICENSE_KEY=<key> or 'agent-browser license set <key>'`
+      );
+      process.exit(1);
+    }
+  }
+  // ─────────────────────────────────────────────────────────────────────────
 
   // Clean up expired state files on startup
   runCleanupExpiredStates();
