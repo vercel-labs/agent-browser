@@ -30,6 +30,9 @@ agent-browser pdf <path>              # Save page as PDF
 agent-browser snapshot                # Accessibility tree with refs
 agent-browser eval <js>               # Run JavaScript
 agent-browser connect <port|url>      # Connect to browser via CDP
+agent-browser stream enable [--port <port>]  # Start runtime WebSocket streaming
+agent-browser stream status           # Show runtime streaming state and bound port
+agent-browser stream disable          # Stop runtime WebSocket streaming
 agent-browser close                   # Close browser (aliases: quit, exit)
 ```
 
@@ -220,6 +223,17 @@ The `frame` command accepts element refs (`@e3`), CSS selectors (`"#my-iframe"`)
 agent-browser dialog accept [text]    # Accept dialog (with optional prompt text)
 agent-browser dialog dismiss          # Dismiss dialog
 ```
+
+## Streaming
+
+```bash
+agent-browser stream enable           # Start runtime WebSocket streaming on an auto-selected port
+agent-browser stream enable --port 9223  # Bind a specific localhost port
+agent-browser stream status           # Show enabled state, port, browser connection, screencasting
+agent-browser stream disable          # Stop runtime streaming and remove the .stream metadata file
+```
+
+Use `stream enable` for sessions that are already running. If you need streaming from daemon startup, set `AGENT_BROWSER_STREAM_PORT` before the first command in that session.
 
 ## Debug
 

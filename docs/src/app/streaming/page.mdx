@@ -5,14 +5,46 @@ where a human can watch and interact alongside an AI agent.
 
 ## Enable streaming
 
-Set the `AGENT_BROWSER_STREAM_PORT` environment variable to start
-a WebSocket server:
+For an already-running session, enable streaming at runtime:
+
+```bash
+agent-browser stream enable
+agent-browser stream status
+agent-browser stream disable
+```
+
+`stream enable` binds an available localhost port automatically unless you pass `--port <port>`. `stream status` returns the enabled state, active port, browser connection state, and whether screencasting is active. `stream disable` tears the server down and removes the session's `.stream` metadata file.
+
+If you want the WebSocket server to exist from daemon startup, set `AGENT_BROWSER_STREAM_PORT` before the first command in that session:
 
 ```bash
 AGENT_BROWSER_STREAM_PORT=9223 agent-browser open example.com
 ```
 
-The server streams viewport frames and accepts input events (mouse, keyboard, touch).
+The environment variable only affects daemon startup. For sessions that are already running, use `agent-browser stream enable` instead.
+
+Once enabled, the server streams viewport frames and accepts input events (mouse, keyboard, touch).
+
+## Runtime status response
+
+`agent-browser stream status --json` returns data like:
+
+```json
+{
+  "enabled": true,
+  "port": 9223,
+  "connected": true,
+  "screencasting": true
+}
+```
+
+`connected` reports whether the daemon currently has a browser attached. `screencasting` reports whether frames are actively being produced for the stream server.
+
+## Relationship to screencast commands
+
+`stream enable` creates the WebSocket server and keeps it available for the session. WebSocket clients then trigger live frame delivery automatically.
+
+The lower-level `screencast_start` and `screencast_stop` commands still control explicit CDP screencasts directly. Use them when you want a screencast without the WebSocket runtime server.
 
 ## WebSocket protocol
 

@@ -795,6 +795,56 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
             }
         }
 
+        // === Runtime stream control ===
+        "stream" => match rest.first().copied() {
+            Some("enable") => {
+                let mut cmd = json!({ "id": id, "action": "stream_enable" });
+                let mut i = 1;
+                while i < rest.len() {
+                    match rest[i] {
+                        "--port" => {
+                            let value = rest.get(i + 1).ok_or_else(|| ParseError::MissingArguments {
+                                context: "stream enable --port".to_string(),
+                                usage: "stream enable [--port <port>]",
+                            })?;
+                            let port = value.parse::<u32>().map_err(|_| ParseError::InvalidValue {
+                                message: format!("Invalid port: '{}' is not a valid integer", value),
+                                usage: "stream enable [--port <port>]",
+                            })?;
+                            if port > u16::MAX as u32 {
+                                return Err(ParseError::InvalidValue {
+                                    message: format!(
+                                        "Invalid port: {} is out of range (valid range: 0-65535)",
+                                        port
+                                    ),
+                                    usage: "stream enable [--port <port>]",
+                                });
+                            }
+                            cmd["port"] = json!(port);
+                            i += 2;
+                        }
+                        flag => {
+                            return Err(ParseError::InvalidValue {
+                                message: format!("Unknown flag for stream enable: {}", flag),
+                                usage: "stream enable [--port <port>]",
+                            });
+                        }
+                    }
+                }
+                Ok(cmd)
+            }
+            Some("disable") => Ok(json!({ "id": id, "action": "stream_disable" })),
+            Some("status") => Ok(json!({ "id": id, "action": "stream_status" })),
+            Some(sub) => Err(ParseError::UnknownSubcommand {
+                subcommand: sub.to_string(),
+                valid_options: &["enable", "disable", "status"],
+            }),
+            None => Err(ParseError::MissingArguments {
+                context: "stream".to_string(),
+                usage: "stream <enable|disable|status>",
+            }),
+        },
+
         // === Get ===
         "get" => parse_get(&rest, &id),
 
@@ -3501,6 +3551,46 @@ mod tests {
         let cmd = parse_command(&args("connect 1"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "launch");
         assert_eq!(cmd["cdpPort"], 1);
+    }
+
+    // === Runtime stream control tests ===
+
+    #[test]
+    fn test_stream_enable_auto_port() {
+        let cmd = parse_command(&args("stream enable"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "stream_enable");
+        assert!(cmd.get("port").is_none());
+    }
+
+    #[test]
+    fn test_stream_enable_with_port() {
+        let cmd = parse_command(&args("stream enable --port 9223"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "stream_enable");
+        assert_eq!(cmd["port"], 9223);
+    }
+
+    #[test]
+    fn test_stream_status() {
+        let cmd = parse_command(&args("stream status"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "stream_status");
+    }
+
+    #[test]
+    fn test_stream_disable() {
+        let cmd = parse_command(&args("stream disable"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "stream_disable");
+    }
+
+    #[test]
+    fn test_stream_enable_invalid_port() {
+        let result = parse_command(&args("stream enable --port abc"), &default_flags());
+        assert!(matches!(result, Err(ParseError::InvalidValue { .. })));
+    }
+
+    #[test]
+    fn test_stream_missing_subcommand() {
+        let result = parse_command(&args("stream"), &default_flags());
+        assert!(matches!(result, Err(ParseError::MissingArguments { .. })));
     }
 
     // === Trace Tests ===
