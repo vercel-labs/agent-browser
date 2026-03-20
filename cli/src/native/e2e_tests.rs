@@ -222,7 +222,11 @@ async fn e2e_runtime_stream_enable_before_launch_attaches_and_disables() {
     assert_success(&resp);
     assert_eq!(get_data(&resp)["enabled"], false);
 
-    let resp = execute_command(&json!({ "id": "2", "action": "stream_enable", "port": 0 }), &mut state).await;
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "stream_enable", "port": 0 }),
+        &mut state,
+    )
+    .await;
     assert_success(&resp);
     let port = get_data(&resp)["port"]
         .as_u64()
@@ -230,7 +234,10 @@ async fn e2e_runtime_stream_enable_before_launch_attaches_and_disables() {
     assert_eq!(get_data(&resp)["connected"], false);
 
     let stream_path = socket_dir.join("e2e-runtime-stream.stream");
-    assert!(stream_path.exists(), "runtime enable should create .stream metadata");
+    assert!(
+        stream_path.exists(),
+        "runtime enable should create .stream metadata"
+    );
 
     let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}"))
         .await
@@ -242,7 +249,8 @@ async fn e2e_runtime_stream_enable_before_launch_attaches_and_disables() {
         .expect("websocket should stay open")
         .expect("websocket message should be valid");
     let initial_text = initial.into_text().expect("initial message should be text");
-    let initial_status: Value = serde_json::from_str(&initial_text).expect("status JSON should parse");
+    let initial_status: Value =
+        serde_json::from_str(&initial_text).expect("status JSON should parse");
     assert_eq!(initial_status["type"], "status");
     assert_eq!(initial_status["connected"], false);
 
@@ -266,10 +274,9 @@ async fn e2e_runtime_stream_enable_before_launch_attaches_and_disables() {
         if !message.is_text() {
             continue;
         }
-        let parsed: Value = serde_json::from_str(
-            message.to_text().expect("text message should be readable"),
-        )
-        .expect("runtime stream payload should be valid JSON");
+        let parsed: Value =
+            serde_json::from_str(message.to_text().expect("text message should be readable"))
+                .expect("runtime stream payload should be valid JSON");
         if parsed.get("type") == Some(&json!("status"))
             && parsed.get("connected") == Some(&json!(true))
         {
@@ -282,10 +289,17 @@ async fn e2e_runtime_stream_enable_before_launch_attaches_and_disables() {
         "runtime stream should report connected=true after browser launch"
     );
 
-    let resp = execute_command(&json!({ "id": "4", "action": "stream_disable" }), &mut state).await;
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "stream_disable" }),
+        &mut state,
+    )
+    .await;
     assert_success(&resp);
     assert_eq!(get_data(&resp)["disabled"], true);
-    assert!(!stream_path.exists(), "stream disable should remove .stream metadata");
+    assert!(
+        !stream_path.exists(),
+        "stream disable should remove .stream metadata"
+    );
 
     let close_message = tokio::time::timeout(tokio::time::Duration::from_secs(5), ws.next())
         .await

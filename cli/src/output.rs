@@ -2920,7 +2920,8 @@ mod tests {
 
     #[test]
     fn test_format_stream_status_text_for_disabled_stream() {
-        let data = json!({ "enabled": false, "port": null, "connected": false, "screencasting": false });
+        let data =
+            json!({ "enabled": false, "port": null, "connected": false, "screencasting": false });
 
         let rendered = super::format_stream_status_text(Some("stream_status"), &data).unwrap();
 

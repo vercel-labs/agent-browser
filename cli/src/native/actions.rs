@@ -3874,8 +3874,13 @@ fn stream_file_path(session_id: &str) -> PathBuf {
 
 fn write_stream_file(session_id: &str, port: u16) -> Result<(), String> {
     let path = stream_file_path(session_id);
-    fs::write(&path, port.to_string())
-        .map_err(|e| format!("Failed to write stream metadata '{}': {}", path.display(), e))
+    fs::write(&path, port.to_string()).map_err(|e| {
+        format!(
+            "Failed to write stream metadata '{}': {}",
+            path.display(),
+            e
+        )
+    })
 }
 
 fn remove_stream_file(session_id: &str) -> Result<(), String> {
@@ -6727,7 +6732,8 @@ mod tests {
         assert_eq!(enabled_status["screencasting"], false);
 
         let stream_path = socket_dir.join("stream-runtime-session.stream");
-        let port_file = fs::read_to_string(&stream_path).expect("stream metadata file should exist");
+        let port_file =
+            fs::read_to_string(&stream_path).expect("stream metadata file should exist");
         assert_eq!(port_file.trim(), port.to_string());
 
         let duplicate_err = handle_stream_enable(&json!({}), &mut state)
@@ -6792,7 +6798,9 @@ mod tests {
         assert!(state.stream_server.is_none());
         assert!(state.stream_client.is_none());
         assert!(
-            !socket_dir.join("stream-port-conflict-session.stream").exists(),
+            !socket_dir
+                .join("stream-port-conflict-session.stream")
+                .exists(),
             "failed enable should not leave stale metadata behind"
         );
 
@@ -7244,6 +7252,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_credentials_roundtrip_via_actions() {
         let _lock = crate::native::auth::AUTH_TEST_MUTEX.lock().unwrap();
         let key_var = "AGENT_BROWSER_ENCRYPTION_KEY";

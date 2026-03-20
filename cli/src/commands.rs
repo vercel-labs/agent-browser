@@ -803,14 +803,20 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                 while i < rest.len() {
                     match rest[i] {
                         "--port" => {
-                            let value = rest.get(i + 1).ok_or_else(|| ParseError::MissingArguments {
-                                context: "stream enable --port".to_string(),
-                                usage: "stream enable [--port <port>]",
-                            })?;
-                            let port = value.parse::<u32>().map_err(|_| ParseError::InvalidValue {
-                                message: format!("Invalid port: '{}' is not a valid integer", value),
-                                usage: "stream enable [--port <port>]",
-                            })?;
+                            let value =
+                                rest.get(i + 1)
+                                    .ok_or_else(|| ParseError::MissingArguments {
+                                        context: "stream enable --port".to_string(),
+                                        usage: "stream enable [--port <port>]",
+                                    })?;
+                            let port =
+                                value.parse::<u32>().map_err(|_| ParseError::InvalidValue {
+                                    message: format!(
+                                        "Invalid port: '{}' is not a valid integer",
+                                        value
+                                    ),
+                                    usage: "stream enable [--port <port>]",
+                                })?;
                             if port > u16::MAX as u32 {
                                 return Err(ParseError::InvalidValue {
                                     message: format!(
