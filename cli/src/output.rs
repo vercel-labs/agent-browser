@@ -757,6 +757,20 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
                 .get("username")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
+            let one_password_item = profile.get("onePasswordItem").and_then(|v| v.as_str());
+            let one_password_vault = profile.get("onePasswordVault").and_then(|v| v.as_str());
+            let username_source = profile
+                .get("usernameSource")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let password_source = profile
+                .get("passwordSource")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let otp_enabled = profile
+                .get("otpEnabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             let created = profile
                 .get("createdAt")
                 .and_then(|v| v.as_str())
@@ -765,6 +779,15 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
             println!("Name: {}", name);
             println!("URL: {}", url);
             println!("Username: {}", user);
+            if let Some(item) = one_password_item {
+                println!("1Password item: {}", item);
+            }
+            if let Some(vault) = one_password_vault {
+                println!("1Password vault: {}", vault);
+            }
+            println!("Username source: {}", username_source);
+            println!("Password source: {}", password_source);
+            println!("OTP enabled: {}", if otp_enabled { "yes" } else { "no" });
             println!("Created: {}", created);
             if let Some(ll) = last_login {
                 println!("Last login: {}", ll);
@@ -1921,12 +1944,20 @@ Subcommands:
 
 Save Options:
   --url <url>              Login page URL (required)
-  --username <user>        Username (required)
-  --password <pass>        Password (required unless --password-stdin)
-  --password-stdin          Read password from stdin (recommended)
+  --onepassword-item <i>   1Password Login item name or ID for username/password and optional OTP
+  --onepassword-vault <v>  Optional 1Password vault for --onepassword-item
+  --username <user>        Username (required unless using 1Password)
+  --username-op <ref>      Advanced: 1Password secret reference for the username (op://...)
+  --password <pass>        Password (required unless --password-stdin, --password-op, or using 1Password)
+  --password-stdin         Read password from stdin (recommended for local secrets)
+  --password-op <ref>      Advanced: 1Password secret reference for the password (op://...)
   --username-selector <s>  Custom CSS selector for username field
   --password-selector <s>  Custom CSS selector for password field
   --submit-selector <s>    Custom CSS selector for submit button
+  --otp-op <ref>           Advanced: 1Password secret reference for a TOTP/OTP code
+  --otp-selector <s>       Custom CSS selector for the OTP input
+  --otp-submit-selector <s>
+                           Custom CSS selector for the OTP submit button
 
 Global Options:
   --json                   Output as JSON
@@ -1935,6 +1966,8 @@ Global Options:
 Examples:
   echo "pass" | agent-browser auth save github --url https://github.com/login --username user --password-stdin
   agent-browser auth save github --url https://github.com/login --username user --password pass
+  agent-browser auth save github --url https://github.com/login --onepassword-item GitHub --onepassword-vault Work
+  agent-browser auth save github --url https://github.com/login --username-op op://Work/GitHub/username --password-op op://Work/GitHub/password --otp-op 'op://Work/GitHub/one-time password?attribute=otp'
   agent-browser auth login github
   agent-browser auth list
   agent-browser auth show github
@@ -2571,7 +2604,7 @@ Batch:
                              --bail stops on first error (default: continue all)
 
 Auth Vault:
-  auth save <name> [opts]    Save auth profile (--url, --username, --password/--password-stdin)
+  auth save <name> [opts]    Save auth profile (--url, --onepassword-item/--onepassword-vault or manual/advanced secret flags)
   auth login <name>          Login using saved credentials
   auth list                  List saved auth profiles
   auth show <name>           Show auth profile metadata

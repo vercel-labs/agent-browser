@@ -55,7 +55,7 @@ The profile directory stores:
 
 ## Import auth from your browser
 
-If you are already logged in to a site in Chrome, you can grab that auth state and reuse it in agent-browser. This is the fastest way to bypass login flows, OAuth, SSO, or 2FA.
+If you are already logged in to a site in Chrome, you can grab that auth state and reuse it in agent-browser. This is the fastest way to bypass complex login flows, OAuth, SSO, passkeys, or 2FA.
 
 **Step 1:** Start Chrome with remote debugging:
 
@@ -96,6 +96,21 @@ agent-browser --session-name myapp state load ./my-auth.json
 ```
 
 State files contain session tokens in plaintext. Add them to `.gitignore` and delete when no longer needed. For encryption at rest, see [State encryption](#state-encryption) below.
+
+## Auth vault with 1Password-backed login
+
+If the site uses a standard username/password form and an OTP field, you can also save an auth profile and let agent-browser resolve the username, password, and optional OTP from a single 1Password Login item at login time.
+
+```bash
+agent-browser auth save myapp \
+  --url https://app.example.com/login \
+  --onepassword-item MyApp \
+  --onepassword-vault Work
+
+agent-browser auth login myapp
+```
+
+This is a good fit for password + TOTP flows. If you need non-standard fields, agent-browser still supports advanced `--username-op`, `--password-op`, and `--otp-op` references. For OAuth, SSO, passkeys, CAPTCHAs, or unusual multi-step authentication, importing browser state is still the more reliable option.
 
 ## Session persistence
 

@@ -88,6 +88,12 @@ agent-browser --session-name myapp open https://app.example.com/dashboard
 ```bash
 echo "$PASSWORD" | agent-browser auth save myapp --url https://app.example.com/login --username user --password-stdin
 agent-browser auth login myapp
+
+# Or keep username / password / optional OTP in a 1Password Login item
+agent-browser auth save myapp \
+  --url https://app.example.com/login \
+  --onepassword-item MyApp \
+  --onepassword-vault Work
 ```
 
 **Option 5: State file (manual save/load)**
@@ -220,6 +226,19 @@ agent-browser wait --load networkidle
 # Save credentials once (encrypted with AGENT_BROWSER_ENCRYPTION_KEY)
 # Recommended: pipe password via stdin to avoid shell history exposure
 echo "pass" | agent-browser auth save github --url https://github.com/login --username user --password-stdin
+
+# Or keep the username, password, and optional OTP in a 1Password Login item
+agent-browser auth save github \
+  --url https://github.com/login \
+  --onepassword-item GitHub \
+  --onepassword-vault Work
+
+# Advanced: use field-level references when you need finer control
+agent-browser auth save github \
+  --url https://github.com/login \
+  --username-op op://Work/GitHub/username \
+  --password-op op://Work/GitHub/password \
+  --otp-op 'op://Work/GitHub/one-time password?attribute=otp'
 
 # Login using saved profile (LLM never sees password)
 agent-browser auth login github

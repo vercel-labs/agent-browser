@@ -476,23 +476,36 @@ async fn test_auth_save_and_show() {
     let result = auth::auth_save(
         "parity-roundtrip",
         "https://example.com",
-        "user",
-        "pass",
-        Some("input#user"),
-        None,
-        None,
+        auth::AuthSaveOptions {
+            one_password_item: Some("Example Login"),
+            one_password_vault: Some("Work"),
+            username_selector: Some("input#user"),
+            otp_selector: Some("input#otp"),
+            otp_submit_selector: Some("button.verify"),
+            ..Default::default()
+        },
     );
     assert!(result.is_ok());
 
     let show = auth::auth_show("parity-roundtrip");
     assert!(show.is_ok());
     let data = show.unwrap();
-    assert_eq!(data["profile"]["username"], "user");
+    assert_eq!(data["profile"]["username"], "");
+    assert_eq!(data["profile"]["onePasswordItem"], "Example Login");
+    assert_eq!(data["profile"]["onePasswordVault"], "Work");
+    assert_eq!(data["profile"]["usernameSource"], "1password-item");
     assert_eq!(data["profile"]["usernameSelector"], "input#user");
+    assert_eq!(data["profile"]["passwordSource"], "1password-item");
+    assert_eq!(data["profile"]["otpEnabled"], true);
+    assert_eq!(data["profile"]["otpSelector"], "input#otp");
 
     let full = auth::credentials_get_full("parity-roundtrip");
     assert!(full.is_ok());
-    assert_eq!(full.unwrap().password, "pass");
+    let full = full.unwrap();
+    assert_eq!(full.one_password_item.as_deref(), Some("Example Login"));
+    assert_eq!(full.one_password_vault.as_deref(), Some("Work"));
+    assert_eq!(full.password, "");
+    assert!(full.password_op_ref.is_none());
 
     // Cleanup
     let _ = auth::credentials_delete("parity-roundtrip");
