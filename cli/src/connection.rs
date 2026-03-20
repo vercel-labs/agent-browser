@@ -122,6 +122,8 @@ fn get_pid_path(session: &str) -> PathBuf {
 fn cleanup_stale_files(session: &str) {
     let pid_path = get_pid_path(session);
     let _ = fs::remove_file(&pid_path);
+    let stream_path = get_socket_dir().join(format!("{}.stream", session));
+    let _ = fs::remove_file(&stream_path);
 
     #[cfg(unix)]
     {

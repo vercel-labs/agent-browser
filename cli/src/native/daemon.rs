@@ -31,6 +31,9 @@ pub async fn run_daemon(session: &str) {
         let _ = fs::remove_file(&socket_path);
     }
 
+    let stream_path = socket_dir.join(format!("{}.stream", session));
+    let _ = fs::remove_file(&stream_path);
+
     if let Ok(days_str) = env::var("AGENT_BROWSER_STATE_EXPIRE_DAYS") {
         if let Ok(days) = days_str.parse::<u64>() {
             if days > 0 {
@@ -47,7 +50,6 @@ pub async fn run_daemon(session: &str) {
                 match StreamServer::start_without_client(port, session.to_string()).await {
                     Ok((stream_server, client_slot)) => {
                         stream_client = Some(client_slot.clone());
-                        let stream_path = socket_dir.join(format!("{}.stream", session));
                         if let Err(e) = fs::write(&stream_path, stream_server.port().to_string()) {
                             let _ =
                                 writeln!(std::io::stderr(), "Failed to write .stream file: {}", e);
@@ -80,7 +82,6 @@ pub async fn run_daemon(session: &str) {
 
     let _ = fs::remove_file(&socket_path);
     let _ = fs::remove_file(&pid_path);
-    let stream_path = socket_dir.join(format!("{}.stream", session));
     let _ = fs::remove_file(&stream_path);
 
     if let Err(e) = result {

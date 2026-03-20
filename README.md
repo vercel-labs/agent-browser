@@ -125,6 +125,9 @@ agent-browser pdf <path>              # Save as PDF
 agent-browser snapshot                # Accessibility tree with refs (best for AI)
 agent-browser eval <js>               # Run JavaScript (-b for base64, --stdin for piped input)
 agent-browser connect <port>          # Connect to browser via CDP
+agent-browser stream enable [--port <port>]  # Start runtime WebSocket streaming
+agent-browser stream status           # Show runtime streaming state and bound port
+agent-browser stream disable          # Stop runtime WebSocket streaming
 agent-browser close                   # Close browser (aliases: quit, exit)
 ```
 
@@ -925,13 +928,26 @@ Stream the browser viewport via WebSocket for live preview or "pair browsing" wh
 
 ### Enable Streaming
 
-Set the `AGENT_BROWSER_STREAM_PORT` environment variable:
+For an already-running session, enable streaming at runtime:
+
+```bash
+agent-browser stream enable
+agent-browser stream status
+agent-browser stream disable
+```
+
+`stream enable` binds an available localhost port automatically unless you pass `--port <port>`.
+Use `stream status` to inspect whether streaming is enabled, which port is active, whether a browser is attached, and whether screencasting is active.
+
+If you want streaming to be available immediately when the daemon starts, set `AGENT_BROWSER_STREAM_PORT` before the first command in that session:
 
 ```bash
 AGENT_BROWSER_STREAM_PORT=9223 agent-browser open example.com
 ```
 
-This starts a WebSocket server on the specified port that streams the browser viewport and accepts input events.
+The environment variable only affects daemon startup. For sessions that are already running, use `agent-browser stream enable` instead.
+
+Once enabled, the WebSocket server streams the browser viewport and accepts input events.
 
 ### WebSocket Protocol
 

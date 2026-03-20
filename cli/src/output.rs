@@ -99,6 +99,37 @@ fn format_storage_text(data: &serde_json::Value) -> Option<String> {
     Some(format!("{}: {}", key, format_storage_value(value)))
 }
 
+fn format_stream_status_text(action: Option<&str>, data: &serde_json::Value) -> Option<String> {
+    match action {
+        Some("stream_disable") => data
+            .get("disabled")
+            .and_then(|v| v.as_bool())
+            .filter(|disabled| *disabled)
+            .map(|_| "Streaming disabled".to_string()),
+        Some("stream_enable") | Some("stream_status") => {
+            let enabled = data.get("enabled").and_then(|v| v.as_bool())?;
+            if !enabled {
+                return Some("Streaming disabled".to_string());
+            }
+
+            let port = data.get("port").and_then(|v| v.as_u64())?;
+            let connected = data
+                .get("connected")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let screencasting = data
+                .get("screencasting")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
+            Some(format!(
+                "Streaming enabled on ws://127.0.0.1:{port}\nConnected: {connected}\nScreencasting: {screencasting}"
+            ))
+        }
+        _ => None,
+    }
+}
+
 pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &OutputOptions) {
     if opts.json {
         if opts.content_boundaries {
@@ -156,8 +187,7 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
                         dtype,
                         message
                     );
-                    if let Some(default_prompt) = data.get("defaultPrompt").and_then(|v| v.as_str())
-                    {
+                    if let Some(default_prompt) = data.get("defaultPrompt").and_then(|v| v.as_str()) {
                         println!("  Default prompt text: \"{}\"", default_prompt);
                     }
                     println!("  Use `dialog accept [text]` or `dialog dismiss` to resolve it");
@@ -167,6 +197,10 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
                 print_warning(resp);
                 return;
             }
+        }
+        if let Some(output) = format_stream_status_text(action, data) {
+            println!("{}", output);
+            return;
         }
         if action == Some("storage_get") {
             if let Some(output) = format_storage_text(data) {
@@ -2393,6 +2427,39 @@ Examples:
 "##
         }
 
+        // === Runtime streaming ===
+        "stream" => {
+            r##"
+agent-browser stream - Manage live WebSocket browser streaming
+
+Usage:
+  agent-browser stream enable [--port <port>]
+  agent-browser stream disable
+  agent-browser stream status
+
+Enables or disables the session-scoped WebSocket stream server without restarting
+an already-running daemon. If --port is omitted, agent-browser binds an
+available localhost port automatically and reports it back.
+
+Notes:
+  - 'stream enable' creates the WebSocket server.
+  - WebSocket clients trigger frame streaming automatically.
+  - 'screencast_start' and 'screencast_stop' still control explicit CDP screencasts.
+  - AGENT_BROWSER_STREAM_PORT only affects daemon startup; use 'stream enable'
+    for sessions that are already running.
+
+Global Options:
+  --json               Output as JSON
+  --session <name>     Use specific session
+
+Examples:
+  agent-browser stream status
+  agent-browser stream enable
+  agent-browser stream enable --port 9223
+  agent-browser stream disable
+"##
+        }
+
         // === iOS Commands ===
         "tap" => {
             r##"
@@ -2637,6 +2704,11 @@ Debug:
   inspect                    Open Chrome DevTools for the active page
   clipboard <op> [text]      Read/write clipboard (read, write, copy, paste)
 
+Streaming:
+  stream enable [--port <n>] Start runtime WebSocket streaming for this session
+  stream disable             Stop runtime WebSocket streaming
+  stream status              Show streaming status and active port
+
 Batch:
   batch [--bail]             Execute commands from stdin (JSON array of string arrays)
                              --bail stops on first error (default: continue all)
@@ -2790,6 +2862,8 @@ Examples:
   agent-browser wait --load networkidle  # Wait for slow pages to load
   agent-browser --cdp 9222 snapshot      # Connect via CDP port
   agent-browser --auto-connect snapshot  # Auto-discover running Chrome
+  agent-browser stream enable            # Start runtime streaming on an auto-selected port
+  agent-browser stream status            # Inspect runtime streaming state
   agent-browser --color-scheme dark open example.com  # Dark mode
   agent-browser --profile ~/.myapp open example.com    # Persistent profile
   agent-browser --session-name myapp open example.com  # Auto-save/restore state
@@ -2895,6 +2969,32 @@ pub fn print_version() {
 mod tests {
     use super::format_storage_text;
     use serde_json::json;
+
+    #[test]
+    fn test_format_stream_status_text_for_enabled_stream() {
+        let data = json!({
+            "enabled": true,
+            "port": 9223,
+            "connected": true,
+            "screencasting": false
+        });
+
+        let rendered = super::format_stream_status_text(Some("stream_status"), &data).unwrap();
+
+        assert_eq!(
+            rendered,
+            "Streaming enabled on ws://127.0.0.1:9223\nConnected: true\nScreencasting: false"
+        );
+    }
+
+    #[test]
+    fn test_format_stream_status_text_for_disabled_stream() {
+        let data = json!({ "enabled": false, "port": null, "connected": false, "screencasting": false });
+
+        let rendered = super::format_stream_status_text(Some("stream_status"), &data).unwrap();
+
+        assert_eq!(rendered, "Streaming disabled");
+    }
 
     #[test]
     fn test_format_storage_text_for_all_entries() {
