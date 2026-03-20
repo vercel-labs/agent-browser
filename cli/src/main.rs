@@ -102,7 +102,13 @@ fn matches_glob_pattern(pattern: &str, value: &str) -> bool {
         } else if pattern[pi] == '*' {
             let is_double_star = pi + 1 < pattern.len() && pattern[pi + 1] == '*';
             if is_double_star {
-                rec(pi + 2, vi, pattern, value, memo)
+                // Skip ** and optional trailing /
+                let skip = if pi + 2 < pattern.len() && pattern[pi + 2] == '/' {
+                    3
+                } else {
+                    2
+                };
+                rec(pi + skip, vi, pattern, value, memo)
                     || (vi < value.len() && rec(pi, vi + 1, pattern, value, memo))
             } else {
                 rec(pi + 1, vi, pattern, value, memo)
