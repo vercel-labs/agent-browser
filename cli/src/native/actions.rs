@@ -37,6 +37,19 @@ use super::webdriver::backend::{BrowserBackend, WebDriverBackend, WEBDRIVER_UNSU
 use super::webdriver::ios;
 use super::webdriver::safari;
 
+/// Wait strategy used by `auth_login` when navigating to the login page.
+///
+/// We intentionally use `Load` (instead of `NetworkIdle`) because many modern
+/// apps keep background requests active indefinitely (polling, analytics,
+/// websockets), which can prevent network-idle from ever resolving.
+///
+/// After navigation completes, `auth_login` explicitly waits for form selectors
+/// to appear before filling/clicking.
+pub const AUTH_LOGIN_WAIT_UNTIL: WaitUntil = WaitUntil::Load;
+
+/// Poll interval used while waiting for auth form selectors to appear.
+const AUTH_LOGIN_SELECTOR_POLL_INTERVAL_MS: u64 = 100;
+
 pub struct PendingConfirmation {
     pub action: String,
     pub cmd: Value,
@@ -5435,6 +5448,59 @@ async fn handle_http_credentials(cmd: &Value, state: &DaemonState) -> Result<Val
 // Auth handlers
 // ---------------------------------------------------------------------------
 
+/// Wait for any selector in `selectors` to appear and return the first match.
+///
+/// This is used by `auth_login` auto-detection so SPA login forms can render
+/// after initial navigation without requiring global network-idle.
+async fn wait_for_any_selector(
+    client: &super::cdp::client::CdpClient,
+    session_id: &str,
+    selectors: &[&str],
+    timeout_ms: u64,
+) -> Result<String, String> {
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
+
+    loop {
+        for selector in selectors {
+            let expression = format!(
+                "!!document.querySelector({})",
+                serde_json::to_string(selector).unwrap_or_default()
+            );
+
+            let result: super::cdp::types::EvaluateResult = client
+                .send_command_typed(
+                    "Runtime.evaluate",
+                    &super::cdp::types::EvaluateParams {
+                        expression,
+                        return_by_value: Some(true),
+                        await_promise: Some(true),
+                    },
+                    Some(session_id),
+                )
+                .await?;
+
+            if result
+                .result
+                .value
+                .as_ref()
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
+                return Ok((*selector).to_string());
+            }
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            return Err(format!("Wait timed out after {}ms", timeout_ms));
+        }
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(
+            AUTH_LOGIN_SELECTOR_POLL_INTERVAL_MS,
+        ))
+        .await;
+    }
+}
+
 async fn handle_auth_save(cmd: &Value) -> Result<Value, String> {
     let name = cmd
         .get("name")
@@ -5480,9 +5546,10 @@ async fn handle_auth_login(cmd: &Value, state: &mut DaemonState) -> Result<Value
     let password = cred.password;
 
     let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
-    mgr.navigate(&url, WaitUntil::Load).await?;
+    mgr.navigate(&url, AUTH_LOGIN_WAIT_UNTIL).await?;
 
     let session_id = mgr.active_session_id()?.to_string();
+    let auth_timeout_ms = mgr.default_timeout_ms();
 
     let auto_user_selectors = [
         "input[type=email]",
@@ -5515,22 +5582,24 @@ async fn handle_auth_login(cmd: &Value, state: &mut DaemonState) -> Result<Value
 
     // Find and fill username
     let user_sel = if let Some(s) = username_sel {
+        wait_for_selector(&mgr.client, &session_id, &s, "attached", auth_timeout_ms)
+            .await
+            .map_err(|_| format!("Timed out waiting for username selector '{}'", s))?;
         s
     } else {
-        let mut found = None;
-        for sel in &auto_user_selectors {
-            let js = format!(
-                "!!document.querySelector({})",
-                serde_json::to_string(sel).unwrap_or_default()
-            );
-            if let Ok(val) = mgr.evaluate(&js, None).await {
-                if val.as_bool().unwrap_or(false) {
-                    found = Some(sel.to_string());
-                    break;
-                }
-            }
-        }
-        found.ok_or("Could not find username field")?
+        wait_for_any_selector(
+            &mgr.client,
+            &session_id,
+            &auto_user_selectors,
+            auth_timeout_ms,
+        )
+        .await
+        .map_err(|_| {
+            format!(
+                "Timed out waiting for username field (tried selectors: {})",
+                auto_user_selectors.join(", ")
+            )
+        })?
     };
     interaction::fill(
         &mgr.client,
@@ -5543,6 +5612,15 @@ async fn handle_auth_login(cmd: &Value, state: &mut DaemonState) -> Result<Value
 
     // Find and fill password
     let pass_sel = password_sel.unwrap_or_else(|| "input[type=password]".to_string());
+    wait_for_selector(
+        &mgr.client,
+        &session_id,
+        &pass_sel,
+        "attached",
+        auth_timeout_ms,
+    )
+    .await
+    .map_err(|_| format!("Timed out waiting for password selector '{}'", pass_sel))?;
     interaction::fill(
         &mgr.client,
         &session_id,
@@ -5554,22 +5632,24 @@ async fn handle_auth_login(cmd: &Value, state: &mut DaemonState) -> Result<Value
 
     // Find and click submit
     let sub_sel = if let Some(s) = submit_sel {
+        wait_for_selector(&mgr.client, &session_id, &s, "attached", auth_timeout_ms)
+            .await
+            .map_err(|_| format!("Timed out waiting for submit selector '{}'", s))?;
         s
     } else {
-        let mut found = None;
-        for sel in &auto_submit_selectors {
-            let js = format!(
-                "!!document.querySelector({})",
-                serde_json::to_string(sel).unwrap_or_default()
-            );
-            if let Ok(val) = mgr.evaluate(&js, None).await {
-                if val.as_bool().unwrap_or(false) {
-                    found = Some(sel.to_string());
-                    break;
-                }
-            }
-        }
-        found.ok_or("Could not find submit button")?
+        wait_for_any_selector(
+            &mgr.client,
+            &session_id,
+            &auto_submit_selectors,
+            auth_timeout_ms,
+        )
+        .await
+        .map_err(|_| {
+            format!(
+                "Timed out waiting for submit button (tried selectors: {})",
+                auto_submit_selectors.join(", ")
+            )
+        })?
     };
     interaction::click(
         &mgr.client,
@@ -6654,6 +6734,17 @@ mod tests {
             patterns.len(),
             1,
             "Should not add a second wildcard when routes already contain one"
+        );
+    }
+
+    #[test]
+    fn test_auth_login_waits_for_load_event() {
+        use super::super::browser::WaitUntil;
+        assert_eq!(
+            super::AUTH_LOGIN_WAIT_UNTIL,
+            WaitUntil::Load,
+            "auth_login should navigate with Load and then wait for form \
+             selectors explicitly"
         );
     }
 }

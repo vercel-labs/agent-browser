@@ -1914,7 +1914,7 @@ Usage: agent-browser auth <subcommand> [args]
 
 Subcommands:
   save <name>              Save credentials for a login profile
-  login <name>             Login using saved credentials
+  login <name>             Login using saved credentials (waits for form fields)
   list                     List saved profiles (names and URLs only)
   show <name>              Show profile metadata (no passwords)
   delete <name>            Delete a saved profile
@@ -1927,6 +1927,10 @@ Save Options:
   --username-selector <s>  Custom CSS selector for username field
   --password-selector <s>  Custom CSS selector for password field
   --submit-selector <s>    Custom CSS selector for submit button
+
+Login behavior:
+  auth login waits for form selectors to appear before filling/clicking.
+  Selector wait timeout follows the default action timeout.
 
 Global Options:
   --json                   Output as JSON
@@ -2572,7 +2576,7 @@ Batch:
 
 Auth Vault:
   auth save <name> [opts]    Save auth profile (--url, --username, --password/--password-stdin)
-  auth login <name>          Login using saved credentials
+  auth login <name>          Login using saved credentials (waits for form fields)
   auth list                  List saved auth profiles
   auth show <name>           Show auth profile metadata
   auth delete <name>         Delete auth profile
