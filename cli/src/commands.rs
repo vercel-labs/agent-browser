@@ -1742,10 +1742,6 @@ fn parse_find(rest: &[&str], id: &str) -> Result<Value, ParseError> {
         usage: "find <locator> <value> [action] [text]",
     })?;
 
-    let name_idx = rest.iter().position(|&s| s == "--name");
-    let name = name_idx.and_then(|i| rest.get(i + 1).copied());
-    let exact = rest.contains(&"--exact");
-
     match *locator {
         "role" | "text" | "label" | "placeholder" | "alt" | "title" | "testid" | "first"
         | "last" => {
@@ -1765,10 +1761,41 @@ fn parse_find(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                 },
             })?;
             let subaction = rest.get(2).unwrap_or(&"click");
-            let fill_value = if rest.len() > 3 {
-                Some(rest[3..].join(" "))
-            } else {
+            let mut name: Option<&str> = None;
+            let mut exact = false;
+            let mut fill_parts: Vec<&str> = Vec::new();
+
+            if rest.len() > 3 {
+                let mut i = 3;
+                while i < rest.len() {
+                    match rest[i] {
+                        "--exact" => {
+                            exact = true;
+                            i += 1;
+                        }
+                        "--name" => {
+                            let n =
+                                rest.get(i + 1)
+                                    .ok_or_else(|| ParseError::MissingArguments {
+                                        context: format!("find {}", locator),
+                                        usage:
+                                            "find role <role> [action] [--name <name>] [--exact]",
+                                    })?;
+                            name = Some(*n);
+                            i += 2;
+                        }
+                        token => {
+                            fill_parts.push(token);
+                            i += 1;
+                        }
+                    }
+                }
+            }
+
+            let fill_value = if fill_parts.is_empty() {
                 None
+            } else {
+                Some(fill_parts.join(" "))
             };
 
             match *locator {
@@ -3322,6 +3349,21 @@ mod tests {
         assert_eq!(cmd["action"], "nth");
         assert_eq!(cmd["index"], 2);
         assert!(cmd.get("value").is_none());
+    }
+
+    #[test]
+    fn test_find_role_fill_does_not_include_flags_in_value() {
+        let cmd = parse_command(
+            &args("find role textbox fill hello --name username --exact"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "getbyrole");
+        assert_eq!(cmd["role"], "textbox");
+        assert_eq!(cmd["subaction"], "fill");
+        assert_eq!(cmd["name"], "username");
+        assert_eq!(cmd["exact"], true);
+        assert_eq!(cmd["value"], "hello");
     }
 
     // === Download Tests ===
