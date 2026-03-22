@@ -2077,7 +2077,7 @@ fn parse_set(rest: &[&str], id: &str) -> Result<Value, ParseError> {
 
 /// Parse network interception, request inspection, and HAR recording commands.
 fn parse_network(rest: &[&str], id: &str) -> Result<Value, ParseError> {
-    const VALID: &[&str] = &["route", "unroute", "requests", "har"];
+    const VALID: &[&str] = &["route", "unroute", "requests", "response", "har"];
 
     match rest.first().copied() {
         Some("route") => {
@@ -2104,6 +2104,19 @@ fn parse_network(rest: &[&str], id: &str) -> Result<Value, ParseError> {
             let mut cmd = json!({ "id": id, "action": "requests", "clear": clear });
             if let Some(f) = filter {
                 cmd["filter"] = json!(f);
+            }
+            Ok(cmd)
+        }
+        Some("response") => {
+            let url = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
+                context: "network response".to_string(),
+                usage: "network response <url-pattern> [--timeout <ms>]",
+            })?;
+            let mut cmd = json!({ "id": id, "action": "responsebody", "url": url });
+            if let Some(idx) = rest.iter().position(|&s| s == "--timeout") {
+                if let Some(ms) = rest.get(idx + 1).and_then(|s| s.parse::<u64>().ok()) {
+                    cmd["timeout"] = json!(ms);
+                }
             }
             Ok(cmd)
         }
@@ -2134,7 +2147,7 @@ fn parse_network(rest: &[&str], id: &str) -> Result<Value, ParseError> {
         }),
         None => Err(ParseError::MissingArguments {
             context: "network".to_string(),
-            usage: "network <route|unroute|requests|har> [args...]",
+            usage: "network <route|unroute|requests|response|har> [args...]",
         }),
     }
 }
@@ -2738,6 +2751,31 @@ mod tests {
     #[test]
     fn test_network_har_requires_subcommand() {
         let result = parse_command(&args("network har"), &default_flags());
+        assert!(matches!(result, Err(ParseError::MissingArguments { .. })));
+    }
+
+    #[test]
+    fn test_network_response() {
+        let cmd = parse_command(&args("network response /api/data"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "responsebody");
+        assert_eq!(cmd["url"], "/api/data");
+    }
+
+    #[test]
+    fn test_network_response_with_timeout() {
+        let cmd = parse_command(
+            &args("network response /api/data --timeout 5000"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "responsebody");
+        assert_eq!(cmd["url"], "/api/data");
+        assert_eq!(cmd["timeout"], 5000);
+    }
+
+    #[test]
+    fn test_network_response_missing_url() {
+        let result = parse_command(&args("network response"), &default_flags());
         assert!(matches!(result, Err(ParseError::MissingArguments { .. })));
     }
 
