@@ -76,6 +76,7 @@ pub struct LaunchOptions {
     pub ignore_https_errors: bool,
     pub color_scheme: Option<String>,
     pub download_path: Option<String>,
+    pub ignore_default_args: Option<Vec<String>>,
 }
 
 impl Default for LaunchOptions {
@@ -94,6 +95,7 @@ impl Default for LaunchOptions {
             ignore_https_errors: false,
             color_scheme: None,
             download_path: None,
+            ignore_default_args: None,
         }
     }
 }
@@ -123,6 +125,14 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
         "--password-store=basic".to_string(),
         "--use-mock-keychain".to_string(),
     ];
+
+    // Remove any default args the user asked to exclude
+    if let Some(ref excluded) = options.ignore_default_args {
+        args.retain(|arg| {
+            let flag = arg.split('=').next().unwrap_or(arg);
+            !excluded.iter().any(|e| e == flag)
+        });
+    }
 
     let has_extensions = options
         .extensions

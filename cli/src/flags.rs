@@ -87,6 +87,7 @@ pub struct Config {
     pub screenshot_quality: Option<u32>,
     pub screenshot_format: Option<String>,
     pub idle_timeout: Option<String>,
+    pub ignore_default_args: Option<String>,
 }
 
 impl Config {
@@ -132,6 +133,7 @@ impl Config {
             screenshot_quality: other.screenshot_quality.or(self.screenshot_quality),
             screenshot_format: other.screenshot_format.or(self.screenshot_format),
             idle_timeout: other.idle_timeout.or(self.idle_timeout),
+            ignore_default_args: other.ignore_default_args.or(self.ignore_default_args),
         }
     }
 }
@@ -217,6 +219,7 @@ fn extract_config_path(args: &[String]) -> Option<Option<String>> {
         "--screenshot-quality",
         "--screenshot-format",
         "--idle-timeout",
+        "--ignore-default-args",
     ];
     let mut i = 0;
     while i < args.len() {
@@ -298,6 +301,7 @@ pub struct Flags {
     pub screenshot_quality: Option<u32>,
     pub screenshot_format: Option<String>,
     pub idle_timeout: Option<String>, // Canonical milliseconds string for AGENT_BROWSER_IDLE_TIMEOUT_MS
+    pub ignore_default_args: Option<Vec<String>>,
 
     // Track which launch-time options were explicitly passed via CLI
     // (as opposed to being set only via environment variables)
@@ -419,6 +423,15 @@ pub fn parse_flags(args: &[String]) -> Flags {
             "AGENT_BROWSER_IDLE_TIMEOUT_MS",
         )
         .or(config.idle_timeout),
+        ignore_default_args: env::var("AGENT_BROWSER_IGNORE_DEFAULT_ARGS")
+            .ok()
+            .or(config.ignore_default_args)
+            .map(|s| {
+                s.split(',')
+                    .map(|a| a.trim().to_string())
+                    .filter(|a| !a.is_empty())
+                    .collect()
+            }),
         cli_executable_path: false,
         cli_extensions: false,
         cli_profile: false,
@@ -474,6 +487,17 @@ pub fn parse_flags(args: &[String]) -> Flags {
                             e
                         ),
                     }
+                    i += 1;
+                }
+            }
+            "--ignore-default-args" => {
+                if let Some(s) = args.get(i + 1) {
+                    flags.ignore_default_args = Some(
+                        s.split(',')
+                            .map(|a| a.trim().to_string())
+                            .filter(|a| !a.is_empty())
+                            .collect(),
+                    );
                     i += 1;
                 }
             }
@@ -749,6 +773,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--screenshot-quality",
         "--screenshot-format",
         "--idle-timeout",
+        "--ignore-default-args",
     ];
 
     let mut i = 0;
@@ -1364,5 +1389,54 @@ mod tests {
         };
         let merged = user.merge(project);
         assert_eq!(merged.extensions, Some(vec!["/ext2".to_string()]));
+    }
+
+    // === --ignore-default-args tests ===
+
+    #[test]
+    fn test_parse_ignore_default_args_flag() {
+        let flags = parse_flags(&args(
+            "--ignore-default-args --disable-gpu,--no-sandbox open example.com",
+        ));
+        assert_eq!(
+            flags.ignore_default_args,
+            Some(vec![
+                "--disable-gpu".to_string(),
+                "--no-sandbox".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn test_parse_ignore_default_args_single_value() {
+        let flags = parse_flags(&args(
+            "--ignore-default-args --disable-gpu open example.com",
+        ));
+        assert_eq!(
+            flags.ignore_default_args,
+            Some(vec!["--disable-gpu".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_parse_ignore_default_args_not_set() {
+        let flags = parse_flags(&args("open example.com"));
+        assert!(flags.ignore_default_args.is_none());
+    }
+
+    #[test]
+    fn test_clean_args_removes_ignore_default_args() {
+        let cleaned = clean_args(&args(
+            "--ignore-default-args --disable-gpu,--no-sandbox open example.com",
+        ));
+        assert_eq!(cleaned, vec!["open", "example.com"]);
+    }
+
+    #[test]
+    fn test_clean_args_removes_ignore_default_args_with_other_flags() {
+        let cleaned = clean_args(&args(
+            "--json --ignore-default-args --disable-gpu --headed open example.com",
+        ));
+        assert_eq!(cleaned, vec!["open", "example.com"]);
     }
 }
