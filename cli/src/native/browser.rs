@@ -95,6 +95,21 @@ fn is_internal_chrome_target(url: &str) -> bool {
         || url.starts_with("devtools://")
 }
 
+pub(crate) fn should_track_target(target: &TargetInfo) -> bool {
+    (target.target_type == "page" || target.target_type == "webview")
+        && (target.url.is_empty() || !is_internal_chrome_target(&target.url))
+}
+
+fn update_page_target_info_in_pages(pages: &mut [PageInfo], target: &TargetInfo) -> bool {
+    if let Some(page) = pages.iter_mut().find(|p| p.target_id == target.target_id) {
+        page.url = target.url.clone();
+        page.title = target.title.clone();
+        page.target_type = target.target_type.clone();
+        return true;
+    }
+    false
+}
+
 /// Converts common error messages into AI-friendly, actionable descriptions.
 pub fn to_ai_friendly_error(error: &str) -> String {
     let lower = error.to_lowercase();
@@ -334,11 +349,7 @@ impl BrowserManager {
         let page_targets: Vec<TargetInfo> = result
             .target_infos
             .into_iter()
-            .filter(|t| {
-                (t.target_type == "page" || t.target_type == "webview")
-                    && !t.url.is_empty()
-                    && !is_internal_chrome_target(&t.url)
-            })
+            .filter(should_track_target)
             .collect();
 
         if page_targets.is_empty() {
@@ -1072,6 +1083,10 @@ impl BrowserManager {
         self.active_page_index = index;
     }
 
+    pub fn update_page_target_info(&mut self, target: &TargetInfo) -> bool {
+        update_page_target_info_in_pages(&mut self.pages, target)
+    }
+
     pub fn remove_page_by_target_id(&mut self, target_id: &str) {
         if let Some(pos) = self.pages.iter().position(|p| p.target_id == target_id) {
             self.pages.remove(pos);
@@ -1327,6 +1342,57 @@ async fn resolve_cdp_url(input: &str) -> Result<String, String> {
 mod tests {
     use super::*;
     use tokio::time::sleep;
+
+    #[test]
+    fn test_should_track_popup_target_with_empty_url() {
+        let target = TargetInfo {
+            target_id: "popup-1".to_string(),
+            target_type: "page".to_string(),
+            title: String::new(),
+            url: String::new(),
+            attached: None,
+            browser_context_id: None,
+        };
+
+        assert!(should_track_target(&target));
+    }
+
+    #[test]
+    fn test_should_not_track_internal_chrome_target() {
+        let target = TargetInfo {
+            target_id: "chrome-tab".to_string(),
+            target_type: "page".to_string(),
+            title: "New Tab".to_string(),
+            url: "chrome://newtab/".to_string(),
+            attached: None,
+            browser_context_id: None,
+        };
+
+        assert!(!should_track_target(&target));
+    }
+
+    #[test]
+    fn test_update_page_target_info_in_pages_updates_existing_page() {
+        let mut pages = vec![PageInfo {
+            target_id: "popup-1".to_string(),
+            session_id: "session-1".to_string(),
+            url: String::new(),
+            title: String::new(),
+            target_type: "page".to_string(),
+        }];
+        let target = TargetInfo {
+            target_id: "popup-1".to_string(),
+            target_type: "page".to_string(),
+            title: "Popup".to_string(),
+            url: "https://example.com/popup".to_string(),
+            attached: None,
+            browser_context_id: None,
+        };
+
+        assert!(update_page_target_info_in_pages(&mut pages, &target));
+        assert_eq!(pages[0].url, "https://example.com/popup");
+        assert_eq!(pages[0].title, "Popup");
+    }
 
     #[test]
     fn test_validate_launch_options_extensions_and_cdp() {

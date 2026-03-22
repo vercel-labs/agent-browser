@@ -9,13 +9,13 @@ use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use tokio::sync::{broadcast, oneshot, RwLock};
 
 use super::auth;
-use super::browser::{BrowserManager, WaitUntil};
+use super::browser::{should_track_target, BrowserManager, WaitUntil};
 use super::cdp::chrome::LaunchOptions;
 use super::cdp::client::CdpClient;
 use super::cdp::types::{
     AttachToTargetParams, AttachToTargetResult, CdpEvent, ConsoleApiCalledEvent,
     CreateTargetResult, DispatchMouseEventParams, ExceptionThrownEvent, TargetCreatedEvent,
-    TargetDestroyedEvent,
+    TargetDestroyedEvent, TargetInfoChangedEvent,
 };
 use super::cookies;
 use super::diff;
@@ -137,6 +137,7 @@ pub struct MouseState {
 struct DrainedEvents {
     pending_acks: Vec<i64>,
     new_targets: Vec<TargetCreatedEvent>,
+    changed_targets: Vec<TargetInfoChangedEvent>,
     destroyed_targets: Vec<String>,
     /// Cross-origin iframe (frame_id, session_id) pairs from Target.attachedToTarget.
     attached_iframe_sessions: Vec<(String, String)>,
@@ -379,6 +380,7 @@ impl DaemonState {
 
         let mut pending_acks: Vec<i64> = Vec::new();
         let mut new_targets: Vec<TargetCreatedEvent> = Vec::new();
+        let mut changed_targets: Vec<TargetInfoChangedEvent> = Vec::new();
         let mut destroyed_targets: Vec<String> = Vec::new();
         let mut attached_iframe_sessions: Vec<(String, String)> = Vec::new();
         let mut detached_iframe_sessions: Vec<String> = Vec::new();
@@ -392,10 +394,7 @@ impl DaemonState {
                             if let Ok(te) =
                                 serde_json::from_value::<TargetCreatedEvent>(event.params.clone())
                             {
-                                if (te.target_info.target_type == "page"
-                                    || te.target_info.target_type == "webview")
-                                    && !te.target_info.url.is_empty()
-                                {
+                                if should_track_target(&te.target_info) {
                                     let already_tracked = self
                                         .browser
                                         .as_ref()
@@ -403,6 +402,16 @@ impl DaemonState {
                                     if !already_tracked {
                                         new_targets.push(te);
                                     }
+                                }
+                            }
+                            continue;
+                        }
+                        "Target.targetInfoChanged" => {
+                            if let Ok(te) = serde_json::from_value::<TargetInfoChangedEvent>(
+                                event.params.clone(),
+                            ) {
+                                if should_track_target(&te.target_info) {
+                                    changed_targets.push(te);
                                 }
                             }
                             continue;
@@ -687,6 +696,7 @@ impl DaemonState {
         DrainedEvents {
             pending_acks,
             new_targets,
+            changed_targets,
             destroyed_targets,
             attached_iframe_sessions,
             detached_iframe_sessions,
@@ -716,6 +726,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
     let DrainedEvents {
         pending_acks,
         new_targets,
+        changed_targets,
         destroyed_targets,
         attached_iframe_sessions,
         detached_iframe_sessions,
@@ -792,6 +803,12 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
                     target_type: te.target_info.target_type.clone(),
                 });
             }
+        }
+    }
+
+    for te in &changed_targets {
+        if let Some(ref mut mgr) = state.browser {
+            mgr.update_page_target_info(&te.target_info);
         }
     }
 
