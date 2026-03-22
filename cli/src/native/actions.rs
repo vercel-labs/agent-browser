@@ -1156,23 +1156,6 @@ fn launch_options_from_env() -> LaunchOptions {
     }
 }
 
-async fn daemon_state_from_env(state: &mut DaemonState) {
-    if let Ok(name) = env::var("AGENT_BROWSER_SESSION_NAME") {
-        if !name.is_empty() {
-            state.session_name = Some(name);
-        }
-    }
-    if let Ok(domains) = env::var("AGENT_BROWSER_ALLOWED_DOMAINS") {
-        if !domains.is_empty() {
-            let mut df = state.domain_filter.write().await;
-            *df = Some(DomainFilter::new(&domains));
-        }
-    }
-    if state.policy.is_none() {
-        state.policy = ActionPolicy::load_if_exists();
-    }
-}
-
 async fn try_auto_restore_state(state: &mut DaemonState) {
     let session_name = match state.session_name.as_deref() {
         Some(n) if !n.is_empty() => n.to_string(),
@@ -4223,75 +4206,6 @@ fn build_role_selector(role: &str, name: Option<&str>, exact: bool) -> String {
     }
 }
 
-async fn resolve_semantic_locator(
-    client: &super::cdp::client::CdpClient,
-    session_id: &str,
-    strategy: &str,
-    value: &str,
-    exact: bool,
-) -> Result<String, String> {
-    let js = match strategy {
-        "role" => {
-            format!(
-                r#"(() => {{
-                    const els = document.querySelectorAll('[role="{}"]');
-                    if (els.length === 0) return null;
-                    return 'found';
-                }})()"#,
-                value
-            )
-        }
-        "text" => {
-            let match_fn = if exact {
-                format!(
-                    "el.textContent.trim() === {}",
-                    serde_json::to_string(value).unwrap_or_default()
-                )
-            } else {
-                format!(
-                    "el.textContent.includes({})",
-                    serde_json::to_string(value).unwrap_or_default()
-                )
-            };
-            format!(
-                r#"(() => {{
-                    const all = document.querySelectorAll('*');
-                    for (const el of all) {{
-                        if (el.children.length === 0 && {}) return 'found';
-                    }}
-                    return null;
-                }})()"#,
-                match_fn
-            )
-        }
-        _ => return Err(format!("Unknown semantic strategy: {}", strategy)),
-    };
-
-    let result: super::cdp::types::EvaluateResult = client
-        .send_command_typed(
-            "Runtime.evaluate",
-            &super::cdp::types::EvaluateParams {
-                expression: js,
-                return_by_value: Some(true),
-                await_promise: Some(false),
-            },
-            Some(session_id),
-        )
-        .await?;
-
-    if result
-        .result
-        .value
-        .as_ref()
-        .map(|v| v.is_null())
-        .unwrap_or(true)
-    {
-        return Err(format!("No element found for {} '{}'", strategy, value));
-    }
-
-    Ok(value.to_string())
-}
-
 async fn handle_getbyrole(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
@@ -4363,14 +4277,13 @@ async fn handle_getbyrole(cmd: &Value, state: &mut DaemonState) -> Result<Value,
 
     // Clean up the marker attribute
     if let Some(ref browser) = state.browser {
-        if let Ok(sid) = browser.active_session_id() {
+        if let Ok(_sid) = browser.active_session_id() {
             let _ = browser
                 .evaluate(
                     "document.querySelector('[data-agent-browser-located]')?.removeAttribute('data-agent-browser-located')",
                     None,
                 )
                 .await;
-            let _ = sid;
         }
     }
 
@@ -4594,7 +4507,6 @@ async fn handle_nth(cmd: &Value, state: &mut DaemonState) -> Result<Value, Strin
 
 async fn handle_find(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let _session_id = mgr.active_session_id()?.to_string();
     let selector = cmd
         .get("selector")
         .and_then(|v| v.as_str())
@@ -4743,7 +4655,6 @@ async fn handle_pause(_state: &DaemonState) -> Result<Value, String> {
 
 async fn handle_multiselect(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let _session_id = mgr.active_session_id()?.to_string();
     let selector = cmd
         .get("selector")
         .and_then(|v| v.as_str())
