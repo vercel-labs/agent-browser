@@ -309,6 +309,7 @@ pub struct Flags {
     pub cli_user_agent: bool,
     pub cli_proxy: bool,
     pub cli_proxy_bypass: bool,
+    pub cli_ignore_https_errors: bool,
     pub cli_allow_file_access: bool,
     pub cli_annotate: bool,
     pub cli_download_path: bool,
@@ -427,6 +428,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
         cli_user_agent: false,
         cli_proxy: false,
         cli_proxy_bypass: false,
+        cli_ignore_https_errors: false,
         cli_allow_file_access: false,
         cli_annotate: false,
         cli_download_path: false,
@@ -554,6 +556,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
             "--ignore-https-errors" => {
                 let (val, consumed) = parse_bool_arg(args, i);
                 flags.ignore_https_errors = val;
+                flags.cli_ignore_https_errors = true;
                 if consumed {
                     i += 1;
                 }
@@ -1294,6 +1297,7 @@ mod tests {
     fn test_ignore_https_errors_false() {
         let flags = parse_flags(&args("--ignore-https-errors false open"));
         assert!(!flags.ignore_https_errors);
+        assert!(flags.cli_ignore_https_errors);
     }
 
     #[test]
