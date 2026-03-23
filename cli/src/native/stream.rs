@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpListener;
-use tokio::sync::{broadcast, Mutex, Notify, RwLock};
+use tokio::sync::{broadcast, watch, Mutex, Notify, RwLock};
 use tokio_tungstenite::tungstenite::Message;
 
 use super::cdp::client::CdpClient;
@@ -46,6 +46,9 @@ pub struct StreamServer {
     screencasting: Arc<Mutex<bool>>,
     viewport_width: Arc<Mutex<u32>>,
     viewport_height: Arc<Mutex<u32>>,
+    shutdown_tx: watch::Sender<bool>,
+    accept_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    cdp_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl StreamServer {
@@ -99,6 +102,24 @@ impl StreamServer {
         (w, h)
     }
 
+    /// Override the cached screencast state for explicit CLI start/stop commands.
+    pub async fn set_screencasting(&self, active: bool) {
+        let mut guard = self.screencasting.lock().await;
+        *guard = active;
+    }
+
+    /// Shut down the accept loop and background CDP listener, releasing the bound port.
+    pub async fn shutdown(&self) {
+        let _ = self.shutdown_tx.send(true);
+
+        if let Some(task) = self.accept_task.lock().await.take() {
+            let _ = task.await;
+        }
+        if let Some(task) = self.cdp_task.lock().await.take() {
+            let _ = task.await;
+        }
+    }
+
     async fn start_inner(
         preferred_port: u16,
         client_slot: Arc<RwLock<Option<Arc<CdpClient>>>>,
@@ -121,6 +142,7 @@ impl StreamServer {
         let cdp_session_id = Arc::new(RwLock::new(None::<String>));
         let viewport_width = Arc::new(Mutex::new(1280u32));
         let viewport_height = Arc::new(Mutex::new(720u32));
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
         let frame_tx_clone = frame_tx.clone();
         let client_count_clone = client_count.clone();
@@ -132,7 +154,8 @@ impl StreamServer {
         // WebSocket accept loop
         let vw_clone = viewport_width.clone();
         let vh_clone = viewport_height.clone();
-        tokio::spawn(async move {
+        let accept_shutdown_rx = shutdown_rx.clone();
+        let accept_task = tokio::spawn(async move {
             accept_loop(
                 listener,
                 frame_tx_clone,
@@ -143,6 +166,7 @@ impl StreamServer {
                 cdp_session_clone,
                 vw_clone,
                 vh_clone,
+                accept_shutdown_rx,
             )
             .await;
         });
@@ -156,7 +180,7 @@ impl StreamServer {
         let cdp_session_bg = cdp_session_id.clone();
         let vw_bg = viewport_width.clone();
         let vh_bg = viewport_height.clone();
-        tokio::spawn(async move {
+        let cdp_task = tokio::spawn(async move {
             cdp_event_loop(
                 frame_tx_bg,
                 client_slot_bg,
@@ -166,6 +190,7 @@ impl StreamServer {
                 cdp_session_bg,
                 vw_bg,
                 vh_bg,
+                shutdown_rx,
             )
             .await;
         });
@@ -181,6 +206,9 @@ impl StreamServer {
                 screencasting,
                 viewport_width,
                 viewport_height,
+                shutdown_tx,
+                accept_task: Mutex::new(Some(accept_task)),
+                cdp_task: Mutex::new(Some(cdp_task)),
             },
             client_slot,
         ))
@@ -252,32 +280,47 @@ async fn accept_loop(
     cdp_session_id: Arc<RwLock<Option<String>>>,
     viewport_width: Arc<Mutex<u32>>,
     viewport_height: Arc<Mutex<u32>>,
+    mut shutdown_rx: watch::Receiver<bool>,
 ) {
-    while let Ok((stream, addr)) = listener.accept().await {
-        let frame_rx = frame_tx.subscribe();
-        let client_count = client_count.clone();
-        let client_slot = client_slot.clone();
-        let client_notify = client_notify.clone();
-        let screencasting = screencasting.clone();
-        let cdp_session_id = cdp_session_id.clone();
-        let vw = viewport_width.clone();
-        let vh = viewport_height.clone();
+    loop {
+        tokio::select! {
+            changed = shutdown_rx.changed() => {
+                if changed.is_err() || *shutdown_rx.borrow() {
+                    break;
+                }
+            }
+            accept_result = listener.accept() => {
+                let Ok((stream, addr)) = accept_result else {
+                    break;
+                };
+                let frame_rx = frame_tx.subscribe();
+                let client_count = client_count.clone();
+                let client_slot = client_slot.clone();
+                let client_notify = client_notify.clone();
+                let screencasting = screencasting.clone();
+                let cdp_session_id = cdp_session_id.clone();
+                let vw = viewport_width.clone();
+                let vh = viewport_height.clone();
+                let shutdown_rx = shutdown_rx.clone();
 
-        tokio::spawn(async move {
-            handle_ws_client(
-                stream,
-                addr,
-                frame_rx,
-                client_count,
-                client_slot,
-                client_notify,
-                screencasting,
-                cdp_session_id,
-                vw,
-                vh,
-            )
-            .await;
-        });
+                tokio::spawn(async move {
+                    handle_ws_client(
+                        stream,
+                        addr,
+                        frame_rx,
+                        client_count,
+                        client_slot,
+                        client_notify,
+                        screencasting,
+                        cdp_session_id,
+                        vw,
+                        vh,
+                        shutdown_rx,
+                    )
+                    .await;
+                });
+            }
+        }
     }
 }
 
@@ -293,6 +336,7 @@ async fn handle_ws_client(
     cdp_session_id: Arc<RwLock<Option<String>>>,
     viewport_width: Arc<Mutex<u32>>,
     viewport_height: Arc<Mutex<u32>>,
+    mut shutdown_rx: watch::Receiver<bool>,
 ) {
     let callback =
         |req: &tokio_tungstenite::tungstenite::handshake::server::Request,
@@ -347,6 +391,12 @@ async fn handle_ws_client(
 
     loop {
         tokio::select! {
+            changed = shutdown_rx.changed() => {
+                if changed.is_err() || *shutdown_rx.borrow() {
+                    let _ = ws_tx.send(Message::Close(None)).await;
+                    break;
+                }
+            }
             frame = frame_rx.recv() => {
                 match frame {
                     Ok(data) => {
@@ -398,10 +448,28 @@ async fn cdp_event_loop(
     cdp_session_id: Arc<RwLock<Option<String>>>,
     viewport_width: Arc<Mutex<u32>>,
     viewport_height: Arc<Mutex<u32>>,
+    mut shutdown_rx: watch::Receiver<bool>,
 ) {
     loop {
         // Wait until we're notified of a client/connection change
-        client_notify.notified().await;
+        tokio::select! {
+            changed = shutdown_rx.changed() => {
+                if changed.is_err() || *shutdown_rx.borrow() {
+                    let session_id = cdp_session_id.read().await.clone();
+                    if *screencasting.lock().await {
+                        if let Some(ref client) = *client_slot.read().await {
+                            let _ = client
+                                .send_command_no_params("Page.stopScreencast", session_id.as_deref())
+                                .await;
+                        }
+                        let mut sc = screencasting.lock().await;
+                        *sc = false;
+                    }
+                    return;
+                }
+            }
+            _ = client_notify.notified() => {}
+        }
 
         // Check if we have WS clients and a CDP client
         let count = *client_count.lock().await;
@@ -453,6 +521,17 @@ async fn cdp_event_loop(
                 // Process CDP events in real-time until client disconnects or CDP closes
                 loop {
                     tokio::select! {
+                        changed = shutdown_rx.changed() => {
+                            if changed.is_err() || *shutdown_rx.borrow() {
+                                let session_id = cdp_session_id.read().await.clone();
+                                let _ = client_arc
+                                    .send_command_no_params("Page.stopScreencast", session_id.as_deref())
+                                    .await;
+                                let mut sc = screencasting.lock().await;
+                                *sc = false;
+                                return;
+                            }
+                        }
                         event = event_rx.recv() => {
                             match event {
                                 Ok(evt) => {

@@ -173,7 +173,7 @@ These environment variables configure additional daemon and runtime behavior:
     <tr><td><code>AGENT_BROWSER_ENCRYPTION_KEY</code></td><td>64-char hex key for AES-256-GCM session encryption.</td><td>(none)</td></tr>
     <tr><td><code>AGENT_BROWSER_EXTENSIONS</code></td><td>Comma-separated browser extension paths. Extensions work in both headed and headless mode.</td><td>(none)</td></tr>
     <tr><td><code>AGENT_BROWSER_HEADED</code></td><td>Show browser window instead of running headless (<code>1</code> to enable).</td><td>(disabled)</td></tr>
-    <tr><td><code>AGENT_BROWSER_STREAM_PORT</code></td><td>Enable WebSocket streaming on the specified port (e.g., <code>9223</code>).</td><td>(disabled)</td></tr>
+    <tr><td><code>AGENT_BROWSER_STREAM_PORT</code></td><td>Enable WebSocket streaming at daemon startup on the specified port (e.g., <code>9223</code>). For an already-running session, use <code>agent-browser stream enable</code>.</td><td>(disabled)</td></tr>
     <tr><td><code>AGENT_BROWSER_IDLE_TIMEOUT_MS</code></td><td>Auto-shutdown the daemon after N ms of inactivity (no commands received). Useful for ephemeral environments.</td><td>(disabled)</td></tr>
     <tr><td><code>AGENT_BROWSER_IOS_DEVICE</code></td><td>Default iOS device name for the <code>ios</code> provider.</td><td>(none)</td></tr>
     <tr><td><code>AGENT_BROWSER_IOS_UDID</code></td><td>Default iOS device UDID for the <code>ios</code> provider.</td><td>(none)</td></tr>

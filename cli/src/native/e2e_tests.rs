@@ -8,8 +8,11 @@
 //!   cargo test e2e -- --ignored --test-threads=1
 
 use base64::{engine::general_purpose::STANDARD, Engine};
+use futures_util::StreamExt;
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+use crate::test_utils::EnvGuard;
 
 use super::actions::{execute_command, DaemonState};
 
@@ -188,6 +191,127 @@ async fn e2e_lightpanda_auto_launch_can_open_page() {
     let resp = execute_command(&json!({ "id": "2", "action": "close" }), &mut state).await;
     assert_success(&resp);
     assert_eq!(get_data(&resp)["closed"], true);
+}
+
+// ---------------------------------------------------------------------------
+// Runtime stream lifecycle
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore]
+async fn e2e_runtime_stream_enable_before_launch_attaches_and_disables() {
+    let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "AGENT_BROWSER_SESSION"]);
+    let socket_dir = std::env::temp_dir().join(format!(
+        "agent-browser-e2e-stream-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&socket_dir).expect("socket dir should be created");
+    guard.set(
+        "AGENT_BROWSER_SOCKET_DIR",
+        socket_dir.to_str().expect("socket dir should be utf-8"),
+    );
+    guard.set("AGENT_BROWSER_SESSION", "e2e-runtime-stream");
+
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(&json!({ "id": "1", "action": "stream_status" }), &mut state).await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["enabled"], false);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "stream_enable", "port": 0 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let port = get_data(&resp)["port"]
+        .as_u64()
+        .expect("stream enable should report the bound port");
+    assert_eq!(get_data(&resp)["connected"], false);
+
+    let stream_path = socket_dir.join("e2e-runtime-stream.stream");
+    assert!(
+        stream_path.exists(),
+        "runtime enable should create .stream metadata"
+    );
+
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}"))
+        .await
+        .expect("websocket client should connect to runtime stream");
+
+    let initial = tokio::time::timeout(tokio::time::Duration::from_secs(5), ws.next())
+        .await
+        .expect("websocket should emit initial status")
+        .expect("websocket should stay open")
+        .expect("websocket message should be valid");
+    let initial_text = initial.into_text().expect("initial message should be text");
+    let initial_status: Value =
+        serde_json::from_str(&initial_text).expect("status JSON should parse");
+    assert_eq!(initial_status["type"], "status");
+    assert_eq!(initial_status["connected"], false);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "navigate", "url": "data:text/html,<h1>Runtime Stream</h1>" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let mut observed_connected = false;
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(10);
+    while tokio::time::Instant::now() < deadline {
+        let Some(message) = tokio::time::timeout(tokio::time::Duration::from_secs(2), ws.next())
+            .await
+            .expect("websocket should emit status after browser launch")
+        else {
+            continue;
+        };
+        let message = message.expect("websocket message should be valid");
+        if !message.is_text() {
+            continue;
+        }
+        let parsed: Value =
+            serde_json::from_str(message.to_text().expect("text message should be readable"))
+                .expect("runtime stream payload should be valid JSON");
+        if parsed.get("type") == Some(&json!("status"))
+            && parsed.get("connected") == Some(&json!(true))
+        {
+            observed_connected = true;
+            break;
+        }
+    }
+    assert!(
+        observed_connected,
+        "runtime stream should report connected=true after browser launch"
+    );
+
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "stream_disable" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["disabled"], true);
+    assert!(
+        !stream_path.exists(),
+        "stream disable should remove .stream metadata"
+    );
+
+    let close_message = tokio::time::timeout(tokio::time::Duration::from_secs(5), ws.next())
+        .await
+        .expect("websocket should close after disable");
+    assert!(
+        close_message.is_none() || close_message.expect("ws result should exist").is_ok(),
+        "websocket should shut down cleanly when the runtime stream is disabled"
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+    let _ = std::fs::remove_dir_all(&socket_dir);
 }
 
 // ---------------------------------------------------------------------------
