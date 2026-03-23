@@ -392,9 +392,8 @@ impl DaemonState {
                             if let Ok(te) =
                                 serde_json::from_value::<TargetCreatedEvent>(event.params.clone())
                             {
-                                if (te.target_info.target_type == "page"
-                                    || te.target_info.target_type == "webview")
-                                    && !te.target_info.url.is_empty()
+                                if te.target_info.target_type == "page"
+                                    || te.target_info.target_type == "webview"
                                 {
                                     let already_tracked = self
                                         .browser

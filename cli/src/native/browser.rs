@@ -336,7 +336,6 @@ impl BrowserManager {
             .into_iter()
             .filter(|t| {
                 (t.target_type == "page" || t.target_type == "webview")
-                    && !t.url.is_empty()
                     && !is_internal_chrome_target(&t.url)
             })
             .collect();
