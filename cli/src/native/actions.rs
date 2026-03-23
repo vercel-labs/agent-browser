@@ -2687,7 +2687,6 @@ async fn handle_state_load(cmd: &Value, state: &DaemonState) -> Result<Value, St
     Ok(json!({ "loaded": true, "path": path }))
 }
 
-
 // ---------------------------------------------------------------------------
 // Phase 6 handlers
 // ---------------------------------------------------------------------------

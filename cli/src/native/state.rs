@@ -485,7 +485,7 @@ pub fn dispatch_state_command(cmd: &Value) -> Option<Result<Value, String>> {
             cmd.get("path")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| "Missing 'path' parameter".to_string())
-                .and_then(|p| state_show(p)),
+                .and_then(state_show),
         ),
         "state_clear" => {
             let path = cmd.get("path").and_then(|v| v.as_str());
@@ -680,5 +680,4 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), "Missing 'name' parameter");
     }
-
 }

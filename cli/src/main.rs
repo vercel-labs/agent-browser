@@ -884,7 +884,7 @@ fn run_batch(flags: &Flags, bail: bool) {
         return;
     }
 
-    let output_opts = OutputOptions::from_flags(&flags);
+    let output_opts = OutputOptions::from_flags(flags);
 
     let mut results: Vec<serde_json::Value> = Vec::new();
     let mut had_error = false;
