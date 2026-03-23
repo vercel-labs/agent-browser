@@ -129,7 +129,7 @@ pub struct PageInfo {
     pub target_type: String, // "page" or "webview"
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WaitUntil {
     Load,
     DomContentLoaded,
@@ -420,6 +420,21 @@ impl BrowserManager {
         self.client
             .send_command_no_params("Network.enable", Some(session_id))
             .await?;
+        // Enable auto-attach for cross-origin iframe support.
+        // flatten: true gives each iframe its own session_id.
+        // Ignored on engines that don't support it (e.g. Lightpanda).
+        let _ = self
+            .client
+            .send_command(
+                "Target.setAutoAttach",
+                Some(json!({
+                    "autoAttach": true,
+                    "waitForDebuggerOnStart": false,
+                    "flatten": true
+                })),
+                Some(session_id),
+            )
+            .await;
         Ok(())
     }
 
@@ -590,6 +605,10 @@ impl BrowserManager {
 
     pub fn has_pages(&self) -> bool {
         !self.pages.is_empty()
+    }
+
+    pub fn default_timeout_ms(&self) -> u64 {
+        self.default_timeout_ms
     }
 
     /// Checks if the CDP connection is alive by sending a simple command.

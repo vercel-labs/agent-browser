@@ -7,7 +7,7 @@ use super::cdp::client::CdpClient;
 use super::cdp::types::{
     AXNode, AXProperty, AXValue, EvaluateParams, EvaluateResult, GetFullAXTreeResult,
 };
-use super::element::RefMap;
+use super::element::{resolve_ax_session, RefMap};
 
 const INTERACTIVE_ROLES: &[&str] = &[
     "button",
@@ -191,6 +191,7 @@ pub async fn take_snapshot(
     options: &SnapshotOptions,
     ref_map: &mut RefMap,
     frame_id: Option<&str>,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<String, String> {
     client
         .send_command_no_params("DOM.enable", Some(session_id))
@@ -254,13 +255,24 @@ pub async fn take_snapshot(
             None
         };
 
-    let ax_params = if let Some(fid) = frame_id {
-        serde_json::json!({ "frameId": fid })
-    } else {
-        serde_json::json!({})
-    };
+    let (ax_params, effective_session_id) =
+        resolve_ax_session(frame_id, session_id, iframe_sessions);
+    // Ensure domains are enabled on the iframe session (defensive fallback
+    // in case the attach-time enable in execute_command was missed).
+    if effective_session_id != session_id {
+        let _ = client
+            .send_command_no_params("DOM.enable", Some(effective_session_id))
+            .await;
+        let _ = client
+            .send_command_no_params("Accessibility.enable", Some(effective_session_id))
+            .await;
+    }
     let ax_tree: GetFullAXTreeResult = client
-        .send_command_typed("Accessibility.getFullAXTree", &ax_params, Some(session_id))
+        .send_command_typed(
+            "Accessibility.getFullAXTree",
+            &ax_params,
+            Some(effective_session_id),
+        )
         .await?;
 
     let (tree_nodes, root_indices) = build_tree(&ax_tree.nodes);
@@ -400,6 +412,7 @@ pub async fn take_snapshot(
                     options,
                     ref_map,
                     Some(&child_fid),
+                    iframe_sessions,
                 ))
                 .await
                 {
@@ -1270,5 +1283,51 @@ mod tests {
         let set = build_dedup_set(&ref_map);
         assert_eq!(set.len(), 1);
         assert!(set.contains("ok"));
+    }
+
+    // -----------------------------------------------------------------------
+    // resolve_ax_session tests (Issue #925 regression guard)
+    // Cross-origin iframes must use a dedicated session without frameId.
+    // Same-origin iframes must use the parent session with frameId.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_cross_origin_iframe_uses_dedicated_session() {
+        let parent_session = "parent-session";
+        let iframe_frame_id = "cross-origin-iframe-frame";
+        let iframe_session = "cross-origin-iframe-session";
+
+        let mut iframe_sessions = HashMap::new();
+        iframe_sessions.insert(iframe_frame_id.to_string(), iframe_session.to_string());
+
+        let (params, session) =
+            resolve_ax_session(Some(iframe_frame_id), parent_session, &iframe_sessions);
+
+        assert_eq!(session, iframe_session);
+        assert_eq!(params, serde_json::json!({}));
+    }
+
+    #[test]
+    fn test_same_origin_iframe_uses_parent_session_with_frame_id() {
+        let parent_session = "parent-session";
+        let iframe_frame_id = "same-origin-iframe-frame";
+        let iframe_sessions = HashMap::new();
+
+        let (params, session) =
+            resolve_ax_session(Some(iframe_frame_id), parent_session, &iframe_sessions);
+
+        assert_eq!(session, parent_session);
+        assert_eq!(params, serde_json::json!({ "frameId": iframe_frame_id }));
+    }
+
+    #[test]
+    fn test_main_frame_uses_parent_session() {
+        let parent_session = "parent-session";
+        let iframe_sessions = HashMap::new();
+
+        let (params, session) = resolve_ax_session(None, parent_session, &iframe_sessions);
+
+        assert_eq!(session, parent_session);
+        assert_eq!(params, serde_json::json!({}));
     }
 }

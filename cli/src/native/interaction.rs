@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde_json::Value;
 
 use super::cdp::client::CdpClient;
@@ -11,9 +13,17 @@ pub async fn click(
     selector_or_ref: &str,
     button: &str,
     click_count: i32,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<(), String> {
-    let (x, y) = resolve_element_center(client, session_id, ref_map, selector_or_ref).await?;
-    dispatch_click(client, session_id, x, y, button, click_count).await
+    let (x, y, effective_session_id) = resolve_element_center(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
+    dispatch_click(client, &effective_session_id, x, y, button, click_count).await
 }
 
 pub async fn dblclick(
@@ -21,8 +31,18 @@ pub async fn dblclick(
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<(), String> {
-    click(client, session_id, ref_map, selector_or_ref, "left", 2).await
+    click(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        "left",
+        2,
+        iframe_sessions,
+    )
+    .await
 }
 
 pub async fn hover(
@@ -30,8 +50,16 @@ pub async fn hover(
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<(), String> {
-    let (x, y) = resolve_element_center(client, session_id, ref_map, selector_or_ref).await?;
+    let (x, y, effective_session_id) = resolve_element_center(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
     client
         .send_command_typed::<_, Value>(
             "Input.dispatchMouseEvent",
@@ -46,7 +74,7 @@ pub async fn hover(
                 delta_y: None,
                 modifiers: None,
             },
-            Some(session_id),
+            Some(&effective_session_id),
         )
         .await?;
     Ok(())
@@ -58,8 +86,16 @@ pub async fn fill(
     ref_map: &RefMap,
     selector_or_ref: &str,
     value: &str,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<(), String> {
-    let object_id = resolve_element_object_id(client, session_id, ref_map, selector_or_ref).await?;
+    let (object_id, effective_session_id) = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
 
     // Focus the element
     client
@@ -72,7 +108,7 @@ pub async fn fill(
                 return_by_value: Some(true),
                 await_promise: Some(false),
             },
-            Some(session_id),
+            Some(&effective_session_id),
         )
         .await?;
 
@@ -92,11 +128,11 @@ pub async fn fill(
                 return_by_value: Some(true),
                 await_promise: Some(false),
             },
-            Some(session_id),
+            Some(&effective_session_id),
         )
         .await?;
 
-    // Insert text
+    // Insert text (keyboard input dispatched at page level, use parent session_id)
     client
         .send_command_typed::<_, Value>(
             "Input.insertText",
@@ -119,8 +155,16 @@ pub async fn type_text(
     text: &str,
     clear: bool,
     delay_ms: Option<u64>,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<(), String> {
-    let object_id = resolve_element_object_id(client, session_id, ref_map, selector_or_ref).await?;
+    let (object_id, effective_session_id) = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
 
     // Focus
     client
@@ -133,7 +177,7 @@ pub async fn type_text(
                 return_by_value: Some(true),
                 await_promise: Some(false),
             },
-            Some(session_id),
+            Some(&effective_session_id),
         )
         .await?;
 
@@ -153,7 +197,7 @@ pub async fn type_text(
                     return_by_value: Some(true),
                     await_promise: Some(false),
                 },
-                Some(session_id),
+                Some(&effective_session_id),
             )
             .await?;
     }
@@ -283,9 +327,11 @@ pub async fn scroll(
     selector_or_ref: Option<&str>,
     delta_x: f64,
     delta_y: f64,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<(), String> {
     if let Some(sel) = selector_or_ref {
-        let object_id = resolve_element_object_id(client, session_id, ref_map, sel).await?;
+        let (object_id, effective_session_id) =
+            resolve_element_object_id(client, session_id, ref_map, sel, iframe_sessions).await?;
         let js = "function(dx, dy) { this.scrollBy(dx, dy); }".to_string();
         client
             .send_command_typed::<_, Value>(
@@ -306,7 +352,7 @@ pub async fn scroll(
                     return_by_value: Some(true),
                     await_promise: Some(false),
                 },
-                Some(session_id),
+                Some(&effective_session_id),
             )
             .await?;
     } else {
@@ -332,8 +378,16 @@ pub async fn select_option(
     ref_map: &RefMap,
     selector_or_ref: &str,
     values: &[String],
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<(), String> {
-    let object_id = resolve_element_object_id(client, session_id, ref_map, selector_or_ref).await?;
+    let (object_id, effective_session_id) = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
 
     let js = r#"function(vals) {
             const options = Array.from(this.options);
@@ -357,7 +411,7 @@ pub async fn select_option(
                 return_by_value: Some(true),
                 await_promise: Some(false),
             },
-            Some(session_id),
+            Some(&effective_session_id),
         )
         .await?;
 
@@ -369,18 +423,48 @@ pub async fn check(
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<(), String> {
-    let is_checked =
-        super::element::is_element_checked(client, session_id, ref_map, selector_or_ref).await?;
+    let is_checked = super::element::is_element_checked(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
     if !is_checked {
-        click(client, session_id, ref_map, selector_or_ref, "left", 1).await?;
+        click(
+            client,
+            session_id,
+            ref_map,
+            selector_or_ref,
+            "left",
+            1,
+            iframe_sessions,
+        )
+        .await?;
 
         // Verify the click changed the state (Playwright parity: _setChecked re-checks).
         // If the coordinate-based click missed (e.g. hidden input, overlay), retry
         // with a JS .click() on the element and its associated input.
-        if !super::element::is_element_checked(client, session_id, ref_map, selector_or_ref).await?
+        if !super::element::is_element_checked(
+            client,
+            session_id,
+            ref_map,
+            selector_or_ref,
+            iframe_sessions,
+        )
+        .await?
         {
-            js_click_checkbox(client, session_id, ref_map, selector_or_ref).await?;
+            js_click_checkbox(
+                client,
+                session_id,
+                ref_map,
+                selector_or_ref,
+                iframe_sessions,
+            )
+            .await?;
         }
     }
     Ok(())
@@ -391,15 +475,46 @@ pub async fn uncheck(
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<(), String> {
-    let is_checked =
-        super::element::is_element_checked(client, session_id, ref_map, selector_or_ref).await?;
+    let is_checked = super::element::is_element_checked(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
     if is_checked {
-        click(client, session_id, ref_map, selector_or_ref, "left", 1).await?;
+        click(
+            client,
+            session_id,
+            ref_map,
+            selector_or_ref,
+            "left",
+            1,
+            iframe_sessions,
+        )
+        .await?;
 
         // Same verify-and-retry as check().
-        if super::element::is_element_checked(client, session_id, ref_map, selector_or_ref).await? {
-            js_click_checkbox(client, session_id, ref_map, selector_or_ref).await?;
+        if super::element::is_element_checked(
+            client,
+            session_id,
+            ref_map,
+            selector_or_ref,
+            iframe_sessions,
+        )
+        .await?
+        {
+            js_click_checkbox(
+                client,
+                session_id,
+                ref_map,
+                selector_or_ref,
+                iframe_sessions,
+            )
+            .await?;
         }
     }
     Ok(())
@@ -419,8 +534,16 @@ async fn js_click_checkbox(
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<(), String> {
-    let object_id = resolve_element_object_id(client, session_id, ref_map, selector_or_ref).await?;
+    let (object_id, effective_session_id) = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
 
     let js = r#"function() {
             var el = this;
@@ -456,7 +579,7 @@ async fn js_click_checkbox(
                 return_by_value: Some(true),
                 await_promise: Some(false),
             },
-            Some(session_id),
+            Some(&effective_session_id),
         )
         .await?;
 
@@ -468,8 +591,16 @@ pub async fn focus(
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<(), String> {
-    let object_id = resolve_element_object_id(client, session_id, ref_map, selector_or_ref).await?;
+    let (object_id, effective_session_id) = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
 
     client
         .send_command_typed::<_, Value>(
@@ -481,7 +612,7 @@ pub async fn focus(
                 return_by_value: Some(true),
                 await_promise: Some(false),
             },
-            Some(session_id),
+            Some(&effective_session_id),
         )
         .await?;
 
@@ -493,8 +624,16 @@ pub async fn clear(
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<(), String> {
-    let object_id = resolve_element_object_id(client, session_id, ref_map, selector_or_ref).await?;
+    let (object_id, effective_session_id) = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
 
     client
         .send_command_typed::<_, Value>(
@@ -512,7 +651,7 @@ pub async fn clear(
                 return_by_value: Some(true),
                 await_promise: Some(false),
             },
-            Some(session_id),
+            Some(&effective_session_id),
         )
         .await?;
 
@@ -524,8 +663,16 @@ pub async fn select_all(
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<(), String> {
-    let object_id = resolve_element_object_id(client, session_id, ref_map, selector_or_ref).await?;
+    let (object_id, effective_session_id) = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
 
     client
         .send_command_typed::<_, Value>(
@@ -549,7 +696,7 @@ pub async fn select_all(
                 return_by_value: Some(true),
                 await_promise: Some(false),
             },
-            Some(session_id),
+            Some(&effective_session_id),
         )
         .await?;
 
@@ -561,8 +708,16 @@ pub async fn scroll_into_view(
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<(), String> {
-    let object_id = resolve_element_object_id(client, session_id, ref_map, selector_or_ref).await?;
+    let (object_id, effective_session_id) = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
 
     client
         .send_command_typed::<_, Value>(
@@ -576,7 +731,7 @@ pub async fn scroll_into_view(
                 return_by_value: Some(true),
                 await_promise: Some(false),
             },
-            Some(session_id),
+            Some(&effective_session_id),
         )
         .await?;
 
@@ -590,8 +745,16 @@ pub async fn dispatch_event(
     selector_or_ref: &str,
     event_type: &str,
     event_init: Option<&Value>,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<(), String> {
-    let object_id = resolve_element_object_id(client, session_id, ref_map, selector_or_ref).await?;
+    let (object_id, effective_session_id) = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
 
     let init_json = event_init
         .map(|v| serde_json::to_string(v).unwrap_or("{}".to_string()))
@@ -613,7 +776,7 @@ pub async fn dispatch_event(
                 return_by_value: Some(true),
                 await_promise: Some(false),
             },
-            Some(session_id),
+            Some(&effective_session_id),
         )
         .await?;
 
@@ -625,8 +788,16 @@ pub async fn highlight(
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<(), String> {
-    let object_id = resolve_element_object_id(client, session_id, ref_map, selector_or_ref).await?;
+    let (object_id, effective_session_id) = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
 
     client
         .send_command_typed::<_, Value>(
@@ -647,7 +818,7 @@ pub async fn highlight(
                 return_by_value: Some(true),
                 await_promise: Some(false),
             },
-            Some(session_id),
+            Some(&effective_session_id),
         )
         .await?;
 
@@ -659,8 +830,16 @@ pub async fn tap_touch(
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<(), String> {
-    let (x, y) = resolve_element_center(client, session_id, ref_map, selector_or_ref).await?;
+    let (x, y, effective_session_id) = resolve_element_center(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
 
     client
         .send_command(
@@ -669,7 +848,7 @@ pub async fn tap_touch(
                 "type": "touchStart",
                 "touchPoints": [{ "x": x, "y": y }],
             })),
-            Some(session_id),
+            Some(&effective_session_id),
         )
         .await?;
 
@@ -680,7 +859,7 @@ pub async fn tap_touch(
                 "type": "touchEnd",
                 "touchPoints": [],
             })),
-            Some(session_id),
+            Some(&effective_session_id),
         )
         .await?;
 

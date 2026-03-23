@@ -1,6 +1,6 @@
 [package]
 name = "agent-browser"
-version = "0.21.2"
+version = "0.21.4"
 edition = "2021"
 description = "Fast browser automation CLI for AI agents"
 license = "Apache-2.0"
@@ -26,6 +26,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 sha2 = "0.10"
 aes-gcm = "0.10"
 async-trait = "0.1"
+socket2 = "0.6"
 similar = "2"
 zip = { version = "8.2.0", default-features = false, features = ["deflate"] }
 time = { version = "0.3", features = ["formatting"] }

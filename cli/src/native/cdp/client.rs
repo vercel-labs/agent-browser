@@ -12,6 +12,10 @@ use super::types::{CdpCommand, CdpEvent, CdpMessage};
 
 type PendingMap = Arc<Mutex<HashMap<u64, oneshot::Sender<CdpMessage>>>>;
 
+/// Interval between WebSocket ping frames sent to keep the connection alive
+/// through intermediate proxies (reverse proxies, load balancers, service meshes).
+const WS_KEEPALIVE_INTERVAL_SECS: u64 = 30;
+
 /// Raw incoming CDP message (text) broadcast to all subscribers.
 /// Used by the inspect proxy to forward responses and events to DevTools.
 #[derive(Debug, Clone)]
@@ -36,6 +40,7 @@ pub struct CdpClient {
     event_tx: broadcast::Sender<CdpEvent>,
     raw_tx: broadcast::Sender<RawCdpMessage>,
     _reader_handle: tokio::task::JoinHandle<()>,
+    _keepalive_handle: tokio::task::JoinHandle<()>,
 }
 
 impl CdpClient {
@@ -54,6 +59,13 @@ impl CdpClient {
                 .await
                 .map_err(|e| format!("CDP WebSocket connect failed: {}", e))?;
 
+        // Enable TCP SO_KEEPALIVE on the underlying socket. This matches the
+        // behavior of Playwright's WebSocket transport (pre-v0.20.0) which used
+        // Node.js HTTP agents with keepAlive: true. TCP-level keepalive probes
+        // maintain the connection at the transport layer, complementing the
+        // WebSocket-level Ping frames sent by the keepalive task below.
+        enable_tcp_keepalive(ws_stream.get_ref());
+
         let (ws_tx, mut ws_rx) = ws_stream.split();
         let ws_tx = Arc::new(Mutex::new(ws_tx));
 
@@ -64,6 +76,9 @@ impl CdpClient {
         let pending_clone = pending.clone();
         let event_tx_clone = event_tx.clone();
         let raw_tx_clone = raw_tx.clone();
+
+        // Notify used to stop the keepalive task when the reader loop exits.
+        let (cancel_tx, mut cancel_rx) = tokio::sync::watch::channel(false);
 
         let reader_handle = tokio::spawn(async move {
             while let Some(msg) = ws_rx.next().await {
@@ -76,6 +91,7 @@ impl CdpClient {
                         Err(_) => continue,
                     },
                     Ok(Message::Close(_)) => break,
+                    Ok(Message::Pong(_)) => continue,
                     Ok(_) => continue,
                     Err(_) => break,
                 };
@@ -120,6 +136,28 @@ impl CdpClient {
             // command senders so callers get an immediate channel-closed error
             // instead of waiting for the 30-second timeout.
             pending_clone.lock().await.clear();
+
+            // Stop the keepalive task — the connection is gone.
+            let _ = cancel_tx.send(true);
+        });
+
+        // Spawn a keepalive task that sends WebSocket Ping frames at a regular
+        // interval. This prevents intermediate proxies (Envoy, nginx, OpenResty,
+        // cloud load balancers) from closing idle WebSocket connections. If the
+        // send fails, the connection is dead and we stop pinging.
+        let keepalive_tx = ws_tx.clone();
+        let keepalive_handle = tokio::spawn(async move {
+            let interval = std::time::Duration::from_secs(WS_KEEPALIVE_INTERVAL_SECS);
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep(interval) => {}
+                    _ = cancel_rx.changed() => break,
+                }
+                let mut tx = keepalive_tx.lock().await;
+                if tx.send(Message::Ping(Vec::new())).await.is_err() {
+                    break;
+                }
+            }
         });
 
         Ok(Self {
@@ -129,6 +167,7 @@ impl CdpClient {
             event_tx,
             raw_tx,
             _reader_handle: reader_handle,
+            _keepalive_handle: keepalive_handle,
         })
     }
 
@@ -264,4 +303,27 @@ impl InspectProxyHandle {
     pub fn subscribe_raw(&self) -> broadcast::Receiver<RawCdpMessage> {
         self.raw_tx.subscribe()
     }
+}
+
+/// Enable TCP SO_KEEPALIVE on the underlying socket of a WebSocket connection.
+/// This is best-effort: failures are silently ignored since the WebSocket-level
+/// Ping keepalive provides the primary connection liveness mechanism.
+fn enable_tcp_keepalive(stream: &tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>) {
+    let tcp_stream = match stream {
+        tokio_tungstenite::MaybeTlsStream::Plain(s) => s,
+        tokio_tungstenite::MaybeTlsStream::Rustls(s) => s.get_ref().0,
+        _ => return,
+    };
+
+    // SockRef borrows the fd without taking ownership.
+    let sock = socket2::SockRef::from(tcp_stream);
+    let keepalive = socket2::TcpKeepalive::new().with_time(std::time::Duration::from_secs(30));
+
+    // with_interval sets TCP_KEEPINTVL — the time between probes after the
+    // first keepalive probe goes unanswered. Available on most platforms
+    // (Linux, macOS, Windows, FreeBSD, etc.) but not OpenBSD or Haiku.
+    #[cfg(not(any(target_os = "openbsd", target_os = "haiku")))]
+    let keepalive = keepalive.with_interval(std::time::Duration::from_secs(10));
+
+    let _ = sock.set_tcp_keepalive(&keepalive);
 }

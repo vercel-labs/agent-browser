@@ -147,11 +147,15 @@ pub async fn resolve_element_center(
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
-) -> Result<(f64, f64), String> {
+    iframe_sessions: &HashMap<String, String>,
+) -> Result<(f64, f64, String), String> {
     if let Some(ref_id) = parse_ref(selector_or_ref) {
         let entry = ref_map
             .get(&ref_id)
             .ok_or_else(|| format!("Unknown ref: {}", ref_id))?;
+
+        let effective_session_id =
+            resolve_frame_session(entry.frame_id.as_deref(), session_id, iframe_sessions);
 
         // Try cached backend_node_id first (fast path)
         if let Some(backend_node_id) = entry.backend_node_id {
@@ -163,25 +167,26 @@ pub async fn resolve_element_center(
                         node_id: None,
                         object_id: None,
                     },
-                    Some(session_id),
+                    Some(effective_session_id),
                 )
                 .await;
 
             if let Ok(r) = result {
-                return Ok(box_model_center(&r.model));
+                let (x, y) = box_model_center(&r.model);
+                return Ok((x, y, effective_session_id.to_string()));
             }
             // backend_node_id is stale; re-query the accessibility tree below
         }
 
         // Fallback: re-query the accessibility tree to find a fresh node by role/name
-        let ref_frame_id = entry.frame_id.clone();
         let fresh_id = find_node_id_by_role_name(
             client,
             session_id,
             &entry.role,
             &entry.name,
             entry.nth,
-            ref_frame_id.as_deref(),
+            entry.frame_id.as_deref(),
+            iframe_sessions,
         )
         .await?;
         let result: DomGetBoxModelResult = client
@@ -192,14 +197,16 @@ pub async fn resolve_element_center(
                     node_id: None,
                     object_id: None,
                 },
-                Some(session_id),
+                Some(effective_session_id),
             )
             .await?;
-        return Ok(box_model_center(&result.model));
+        let (x, y) = box_model_center(&result.model);
+        return Ok((x, y, effective_session_id.to_string()));
     }
 
     // CSS selector
-    resolve_by_selector(client, session_id, selector_or_ref).await
+    let (x, y) = resolve_by_selector(client, session_id, selector_or_ref).await?;
+    Ok((x, y, session_id.to_string()))
 }
 
 pub async fn resolve_element_object_id(
@@ -207,11 +214,15 @@ pub async fn resolve_element_object_id(
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
-) -> Result<String, String> {
+    iframe_sessions: &HashMap<String, String>,
+) -> Result<(String, String), String> {
     if let Some(ref_id) = parse_ref(selector_or_ref) {
         let entry = ref_map
             .get(&ref_id)
             .ok_or_else(|| format!("Unknown ref: {}", ref_id))?;
+
+        let effective_session_id =
+            resolve_frame_session(entry.frame_id.as_deref(), session_id, iframe_sessions);
 
         // Try cached backend_node_id first (fast path)
         if let Some(backend_node_id) = entry.backend_node_id {
@@ -223,27 +234,27 @@ pub async fn resolve_element_object_id(
                         node_id: None,
                         object_group: Some("agent-browser".to_string()),
                     },
-                    Some(session_id),
+                    Some(effective_session_id),
                 )
                 .await;
 
             if let Ok(r) = result {
-                if let Some(oid) = r.object.object_id {
-                    return Ok(oid);
+                if let Some(object_id) = r.object.object_id {
+                    return Ok((object_id, effective_session_id.to_string()));
                 }
             }
             // backend_node_id is stale; re-query the accessibility tree below
         }
 
         // Fallback: re-query the accessibility tree to find a fresh node by role/name
-        let ref_frame_id = entry.frame_id.clone();
         let fresh_id = find_node_id_by_role_name(
             client,
             session_id,
             &entry.role,
             &entry.name,
             entry.nth,
-            ref_frame_id.as_deref(),
+            entry.frame_id.as_deref(),
+            iframe_sessions,
         )
         .await?;
         let result: DomResolveNodeResult = client
@@ -254,20 +265,18 @@ pub async fn resolve_element_object_id(
                     node_id: None,
                     object_group: Some("agent-browser".to_string()),
                 },
-                Some(session_id),
+                Some(effective_session_id),
             )
             .await?;
-        return result
+        let object_id = result
             .object
             .object_id
-            .ok_or_else(|| format!("No objectId for ref {}", ref_id));
+            .ok_or_else(|| format!("No objectId for ref {}", ref_id))?;
+        return Ok((object_id, effective_session_id.to_string()));
     }
 
-    // CSS selector fallback
-    let js = format!(
-        "document.querySelector({})",
-        serde_json::to_string(selector_or_ref).unwrap_or_default()
-    );
+    // Selector fallback (CSS or XPath)
+    let js = build_find_element_js(selector_or_ref);
     let result: EvaluateResult = client
         .send_command_typed(
             "Runtime.evaluate",
@@ -280,10 +289,44 @@ pub async fn resolve_element_object_id(
         )
         .await?;
 
-    result
+    let object_id = result
         .result
         .object_id
-        .ok_or_else(|| format!("Element not found: {}", selector_or_ref))
+        .ok_or_else(|| format!("Element not found: {}", selector_or_ref))?;
+    Ok((object_id, session_id.to_string()))
+}
+
+/// Determine which CDP session and parameters to use for an AX tree query.
+/// Cross-origin iframes have a dedicated session (no frameId needed);
+/// same-origin iframes use the parent session with a frameId parameter.
+pub(super) fn resolve_ax_session<'a>(
+    frame_id: Option<&str>,
+    session_id: &'a str,
+    iframe_sessions: &'a HashMap<String, String>,
+) -> (serde_json::Value, &'a str) {
+    if let Some(frame_id) = frame_id {
+        if let Some(iframe_sid) = iframe_sessions.get(frame_id) {
+            (serde_json::json!({}), iframe_sid.as_str())
+        } else {
+            (serde_json::json!({ "frameId": frame_id }), session_id)
+        }
+    } else {
+        (serde_json::json!({}), session_id)
+    }
+}
+
+/// Resolve the effective CDP session for an element's frame.
+/// If the element's frame_id has a dedicated cross-origin iframe session, return it.
+/// Otherwise, return the parent session.
+fn resolve_frame_session<'a>(
+    frame_id: Option<&str>,
+    session_id: &'a str,
+    iframe_sessions: &'a HashMap<String, String>,
+) -> &'a str {
+    frame_id
+        .and_then(|fid| iframe_sessions.get(fid))
+        .map(|s| s.as_str())
+        .unwrap_or(session_id)
 }
 
 /// Re-query the accessibility tree to find a node matching role+name+nth,
@@ -297,14 +340,16 @@ async fn find_node_id_by_role_name(
     name: &str,
     nth: Option<usize>,
     frame_id: Option<&str>,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<i64, String> {
-    let ax_params = if let Some(fid) = frame_id {
-        serde_json::json!({ "frameId": fid })
-    } else {
-        serde_json::json!({})
-    };
+    let (ax_params, effective_session_id) =
+        resolve_ax_session(frame_id, session_id, iframe_sessions);
     let ax_tree: GetFullAXTreeResult = client
-        .send_command_typed("Accessibility.getFullAXTree", &ax_params, Some(session_id))
+        .send_command_typed(
+            "Accessibility.getFullAXTree",
+            &ax_params,
+            Some(effective_session_id),
+        )
         .await?;
 
     let nth_index = nth.unwrap_or(0);
@@ -347,20 +392,54 @@ fn extract_ax_string(value: &Option<AXValue>) -> String {
     }
 }
 
+/// Build a JS expression that finds a DOM element by CSS selector or XPath.
+fn build_find_element_js(selector: &str) -> String {
+    if let Some(xpath) = selector.strip_prefix("xpath=") {
+        format!(
+            "document.evaluate({}, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue",
+            serde_json::to_string(xpath).unwrap_or_default()
+        )
+    } else {
+        format!(
+            "document.querySelector({})",
+            serde_json::to_string(selector).unwrap_or_default()
+        )
+    }
+}
+
+/// Build a JS expression that counts matching DOM elements by CSS selector or XPath.
+fn build_count_elements_js(selector: &str) -> String {
+    if let Some(xpath) = selector.strip_prefix("xpath=") {
+        format!(
+            "document.evaluate({}, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null).snapshotLength",
+            serde_json::to_string(xpath).unwrap_or_default()
+        )
+    } else {
+        format!(
+            "document.querySelectorAll({}).length",
+            serde_json::to_string(selector).unwrap_or_default()
+        )
+    }
+}
+
+fn build_selector_js(selector: &str) -> String {
+    let find_expr = build_find_element_js(selector);
+    format!(
+        r#"(() => {{
+            const el = {find_expr};
+            if (!el) return null;
+            const rect = el.getBoundingClientRect();
+            return {{ x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 }};
+        }})()"#,
+    )
+}
+
 async fn resolve_by_selector(
     client: &CdpClient,
     session_id: &str,
     selector: &str,
 ) -> Result<(f64, f64), String> {
-    let js = format!(
-        r#"(() => {{
-            const el = document.querySelector({sel});
-            if (!el) return null;
-            const rect = el.getBoundingClientRect();
-            return {{ x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 }};
-        }})()"#,
-        sel = serde_json::to_string(selector).unwrap_or_default(),
-    );
+    let js = build_selector_js(selector);
 
     let result: EvaluateResult = client
         .send_command_typed(
@@ -400,8 +479,16 @@ pub async fn get_element_text(
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<String, String> {
-    let object_id = resolve_element_object_id(client, session_id, ref_map, selector_or_ref).await?;
+    let (object_id, effective_session_id) = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
 
     let result: EvaluateResult = client
         .send_command_typed(
@@ -414,7 +501,7 @@ pub async fn get_element_text(
                 return_by_value: Some(true),
                 await_promise: Some(false),
             },
-            Some(session_id),
+            Some(&effective_session_id),
         )
         .await?;
 
@@ -431,8 +518,16 @@ pub async fn get_element_attribute(
     ref_map: &RefMap,
     selector_or_ref: &str,
     attribute: &str,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<Value, String> {
-    let object_id = resolve_element_object_id(client, session_id, ref_map, selector_or_ref).await?;
+    let (object_id, effective_session_id) = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
 
     let result: EvaluateResult = client
         .send_command_typed(
@@ -447,7 +542,7 @@ pub async fn get_element_attribute(
                 return_by_value: Some(true),
                 await_promise: Some(false),
             },
-            Some(session_id),
+            Some(&effective_session_id),
         )
         .await?;
 
@@ -459,8 +554,16 @@ pub async fn is_element_visible(
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<bool, String> {
-    let object_id = resolve_element_object_id(client, session_id, ref_map, selector_or_ref).await?;
+    let (object_id, effective_session_id) = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
 
     let result: EvaluateResult = client
         .send_command_typed(
@@ -480,7 +583,7 @@ pub async fn is_element_visible(
                 return_by_value: Some(true),
                 await_promise: Some(false),
             },
-            Some(session_id),
+            Some(&effective_session_id),
         )
         .await?;
 
@@ -496,8 +599,16 @@ pub async fn is_element_enabled(
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<bool, String> {
-    let object_id = resolve_element_object_id(client, session_id, ref_map, selector_or_ref).await?;
+    let (object_id, effective_session_id) = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
 
     let result: EvaluateResult = client
         .send_command_typed(
@@ -509,7 +620,7 @@ pub async fn is_element_enabled(
                 return_by_value: Some(true),
                 await_promise: Some(false),
             },
-            Some(session_id),
+            Some(&effective_session_id),
         )
         .await?;
 
@@ -525,8 +636,16 @@ pub async fn is_element_checked(
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<bool, String> {
-    let object_id = resolve_element_object_id(client, session_id, ref_map, selector_or_ref).await?;
+    let (object_id, effective_session_id) = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
 
     // Mirrors Playwright's getChecked() with follow-label retargeting:
     // 1. If element is a native checkbox/radio input, return .checked
@@ -571,7 +690,7 @@ pub async fn is_element_checked(
                 return_by_value: Some(true),
                 await_promise: Some(false),
             },
-            Some(session_id),
+            Some(&effective_session_id),
         )
         .await?;
 
@@ -587,8 +706,16 @@ pub async fn get_element_inner_text(
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<String, String> {
-    let object_id = resolve_element_object_id(client, session_id, ref_map, selector_or_ref).await?;
+    let (object_id, effective_session_id) = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
 
     let result: EvaluateResult = client
         .send_command_typed(
@@ -600,7 +727,7 @@ pub async fn get_element_inner_text(
                 return_by_value: Some(true),
                 await_promise: Some(false),
             },
-            Some(session_id),
+            Some(&effective_session_id),
         )
         .await?;
 
@@ -616,8 +743,16 @@ pub async fn get_element_inner_html(
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<String, String> {
-    let object_id = resolve_element_object_id(client, session_id, ref_map, selector_or_ref).await?;
+    let (object_id, effective_session_id) = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
 
     let result: EvaluateResult = client
         .send_command_typed(
@@ -629,7 +764,7 @@ pub async fn get_element_inner_html(
                 return_by_value: Some(true),
                 await_promise: Some(false),
             },
-            Some(session_id),
+            Some(&effective_session_id),
         )
         .await?;
 
@@ -645,8 +780,16 @@ pub async fn get_element_input_value(
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<String, String> {
-    let object_id = resolve_element_object_id(client, session_id, ref_map, selector_or_ref).await?;
+    let (object_id, effective_session_id) = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
 
     let result: EvaluateResult = client
         .send_command_typed(
@@ -660,7 +803,7 @@ pub async fn get_element_input_value(
                 return_by_value: Some(true),
                 await_promise: Some(false),
             },
-            Some(session_id),
+            Some(&effective_session_id),
         )
         .await?;
 
@@ -677,8 +820,16 @@ pub async fn set_element_value(
     ref_map: &RefMap,
     selector_or_ref: &str,
     value: &str,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<(), String> {
-    let object_id = resolve_element_object_id(client, session_id, ref_map, selector_or_ref).await?;
+    let (object_id, effective_session_id) = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
 
     let js = format!(
         "function() {{ this.value = {}; this.dispatchEvent(new Event('input', {{bubbles: true}})); this.dispatchEvent(new Event('change', {{bubbles: true}})); }}",
@@ -695,7 +846,7 @@ pub async fn set_element_value(
                 return_by_value: Some(true),
                 await_promise: Some(false),
             },
-            Some(session_id),
+            Some(&effective_session_id),
         )
         .await?;
 
@@ -707,8 +858,16 @@ pub async fn get_element_bounding_box(
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<Value, String> {
-    let object_id = resolve_element_object_id(client, session_id, ref_map, selector_or_ref).await?;
+    let (object_id, effective_session_id) = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
 
     let result: EvaluateResult = client
         .send_command_typed(
@@ -724,7 +883,7 @@ pub async fn get_element_bounding_box(
                 return_by_value: Some(true),
                 await_promise: Some(false),
             },
-            Some(session_id),
+            Some(&effective_session_id),
         )
         .await?;
 
@@ -739,10 +898,7 @@ pub async fn get_element_count(
     session_id: &str,
     selector: &str,
 ) -> Result<i64, String> {
-    let js = format!(
-        "document.querySelectorAll({}).length",
-        serde_json::to_string(selector).unwrap_or_default()
-    );
+    let js = build_count_elements_js(selector);
 
     let result: EvaluateResult = client
         .send_command_typed(
@@ -765,8 +921,16 @@ pub async fn get_element_styles(
     ref_map: &RefMap,
     selector_or_ref: &str,
     properties: Option<Vec<String>>,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<Value, String> {
-    let object_id = resolve_element_object_id(client, session_id, ref_map, selector_or_ref).await?;
+    let (object_id, effective_session_id) = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
 
     let js = match properties {
         Some(props) => {
@@ -804,7 +968,7 @@ pub async fn get_element_styles(
                 return_by_value: Some(true),
                 await_promise: Some(false),
             },
-            Some(session_id),
+            Some(&effective_session_id),
         )
         .await?;
 
@@ -850,6 +1014,47 @@ mod tests {
     }
 
     #[test]
+    fn test_build_selector_js_css() {
+        let js = build_selector_js("#submit-btn");
+        assert!(js.contains("document.querySelector(\"#submit-btn\")"));
+        assert!(!js.contains("document.evaluate"));
+    }
+
+    #[test]
+    fn test_build_selector_js_xpath() {
+        let js = build_selector_js("xpath=//button[@id='ok']");
+        assert!(js.contains("document.evaluate(\"//button[@id='ok']\", document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null)"));
+        assert!(!js.contains("document.querySelector"));
+    }
+
+    #[test]
+    fn test_build_selector_js_xpath_empty() {
+        let js = build_selector_js("xpath=");
+        assert!(js.contains("document.evaluate"));
+    }
+
+    #[test]
+    fn test_build_selector_js_not_xpath_prefix() {
+        // "xpath" without "=" should be treated as CSS selector
+        let js = build_selector_js("xpath//div");
+        assert!(js.contains("document.querySelector"));
+    }
+
+    #[test]
+    fn test_build_count_elements_js_css() {
+        let js = build_count_elements_js(".item");
+        assert!(js.contains("document.querySelectorAll(\".item\").length"));
+        assert!(!js.contains("document.evaluate"));
+    }
+
+    #[test]
+    fn test_build_count_elements_js_xpath() {
+        let js = build_count_elements_js("xpath=//li");
+        assert!(js.contains("document.evaluate(\"//li\", document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null).snapshotLength"));
+        assert!(!js.contains("querySelectorAll"));
+    }
+
+    #[test]
     fn test_box_model_center() {
         let model = BoxModel {
             content: vec![10.0, 20.0, 110.0, 20.0, 110.0, 60.0, 10.0, 60.0],
@@ -862,5 +1067,49 @@ mod tests {
         let (x, y) = box_model_center(&model);
         assert!((x - 60.0).abs() < 0.01);
         assert!((y - 40.0).abs() < 0.01);
+    }
+
+    // -----------------------------------------------------------------------
+    // resolve_frame_session tests (Issue #925)
+    // Cross-origin iframe elements must resolve to the dedicated session.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_cross_origin_element_uses_dedicated_session() {
+        let mut iframe_sessions = HashMap::new();
+        iframe_sessions.insert(
+            "cross-origin-frame".to_string(),
+            "iframe-session".to_string(),
+        );
+
+        let session = resolve_frame_session(
+            Some("cross-origin-frame"),
+            "parent-session",
+            &iframe_sessions,
+        );
+
+        assert_eq!(session, "iframe-session");
+    }
+
+    #[test]
+    fn test_same_origin_element_uses_parent_session() {
+        let iframe_sessions = HashMap::new();
+
+        let session = resolve_frame_session(
+            Some("same-origin-frame"),
+            "parent-session",
+            &iframe_sessions,
+        );
+
+        assert_eq!(session, "parent-session");
+    }
+
+    #[test]
+    fn test_main_frame_element_uses_parent_session() {
+        let iframe_sessions = HashMap::new();
+
+        let session = resolve_frame_session(None, "parent-session", &iframe_sessions);
+
+        assert_eq!(session, "parent-session");
     }
 }
