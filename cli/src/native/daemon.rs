@@ -1,6 +1,7 @@
 use serde_json::Value;
 use std::env;
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
 use std::process;
 
@@ -9,6 +10,12 @@ use tokio::signal;
 
 use super::actions::{execute_command, DaemonState};
 use super::state;
+
+/// Safely write to stderr, ignoring errors when pipe is closed.
+/// This prevents daemon crash when CLI's stderr pipe is dropped.
+fn safe_eprintln(msg: &str) {
+    let _ = writeln!(std::io::stderr(), "{}", msg);
+}
 
 pub async fn run_daemon(session: &str) {
     let socket_dir = get_daemon_socket_dir();
@@ -41,7 +48,7 @@ pub async fn run_daemon(session: &str) {
     let _ = fs::remove_file(&stream_path);
 
     if let Err(e) = result {
-        eprintln!("Daemon error: {}", e);
+        safe_eprintln(&format!("Daemon error: {}", e));
         process::exit(1);
     }
 }
@@ -67,7 +74,7 @@ async fn run_socket_server(socket_path: &PathBuf, _session: &str) -> Result<(), 
                         });
                     }
                     Err(e) => {
-                        eprintln!("Accept error: {}", e);
+                        safe_eprintln(&format!("Accept error: {}", e));
                     }
                 }
             }
@@ -111,7 +118,7 @@ async fn run_socket_server(socket_path: &PathBuf, session: &str) -> Result<(), S
                         });
                     }
                     Err(e) => {
-                        eprintln!("Accept error: {}", e);
+                        safe_eprintln(&format!("Accept error: {}", e));
                     }
                 }
             }
@@ -201,21 +208,21 @@ async fn shutdown_signal() {
         let mut sigint = match signal::unix::signal(signal::unix::SignalKind::interrupt()) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("Failed to install SIGINT handler: {}", e);
+                safe_eprintln(&format!("Failed to install SIGINT handler: {}", e));
                 process::exit(1);
             }
         };
         let mut sigterm = match signal::unix::signal(signal::unix::SignalKind::terminate()) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("Failed to install SIGTERM handler: {}", e);
+                safe_eprintln(&format!("Failed to install SIGTERM handler: {}", e));
                 process::exit(1);
             }
         };
         let mut sighup = match signal::unix::signal(signal::unix::SignalKind::hangup()) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("Failed to install SIGHUP handler: {}", e);
+                safe_eprintln(&format!("Failed to install SIGHUP handler: {}", e));
                 process::exit(1);
             }
         };
@@ -230,7 +237,7 @@ async fn shutdown_signal() {
     #[cfg(windows)]
     {
         if let Err(e) = signal::ctrl_c().await {
-            eprintln!("Failed to install Ctrl+C handler: {}", e);
+            safe_eprintln(&format!("Failed to install Ctrl+C handler: {}", e));
             process::exit(1);
         }
     }

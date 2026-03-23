@@ -5,6 +5,7 @@
 
 use serde_json::{json, Value};
 use std::env;
+use std::io::Write;
 
 /// Provider session info for cleanup on failure.
 #[derive(Debug)]
@@ -400,8 +401,9 @@ mod agentcore {
             live_view_url: live_view_url.clone(),
         });
 
-        eprintln!("Session: {}", session_id);
-        eprintln!("Live View: {}", live_view_url);
+        // Use safe stderr write to prevent daemon crash when CLI's stderr pipe is closed
+        let _ = writeln!(std::io::stderr(), "Session: {}", session_id);
+        let _ = writeln!(std::io::stderr(), "Live View: {}", live_view_url);
 
         let ws_path = format!("/browser-streams/{}/sessions/{}/automation", browser_identifier, session_id);
         let ws_url = format!("wss://{}{}", host, ws_path);
