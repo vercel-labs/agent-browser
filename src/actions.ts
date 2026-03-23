@@ -631,7 +631,7 @@ async function handleScroll(command: ScrollCommand, browser: BrowserManager): Pr
     if (command.x !== undefined || command.y !== undefined) {
       await element.evaluate(
         (el, { x, y }) => {
-          el.scrollBy(x ?? 0, y ?? 0);
+          (el as HTMLElement).scrollBy(x ?? 0, y ?? 0);
         },
         { x: command.x, y: command.y }
       );
