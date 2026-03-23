@@ -259,6 +259,12 @@ fn main() {
         }
     };
 
+    if let Some(tab_id) = flags.tab {
+        if cmd.get("tabId").is_none() {
+            cmd["tabId"] = json!(tab_id);
+        }
+    }
+
     // Handle --password-stdin for auth save
     if cmd.get("action").and_then(|v| v.as_str()) == Some("auth_save") {
         if cmd.get("password").is_some() {

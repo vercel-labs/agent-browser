@@ -932,28 +932,35 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
         }
 
         // === Tabs ===
-        "tab" => match rest.first().copied() {
-            Some("new") => {
-                let mut cmd = json!({ "id": id, "action": "tab_new" });
-                if let Some(url) = rest.get(1) {
-                    cmd["url"] = json!(url);
+        "tab" => {
+            const VALID: &[&str] = &["list", "new", "close", "<id>"];
+            match rest.first().copied() {
+                Some("new") => {
+                    let mut cmd = json!({ "id": id, "action": "tab_new" });
+                    if let Some(url) = rest.get(1) {
+                        cmd["url"] = json!(url);
+                    }
+                    Ok(cmd)
                 }
-                Ok(cmd)
-            }
-            Some("list") => Ok(json!({ "id": id, "action": "tab_list" })),
-            Some("close") => {
-                let mut cmd = json!({ "id": id, "action": "tab_close" });
-                if let Some(index) = rest.get(1).and_then(|s| s.parse::<i32>().ok()) {
-                    cmd["index"] = json!(index);
+                Some("list") => Ok(json!({ "id": id, "action": "tab_list" })),
+                Some("close") => {
+                    let mut cmd = json!({ "id": id, "action": "tab_close" });
+                    if let Some(tab_id) = rest.get(1).and_then(|s| s.parse::<i32>().ok()) {
+                        cmd["tabId"] = json!(tab_id);
+                    }
+                    Ok(cmd)
                 }
-                Ok(cmd)
+                Some(n) if n.parse::<i32>().is_ok() => {
+                    let tab_id = n.parse::<i32>().expect("already checked parse succeeds");
+                    Ok(json!({ "id": id, "action": "tab_switch", "tabId": tab_id }))
+                }
+                Some(sub) => Err(ParseError::UnknownSubcommand {
+                    subcommand: sub.to_string(),
+                    valid_options: VALID,
+                }),
+                None => Ok(json!({ "id": id, "action": "tab_list" })),
             }
-            Some(n) if n.parse::<i32>().is_ok() => {
-                let index = n.parse::<i32>().expect("already checked parse succeeds");
-                Ok(json!({ "id": id, "action": "tab_switch", "index": index }))
-            }
-            _ => Ok(json!({ "id": id, "action": "tab_list" })),
-        },
+        }
 
         // === Window ===
         "window" => {
@@ -2197,6 +2204,7 @@ mod tests {
     fn default_flags() -> Flags {
         Flags {
             session: "test".to_string(),
+            tab: None,
             json: false,
             headed: false,
             debug: false,
@@ -2704,13 +2712,49 @@ mod tests {
     fn test_tab_switch() {
         let cmd = parse_command(&args("tab 2"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "tab_switch");
-        assert_eq!(cmd["index"], 2);
+        assert_eq!(cmd["tabId"], 2);
     }
 
     #[test]
     fn test_tab_close() {
         let cmd = parse_command(&args("tab close"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "tab_close");
+    }
+
+    #[test]
+    fn test_tab_close_with_id() {
+        let cmd = parse_command(&args("tab close 2"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "tab_close");
+        assert_eq!(cmd["tabId"], 2);
+    }
+
+    #[test]
+    fn test_tab_switch_sends_tab_id() {
+        let cmd = parse_command(&args("tab 2"), &default_flags()).unwrap();
+        assert_eq!(cmd["tabId"], 2);
+        assert!(cmd.get("index").is_none());
+    }
+
+    #[test]
+    fn test_tab_close_sends_tab_id() {
+        let cmd = parse_command(&args("tab close 3"), &default_flags()).unwrap();
+        assert_eq!(cmd["tabId"], 3);
+        assert!(cmd.get("index").is_none());
+    }
+
+    #[test]
+    fn test_tab_no_args_defaults_to_list() {
+        let cmd = parse_command(&args("tab"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "tab_list");
+    }
+
+    #[test]
+    fn test_tab_unknown_subcommand_errors() {
+        let result = parse_command(&args("tab select 3"), &default_flags());
+        assert!(
+            result.is_err(),
+            "tab select should error, not silently fall through to tab_list"
+        );
     }
 
     // === Network ===
