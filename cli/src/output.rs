@@ -1230,6 +1230,7 @@ Examples:
   agent-browser press Tab
   agent-browser press Control+a
   agent-browser press Control+Shift+s
+  agent-browser press 'Meta+,'
   agent-browser press Escape
 "##
         }
@@ -2521,7 +2522,7 @@ Core Commands:
   dblclick <sel>             Double-click element
   type <sel> <text>          Type into element
   fill <sel> <text>          Clear and fill
-  press <key>                Press key (Enter, Tab, Control+a)
+  press <key>                Press key (Enter, Tab, Control+a, Meta+,)
   keyboard type <text>       Type text with real keystrokes (no selector)
   keyboard inserttext <text> Insert text without key events
   hover <sel>                Hover element

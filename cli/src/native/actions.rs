@@ -2093,8 +2093,49 @@ async fn handle_press(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         .and_then(|v| v.as_str())
         .ok_or("Missing 'key' parameter")?;
 
-    interaction::press_key(&mgr.client, &session_id, key).await?;
+    let (base_key, modifiers) = split_key_chord(key);
+    match modifiers {
+        Some(bits) => {
+            interaction::press_key_with_modifiers(&mgr.client, &session_id, base_key, Some(bits))
+                .await?
+        }
+        None => interaction::press_key(&mgr.client, &session_id, base_key).await?,
+    }
     Ok(json!({ "pressed": key }))
+}
+
+fn split_key_chord(input: &str) -> (&str, Option<i32>) {
+    let mut modifiers = 0;
+    let mut remainder = input;
+    let mut consumed_modifier = false;
+
+    // CLI chord syntax is "Modifier+Key", e.g. "Control+a" or "Meta+,".
+    // Consume only leading modifier segments so plain "+" and unknown names
+    // keep their existing concrete behavior.
+    while let Some((candidate, tail)) = remainder.split_once('+') {
+        let Some(bit) = modifier_bit(candidate) else {
+            break;
+        };
+        modifiers |= bit;
+        remainder = if tail.is_empty() { "+" } else { tail };
+        consumed_modifier = true;
+    }
+
+    if consumed_modifier {
+        (remainder, Some(modifiers))
+    } else {
+        (input, None)
+    }
+}
+
+fn modifier_bit(token: &str) -> Option<i32> {
+    match token.to_ascii_lowercase().as_str() {
+        "alt" => Some(1),
+        "control" | "ctrl" => Some(2),
+        "meta" | "cmd" | "command" => Some(4),
+        "shift" => Some(8),
+        _ => None,
+    }
 }
 
 async fn handle_hover(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -6718,6 +6759,22 @@ mod tests {
         assert_eq!(resp["id"], "cmd-2");
         assert_eq!(resp["success"], false);
         assert_eq!(resp["error"], "Something went wrong");
+    }
+
+    #[test]
+    fn test_split_key_chord_without_modifiers() {
+        assert_eq!(split_key_chord("Enter"), ("Enter", None));
+        assert_eq!(split_key_chord(","), (",", None));
+        assert_eq!(split_key_chord("+"), ("+", None));
+    }
+
+    #[test]
+    fn test_split_key_chord_with_modifiers() {
+        assert_eq!(split_key_chord("Control+a"), ("a", Some(2)));
+        assert_eq!(split_key_chord("Ctrl+Shift+s"), ("s", Some(10)));
+        assert_eq!(split_key_chord("Meta+,"), (",", Some(4)));
+        assert_eq!(split_key_chord("Command+Comma"), ("Comma", Some(4)));
+        assert_eq!(split_key_chord("Control++"), ("+", Some(2)));
     }
 
     #[tokio::test]

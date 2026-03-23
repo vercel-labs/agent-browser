@@ -123,6 +123,7 @@ agent-browser type @e2 "text"         # Type without clearing
 agent-browser select @e1 "option"     # Select dropdown option
 agent-browser check @e1               # Check checkbox
 agent-browser press Enter             # Press key
+agent-browser press 'Meta+,'          # Press punctuation combo
 agent-browser keyboard type "text"    # Type at current focus (no selector)
 agent-browser keyboard inserttext "text"  # Insert without key events
 agent-browser scroll down 500         # Scroll page
