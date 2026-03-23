@@ -4277,7 +4277,7 @@ async fn handle_getbyrole(cmd: &Value, state: &mut DaemonState) -> Result<Value,
 
     // Clean up the marker attribute
     if let Some(ref browser) = state.browser {
-        if let Ok(_) = browser.active_session_id() {
+        if browser.active_session_id().is_ok() {
             let _ = browser
                 .evaluate(
                     "document.querySelector('[data-agent-browser-located]')?.removeAttribute('data-agent-browser-located')",
