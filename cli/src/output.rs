@@ -374,7 +374,15 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
                         .get("resourceType")
                         .and_then(|v| v.as_str())
                         .unwrap_or("");
-                    println!("{} {} ({})", method, url, resource_type);
+                    let request_id = req.get("requestId").and_then(|v| v.as_str()).unwrap_or("");
+                    let status = req.get("status").and_then(|v| v.as_i64());
+                    match status {
+                        Some(s) => println!(
+                            "[{}] {} {} ({}) {}",
+                            request_id, method, url, resource_type, s
+                        ),
+                        None => println!("[{}] {} {} ({})", request_id, method, url, resource_type),
+                    }
                 }
             }
             return;
@@ -1727,6 +1735,10 @@ Subcommands:
   requests [options]         List captured requests
     --clear                  Clear request log
     --filter <pattern>       Filter by URL pattern
+    --type <types>           Filter by resource type (comma-separated: xhr,fetch,document)
+    --method <method>        Filter by HTTP method (GET, POST, etc.)
+    --status <code>          Filter by status (200, 2xx, 400-499)
+  request <requestId>        View full request/response detail (including body)
   har <start|stop> [path]    Record and export a HAR file
 
 Global Options:
@@ -1739,7 +1751,10 @@ Examples:
   agent-browser network unroute
   agent-browser network requests
   agent-browser network requests --filter "api"
+  agent-browser network requests --type xhr,fetch
+  agent-browser network requests --method POST --status 2xx
   agent-browser network requests --clear
+  agent-browser network request 1234.5
   agent-browser network har start
   agent-browser network har stop ./capture.har
 "##

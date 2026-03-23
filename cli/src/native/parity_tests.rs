@@ -172,6 +172,7 @@ const DOCUMENTED_ACTIONS: &[&str] = &[
     "route",
     "unroute",
     "requests",
+    "request_detail",
     "credentials",
     "auth_save",
     "auth_login",
@@ -545,6 +546,11 @@ async fn test_tracked_request_struct() {
         headers: json!({"Accept": "text/html"}),
         timestamp: 12345,
         resource_type: "Document".to_string(),
+        request_id: "1.1".to_string(),
+        post_data: None,
+        status: Some(200),
+        response_headers: None,
+        mime_type: Some("text/html".to_string()),
     };
     let serialized = serde_json::to_value(&tr).unwrap();
     assert_eq!(serialized["url"], "https://example.com/api");
@@ -565,6 +571,11 @@ async fn test_request_tracking_state() {
         headers: json!({}),
         timestamp: 1,
         resource_type: "Document".to_string(),
+        request_id: "1.1".to_string(),
+        post_data: None,
+        status: None,
+        response_headers: None,
+        mime_type: None,
     });
     state.tracked_requests.push(super::actions::TrackedRequest {
         url: "https://other.com".to_string(),
@@ -572,6 +583,11 @@ async fn test_request_tracking_state() {
         headers: json!({}),
         timestamp: 2,
         resource_type: "XHR".to_string(),
+        request_id: "1.2".to_string(),
+        post_data: None,
+        status: None,
+        response_headers: None,
+        mime_type: None,
     });
     assert_eq!(state.tracked_requests.len(), 2);
 
@@ -587,6 +603,30 @@ async fn test_request_tracking_state() {
     // Clear
     state.tracked_requests.clear();
     assert!(state.tracked_requests.is_empty());
+}
+
+#[test]
+fn test_matches_status_filter() {
+    use super::actions::matches_status_filter;
+
+    // Exact match
+    assert!(matches_status_filter(Some(200), "200"));
+    assert!(!matches_status_filter(Some(201), "200"));
+
+    // Class match (Nxx)
+    assert!(matches_status_filter(Some(200), "2xx"));
+    assert!(matches_status_filter(Some(299), "2xx"));
+    assert!(!matches_status_filter(Some(301), "2xx"));
+    assert!(matches_status_filter(Some(404), "4xx"));
+
+    // Range match
+    assert!(matches_status_filter(Some(400), "400-499"));
+    assert!(matches_status_filter(Some(499), "400-499"));
+    assert!(!matches_status_filter(Some(500), "400-499"));
+
+    // None status
+    assert!(!matches_status_filter(None, "200"));
+    assert!(!matches_status_filter(None, "2xx"));
 }
 
 #[tokio::test]
