@@ -65,6 +65,7 @@ impl Drop for ChromeProcess {
 pub struct LaunchOptions {
     pub headless: bool,
     pub executable_path: Option<String>,
+    pub launch_command: Option<String>,
     pub proxy: Option<String>,
     pub proxy_bypass: Option<String>,
     pub profile: Option<String>,
@@ -83,6 +84,7 @@ impl Default for LaunchOptions {
         Self {
             headless: true,
             executable_path: None,
+            launch_command: None,
             proxy: None,
             proxy_bypass: None,
             profile: None,
@@ -104,7 +106,7 @@ struct ChromeArgs {
     temp_user_data_dir: Option<PathBuf>,
 }
 
-fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
+fn build_chrome_args(options: &LaunchOptions, chrome_path: &Path) -> Result<ChromeArgs, String> {
     let mut args = vec![
         "--remote-debugging-port=0".to_string(),
         "--no-first-run".to_string(),
@@ -123,6 +125,8 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
         "--password-store=basic".to_string(),
         "--use-mock-keychain".to_string(),
     ];
+
+    let windows_browser_on_wsl = is_windows_browser_on_wsl(chrome_path);
 
     let has_extensions = options
         .extensions
@@ -154,8 +158,12 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
         args.push(format!("--user-data-dir={}", expanded));
         (dir, None)
     } else {
-        let dir =
-            std::env::temp_dir().join(format!("agent-browser-chrome-{}", uuid::Uuid::new_v4()));
+        let base_dir = if windows_browser_on_wsl {
+            wsl_windows_temp_dir()?
+        } else {
+            std::env::temp_dir()
+        };
+        let dir = base_dir.join(format!("agent-browser-chrome-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir)
             .map_err(|e| format!("Failed to create temp profile dir: {}", e))?;
         args.push(format!("--user-data-dir={}", dir.display()));
@@ -194,11 +202,194 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
         args.push("--disable-dev-shm-usage".to_string());
     }
 
+    let args = if windows_browser_on_wsl {
+        normalize_wsl_windows_browser_args(args)?
+    } else {
+        args
+    };
+
     Ok(ChromeArgs {
         args,
         user_data_dir,
         temp_user_data_dir,
     })
+}
+
+#[cfg(target_os = "linux")]
+fn is_wsl() -> bool {
+    std::env::var("WSL_DISTRO_NAME").is_ok()
+        || std::env::var("WSL_INTEROP").is_ok()
+        || std::fs::read_to_string("/proc/version")
+            .map(|version| version.to_ascii_lowercase().contains("microsoft"))
+            .unwrap_or(false)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn is_wsl() -> bool {
+    false
+}
+
+fn is_windows_browser_on_wsl(chrome_path: &Path) -> bool {
+    is_wsl()
+        && chrome_path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
+}
+
+#[cfg(target_os = "linux")]
+fn normalize_wsl_windows_browser_args(args: Vec<String>) -> Result<Vec<String>, String> {
+    args.into_iter()
+        .map(|arg| normalize_wsl_windows_browser_arg(&arg))
+        .collect()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn normalize_wsl_windows_browser_args(args: Vec<String>) -> Result<Vec<String>, String> {
+    Ok(args)
+}
+
+#[cfg(target_os = "linux")]
+fn normalize_wsl_windows_browser_arg(arg: &str) -> Result<String, String> {
+    for prefix in ["--user-data-dir="] {
+        if let Some(value) = arg.strip_prefix(prefix) {
+            return Ok(format!("{}{}", prefix, maybe_wsl_to_windows_path(value)?));
+        }
+    }
+
+    for prefix in ["--load-extension=", "--disable-extensions-except="] {
+        if let Some(value) = arg.strip_prefix(prefix) {
+            let converted = value
+                .split(',')
+                .map(maybe_wsl_to_windows_path)
+                .collect::<Result<Vec<_>, _>>()?
+                .join(",");
+            return Ok(format!("{}{}", prefix, converted));
+        }
+    }
+
+    Ok(arg.to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn maybe_wsl_to_windows_path(path: &str) -> Result<String, String> {
+    if path.starts_with(r"\\") || path.as_bytes().get(1) == Some(&b':') {
+        return Ok(path.to_string());
+    }
+    wslpath("-w", path)
+}
+
+#[cfg(target_os = "linux")]
+fn wsl_windows_temp_dir() -> Result<PathBuf, String> {
+    let output = Command::new("cmd.exe")
+        .current_dir("/mnt/c")
+        .args(["/C", "echo %TEMP%"])
+        .output()
+        .map_err(|e| format!("Failed to resolve Windows temp dir: {}", e))?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "Failed to resolve Windows temp dir: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let windows_path = stdout
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .map(str::trim)
+        .ok_or_else(|| "Failed to resolve Windows temp dir: empty output".to_string())?;
+
+    Ok(PathBuf::from(wslpath("-u", windows_path)?))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn wsl_windows_temp_dir() -> Result<PathBuf, String> {
+    Ok(std::env::temp_dir())
+}
+
+#[cfg(target_os = "linux")]
+fn wslpath(mode: &str, path: &str) -> Result<String, String> {
+    let output = Command::new("wslpath")
+        .args([mode, path])
+        .output()
+        .map_err(|e| format!("Failed to run wslpath {} {}: {}", mode, path, e))?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "wslpath {} {} failed: {}",
+            mode,
+            path,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn launch_command_executable_path(chrome_path: &Path) -> Result<String, String> {
+    if is_windows_browser_on_wsl(chrome_path) {
+        wslpath("-w", chrome_path.to_string_lossy().as_ref())
+    } else {
+        Ok(chrome_path.display().to_string())
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn launch_command_executable_path(chrome_path: &Path) -> Result<String, String> {
+    Ok(chrome_path.display().to_string())
+}
+
+fn shell_quote(value: &str) -> String {
+    #[cfg(windows)]
+    {
+        format!("\"{}\"", value.replace('"', "\\\""))
+    }
+
+    #[cfg(not(windows))]
+    {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
+}
+
+fn render_launch_command(
+    template: &str,
+    chrome_path: &Path,
+    args: &[String],
+) -> Result<String, String> {
+    let executable_path = shell_quote(&launch_command_executable_path(chrome_path)?);
+    let arguments = args
+        .iter()
+        .map(|arg| shell_quote(arg))
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    Ok(template
+        .replace("{executablePath}", &executable_path)
+        .replace("{arguments}", &arguments))
+}
+
+#[cfg(windows)]
+fn spawn_launch_command(command: &str) -> Result<Child, std::io::Error> {
+    Command::new("cmd.exe")
+        .args(["/C", command])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+}
+
+#[cfg(not(windows))]
+fn spawn_launch_command(command: &str) -> Result<Child, std::io::Error> {
+    Command::new("/bin/sh")
+        .args(["-lc", command])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
 }
 
 pub fn launch_chrome(options: &LaunchOptions) -> Result<ChromeProcess, String> {
@@ -240,7 +431,7 @@ fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<Chro
         args,
         user_data_dir,
         temp_user_data_dir,
-    } = build_chrome_args(options)?;
+    } = build_chrome_args(options, chrome_path)?;
 
     // Mitigate stale DevToolsActivePort risk (e.g., previous crash left it behind).
     // Puppeteer does similar cleanup before spawning.
@@ -252,16 +443,24 @@ fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<Chro
         }
     };
 
-    let mut child = Command::new(chrome_path)
-        .args(&args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| {
+    let mut child = if let Some(ref launch_command) = options.launch_command {
+        let command = render_launch_command(launch_command, chrome_path, &args)?;
+        spawn_launch_command(&command).map_err(|e| {
             cleanup_temp_dir(&temp_user_data_dir);
-            format!("Failed to launch Chrome at {:?}: {}", chrome_path, e)
-        })?;
+            format!("Failed to launch Chrome with launch command: {}", e)
+        })?
+    } else {
+        Command::new(chrome_path)
+            .args(&args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| {
+                cleanup_temp_dir(&temp_user_data_dir);
+                format!("Failed to launch Chrome at {:?}: {}", chrome_path, e)
+            })?
+    };
 
     // Shared overall deadline so we don't double-wait (poll + stderr fallback).
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
@@ -508,19 +707,25 @@ pub fn read_devtools_active_port(user_data_dir: &Path) -> Option<(u16, String)> 
     Some((port, ws_path))
 }
 
-pub async fn auto_connect_cdp() -> Result<String, String> {
-    let user_data_dirs = get_chrome_user_data_dirs();
+pub async fn auto_connect_cdp(profile: Option<&str>) -> Result<String, String> {
+    let mut user_data_dirs = Vec::new();
+    if let Some(profile) = profile {
+        user_data_dirs.push(PathBuf::from(expand_tilde(profile)));
+    }
+    user_data_dirs.extend(get_chrome_user_data_dirs());
 
     for dir in &user_data_dirs {
         if let Some((port, ws_path)) = read_devtools_active_port(dir) {
-            // Try HTTP endpoint first (pre-M144)
-            if let Ok(ws_url) = discover_cdp_url("127.0.0.1", port).await {
-                return Ok(ws_url);
-            }
-            // M144+: direct WebSocket — verify the port is actually listening
-            // before returning, otherwise a stale DevToolsActivePort file
-            // (left behind after Chrome exits/crashes) produces a confusing
-            // "connection refused" error instead of falling through.
+            // Preferred path: DevToolsActivePort already tells us which browser
+            // WebSocket to use, so return it directly as long as the port is
+            // still reachable.
+            //
+            // This keeps the pre-existing stale-file protection, but avoids an
+            // extra discovery WebSocket. On Chrome's M144+ remote-debugging UI,
+            // that temporary discovery connection can trigger the permission
+            // dialog once, then the real BrowserManager connection triggers it
+            // again. Using the file-backed WS path here makes the actual browser
+            // session the first and only WebSocket connection.
             if is_port_reachable(port) {
                 let ws_url = format!("ws://127.0.0.1:{}{}", port, ws_path);
                 return Ok(ws_url);
@@ -770,6 +975,16 @@ mod tests {
             .unwrap()
     }
 
+    #[cfg(unix)]
+    fn test_chrome_path() -> &'static Path {
+        Path::new("/tmp/chrome")
+    }
+
+    #[cfg(windows)]
+    fn test_chrome_path() -> &'static Path {
+        Path::new(r"C:\chrome.exe")
+    }
+
     #[test]
     fn test_find_chrome_returns_some_on_host() {
         // This test only makes sense on systems with Chrome installed
@@ -795,9 +1010,47 @@ mod tests {
     }
 
     #[test]
+    fn test_render_launch_command_replaces_placeholders() {
+        let command = render_launch_command(
+            "pwsh -NoProfile -Command \"& {executablePath} {arguments}\"",
+            test_chrome_path(),
+            &["--headless=new".to_string(), "about:blank".to_string()],
+        )
+        .unwrap();
+        assert!(command.contains("pwsh -NoProfile -Command"));
+        assert!(command.contains("--headless=new"));
+        assert!(command.contains("about:blank"));
+    }
+
+    #[test]
     fn test_read_devtools_active_port_missing() {
         let result = read_devtools_active_port(Path::new("/nonexistent"));
         assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_auto_connect_cdp_uses_devtools_active_port_without_discovery() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let dir = std::env::temp_dir().join(format!(
+            "agent-browser-auto-connect-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("DevToolsActivePort"),
+            format!("{}\n/devtools/browser/test-id\n", port),
+        )
+        .unwrap();
+
+        let ws_url = auto_connect_cdp(Some(dir.to_str().unwrap())).await.unwrap();
+        assert_eq!(
+            ws_url,
+            format!("ws://127.0.0.1:{}/devtools/browser/test-id", port)
+        );
+
+        drop(listener);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -847,7 +1100,7 @@ mod tests {
             headless: true,
             ..Default::default()
         };
-        let result = build_chrome_args(&opts).unwrap();
+        let result = build_chrome_args(&opts, test_chrome_path()).unwrap();
         assert!(result.args.iter().any(|a| a == "--headless=new"));
         assert!(result
             .args
@@ -867,7 +1120,7 @@ mod tests {
             headless: false,
             ..Default::default()
         };
-        let result = build_chrome_args(&opts).unwrap();
+        let result = build_chrome_args(&opts, test_chrome_path()).unwrap();
         assert!(!result.args.iter().any(|a| a.contains("--headless")));
         assert!(!result
             .args
@@ -884,7 +1137,7 @@ mod tests {
     #[test]
     fn test_build_args_temp_user_data_dir_created() {
         let opts = LaunchOptions::default();
-        let result = build_chrome_args(&opts).unwrap();
+        let result = build_chrome_args(&opts, test_chrome_path()).unwrap();
         let dir = result.temp_user_data_dir.as_ref().unwrap();
         assert!(dir.exists());
         assert!(result
@@ -900,7 +1153,7 @@ mod tests {
             profile: Some("/tmp/my-profile".to_string()),
             ..Default::default()
         };
-        let result = build_chrome_args(&opts).unwrap();
+        let result = build_chrome_args(&opts, test_chrome_path()).unwrap();
         assert!(result.temp_user_data_dir.is_none());
         assert!(result
             .args
@@ -915,7 +1168,7 @@ mod tests {
             args: vec!["--window-size=1920,1080".to_string()],
             ..Default::default()
         };
-        let result = build_chrome_args(&opts).unwrap();
+        let result = build_chrome_args(&opts, test_chrome_path()).unwrap();
         assert!(!result.args.iter().any(|a| a == "--window-size=1280,720"));
         assert!(result.args.iter().any(|a| a == "--window-size=1920,1080"));
         if let Some(ref dir) = result.temp_user_data_dir {
@@ -930,7 +1183,7 @@ mod tests {
             args: vec!["--start-maximized".to_string()],
             ..Default::default()
         };
-        let result = build_chrome_args(&opts).unwrap();
+        let result = build_chrome_args(&opts, test_chrome_path()).unwrap();
         assert!(!result.args.iter().any(|a| a == "--window-size=1280,720"));
         assert!(result.args.iter().any(|a| a == "--start-maximized"));
         if let Some(ref dir) = result.temp_user_data_dir {
@@ -941,7 +1194,7 @@ mod tests {
     #[test]
     fn test_build_args_disables_translate() {
         let opts = LaunchOptions::default();
-        let result = build_chrome_args(&opts).unwrap();
+        let result = build_chrome_args(&opts, test_chrome_path()).unwrap();
         assert!(result
             .args
             .iter()
@@ -958,7 +1211,7 @@ mod tests {
             extensions: Some(vec!["/tmp/my-ext".to_string()]),
             ..Default::default()
         };
-        let result = build_chrome_args(&opts).unwrap();
+        let result = build_chrome_args(&opts, test_chrome_path()).unwrap();
         assert!(
             !result.args.iter().any(|a| a.contains("--headless")),
             "headless flag should be omitted when extensions are present"
@@ -983,7 +1236,7 @@ mod tests {
             extensions: Some(vec!["/tmp/my-ext".to_string()]),
             ..Default::default()
         };
-        let result = build_chrome_args(&opts).unwrap();
+        let result = build_chrome_args(&opts, test_chrome_path()).unwrap();
         assert!(
             !result.args.iter().any(|a| a.contains("--headless")),
             "headless flag should not be present in headed mode"

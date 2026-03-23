@@ -312,8 +312,8 @@ impl BrowserManager {
         Ok(manager)
     }
 
-    pub async fn connect_auto() -> Result<Self, String> {
-        let ws_url = auto_connect_cdp().await?;
+    pub async fn connect_auto(profile: Option<&str>) -> Result<Self, String> {
+        let ws_url = auto_connect_cdp(profile).await?;
         Self::connect_cdp(&ws_url).await
     }
 
