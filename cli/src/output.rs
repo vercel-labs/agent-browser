@@ -2613,6 +2613,7 @@ Snapshot Options:
 Authentication:
   --profile <path>           Persist login sessions across restarts (cookies, IndexedDB, cache)
                              (or AGENT_BROWSER_PROFILE env)
+                             When used with --session, data is stored in <path>/<session>/
   --session-name <name>      Auto-save/restore cookies and localStorage by name
                              (or AGENT_BROWSER_SESSION_NAME env)
   --state <path>             Load saved auth state (cookies + storage) from JSON file
