@@ -321,12 +321,12 @@ impl EventTracker {
     }
 
     pub fn get_console_json(&self) -> Value {
-        let entries: Vec<Value> = self
+        let messages: Vec<Value> = self
             .console_entries
             .iter()
-            .map(|e| json!({ "level": e.level, "text": e.text }))
+            .map(|e| json!({ "type": e.level, "text": e.text }))
             .collect();
-        json!({ "entries": entries })
+        json!({ "messages": messages })
     }
 
     pub fn get_errors_json(&self) -> Value {
