@@ -24,7 +24,9 @@
     "postinstall": "node scripts/postinstall.js",
     "changeset": "changeset",
     "ci:version": "changeset version && pnpm run version:sync && pnpm install --no-frozen-lockfile",
-    "ci:publish": "pnpm run version:sync && changeset publish"
+    "ci:publish": "pnpm run version:sync && changeset publish",
+    "license:validate": "node scripts/validate-license.js",
+    "stripe:setup": "node scripts/create-stripe-products.js"
   },
   "keywords": [
     "browser",
@@ -45,6 +47,7 @@
   },
   "homepage": "https://github.com/vercel-labs/agent-browser#readme",
   "devDependencies": {
-    "@changesets/cli": "^2.29.8"
+    "@changesets/cli": "^2.29.8",
+    "stripe": "^17.7.0"
   }
 }

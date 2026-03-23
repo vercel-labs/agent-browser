@@ -16,6 +16,27 @@ import { platform, arch } from 'os';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
+// ─── Built-in JS subcommands ──────────────────────────────────────────────────
+// These are handled before delegating to the native Rust binary.
+
+const subcommand = process.argv[2];
+
+// `agent-browser license [--json]` — validate the current license key
+if (subcommand === 'license') {
+  const validatorPath = join(__dirname, '..', 'scripts', 'validate-license.js');
+  if (!existsSync(validatorPath)) {
+    console.error('License validator not found. Please reinstall agent-browser.');
+    process.exit(1);
+  }
+  const child = spawn(process.execPath, [validatorPath, ...process.argv.slice(3)], {
+    stdio: 'inherit',
+    env: process.env,
+  });
+  child.on('close', (code) => process.exit(code ?? 0));
+  // Stop here — don't fall through to the Rust binary
+  // (the exit is handled by the child's close event)
+}
+
 // Detect if the system uses musl libc (e.g. Alpine Linux)
 function isMusl() {
   if (platform() !== 'linux') return false;
