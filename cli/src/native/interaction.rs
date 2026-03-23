@@ -282,6 +282,7 @@ pub async fn press_key_with_modifiers(
     modifiers: Option<i32>,
 ) -> Result<(), String> {
     let (key_name, code, key_code) = named_key_info(key);
+    let text = key_text(&key_name);
 
     client
         .send_command_typed::<_, Value>(
@@ -290,8 +291,8 @@ pub async fn press_key_with_modifiers(
                 event_type: "keyDown".to_string(),
                 key: Some(key_name.clone()),
                 code: Some(code.clone()),
-                text: None,
-                unmodified_text: None,
+                text: text.clone(),
+                unmodified_text: text.clone(),
                 windows_virtual_key_code: Some(key_code),
                 native_virtual_key_code: Some(key_code),
                 modifiers,
@@ -1000,6 +1001,26 @@ fn punctuation_key_info(ch: char) -> (&'static str, i32) {
     }
 }
 
+/// Return the `text` value that CDP `Input.dispatchKeyEvent` needs on the
+/// `keyDown` event so that Chrome performs the default action for the key.
+/// For example Enter needs `"\r"` to actually submit a form, and Tab needs
+/// `"\t"` to move focus.  Non-printable / navigation keys return `None`.
+fn key_text(key_name: &str) -> Option<String> {
+    match key_name {
+        "Enter" => Some("\r".to_string()),
+        "Tab" => Some("\t".to_string()),
+        " " => Some(" ".to_string()),
+        _ => {
+            // Single printable characters carry themselves as text.
+            if key_name.len() == 1 {
+                Some(key_name.to_string())
+            } else {
+                None
+            }
+        }
+    }
+}
+
 fn named_key_info(key: &str) -> (String, String, i32) {
     match key.to_lowercase().as_str() {
         "enter" | "return" => ("Enter".to_string(), "Enter".to_string(), 13),
@@ -1126,5 +1147,20 @@ mod tests {
             );
             assert_eq!(key, ch.to_string());
         }
+    }
+
+    #[test]
+    fn test_key_text_returns_correct_text_for_special_keys() {
+        assert_eq!(key_text("Enter"), Some("\r".to_string()));
+        assert_eq!(key_text("Tab"), Some("\t".to_string()));
+        assert_eq!(key_text(" "), Some(" ".to_string()));
+        // Single printable characters carry themselves.
+        assert_eq!(key_text("a"), Some("a".to_string()));
+        assert_eq!(key_text("Z"), Some("Z".to_string()));
+        // Non-printable named keys return None.
+        assert_eq!(key_text("Escape"), None);
+        assert_eq!(key_text("ArrowUp"), None);
+        assert_eq!(key_text("Backspace"), None);
+        assert_eq!(key_text("Delete"), None);
     }
 }
