@@ -287,6 +287,7 @@ async fn connect_kernel() -> Result<(String, Option<ProviderSession>), String> {
 #[cfg(feature = "agentcore")]
 mod agentcore {
     use super::*;
+    use std::io::Write;
 
     /// AgentCore-specific session info for Live View URL
     pub struct AgentCoreSessionInfo {
@@ -400,8 +401,8 @@ mod agentcore {
             live_view_url: live_view_url.clone(),
         });
 
-        eprintln!("Session: {}", session_id);
-        eprintln!("Live View: {}", live_view_url);
+        let _ = writeln!(std::io::stderr(), "Session: {}", session_id);
+        let _ = writeln!(std::io::stderr(), "Live View: {}", live_view_url);
 
         let ws_path = format!("/browser-streams/{}/sessions/{}/automation", browser_identifier, session_id);
         let ws_url = format!("wss://{}{}", host, ws_path);

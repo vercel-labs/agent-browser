@@ -297,6 +297,13 @@ fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
     if let Some(ca) = opts.confirm_actions {
         cmd.env("AGENT_BROWSER_CONFIRM_ACTIONS", ca);
     }
+
+    // Forward AGENTCORE_* environment variables to daemon
+    for (key, value) in std::env::vars() {
+        if key.starts_with("AGENTCORE_") {
+            cmd.env(&key, value);
+        }
+    }
 }
 
 pub fn ensure_daemon(session: &str, opts: &DaemonOptions) -> Result<DaemonResult, String> {
