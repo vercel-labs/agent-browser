@@ -2989,14 +2989,134 @@ async fn handle_set_media(cmd: &Value, state: &DaemonState) -> Result<Value, Str
     Ok(json!({ "set": true }))
 }
 
-async fn handle_download(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let path = cmd
+async fn handle_download(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let selector = cmd
+        .get("selector")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'selector' parameter")?;
+    let path_str = cmd
         .get("path")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'path' parameter")?;
-    mgr.set_download_behavior(path).await?;
-    Ok(json!({ "downloadPath": path }))
+
+    // Resolve to absolute path
+    let dest = if std::path::Path::new(path_str).is_absolute() {
+        PathBuf::from(path_str)
+    } else {
+        std::env::current_dir()
+            .map_err(|e| format!("Failed to get current directory: {}", e))?
+            .join(path_str)
+    };
+
+    // Extract directory and desired filename
+    let download_dir = dest
+        .parent()
+        .ok_or("Invalid download path: no parent directory")?
+        .to_path_buf();
+
+    // Create the directory if it doesn't exist
+    std::fs::create_dir_all(&download_dir)
+        .map_err(|e| format!("Failed to create download directory: {}", e))?;
+
+    let download_dir_str = download_dir
+        .to_str()
+        .ok_or("Download directory path is not valid UTF-8")?;
+
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?.to_string();
+
+    // Set download behavior to save to the parent directory
+    mgr.set_download_behavior(download_dir_str).await?;
+
+    // Subscribe to CDP events before clicking so we don't miss the download event
+    let mut rx = mgr.client.subscribe();
+
+    // Click the element to trigger the download
+    interaction::click(
+        &mgr.client,
+        &session_id,
+        &state.ref_map,
+        selector,
+        "left",
+        1,
+        &state.iframe_sessions,
+    )
+    .await?;
+
+    // Wait for download to complete (30s timeout)
+    let timeout_ms: u64 = 30000;
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
+    let mut downloaded_guid: Option<String> = None;
+
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Err("Timeout waiting for download to complete".to_string());
+        }
+
+        match tokio::time::timeout(remaining, rx.recv()).await {
+            Ok(Ok(event)) => {
+                // Capture the GUID from downloadWillBegin
+                if event.method == "Browser.downloadWillBegin"
+                    && event.session_id.as_deref() == Some(&session_id)
+                {
+                    if let Some(guid) = event.params.get("guid").and_then(|v| v.as_str()) {
+                        downloaded_guid = Some(guid.to_string());
+                    }
+                }
+                // Check for download completion
+                if event.method == "Browser.downloadProgress"
+                    && event.session_id.as_deref() == Some(&session_id)
+                    && event.params.get("state").and_then(|v| v.as_str()) == Some("completed")
+                {
+                    break;
+                }
+                // Also check Page.downloadProgress for older Chrome versions
+                if event.method == "Page.downloadProgress"
+                    && event.session_id.as_deref() == Some(&session_id)
+                    && event.params.get("state").and_then(|v| v.as_str()) == Some("completed")
+                {
+                    break;
+                }
+            }
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
+            Ok(Err(_)) => return Err("Event stream closed".to_string()),
+            Err(_) => return Err("Timeout waiting for download to complete".to_string()),
+        }
+    }
+
+    // With "allowAndName" behavior, Chrome saves the file using the GUID as filename.
+    // Rename it to the user-requested filename.
+    if let Some(guid) = downloaded_guid {
+        let guid_path = download_dir.join(&guid);
+        if guid_path.exists() {
+            std::fs::rename(&guid_path, &dest)
+                .map_err(|e| format!("Failed to rename downloaded file: {}", e))?;
+        }
+    } else {
+        // No GUID captured -- try to find the most recently created file in the dir
+        // and rename it to the desired destination
+        if let Ok(entries) = std::fs::read_dir(&download_dir) {
+            let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
+            for entry in entries.flatten() {
+                if let Ok(meta) = entry.metadata() {
+                    if let Ok(modified) = meta.modified() {
+                        if newest.as_ref().is_none_or(|(t, _)| modified > *t) {
+                            newest = Some((modified, entry.path()));
+                        }
+                    }
+                }
+            }
+            if let Some((_, newest_path)) = newest {
+                if newest_path != dest {
+                    let _ = std::fs::rename(&newest_path, &dest);
+                }
+            }
+        }
+    }
+
+    let dest_str = dest.to_string_lossy().to_string();
+    Ok(json!({ "path": dest_str }))
 }
 
 // ---------------------------------------------------------------------------
