@@ -1,5 +1,6 @@
 mod color;
 mod commands;
+mod completion;
 mod connection;
 mod flags;
 mod install;
@@ -21,6 +22,7 @@ use windows_sys::Win32::Foundation::CloseHandle;
 use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
 
 use commands::{gen_id, parse_command, ParseError};
+use completion::run_completion;
 use connection::{ensure_daemon, get_socket_dir, send_command, DaemonOptions};
 use flags::{clean_args, parse_flags, Flags};
 use install::run_install;
@@ -231,6 +233,13 @@ fn main() {
     // Handle upgrade separately
     if clean.first().map(|s| s.as_str()) == Some("upgrade") {
         run_upgrade();
+        return;
+    }
+
+    // Handle completion separately
+    if clean.first().map(|s| s.as_str()) == Some("completion") {
+        let shell = clean.get(1).map(|s| s.as_str()).unwrap_or("");
+        run_completion(shell);
         return;
     }
 

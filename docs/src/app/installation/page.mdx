@@ -75,6 +75,18 @@ agent-browser upgrade
 
 Detects your installation method (npm, Homebrew, or Cargo) and runs the appropriate update command automatically. Displays the version change on success, or informs you if you are already on the latest version.
 
+## Shell completion
+
+Enable tab completion for commands and flags:
+
+```bash
+# bash (~/.bashrc or ~/.bash_profile)
+eval "$(agent-browser completion bash)"
+
+# zsh (~/.zshrc)
+eval "$(agent-browser completion zsh)"
+```
+
 ## Custom browser
 
 Use a custom browser executable instead of bundled Chromium:

@@ -1,0 +1,259 @@
+#compdef agent-browser
+# Shell completion for agent-browser
+# Source: cli/completions/_agent_browser
+# Keep in sync with: cli/src/commands.rs and cli/src/flags.rs
+#
+# To activate (add one of these to ~/.zshrc):
+#   eval "$(agent-browser completion zsh)"
+#   # or manually: fpath=(~/.zfunc $fpath) && agent-browser completion zsh > ~/.zfunc/_agent_browser
+
+_agent_browser() {
+    local state
+
+    _arguments \
+        '--json[Output in JSON format]' \
+        '--headed[Show browser window]' \
+        '--debug[Enable debug logging]' \
+        '--session[Session ID]:session:' \
+        '--headers[HTTP headers as JSON]:json:' \
+        '--executable-path[Browser executable path]:path:_files' \
+        '--cdp[CDP endpoint URL]:url:' \
+        '--extension[Browser extension path]:path:_dirs' \
+        '--profile[Browser profile directory]:path:_files' \
+        '--state[Browser state file]:path:_files' \
+        '--proxy[Proxy server URL]:url:' \
+        '--proxy-bypass[Domains to bypass proxy]:domains:' \
+        '--args[Extra browser arguments]:args:' \
+        '--user-agent[Custom user agent]:agent:' \
+        '--provider[Browser provider]:provider:(chromium firefox webkit ios android)' \
+        '-p[Browser provider]:provider:(chromium firefox webkit ios android)' \
+        '--device[Device emulation name]:device:' \
+        '--ignore-https-errors[Ignore HTTPS certificate errors]' \
+        '--allow-file-access[Allow file:// URL access]' \
+        '--auto-connect[Connect to running browser]' \
+        '--session-name[Named session for state persistence]:name:' \
+        '--annotate[Annotate elements in screenshots]' \
+        '--color-scheme[Color scheme]:scheme:(light dark)' \
+        '--download-path[Download directory]:path:_files' \
+        '--content-boundaries[Show content boundaries]' \
+        '--max-output[Max output size in bytes]:bytes:' \
+        '--allowed-domains[Allowed domains comma-separated]:domains:' \
+        '--action-policy[Action approval policy]:policy:' \
+        '--confirm-actions[Actions requiring confirmation]:actions:' \
+        '--confirm-interactive[Require interactive confirmation]' \
+        '--engine[Browser engine]:engine:(chrome lightpanda)' \
+        '--screenshot-dir[Default screenshot directory]:path:_files' \
+        '--screenshot-quality[JPEG quality 0-100]:quality:' \
+        '--screenshot-format[Screenshot format]:format:(png jpeg)' \
+        '--idle-timeout[Idle timeout e.g. 30s 5m]:duration:' \
+        '--config[Config file path]:path:_files' \
+        '1: :->cmd' \
+        '*: :->args' && return 0
+
+    case $state in
+        cmd)
+            local -a cmds=(
+                'open:Navigate to a URL'
+                'goto:Navigate to a URL'
+                'navigate:Navigate to a URL'
+                'back:Go back'
+                'forward:Go forward'
+                'reload:Reload the page'
+                'click:Click an element'
+                'dblclick:Double-click an element'
+                'fill:Clear and fill an element'
+                'type:Type into an element'
+                'hover:Hover over an element'
+                'focus:Focus an element'
+                'check:Check a checkbox'
+                'uncheck:Uncheck a checkbox'
+                'select:Select a dropdown option'
+                'drag:Drag and drop'
+                'upload:Upload files'
+                'download:Download a file'
+                'scroll:Scroll the page'
+                'scrollintoview:Scroll element into view'
+                'press:Press a key'
+                'key:Press a key'
+                'keyboard:Type with real keystrokes'
+                'get:Get element property'
+                'is:Check element state'
+                'find:Find elements'
+                'screenshot:Take a screenshot'
+                'pdf:Save as PDF'
+                'snapshot:Accessibility tree snapshot'
+                'eval:Run JavaScript'
+                'connect:Connect to browser via CDP'
+                'wait:Wait for element or time'
+                'inspect:Open Chrome DevTools'
+                'batch:Execute commands from stdin'
+                'cookies:Manage cookies'
+                'storage:Manage storage'
+                'state:Manage browser state'
+                'network:Manage network'
+                'trace:Record a trace'
+                'profiler:Record a profile'
+                'record:Record video'
+                'set:Configure browser settings'
+                'mouse:Mouse actions'
+                'tab:Manage tabs'
+                'window:Manage windows'
+                'frame:Switch frames'
+                'dialog:Handle dialogs'
+                'console:View console logs'
+                'errors:View page errors'
+                'highlight:Highlight an element'
+                'clipboard:Read/write clipboard'
+                'diff:Compare snapshots'
+                'auth:Auth vault'
+                'close:Close browser'
+                'install:Install browser binaries'
+                'upgrade:Upgrade to latest version'
+                'session:Manage sessions'
+                'confirm:Approve a pending action'
+                'deny:Deny a pending action'
+                'completion:Generate shell completion script'
+            )
+            _describe 'command' cmds
+            ;;
+        args)
+            case ${words[2]} in
+                auth)
+                    local -a sub=('save:Save credentials' 'login:Login with saved profile' 'list:List saved profiles' 'show:Show profile details' 'delete:Delete a profile')
+                    _describe 'subcommand' sub
+                    _arguments \
+                        '--url[Authentication URL]:url:' \
+                        '--username[Username]:username:' \
+                        '--password[Password]:password:' \
+                        '--password-stdin[Read password from stdin]' \
+                        '--username-selector[Username field selector]:selector:' \
+                        '--password-selector[Password field selector]:selector:' \
+                        '--submit-selector[Submit button selector]:selector:' ;;
+                cookies)
+                    local -a sub=('get:Get cookies' 'set:Set a cookie' 'clear:Clear cookies')
+                    _describe 'subcommand' sub
+                    _arguments \
+                        '--url[Cookie URL scope]:url:' \
+                        '--domain[Cookie domain]:domain:' \
+                        '--path[Cookie path]:path:' \
+                        '--httpOnly[HTTP-only cookie]' \
+                        '--secure[Secure cookie]' \
+                        '--sameSite[SameSite policy]:policy:(Strict Lax None)' \
+                        '--expires[Expiry timestamp (seconds)]:timestamp:' ;;
+                network)
+                    local -a sub=('route:Intercept a URL pattern' 'unroute:Remove intercept' 'requests:Show network requests' 'har:Record HAR file')
+                    _describe 'subcommand' sub
+                    _arguments \
+                        '--abort[Abort matching requests]' \
+                        '--body[Response body]:body:' ;;
+                get)
+                    local -a sub=('text:Get text content' 'html:Get HTML content' 'value:Get input value' 'attr:Get attribute' 'title:Get page title' 'url:Get page URL' 'count:Count elements' 'box:Get bounding box' 'styles:Get computed styles' 'cdp-url:Get CDP URL')
+                    _describe 'subcommand' sub ;;
+                is)
+                    local -a sub=('visible:Check if visible' 'enabled:Check if enabled' 'checked:Check if checked')
+                    _describe 'subcommand' sub ;;
+                find)
+                    local -a sub=('role:Find by ARIA role' 'text:Find by text' 'label:Find by label' 'placeholder:Find by placeholder' 'alt:Find by alt text' 'title:Find by title' 'testid:Find by test ID' 'first:Get first match' 'last:Get last match' 'nth:Get nth match')
+                    _describe 'subcommand' sub
+                    _arguments \
+                        '--exact[Exact match]' \
+                        '--name[Search by name]:name:' ;;
+                set)
+                    local -a sub=('viewport:Set viewport size' 'device:Emulate device' 'geo:Set geolocation' 'geolocation:Set geolocation' 'offline:Toggle offline mode' 'headers:Set HTTP headers' 'credentials:Set HTTP credentials' 'auth:Set HTTP auth credentials' 'media:Set media type')
+                    _describe 'subcommand' sub ;;
+                mouse)
+                    local -a sub=('move:Move mouse' 'down:Mouse button down' 'up:Mouse button up' 'wheel:Scroll wheel')
+                    _describe 'subcommand' sub ;;
+                tab)
+                    local -a sub=('new:Open new tab' 'list:List tabs' 'close:Close tab')
+                    _describe 'subcommand' sub ;;
+                keyboard)
+                    local -a sub=('type:Type text with keystrokes' 'inserttext:Insert text without key events')
+                    _describe 'subcommand' sub ;;
+                diff)
+                    local -a sub=('snapshot:Compare snapshots' 'screenshot:Compare screenshots' 'url:Compare URLs')
+                    _describe 'subcommand' sub
+                    _arguments \
+                        '-b[Baseline file]:path:_files' '--baseline[Baseline file]:path:_files' \
+                        '-s[Scope to selector]:selector:' '--selector[Scope to selector]:selector:' \
+                        '-c[Compact output]' '--compact[Compact output]' \
+                        '-d[Max depth]:depth:' '--depth[Max depth]:depth:' \
+                        '-o[Output diff image]:path:_files' '--output[Output diff image]:path:_files' \
+                        '-t[Pixel threshold 0-1]:threshold:' '--threshold[Pixel threshold]:threshold:' \
+                        '-f[Full page]' '--full[Full page]' \
+                        '--screenshot[Compare as screenshots]' \
+                        '--wait-until[Wait for load state]:state:(load domcontentloaded networkidle)' ;;
+                clipboard)
+                    local -a sub=('read:Read clipboard' 'write:Write clipboard' 'copy:Copy to clipboard' 'paste:Paste from clipboard')
+                    _describe 'subcommand' sub ;;
+                scroll)
+                    local -a sub=('up:Scroll up' 'down:Scroll down' 'left:Scroll left' 'right:Scroll right')
+                    _describe 'subcommand' sub ;;
+                storage)
+                    local -a sub=('local:Local storage' 'session:Session storage')
+                    _describe 'subcommand' sub ;;
+                state)
+                    local -a sub=('save:Save state' 'load:Load state' 'list:List states' 'clear:Clear state' 'show:Show state' 'clean:Clean states' 'rename:Rename state')
+                    _describe 'subcommand' sub
+                    _arguments \
+                        '-a[Apply to all]' '--all[Apply to all]' \
+                        '--older-than[Days threshold]:days:' ;;
+                trace)
+                    local -a sub=('start:Start recording' 'stop:Stop recording')
+                    _describe 'subcommand' sub ;;
+                record)
+                    local -a sub=('start:Start recording' 'stop:Stop recording' 'restart:Restart recording')
+                    _describe 'subcommand' sub ;;
+                profiler)
+                    local -a sub=('start:Start recording' 'stop:Stop recording')
+                    _describe 'subcommand' sub
+                    _arguments '--categories[Profiler categories]:categories:' ;;
+                dialog)
+                    local -a sub=('accept:Accept dialog' 'dismiss:Dismiss dialog')
+                    _describe 'subcommand' sub ;;
+                window)
+                    local -a sub=('new:Open new window')
+                    _describe 'subcommand' sub ;;
+                session)
+                    local -a sub=('list:List active sessions')
+                    _describe 'subcommand' sub ;;
+                completion)
+                    local -a shells=('bash:Bash completion script' 'zsh:Zsh completion script')
+                    _describe 'shell' shells ;;
+                snapshot)
+                    _arguments \
+                        '-i[Only interactive elements]' '--interactive[Only interactive elements]' \
+                        '-c[Remove empty structural elements]' '--compact[Remove empty structural elements]' \
+                        '-C[Include cursor position]' '--cursor[Include cursor position]' \
+                        '-d[Limit tree depth]:depth:' '--depth[Limit tree depth]:depth:' \
+                        '-s[Scope to CSS selector]:selector:' '--selector[Scope to CSS selector]:selector:' ;;
+                wait)
+                    _arguments \
+                        '-u[Wait for URL pattern]:pattern:' '--url[Wait for URL pattern]:pattern:' \
+                        '-l[Wait for load state]:state:(load domcontentloaded networkidle)' \
+                        '--load[Wait for load state]:state:(load domcontentloaded networkidle)' \
+                        '-f[Wait for JS function]:expression:' '--fn[Wait for JS function]:expression:' \
+                        '-t[Wait for text]:text:' '--text[Wait for text]:text:' \
+                        '-d[Wait for download]:path:_files' '--download[Wait for download]:path:_files' \
+                        '--timeout[Timeout in ms]:ms:' ;;
+                screenshot)
+                    _arguments \
+                        '-f[Capture full page]' '--full[Capture full page]' ;;
+                click|dblclick|hover)
+                    _arguments '--new-tab[Open link in new tab]' ;;
+                eval)
+                    _arguments \
+                        '-b[Script is base64 encoded]' '--base64[Script is base64 encoded]' \
+                        '--stdin[Read script from stdin]' ;;
+                batch)
+                    _arguments '--bail[Stop on first error]' ;;
+            esac
+            ;;
+    esac
+}
+
+if [ "$funcstack[1]" = "_agent_browser" ]; then
+    _agent_browser "$@"
+else
+    compdef _agent_browser agent-browser
+fi

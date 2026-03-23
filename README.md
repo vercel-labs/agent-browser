@@ -68,6 +68,18 @@ agent-browser upgrade
 
 Detects your installation method (npm, Homebrew, or Cargo) and runs the appropriate update command automatically.
 
+### Shell Completion
+
+Enable tab completion for commands and flags:
+
+```bash
+# bash (~/.bashrc or ~/.bash_profile)
+eval "$(agent-browser completion bash)"
+
+# zsh (~/.zshrc)
+eval "$(agent-browser completion zsh)"
+```
+
 ### Requirements
 
 - **Chrome** - Run `agent-browser install` to download Chrome from [Chrome for Testing](https://developer.chrome.com/blog/chrome-for-testing/) (Google's official automation channel). No Playwright or Node.js required for the daemon.
