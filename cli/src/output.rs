@@ -1612,6 +1612,37 @@ Examples:
 "##
         }
 
+        // === Assert ===
+        "assert" => {
+            r##"
+agent-browser assert - Assert page or element state
+
+Usage: agent-browser assert <subcommand> [args]
+
+Asserts conditions and exits with code 1 when a condition is not met.
+
+Subcommands:
+  visible <selector>         Assert element is visible (exit 1 if not)
+  hidden <selector>          Assert element is hidden
+  text <selector> <txt>      Assert element contains text
+  url <pattern>              Assert URL matches pattern (* and ** globs)
+  title <expected>           Assert page title matches
+  enabled <selector>         Assert element is enabled
+  checked <selector>         Assert element is checked
+
+Global Options:
+  --json               Output as JSON
+  --session <name>     Use specific session
+
+Examples:
+  agent-browser assert visible "#modal"
+  agent-browser assert hidden "#loading"
+  agent-browser assert text "@e3" "Welcome"
+  agent-browser assert url "**/dashboard"
+  agent-browser assert title "Dashboard"
+"##
+        }
+
         // === Find ===
         "find" => {
             r##"
@@ -2539,6 +2570,10 @@ Get Info:  agent-browser get <what> [selector]
 
 Check State:  agent-browser is <what> <selector>
   visible, enabled, checked
+
+Assert:  agent-browser assert <what> [args]
+  visible <selector>, hidden <selector>, text <selector> <txt>
+  url <pattern>, title <expected>, enabled <selector>, checked <selector>
 
 Find Elements:  agent-browser find <locator> <value> <action> [text]
   role, text, label, placeholder, alt, title, testid, first, last, nth
