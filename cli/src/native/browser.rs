@@ -174,6 +174,11 @@ pub struct BrowserManager {
     pages: Vec<PageInfo>,
     active_page_index: usize,
     default_timeout_ms: u64,
+    /// Whether the browser was launched with extensions.  Extensions only run
+    /// in the default browser context, so callers that create new contexts
+    /// (e.g. recording, window_new) must skip `Target.createBrowserContext`
+    /// when this is `true`.
+    pub has_extensions: bool,
 }
 
 const LIGHTPANDA_CDP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -210,6 +215,11 @@ impl BrowserManager {
         let user_agent = options.user_agent.clone();
         let color_scheme = options.color_scheme.clone();
         let download_path = options.download_path.clone();
+        let has_extensions = options
+            .extensions
+            .as_ref()
+            .map(|e| !e.is_empty())
+            .unwrap_or(false);
 
         let (ws_url, process) = match engine {
             "lightpanda" => {
@@ -242,6 +252,7 @@ impl BrowserManager {
                 pages: Vec::new(),
                 active_page_index: 0,
                 default_timeout_ms: 25_000,
+                has_extensions,
             };
             manager.discover_and_attach_targets().await?;
             manager
@@ -306,6 +317,7 @@ impl BrowserManager {
             pages: Vec::new(),
             active_page_index: 0,
             default_timeout_ms: 10_000,
+            has_extensions: false,
         };
 
         manager.discover_and_attach_targets().await?;
@@ -1237,6 +1249,7 @@ async fn initialize_lightpanda_manager(
             pages: Vec::new(),
             active_page_index: 0,
             default_timeout_ms: 25_000,
+            has_extensions: false,
         };
 
         match discover_and_attach_lightpanda_targets(&mut manager, deadline).await {
@@ -1504,6 +1517,58 @@ mod tests {
         assert!(!is_internal_chrome_target("https://example.com"));
         assert!(!is_internal_chrome_target("http://localhost:3000"));
         assert!(!is_internal_chrome_target("about:blank"));
+    }
+
+    // -----------------------------------------------------------------------
+    // has_extensions field tests
+    // -----------------------------------------------------------------------
+
+    /// Extensions present → has_extensions must be true so that recording and
+    /// window_new skip creating isolated (incognito-like) browser contexts
+    /// where extensions are not injected.
+    #[test]
+    fn test_has_extensions_true_when_extensions_present() {
+        let opts = LaunchOptions {
+            extensions: Some(vec!["/tmp/my-ext".to_string()]),
+            ..Default::default()
+        };
+        let has = opts
+            .extensions
+            .as_ref()
+            .map(|e| !e.is_empty())
+            .unwrap_or(false);
+        assert!(
+            has,
+            "has_extensions should be true when extensions are provided"
+        );
+    }
+
+    #[test]
+    fn test_has_extensions_false_when_no_extensions() {
+        let opts = LaunchOptions::default();
+        let has = opts
+            .extensions
+            .as_ref()
+            .map(|e| !e.is_empty())
+            .unwrap_or(false);
+        assert!(!has, "has_extensions should be false when no extensions");
+    }
+
+    #[test]
+    fn test_has_extensions_false_when_empty_vec() {
+        let opts = LaunchOptions {
+            extensions: Some(vec![]),
+            ..Default::default()
+        };
+        let has = opts
+            .extensions
+            .as_ref()
+            .map(|e| !e.is_empty())
+            .unwrap_or(false);
+        assert!(
+            !has,
+            "has_extensions should be false for empty extensions vec"
+        );
     }
 
     // -----------------------------------------------------------------------
