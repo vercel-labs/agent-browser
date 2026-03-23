@@ -2242,6 +2242,7 @@ mod tests {
             screenshot_quality: None,
             screenshot_format: None,
             idle_timeout: None,
+            tab_index: None,
         }
     }
 
