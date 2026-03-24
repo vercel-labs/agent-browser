@@ -1,11 +1,41 @@
 use crate::color;
+use serde::Deserialize;
+use std::env;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{exit, Command, Stdio};
+use url::Url;
 
-const LAST_KNOWN_GOOD_URL: &str =
-    "https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json";
+const OFFICIAL_LAST_KNOWN_GOOD_URL: &str =
+    "https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions.json";
+const OFFICIAL_DOWNLOAD_BASE_URL: &str = "https://storage.googleapis.com/chrome-for-testing-public";
+const CHROME_LAST_KNOWN_GOOD_URL_ENV: &str = "AGENT_BROWSER_CHROME_LAST_KNOWN_GOOD_URL";
+const CHROME_DOWNLOAD_BASE_URL_ENV: &str = "AGENT_BROWSER_CHROME_DOWNLOAD_BASE_URL";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ChromeInstallSource {
+    last_known_good_url: String,
+    download_base_url: String,
+    custom_last_known_good_url: bool,
+    custom_download_base_url: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct LastKnownGoodVersions {
+    channels: ChromeChannels,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChromeChannels {
+    #[serde(rename = "Stable")]
+    stable: ChromeChannel,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChromeChannel {
+    version: String,
+}
 
 pub fn get_browsers_dir() -> PathBuf {
     dirs::home_dir()
@@ -127,51 +157,140 @@ fn platform_key() -> &'static str {
     }
 }
 
-async fn fetch_download_url() -> Result<(String, String), String> {
-    let resp = reqwest::get(LAST_KNOWN_GOOD_URL)
+/// Resolve Chrome installer env vars into Stable manifest and download base URLs.
+fn resolve_install_source() -> Result<ChromeInstallSource, String> {
+    let last_known_good_url = read_env_var(CHROME_LAST_KNOWN_GOOD_URL_ENV)?;
+    let download_base_url = read_env_var(CHROME_DOWNLOAD_BASE_URL_ENV)?;
+
+    let (last_known_good_url, custom_last_known_good_url) = match last_known_good_url {
+        Some(value) => {
+            validate_install_url(CHROME_LAST_KNOWN_GOOD_URL_ENV, &value)?;
+            (value, true)
+        }
+        None => (OFFICIAL_LAST_KNOWN_GOOD_URL.to_string(), false),
+    };
+
+    let (download_base_url, custom_download_base_url) = match download_base_url {
+        Some(value) => {
+            let normalized = trim_trailing_slash(value);
+            validate_install_url(CHROME_DOWNLOAD_BASE_URL_ENV, &normalized)?;
+            (normalized, true)
+        }
+        None => (OFFICIAL_DOWNLOAD_BASE_URL.to_string(), false),
+    };
+
+    Ok(ChromeInstallSource {
+        last_known_good_url,
+        download_base_url,
+        custom_last_known_good_url,
+        custom_download_base_url,
+    })
+}
+
+fn read_env_var(name: &str) -> Result<Option<String>, String> {
+    match env::var(name) {
+        Ok(value) => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                Err(format!("{name} is set but empty"))
+            } else {
+                Ok(Some(trimmed.to_string()))
+            }
+        }
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(env::VarError::NotUnicode(_)) => Err(format!("{name} contains non-Unicode data")),
+    }
+}
+
+fn trim_trailing_slash(value: String) -> String {
+    value.trim_end_matches('/').to_string()
+}
+
+fn validate_install_url(name: &str, value: &str) -> Result<(), String> {
+    let parsed = Url::parse(value).map_err(|e| format!("{name} is not a valid URL: {e}"))?;
+    match parsed.scheme() {
+        "http" | "https" => Ok(()),
+        scheme => Err(format!("{name} must use http or https, got {scheme}")),
+    }
+}
+
+fn archive_name_for_platform(platform: &str) -> Option<&'static str> {
+    match platform {
+        "linux64" => Some("chrome-linux64.zip"),
+        "mac-arm64" => Some("chrome-mac-arm64.zip"),
+        "mac-x64" => Some("chrome-mac-x64.zip"),
+        "win64" => Some("chrome-win64.zip"),
+        _ => None,
+    }
+}
+
+fn build_download_url(base_url: &str, version: &str, platform: &str) -> Result<String, String> {
+    const DOWNLOAD_URL_LABEL: &str = "Chrome install URL";
+
+    let archive = archive_name_for_platform(platform)
+        .ok_or_else(|| format!("Unsupported platform for archive download: {platform}"))?;
+    let url = format!("{base_url}/{version}/{platform}/{archive}");
+    validate_install_url(DOWNLOAD_URL_LABEL, &url)?;
+    Ok(url)
+}
+
+fn validate_chrome_version(version: &str) -> Result<(), String> {
+    let parts: Vec<_> = version.split('.').collect();
+    if parts.len() != 4
+        || parts
+            .iter()
+            .any(|part| part.is_empty() || !part.chars().all(|c| c.is_ascii_digit()))
+    {
+        return Err(format!(
+            "Invalid Chrome version '{version}'. Expected numeric format like 146.0.7680.80"
+        ));
+    }
+    Ok(())
+}
+
+fn is_insecure_custom_url(url: &str, custom_configured: bool) -> bool {
+    if !custom_configured {
+        return false;
+    }
+
+    Url::parse(url)
+        .map(|parsed| parsed.scheme() == "http")
+        .unwrap_or(false)
+}
+
+fn parse_stable_version(body: &[u8]) -> Result<String, String> {
+    let manifest: LastKnownGoodVersions =
+        serde_json::from_slice(body).map_err(|e| format!("invalid JSON: {e}"))?;
+    let version = manifest.channels.stable.version.trim();
+    if version.is_empty() {
+        return Err("missing Stable version".to_string());
+    }
+    Ok(version.to_string())
+}
+
+async fn resolve_version(source: &ChromeInstallSource) -> Result<String, String> {
+    let url = &source.last_known_good_url;
+
+    let resp = reqwest::get(url)
         .await
-        .map_err(|e| format!("Failed to fetch version info: {}", e))?;
+        .map_err(|e| format!("Failed to fetch version info from {url}: {e}"))?
+        .error_for_status()
+        .map_err(|e| format!("Failed to fetch version info from {url}: {e}"))?;
 
-    let body: serde_json::Value = resp
-        .json()
+    let body = resp
+        .bytes()
         .await
-        .map_err(|e| format!("Failed to parse version info: {}", e))?;
+        .map_err(|e| format!("Failed to read version info from {url}: {e}"))?;
 
-    let channel = body
-        .get("channels")
-        .and_then(|c| c.get("Stable"))
-        .ok_or("No Stable channel found in version info")?;
-
-    let version = channel
-        .get("version")
-        .and_then(|v| v.as_str())
-        .ok_or("No version string found")?
-        .to_string();
-
-    let platform = platform_key();
-
-    let url = channel
-        .get("downloads")
-        .and_then(|d| d.get("chrome"))
-        .and_then(|c| c.as_array())
-        .and_then(|arr| {
-            arr.iter().find_map(|entry| {
-                if entry.get("platform")?.as_str()? == platform {
-                    Some(entry.get("url")?.as_str()?.to_string())
-                } else {
-                    None
-                }
-            })
-        })
-        .ok_or_else(|| format!("No download URL found for platform: {}", platform))?;
-
-    Ok((version, url))
+    parse_stable_version(&body).map_err(|e| format!("Failed to parse version info from {url}: {e}"))
 }
 
 async fn download_bytes(url: &str) -> Result<Vec<u8>, String> {
     let resp = reqwest::get(url)
         .await
-        .map_err(|e| format!("Download failed: {}", e))?;
+        .map_err(|e| format!("Download failed for {url}: {e}"))?
+        .error_for_status()
+        .map_err(|e| format!("Download failed for {url}: {e}"))?;
 
     let total = resp.content_length();
     let mut bytes = Vec::new();
@@ -269,6 +388,11 @@ fn extract_zip(bytes: Vec<u8>, dest: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn exit_install_error(message: String) -> ! {
+    eprintln!("{} {}", color::error_indicator(), message);
+    exit(1);
+}
+
 pub fn run_install(with_deps: bool) {
     if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
         eprintln!(
@@ -299,6 +423,14 @@ pub fn run_install(with_deps: bool) {
 
     println!("{}", color::cyan("Installing Chrome..."));
 
+    let source = match resolve_install_source() {
+        Ok(source) => source,
+        Err(e) => {
+            eprintln!("{} {}", color::error_indicator(), e);
+            exit(1);
+        }
+    };
+
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -311,12 +443,16 @@ pub fn run_install(with_deps: bool) {
             exit(1);
         });
 
-    let (version, url) = match rt.block_on(fetch_download_url()) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("{} {}", color::error_indicator(), e);
-            exit(1);
-        }
+    let version = match rt.block_on(resolve_version(&source)) {
+        Ok(version) => version,
+        Err(e) => exit_install_error(e),
+    };
+    if let Err(e) = validate_chrome_version(&version) {
+        exit_install_error(e);
+    }
+    let url = match build_download_url(&source.download_base_url, &version, platform_key()) {
+        Ok(url) => url,
+        Err(e) => exit_install_error(e),
     };
 
     let dest = get_browsers_dir().join(format!("chrome-{}", version));
@@ -333,14 +469,29 @@ pub fn run_install(with_deps: bool) {
     }
 
     println!("  Downloading Chrome {} for {}", version, platform_key());
+    if source.custom_last_known_good_url {
+        println!("  Stable manifest override: {}", source.last_known_good_url);
+        if is_insecure_custom_url(&source.last_known_good_url, true) {
+            println!(
+                "  {} Using insecure HTTP Stable manifest override; only use this on a trusted internal network.",
+                color::warning_indicator()
+            );
+        }
+    }
+    if source.custom_download_base_url {
+        println!("  Download base override: {}", source.download_base_url);
+        if is_insecure_custom_url(&source.download_base_url, true) {
+            println!(
+                "  {} Using insecure HTTP download base override; only use this on a trusted internal network.",
+                color::warning_indicator()
+            );
+        }
+    }
     println!("  {}", url);
 
     let bytes = match rt.block_on(download_bytes(&url)) {
         Ok(b) => b,
-        Err(e) => {
-            eprintln!("{} {}", color::error_indicator(), e);
-            exit(1);
-        }
+        Err(e) => exit_install_error(e),
     };
 
     match extract_zip(bytes, &dest) {
@@ -630,4 +781,181 @@ fn package_exists_apt(pkg: &str) -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::EnvGuard;
+
+    #[test]
+    fn resolve_install_source_uses_official_defaults() {
+        let _guard = EnvGuard::new(&[CHROME_LAST_KNOWN_GOOD_URL_ENV, CHROME_DOWNLOAD_BASE_URL_ENV]);
+
+        let source = resolve_install_source().unwrap();
+
+        assert!(!source.custom_last_known_good_url);
+        assert!(!source.custom_download_base_url);
+        assert_eq!(
+            source.last_known_good_url,
+            OFFICIAL_LAST_KNOWN_GOOD_URL.to_string()
+        );
+        assert_eq!(
+            source.download_base_url,
+            OFFICIAL_DOWNLOAD_BASE_URL.to_string()
+        );
+    }
+
+    #[test]
+    fn resolve_install_source_overrides_last_known_good_url() {
+        let guard = EnvGuard::new(&[CHROME_LAST_KNOWN_GOOD_URL_ENV, CHROME_DOWNLOAD_BASE_URL_ENV]);
+        guard.set(
+            CHROME_LAST_KNOWN_GOOD_URL_ENV,
+            "https://mirror.example.com/cft/last-known-good-versions.json",
+        );
+
+        let source = resolve_install_source().unwrap();
+
+        assert!(source.custom_last_known_good_url);
+        assert!(!source.custom_download_base_url);
+        assert_eq!(
+            source.last_known_good_url,
+            "https://mirror.example.com/cft/last-known-good-versions.json".to_string()
+        );
+        assert_eq!(
+            source.download_base_url,
+            OFFICIAL_DOWNLOAD_BASE_URL.to_string()
+        );
+    }
+
+    #[test]
+    fn resolve_install_source_overrides_download_base_url() {
+        let guard = EnvGuard::new(&[CHROME_LAST_KNOWN_GOOD_URL_ENV, CHROME_DOWNLOAD_BASE_URL_ENV]);
+        guard.set(
+            CHROME_DOWNLOAD_BASE_URL_ENV,
+            "https://mirror.example.com/chrome-for-testing/",
+        );
+
+        let source = resolve_install_source().unwrap();
+
+        assert!(!source.custom_last_known_good_url);
+        assert!(source.custom_download_base_url);
+        assert_eq!(
+            source.last_known_good_url,
+            OFFICIAL_LAST_KNOWN_GOOD_URL.to_string()
+        );
+        assert_eq!(
+            source.download_base_url,
+            "https://mirror.example.com/chrome-for-testing".to_string()
+        );
+    }
+
+    #[test]
+    fn resolve_install_source_allows_http_overrides() {
+        let guard = EnvGuard::new(&[CHROME_LAST_KNOWN_GOOD_URL_ENV, CHROME_DOWNLOAD_BASE_URL_ENV]);
+        guard.set(
+            CHROME_LAST_KNOWN_GOOD_URL_ENV,
+            "http://mirror.internal/chrome-for-testing/last-known-good-versions.json",
+        );
+        guard.set(
+            CHROME_DOWNLOAD_BASE_URL_ENV,
+            "http://mirror.internal/chrome-for-testing",
+        );
+
+        let source = resolve_install_source().unwrap();
+
+        assert!(source.custom_last_known_good_url);
+        assert!(source.custom_download_base_url);
+        assert!(is_insecure_custom_url(
+            &source.last_known_good_url,
+            source.custom_last_known_good_url
+        ));
+        assert!(is_insecure_custom_url(
+            &source.download_base_url,
+            source.custom_download_base_url
+        ));
+    }
+
+    #[test]
+    fn resolve_install_source_rejects_empty_last_known_good_url() {
+        let guard = EnvGuard::new(&[CHROME_LAST_KNOWN_GOOD_URL_ENV, CHROME_DOWNLOAD_BASE_URL_ENV]);
+        guard.set(CHROME_LAST_KNOWN_GOOD_URL_ENV, "   ");
+
+        let err = resolve_install_source().unwrap_err();
+
+        assert!(err.contains("is set but empty"));
+    }
+
+    #[test]
+    fn resolve_install_source_rejects_empty_download_base_url() {
+        let guard = EnvGuard::new(&[CHROME_LAST_KNOWN_GOOD_URL_ENV, CHROME_DOWNLOAD_BASE_URL_ENV]);
+        guard.set(CHROME_DOWNLOAD_BASE_URL_ENV, "   ");
+
+        let err = resolve_install_source().unwrap_err();
+
+        assert!(err.contains("is set but empty"));
+    }
+
+    #[test]
+    fn build_download_url_uses_base_url() {
+        let url = build_download_url(
+            "https://mirror.example.com/chrome-for-testing",
+            "146.0.7680.80",
+            "win64",
+        )
+        .unwrap();
+
+        assert_eq!(
+            url,
+            "https://mirror.example.com/chrome-for-testing/146.0.7680.80/win64/chrome-win64.zip"
+        );
+    }
+
+    #[test]
+    fn build_download_url_accepts_http_base_url() {
+        let url = build_download_url(
+            "http://mirror.internal/chrome-for-testing",
+            "146.0.7680.80",
+            "win64",
+        )
+        .unwrap();
+
+        assert_eq!(
+            url,
+            "http://mirror.internal/chrome-for-testing/146.0.7680.80/win64/chrome-win64.zip"
+        );
+    }
+
+    #[test]
+    fn parse_stable_version_reads_manifest() {
+        let version = parse_stable_version(
+            br#"{
+                "channels": {
+                    "Stable": {
+                        "version": "146.0.7680.80"
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(version, "146.0.7680.80");
+    }
+
+    #[test]
+    fn validate_chrome_version_accepts_cft_format() {
+        validate_chrome_version("146.0.7680.80").unwrap();
+    }
+
+    #[test]
+    fn validate_chrome_version_rejects_path_traversal() {
+        let err = validate_chrome_version("146.0.7680.80/../../evil").unwrap_err();
+        assert!(err.contains("Invalid Chrome version"));
+    }
+
+    #[test]
+    fn validate_chrome_version_rejects_non_numeric_suffix() {
+        let err = validate_chrome_version("146.0.7680.80-beta").unwrap_err();
+        assert!(err.contains("Invalid Chrome version"));
+    }
 }

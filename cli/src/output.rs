@@ -2283,13 +2283,23 @@ agent-browser install - Install browser binaries
 Usage: agent-browser install [--with-deps]
 
 Downloads and installs browser binaries required for automation.
+For reliable mirror installs, set AGENT_BROWSER_CHROME_LAST_KNOWN_GOOD_URL
+and AGENT_BROWSER_CHROME_DOWNLOAD_BASE_URL together so the Stable manifest and
+ZIP download base stay in sync. HTTPS is recommended. HTTP is supported for
+trusted internal mirrors and prints a warning at install time.
 
 Options:
   -d, --with-deps      Also install system dependencies (Linux only)
 
+Environment:
+  AGENT_BROWSER_CHROME_LAST_KNOWN_GOOD_URL   URL to CfT last-known-good-versions.json
+  AGENT_BROWSER_CHROME_DOWNLOAD_BASE_URL     Base URL for Chrome ZIP downloads
+
 Examples:
   agent-browser install
   agent-browser install --with-deps
+  AGENT_BROWSER_CHROME_LAST_KNOWN_GOOD_URL=https://mirror.example.com/chrome-for-testing/last-known-good-versions.json AGENT_BROWSER_CHROME_DOWNLOAD_BASE_URL=https://mirror.example.com/chrome-for-testing agent-browser install
+  AGENT_BROWSER_CHROME_LAST_KNOWN_GOOD_URL=http://mirror.internal/chrome-for-testing/last-known-good-versions.json AGENT_BROWSER_CHROME_DOWNLOAD_BASE_URL=http://mirror.internal/chrome-for-testing agent-browser install
 "##
         }
 
@@ -2721,6 +2731,8 @@ Environment:
   AGENT_BROWSER_CONFIRM_ACTIONS  Action categories requiring confirmation
   AGENT_BROWSER_CONFIRM_INTERACTIVE Enable interactive confirmation prompts
   AGENT_BROWSER_ENGINE           Browser engine: chrome (default), lightpanda
+  AGENT_BROWSER_CHROME_LAST_KNOWN_GOOD_URL URL to CfT last-known-good-versions.json
+  AGENT_BROWSER_CHROME_DOWNLOAD_BASE_URL Base URL for Chrome for Testing installs
   AGENT_BROWSER_SCREENSHOT_DIR   Default screenshot output directory
   AGENT_BROWSER_SCREENSHOT_QUALITY JPEG quality 0-100
   AGENT_BROWSER_SCREENSHOT_FORMAT Screenshot format: png, jpeg
