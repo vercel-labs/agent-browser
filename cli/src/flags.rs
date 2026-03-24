@@ -217,6 +217,7 @@ fn extract_config_path(args: &[String]) -> Option<Option<String>> {
         "--screenshot-quality",
         "--screenshot-format",
         "--idle-timeout",
+        "--tab",
     ];
     let mut i = 0;
     while i < args.len() {
@@ -298,6 +299,7 @@ pub struct Flags {
     pub screenshot_quality: Option<u32>,
     pub screenshot_format: Option<String>,
     pub idle_timeout: Option<String>, // Canonical milliseconds string for AGENT_BROWSER_IDLE_TIMEOUT_MS
+    pub tab_index: Option<usize>,
 
     // Track which launch-time options were explicitly passed via CLI
     // (as opposed to being set only via environment variables)
@@ -431,6 +433,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
         cli_annotate: false,
         cli_download_path: false,
         cli_headed: false,
+        tab_index: None,
     };
 
     let mut i = 0;
@@ -473,6 +476,20 @@ pub fn parse_flags(args: &[String]) -> Flags {
                             color::warning_indicator(),
                             e
                         ),
+                    }
+                    i += 1;
+                }
+            }
+            "--tab" => {
+                if let Some(s) = args.get(i + 1) {
+                    if let Ok(idx) = s.parse::<usize>() {
+                        flags.tab_index = Some(idx);
+                    } else {
+                        eprintln!(
+                            "{} Invalid --tab value: {} (expected a number)",
+                            color::warning_indicator(),
+                            s
+                        );
                     }
                     i += 1;
                 }
@@ -749,6 +766,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--screenshot-quality",
         "--screenshot-format",
         "--idle-timeout",
+        "--tab",
     ];
 
     let mut i = 0;

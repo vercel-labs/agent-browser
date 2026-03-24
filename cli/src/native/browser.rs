@@ -456,6 +456,25 @@ impl BrowserManager {
             .ok_or_else(|| "No active page".to_string())
     }
 
+    /// Get the current active page index.
+    pub fn active_page(&self) -> usize {
+        self.active_page_index
+    }
+
+    /// Temporarily override the active page index. Returns an error if the
+    /// index is out of range.
+    pub fn set_active_page(&mut self, index: usize) -> Result<(), String> {
+        if index >= self.pages.len() {
+            return Err(format!(
+                "Tab index {} out of range (0-{})",
+                index,
+                self.pages.len().saturating_sub(1)
+            ));
+        }
+        self.active_page_index = index;
+        Ok(())
+    }
+
     pub async fn navigate(&mut self, url: &str, wait_until: WaitUntil) -> Result<Value, String> {
         let session_id = self.active_session_id()?.to_string();
         let mut lifecycle_rx = self.client.subscribe();
