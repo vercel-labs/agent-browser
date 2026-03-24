@@ -1223,7 +1223,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                         context: "state show".to_string(),
                         usage: "state show <filename>",
                     })?;
-                    Ok(json!({ "id": id, "action": "state_show", "filename": filename }))
+                    Ok(json!({ "id": id, "action": "state_show", "path": filename }))
                 }
                 Some("clean") => {
                     let mut days: Option<i64> = None;
