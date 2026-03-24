@@ -1754,6 +1754,7 @@ async fn handle_close(state: &mut DaemonState) -> Result<Value, String> {
         mgr.close().await?;
     }
     state.browser = None;
+    state.launch_hash = None;
     state.reset_input_state();
     state.update_stream_client().await;
 
