@@ -398,6 +398,9 @@ agent-browser --session-name myapp state load ./my-auth.json
 > - `--remote-debugging-port` exposes full browser control on localhost. Any local process can connect. Only use on trusted machines and close Chrome when done.
 > - State files contain session tokens in plaintext. Add them to `.gitignore` and delete when no longer needed. For encryption at rest, set `AGENT_BROWSER_ENCRYPTION_KEY` (see [State Encryption](#state-encryption)).
 
+> **Troubleshooting:**
+> If `--auto-connect` fails with "No running Chrome instance found" even when Chrome is open with `--remote-debugging-port`, make sure to check the **"Allow remote debugging for this browser instance"** checkbox at `chrome://inspect/#remote-debugging`. This is required for auto-discovery to work.
+
 For full details on login flows, OAuth, 2FA, cookie-based auth, and the auth vault, see the [Authentication](docs/src/app/sessions/page.mdx) docs.
 
 ## Sessions
