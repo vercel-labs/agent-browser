@@ -32,6 +32,7 @@ use super::state;
 use super::storage;
 use super::stream::{self, StreamServer};
 use super::tracing::{self as native_tracing, TracingState};
+use super::tauri_backend::{TauriBackend, TAURI_UNSUPPORTED_ACTIONS};
 use super::webdriver::appium::AppiumManager;
 use super::webdriver::backend::{BrowserBackend, WebDriverBackend, WEBDRIVER_UNSUPPORTED_ACTIONS};
 use super::webdriver::ios;
@@ -134,6 +135,7 @@ pub struct FetchPausedRequest {
 pub enum BackendType {
     Cdp,
     WebDriver,
+    Tauri,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -160,6 +162,7 @@ pub struct DaemonState {
     pub appium: Option<AppiumManager>,
     pub safari_driver: Option<safari::SafariDriverProcess>,
     pub webdriver_backend: Option<super::webdriver::backend::WebDriverBackend>,
+    pub tauri_backend: Option<TauriBackend>,
     pub backend_type: BackendType,
     pub ref_map: RefMap,
     pub domain_filter: Arc<RwLock<Option<DomainFilter>>>,
@@ -205,6 +208,7 @@ impl DaemonState {
             appium: None,
             safari_driver: None,
             webdriver_backend: None,
+            tauri_backend: None,
             backend_type: BackendType::Cdp,
             ref_map: RefMap::new(),
             domain_filter: Arc::new(RwLock::new(
@@ -918,8 +922,10 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
             | "device_list"
     );
     if !skip_launch {
-        // Check if existing connection is stale and needs re-launch
-        let needs_launch = if let Some(ref mgr) = state.browser {
+        // Tauri backend manages its own connection — skip browser auto-launch
+        let needs_launch = if state.tauri_backend.is_some() {
+            false
+        } else if let Some(ref mgr) = state.browser {
             !mgr.is_connection_alive().await
         } else {
             true
@@ -954,6 +960,19 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
             &id,
             &format!(
                 "Action '{}' is not supported on the WebDriver backend",
+                action
+            ),
+        );
+    }
+
+    // Tauri backend: reject unsupported actions
+    if matches!(state.backend_type, BackendType::Tauri)
+        && TAURI_UNSUPPORTED_ACTIONS.contains(&action)
+    {
+        return error_response(
+            &id,
+            &format!(
+                "Action '{}' is not supported on the Tauri MCP backend",
                 action
             ),
         );
@@ -1326,6 +1345,9 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
             "safari" => {
                 return launch_safari(cmd, state).await;
             }
+            "tauri" => {
+                return launch_tauri(cmd, state).await;
+            }
             _ => {
                 let (ws_url, provider_session) = providers::connect_provider(provider).await?;
                 match BrowserManager::connect_cdp(&ws_url).await {
@@ -1528,6 +1550,47 @@ async fn launch_safari(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     }))
 }
 
+async fn launch_tauri(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let port: u16 = cmd
+        .get("port")
+        .and_then(|v| v.as_u64())
+        .map(|p| p as u16)
+        .or_else(|| {
+            env::var("AGENT_BROWSER_TAURI_PORT")
+                .ok()
+                .and_then(|s| s.parse().ok())
+        })
+        .unwrap_or(9876);
+
+    let host = cmd
+        .get("host")
+        .and_then(|v| v.as_str())
+        .unwrap_or("127.0.0.1");
+
+    // Security: only allow loopback hosts — Tauri MCP uses plaintext HTTP
+    // and may transmit sensitive page content / form values.
+    if host != "127.0.0.1" && host != "localhost" && host != "::1" {
+        return Err(format!(
+            "Tauri provider only allows loopback hosts (127.0.0.1, localhost, ::1); got: {host}"
+        ));
+    }
+
+    let backend = TauriBackend::new(host, port);
+    backend.connect().await?;
+
+    state.tauri_backend = Some(backend);
+    state.backend_type = BackendType::Tauri;
+    state.reset_input_state();
+
+    Ok(json!({
+        "launched": true,
+        "provider": "tauri",
+        "host": host,
+        "port": port,
+        "backend": "tauri",
+    }))
+}
+
 async fn handle_navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let url = cmd
         .get("url")
@@ -1539,6 +1602,13 @@ async fn handle_navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         if let Some(ref filter) = *df {
             filter.check_url(url)?;
         }
+    }
+
+    // Tauri backend path
+    if let Some(ref tb) = state.tauri_backend {
+        state.ref_map.clear();
+        tb.navigate(url).await?;
+        return Ok(json!({ "url": url, "title": "" }));
     }
 
     // WebDriver backend path
@@ -1608,6 +1678,10 @@ async fn handle_navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
 }
 
 async fn handle_url(state: &DaemonState) -> Result<Value, String> {
+    if state.tauri_backend.is_some() {
+        // Tauri MCP plugin doesn't expose a "get current URL" tool
+        return Ok(json!({ "url": "" }));
+    }
     if let Some(ref wb) = state.webdriver_backend {
         if state.browser.is_none() {
             let url = wb.get_url().await?;
@@ -1664,6 +1738,9 @@ fn open_url_in_browser(url: &str) {
 }
 
 async fn handle_title(state: &DaemonState) -> Result<Value, String> {
+    if state.tauri_backend.is_some() {
+        return Ok(json!({ "title": "" }));
+    }
     if let Some(ref wb) = state.webdriver_backend {
         if state.browser.is_none() {
             let title = wb.get_title().await?;
@@ -1676,6 +1753,10 @@ async fn handle_title(state: &DaemonState) -> Result<Value, String> {
 }
 
 async fn handle_content(state: &DaemonState) -> Result<Value, String> {
+    if let Some(ref tb) = state.tauri_backend {
+        let tree = tb.snapshot(false).await?;
+        return Ok(json!({ "html": tree, "origin": "" }));
+    }
     if let Some(ref wb) = state.webdriver_backend {
         if state.browser.is_none() {
             let html = wb.get_content().await?;
@@ -1713,6 +1794,14 @@ async fn handle_evaluate(cmd: &Value, state: &DaemonState) -> Result<Value, Stri
 }
 
 async fn handle_close(state: &mut DaemonState) -> Result<Value, String> {
+    // Tauri backend: send close tool call and clean up
+    if let Some(ref mut tb) = state.tauri_backend {
+        let _ = tb.close().await;
+        state.tauri_backend = None;
+        state.backend_type = BackendType::Cdp; // Reset to default
+        return Ok(json!({ "closed": true }));
+    }
+
     if let Some(ref mgr) = state.browser {
         if let Some(ref session_name) = state.session_name {
             if let Ok(session_id) = mgr.active_session_id() {
@@ -1771,6 +1860,18 @@ async fn handle_close(state: &mut DaemonState) -> Result<Value, String> {
 // ---------------------------------------------------------------------------
 
 async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    // Tauri backend path
+    if let Some(ref tb) = state.tauri_backend {
+        let interactive = cmd
+            .get("interactive")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let tree_str = tb.snapshot(interactive).await?;
+        let tree_value: Value = serde_json::from_str(&tree_str)
+            .unwrap_or(Value::String(tree_str));
+        return Ok(json!({ "snapshot": tree_value, "origin": "", "refs": {} }));
+    }
+
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
 
@@ -1826,6 +1927,12 @@ async fn handle_screenshot(cmd: &Value, state: &mut DaemonState) -> Result<Value
         .get("annotate")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+
+    // Tauri backend path
+    if let Some(ref tb) = state.tauri_backend {
+        let b64 = tb.screenshot().await?;
+        return Ok(json!({ "screenshot": b64 }));
+    }
 
     if let Some(ref wb) = state.webdriver_backend {
         if state.browser.is_none() {
@@ -1935,6 +2042,12 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         .and_then(|v| v.as_str())
         .ok_or("Missing 'selector' parameter")?;
 
+    // Tauri backend: selector is the @ref identifier
+    if let Some(ref tb) = state.tauri_backend {
+        tb.click(selector).await?;
+        return Ok(json!({ "clicked": selector }));
+    }
+
     if let Some(ref wb) = state.webdriver_backend {
         if state.browser.is_none() {
             wb.click(selector).await?;
@@ -2034,6 +2147,12 @@ async fn handle_fill(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
         .get("value")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'value' parameter")?;
+
+    // Tauri backend: selector is the @ref identifier
+    if let Some(ref tb) = state.tauri_backend {
+        tb.fill(selector, value).await?;
+        return Ok(json!({ "filled": selector }));
+    }
 
     if let Some(ref wb) = state.webdriver_backend {
         if state.browser.is_none() {
