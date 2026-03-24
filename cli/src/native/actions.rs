@@ -1172,6 +1172,19 @@ async fn auto_launch(state: &mut DaemonState) -> Result<(), String> {
     Ok(())
 }
 
+/// Returns the effective Chrome user-data-dir path for a session.
+///
+/// Appends the session ID as a subdirectory under the base profile path so
+/// that each `--session` daemon gets its own independent Chrome instance even
+/// when `--profile` is shared across sessions. Chrome enforces a singleton
+/// constraint per `--user-data-dir`, so without this isolation the second
+/// daemon silently connects to the first daemon's Chrome instance instead of
+/// launching a new one.
+fn session_scoped_profile(profile: &str, session_id: &str) -> String {
+    let profile = profile.trim_end_matches('/');
+    format!("{}/{}", profile, session_id)
+}
+
 fn launch_options_from_env() -> LaunchOptions {
     let headed = env::var("AGENT_BROWSER_HEADED")
         .map(|v| v == "1" || v == "true")
@@ -1189,7 +1202,12 @@ fn launch_options_from_env() -> LaunchOptions {
         executable_path: env::var("AGENT_BROWSER_EXECUTABLE_PATH").ok(),
         proxy: env::var("AGENT_BROWSER_PROXY").ok(),
         proxy_bypass: env::var("AGENT_BROWSER_PROXY_BYPASS").ok(),
-        profile: env::var("AGENT_BROWSER_PROFILE").ok(),
+        profile: env::var("AGENT_BROWSER_PROFILE").ok().map(|p| {
+            match env::var("AGENT_BROWSER_SESSION").ok() {
+                Some(session) => session_scoped_profile(&p, &session),
+                None => p,
+            }
+        }),
         allow_file_access: env::var("AGENT_BROWSER_ALLOW_FILE_ACCESS")
             .map(|v| v == "1" || v == "true")
             .unwrap_or(false),
@@ -1371,7 +1389,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         profile: cmd
             .get("profile")
             .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
+            .map(|s| session_scoped_profile(s, &state.session_id)),
         allow_file_access: cmd
             .get("allowFileAccess")
             .and_then(|v| v.as_bool())
@@ -6880,6 +6898,56 @@ mod tests {
         assert!(
             !opts.headless,
             "AGENT_BROWSER_HEADED=1 should set headless=false"
+        );
+    }
+
+    #[test]
+    fn test_session_scoped_profile_basic() {
+        assert_eq!(
+            session_scoped_profile("/tmp/my-profile", "first"),
+            "/tmp/my-profile/first"
+        );
+    }
+
+    #[test]
+    fn test_session_scoped_profile_default_session() {
+        assert_eq!(
+            session_scoped_profile("/tmp/my-profile", "default"),
+            "/tmp/my-profile/default"
+        );
+    }
+
+    #[test]
+    fn test_session_scoped_profile_strips_trailing_slash() {
+        assert_eq!(
+            session_scoped_profile("/tmp/my-profile/", "second"),
+            "/tmp/my-profile/second"
+        );
+    }
+
+    #[test]
+    fn test_launch_options_from_env_profile_with_session() {
+        let _guard = EnvGuard::new(&["AGENT_BROWSER_PROFILE", "AGENT_BROWSER_SESSION"]);
+        _guard.set("AGENT_BROWSER_PROFILE", "/tmp/test-profile");
+        _guard.set("AGENT_BROWSER_SESSION", "my-session");
+        let opts = launch_options_from_env();
+        assert_eq!(
+            opts.profile.as_deref(),
+            Some("/tmp/test-profile/my-session"),
+            "profile should include session subdirectory"
+        );
+    }
+
+    #[test]
+    fn test_launch_options_from_env_profile_without_session() {
+        let _guard = EnvGuard::new(&["AGENT_BROWSER_PROFILE", "AGENT_BROWSER_SESSION"]);
+        _guard.set("AGENT_BROWSER_PROFILE", "/tmp/test-profile");
+        _guard.remove("AGENT_BROWSER_SESSION"); // no session set
+        let opts = launch_options_from_env();
+        assert_eq!(
+            opts.profile.as_deref(),
+            Some("/tmp/test-profile"),
+            "profile should be unchanged when session is unset"
         );
     }
 

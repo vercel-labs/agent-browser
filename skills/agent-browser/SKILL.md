@@ -72,6 +72,8 @@ agent-browser --profile ~/.myapp open https://app.example.com/login
 agent-browser --profile ~/.myapp open https://app.example.com/dashboard
 ```
 
+When using `--profile` with `--session`, each session stores its Chrome data in a separate subdirectory (`<profile>/<session>/`) so that concurrent sessions with the same base profile path run independent Chrome instances without conflict.
+
 **Option 3: Session name (auto-save/restore cookies + localStorage)**
 
 ```bash

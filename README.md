@@ -452,6 +452,8 @@ The profile directory stores:
 
 **Tip**: Use different profile paths for different projects to keep their browser state isolated.
 
+**Sessions with profiles**: When `--session` is combined with `--profile`, each session stores its Chrome data in a separate subdirectory: `<profile>/<session>/`. This ensures that concurrent sessions using the same base profile path each get their own isolated Chrome instance. For example, `--profile ~/.myapp-profile --session work` uses `~/.myapp-profile/work/` and `--session personal` uses `~/.myapp-profile/personal/`.
+
 ## Session Persistence
 
 Alternatively, use `--session-name` to automatically save and restore cookies and localStorage across browser restarts:
