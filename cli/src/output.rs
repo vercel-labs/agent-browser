@@ -187,7 +187,8 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
                         dtype,
                         message
                     );
-                    if let Some(default_prompt) = data.get("defaultPrompt").and_then(|v| v.as_str()) {
+                    if let Some(default_prompt) = data.get("defaultPrompt").and_then(|v| v.as_str())
+                    {
                         println!("  Default prompt text: \"{}\"", default_prompt);
                     }
                     println!("  Use `dialog accept [text]` or `dialog dismiss` to resolve it");

@@ -7228,7 +7228,10 @@ mod tests {
             "AGENT_BROWSER_SOCKET_DIR",
             socket_dir.to_str().expect("socket dir should be utf-8"),
         );
-        guard.set("AGENT_BROWSER_SESSION", "stream-preserve-screencast-session");
+        guard.set(
+            "AGENT_BROWSER_SESSION",
+            "stream-preserve-screencast-session",
+        );
 
         let mut state = DaemonState::new();
         handle_stream_enable(&json!({ "port": 0 }), &mut state)
