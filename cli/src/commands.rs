@@ -151,6 +151,13 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                 Ok(json!({ "id": id, "action": "click", "selector": sel }))
             }
         }
+        "click_js" => {
+            let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
+                context: "click_js".to_string(),
+                usage: "click_js <selector>",
+            })?;
+            Ok(json!({ "id": id, "action": "click_js", "selector": sel }))
+        }
         "dblclick" => {
             let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
                 context: "dblclick".to_string(),

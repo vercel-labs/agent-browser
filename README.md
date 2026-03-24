@@ -100,6 +100,7 @@ agent-browser find role button click --name "Submit"
 ```bash
 agent-browser open <url>              # Navigate to URL (aliases: goto, navigate)
 agent-browser click <sel>             # Click element (--new-tab to open in new tab)
+agent-browser click_js <sel>          # Click element via JavaScript (React SPA compatible)
 agent-browser dblclick <sel>          # Double-click element
 agent-browser focus <sel>             # Focus element
 agent-browser type <sel> <text>       # Type into element
@@ -365,13 +366,13 @@ agent-browser provides multiple ways to persist login sessions so you don't re-a
 
 ### Quick summary
 
-| Approach | Best for | Flag / Env |
-|----------|----------|------------|
-| **Persistent profile** | Full browser state (cookies, IndexedDB, service workers, cache) across restarts | `--profile <path>` / `AGENT_BROWSER_PROFILE` |
-| **Session persistence** | Auto-save/restore cookies + localStorage by name | `--session-name <name>` / `AGENT_BROWSER_SESSION_NAME` |
-| **Import from your browser** | Grab auth from a Chrome session you already logged into | `--auto-connect` + `state save` |
-| **State file** | Load a previously saved state JSON on launch | `--state <path>` / `AGENT_BROWSER_STATE` |
-| **Auth vault** | Store credentials locally (encrypted), login by name | `auth save` / `auth login` |
+| Approach                     | Best for                                                                        | Flag / Env                                             |
+| ---------------------------- | ------------------------------------------------------------------------------- | ------------------------------------------------------ |
+| **Persistent profile**       | Full browser state (cookies, IndexedDB, service workers, cache) across restarts | `--profile <path>` / `AGENT_BROWSER_PROFILE`           |
+| **Session persistence**      | Auto-save/restore cookies + localStorage by name                                | `--session-name <name>` / `AGENT_BROWSER_SESSION_NAME` |
+| **Import from your browser** | Grab auth from a Chrome session you already logged into                         | `--auto-connect` + `state save`                        |
+| **State file**               | Load a previously saved state JSON on launch                                    | `--state <path>` / `AGENT_BROWSER_STATE`               |
+| **Auth vault**               | Store credentials locally (encrypted), login by name                            | `auth save` / `auth login`                             |
 
 ### Import auth from your browser
 
@@ -395,6 +396,7 @@ agent-browser --session-name myapp state load ./my-auth.json
 ```
 
 > **Security notes:**
+>
 > - `--remote-debugging-port` exposes full browser control on localhost. Any local process can connect. Only use on trusted machines and close Chrome when done.
 > - State files contain session tokens in plaintext. Add them to `.gitignore` and delete when no longer needed. For encryption at rest, set `AGENT_BROWSER_ENCRYPTION_KEY` (see [State Encryption](#state-encryption)).
 
@@ -524,12 +526,12 @@ agent-browser snapshot -s "#main"         # Scope to CSS selector
 agent-browser snapshot -i -c -d 5         # Combine options
 ```
 
-| Option                 | Description                                                             |
-| ---------------------- | ----------------------------------------------------------------------- |
-| `-i, --interactive`    | Only show interactive elements (buttons, links, inputs)                 |
-| `-c, --compact`        | Remove empty structural elements                                        |
-| `-d, --depth <n>`      | Limit tree depth                                                        |
-| `-s, --selector <sel>` | Scope to CSS selector                                                   |
+| Option                 | Description                                             |
+| ---------------------- | ------------------------------------------------------- |
+| `-i, --interactive`    | Only show interactive elements (buttons, links, inputs) |
+| `-c, --compact`        | Remove empty structural elements                        |
+| `-d, --depth <n>`      | Limit tree depth                                        |
+| `-s, --selector <sel>` | Scope to CSS selector                                   |
 
 ## Annotated Screenshots
 
@@ -556,42 +558,42 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 
 ## Options
 
-| Option | Description |
-|--------|-------------|
-| `--session <name>` | Use isolated session (or `AGENT_BROWSER_SESSION` env) |
-| `--session-name <name>` | Auto-save/restore session state (or `AGENT_BROWSER_SESSION_NAME` env) |
-| `--profile <path>` | Persistent browser profile directory (or `AGENT_BROWSER_PROFILE` env) |
-| `--state <path>` | Load storage state from JSON file (or `AGENT_BROWSER_STATE` env) |
-| `--headers <json>` | Set HTTP headers scoped to the URL's origin |
-| `--executable-path <path>` | Custom browser executable (or `AGENT_BROWSER_EXECUTABLE_PATH` env) |
-| `--extension <path>` | Load browser extension (repeatable; or `AGENT_BROWSER_EXTENSIONS` env) |
-| `--args <args>` | Browser launch args, comma or newline separated (or `AGENT_BROWSER_ARGS` env) |
-| `--user-agent <ua>` | Custom User-Agent string (or `AGENT_BROWSER_USER_AGENT` env) |
-| `--proxy <url>` | Proxy server URL with optional auth (or `AGENT_BROWSER_PROXY` env) |
-| `--proxy-bypass <hosts>` | Hosts to bypass proxy (or `AGENT_BROWSER_PROXY_BYPASS` env) |
-| `--ignore-https-errors` | Ignore HTTPS certificate errors (useful for self-signed certs) |
-| `--allow-file-access` | Allow file:// URLs to access local files (Chromium only) |
-| `-p, --provider <name>` | Cloud browser provider (or `AGENT_BROWSER_PROVIDER` env) |
-| `--device <name>` | iOS device name, e.g. "iPhone 15 Pro" (or `AGENT_BROWSER_IOS_DEVICE` env) |
-| `--json` | JSON output (for agents) |
-| `--annotate` | Annotated screenshot with numbered element labels (or `AGENT_BROWSER_ANNOTATE` env) |
-| `--screenshot-dir <path>` | Default screenshot output directory (or `AGENT_BROWSER_SCREENSHOT_DIR` env) |
-| `--screenshot-quality <n>` | JPEG quality 0-100 (or `AGENT_BROWSER_SCREENSHOT_QUALITY` env) |
-| `--screenshot-format <fmt>` | Screenshot format: `png`, `jpeg` (or `AGENT_BROWSER_SCREENSHOT_FORMAT` env) |
-| `--headed` | Show browser window (not headless) (or `AGENT_BROWSER_HEADED` env) |
-| `--cdp <port\|url>` | Connect via Chrome DevTools Protocol (port or WebSocket URL) |
-| `--auto-connect` | Auto-discover and connect to running Chrome (or `AGENT_BROWSER_AUTO_CONNECT` env) |
-| `--color-scheme <scheme>` | Color scheme: `dark`, `light`, `no-preference` (or `AGENT_BROWSER_COLOR_SCHEME` env) |
-| `--download-path <path>` | Default download directory (or `AGENT_BROWSER_DOWNLOAD_PATH` env) |
-| `--content-boundaries` | Wrap page output in boundary markers for LLM safety (or `AGENT_BROWSER_CONTENT_BOUNDARIES` env) |
-| `--max-output <chars>` | Truncate page output to N characters (or `AGENT_BROWSER_MAX_OUTPUT` env) |
-| `--allowed-domains <list>` | Comma-separated allowed domain patterns (or `AGENT_BROWSER_ALLOWED_DOMAINS` env) |
-| `--action-policy <path>` | Path to action policy JSON file (or `AGENT_BROWSER_ACTION_POLICY` env) |
-| `--confirm-actions <list>` | Action categories requiring confirmation (or `AGENT_BROWSER_CONFIRM_ACTIONS` env) |
-| `--confirm-interactive` | Interactive confirmation prompts; auto-denies if stdin is not a TTY (or `AGENT_BROWSER_CONFIRM_INTERACTIVE` env) |
-| `--engine <name>` | Browser engine: `chrome` (default), `lightpanda` (or `AGENT_BROWSER_ENGINE` env) |
-| `--config <path>` | Use a custom config file (or `AGENT_BROWSER_CONFIG` env) |
-| `--debug` | Debug output |
+| Option                      | Description                                                                                                      |
+| --------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `--session <name>`          | Use isolated session (or `AGENT_BROWSER_SESSION` env)                                                            |
+| `--session-name <name>`     | Auto-save/restore session state (or `AGENT_BROWSER_SESSION_NAME` env)                                            |
+| `--profile <path>`          | Persistent browser profile directory (or `AGENT_BROWSER_PROFILE` env)                                            |
+| `--state <path>`            | Load storage state from JSON file (or `AGENT_BROWSER_STATE` env)                                                 |
+| `--headers <json>`          | Set HTTP headers scoped to the URL's origin                                                                      |
+| `--executable-path <path>`  | Custom browser executable (or `AGENT_BROWSER_EXECUTABLE_PATH` env)                                               |
+| `--extension <path>`        | Load browser extension (repeatable; or `AGENT_BROWSER_EXTENSIONS` env)                                           |
+| `--args <args>`             | Browser launch args, comma or newline separated (or `AGENT_BROWSER_ARGS` env)                                    |
+| `--user-agent <ua>`         | Custom User-Agent string (or `AGENT_BROWSER_USER_AGENT` env)                                                     |
+| `--proxy <url>`             | Proxy server URL with optional auth (or `AGENT_BROWSER_PROXY` env)                                               |
+| `--proxy-bypass <hosts>`    | Hosts to bypass proxy (or `AGENT_BROWSER_PROXY_BYPASS` env)                                                      |
+| `--ignore-https-errors`     | Ignore HTTPS certificate errors (useful for self-signed certs)                                                   |
+| `--allow-file-access`       | Allow file:// URLs to access local files (Chromium only)                                                         |
+| `-p, --provider <name>`     | Cloud browser provider (or `AGENT_BROWSER_PROVIDER` env)                                                         |
+| `--device <name>`           | iOS device name, e.g. "iPhone 15 Pro" (or `AGENT_BROWSER_IOS_DEVICE` env)                                        |
+| `--json`                    | JSON output (for agents)                                                                                         |
+| `--annotate`                | Annotated screenshot with numbered element labels (or `AGENT_BROWSER_ANNOTATE` env)                              |
+| `--screenshot-dir <path>`   | Default screenshot output directory (or `AGENT_BROWSER_SCREENSHOT_DIR` env)                                      |
+| `--screenshot-quality <n>`  | JPEG quality 0-100 (or `AGENT_BROWSER_SCREENSHOT_QUALITY` env)                                                   |
+| `--screenshot-format <fmt>` | Screenshot format: `png`, `jpeg` (or `AGENT_BROWSER_SCREENSHOT_FORMAT` env)                                      |
+| `--headed`                  | Show browser window (not headless) (or `AGENT_BROWSER_HEADED` env)                                               |
+| `--cdp <port\|url>`         | Connect via Chrome DevTools Protocol (port or WebSocket URL)                                                     |
+| `--auto-connect`            | Auto-discover and connect to running Chrome (or `AGENT_BROWSER_AUTO_CONNECT` env)                                |
+| `--color-scheme <scheme>`   | Color scheme: `dark`, `light`, `no-preference` (or `AGENT_BROWSER_COLOR_SCHEME` env)                             |
+| `--download-path <path>`    | Default download directory (or `AGENT_BROWSER_DOWNLOAD_PATH` env)                                                |
+| `--content-boundaries`      | Wrap page output in boundary markers for LLM safety (or `AGENT_BROWSER_CONTENT_BOUNDARIES` env)                  |
+| `--max-output <chars>`      | Truncate page output to N characters (or `AGENT_BROWSER_MAX_OUTPUT` env)                                         |
+| `--allowed-domains <list>`  | Comma-separated allowed domain patterns (or `AGENT_BROWSER_ALLOWED_DOMAINS` env)                                 |
+| `--action-policy <path>`    | Path to action policy JSON file (or `AGENT_BROWSER_ACTION_POLICY` env)                                           |
+| `--confirm-actions <list>`  | Action categories requiring confirmation (or `AGENT_BROWSER_CONFIRM_ACTIONS` env)                                |
+| `--confirm-interactive`     | Interactive confirmation prompts; auto-denies if stdin is not a TTY (or `AGENT_BROWSER_CONFIRM_INTERACTIVE` env) |
+| `--engine <name>`           | Browser engine: `chrome` (default), `lightpanda` (or `AGENT_BROWSER_ENGINE` env)                                 |
+| `--config <path>`           | Use a custom config file (or `AGENT_BROWSER_CONFIG` env)                                                         |
+| `--debug`                   | Debug output                                                                                                     |
 
 ## Configuration
 
@@ -644,8 +646,8 @@ export AGENT_BROWSER_DEFAULT_TIMEOUT=45000
 
 > **Note:** Setting this above 30000 (30s) may cause EAGAIN errors on slow operations because the CLI's read timeout will expire before the daemon responds. The CLI retries transient errors automatically, but response times will increase.
 
-| Variable                        | Description                              |
-| ------------------------------- | ---------------------------------------- |
+| Variable                        | Description                                      |
+| ------------------------------- | ------------------------------------------------ |
 | `AGENT_BROWSER_DEFAULT_TIMEOUT` | Default operation timeout in ms (default: 25000) |
 
 ## Selectors
@@ -814,11 +816,11 @@ AGENT_BROWSER_EXECUTABLE_PATH=/path/to/chromium agent-browser open example.com
 Run agent-browser + Chrome in an ephemeral Vercel Sandbox microVM. No external server needed:
 
 ```typescript
-import { Sandbox } from "@vercel/sandbox";
+import { Sandbox } from '@vercel/sandbox';
 
-const sandbox = await Sandbox.create({ runtime: "node24" });
-await sandbox.runCommand("agent-browser", ["open", "https://example.com"]);
-const result = await sandbox.runCommand("agent-browser", ["screenshot", "--json"]);
+const sandbox = await Sandbox.create({ runtime: 'node24' });
+await sandbox.runCommand('agent-browser', ['open', 'https://example.com']);
+const result = await sandbox.runCommand('agent-browser', ['screenshot', '--json']);
 await sandbox.stop();
 ```
 

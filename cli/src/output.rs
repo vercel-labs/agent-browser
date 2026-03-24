@@ -1038,6 +1038,40 @@ Examples:
   agent-browser click @e3 --new-tab
 "##
         }
+        "click_js" => {
+            r##"
+agent-browser click_js - Click an element using JavaScript (React SPA compatible)
+
+Usage: agent-browser click_js <selector>
+
+Clicks on the specified element using JavaScript element.click() method.
+Unlike the standard click command which uses coordinate-based mouse events,
+this command directly calls the native click() method on the DOM element.
+
+When to Use:
+  - React Single Page Applications (SPAs) where standard click doesn't trigger handlers
+  - Material-UI, Ant Design, or other React component libraries
+  - Any situation where the standard click() command reports success but nothing happens
+
+Technical Details:
+  React uses a SyntheticEvent system with event delegation. Events must bubble
+  through React's event system to trigger onClick handlers. The native element.click()
+  method ensures proper event bubbling, while coordinate-based mouse events may not.
+
+Note:
+  This method is slightly slower than standard click() but works reliably with
+  React and other modern JavaScript frameworks.
+
+Global Options:
+  --json               Output as JSON
+  --session <name>     Use specific session
+
+Examples:
+  agent-browser click_js "button"
+  agent-browser click_js @e1
+  agent-browser click_js "[data-testid='add-button']"
+"##
+        }
         "dblclick" => {
             r##"
 agent-browser dblclick - Double-click an element

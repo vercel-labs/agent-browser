@@ -26,6 +26,75 @@ pub async fn click(
     dispatch_click(client, &effective_session_id, x, y, button, click_count).await
 }
 
+/// Clicks an element using JavaScript element.click() method.
+/// 
+/// This method properly triggers React's SyntheticEvent handlers and works with React SPAs.
+/// Unlike coordinate-based clicking, this uses Runtime.callFunctionOn to call the native
+/// click() method on the DOM element, which properly bubbles through React's event system.
+/// 
+/// # Arguments
+/// * `client` - The CDP client
+/// * `session_id` - The browser session ID  
+/// * `ref_map` - Map of element references
+/// * `selector_or_ref` - CSS selector or @ref to click
+/// * `iframe_sessions` - Map of iframe sessions
+/// 
+/// # When to Use
+/// Use this method instead of `click()` when:
+/// - Testing React Single Page Applications (SPAs)
+/// - Clicking Material-UI, Ant Design, or other React component library buttons
+/// - The standard click() command reports success but nothing happens
+/// - Event handlers are attached via React's onClick prop
+/// 
+/// # Example
+/// ```
+/// // For React SPAs with Material-UI FAB buttons
+/// click_js(client, session_id, ref_map, "button", iframe_sessions).await?;
+/// ```
+/// 
+/// # Technical Details
+/// React uses a SyntheticEvent system with event delegation. Events must bubble through
+/// React's event system to trigger onClick handlers. The native element.click() method
+/// ensures proper event bubbling, while coordinate-based mouse events may not.
+pub async fn click_js(
+    client: &CdpClient,
+    session_id: &str,
+    ref_map: &RefMap,
+    selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
+) -> Result<(), String> {
+    let (object_id, effective_session_id) = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    ).await?;
+
+    // Call element.click() via CDP Runtime.callFunctionOn
+    // This ensures the click properly bubbles through React's SyntheticEvent system
+    let params = CallFunctionOnParams {
+        object_id: Some(object_id),
+        function_declaration: "function() { 
+            // Scroll element into view first
+            this.scrollIntoView({ behavior: 'instant', block: 'center' });
+            // Trigger the native click
+            this.click(); 
+        }".to_string(),
+        arguments: None,
+        return_by_value: Some(true),
+        await_promise: None,
+    };
+
+    client.send_command_typed::<_, Value>(
+        "Runtime.callFunctionOn",
+        &params,
+        Some(&effective_session_id),
+    ).await?;
+
+    Ok(())
+}
+
 pub async fn dblclick(
     client: &CdpClient,
     session_id: &str,
