@@ -3148,21 +3148,31 @@ async fn handle_download(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
 
         match tokio::time::timeout(remaining, rx.recv()).await {
             Ok(Ok(event)) => {
-                let is_this_session = event.session_id.as_deref() == Some(&session_id);
+                // Browser-domain download events may arrive without a sessionId
+                // or with a different sessionId than the page session, so we
+                // accept them regardless. Page-domain events are matched by
+                // session to avoid cross-tab confusion.
+                let is_page_session = event.session_id.as_deref() == Some(&session_id);
+                let is_download_event = |method: &str, browser_method: &str, page_method: &str| {
+                    method == browser_method || (method == page_method && is_page_session)
+                };
+
                 // Capture the GUID from downloadWillBegin
-                if is_this_session
-                    && (event.method == "Browser.downloadWillBegin"
-                        || event.method == "Page.downloadWillBegin")
-                {
+                if is_download_event(
+                    &event.method,
+                    "Browser.downloadWillBegin",
+                    "Page.downloadWillBegin",
+                ) {
                     if let Some(guid) = event.params.get("guid").and_then(|v| v.as_str()) {
                         downloaded_guid = Some(guid.to_string());
                     }
                 }
                 // Check for download completion or cancellation
-                if is_this_session
-                    && (event.method == "Browser.downloadProgress"
-                        || event.method == "Page.downloadProgress")
-                {
+                if is_download_event(
+                    &event.method,
+                    "Browser.downloadProgress",
+                    "Page.downloadProgress",
+                ) {
                     match event.params.get("state").and_then(|v| v.as_str()) {
                         Some("completed") => break,
                         Some("canceled") => {
@@ -3182,13 +3192,30 @@ async fn handle_download(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     // Rename it to the user-requested filename.
     if let Some(guid) = downloaded_guid {
         let guid_path = download_dir.join(&guid);
+        // Chrome may still be flushing the file to disk after signalling
+        // completion; wait briefly for it to appear.
+        for _ in 0..10 {
+            if guid_path.exists() {
+                break;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        }
         if guid_path.exists() {
             std::fs::rename(&guid_path, &dest)
                 .map_err(|e| format!("Failed to rename downloaded file: {}", e))?;
+        } else {
+            // The file might have been saved under its original name instead
+            // of the GUID (e.g. when Chrome falls back to "allow" behavior).
+            if !dest.exists() {
+                return Err(format!(
+                    "Downloaded file not found at expected path (GUID: {})",
+                    guid
+                ));
+            }
         }
     } else {
-        // GUID capture failed — the file may have been saved under its original name
-        // by Chrome. Only rename if dest doesn't already exist (avoid touching
+        // GUID capture failed -- the file may have been saved under its original name
+        // by Chrome. Only return success if dest already exists (avoid touching
         // unrelated files in the directory).
         if !dest.exists() {
             return Err(
@@ -4970,8 +4997,13 @@ async fn handle_waitfordownload(cmd: &Value, state: &DaemonState) -> Result<Valu
 
         match tokio::time::timeout(remaining, rx.recv()).await {
             Ok(Ok(event)) => {
-                if event.method == "Page.downloadProgress"
-                    && event.session_id.as_deref() == Some(&session_id)
+                // Browser-domain events may arrive without a sessionId;
+                // Page-domain events are matched by session.
+                let is_page_session = event.session_id.as_deref() == Some(&session_id);
+                let is_progress = event.method == "Browser.downloadProgress"
+                    || (event.method == "Page.downloadProgress" && is_page_session);
+
+                if is_progress
                     && event.params.get("state").and_then(|v| v.as_str()) == Some("completed")
                 {
                     let path = cmd
