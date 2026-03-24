@@ -10,6 +10,9 @@ use tokio::sync::{broadcast, watch, Mutex, Notify, RwLock};
 use tokio_tungstenite::tungstenite::Message;
 
 use super::cdp::client::CdpClient;
+use super::stream_protocol::{
+    ClientMessage, ErrorMessage, FrameMessage, StatusMessage,
+};
 use crate::connection::get_socket_dir;
 #[cfg(windows)]
 use crate::connection::resolve_port;
@@ -304,20 +307,8 @@ impl StreamServer {
 
     /// Broadcast a screencast frame with structured metadata.
     pub fn broadcast_screencast_frame(&self, base64_data: &str, metadata: &FrameMetadata) {
-        let msg = json!({
-            "type": "frame",
-            "data": base64_data,
-            "metadata": {
-                "offsetTop": metadata.offset_top,
-                "pageScaleFactor": metadata.page_scale_factor,
-                "deviceWidth": metadata.device_width,
-                "deviceHeight": metadata.device_height,
-                "scrollOffsetX": metadata.scroll_offset_x,
-                "scrollOffsetY": metadata.scroll_offset_y,
-                "timestamp": metadata.timestamp,
-            }
-        });
-        let s = msg.to_string();
+        let msg = FrameMessage::new(base64_data, metadata);
+        let s = serde_json::to_string(&msg).unwrap_or_default();
         if let Ok(mut lf) = self.last_frame.try_write() {
             *lf = Some(s.clone());
         }
@@ -338,25 +329,16 @@ impl StreamServer {
             *guard = engine.to_string();
         }
         let rec = *self.recording.lock().await;
-        let msg = json!({
-            "type": "status",
-            "connected": connected,
-            "screencasting": screencasting,
-            "viewportWidth": viewport_width,
-            "viewportHeight": viewport_height,
-            "engine": engine,
-            "recording": rec,
-        });
-        let _ = self.frame_tx.send(msg.to_string());
+        let msg = StatusMessage::new(connected, screencasting, viewport_width, viewport_height, engine, rec);
+        let _ = self.frame_tx.send(serde_json::to_string(&msg).unwrap_or_default());
     }
 
     /// Broadcast an error message to all connected clients.
     pub fn broadcast_error(&self, message: &str) {
-        let msg = json!({
-            "type": "error",
-            "message": message,
-        });
-        let _ = self.frame_tx.send(msg.to_string());
+        let msg = ErrorMessage::new(message);
+        let _ = self
+            .frame_tx
+            .send(serde_json::to_string(&msg).unwrap_or_default());
     }
 
     /// Broadcast a command event when a command begins executing.
@@ -642,16 +624,8 @@ async fn handle_ws_client(
         let vh = *viewport_height.lock().await;
         let eng = last_engine.read().await.clone();
         let rec = *recording.lock().await;
-        let status = json!({
-            "type": "status",
-            "connected": connected,
-            "screencasting": sc,
-            "viewportWidth": vw,
-            "viewportHeight": vh,
-            "engine": eng,
-            "recording": rec,
-        });
-        let _ = ws_tx.send(Message::Text(status.to_string())).await;
+        let status = StatusMessage::new(connected, sc, vw, vh, &eng, rec);
+        let _ = ws_tx.send(Message::Text(serde_json::to_string(&status).unwrap_or_default())).await;
 
         let tabs = last_tabs.read().await;
         if !tabs.is_empty() {
@@ -802,16 +776,8 @@ async fn cdp_event_loop(
 
                 // Broadcast connection status with current viewport
                 let rec = *recording.lock().await;
-                let status = json!({
-                    "type": "status",
-                    "connected": true,
-                    "screencasting": supports_screencast,
-                    "viewportWidth": vw,
-                    "viewportHeight": vh,
-                    "engine": eng,
-                    "recording": rec,
-                });
-                let _ = frame_tx.send(status.to_string());
+                let status = StatusMessage::new(true, supports_screencast, vw, vh, &eng, rec);
+                let _ = frame_tx.send(serde_json::to_string(&status).unwrap_or_default());
 
                 // Process CDP events in real-time until client disconnects or CDP closes
                 loop {
@@ -869,20 +835,17 @@ async fn cdp_event_loop(
 
                                         if let Some(data) = evt.params.get("data").and_then(|v| v.as_str()) {
                                             let meta = evt.params.get("metadata");
-                                            let msg = json!({
-                                                "type": "frame",
-                                                "data": data,
-                                                "metadata": {
-                                                    "offsetTop": meta.and_then(|m| m.get("offsetTop")).and_then(|v| v.as_f64()).unwrap_or(0.0),
-                                                    "pageScaleFactor": meta.and_then(|m| m.get("pageScaleFactor")).and_then(|v| v.as_f64()).unwrap_or(1.0),
-                                                    "deviceWidth": meta.and_then(|m| m.get("deviceWidth")).and_then(|v| v.as_u64()).unwrap_or(1280),
-                                                    "deviceHeight": meta.and_then(|m| m.get("deviceHeight")).and_then(|v| v.as_u64()).unwrap_or(720),
-                                                    "scrollOffsetX": meta.and_then(|m| m.get("scrollOffsetX")).and_then(|v| v.as_f64()).unwrap_or(0.0),
-                                                    "scrollOffsetY": meta.and_then(|m| m.get("scrollOffsetY")).and_then(|v| v.as_f64()).unwrap_or(0.0),
-                                                    "timestamp": meta.and_then(|m| m.get("timestamp")).and_then(|v| v.as_u64()).unwrap_or(0),
-                                                }
-                                            });
-                                            let msg_str = msg.to_string();
+                                            let metadata = FrameMetadata {
+                                                offset_top: meta.and_then(|m| m.get("offsetTop")).and_then(|v| v.as_f64()).unwrap_or(0.0),
+                                                page_scale_factor: meta.and_then(|m| m.get("pageScaleFactor")).and_then(|v| v.as_f64()).unwrap_or(1.0),
+                                                device_width: meta.and_then(|m| m.get("deviceWidth")).and_then(|v| v.as_u64()).unwrap_or(1280) as u32,
+                                                device_height: meta.and_then(|m| m.get("deviceHeight")).and_then(|v| v.as_u64()).unwrap_or(720) as u32,
+                                                scroll_offset_x: meta.and_then(|m| m.get("scrollOffsetX")).and_then(|v| v.as_f64()).unwrap_or(0.0),
+                                                scroll_offset_y: meta.and_then(|m| m.get("scrollOffsetY")).and_then(|v| v.as_f64()).unwrap_or(0.0),
+                                                timestamp: meta.and_then(|m| m.get("timestamp")).and_then(|v| v.as_u64()).unwrap_or(0),
+                                            };
+                                            let msg = FrameMessage::new(data, &metadata);
+                                            let msg_str = serde_json::to_string(&msg).unwrap_or_default();
                                             {
                                                 let mut lf = last_frame.write().await;
                                                 *lf = Some(msg_str.clone());
@@ -1006,65 +969,62 @@ async fn cdp_event_loop(
 }
 
 async fn handle_client_message(msg: &str, client: &CdpClient, session_id: Option<&str>) {
-    let parsed: Value = match serde_json::from_str(msg) {
+    let parsed: ClientMessage = match serde_json::from_str(msg) {
         Ok(v) => v,
         Err(_) => return,
     };
 
-    let msg_type = parsed.get("type").and_then(|v| v.as_str()).unwrap_or("");
-
-    match msg_type {
-        "input_mouse" => {
+    match parsed {
+        ClientMessage::Mouse(m) => {
             let _ = client
                 .send_command(
                     "Input.dispatchMouseEvent",
                     Some(json!({
-                        "type": parsed.get("eventType").and_then(|v| v.as_str()).unwrap_or("mouseMoved"),
-                        "x": parsed.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0),
-                        "y": parsed.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0),
-                        "button": parsed.get("button").and_then(|v| v.as_str()).unwrap_or("none"),
-                        "clickCount": parsed.get("clickCount").and_then(|v| v.as_i64()).unwrap_or(0),
-                        "deltaX": parsed.get("deltaX").and_then(|v| v.as_f64()).unwrap_or(0.0),
-                        "deltaY": parsed.get("deltaY").and_then(|v| v.as_f64()).unwrap_or(0.0),
-                        "modifiers": parsed.get("modifiers").and_then(|v| v.as_i64()).unwrap_or(0),
+                        "type": m.event_type,
+                        "x": m.x,
+                        "y": m.y,
+                        "button": m.button,
+                        "clickCount": m.click_count,
+                        "deltaX": m.delta_x,
+                        "deltaY": m.delta_y,
+                        "modifiers": m.modifiers,
                     })),
                     session_id,
                 )
                 .await;
         }
-        "input_keyboard" => {
+        ClientMessage::Keyboard(k) => {
             let _ = client
                 .send_command(
                     "Input.dispatchKeyEvent",
                     Some(json!({
-                        "type": parsed.get("eventType").and_then(|v| v.as_str()).unwrap_or("keyDown"),
-                        "key": parsed.get("key"),
-                        "code": parsed.get("code"),
-                        "text": parsed.get("text"),
-                        "windowsVirtualKeyCode": parsed.get("windowsVirtualKeyCode").and_then(|v| v.as_i64()).unwrap_or(0),
-                        "modifiers": parsed.get("modifiers").and_then(|v| v.as_i64()).unwrap_or(0),
+                        "type": k.event_type,
+                        "key": k.key,
+                        "code": k.code,
+                        "text": k.text,
+                        "windowsVirtualKeyCode": k.windows_virtual_key_code,
+                        "modifiers": k.modifiers,
                     })),
                     session_id,
                 )
                 .await;
         }
-        "input_touch" => {
+        ClientMessage::Touch(t) => {
             let _ = client
                 .send_command(
                     "Input.dispatchTouchEvent",
                     Some(json!({
-                        "type": parsed.get("eventType").and_then(|v| v.as_str()).unwrap_or("touchStart"),
-                        "touchPoints": parsed.get("touchPoints").unwrap_or(&json!([])),
-                        "modifiers": parsed.get("modifiers").and_then(|v| v.as_i64()).unwrap_or(0),
+                        "type": t.event_type,
+                        "touchPoints": t.touch_points,
+                        "modifiers": t.modifiers,
                     })),
                     session_id,
                 )
                 .await;
         }
-        "status" => {
+        ClientMessage::StatusRequest => {
             // Client requesting status -- handled via broadcast_status from the caller
         }
-        _ => {}
     }
 }
 
