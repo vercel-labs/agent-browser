@@ -631,6 +631,27 @@ Auto-discovered config files that are missing are silently ignored. If `--config
 
 > **Tip:** If your project-level `agent-browser.json` contains environment-specific values (paths, proxies), consider adding it to `.gitignore`.
 
+### Docs Chat LLM Provider
+
+The documentation site includes an AI chat assistant (Ask AI) powered by Anthropic by default. You can switch to a different LLM provider using the `DOCS_CHAT_MODEL` environment variable.
+
+**Supported providers:**
+
+| Provider | Model ID | Notes |
+| --- | --- | --- |
+| Anthropic (default) | `anthropic/claude-haiku-4.5` | Supports prompt caching |
+| [MiniMax](https://www.minimaxi.com) | `minimax/MiniMax-M2.7` | 1M context, OpenAI-compatible |
+| MiniMax | `minimax/MiniMax-M2.7-highspeed` | Fast inference variant |
+| OpenAI | `openai/gpt-4o-mini` | Via AI SDK registry |
+
+**Example:**
+
+```bash
+# Use MiniMax as the docs chat provider
+export DOCS_CHAT_MODEL="minimax/MiniMax-M2.7"
+export MINIMAX_API_KEY="your-api-key"
+```
+
 ## Default Timeout
 
 The default timeout for standard operations (clicks, waits, fills, etc.) is 25 seconds. This is intentionally below the CLI's 30-second IPC read timeout so that the daemon returns a proper error instead of the CLI timing out with EAGAIN.
