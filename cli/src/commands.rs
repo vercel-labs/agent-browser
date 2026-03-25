@@ -1337,6 +1337,20 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
             Ok(json!({ "id": id, "action": "batch", "bail": bail }))
         }
 
+        // === Media ===
+        "media" => {
+            const VALID: &[&str] = &["status", "pause", "play"];
+            match rest.first().copied() {
+                Some("status") | None => Ok(json!({ "id": id, "action": "media_status" })),
+                Some("pause") => Ok(json!({ "id": id, "action": "media_pause" })),
+                Some("play") => Ok(json!({ "id": id, "action": "media_play" })),
+                Some(sub) => Err(ParseError::UnknownSubcommand {
+                    subcommand: sub.to_string(),
+                    valid_options: VALID,
+                }),
+            }
+        }
+
         _ => Err(ParseError::UnknownCommand {
             command: cmd.to_string(),
         }),
@@ -4171,5 +4185,31 @@ mod tests {
         let cmd = parse_command(&args("batch --bail"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "batch");
         assert_eq!(cmd["bail"], true);
+    }
+
+    // === Media ===
+
+    #[test]
+    fn test_media_status() {
+        let cmd = parse_command(&args("media status"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "media_status");
+    }
+
+    #[test]
+    fn test_media_default_is_status() {
+        let cmd = parse_command(&args("media"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "media_status");
+    }
+
+    #[test]
+    fn test_media_pause() {
+        let cmd = parse_command(&args("media pause"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "media_pause");
+    }
+
+    #[test]
+    fn test_media_play() {
+        let cmd = parse_command(&args("media play"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "media_play");
     }
 }
