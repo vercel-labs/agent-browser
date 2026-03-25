@@ -396,6 +396,7 @@ fn main() {
         auto_connect: flags.auto_connect,
         idle_timeout: flags.idle_timeout.as_deref(),
         cdp: flags.cdp.as_deref(),
+        use_system_keychain: flags.use_system_keychain,
     };
     let daemon_result = match ensure_daemon(&flags.session, &daemon_opts) {
         Ok(result) => result,

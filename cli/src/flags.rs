@@ -87,6 +87,7 @@ pub struct Config {
     pub screenshot_quality: Option<u32>,
     pub screenshot_format: Option<String>,
     pub idle_timeout: Option<String>,
+    pub use_system_keychain: Option<bool>,
 }
 
 impl Config {
@@ -132,6 +133,7 @@ impl Config {
             screenshot_quality: other.screenshot_quality.or(self.screenshot_quality),
             screenshot_format: other.screenshot_format.or(self.screenshot_format),
             idle_timeout: other.idle_timeout.or(self.idle_timeout),
+            use_system_keychain: other.use_system_keychain.or(self.use_system_keychain),
         }
     }
 }
@@ -298,6 +300,7 @@ pub struct Flags {
     pub screenshot_quality: Option<u32>,
     pub screenshot_format: Option<String>,
     pub idle_timeout: Option<String>, // Canonical milliseconds string for AGENT_BROWSER_IDLE_TIMEOUT_MS
+    pub use_system_keychain: bool,
 
     // Track which launch-time options were explicitly passed via CLI
     // (as opposed to being set only via environment variables)
@@ -429,6 +432,8 @@ pub fn parse_flags(args: &[String]) -> Flags {
             "AGENT_BROWSER_IDLE_TIMEOUT_MS",
         )
         .or(config.idle_timeout),
+        use_system_keychain: env_var_is_truthy("AGENT_BROWSER_USE_SYSTEM_KEYCHAIN")
+            || config.use_system_keychain.unwrap_or(false),
         cli_executable_path: false,
         cli_extensions: false,
         cli_profile: false,
@@ -572,6 +577,13 @@ pub fn parse_flags(args: &[String]) -> Flags {
                 let (val, consumed) = parse_bool_arg(args, i);
                 flags.allow_file_access = val;
                 flags.cli_allow_file_access = true;
+                if consumed {
+                    i += 1;
+                }
+            }
+            "--use-system-keychain" => {
+                let (val, consumed) = parse_bool_arg(args, i);
+                flags.use_system_keychain = val;
                 if consumed {
                     i += 1;
                 }
@@ -729,6 +741,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--annotate",
         "--content-boundaries",
         "--confirm-interactive",
+        "--use-system-keychain",
     ];
     // Global flags that always take a value (need to skip the next arg too)
     const GLOBAL_FLAGS_WITH_VALUE: &[&str] = &[

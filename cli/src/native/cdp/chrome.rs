@@ -78,6 +78,9 @@ pub struct LaunchOptions {
     pub ignore_https_errors: bool,
     pub color_scheme: Option<String>,
     pub download_path: Option<String>,
+    /// Use the real OS keychain instead of a mock. Enables enterprise SSO
+    /// (macOS Platform SSO, Intune, Azure AD Conditional Access).
+    pub use_system_keychain: bool,
 }
 
 impl Default for LaunchOptions {
@@ -98,6 +101,7 @@ impl Default for LaunchOptions {
             ignore_https_errors: false,
             color_scheme: None,
             download_path: None,
+            use_system_keychain: false,
         }
     }
 }
@@ -124,9 +128,12 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
         "--disable-features=Translate".to_string(),
         "--enable-features=NetworkService,NetworkServiceInProcess".to_string(),
         "--metrics-recording-only".to_string(),
-        "--password-store=basic".to_string(),
-        "--use-mock-keychain".to_string(),
     ];
+
+    if !options.use_system_keychain {
+        args.push("--password-store=basic".to_string());
+        args.push("--use-mock-keychain".to_string());
+    }
 
     let has_extensions = options
         .extensions
