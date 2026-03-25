@@ -189,6 +189,8 @@ pub struct BrowserManager {
     pages: Vec<PageInfo>,
     active_page_index: usize,
     default_timeout_ms: u64,
+    /// Stored download path from launch options, re-applied to new contexts (e.g., recording)
+    pub download_path: Option<String>,
 }
 
 const LIGHTPANDA_CDP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -257,6 +259,7 @@ impl BrowserManager {
                 pages: Vec::new(),
                 active_page_index: 0,
                 default_timeout_ms: 25_000,
+                download_path: download_path.clone(),
             };
             manager.discover_and_attach_targets().await?;
             manager
@@ -321,6 +324,7 @@ impl BrowserManager {
             pages: Vec::new(),
             active_page_index: 0,
             default_timeout_ms: 10_000,
+            download_path: None, // CDP connections don't have a launch-time download path
         };
 
         manager.discover_and_attach_targets().await?;

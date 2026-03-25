@@ -3489,6 +3489,25 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
         let new_session_id = attach_result.session_id.clone();
         mgr.enable_domains_pub(&new_session_id).await?;
 
+        // Re-apply download behavior to the recording context.
+        // Without this, downloads in the recording context are silently dropped
+        // because Browser.setDownloadBehavior at launch only applies to the default context.
+        if let Some(ref dl_path) = mgr.download_path {
+            let _ = mgr
+                .client
+                .send_command(
+                    "Browser.setDownloadBehavior",
+                    Some(json!({
+                        "behavior": "allow",
+                        "downloadPath": dl_path,
+                        "browserContextId": context_id,
+                        "eventsEnabled": true
+                    })),
+                    None,
+                )
+                .await;
+        }
+
         // Transfer cookies to new context
         if let Some(ref cr) = cookies_result {
             if let Some(cookie_arr) = cr.get("cookies").and_then(|v| v.as_array()) {
