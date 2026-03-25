@@ -322,6 +322,10 @@ impl EventTracker {
         });
     }
 
+    pub fn clear_console(&mut self) {
+        self.console_entries.clear();
+    }
+
     pub fn get_console_json(&self) -> Value {
         let messages: Vec<Value> = self
             .console_entries

@@ -1074,7 +1074,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         "setcontent" => handle_setcontent(cmd, state).await,
         "headers" => handle_headers(cmd, state).await,
         "offline" => handle_offline(cmd, state).await,
-        "console" => handle_console(state).await,
+        "console" => handle_console(cmd, state).await,
         "errors" => handle_errors(state).await,
         "state_save" => handle_state_save(cmd, state).await,
         "state_load" => handle_state_load(cmd, state).await,
@@ -2884,8 +2884,15 @@ async fn handle_offline(cmd: &Value, state: &DaemonState) -> Result<Value, Strin
     Ok(json!({ "offline": offline }))
 }
 
-async fn handle_console(state: &DaemonState) -> Result<Value, String> {
-    Ok(state.event_tracker.get_console_json())
+async fn handle_console(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let clear = cmd.get("clear").and_then(|v| v.as_bool()).unwrap_or(false);
+    if clear {
+        state.event_tracker.clear_console();
+        Ok(json!({ "cleared": true }))
+    } else {
+        let result = state.event_tracker.get_console_json();
+        Ok(result)
+    }
 }
 
 async fn handle_errors(state: &DaemonState) -> Result<Value, String> {
