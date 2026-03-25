@@ -45,39 +45,39 @@ Every CLI flag can be set in the config file using its camelCase equivalent:
 
 <table>
   <thead>
-    <tr><th>Config Key</th><th>CLI Flag</th><th>Type</th></tr>
+    <tr><th>Config Key</th><th>CLI Flag</th><th>Type</th><th>Description</th></tr>
   </thead>
   <tbody>
-    <tr><td><code>headed</code></td><td><code>--headed</code></td><td>boolean</td></tr>
-    <tr><td><code>json</code></td><td><code>--json</code></td><td>boolean</td></tr>
-    <tr><td><code>full</code></td><td><code>--full, -f</code></td><td>boolean</td></tr>
-    <tr><td><code>debug</code></td><td><code>--debug</code></td><td>boolean</td></tr>
-    <tr><td><code>session</code></td><td><code>--session</code></td><td>string</td></tr>
-    <tr><td><code>sessionName</code></td><td><code>--session-name</code></td><td>string</td></tr>
-    <tr><td><code>executablePath</code></td><td><code>--executable-path</code></td><td>string</td></tr>
-    <tr><td><code>extensions</code></td><td><code>--extension</code></td><td>string[]</td></tr>
-    <tr><td><code>profile</code></td><td><code>--profile</code></td><td>string</td></tr>
-    <tr><td><code>state</code></td><td><code>--state</code></td><td>string</td></tr>
-    <tr><td><code>proxy</code></td><td><code>--proxy</code></td><td>string</td></tr>
-    <tr><td><code>proxyBypass</code></td><td><code>--proxy-bypass</code></td><td>string</td></tr>
-    <tr><td><code>args</code></td><td><code>--args</code></td><td>string</td></tr>
-    <tr><td><code>userAgent</code></td><td><code>--user-agent</code></td><td>string</td></tr>
-    <tr><td><code>provider</code></td><td><code>-p, --provider</code></td><td>string</td></tr>
-    <tr><td><code>device</code></td><td><code>--device</code></td><td>string</td></tr>
-    <tr><td><code>ignoreHttpsErrors</code></td><td><code>--ignore-https-errors</code></td><td>boolean</td></tr>
-    <tr><td><code>allowFileAccess</code></td><td><code>--allow-file-access</code></td><td>boolean</td></tr>
-    <tr><td><code>cdp</code></td><td><code>--cdp</code></td><td>string</td></tr>
-    <tr><td><code>autoConnect</code></td><td><code>--auto-connect</code></td><td>boolean</td></tr>
-    <tr><td><code>colorScheme</code></td><td><code>--color-scheme</code></td><td>string (<code>dark</code>, <code>light</code>, <code>no-preference</code>)</td></tr>
-    <tr><td><code>downloadPath</code></td><td><code>--download-path</code></td><td>string</td></tr>
-    <tr><td><code>contentBoundaries</code></td><td><code>--content-boundaries</code></td><td>boolean</td></tr>
-    <tr><td><code>maxOutput</code></td><td><code>--max-output</code></td><td>number</td></tr>
-    <tr><td><code>allowedDomains</code></td><td><code>--allowed-domains</code></td><td>string[]</td></tr>
-    <tr><td><code>actionPolicy</code></td><td><code>--action-policy</code></td><td>string</td></tr>
-    <tr><td><code>confirmActions</code></td><td><code>--confirm-actions</code></td><td>string</td></tr>
-    <tr><td><code>confirmInteractive</code></td><td><code>--confirm-interactive</code></td><td>boolean</td></tr>
-    <tr><td><code>engine</code></td><td><code>--engine</code></td><td>string (<code>chrome</code>, <code>lightpanda</code>)</td></tr>
-    <tr><td><code>headers</code></td><td><code>--headers</code></td><td>string (JSON)</td></tr>
+    <tr><td><code>headed</code></td><td><code>--headed</code></td><td>boolean</td><td>Show browser window instead of running headless</td></tr>
+    <tr><td><code>json</code></td><td><code>--json</code></td><td>boolean</td><td>JSON output (for agents)</td></tr>
+    <tr><td><code>full</code></td><td><code>--full, -f</code></td><td>boolean</td><td>Capture full page when taking screenshots</td></tr>
+    <tr><td><code>debug</code></td><td><code>--debug</code></td><td>boolean</td><td>Enable debug output</td></tr>
+    <tr><td><code>session</code></td><td><code>--session</code></td><td>string</td><td>Use an isolated named session (or <code>AGENT_BROWSER_SESSION</code> env)</td></tr>
+    <tr><td><code>sessionName</code></td><td><code>--session-name</code></td><td>string</td><td>Auto-save and restore session state by name (or <code>AGENT_BROWSER_SESSION_NAME</code> env)</td></tr>
+    <tr><td><code>executablePath</code></td><td><code>--executable-path</code></td><td>string</td><td>Custom browser executable path (or <code>AGENT_BROWSER_EXECUTABLE_PATH</code> env)</td></tr>
+    <tr><td><code>extensions</code></td><td><code>--extension</code></td><td>string[]</td><td>Browser extension paths to load; repeatable (or <code>AGENT_BROWSER_EXTENSIONS</code> env)</td></tr>
+    <tr><td><code>profile</code></td><td><code>--profile</code></td><td>string</td><td>Persistent browser profile directory — preserves cookies, storage, and login sessions across restarts (or <code>AGENT_BROWSER_PROFILE</code> env)</td></tr>
+    <tr><td><code>state</code></td><td><code>--state</code></td><td>string</td><td>Load storage state from a JSON file on launch (or <code>AGENT_BROWSER_STATE</code> env)</td></tr>
+    <tr><td><code>proxy</code></td><td><code>--proxy</code></td><td>string</td><td>Proxy server URL with optional auth (or <code>AGENT_BROWSER_PROXY</code> env)</td></tr>
+    <tr><td><code>proxyBypass</code></td><td><code>--proxy-bypass</code></td><td>string</td><td>Comma-separated hosts to bypass the proxy (or <code>AGENT_BROWSER_PROXY_BYPASS</code> env)</td></tr>
+    <tr><td><code>args</code></td><td><code>--args</code></td><td>string</td><td>Extra browser launch arguments, comma or newline separated (or <code>AGENT_BROWSER_ARGS</code> env)</td></tr>
+    <tr><td><code>userAgent</code></td><td><code>--user-agent</code></td><td>string</td><td>Custom User-Agent string (or <code>AGENT_BROWSER_USER_AGENT</code> env)</td></tr>
+    <tr><td><code>provider</code></td><td><code>-p, --provider</code></td><td>string</td><td>Cloud browser provider (or <code>AGENT_BROWSER_PROVIDER</code> env)</td></tr>
+    <tr><td><code>device</code></td><td><code>--device</code></td><td>string</td><td>iOS device name to emulate, e.g. <code>iPhone 15 Pro</code> (or <code>AGENT_BROWSER_IOS_DEVICE</code> env)</td></tr>
+    <tr><td><code>ignoreHttpsErrors</code></td><td><code>--ignore-https-errors</code></td><td>boolean</td><td>Ignore HTTPS certificate errors — useful for self-signed certs</td></tr>
+    <tr><td><code>allowFileAccess</code></td><td><code>--allow-file-access</code></td><td>boolean</td><td>Allow <code>file://</code> URLs to access local files (Chromium only)</td></tr>
+    <tr><td><code>cdp</code></td><td><code>--cdp</code></td><td>string</td><td>Connect to a browser via Chrome DevTools Protocol — accepts a port number or full WebSocket URL</td></tr>
+    <tr><td><code>autoConnect</code></td><td><code>--auto-connect</code></td><td>boolean</td><td>Auto-discover and connect to an already-running Chrome instance via CDP (or <code>AGENT_BROWSER_AUTO_CONNECT</code> env)</td></tr>
+    <tr><td><code>colorScheme</code></td><td><code>--color-scheme</code></td><td>string (<code>dark</code>, <code>light</code>, <code>no-preference</code>)</td><td>Emulated color scheme preference (or <code>AGENT_BROWSER_COLOR_SCHEME</code> env)</td></tr>
+    <tr><td><code>downloadPath</code></td><td><code>--download-path</code></td><td>string</td><td>Default directory for browser downloads (or <code>AGENT_BROWSER_DOWNLOAD_PATH</code> env)</td></tr>
+    <tr><td><code>contentBoundaries</code></td><td><code>--content-boundaries</code></td><td>boolean</td><td>Wrap page output in boundary markers so LLMs can distinguish tool output from untrusted content (or <code>AGENT_BROWSER_CONTENT_BOUNDARIES</code> env)</td></tr>
+    <tr><td><code>maxOutput</code></td><td><code>--max-output</code></td><td>number</td><td>Truncate page output to N characters to prevent context flooding (or <code>AGENT_BROWSER_MAX_OUTPUT</code> env)</td></tr>
+    <tr><td><code>allowedDomains</code></td><td><code>--allowed-domains</code></td><td>string[]</td><td>Restrict navigation and sub-resource requests to these domain patterns, e.g. <code>example.com,*.example.com</code> (or <code>AGENT_BROWSER_ALLOWED_DOMAINS</code> env)</td></tr>
+    <tr><td><code>actionPolicy</code></td><td><code>--action-policy</code></td><td>string</td><td>Path to a JSON file that gates destructive actions with a static policy (or <code>AGENT_BROWSER_ACTION_POLICY</code> env)</td></tr>
+    <tr><td><code>confirmActions</code></td><td><code>--confirm-actions</code></td><td>string</td><td>Comma-separated action categories that require explicit confirmation, e.g. <code>eval,download</code> (or <code>AGENT_BROWSER_CONFIRM_ACTIONS</code> env)</td></tr>
+    <tr><td><code>confirmInteractive</code></td><td><code>--confirm-interactive</code></td><td>boolean</td><td>Enable interactive confirmation prompts; auto-denies if stdin is not a TTY (or <code>AGENT_BROWSER_CONFIRM_INTERACTIVE</code> env)</td></tr>
+    <tr><td><code>engine</code></td><td><code>--engine</code></td><td>string (<code>chrome</code>, <code>lightpanda</code>)</td><td>Browser engine to use (or <code>AGENT_BROWSER_ENGINE</code> env)</td></tr>
+    <tr><td><code>headers</code></td><td><code>--headers</code></td><td>string (JSON)</td><td>Extra HTTP headers as a JSON object, scoped to the URL's origin (or <code>AGENT_BROWSER_HEADERS</code> env)</td></tr>
   </tbody>
 </table>
 
