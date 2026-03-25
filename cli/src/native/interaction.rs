@@ -202,25 +202,21 @@ pub async fn type_text(
             .await?;
     }
 
+    type_text_into_active_context(client, session_id, text, delay_ms).await
+}
+
+pub async fn type_text_into_active_context(
+    client: &CdpClient,
+    session_id: &str,
+    text: &str,
+    delay_ms: Option<u64>,
+) -> Result<(), String> {
     let delay = delay_ms.unwrap_or(0);
 
     for ch in text.chars() {
-        let text_str = ch.to_string();
-        let (key, code, key_code) = char_to_key_info(ch);
-
-        // Characters that have no US-keyboard mapping (key_code == 0 and empty
-        // code) are inserted via `Input.insertText`, matching Playwright's
-        // keyboard.type() fallback behaviour.  This handles emoji, CJK, and
-        // other characters that don't correspond to a physical key.
-        if key_code == 0 && code.is_empty() {
-            client
-                .send_command_typed::<_, Value>(
-                    "Input.insertText",
-                    &InsertTextParams { text: text_str },
-                    Some(session_id),
-                )
-                .await?;
-        } else {
+        if matches!(ch, '\n' | '\r' | '\t') {
+            let (key, code, key_code) = char_to_key_info(ch);
+            let text_str = key_text(&key);
             client
                 .send_command_typed::<_, Value>(
                     "Input.dispatchKeyEvent",
@@ -228,8 +224,8 @@ pub async fn type_text(
                         event_type: "keyDown".to_string(),
                         key: Some(key.clone()),
                         code: Some(code.clone()),
-                        text: Some(text_str.clone()),
-                        unmodified_text: Some(text_str.clone()),
+                        text: text_str.clone(),
+                        unmodified_text: text_str,
                         windows_virtual_key_code: Some(key_code),
                         native_virtual_key_code: Some(key_code),
                         modifiers: None,
@@ -250,6 +246,19 @@ pub async fn type_text(
                         windows_virtual_key_code: Some(key_code),
                         native_virtual_key_code: Some(key_code),
                         modifiers: None,
+                    },
+                    Some(session_id),
+                )
+                .await?;
+        } else {
+            // VS Code/Electron webviews reject repeated dispatchKeyEvent calls
+            // carrying printable `text`. Insert printable characters directly
+            // and reserve key events for controls like Enter and Tab.
+            client
+                .send_command_typed::<_, Value>(
+                    "Input.insertText",
+                    &InsertTextParams {
+                        text: ch.to_string(),
                     },
                     Some(session_id),
                 )

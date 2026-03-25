@@ -3115,6 +3115,33 @@ async fn handle_keyboard(cmd: &Value, state: &DaemonState) -> Result<Value, Stri
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
 
+    match cmd.get("subaction").and_then(|v| v.as_str()) {
+        Some("type") => {
+            let text = cmd
+                .get("text")
+                .and_then(|v| v.as_str())
+                .ok_or("Missing 'text' parameter")?;
+            interaction::type_text_into_active_context(&mgr.client, &session_id, text, None)
+                .await?;
+            return Ok(json!({ "typed": text }));
+        }
+        Some("insertText") => {
+            let text = cmd
+                .get("text")
+                .and_then(|v| v.as_str())
+                .ok_or("Missing 'text' parameter")?;
+            mgr.client
+                .send_command(
+                    "Input.insertText",
+                    Some(json!({ "text": text })),
+                    Some(&session_id),
+                )
+                .await?;
+            return Ok(json!({ "inserted": true }));
+        }
+        _ => {}
+    }
+
     let event_type = cmd
         .get("eventType")
         .and_then(|v| v.as_str())
