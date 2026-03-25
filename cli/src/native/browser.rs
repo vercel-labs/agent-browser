@@ -95,8 +95,14 @@ fn is_internal_chrome_target(url: &str) -> bool {
         || url.starts_with("devtools://")
 }
 
+fn is_vscode_webview_target(url: &str) -> bool {
+    url.starts_with("vscode-webview://")
+}
+
 pub(crate) fn should_track_target(target: &TargetInfo) -> bool {
-    (target.target_type == "page" || target.target_type == "webview")
+    (target.target_type == "page"
+        || target.target_type == "webview"
+        || (target.target_type == "iframe" && is_vscode_webview_target(&target.url)))
         && (target.url.is_empty() || !is_internal_chrome_target(&target.url))
 }
 
@@ -141,7 +147,7 @@ pub struct PageInfo {
     pub session_id: String,
     pub url: String,
     pub title: String,
-    pub target_type: String, // "page" or "webview"
+    pub target_type: String, // "page", "webview", "iframe", or another CDP target type
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1365,6 +1371,36 @@ mod tests {
             target_type: "page".to_string(),
             title: "New Tab".to_string(),
             url: "chrome://newtab/".to_string(),
+            attached: None,
+            browser_context_id: None,
+        };
+
+        assert!(!should_track_target(&target));
+    }
+
+    #[test]
+    fn test_should_track_vscode_webview_iframe_target() {
+        let target = TargetInfo {
+            target_id: "vscode-webview-iframe".to_string(),
+            target_type: "iframe".to_string(),
+            title: "Example".to_string(),
+            url: "vscode-webview://123/index.html?id=webview-1&extensionId=publisher.example"
+                .to_string(),
+            attached: None,
+            browser_context_id: None,
+        };
+
+        assert!(should_track_target(&target));
+    }
+
+    #[test]
+    fn test_should_not_track_vscode_service_worker_target() {
+        let target = TargetInfo {
+            target_id: "vscode-webview-sw".to_string(),
+            target_type: "service_worker".to_string(),
+            title: "Service Worker".to_string(),
+            url: "vscode-webview://123/service-worker.js?v=4&extensionId=publisher.example"
+                .to_string(),
             attached: None,
             browser_context_id: None,
         };

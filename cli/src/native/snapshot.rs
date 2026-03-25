@@ -184,6 +184,72 @@ impl RoleNameTracker {
     }
 }
 
+fn is_vscode_webview_url(url: &str) -> bool {
+    url.starts_with("vscode-webview://")
+}
+
+fn find_frame_id(tree: &Value, name: Option<&str>, url: Option<&str>) -> Option<String> {
+    let frame = tree.get("frame")?;
+    let frame_name = frame.get("name").and_then(|v| v.as_str()).unwrap_or("");
+    let frame_url = frame.get("url").and_then(|v| v.as_str()).unwrap_or("");
+    let frame_id = frame.get("id").and_then(|v| v.as_str())?;
+
+    if let Some(n) = name {
+        if frame_name == n {
+            return Some(frame_id.to_string());
+        }
+    }
+    if let Some(u) = url {
+        if frame_url.contains(u) {
+            return Some(frame_id.to_string());
+        }
+    }
+
+    if let Some(children) = tree.get("childFrames").and_then(|v| v.as_array()) {
+        for child in children {
+            if let Some(id) = find_frame_id(child, name, url) {
+                return Some(id);
+            }
+        }
+    }
+
+    None
+}
+
+async fn resolve_vscode_active_frame_id(
+    client: &CdpClient,
+    session_id: &str,
+) -> Result<Option<String>, String> {
+    let location: EvaluateResult = client
+        .send_command_typed(
+            "Runtime.evaluate",
+            &EvaluateParams {
+                expression: "location.href".to_string(),
+                return_by_value: Some(true),
+                await_promise: Some(false),
+            },
+            Some(session_id),
+        )
+        .await?;
+    let url = location
+        .result
+        .value
+        .and_then(|v| v.as_str().map(|s| s.to_string()))
+        .unwrap_or_default();
+    if !is_vscode_webview_url(&url) {
+        return Ok(None);
+    }
+
+    let tree_result = client
+        .send_command_no_params("Page.getFrameTree", Some(session_id))
+        .await?;
+    Ok(find_frame_id(
+        &tree_result["frameTree"],
+        Some("active-frame"),
+        None,
+    ))
+}
+
 pub async fn take_snapshot(
     client: &CdpClient,
     session_id: &str,
@@ -254,7 +320,7 @@ pub async fn take_snapshot(
             None
         };
 
-    let (ax_params, effective_session_id) =
+    let (mut ax_params, effective_session_id) =
         resolve_ax_session(frame_id, session_id, iframe_sessions);
     // Ensure domains are enabled on the iframe session (defensive fallback
     // in case the attach-time enable in execute_command was missed).
@@ -265,6 +331,13 @@ pub async fn take_snapshot(
         let _ = client
             .send_command_no_params("Accessibility.enable", Some(effective_session_id))
             .await;
+    }
+    if frame_id.is_none() || frame_id.is_some_and(|fid| iframe_sessions.contains_key(fid)) {
+        if let Some(active_frame_id) =
+            resolve_vscode_active_frame_id(client, effective_session_id).await?
+        {
+            ax_params = serde_json::json!({ "frameId": active_frame_id });
+        }
     }
     let ax_tree: GetFullAXTreeResult = client
         .send_command_typed(
