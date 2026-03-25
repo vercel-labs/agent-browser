@@ -1038,38 +1038,33 @@ Examples:
   agent-browser click @e3 --new-tab
 "##
         }
-        "click_js" => {
+        "clickjs" => {
             r##"
-agent-browser click_js - Click an element using JavaScript (React SPA compatible)
+agent-browser clickjs - Click an element using JavaScript
 
-Usage: agent-browser click_js <selector>
+Usage: agent-browser clickjs <selector>
 
-Clicks on the specified element using JavaScript element.click() method.
-Unlike the standard click command which uses coordinate-based mouse events,
-this command directly calls the native click() method on the DOM element.
+Clicks on the specified element using JavaScript element.click() instead of
+coordinate-based CDP mouse events. This bypasses coordinate resolution issues
+(overlapping elements, viewport offsets, fixed-position elements) that can
+cause the standard click to target the wrong element or miss entirely.
 
 When to Use:
-  - React Single Page Applications (SPAs) where standard click doesn't trigger handlers
-  - Material-UI, Ant Design, or other React component libraries
-  - Any situation where the standard click() command reports success but nothing happens
+  - The standard click reports success but nothing happens
+  - Elements with complex positioning (fixed, absolute, overlapping layers)
+  - Floating action buttons or elements behind overlays
 
-Technical Details:
-  React uses a SyntheticEvent system with event delegation. Events must bubble
-  through React's event system to trigger onClick handlers. The native element.click()
-  method ensures proper event bubbling, while coordinate-based mouse events may not.
-
-Note:
-  This method is slightly slower than standard click() but works reliably with
-  React and other modern JavaScript frameworks.
+Note: CDP mouse events do trigger React synthetic events (React 17+ attaches
+at the root). The benefit here is avoiding coordinate resolution problems.
 
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
 
 Examples:
-  agent-browser click_js "button"
-  agent-browser click_js @e1
-  agent-browser click_js "[data-testid='add-button']"
+  agent-browser clickjs "button"
+  agent-browser clickjs @e1
+  agent-browser clickjs "[data-testid='add-button']"
 "##
         }
         "dblclick" => {
