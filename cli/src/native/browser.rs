@@ -1256,6 +1256,7 @@ async fn initialize_lightpanda_manager(
             pages: Vec::new(),
             active_page_index: 0,
             default_timeout_ms: 25_000,
+            download_path: None,
         };
 
         match discover_and_attach_lightpanda_targets(&mut manager, deadline).await {
