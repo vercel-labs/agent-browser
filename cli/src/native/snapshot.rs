@@ -215,6 +215,7 @@ pub async fn take_snapshot(
                         expression: js,
                         return_by_value: Some(false),
                         await_promise: Some(false),
+                        ..Default::default()
                     },
                     Some(session_id),
                 )
@@ -531,8 +532,9 @@ async fn find_cursor_interactive_elements(
         'slider':1, 'spinbutton':1, 'switch':1, 'tab':1, 'treeitem':1
     };
     var interactiveTags = {
-        'a':1, 'button':1, 'input':1, 'select':1, 'textarea':1, 'details':1, 'summary':1
+        'button':1, 'input':1, 'select':1, 'textarea':1, 'details':1, 'summary':1
     };
+    var hasGetEventListeners = typeof getEventListeners === 'function';
 
     var allElements = document.body.querySelectorAll('*');
     for (var i = 0; i < allElements.length; i++) {
@@ -543,8 +545,16 @@ async fn find_cursor_interactive_elements(
         var tagName = el.tagName.toLowerCase();
         if (interactiveTags[tagName]) continue;
 
+        // Skip <a> tags that have href (they get 'link' role in the AX tree).
+        // <a> without href gets 'generic' role and would be missed by both
+        // the AX tree and this detection, so we let it through.
+        if (tagName === 'a' && el.hasAttribute('href')) continue;
+
         var role = el.getAttribute('role');
         if (role && interactiveRoles[role.toLowerCase()]) continue;
+
+        var rect = el.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) continue;
 
         var computedStyle = getComputedStyle(el);
         var hasCursorPointer = computedStyle.cursor === 'pointer';
@@ -553,8 +563,20 @@ async fn find_cursor_interactive_elements(
         var hasTabIndex = tabIndex !== null && tabIndex !== '-1';
         var ce = el.getAttribute('contenteditable');
         var isEditable = ce === '' || ce === 'true';
+        var text = (el.textContent || '').trim();
+        var hasClickListener = false;
 
-        if (!hasCursorPointer && !hasOnClick && !hasTabIndex && !isEditable) continue;
+        if (!hasCursorPointer && !hasOnClick && !hasTabIndex && !isEditable) {
+            // Fallback: detect click listeners registered via addEventListener.
+            // Only check visible elements with text content to limit overhead.
+            if (hasGetEventListeners && text) {
+                var listeners = getEventListeners(el);
+                if (listeners.click && listeners.click.length > 0) {
+                    hasClickListener = true;
+                }
+            }
+            if (!hasClickListener) continue;
+        }
 
         // Skip elements that only inherit cursor:pointer from an ancestor
         if (hasCursorPointer && !hasOnClick && !hasTabIndex && !isEditable) {
@@ -562,16 +584,12 @@ async fn find_cursor_interactive_elements(
             if (parent && getComputedStyle(parent).cursor === 'pointer') continue;
         }
 
-        var text = (el.textContent || '').trim().slice(0, 100);
-
-        var rect = el.getBoundingClientRect();
-        if (rect.width === 0 || rect.height === 0) continue;
-
         el.setAttribute('data-__ab-ci', String(results.length));
         results.push({
-            text: text,
+            text: text.slice(0, 100),
             tagName: tagName,
             hasOnClick: hasOnClick,
+            hasClickListener: hasClickListener,
             hasCursorPointer: hasCursorPointer,
             hasTabIndex: hasTabIndex,
             isEditable: isEditable
@@ -588,6 +606,7 @@ async fn find_cursor_interactive_elements(
                 expression: js.to_string(),
                 return_by_value: Some(true),
                 await_promise: Some(false),
+                include_command_line_api: Some(true),
             },
             Some(session_id),
         )
@@ -686,6 +705,7 @@ async fn find_cursor_interactive_elements(
                 expression: cleanup_js,
                 return_by_value: Some(true),
                 await_promise: Some(false),
+                ..Default::default()
             },
             Some(session_id),
         )
@@ -709,6 +729,10 @@ async fn find_cursor_interactive_elements(
             .get("hasOnClick")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        let has_click_listener = elem
+            .get("hasClickListener")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         let has_tab_index = elem
             .get("hasTabIndex")
             .and_then(|v| v.as_bool())
@@ -718,7 +742,7 @@ async fn find_cursor_interactive_elements(
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        let kind = if has_cursor_pointer || has_on_click {
+        let kind = if has_cursor_pointer || has_on_click || has_click_listener {
             "clickable"
         } else if is_editable {
             "editable"
@@ -732,6 +756,9 @@ async fn find_cursor_interactive_elements(
         }
         if has_on_click {
             hints.push("onclick".to_string());
+        }
+        if has_click_listener {
+            hints.push("click-listener".to_string());
         }
         if has_tab_index {
             hints.push("tabindex".to_string());

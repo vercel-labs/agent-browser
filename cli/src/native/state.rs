@@ -66,6 +66,7 @@ pub async fn save_state(
                 expression: origin_js.to_string(),
                 return_by_value: Some(true),
                 await_promise: Some(false),
+                ..Default::default()
             },
             Some(session_id),
         )
@@ -204,6 +205,7 @@ pub async fn load_state(client: &CdpClient, session_id: &str, path: &str) -> Res
                         expression: js,
                         return_by_value: Some(true),
                         await_promise: Some(false),
+                        ..Default::default()
                     },
                     Some(session_id),
                 )
@@ -223,6 +225,7 @@ pub async fn load_state(client: &CdpClient, session_id: &str, path: &str) -> Res
                         expression: js,
                         return_by_value: Some(true),
                         await_promise: Some(false),
+                        ..Default::default()
                     },
                     Some(session_id),
                 )

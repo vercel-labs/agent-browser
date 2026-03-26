@@ -2498,6 +2498,78 @@ async fn e2e_snapshot_cursor_interactive() {
     assert_success(&resp);
 }
 
+/// Issue #1016 – Elements with click listeners registered via addEventListener
+/// (without onclick attribute or cursor:pointer) must be detected as clickable.
+/// Also verifies that <a> tags without href are detected.
+#[tokio::test]
+#[ignore]
+async fn e2e_snapshot_addeventlistener_detection() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Page with elements that use addEventListener only (no onclick attr, no cursor:pointer):
+    //  - <span> with addEventListener('click', ...)
+    //  - <a> without href, with addEventListener('click', ...)
+    //  - <div> with addEventListener('click', ...) but no text (should be skipped)
+    let html = concat!(
+        "<html><body>",
+        "<span id='dl1'>report.pdf</span>",
+        "<a id='dl2'>invoice.xlsx</a>",
+        "<div id='empty'></div>",
+        "<script>",
+        "document.getElementById('dl1').addEventListener('click', function() { });",
+        "document.getElementById('dl2').addEventListener('click', function() { });",
+        "document.getElementById('empty').addEventListener('click', function() { });",
+        "</script>",
+        "</body></html>",
+    );
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "setcontent", "html": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "snapshot", "interactive": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let snapshot = get_data(&resp)["snapshot"].as_str().unwrap();
+
+    // The span and <a> with addEventListener should be detected as clickable with click-listener hint
+    assert!(
+        snapshot.lines().any(|l| l.contains("report.pdf") && l.contains("clickable") && l.contains("click-listener")),
+        "Expected 'report.pdf' to be marked clickable with click-listener hint:\n{}",
+        snapshot,
+    );
+    assert!(
+        snapshot.lines().any(|l| l.contains("invoice.xlsx") && l.contains("clickable") && l.contains("click-listener")),
+        "Expected 'invoice.xlsx' to be marked clickable with click-listener hint:\n{}",
+        snapshot,
+    );
+
+    // Empty div with addEventListener should NOT appear (no text content guard)
+    let clickable_count = snapshot.lines().filter(|l| l.contains("clickable")).count();
+    assert_eq!(
+        clickable_count, 2,
+        "Expected exactly 2 clickable elements (empty div should be excluded):\n{}",
+        snapshot,
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 /// Verifies that `screenshot --annotate` completes in bounded time even with
 /// many interactive elements. Guards against the sequential CDP round-trip
 /// regression that caused hangs over high-latency WSS (Issue #841).

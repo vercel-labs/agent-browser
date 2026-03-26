@@ -573,6 +573,7 @@ impl BrowserManager {
                     expression: script.to_string(),
                     return_by_value: Some(true),
                     await_promise: Some(true),
+                    ..Default::default()
                 },
                 Some(&session_id),
             )
@@ -1040,6 +1041,7 @@ impl BrowserManager {
                     ),
                     return_by_value: Some(false),
                     await_promise: Some(false),
+                    ..Default::default()
                 },
                 Some(session_id),
             )

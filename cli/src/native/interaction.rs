@@ -382,6 +382,7 @@ pub async fn scroll(
                     expression: js,
                     return_by_value: Some(true),
                     await_promise: Some(false),
+                    ..Default::default()
                 },
                 Some(session_id),
             )

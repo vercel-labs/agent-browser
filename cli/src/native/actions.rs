@@ -2750,6 +2750,7 @@ async fn poll_until_true(
                     expression: expression.to_string(),
                     return_by_value: Some(true),
                     await_promise: Some(true),
+                    ..Default::default()
                 },
                 Some(session_id),
             )
@@ -4514,6 +4515,7 @@ async fn handle_waitforfunction(cmd: &Value, state: &DaemonState) -> Result<Valu
                 expression: format!("({})", expression),
                 return_by_value: Some(true),
                 await_promise: Some(true),
+                ..Default::default()
             },
             Some(&session_id),
         )
@@ -4815,6 +4817,7 @@ async fn handle_getbyrole(cmd: &Value, state: &mut DaemonState) -> Result<Value,
                 expression: js,
                 return_by_value: Some(true),
                 await_promise: Some(false),
+                ..Default::default()
             },
             Some(&session_id),
         )
@@ -4945,6 +4948,7 @@ async fn handle_semantic_locator(
                 expression: query,
                 return_by_value: Some(true),
                 await_promise: Some(false),
+                ..Default::default()
             },
             Some(&session_id),
         )
@@ -5031,6 +5035,7 @@ async fn handle_nth(cmd: &Value, state: &mut DaemonState) -> Result<Value, Strin
                 expression: js,
                 return_by_value: Some(true),
                 await_promise: Some(false),
+                ..Default::default()
             },
             Some(&session_id),
         )
@@ -5104,6 +5109,7 @@ async fn handle_evalhandle(cmd: &Value, state: &DaemonState) -> Result<Value, St
                 expression: script.to_string(),
                 return_by_value: Some(false),
                 await_promise: Some(true),
+                ..Default::default()
             },
             Some(&session_id),
         )
@@ -6397,6 +6403,7 @@ async fn wait_for_any_selector(
                         expression,
                         return_by_value: Some(true),
                         await_promise: Some(true),
+                        ..Default::default()
                     },
                     Some(session_id),
                 )

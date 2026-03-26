@@ -232,7 +232,7 @@ pub struct HandleJavaScriptDialogParams {
 // Runtime domain
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EvaluateParams {
     pub expression: String,
@@ -240,6 +240,8 @@ pub struct EvaluateParams {
     pub return_by_value: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub await_promise: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub include_command_line_api: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]

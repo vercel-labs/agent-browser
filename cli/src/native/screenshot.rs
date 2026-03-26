@@ -456,6 +456,7 @@ async fn inject_annotation_overlay(
                 expression,
                 return_by_value: Some(true),
                 await_promise: Some(false),
+                ..Default::default()
             },
             Some(session_id),
         )
@@ -482,6 +483,7 @@ async fn remove_annotation_overlay(client: &CdpClient, session_id: &str) -> Resu
                 expression,
                 return_by_value: Some(true),
                 await_promise: Some(false),
+                ..Default::default()
             },
             Some(session_id),
         )
@@ -498,6 +500,7 @@ async fn get_scroll_offsets(client: &CdpClient, session_id: &str) -> Result<(f64
                 expression: "({x: window.scrollX || 0, y: window.scrollY || 0})".to_string(),
                 return_by_value: Some(true),
                 await_promise: Some(false),
+                ..Default::default()
             },
             Some(session_id),
         )
