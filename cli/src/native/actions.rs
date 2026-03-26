@@ -208,8 +208,9 @@ pub struct DaemonState {
     pub mouse_state: MouseState,
     /// Tracks the currently open JavaScript dialog (alert/confirm/prompt), if any.
     pub pending_dialog: Option<PendingDialog>,
-    /// CSS selector that targets the active iframe element in the parent page.
-    /// Used by `resolve_element_in_frame` to compute the iframe's viewport offset.
+    /// Selector or ref token that targets the active iframe element in the
+    /// parent page. Used by `resolve_element_in_frame` to compute the iframe's
+    /// viewport offset.
     pub active_frame_selector: Option<String>,
     /// Shared slot for stream server to receive CDP client when browser launches.
     pub stream_client: Option<Arc<RwLock<Option<Arc<CdpClient>>>>>,
@@ -4691,6 +4692,7 @@ async fn handle_frame(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
                 .unwrap_or(&ref_id);
 
             state.active_frame_id = Some(frame_id.to_string());
+            state.active_frame_selector = Some(frame_offset_target_for_ref(&ref_id, entry));
             return Ok(json!({ "frame": label }));
         }
 
@@ -4823,6 +4825,7 @@ async fn execute_subaction(
                 let (x, y) = resolve_element_in_frame(
                     mgr,
                     &session_id,
+                    &state.ref_map,
                     selector,
                     context_id,
                     frame_selector.as_deref(),
@@ -4869,6 +4872,7 @@ async fn execute_subaction(
                 let (x, y) = resolve_element_in_frame(
                     mgr,
                     &session_id,
+                    &state.ref_map,
                     selector,
                     context_id,
                     frame_selector.as_deref(),
@@ -4892,6 +4896,7 @@ async fn execute_subaction(
                 let (x, y) = resolve_element_in_frame(
                     mgr,
                     &session_id,
+                    &state.ref_map,
                     selector,
                     context_id,
                     frame_selector.as_deref(),
@@ -4960,7 +4965,8 @@ async fn execute_subaction(
 /// the main page.
 async fn resolve_element_in_frame(
     mgr: &super::browser::BrowserManager,
-    _session_id: &str,
+    session_id: &str,
+    ref_map: &RefMap,
     selector: &str,
     context_id: Option<i64>,
     frame_selector: Option<&str>,
@@ -4992,36 +4998,7 @@ async fn resolve_element_in_frame(
     // page viewport, so we need to add the iframe element's offset.
     // When we have a specific frame selector, use it to find the right
     // iframe instead of grabbing the first visible one on the page.
-    let offset_js = if let Some(fs) = frame_selector {
-        format!(
-            r#"(() => {{
-            const el = document.querySelector({fs});
-            if (el) {{
-                const r = el.getBoundingClientRect();
-                return {{ x: r.x, y: r.y }};
-            }}
-            return {{ x: 0, y: 0 }};
-        }})()"#,
-            fs = serde_json::to_string(fs).unwrap_or_default(),
-        )
-    } else {
-        r#"(() => {
-            const iframes = document.querySelectorAll('iframe, frame');
-            for (const f of iframes) {
-                const r = f.getBoundingClientRect();
-                if (r.width > 0 && r.height > 0) {
-                    return { x: r.x, y: r.y };
-                }
-            }
-            return { x: 0, y: 0 };
-        })()"#
-            .to_string()
-    };
-
-    let iframe_offset = mgr
-        .evaluate(&offset_js, None)
-        .await
-        .unwrap_or(serde_json::json!({ "x": 0, "y": 0 }));
+    let iframe_offset = resolve_iframe_offset(mgr, session_id, ref_map, frame_selector).await;
 
     let offset_x = iframe_offset
         .get("x")
@@ -5033,6 +5010,81 @@ async fn resolve_element_in_frame(
         .unwrap_or(0.0);
 
     Ok((x + offset_x, y + offset_y))
+}
+
+fn frame_offset_target_for_ref(ref_id: &str, entry: &super::element::RefEntry) -> String {
+    entry
+        .selector
+        .clone()
+        .unwrap_or_else(|| format!("@{}", ref_id))
+}
+
+async fn resolve_iframe_offset(
+    mgr: &super::browser::BrowserManager,
+    session_id: &str,
+    ref_map: &RefMap,
+    frame_selector: Option<&str>,
+) -> Value {
+    if let Some(fs) = frame_selector {
+        if let Some(ref_id) = super::element::parse_ref(fs) {
+            if let Some(entry) = ref_map.get(&ref_id) {
+                if let Some(backend_node_id) = entry.backend_node_id {
+                    let result: Result<super::cdp::types::DomGetBoxModelResult, String> = mgr
+                        .client
+                        .send_command_typed(
+                            "DOM.getBoxModel",
+                            &super::cdp::types::DomGetBoxModelParams {
+                                backend_node_id: Some(backend_node_id),
+                                node_id: None,
+                                object_id: None,
+                            },
+                            Some(session_id),
+                        )
+                        .await;
+
+                    if let Ok(result) = result {
+                        if result.model.border.len() >= 2 {
+                            return serde_json::json!({
+                                "x": result.model.border[0],
+                                "y": result.model.border[1],
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let offset_js =
+        if let Some(fs) = frame_selector.filter(|fs| super::element::parse_ref(fs).is_none()) {
+            format!(
+                r#"(() => {{
+            const el = document.querySelector({fs});
+            if (el) {{
+                const r = el.getBoundingClientRect();
+                return {{ x: r.x, y: r.y }};
+            }}
+            return {{ x: 0, y: 0 }};
+        }})()"#,
+                fs = serde_json::to_string(fs).unwrap_or_default(),
+            )
+        } else {
+            r#"(() => {
+            const iframes = document.querySelectorAll('iframe, frame');
+            for (const f of iframes) {
+                const r = f.getBoundingClientRect();
+                if (r.width > 0 && r.height > 0) {
+                    return { x: r.x, y: r.y };
+                }
+            }
+            return { x: 0, y: 0 };
+        })()"#
+                .to_string()
+        };
+
+    mgr.evaluate(&offset_js, None)
+        .await
+        .unwrap_or(serde_json::json!({ "x": 0, "y": 0 }))
 }
 
 /// Fill an input inside an iframe by evaluating focus + value-set in the
@@ -7426,6 +7478,7 @@ fn error_response(id: &str, error: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::native::element::RefEntry;
     use crate::test_utils::EnvGuard;
     use std::fs;
 
@@ -7438,6 +7491,37 @@ mod tests {
             "agent-browser-{label}-{}-{nanos}",
             std::process::id()
         ))
+    }
+
+    #[test]
+    fn test_frame_offset_target_for_ref_prefers_cached_selector() {
+        let entry = RefEntry {
+            backend_node_id: Some(42),
+            role: "Iframe".to_string(),
+            name: "Embedded".to_string(),
+            nth: None,
+            selector: Some("iframe[name=\"embedded\"]".to_string()),
+            frame_id: Some("frame-1".to_string()),
+        };
+
+        assert_eq!(
+            frame_offset_target_for_ref("e7", &entry),
+            "iframe[name=\"embedded\"]"
+        );
+    }
+
+    #[test]
+    fn test_frame_offset_target_for_ref_falls_back_to_ref_token() {
+        let entry = RefEntry {
+            backend_node_id: Some(42),
+            role: "Iframe".to_string(),
+            name: "Embedded".to_string(),
+            nth: None,
+            selector: None,
+            frame_id: Some("frame-1".to_string()),
+        };
+
+        assert_eq!(frame_offset_target_for_ref("e7", &entry), "@e7");
     }
 
     #[tokio::test]
