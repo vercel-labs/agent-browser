@@ -253,7 +253,11 @@ fn run_dashboard_start(port: u16, json_mode: bool) {
             if json_mode {
                 print_json_error(format!("Failed to get executable path: {}", e));
             } else {
-                eprintln!("{} Failed to get executable path: {}", color::error_indicator(), e);
+                eprintln!(
+                    "{} Failed to get executable path: {}",
+                    color::error_indicator(),
+                    e
+                );
             }
             exit(1);
         }
@@ -305,7 +309,11 @@ fn run_dashboard_start(port: u16, json_mode: bool) {
             if json_mode {
                 print_json_error(format!("Failed to start dashboard: {}", e));
             } else {
-                eprintln!("{} Failed to start dashboard: {}", color::error_indicator(), e);
+                eprintln!(
+                    "{} Failed to start dashboard: {}",
+                    color::error_indicator(),
+                    e
+                );
             }
             exit(1);
         }
@@ -319,7 +327,9 @@ fn run_dashboard_stop(json_mode: bool) {
         Ok(s) => s,
         Err(_) => {
             if json_mode {
-                print_json_value(json!({ "success": true, "data": { "stopped": false, "reason": "not running" } }));
+                print_json_value(
+                    json!({ "success": true, "data": { "stopped": false, "reason": "not running" } }),
+                );
             } else {
                 println!("Dashboard is not running");
             }
@@ -332,7 +342,9 @@ fn run_dashboard_stop(json_mode: bool) {
         Err(_) => {
             let _ = fs::remove_file(&pid_path);
             if json_mode {
-                print_json_value(json!({ "success": true, "data": { "stopped": false, "reason": "invalid pid" } }));
+                print_json_value(
+                    json!({ "success": true, "data": { "stopped": false, "reason": "invalid pid" } }),
+                );
             } else {
                 println!("Dashboard is not running");
             }
@@ -388,8 +400,7 @@ fn run_close_all(flags: &Flags) {
                         };
                         #[cfg(windows)]
                         let running = unsafe {
-                            let handle =
-                                OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+                            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
                             if handle != 0 {
                                 CloseHandle(handle);
                                 true

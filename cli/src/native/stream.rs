@@ -1064,10 +1064,7 @@ async fn handle_http_request(
 
     let first_line = request.lines().next().unwrap_or("");
     let method = first_line.split_whitespace().next().unwrap_or("GET");
-    let path = first_line
-        .split_whitespace()
-        .nth(1)
-        .unwrap_or("/");
+    let path = first_line.split_whitespace().nth(1).unwrap_or("/");
 
     // Handle CORS preflight
     if method == "OPTIONS" {
@@ -1084,8 +1081,13 @@ async fn handle_http_request(
         let result = spawn_session(body_str).await;
         let (status, resp_body) = match result {
             Ok(msg) => ("200 OK", msg),
-            Err(e) => ("400 Bad Request", format!(r#"{{"success":false,"error":{}}}"#,
-                serde_json::to_string(&e).unwrap_or_else(|_| format!("\"{}\"", e)))),
+            Err(e) => (
+                "400 Bad Request",
+                format!(
+                    r#"{{"success":false,"error":{}}}"#,
+                    serde_json::to_string(&e).unwrap_or_else(|_| format!("\"{}\"", e))
+                ),
+            ),
         };
         let response = format!(
             "HTTP/1.1 {status}\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n{CORS_HEADERS}\r\n",
@@ -1104,7 +1106,10 @@ async fn handle_http_request(
             Ok(resp) => ("200 OK", resp),
             Err(e) => (
                 "502 Bad Gateway",
-                format!(r#"{{"success":false,"error":{}}}"#, serde_json::to_string(&e).unwrap_or_else(|_| format!("\"{}\"", e))),
+                format!(
+                    r#"{{"success":false,"error":{}}}"#,
+                    serde_json::to_string(&e).unwrap_or_else(|_| format!("\"{}\"", e))
+                ),
             ),
         };
         let response = format!(
@@ -1127,7 +1132,9 @@ async fn handle_http_request(
         (
             "200 OK",
             "application/json; charset=utf-8",
-            serde_json::to_string(&*tabs).unwrap_or_else(|_| "[]".to_string()).into_bytes(),
+            serde_json::to_string(&*tabs)
+                .unwrap_or_else(|_| "[]".to_string())
+                .into_bytes(),
         )
     } else if path == "/api/status" {
         let engine = last_engine.read().await;
@@ -1168,14 +1175,16 @@ fn extract_http_body(request: &str) -> Option<&str> {
 
 /// Relay a command JSON body to the daemon's Unix socket and return the response.
 async fn relay_command_to_daemon(session_name: &str, body: &str) -> Result<String, String> {
-    let mut cmd: Value =
-        serde_json::from_str(body).map_err(|e| format!("Invalid JSON: {}", e))?;
+    let mut cmd: Value = serde_json::from_str(body).map_err(|e| format!("Invalid JSON: {}", e))?;
 
     if cmd.get("id").is_none() {
-        let id = format!("dash-{}", std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis());
+        let id = format!(
+            "dash-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+        );
         cmd["id"] = json!(id);
     }
 
@@ -1257,7 +1266,6 @@ code { background: #262626; padding: 2px 8px; border-radius: 4px; font-size: 14p
 </div>
 </body>
 </html>"#;
-
 
 /// Discover all active streaming sessions by reading `*.stream` files.
 /// Stale entries (dead process) are removed on the fly.
@@ -1367,7 +1375,6 @@ fn is_process_alive(pid_path: &Path) -> bool {
         true
     }
 }
-
 
 fn timestamp_ms() -> u64 {
     std::time::SystemTime::now()
@@ -1511,8 +1518,13 @@ async fn handle_dashboard_connection(
         };
         let (status, resp_body) = match result {
             Ok(msg) => ("200 OK", msg),
-            Err(e) => ("400 Bad Request", format!(r#"{{"success":false,"error":{}}}"#,
-                serde_json::to_string(&e).unwrap_or_else(|_| format!("\"{}\"", e)))),
+            Err(e) => (
+                "400 Bad Request",
+                format!(
+                    r#"{{"success":false,"error":{}}}"#,
+                    serde_json::to_string(&e).unwrap_or_else(|_| format!("\"{}\"", e))
+                ),
+            ),
         };
         let response = format!(
             "HTTP/1.1 {status}\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n{CORS_HEADERS}\r\n",
@@ -1554,16 +1566,10 @@ async fn handle_dashboard_connection(
 /// Read the full POST body from a request. First checks if the body is already
 /// present in the initial read buffer; if not, reads remaining bytes based on
 /// Content-Length.
-async fn read_post_body(
-    stream: &mut tokio::net::TcpStream,
-    initial: &[u8],
-    n: usize,
-) -> String {
+async fn read_post_body(stream: &mut tokio::net::TcpStream, initial: &[u8], n: usize) -> String {
     use tokio::io::AsyncReadExt;
     let header_str = String::from_utf8_lossy(&initial[..n]);
-    let body = extract_http_body(&header_str)
-        .unwrap_or("")
-        .to_string();
+    let body = extract_http_body(&header_str).unwrap_or("").to_string();
 
     if !body.is_empty() {
         return body;
@@ -1591,8 +1597,7 @@ async fn read_post_body(
 
 /// Execute an agent-browser CLI command and return JSON with stdout/stderr.
 async fn exec_cli(body: &str) -> Result<String, String> {
-    let parsed: Value = serde_json::from_str(body)
-        .map_err(|e| format!("Invalid JSON: {}", e))?;
+    let parsed: Value = serde_json::from_str(body).map_err(|e| format!("Invalid JSON: {}", e))?;
     let args: Vec<String> = parsed
         .get("args")
         .and_then(|v| v.as_array())
@@ -1605,8 +1610,7 @@ async fn exec_cli(body: &str) -> Result<String, String> {
         return Err("Empty args array".to_string());
     }
 
-    let exe = std::env::current_exe()
-        .map_err(|e| format!("Cannot resolve executable: {}", e))?;
+    let exe = std::env::current_exe().map_err(|e| format!("Cannot resolve executable: {}", e))?;
 
     let mut cmd = tokio::process::Command::new(&exe);
     cmd.args(&args)
@@ -1635,8 +1639,7 @@ async fn exec_cli(body: &str) -> Result<String, String> {
 /// Kill a session daemon by sending SIGTERM, then SIGKILL if it survives.
 /// Cleans up socket/pid/stream/engine files afterward.
 fn kill_session(body: &str) -> Result<String, String> {
-    let parsed: Value = serde_json::from_str(body)
-        .map_err(|e| format!("Invalid JSON: {}", e))?;
+    let parsed: Value = serde_json::from_str(body).map_err(|e| format!("Invalid JSON: {}", e))?;
     let session = parsed
         .get("session")
         .and_then(|v| v.as_str())
@@ -1651,7 +1654,9 @@ fn kill_session(body: &str) -> Result<String, String> {
 
     let pid_str = std::fs::read_to_string(&pid_path)
         .map_err(|_| format!("No PID file for session '{}'", session))?;
-    let pid: u32 = pid_str.trim().parse()
+    let pid: u32 = pid_str
+        .trim()
+        .parse()
         .map_err(|_| format!("Invalid PID in file: {}", pid_str.trim()))?;
 
     #[cfg(unix)]
@@ -1676,8 +1681,7 @@ fn kill_session(body: &str) -> Result<String, String> {
 
 /// Spawn a new session daemon from a POST /api/sessions request.
 async fn spawn_session(body: &str) -> Result<String, String> {
-    let parsed: Value = serde_json::from_str(body)
-        .map_err(|e| format!("Invalid JSON: {}", e))?;
+    let parsed: Value = serde_json::from_str(body).map_err(|e| format!("Invalid JSON: {}", e))?;
     let session = parsed
         .get("session")
         .and_then(|v| v.as_str())
@@ -1687,8 +1691,7 @@ async fn spawn_session(body: &str) -> Result<String, String> {
         return Err("Session name must be 1-64 characters".to_string());
     }
 
-    let exe = std::env::current_exe()
-        .map_err(|e| format!("Cannot resolve executable: {}", e))?;
+    let exe = std::env::current_exe().map_err(|e| format!("Cannot resolve executable: {}", e))?;
 
     let mut cmd = tokio::process::Command::new(&exe);
     cmd.arg("open")
@@ -1699,12 +1702,16 @@ async fn spawn_session(body: &str) -> Result<String, String> {
     cmd.stdout(std::process::Stdio::null());
     cmd.stderr(std::process::Stdio::null());
 
-    let status = cmd.status().await
+    let status = cmd
+        .status()
+        .await
         .map_err(|e| format!("Failed to spawn session: {}", e))?;
 
     if status.success() {
-        Ok(format!(r#"{{"success":true,"session":{}}}"#,
-            serde_json::to_string(session).unwrap_or_default()))
+        Ok(format!(
+            r#"{{"success":true,"session":{}}}"#,
+            serde_json::to_string(session).unwrap_or_default()
+        ))
     } else {
         Err(format!("Session process exited with {}", status))
     }

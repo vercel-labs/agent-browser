@@ -3289,7 +3289,13 @@ async fn handle_tab_switch(cmd: &Value, state: &mut DaemonState) -> Result<Value
     let result = mgr.tab_switch(index).await?;
 
     if let Some(ref server) = state.stream_server {
-        if let Ok(dims) = mgr.evaluate("JSON.stringify([window.innerWidth,window.innerHeight])", None).await {
+        if let Ok(dims) = mgr
+            .evaluate(
+                "JSON.stringify([window.innerWidth,window.innerHeight])",
+                None,
+            )
+            .await
+        {
             if let Some(s) = dims.get("result").and_then(|v| v.as_str()) {
                 if let Ok(arr) = serde_json::from_str::<Vec<u32>>(s) {
                     if arr.len() == 2 && arr[0] > 0 && arr[1] > 0 {
@@ -3364,7 +3370,11 @@ async fn handle_set_media(cmd: &Value, state: &DaemonState) -> Result<Value, Str
         }
     }
 
-    let features = if feat_list.is_empty() { None } else { Some(feat_list) };
+    let features = if feat_list.is_empty() {
+        None
+    } else {
+        Some(feat_list)
+    };
 
     mgr.set_emulated_media(media, features).await?;
     Ok(json!({ "set": true }))
