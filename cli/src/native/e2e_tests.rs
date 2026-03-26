@@ -3463,3 +3463,108 @@ async fn e2e_headers_case_insensitive_no_duplicates() {
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     assert_success(&resp);
 }
+
+// ---------------------------------------------------------------------------
+// Stream: custom viewport is reflected in screencast frame metadata
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore]
+async fn e2e_stream_frame_metadata_respects_custom_viewport() {
+    let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "AGENT_BROWSER_SESSION"]);
+    let socket_dir = std::env::temp_dir().join(format!(
+        "agent-browser-e2e-stream-viewport-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&socket_dir).expect("socket dir should be created");
+    guard.set(
+        "AGENT_BROWSER_SOCKET_DIR",
+        socket_dir.to_str().expect("socket dir should be utf-8"),
+    );
+    guard.set("AGENT_BROWSER_SESSION", "e2e-stream-viewport");
+
+    let mut state = DaemonState::new();
+
+    // Enable stream on an ephemeral port
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "stream_enable", "port": 0 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let port = get_data(&resp)["port"]
+        .as_u64()
+        .expect("stream enable should report the bound port");
+
+    // Set a custom viewport before launching the browser
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "viewport", "width": 800, "height": 600 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Connect a WebSocket client
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}"))
+        .await
+        .expect("websocket client should connect to runtime stream");
+
+    // Navigate to trigger browser launch and screencast
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "navigate", "url": "data:text/html,<h1>Viewport Test</h1>" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Wait for a frame message and verify its metadata
+    let mut found_frame = false;
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(15);
+    while tokio::time::Instant::now() < deadline {
+        let msg = tokio::time::timeout(tokio::time::Duration::from_secs(3), ws.next()).await;
+        let Some(Ok(message)) = msg.ok().flatten() else {
+            continue;
+        };
+        if !message.is_text() {
+            continue;
+        }
+        let parsed: Value =
+            serde_json::from_str(message.to_text().expect("text message should be readable"))
+                .expect("stream payload should be valid JSON");
+        if parsed.get("type") == Some(&json!("frame")) {
+            let meta = &parsed["metadata"];
+            assert_eq!(
+                meta["deviceWidth"], 800,
+                "frame metadata deviceWidth should match custom viewport, got: {}",
+                meta
+            );
+            assert_eq!(
+                meta["deviceHeight"], 600,
+                "frame metadata deviceHeight should match custom viewport, got: {}",
+                meta
+            );
+            found_frame = true;
+            break;
+        }
+    }
+    assert!(
+        found_frame,
+        "should have received at least one frame message with correct viewport metadata"
+    );
+
+    // Cleanup
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "stream_disable" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+    let _ = std::fs::remove_dir_all(&socket_dir);
+}
