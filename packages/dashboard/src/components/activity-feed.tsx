@@ -1,7 +1,9 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import type { ActivityEvent } from "@/hooks/use-stream-connection";
+import { useAtomValue, useSetAtom } from "jotai/react";
+import type { ActivityEvent } from "@/types";
+import { combinedEventsAtom, persistActivityAtom, togglePersistAtom, clearActivityAtom } from "@/store/activity";
 import { Bookmark, Trash2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
@@ -13,13 +15,6 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { JsonSyntax } from "@/components/json-syntax";
-
-interface ActivityFeedProps {
-  events: ActivityEvent[];
-  persist: boolean;
-  onTogglePersist: () => void;
-  onClear: () => void;
-}
 
 function formatTime(ts: number): string {
   const d = new Date(ts);
@@ -166,7 +161,12 @@ function ConsoleEntry({
   );
 }
 
-export function ActivityFeed({ events, persist, onTogglePersist, onClear }: ActivityFeedProps) {
+export function ActivityFeed() {
+  const events = useAtomValue(combinedEventsAtom);
+  const persist = useAtomValue(persistActivityAtom);
+  const togglePersist = useSetAtom(togglePersistAtom);
+  const clearActivity = useSetAtom(clearActivityAtom);
+
   const bottomRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const autoScrollRef = useRef(true);
@@ -193,7 +193,7 @@ export function ActivityFeed({ events, persist, onTogglePersist, onClear }: Acti
         </Badge>
         <button
           type="button"
-          onClick={onTogglePersist}
+          onClick={() => togglePersist()}
           className={cn(
             "flex h-5 items-center gap-1 rounded border px-1.5 text-[10px] transition-colors",
             persist
@@ -207,7 +207,7 @@ export function ActivityFeed({ events, persist, onTogglePersist, onClear }: Acti
         </button>
         <button
           type="button"
-          onClick={onClear}
+          onClick={() => clearActivity()}
           className="flex h-5 items-center gap-1 rounded border border-border px-1.5 text-[10px] text-muted-foreground transition-colors hover:text-foreground"
           title="Clear activity"
         >

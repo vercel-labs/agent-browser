@@ -1,8 +1,20 @@
 "use client";
 
 import { useCallback, useRef, useState, type SyntheticEvent } from "react";
-import type { SessionInfo } from "@/hooks/use-sessions";
-import type { TabInfo } from "@/hooks/use-stream-connection";
+import { useAtomValue, useSetAtom } from "jotai/react";
+import type { SessionInfo, TabInfo } from "@/types";
+import {
+  sessionsAtom,
+  activePortAtom,
+  createSessionAtom,
+  closeSessionAtom,
+  killSessionAtom,
+  closeAllSessionsAtom,
+  closeTabAtom,
+  addTabAtom,
+  switchTabAtom,
+} from "@/store/sessions";
+import { tabsForPortAtom, engineForPortAtom } from "@/store/tabs";
 import { ChevronRight, Loader2, Plus, Trash2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
@@ -41,21 +53,6 @@ const ENGINE_LOGOS: Record<string, string> = {
 };
 
 const SUPPORTED_ENGINES = ["chrome", "lightpanda"] as const;
-
-interface SessionTreeProps {
-  sessions: SessionInfo[];
-  activePort: number;
-  getTabsForSession: (port: number) => TabInfo[];
-  getEngineForSession: (port: number) => string;
-  onSelectSession: (port: number) => void;
-  onCloseTab: (port: number, tabIndex: number) => void;
-  onAddTab: (port: number) => void;
-  onSwitchTab: (port: number, tabIndex: number) => void;
-  onCreateSession: (name: string, engine: string) => void;
-  onCloseSession: (port: number) => void;
-  onKillSession: (port: number) => void;
-  onCloseAllSessions: () => void;
-}
 
 function EngineLogo({ engine }: { engine: string }) {
   const src = ENGINE_LOGOS[engine];
@@ -303,20 +300,20 @@ function SessionNode({
   );
 }
 
-export function SessionTree({
-  sessions,
-  activePort,
-  getTabsForSession,
-  getEngineForSession,
-  onSelectSession,
-  onCloseTab,
-  onAddTab,
-  onSwitchTab,
-  onCreateSession,
-  onCloseSession,
-  onKillSession,
-  onCloseAllSessions,
-}: SessionTreeProps) {
+export function SessionTree() {
+  const sessions = useAtomValue(sessionsAtom);
+  const activePort = useAtomValue(activePortAtom);
+  const setActivePort = useSetAtom(activePortAtom);
+  const getTabsForSession = useAtomValue(tabsForPortAtom);
+  const getEngineForSession = useAtomValue(engineForPortAtom);
+  const dispatchCreateSession = useSetAtom(createSessionAtom);
+  const dispatchCloseSession = useSetAtom(closeSessionAtom);
+  const dispatchKillSession = useSetAtom(killSessionAtom);
+  const dispatchCloseAllSessions = useSetAtom(closeAllSessionsAtom);
+  const dispatchCloseTab = useSetAtom(closeTabAtom);
+  const dispatchAddTab = useSetAtom(addTabAtom);
+  const dispatchSwitchTab = useSetAtom(switchTabAtom);
+
   const [expandedMap, setExpandedMap] = useState<Record<number, boolean>>({});
   const [newSessionOpen, setNewSessionOpen] = useState(false);
   const [closeAllOpen, setCloseAllOpen] = useState(false);
@@ -336,11 +333,11 @@ export function SessionTree({
   const handleCreateSubmit = useCallback(() => {
     const name = newSessionName.trim();
     if (name) {
-      onCreateSession(name, newSessionEngine);
+      dispatchCreateSession({ name, engine: newSessionEngine });
       setNewSessionName("");
       setNewSessionOpen(false);
     }
-  }, [newSessionName, newSessionEngine, onCreateSession]);
+  }, [newSessionName, newSessionEngine, dispatchCreateSession]);
 
   return (
     <div className="flex h-full flex-col">
@@ -383,13 +380,13 @@ export function SessionTree({
                 tabs={getTabsForSession(s.port)}
                 engine={getEngineForSession(s.port)}
                 expanded={isExpanded(s.port)}
-                onSelect={() => onSelectSession(s.port)}
+                onSelect={() => setActivePort(s.port)}
                 onToggle={() => toggleExpanded(s.port)}
-                onCloseTab={(tabIndex) => onCloseTab(s.port, tabIndex)}
-                onAddTab={() => onAddTab(s.port)}
-                onSwitchTab={(tabIndex) => onSwitchTab(s.port, tabIndex)}
-                onClose={() => onCloseSession(s.port)}
-                onKill={() => onKillSession(s.port)}
+                onCloseTab={(tabIndex) => dispatchCloseTab({ port: s.port, tabIndex })}
+                onAddTab={() => dispatchAddTab(s.port)}
+                onSwitchTab={(tabIndex) => dispatchSwitchTab({ port: s.port, tabIndex })}
+                onClose={() => dispatchCloseSession(s.port)}
+                onKill={() => dispatchKillSession(s.port)}
               />
             ))
           )}
@@ -474,7 +471,7 @@ export function SessionTree({
               size="sm"
               onClick={() => {
                 setCloseAllOpen(false);
-                onCloseAllSessions();
+                dispatchCloseAllSessions();
               }}
             >
               Close all

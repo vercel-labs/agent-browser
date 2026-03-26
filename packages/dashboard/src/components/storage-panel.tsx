@@ -1,14 +1,12 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useAtomValue } from "jotai/react";
+import { activeSessionNameAtom } from "@/store/sessions";
 import { execCommand, sessionArgs } from "@/lib/exec";
 import { cn } from "@/lib/utils";
 import { Separator } from "@/components/ui/separator";
 import { Loader2, RefreshCw } from "lucide-react";
-
-interface StoragePanelProps {
-  sessionName: string;
-}
 
 type StorageTab = "cookies" | "localStorage" | "sessionStorage";
 
@@ -48,7 +46,9 @@ function formatExpiry(expires: number | undefined): string {
   });
 }
 
-export function StoragePanel({ sessionName }: StoragePanelProps) {
+export function StoragePanel() {
+  const sessionName = useAtomValue(activeSessionNameAtom);
+
   const [tab, setTab] = useState<StorageTab>("cookies");
   const [cookies, setCookies] = useState<CookieEntry[]>([]);
   const [local, setLocal] = useState<StorageEntry[]>([]);

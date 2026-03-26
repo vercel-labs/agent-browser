@@ -3,6 +3,7 @@ import "./globals.css";
 import { Geist } from "next/font/google";
 import { cn } from "@/lib/utils";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { JotaiProvider } from "@/store/provider";
 
 const geist = Geist({ subsets: ["latin"], variable: "--font-sans" });
 
@@ -19,7 +20,9 @@ export default function RootLayout({
   return (
     <html lang="en" className={cn("dark font-sans antialiased", geist.variable)}>
       <body>
-        <TooltipProvider>{children}</TooltipProvider>
+        <JotaiProvider>
+          <TooltipProvider>{children}</TooltipProvider>
+        </JotaiProvider>
       </body>
     </html>
   );

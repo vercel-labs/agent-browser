@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useAtomValue, useSetAtom } from "jotai/react";
 import { ArrowLeft, ArrowRight, Camera, Circle, FileCode, Maximize, Moon, RotateCw, Smartphone, Square, Sun, Wifi, WifiOff } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { execCommand, sessionArgs } from "@/lib/exec";
@@ -28,22 +29,20 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import {
+  currentFrameAtom,
+  viewportWidthAtom,
+  viewportHeightAtom,
+  browserConnectedAtom,
+  screencastingAtom,
+  recordingAtom,
+  streamEngineAtom,
+  activeUrlAtom,
+  sendInputAtom,
+} from "@/store/stream";
+import { activeSessionNameAtom, activePortAtom } from "@/store/sessions";
 
 const SCREENCAST_ENGINES = new Set(["chrome"]);
-
-interface ViewportProps {
-  frame: string | null;
-  viewportWidth: number;
-  viewportHeight: number;
-  browserConnected: boolean;
-  screencasting: boolean;
-  recording: boolean;
-  engine: string;
-  url: string;
-  sessionName: string;
-  streamPort: number;
-  sendInput: (msg: Record<string, unknown>) => void;
-}
 
 function cdpModifiers(e: React.MouseEvent | React.WheelEvent): number {
   let m = 0;
@@ -121,19 +120,19 @@ function normalizeUrl(input: string): string {
   return `https://${trimmed}`;
 }
 
-export function Viewport({
-  frame,
-  viewportWidth,
-  viewportHeight,
-  browserConnected,
-  screencasting,
-  recording,
-  engine,
-  url,
-  sessionName,
-  streamPort,
-  sendInput,
-}: ViewportProps) {
+export function Viewport() {
+  const frame = useAtomValue(currentFrameAtom);
+  const viewportWidth = useAtomValue(viewportWidthAtom);
+  const viewportHeight = useAtomValue(viewportHeightAtom);
+  const browserConnected = useAtomValue(browserConnectedAtom);
+  const screencasting = useAtomValue(screencastingAtom);
+  const recording = useAtomValue(recordingAtom);
+  const engine = useAtomValue(streamEngineAtom);
+  const url = useAtomValue(activeUrlAtom);
+  const sessionName = useAtomValue(activeSessionNameAtom);
+  const streamPort = useAtomValue(activePortAtom);
+  const sendInput = useSetAtom(sendInputAtom);
+
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasAreaRef = useRef<HTMLDivElement>(null);

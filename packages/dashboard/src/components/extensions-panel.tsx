@@ -1,18 +1,16 @@
 "use client";
 
-import type { ExtensionInfo } from "@/hooks/use-sessions";
+import { useAtomValue } from "jotai/react";
+import { activeExtensionsAtom, activeSessionNameAtom } from "@/store/sessions";
 import { cn } from "@/lib/utils";
 import { Puzzle } from "lucide-react";
 import { Separator } from "@/components/ui/separator";
 import { Badge } from "@/components/ui/badge";
 import { useState } from "react";
 
-interface ExtensionsPanelProps {
-  extensions: ExtensionInfo[];
-  sessionName: string;
-}
-
-export function ExtensionsPanel({ extensions, sessionName }: ExtensionsPanelProps) {
+export function ExtensionsPanel() {
+  const extensions = useAtomValue(activeExtensionsAtom);
+  const sessionName = useAtomValue(activeSessionNameAtom);
   const [expanded, setExpanded] = useState<string | null>(null);
 
   if (!sessionName) {

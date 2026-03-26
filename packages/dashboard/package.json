@@ -10,6 +10,7 @@
   "dependencies": {
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "jotai": "^2.19.0",
     "lucide-react": "^1.7.0",
     "next": "16.1.1",
     "radix-ui": "^1.4.3",

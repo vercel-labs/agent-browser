@@ -1,18 +1,15 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { ConsoleEntry } from "@/hooks/use-stream-connection";
+import { useAtomValue, useSetAtom } from "jotai/react";
+import type { ConsoleEntry } from "@/types";
+import { consoleLogsAtom, clearConsoleLogsAtom } from "@/store/stream";
+import { activeSessionNameAtom } from "@/store/sessions";
 import { execCommand, sessionArgs } from "@/lib/exec";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { CornerDownLeft, Loader2, Trash2 } from "lucide-react";
-
-interface ConsolePanelProps {
-  entries: ConsoleEntry[];
-  onClear: () => void;
-  sessionName: string;
-}
 
 type FilterLevel = "all" | "errors" | "warnings" | "info" | "log";
 
@@ -72,7 +69,11 @@ interface EvalEntry {
 
 let evalIdCounter = 0;
 
-export function ConsolePanel({ entries, onClear, sessionName }: ConsolePanelProps) {
+export function ConsolePanel() {
+  const entries = useAtomValue(consoleLogsAtom);
+  const clearConsoleLogs = useSetAtom(clearConsoleLogsAtom);
+  const sessionName = useAtomValue(activeSessionNameAtom);
+
   const [filter, setFilter] = useState<FilterLevel>("all");
   const bottomRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -184,7 +185,7 @@ export function ConsolePanel({ entries, onClear, sessionName }: ConsolePanelProp
         ))}
         <button
           type="button"
-          onClick={onClear}
+          onClick={() => clearConsoleLogs()}
           className="ml-auto flex size-5 items-center justify-center rounded text-muted-foreground transition-colors hover:text-foreground"
           title="Clear console"
         >

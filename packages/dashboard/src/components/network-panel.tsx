@@ -1,6 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useAtomValue } from "jotai/react";
+import { activeSessionNameAtom } from "@/store/sessions";
 import { execCommand, sessionArgs } from "@/lib/exec";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
@@ -14,10 +16,6 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Circle, Loader2, RefreshCw, Square, Trash2 } from "lucide-react";
-
-interface NetworkPanelProps {
-  sessionName: string;
-}
 
 interface NetworkRequest {
   url: string;
@@ -73,7 +71,9 @@ function urlHost(url: string): string {
   }
 }
 
-export function NetworkPanel({ sessionName }: NetworkPanelProps) {
+export function NetworkPanel() {
+  const sessionName = useAtomValue(activeSessionNameAtom);
+
   const [requests, setRequests] = useState<NetworkRequest[]>([]);
   const [loading, setLoading] = useState(false);
   const [typeFilter, setTypeFilter] = useState<TypeFilter>("all");
