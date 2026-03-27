@@ -11,7 +11,8 @@ use tokio_tungstenite::tungstenite::Message;
 
 use super::cdp::client::CdpClient;
 use super::stream_protocol::{
-    ClientMessage, ErrorMessage, FrameMessage, StatusMessage,
+    ClientMessage, CommandMessage, ConsoleMessage, ErrorMessage, FrameMessage, PageErrorMessage,
+    ResultMessage, StatusMessage, TabsMessage, UrlMessage,
 };
 use crate::connection::get_socket_dir;
 #[cfg(windows)]
@@ -343,14 +344,8 @@ impl StreamServer {
 
     /// Broadcast a command event when a command begins executing.
     pub fn broadcast_command(&self, action: &str, id: &str, params: &Value) {
-        let msg = json!({
-            "type": "command",
-            "action": action,
-            "id": id,
-            "params": params,
-            "timestamp": timestamp_ms(),
-        });
-        let _ = self.frame_tx.send(msg.to_string());
+        let msg = CommandMessage::new(action, id, params);
+        let _ = self.frame_tx.send(serde_json::to_string(&msg).unwrap_or_default());
     }
 
     /// Broadcast a result event after a command finishes executing.
@@ -362,39 +357,20 @@ impl StreamServer {
         data: &Value,
         duration_ms: u64,
     ) {
-        let msg = json!({
-            "type": "result",
-            "id": id,
-            "action": action,
-            "success": success,
-            "data": data,
-            "duration_ms": duration_ms,
-            "timestamp": timestamp_ms(),
-        });
-        let _ = self.frame_tx.send(msg.to_string());
+        let msg = ResultMessage::new(id, action, success, data, duration_ms);
+        let _ = self.frame_tx.send(serde_json::to_string(&msg).unwrap_or_default());
     }
 
     /// Broadcast a console event from the browser.
     pub fn broadcast_console(&self, level: &str, text: &str) {
-        let msg = json!({
-            "type": "console",
-            "level": level,
-            "text": text,
-            "timestamp": timestamp_ms(),
-        });
-        let _ = self.frame_tx.send(msg.to_string());
+        let msg = ConsoleMessage::new(level, text);
+        let _ = self.frame_tx.send(serde_json::to_string(&msg).unwrap_or_default());
     }
 
     /// Broadcast a page error (uncaught exception) from the browser.
     pub fn broadcast_page_error(&self, text: &str, line: Option<i64>, column: Option<i64>) {
-        let msg = json!({
-            "type": "page_error",
-            "text": text,
-            "line": line,
-            "column": column,
-            "timestamp": timestamp_ms(),
-        });
-        let _ = self.frame_tx.send(msg.to_string());
+        let msg = PageErrorMessage::new(text, line, column);
+        let _ = self.frame_tx.send(serde_json::to_string(&msg).unwrap_or_default());
     }
 
     /// Broadcast the current tab list so the dashboard can render a tab bar.
@@ -404,12 +380,8 @@ impl StreamServer {
             let mut guard = self.last_tabs.write().await;
             *guard = tabs.to_vec();
         }
-        let msg = json!({
-            "type": "tabs",
-            "tabs": tabs,
-            "timestamp": timestamp_ms(),
-        });
-        let _ = self.frame_tx.send(msg.to_string());
+        let msg = TabsMessage::new(tabs);
+        let _ = self.frame_tx.send(serde_json::to_string(&msg).unwrap_or_default());
     }
 
     /// Whether the dashboard directory is available.
@@ -629,12 +601,8 @@ async fn handle_ws_client(
 
         let tabs = last_tabs.read().await;
         if !tabs.is_empty() {
-            let tabs_msg = json!({
-                "type": "tabs",
-                "tabs": *tabs,
-                "timestamp": timestamp_ms(),
-            });
-            let _ = ws_tx.send(Message::Text(tabs_msg.to_string())).await;
+            let tabs_msg = TabsMessage::new(&tabs);
+            let _ = ws_tx.send(Message::Text(serde_json::to_string(&tabs_msg).unwrap_or_default())).await;
         }
 
         // Send the most recent screencast frame so new clients see content immediately
@@ -815,12 +783,8 @@ async fn cdp_event_loop(
                                                             }
                                                         }
                                                     }
-                                                    let msg = json!({
-                                                        "type": "url",
-                                                        "url": url,
-                                                        "timestamp": timestamp_ms(),
-                                                    });
-                                                    let _ = frame_tx.send(msg.to_string());
+                                                    let msg = UrlMessage::new(url);
+                                                    let _ = frame_tx.send(serde_json::to_string(&msg).unwrap_or_default());
                                                 }
                                             }
                                         }
@@ -873,13 +837,8 @@ async fn cdp_event_loop(
                                             })
                                             .unwrap_or_default();
                                         if !text.is_empty() {
-                                            let msg = json!({
-                                                "type": "console",
-                                                "level": level,
-                                                "text": text,
-                                                "timestamp": timestamp_ms(),
-                                            });
-                                            let _ = frame_tx.send(msg.to_string());
+                                            let msg = ConsoleMessage::new(level, &text);
+                                            let _ = frame_tx.send(serde_json::to_string(&msg).unwrap_or_default());
                                         }
                                     } else if evt.method == "Runtime.exceptionThrown" {
                                         let text = evt.params.get("exceptionDetails")
@@ -893,14 +852,8 @@ async fn cdp_event_loop(
                                             .and_then(|d| d.get("lineNumber").and_then(|v| v.as_i64()));
                                         let column = evt.params.get("exceptionDetails")
                                             .and_then(|d| d.get("columnNumber").and_then(|v| v.as_i64()));
-                                        let msg = json!({
-                                            "type": "page_error",
-                                            "text": text,
-                                            "line": line,
-                                            "column": column,
-                                            "timestamp": timestamp_ms(),
-                                        });
-                                        let _ = frame_tx.send(msg.to_string());
+                                        let msg = PageErrorMessage::new(text, line, column);
+                                        let _ = frame_tx.send(serde_json::to_string(&msg).unwrap_or_default());
                                     }
                                 }
                                 Err(broadcast::error::RecvError::Lagged(_)) => continue,
@@ -1367,7 +1320,7 @@ fn is_process_alive(pid_path: &Path) -> bool {
     }
 }
 
-fn timestamp_ms() -> u64 {
+pub(super) fn timestamp_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)

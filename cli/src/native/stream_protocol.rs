@@ -110,6 +110,144 @@ impl<'a> ErrorMessage<'a> {
     }
 }
 
+/// Notification that a command has begun executing.
+#[derive(Debug, Clone, Serialize)]
+pub struct CommandMessage<'a> {
+    #[serde(rename = "type")]
+    pub msg_type: &'static str,
+    pub action: &'a str,
+    pub id: &'a str,
+    pub params: &'a serde_json::Value,
+    pub timestamp: u64,
+}
+
+impl<'a> CommandMessage<'a> {
+    pub fn new(action: &'a str, id: &'a str, params: &'a serde_json::Value) -> Self {
+        Self {
+            msg_type: "command",
+            action,
+            id,
+            params,
+            timestamp: super::stream::timestamp_ms(),
+        }
+    }
+}
+
+/// Result of a completed command execution.
+#[derive(Debug, Clone, Serialize)]
+pub struct ResultMessage<'a> {
+    #[serde(rename = "type")]
+    pub msg_type: &'static str,
+    pub id: &'a str,
+    pub action: &'a str,
+    pub success: bool,
+    pub data: &'a serde_json::Value,
+    pub duration_ms: u64,
+    pub timestamp: u64,
+}
+
+impl<'a> ResultMessage<'a> {
+    pub fn new(
+        id: &'a str,
+        action: &'a str,
+        success: bool,
+        data: &'a serde_json::Value,
+        duration_ms: u64,
+    ) -> Self {
+        Self {
+            msg_type: "result",
+            id,
+            action,
+            success,
+            data,
+            duration_ms,
+            timestamp: super::stream::timestamp_ms(),
+        }
+    }
+}
+
+/// Console log message from the browser page.
+#[derive(Debug, Clone, Serialize)]
+pub struct ConsoleMessage<'a> {
+    #[serde(rename = "type")]
+    pub msg_type: &'static str,
+    pub level: &'a str,
+    pub text: &'a str,
+    pub timestamp: u64,
+}
+
+impl<'a> ConsoleMessage<'a> {
+    pub fn new(level: &'a str, text: &'a str) -> Self {
+        Self {
+            msg_type: "console",
+            level,
+            text,
+            timestamp: super::stream::timestamp_ms(),
+        }
+    }
+}
+
+/// Uncaught exception from the browser page.
+#[derive(Debug, Clone, Serialize)]
+pub struct PageErrorMessage<'a> {
+    #[serde(rename = "type")]
+    pub msg_type: &'static str,
+    pub text: &'a str,
+    pub line: Option<i64>,
+    pub column: Option<i64>,
+    pub timestamp: u64,
+}
+
+impl<'a> PageErrorMessage<'a> {
+    pub fn new(text: &'a str, line: Option<i64>, column: Option<i64>) -> Self {
+        Self {
+            msg_type: "page_error",
+            text,
+            line,
+            column,
+            timestamp: super::stream::timestamp_ms(),
+        }
+    }
+}
+
+/// Current browser tab list.
+#[derive(Debug, Clone, Serialize)]
+pub struct TabsMessage<'a> {
+    #[serde(rename = "type")]
+    pub msg_type: &'static str,
+    pub tabs: &'a [serde_json::Value],
+    pub timestamp: u64,
+}
+
+impl<'a> TabsMessage<'a> {
+    pub fn new(tabs: &'a [serde_json::Value]) -> Self {
+        Self {
+            msg_type: "tabs",
+            tabs,
+            timestamp: super::stream::timestamp_ms(),
+        }
+    }
+}
+
+/// URL navigation event for the active tab.
+#[derive(Debug, Clone, Serialize)]
+pub struct UrlMessage<'a> {
+    #[serde(rename = "type")]
+    pub msg_type: &'static str,
+    pub url: &'a str,
+    pub timestamp: u64,
+}
+
+impl<'a> UrlMessage<'a> {
+    pub fn new(url: &'a str) -> Self {
+        Self {
+            msg_type: "url",
+            url,
+            timestamp: super::stream::timestamp_ms(),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Client -> Server messages
 // ---------------------------------------------------------------------------
@@ -214,6 +352,82 @@ mod tests {
         let json = serde_json::to_value(&msg).unwrap();
         assert_eq!(json["type"], "error");
         assert_eq!(json["message"], "something broke");
+    }
+
+    #[test]
+    fn command_message_serializes_correctly() {
+        let params = serde_json::json!({"url": "https://example.com"});
+        let msg = CommandMessage::new("navigate", "cmd-1", &params);
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "command");
+        assert_eq!(json["action"], "navigate");
+        assert_eq!(json["id"], "cmd-1");
+        assert_eq!(json["params"]["url"], "https://example.com");
+        assert!(json["timestamp"].as_u64().is_some());
+    }
+
+    #[test]
+    fn result_message_serializes_correctly() {
+        let data = serde_json::json!({"ok": true});
+        let msg = ResultMessage::new("cmd-1", "navigate", true, &data, 42);
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "result");
+        assert_eq!(json["id"], "cmd-1");
+        assert_eq!(json["action"], "navigate");
+        assert_eq!(json["success"], true);
+        assert_eq!(json["data"]["ok"], true);
+        assert_eq!(json["duration_ms"], 42);
+        assert!(json["timestamp"].as_u64().is_some());
+    }
+
+    #[test]
+    fn console_message_serializes_correctly() {
+        let msg = ConsoleMessage::new("warn", "something happened");
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "console");
+        assert_eq!(json["level"], "warn");
+        assert_eq!(json["text"], "something happened");
+        assert!(json["timestamp"].as_u64().is_some());
+    }
+
+    #[test]
+    fn page_error_message_serializes_correctly() {
+        let msg = PageErrorMessage::new("ReferenceError: x is not defined", Some(10), Some(5));
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "page_error");
+        assert_eq!(json["text"], "ReferenceError: x is not defined");
+        assert_eq!(json["line"], 10);
+        assert_eq!(json["column"], 5);
+        assert!(json["timestamp"].as_u64().is_some());
+    }
+
+    #[test]
+    fn page_error_message_with_none_fields() {
+        let msg = PageErrorMessage::new("Unknown error", None, None);
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "page_error");
+        assert!(json["line"].is_null());
+        assert!(json["column"].is_null());
+    }
+
+    #[test]
+    fn tabs_message_serializes_correctly() {
+        let tabs = vec![serde_json::json!({"url": "https://example.com", "active": true})];
+        let msg = TabsMessage::new(&tabs);
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "tabs");
+        assert!(json["tabs"].is_array());
+        assert_eq!(json["tabs"][0]["url"], "https://example.com");
+        assert!(json["timestamp"].as_u64().is_some());
+    }
+
+    #[test]
+    fn url_message_serializes_correctly() {
+        let msg = UrlMessage::new("https://example.com/page");
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "url");
+        assert_eq!(json["url"], "https://example.com/page");
+        assert!(json["timestamp"].as_u64().is_some());
     }
 
     #[test]
