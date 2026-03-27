@@ -16,9 +16,9 @@ use super::browser::{should_track_target, BrowserManager, WaitUntil};
 use super::cdp::chrome::LaunchOptions;
 use super::cdp::client::CdpClient;
 use super::cdp::types::{
-    AttachToTargetParams, AttachToTargetResult, CdpEvent, ConsoleApiCalledEvent,
-    CreateTargetResult, DispatchMouseEventParams, ExceptionThrownEvent,
-    JavascriptDialogOpeningEvent, TargetCreatedEvent, TargetDestroyedEvent, TargetInfoChangedEvent,
+    AttachToTargetParams, AttachToTargetResult, CdpEvent, CreateTargetResult,
+    DispatchMouseEventParams, ExceptionThrownEvent, JavascriptDialogOpeningEvent,
+    TargetCreatedEvent, TargetDestroyedEvent, TargetInfoChangedEvent,
 };
 use super::cookies;
 use super::diff;
@@ -555,29 +555,22 @@ impl DaemonState {
 
                     match event.method.as_str() {
                         "Runtime.consoleAPICalled" => {
-                            if let Ok(console_event) = serde_json::from_value::<ConsoleApiCalledEvent>(
-                                event.params.clone(),
-                            ) {
-                                let text: String = console_event
-                                    .args
-                                    .iter()
-                                    .filter_map(|arg| {
-                                        arg.value
-                                            .as_ref()
-                                            .map(|v| match v {
-                                                Value::String(s) => s.clone(),
-                                                other => other.to_string(),
-                                            })
-                                            .or_else(|| arg.description.clone())
-                                    })
-                                    .collect::<Vec<_>>()
-                                    .join(" ");
-                                self.event_tracker
-                                    .add_console(&console_event.call_type, &text);
-                                if let Some(ref server) = self.stream_server {
-                                    server.broadcast_console(&console_event.call_type, &text);
-                                }
+                            let level = event
+                                .params
+                                .get("type")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("log");
+                            let raw_args: Vec<Value> = event
+                                .params
+                                .get("args")
+                                .and_then(|v| v.as_array())
+                                .cloned()
+                                .unwrap_or_default();
+                            let text = network::format_console_args(&raw_args);
+                            if let Some(ref server) = self.stream_server {
+                                server.broadcast_console(level, &text, &raw_args);
                             }
+                            self.event_tracker.add_console(level, &text, raw_args);
                         }
                         "Runtime.exceptionThrown" => {
                             if let Ok(ex_event) =

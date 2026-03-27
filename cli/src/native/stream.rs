@@ -10,6 +10,7 @@ use tokio::sync::{broadcast, watch, Mutex, Notify, RwLock};
 use tokio_tungstenite::tungstenite::Message;
 
 use super::cdp::client::CdpClient;
+use super::network;
 #[cfg(windows)]
 use crate::connection::get_port_for_session;
 use crate::connection::get_socket_dir;
@@ -393,13 +394,18 @@ impl StreamServer {
     }
 
     /// Broadcast a console event from the browser.
-    pub fn broadcast_console(&self, level: &str, text: &str) {
-        let msg = json!({
+    pub fn broadcast_console(&self, level: &str, text: &str, args: &[Value]) {
+        let mut msg = json!({
             "type": "console",
             "level": level,
             "text": text,
             "timestamp": timestamp_ms(),
         });
+        if !args.is_empty() {
+            msg.as_object_mut()
+                .unwrap()
+                .insert("args".to_string(), Value::Array(args.to_vec()));
+        }
         let _ = self.frame_tx.send(msg.to_string());
     }
 
@@ -887,29 +893,24 @@ async fn cdp_event_loop(
                                         let level = evt.params.get("type")
                                             .and_then(|v| v.as_str())
                                             .unwrap_or("log");
-                                        let text = evt.params.get("args")
+                                        let raw_args = evt.params.get("args")
                                             .and_then(|v| v.as_array())
-                                            .map(|args| {
-                                                args.iter()
-                                                    .filter_map(|arg| {
-                                                        arg.get("value")
-                                                            .map(|v| match v {
-                                                                Value::String(s) => s.clone(),
-                                                                other => other.to_string(),
-                                                            })
-                                                            .or_else(|| arg.get("description").and_then(|v| v.as_str()).map(|s| s.to_string()))
-                                                    })
-                                                    .collect::<Vec<_>>()
-                                                    .join(" ")
-                                            })
+                                            .cloned()
                                             .unwrap_or_default();
+                                        let text = network::format_console_args(&raw_args);
                                         if !text.is_empty() {
-                                            let msg = json!({
+                                            let mut msg = json!({
                                                 "type": "console",
                                                 "level": level,
                                                 "text": text,
                                                 "timestamp": timestamp_ms(),
                                             });
+                                            if !raw_args.is_empty() {
+                                                msg.as_object_mut().unwrap().insert(
+                                                    "args".to_string(),
+                                                    Value::Array(raw_args),
+                                                );
+                                            }
                                             let _ = frame_tx.send(msg.to_string());
                                         }
                                     } else if evt.method == "Runtime.exceptionThrown" {
