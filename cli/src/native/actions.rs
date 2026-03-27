@@ -122,6 +122,12 @@ pub struct TrackedRequest {
     pub response_headers: Option<Value>,
     #[serde(rename = "mimeType", skip_serializing_if = "Option::is_none")]
     pub mime_type: Option<String>,
+    #[serde(rename = "encodedDataLength", skip_serializing_if = "Option::is_none")]
+    pub encoded_data_length: Option<i64>,
+    #[serde(rename = "durationMs", skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<f64>,
+    #[serde(skip)]
+    pub mono_start: Option<f64>,
 }
 
 pub struct FetchPausedRequest {
@@ -677,6 +683,10 @@ impl DaemonState {
                                         .duration_since(std::time::UNIX_EPOCH)
                                         .map(|d| d.as_millis() as u64)
                                         .unwrap_or(0);
+                                    let mono_start = event
+                                        .params
+                                        .get("timestamp")
+                                        .and_then(|v| v.as_f64());
                                     self.tracked_requests.push(TrackedRequest {
                                         url,
                                         method,
@@ -691,6 +701,9 @@ impl DaemonState {
                                         status: None,
                                         response_headers: None,
                                         mime_type: None,
+                                        encoded_data_length: None,
+                                        duration_ms: None,
+                                        mono_start,
                                     });
                                 }
                             }
@@ -754,6 +767,10 @@ impl DaemonState {
                                         .get("mimeType")
                                         .and_then(|v| v.as_str())
                                         .map(String::from);
+                                    let resp_encoded_len = response
+                                        .get("encodedDataLength")
+                                        .and_then(|v| v.as_i64())
+                                        .filter(|&n| n >= 0);
                                     if let Some(entry) = self
                                         .tracked_requests
                                         .iter_mut()
@@ -763,11 +780,14 @@ impl DaemonState {
                                         entry.status = status;
                                         entry.mime_type = resp_mime;
                                         entry.response_headers = resp_headers;
+                                        entry.encoded_data_length = resp_encoded_len;
                                     }
                                 }
                             }
                         }
-                        "Network.loadingFinished" if self.har_recording => {
+                        "Network.loadingFinished"
+                            if self.har_recording || self.request_tracking =>
+                        {
                             let request_id = event
                                 .params
                                 .get("requestId")
@@ -778,17 +798,39 @@ impl DaemonState {
                                 .params
                                 .get("encodedDataLength")
                                 .and_then(|v| v.as_i64());
-                            if let Some(entry) = self
-                                .har_entries
-                                .iter_mut()
-                                .rev()
-                                .find(|e| e.request_id == request_id)
-                            {
-                                if let Some(ts) = timestamp {
-                                    entry.loading_finished_timestamp = Some(ts);
+                            if self.har_recording {
+                                if let Some(entry) = self
+                                    .har_entries
+                                    .iter_mut()
+                                    .rev()
+                                    .find(|e| e.request_id == request_id)
+                                {
+                                    if let Some(ts) = timestamp {
+                                        entry.loading_finished_timestamp = Some(ts);
+                                    }
+                                    if let Some(len) = encoded_data_length {
+                                        entry.response_body_size = len;
+                                    }
                                 }
-                                if let Some(len) = encoded_data_length {
-                                    entry.response_body_size = len;
+                            }
+                            if self.request_tracking {
+                                if let Some(entry) = self
+                                    .tracked_requests
+                                    .iter_mut()
+                                    .rev()
+                                    .find(|e| e.request_id == request_id)
+                                {
+                                    if let Some(len) = encoded_data_length {
+                                        entry.encoded_data_length = Some(len);
+                                    }
+                                    if let (Some(start), Some(end)) =
+                                        (entry.mono_start, timestamp)
+                                    {
+                                        let ms = ((end - start) * 1000.0).round();
+                                        if ms >= 0.0 {
+                                            entry.duration_ms = Some(ms);
+                                        }
+                                    }
                                 }
                             }
                         }
