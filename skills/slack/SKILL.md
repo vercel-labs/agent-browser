@@ -235,15 +235,6 @@ agent-browser console
 agent-browser errors
 ```
 
-### View raw HTML of an element
-
-```bash
-# Snapshot shows the accessibility tree. If an element isn't there,
-# it may not be interactive (e.g., div instead of button)
-# Use snapshot -i -C to include cursor-interactive divs
-agent-browser snapshot -i -C
-```
-
 ### Get current page state
 
 ```bash

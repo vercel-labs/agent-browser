@@ -90,6 +90,8 @@ echo "$PASSWORD" | agent-browser auth save myapp --url https://app.example.com/l
 agent-browser auth login myapp
 ```
 
+`auth login` navigates with `load` and then waits for login form selectors to appear before filling/clicking, which is more reliable on delayed SPA login screens.
+
 **Option 5: State file (manual save/load)**
 
 ```bash
@@ -108,10 +110,10 @@ See [references/authentication.md](references/authentication.md) for OAuth, 2FA,
 # Navigation
 agent-browser open <url>              # Navigate (aliases: goto, navigate)
 agent-browser close                   # Close browser
+agent-browser close --all             # Close all active sessions
 
 # Snapshot
 agent-browser snapshot -i             # Interactive elements with refs (recommended)
-agent-browser snapshot -i -C          # Include cursor-interactive elements (divs with onclick, cursor:pointer)
 agent-browser snapshot -s "#selector" # Scope to CSS selector
 
 # Interaction (use @refs from snapshot)
@@ -149,6 +151,10 @@ agent-browser --download-path ./downloads open <url>  # Set default download dir
 
 # Network
 agent-browser network requests                 # Inspect tracked requests
+agent-browser network requests --type xhr,fetch  # Filter by resource type
+agent-browser network requests --method POST   # Filter by HTTP method
+agent-browser network requests --status 2xx    # Filter by status (200, 2xx, 400-499)
+agent-browser network request <requestId>      # View full request/response detail
 agent-browser network route "**/api/*" --abort  # Block matching requests
 agent-browser network har start                # Start HAR recording
 agent-browser network har stop ./capture.har   # Stop and save HAR file
@@ -166,11 +172,23 @@ agent-browser screenshot --screenshot-dir ./shots  # Save to custom directory
 agent-browser screenshot --screenshot-format jpeg --screenshot-quality 80
 agent-browser pdf output.pdf          # Save as PDF
 
+# Live preview / streaming
+agent-browser stream enable           # Start runtime WebSocket streaming on an auto-selected port
+agent-browser stream enable --port 9223  # Bind a specific localhost port
+agent-browser stream status           # Inspect enabled state, port, connection, and screencasting
+agent-browser stream disable          # Stop runtime streaming and remove the .stream metadata file
+
 # Clipboard
 agent-browser clipboard read                      # Read text from clipboard
 agent-browser clipboard write "Hello, World!"     # Write text to clipboard
 agent-browser clipboard copy                      # Copy current selection
 agent-browser clipboard paste                     # Paste from clipboard
+
+# Dialogs (alert, confirm, prompt)
+agent-browser dialog accept              # Accept dialog
+agent-browser dialog accept "my input"   # Accept prompt dialog with text
+agent-browser dialog dismiss             # Dismiss/cancel dialog
+agent-browser dialog status              # Check if a dialog is currently open
 
 # Diff (compare page states)
 agent-browser diff snapshot                          # Compare current vs last snapshot
@@ -180,6 +198,10 @@ agent-browser diff url <url1> <url2>                 # Compare two pages
 agent-browser diff url <url1> <url2> --wait-until networkidle  # Custom wait strategy
 agent-browser diff url <url1> <url2> --selector "#main"  # Scope to element
 ```
+
+## Streaming
+
+Every session automatically starts a WebSocket stream server on an OS-assigned port. Use `agent-browser stream status` to see the bound port and connection state. Use `stream disable` to tear it down, and `stream enable --port <port>` to re-enable on a specific port.
 
 ## Batch Execution
 
@@ -229,6 +251,8 @@ agent-browser auth list
 agent-browser auth show github
 agent-browser auth delete github
 ```
+
+`auth login` waits for username/password/submit selectors before interacting, with a timeout tied to the default action timeout.
 
 ### Authentication with State Persistence
 
@@ -515,6 +539,26 @@ agent-browser wait 5000
 
 When dealing with consistently slow websites, use `wait --load networkidle` after `open` to ensure the page is fully loaded before taking a snapshot. If a specific element is slow to render, wait for it directly with `wait <selector>` or `wait @ref`.
 
+## JavaScript Dialogs (alert / confirm / prompt)
+
+When a page opens a JavaScript dialog (`alert()`, `confirm()`, or `prompt()`), it blocks all other browser commands (snapshot, screenshot, click, etc.) until the dialog is dismissed. If commands start timing out unexpectedly, check for a pending dialog:
+
+```bash
+# Check if a dialog is blocking
+agent-browser dialog status
+
+# Accept the dialog (dismiss the alert / click OK)
+agent-browser dialog accept
+
+# Accept a prompt dialog with input text
+agent-browser dialog accept "my input"
+
+# Dismiss the dialog (click Cancel)
+agent-browser dialog dismiss
+```
+
+When a dialog is pending, all command responses include a `warning` field indicating the dialog type and message. In `--json` mode this appears as a `"warning"` key in the response object.
+
 ## Session Management and Cleanup
 
 When running multiple agents or automations concurrently, always use named sessions to avoid conflicts:
@@ -533,9 +577,10 @@ Always close your browser session when done to avoid leaked processes:
 ```bash
 agent-browser close                    # Close default session
 agent-browser --session agent1 close   # Close specific session
+agent-browser close --all              # Close all active sessions
 ```
 
-If a previous session was not closed properly, the daemon may still be running. Use `agent-browser close` to clean it up before starting new work.
+If a previous session was not closed properly, the daemon may still be running. Use `agent-browser close` to clean it up, or `agent-browser close --all` to shut down every session at once.
 
 To auto-shutdown the daemon after a period of inactivity (useful for ephemeral/CI environments):
 
@@ -666,6 +711,26 @@ Supported engines:
 - `lightpanda` -- Lightpanda headless browser via CDP (10x faster, 10x less memory than Chrome)
 
 Lightpanda does not support `--extension`, `--profile`, `--state`, or `--allow-file-access`. Install Lightpanda from https://lightpanda.io/docs/open-source/installation.
+
+## Observability Dashboard
+
+The dashboard is a standalone background server that shows live browser viewports, command activity, and console output for all sessions.
+
+```bash
+# Install the dashboard once
+agent-browser dashboard install
+
+# Start the dashboard server (background, port 4848)
+agent-browser dashboard start
+
+# All sessions are automatically visible in the dashboard
+agent-browser open example.com
+
+# Stop the dashboard
+agent-browser dashboard stop
+```
+
+The dashboard runs independently of browser sessions on port 4848 (configurable with `--port`). All sessions automatically stream to the dashboard.
 
 ## Ready-to-Use Templates
 

@@ -9,7 +9,6 @@ Filter output to reduce size:
 ```bash
 agent-browser snapshot                    # Full accessibility tree
 agent-browser snapshot -i                 # Interactive elements only (recommended)
-agent-browser snapshot -i -C              # Include cursor-interactive elements
 agent-browser snapshot -c                 # Compact (remove empty elements)
 agent-browser snapshot -d 3               # Limit depth to 3 levels
 agent-browser snapshot -s "#main"         # Scope to CSS selector
@@ -22,31 +21,11 @@ agent-browser snapshot -i -c -d 5         # Combine options
   </thead>
   <tbody>
     <tr><td><code>-i, --interactive</code></td><td>Only interactive elements (buttons, links, inputs)</td></tr>
-    <tr><td><code>-C, --cursor</code></td><td>Include cursor-interactive elements (cursor:pointer, onclick, tabindex)</td></tr>
     <tr><td><code>-c, --compact</code></td><td>Remove empty structural elements</td></tr>
     <tr><td><code>-d, --depth</code></td><td>Limit tree depth</td></tr>
     <tr><td><code>-s, --selector</code></td><td>Scope to CSS selector</td></tr>
   </tbody>
 </table>
-
-## Cursor-interactive elements
-
-Many modern web apps use custom clickable elements (divs, spans) instead of standard buttons or links.
-The `-C` flag detects these by looking for:
-
-- `cursor: pointer` CSS style
-- `onclick` attribute or handler
-- `tabindex` attribute (keyboard focusable)
-
-```bash
-agent-browser snapshot -i -C
-# Output includes:
-# @e1 [button] "Submit"
-# @e2 [link] "Learn more"
-# Cursor-interactive elements:
-# @e3 [clickable] "Menu Item" [cursor:pointer, onclick]
-# @e4 [clickable] "Card" [cursor:pointer]
-```
 
 ## Output format
 

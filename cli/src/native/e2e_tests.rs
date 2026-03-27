@@ -8,10 +8,13 @@
 //!   cargo test e2e -- --ignored --test-threads=1
 
 use base64::{engine::general_purpose::STANDARD, Engine};
+use futures_util::StreamExt;
 use serde_json::{json, Value};
 use std::fs;
 use std::path::PathBuf;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+use crate::test_utils::EnvGuard;
 
 use super::actions::{execute_command, DaemonState};
 
@@ -190,6 +193,127 @@ async fn e2e_lightpanda_auto_launch_can_open_page() {
     let resp = execute_command(&json!({ "id": "2", "action": "close" }), &mut state).await;
     assert_success(&resp);
     assert_eq!(get_data(&resp)["closed"], true);
+}
+
+// ---------------------------------------------------------------------------
+// Runtime stream lifecycle
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore]
+async fn e2e_runtime_stream_enable_before_launch_attaches_and_disables() {
+    let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "AGENT_BROWSER_SESSION"]);
+    let socket_dir = std::env::temp_dir().join(format!(
+        "agent-browser-e2e-stream-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&socket_dir).expect("socket dir should be created");
+    guard.set(
+        "AGENT_BROWSER_SOCKET_DIR",
+        socket_dir.to_str().expect("socket dir should be utf-8"),
+    );
+    guard.set("AGENT_BROWSER_SESSION", "e2e-runtime-stream");
+
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(&json!({ "id": "1", "action": "stream_status" }), &mut state).await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["enabled"], false);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "stream_enable", "port": 0 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let port = get_data(&resp)["port"]
+        .as_u64()
+        .expect("stream enable should report the bound port");
+    assert_eq!(get_data(&resp)["connected"], false);
+
+    let stream_path = socket_dir.join("e2e-runtime-stream.stream");
+    assert!(
+        stream_path.exists(),
+        "runtime enable should create .stream metadata"
+    );
+
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}"))
+        .await
+        .expect("websocket client should connect to runtime stream");
+
+    let initial = tokio::time::timeout(tokio::time::Duration::from_secs(5), ws.next())
+        .await
+        .expect("websocket should emit initial status")
+        .expect("websocket should stay open")
+        .expect("websocket message should be valid");
+    let initial_text = initial.into_text().expect("initial message should be text");
+    let initial_status: Value =
+        serde_json::from_str(&initial_text).expect("status JSON should parse");
+    assert_eq!(initial_status["type"], "status");
+    assert_eq!(initial_status["connected"], false);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "navigate", "url": "data:text/html,<h1>Runtime Stream</h1>" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let mut observed_connected = false;
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(10);
+    while tokio::time::Instant::now() < deadline {
+        let Some(message) = tokio::time::timeout(tokio::time::Duration::from_secs(2), ws.next())
+            .await
+            .expect("websocket should emit status after browser launch")
+        else {
+            continue;
+        };
+        let message = message.expect("websocket message should be valid");
+        if !message.is_text() {
+            continue;
+        }
+        let parsed: Value =
+            serde_json::from_str(message.to_text().expect("text message should be readable"))
+                .expect("runtime stream payload should be valid JSON");
+        if parsed.get("type") == Some(&json!("status"))
+            && parsed.get("connected") == Some(&json!(true))
+        {
+            observed_connected = true;
+            break;
+        }
+    }
+    assert!(
+        observed_connected,
+        "runtime stream should report connected=true after browser launch"
+    );
+
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "stream_disable" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["disabled"], true);
+    assert!(
+        !stream_path.exists(),
+        "stream disable should remove .stream metadata"
+    );
+
+    let close_message = tokio::time::timeout(tokio::time::Duration::from_secs(5), ws.next())
+        .await
+        .expect("websocket should close after disable");
+    assert!(
+        close_message.is_none() || close_message.expect("ws result should exist").is_ok(),
+        "websocket should shut down cleanly when the runtime stream is disabled"
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+    let _ = std::fs::remove_dir_all(&socket_dir);
 }
 
 // ---------------------------------------------------------------------------
@@ -2276,12 +2400,12 @@ async fn e2e_material_checkbox_check_uncheck() {
 
 // ---------------------------------------------------------------------------
 // Issue #841 – snapshot -C and screenshot --annotate must not hang over WSS
+// (PS: -C is deprecated, cursor-interactive elements are referred by default now)
 // ---------------------------------------------------------------------------
 
-/// Verifies that `snapshot -C` (cursor-interactive mode) detects elements with
-/// cursor:pointer / onclick / tabindex, produces the correct v0.19.0-compatible
-/// output format, deduplicates against the ARIA tree, and completes in bounded
-/// time (no sequential CDP round-trip explosion).
+/// Verifies that `snapshot` detects elements with cursor:pointer / onclick / tabindex,
+/// produces the correct v0.19.0-compatible output format, deduplicates against the ARIA
+/// tree, and completes in bounded time (no sequential CDP round-trip explosion).
 #[tokio::test]
 #[ignore]
 async fn e2e_snapshot_cursor_interactive() {
@@ -2295,7 +2419,7 @@ async fn e2e_snapshot_cursor_interactive() {
     assert_success(&resp);
 
     // Page with:
-    //  - <button> and <a> (standard interactive – ARIA tree, NOT in cursor section)
+    //  - <button> and <a> (standard interactive – ARIA tree)
     //  - <div cursor:pointer onclick> (clickable – cursor section)
     //  - <div tabindex=0> (focusable – cursor section)
     //  - <span cursor:pointer> (clickable – cursor section)
@@ -2318,10 +2442,10 @@ async fn e2e_snapshot_cursor_interactive() {
     .await;
     assert_success(&resp);
 
-    // snapshot -i -C: interactive tree + cursor section
+    // snapshot -i: interactive tree
     let start = std::time::Instant::now();
     let resp = execute_command(
-        &json!({ "id": "3", "action": "snapshot", "interactive": true, "cursor": true }),
+        &json!({ "id": "3", "action": "snapshot", "interactive": true }),
         &mut state,
     )
     .await;
@@ -2368,7 +2492,7 @@ async fn e2e_snapshot_cursor_interactive() {
     // Must complete quickly (< 5s), not hit the 30s CDP timeout
     assert!(
         elapsed.as_secs() < 5,
-        "snapshot -C took {:?}, expected < 5s (Issue #841 regression)",
+        "snapshot took {:?}, expected < 5s (Issue #841 regression)",
         elapsed,
     );
 
@@ -2435,7 +2559,7 @@ async fn e2e_screenshot_annotate_many_elements() {
     assert_success(&resp);
 }
 
-/// Verifies `snapshot -C` with many cursor-interactive elements completes in
+/// Verifies `snapshot` with many cursor-interactive elements completes in
 /// bounded time. Direct regression test for Issue #841's root cause: N×2
 /// sequential CDP round-trips per cursor-interactive element.
 #[tokio::test]
@@ -2470,7 +2594,7 @@ async fn e2e_snapshot_cursor_many_elements() {
 
     let start = std::time::Instant::now();
     let resp = execute_command(
-        &json!({ "id": "3", "action": "snapshot", "interactive": true, "cursor": true }),
+        &json!({ "id": "3", "action": "snapshot", "interactive": true }),
         &mut state,
     )
     .await;
@@ -2494,7 +2618,7 @@ async fn e2e_snapshot_cursor_many_elements() {
     // Must complete quickly
     assert!(
         elapsed.as_secs() < 10,
-        "snapshot -C with 100 cursor elements took {:?}, expected < 10s (Issue #841)",
+        "snapshot with 100 cursor elements took {:?}, expected < 10s (Issue #841)",
         elapsed,
     );
 
@@ -2506,7 +2630,7 @@ async fn e2e_snapshot_cursor_many_elements() {
 /// the actual text content from parent elements.
 #[tokio::test]
 #[ignore]
-async fn e2e_snapshot_inline_text_box_filtered() {
+async fn e2e_snapshot_continuous_static_text() {
     let mut state = DaemonState::new();
 
     let resp = execute_command(
@@ -2516,7 +2640,7 @@ async fn e2e_snapshot_inline_text_box_filtered() {
     .await;
     assert_success(&resp);
 
-    // Simple HTML with text content that would generate InlineTextBox nodes
+    // Simple HTML with text content that would generate InlineTextBox nodes and sperate to multiple StaticText nodes
     let html =
         "data:text/html,<html><body><div><span>Hello</span> <span>World</span></div></body></html>";
 
@@ -2527,7 +2651,7 @@ async fn e2e_snapshot_inline_text_box_filtered() {
     .await;
     assert_success(&resp);
 
-    // Take snapshot to capture full output and verify InlineTextBox filtering
+    // Take snapshot to capture full output and verify InlineTextBox filtering and StaticText aggregation
     let start = std::time::Instant::now();
     let resp = execute_command(&json!({ "id": "3", "action": "snapshot" }), &mut state).await;
     assert_success(&resp);
@@ -2544,13 +2668,8 @@ async fn e2e_snapshot_inline_text_box_filtered() {
 
     // Verify that the actual text content is preserved
     assert!(
-        snapshot_output.contains("Hello"),
-        "Snapshot should contain 'Hello': {}",
-        snapshot_output
-    );
-    assert!(
-        snapshot_output.contains("World"),
-        "Snapshot should contain 'World': {}",
+        snapshot_output.contains("Hello World"),
+        "Snapshot should contain 'Hello World': {}",
         snapshot_output
     );
 
@@ -2614,6 +2733,149 @@ async fn start_echo_server() -> (String, tokio::task::JoinHandle<()>) {
     });
 
     (base_url, handle)
+}
+
+/// Starts a tiny HTTP server that serves a delayed-render login form.
+///
+/// The page continuously fetches `/ping` so `networkidle` is hard to reach,
+/// while the login form itself appears after `render_delay_ms`.
+async fn start_delayed_login_server(
+    render_delay_ms: u64,
+    ping_interval_ms: u64,
+) -> (String, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let base_url = format!("http://127.0.0.1:{}", port);
+
+    let handle = tokio::spawn(async move {
+        // Serve enough requests for navigation + many background /ping calls.
+        for _ in 0..1000 {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
+            };
+
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 8192];
+                let n = stream.read(&mut buf).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..n]);
+                let request_line = request.lines().next().unwrap_or_default();
+                let path = request_line.split_whitespace().nth(1).unwrap_or("/");
+
+                let (status, content_type, body) = if path.starts_with("/ping") {
+                    ("204 No Content", "text/plain", String::new())
+                } else {
+                    let html = format!(
+                        r#"<!doctype html>
+<html>
+  <head><meta charset="utf-8"><title>Delayed Login</title></head>
+  <body>
+    <input id="search" type="text" name="search" />
+    <div id="root">loading...</div>
+    <script>
+      setInterval(() => {{
+        fetch('/ping?ts=' + Date.now()).catch(() => {{}});
+      }}, {ping_interval_ms});
+
+      setTimeout(() => {{
+        const root = document.getElementById('root');
+        root.innerHTML = `
+          <form id="login-form" onsubmit="event.preventDefault(); window.__submitted = true;">
+            <input type="email" name="email" />
+            <input type="password" name="password" />
+            <button type="submit">Sign in</button>
+          </form>
+        `;
+      }}, {render_delay_ms});
+    </script>
+  </body>
+</html>"#,
+                    );
+                    ("200 OK", "text/html", html)
+                };
+
+                let response = format!(
+                    "HTTP/1.1 {}\r\nContent-Type: {}\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    status,
+                    content_type,
+                    body.len(),
+                    body,
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.flush().await;
+            });
+        }
+    });
+
+    (base_url, handle)
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_auth_login_waits_for_delayed_spa_form_render() {
+    let (base_url, _server) = start_delayed_login_server(1200, 100).await;
+    let mut state = DaemonState::new();
+
+    let profile_name = format!(
+        "e2e-auth-login-spa-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_else(|_| std::time::Duration::from_secs(0))
+            .as_millis()
+    );
+
+    let launch = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&launch);
+
+    let save = execute_command(
+        &json!({
+            "id": "2",
+            "action": "auth_save",
+            "name": profile_name.clone(),
+            "url": format!("{}/login", base_url),
+            "username": "user@example.com",
+            "password": "super-secret",
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&save);
+
+    let login = execute_command(
+        &json!({ "id": "3", "action": "auth_login", "name": profile_name.clone() }),
+        &mut state,
+    )
+    .await;
+    assert_success(&login);
+    assert_eq!(get_data(&login)["loggedIn"], true);
+
+    let verify = execute_command(
+        &json!({
+            "id": "4",
+            "action": "evaluate",
+            "script": "({ user: document.querySelector('input[type=email]')?.value ?? '', pass: document.querySelector('input[type=password]')?.value ?? '', search: document.querySelector('#search')?.value ?? '', submitted: !!window.__submitted })",
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&verify);
+    let result = &get_data(&verify)["result"];
+    assert_eq!(result["user"], "user@example.com");
+    assert_eq!(result["pass"], "super-secret");
+    assert_eq!(result["search"], "");
+    assert_eq!(result["submitted"], true);
+
+    let _ = execute_command(
+        &json!({ "id": "5", "action": "auth_delete", "name": profile_name }),
+        &mut state,
+    )
+    .await;
+
+    let close = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&close);
 }
 
 // ---------------------------------------------------------------------------

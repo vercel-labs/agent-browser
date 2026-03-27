@@ -334,19 +334,13 @@ If you can't find an element:
    agent-browser snapshot -i
    ```
 
-3. **Try snapshot with extended range**
-   ```bash
-   # Include cursor-interactive elements (divs with onclick handlers)
-   agent-browser snapshot -i -C
-   ```
-
-4. **Check current URL**
+3. **Check current URL**
    ```bash
    agent-browser get url
    # Verify you're in the right section
    ```
 
-5. **Wait for page to load**
+4. **Wait for page to load**
    ```bash
    agent-browser wait --load networkidle
    agent-browser wait 1000

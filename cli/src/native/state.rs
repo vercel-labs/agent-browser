@@ -475,6 +475,41 @@ pub fn find_auto_state_file(session_name: &str) -> Option<String> {
     best_path.map(|(p, _)| p)
 }
 
+/// Dispatch a state management command from its JSON payload.
+/// Returns `Some(result)` for recognised state_* actions, `None` otherwise.
+pub fn dispatch_state_command(cmd: &Value) -> Option<Result<Value, String>> {
+    let action = cmd.get("action").and_then(|v| v.as_str())?;
+    match action {
+        "state_list" => Some(state_list()),
+        "state_show" => Some(
+            cmd.get("path")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "Missing 'path' parameter".to_string())
+                .and_then(state_show),
+        ),
+        "state_clear" => {
+            let path = cmd.get("path").and_then(|v| v.as_str());
+            Some(state_clear(path))
+        }
+        "state_clean" => {
+            let days = cmd.get("days").and_then(|v| v.as_u64()).unwrap_or(30);
+            Some(state_clean(days))
+        }
+        "state_rename" => Some(
+            cmd.get("path")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "Missing 'path' parameter".to_string())
+                .and_then(|path| {
+                    cmd.get("name")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| "Missing 'name' parameter".to_string())
+                        .and_then(|name| state_rename(path, name))
+                }),
+        ),
+        _ => None,
+    }
+}
+
 pub fn get_sessions_dir() -> PathBuf {
     if let Some(home) = dirs::home_dir() {
         home.join(".agent-browser").join("sessions")
@@ -603,5 +638,46 @@ mod tests {
         assert_eq!(json["httpOnly"], false);
         assert_eq!(json["secure"], true);
         assert_eq!(json["sameSite"], "Strict");
+    }
+
+    #[test]
+    fn test_dispatch_state_command_routes_state_list() {
+        let cmd = serde_json::json!({ "action": "state_list" });
+        let result = dispatch_state_command(&cmd);
+        assert!(result.is_some());
+        assert!(result.unwrap().is_ok());
+    }
+
+    #[test]
+    fn test_dispatch_state_command_returns_none_for_unknown() {
+        let cmd = serde_json::json!({ "action": "navigate" });
+        assert!(dispatch_state_command(&cmd).is_none());
+    }
+
+    #[test]
+    fn test_dispatch_state_command_returns_none_for_missing_action() {
+        let cmd = serde_json::json!({});
+        assert!(dispatch_state_command(&cmd).is_none());
+    }
+
+    #[test]
+    fn test_dispatch_state_show_missing_path() {
+        let cmd = serde_json::json!({ "action": "state_show" });
+        let result = dispatch_state_command(&cmd).unwrap();
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Missing 'path' parameter");
+    }
+
+    #[test]
+    fn test_dispatch_state_rename_missing_params() {
+        let cmd = serde_json::json!({ "action": "state_rename" });
+        let result = dispatch_state_command(&cmd).unwrap();
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Missing 'path' parameter");
+
+        let cmd = serde_json::json!({ "action": "state_rename", "path": "/tmp/test.json" });
+        let result = dispatch_state_command(&cmd).unwrap();
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Missing 'name' parameter");
     }
 }

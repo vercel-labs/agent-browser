@@ -30,7 +30,11 @@ agent-browser pdf <path>              # Save page as PDF
 agent-browser snapshot                # Accessibility tree with refs
 agent-browser eval <js>               # Run JavaScript
 agent-browser connect <port|url>      # Connect to browser via CDP
+agent-browser stream enable [--port <port>]  # Start runtime WebSocket streaming
+agent-browser stream status           # Show runtime streaming state and bound port
+agent-browser stream disable          # Stop runtime WebSocket streaming
 agent-browser close                   # Close browser (aliases: quit, exit)
+agent-browser close --all             # Close all active sessions
 ```
 
 ## Get info
@@ -173,6 +177,10 @@ agent-browser network unroute [url]            # Remove routes
 agent-browser network requests                 # View tracked requests
 agent-browser network requests --clear         # Clear request log
 agent-browser network requests --filter <pat>  # Filter by URL pattern
+agent-browser network requests --type xhr,fetch  # Filter by resource type
+agent-browser network requests --method POST   # Filter by HTTP method
+agent-browser network requests --status 2xx    # Filter by status (200, 2xx, 400-499)
+agent-browser network request <requestId>      # View full request/response detail
 agent-browser network har start                # Start HAR recording
 agent-browser network har stop [output.har]    # Stop and save HAR (temp path if omitted)
 ```
@@ -219,7 +227,21 @@ The `frame` command accepts element refs (`@e3`), CSS selectors (`"#my-iframe"`)
 ```bash
 agent-browser dialog accept [text]    # Accept dialog (with optional prompt text)
 agent-browser dialog dismiss          # Dismiss dialog
+agent-browser dialog status           # Check if a dialog is currently open
 ```
+
+When a JavaScript dialog (`alert`, `confirm`, `prompt`) is pending, all command responses include a `warning` field with the dialog type and message.
+
+## Streaming
+
+```bash
+agent-browser stream enable           # Start runtime WebSocket streaming on an auto-selected port
+agent-browser stream enable --port 9223  # Bind a specific localhost port
+agent-browser stream status           # Show enabled state, port, browser connection, screencasting
+agent-browser stream disable          # Stop runtime streaming and remove the .stream metadata file
+```
+
+Streaming is enabled automatically for all sessions. Use these commands to check status, re-enable on a specific port, or disable streaming.
 
 ## Debug
 
@@ -258,6 +280,8 @@ Save options:
 - `--username-selector <sel>` -- custom CSS selector for username field
 - `--password-selector <sel>` -- custom CSS selector for password field
 - `--submit-selector <sel>` -- custom CSS selector for submit button
+
+`auth login` navigates with `load` and then waits for the username/password/submit selectors to appear before interacting. This improves reliability on SPA login pages where fields render after initial page load.
 
 ```bash
 echo "pass" | agent-browser auth save github --url https://github.com/login --username user --password-stdin
@@ -300,6 +324,15 @@ agent-browser state clean --older-than <days>  # Delete old states
 ```bash
 agent-browser session                 # Show current session name
 agent-browser session list            # List active sessions
+```
+
+## Dashboard
+
+```bash
+agent-browser dashboard [start]       # Start the dashboard server (default port: 4848)
+agent-browser dashboard start --port <n>  # Start on a specific port
+agent-browser dashboard stop          # Stop the dashboard server
+agent-browser dashboard install       # Install the dashboard files
 ```
 
 ## Navigation

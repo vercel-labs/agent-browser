@@ -233,15 +233,16 @@ pub async fn install_domain_filter_script(
 pub async fn install_domain_filter_fetch(
     client: &CdpClient,
     session_id: &str,
+    handle_auth_requests: bool,
 ) -> Result<(), String> {
+    let mut params = json!({
+        "patterns": [{ "urlPattern": "*" }]
+    });
+    if handle_auth_requests {
+        params["handleAuthRequests"] = json!(true);
+    }
     client
-        .send_command(
-            "Fetch.enable",
-            Some(json!({
-                "patterns": [{ "urlPattern": "*" }]
-            })),
-            Some(session_id),
-        )
+        .send_command("Fetch.enable", Some(params), Some(session_id))
         .await?;
     Ok(())
 }
@@ -253,9 +254,10 @@ pub async fn install_domain_filter(
     client: &CdpClient,
     session_id: &str,
     allowed_domains: &[String],
+    handle_auth_requests: bool,
 ) -> Result<(), String> {
     install_domain_filter_script(client, session_id, allowed_domains).await?;
-    install_domain_filter_fetch(client, session_id).await?;
+    install_domain_filter_fetch(client, session_id, handle_auth_requests).await?;
     Ok(())
 }
 
@@ -320,13 +322,17 @@ impl EventTracker {
         });
     }
 
+    pub fn clear_console(&mut self) {
+        self.console_entries.clear();
+    }
+
     pub fn get_console_json(&self) -> Value {
-        let entries: Vec<Value> = self
+        let messages: Vec<Value> = self
             .console_entries
             .iter()
-            .map(|e| json!({ "level": e.level, "text": e.text }))
+            .map(|e| json!({ "type": e.level, "text": e.text }))
             .collect();
-        json!({ "entries": entries })
+        json!({ "messages": messages })
     }
 
     pub fn get_errors_json(&self) -> Value {

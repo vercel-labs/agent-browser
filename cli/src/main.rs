@@ -54,34 +54,67 @@ fn print_json_error_with_type(message: impl AsRef<str>, error_type: &str) {
     }));
 }
 
-fn parse_proxy(proxy_str: &str) -> serde_json::Value {
+struct ParsedProxy {
+    server: String,
+    username: Option<String>,
+    password: Option<String>,
+}
+
+fn parse_proxy(proxy_str: &str) -> ParsedProxy {
     let Some(protocol_end) = proxy_str.find("://") else {
-        return json!({ "server": proxy_str });
+        return ParsedProxy {
+            server: proxy_str.to_string(),
+            username: None,
+            password: None,
+        };
     };
     let protocol = &proxy_str[..protocol_end + 3];
     let rest = &proxy_str[protocol_end + 3..];
 
     let Some(at_pos) = rest.rfind('@') else {
-        return json!({ "server": proxy_str });
+        return ParsedProxy {
+            server: proxy_str.to_string(),
+            username: None,
+            password: None,
+        };
     };
 
     let creds = &rest[..at_pos];
     let server_part = &rest[at_pos + 1..];
     let server = format!("{}{}", protocol, server_part);
 
-    let Some(colon_pos) = creds.find(':') else {
-        return json!({
-            "server": server,
-            "username": creds,
-            "password": ""
-        });
+    let (username, password) = match creds.find(':') {
+        Some(colon_pos) => {
+            let u = &creds[..colon_pos];
+            let p = &creds[colon_pos + 1..];
+            (
+                if u.is_empty() {
+                    None
+                } else {
+                    Some(u.to_string())
+                },
+                if p.is_empty() {
+                    None
+                } else {
+                    Some(p.to_string())
+                },
+            )
+        }
+        None => (
+            if creds.is_empty() {
+                None
+            } else {
+                Some(creds.to_string())
+            },
+            None,
+        ),
     };
 
-    json!({
-        "server": server,
-        "username": &creds[..colon_pos],
-        "password": &creds[colon_pos + 1..]
-    })
+    ParsedProxy {
+        server,
+        username,
+        password,
+    }
 }
 
 fn run_session(args: &[String], session: &str, json_mode: bool) {
@@ -165,6 +198,278 @@ fn run_session(args: &[String], session: &str, json_mode: bool) {
     }
 }
 
+fn get_dashboard_pid_path() -> std::path::PathBuf {
+    get_socket_dir().join("dashboard.pid")
+}
+
+fn is_pid_alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        unsafe { libc::kill(pid as i32, 0) == 0 }
+    }
+    #[cfg(windows)]
+    {
+        unsafe {
+            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if handle != 0 {
+                CloseHandle(handle);
+                true
+            } else {
+                false
+            }
+        }
+    }
+}
+
+fn run_dashboard_start(port: u16, json_mode: bool) {
+    let pid_path = get_dashboard_pid_path();
+
+    // Check if already running
+    if let Ok(pid_str) = fs::read_to_string(&pid_path) {
+        if let Ok(pid) = pid_str.trim().parse::<u32>() {
+            if is_pid_alive(pid) {
+                if json_mode {
+                    print_json_value(json!({
+                        "success": true,
+                        "data": { "port": port, "pid": pid, "already_running": true },
+                    }));
+                } else {
+                    println!("Dashboard already running at http://localhost:{}", port);
+                }
+                return;
+            }
+        }
+        let _ = fs::remove_file(&pid_path);
+    }
+
+    let socket_dir = get_socket_dir();
+    if !socket_dir.exists() {
+        let _ = fs::create_dir_all(&socket_dir);
+    }
+
+    let exe_path = match env::current_exe() {
+        Ok(p) => p.canonicalize().unwrap_or(p),
+        Err(e) => {
+            if json_mode {
+                print_json_error(format!("Failed to get executable path: {}", e));
+            } else {
+                eprintln!(
+                    "{} Failed to get executable path: {}",
+                    color::error_indicator(),
+                    e
+                );
+            }
+            exit(1);
+        }
+    };
+
+    let mut cmd = std::process::Command::new(&exe_path);
+    cmd.env("AGENT_BROWSER_DASHBOARD", "1")
+        .env("AGENT_BROWSER_DASHBOARD_PORT", port.to_string());
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
+        const DETACHED_PROCESS: u32 = 0x00000008;
+        cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS);
+    }
+
+    match cmd
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(child) => {
+            let pid = child.id();
+            let _ = fs::write(&pid_path, pid.to_string());
+
+            if json_mode {
+                print_json_value(json!({
+                    "success": true,
+                    "data": { "port": port, "pid": pid },
+                }));
+            } else {
+                println!("Dashboard started at http://localhost:{}", port);
+            }
+        }
+        Err(e) => {
+            if json_mode {
+                print_json_error(format!("Failed to start dashboard: {}", e));
+            } else {
+                eprintln!(
+                    "{} Failed to start dashboard: {}",
+                    color::error_indicator(),
+                    e
+                );
+            }
+            exit(1);
+        }
+    }
+}
+
+fn run_dashboard_stop(json_mode: bool) {
+    let pid_path = get_dashboard_pid_path();
+
+    let pid_str = match fs::read_to_string(&pid_path) {
+        Ok(s) => s,
+        Err(_) => {
+            if json_mode {
+                print_json_value(
+                    json!({ "success": true, "data": { "stopped": false, "reason": "not running" } }),
+                );
+            } else {
+                println!("Dashboard is not running");
+            }
+            return;
+        }
+    };
+
+    let pid: u32 = match pid_str.trim().parse() {
+        Ok(p) => p,
+        Err(_) => {
+            let _ = fs::remove_file(&pid_path);
+            if json_mode {
+                print_json_value(
+                    json!({ "success": true, "data": { "stopped": false, "reason": "invalid pid" } }),
+                );
+            } else {
+                println!("Dashboard is not running");
+            }
+            return;
+        }
+    };
+
+    #[cfg(unix)]
+    {
+        unsafe {
+            libc::kill(pid as i32, libc::SIGTERM);
+        }
+    }
+    #[cfg(windows)]
+    {
+        unsafe {
+            let handle = OpenProcess(1, 0, pid); // PROCESS_TERMINATE = 1
+            if handle != 0 {
+                windows_sys::Win32::System::Threading::TerminateProcess(handle, 0);
+                CloseHandle(handle);
+            }
+        }
+    }
+
+    let _ = fs::remove_file(&pid_path);
+
+    if json_mode {
+        print_json_value(json!({ "success": true, "data": { "stopped": true } }));
+    } else {
+        println!("{} Dashboard stopped", color::green("✓"));
+    }
+}
+
+fn run_close_all(flags: &Flags) {
+    let socket_dir = get_socket_dir();
+    let mut sessions: Vec<String> = Vec::new();
+
+    if let Ok(entries) = fs::read_dir(&socket_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if let Some(session_name) = name.strip_suffix(".pid") {
+                if session_name.is_empty() {
+                    continue;
+                }
+                let pid_path = socket_dir.join(&name);
+                if let Ok(pid_str) = fs::read_to_string(&pid_path) {
+                    if let Ok(pid) = pid_str.trim().parse::<u32>() {
+                        #[cfg(unix)]
+                        let running = unsafe {
+                            libc::kill(pid as i32, 0) == 0
+                                || std::io::Error::last_os_error().raw_os_error()
+                                    != Some(libc::ESRCH)
+                        };
+                        #[cfg(windows)]
+                        let running = unsafe {
+                            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+                            if handle != 0 {
+                                CloseHandle(handle);
+                                true
+                            } else {
+                                false
+                            }
+                        };
+                        if running {
+                            sessions.push(session_name.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if sessions.is_empty() {
+        if flags.json {
+            print_json_value(json!({
+                "success": true,
+                "data": { "closed": 0, "sessions": [] },
+            }));
+        } else {
+            println!("No active sessions");
+        }
+        return;
+    }
+
+    let mut closed: Vec<String> = Vec::new();
+    let mut failed: Vec<(String, String)> = Vec::new();
+
+    for session in &sessions {
+        let cmd = json!({ "id": gen_id(), "action": "close" });
+        match send_command(cmd, session) {
+            Ok(resp) if resp.success => closed.push(session.clone()),
+            Ok(resp) => {
+                let err = resp.error.unwrap_or_else(|| "Unknown error".to_string());
+                failed.push((session.clone(), err));
+            }
+            Err(e) => failed.push((session.clone(), e.to_string())),
+        }
+    }
+
+    if flags.json {
+        print_json_value(json!({
+            "success": failed.is_empty(),
+            "data": {
+                "closed": closed.len(),
+                "sessions": closed,
+                "failed": failed.iter().map(|(s, e)| json!({"session": s, "error": e})).collect::<Vec<_>>(),
+            },
+        }));
+    } else {
+        for s in &closed {
+            println!("{} Closed session: {}", color::green("✓"), s);
+        }
+        for (s, e) in &failed {
+            eprintln!("{} Failed to close {}: {}", color::error_indicator(), s, e);
+        }
+        if closed.is_empty() && !failed.is_empty() {
+            exit(1);
+        }
+    }
+
+    if !failed.is_empty() {
+        exit(1);
+    }
+}
+
 fn main() {
     // Rust ignores SIGPIPE by default, causing println! to panic on broken pipes.
     // Reset to SIG_DFL so the OS terminates the process cleanly instead.
@@ -191,6 +496,17 @@ fn main() {
         let session = env::var("AGENT_BROWSER_SESSION").unwrap_or_else(|_| "default".to_string());
         let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
         rt.block_on(native::daemon::run_daemon(&session));
+        return;
+    }
+
+    // Standalone dashboard server mode
+    if env::var("AGENT_BROWSER_DASHBOARD").is_ok() {
+        let port: u16 = env::var("AGENT_BROWSER_DASHBOARD_PORT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(4848);
+        let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+        rt.block_on(native::stream::run_dashboard_server(port));
         return;
     }
 
@@ -234,9 +550,51 @@ fn main() {
         return;
     }
 
+    // Handle dashboard subcommand
+    if clean.first().map(|s| s.as_str()) == Some("dashboard") {
+        match clean.get(1).map(|s| s.as_str()) {
+            Some("install") => {
+                install::run_dashboard_install();
+                return;
+            }
+            Some("start") | None => {
+                let port = clean
+                    .iter()
+                    .position(|a| a == "--port")
+                    .and_then(|i| clean.get(i + 1))
+                    .and_then(|s| s.parse::<u16>().ok())
+                    .unwrap_or(4848);
+                run_dashboard_start(port, flags.json);
+                return;
+            }
+            Some("stop") => {
+                run_dashboard_stop(flags.json);
+                return;
+            }
+            Some(unknown) => {
+                eprintln!(
+                    "{} Unknown dashboard subcommand: {}",
+                    color::error_indicator(),
+                    unknown
+                );
+                exit(1);
+            }
+        }
+    }
+
     // Handle session separately (doesn't need daemon)
     if clean.first().map(|s| s.as_str()) == Some("session") {
         run_session(&clean, &flags.session, flags.json);
+        return;
+    }
+
+    // Handle close --all: close all active sessions
+    if matches!(
+        clean.first().map(|s| s.as_str()),
+        Some("close") | Some("quit") | Some("exit")
+    ) && clean.iter().any(|a| a == "--all")
+    {
+        run_close_all(&flags);
         return;
     }
 
@@ -303,6 +661,40 @@ fn main() {
         }
     }
 
+    // Handle state management commands locally — these are pure file operations
+    // that don't need a daemon, avoiding an unnecessary daemon startup that
+    // would lack runtime config like session_name.
+    if let Some(result) = native::state::dispatch_state_command(&cmd) {
+        let action = cmd.get("action").and_then(|v| v.as_str());
+        let resp = match result {
+            Ok(data) => connection::Response {
+                success: true,
+                data: Some(data),
+                error: None,
+                warning: None,
+            },
+            Err(e) => connection::Response {
+                success: false,
+                data: None,
+                error: Some(e),
+                warning: None,
+            },
+        };
+        let output_opts = OutputOptions::from_flags(&flags);
+        output::print_response_with_opts(&resp, action, &output_opts);
+        if !resp.success {
+            exit(1);
+        }
+        return;
+    }
+
+    // Parse proxy URL to separate server from credentials for the daemon.
+    let (proxy_server, proxy_username, proxy_password) = if let Some(ref proxy_str) = flags.proxy {
+        let parsed = parse_proxy(proxy_str);
+        (Some(parsed.server), parsed.username, parsed.password)
+    } else {
+        (None, None, None)
+    };
     let daemon_opts = DaemonOptions {
         headed: flags.headed,
         debug: flags.debug,
@@ -310,8 +702,10 @@ fn main() {
         extensions: &flags.extensions,
         args: flags.args.as_deref(),
         user_agent: flags.user_agent.as_deref(),
-        proxy: flags.proxy.as_deref(),
+        proxy: proxy_server.as_deref(),
         proxy_bypass: flags.proxy_bypass.as_deref(),
+        proxy_username: proxy_username.as_deref(),
+        proxy_password: proxy_password.as_deref(),
         ignore_https_errors: flags.ignore_https_errors,
         allow_file_access: flags.allow_file_access,
         profile: flags.profile.as_deref(),
@@ -328,6 +722,7 @@ fn main() {
         idle_timeout: flags.idle_timeout.as_deref(),
         cdp: flags.cdp.as_deref(),
     };
+
     let daemon_result = match ensure_daemon(&flags.session, &daemon_opts) {
         Ok(result) => result,
         Err(e) => {
@@ -450,8 +845,11 @@ fn main() {
         exit(1);
     }
 
-    // Auto-connect to existing browser
-    if flags.auto_connect {
+    // Auto-connect to existing browser.
+    // Skip when the daemon was already running — it already holds the connection
+    // from a previous auto-connect launch, so re-sending the launch command would
+    // redundantly probe Chrome and may trigger repeated permission prompts (#962).
+    if flags.auto_connect && !daemon_result.already_running {
         let mut launch_cmd = json!({
             "id": gen_id(),
             "action": "launch",
@@ -491,8 +889,11 @@ fn main() {
 
     // Connect via CDP if --cdp flag is set
     // Accepts either a port number (e.g., "9222") or a full URL (e.g., "ws://..." or "wss://...")
+    // Skip when daemon already running — it already holds the CDP connection.
     if let Some(ref cdp_value) = flags.cdp {
-        let mut launch_cmd = if cdp_value.starts_with("ws://")
+        // Validate CDP value eagerly (even when daemon is already running) so
+        // the user gets an immediate error for bad input instead of a silent no-op.
+        let launch_cmd = if cdp_value.starts_with("ws://")
             || cdp_value.starts_with("wss://")
             || cdp_value.starts_with("http://")
             || cdp_value.starts_with("https://")
@@ -548,65 +949,72 @@ fn main() {
             })
         };
 
-        if flags.ignore_https_errors {
-            launch_cmd["ignoreHTTPSErrors"] = json!(true);
-        }
+        if !daemon_result.already_running {
+            let mut launch_cmd = launch_cmd;
 
-        if let Some(ref cs) = flags.color_scheme {
-            launch_cmd["colorScheme"] = json!(cs);
-        }
-
-        if let Some(ref dp) = flags.download_path {
-            launch_cmd["downloadPath"] = json!(dp);
-        }
-
-        let err = match send_command(launch_cmd, &flags.session) {
-            Ok(resp) if resp.success => None,
-            Ok(resp) => Some(
-                resp.error
-                    .unwrap_or_else(|| "CDP connection failed".to_string()),
-            ),
-            Err(e) => Some(e.to_string()),
-        };
-
-        if let Some(msg) = err {
-            if flags.json {
-                print_json_error(msg);
-            } else {
-                eprintln!("{} {}", color::error_indicator(), msg);
+            if flags.ignore_https_errors {
+                launch_cmd["ignoreHTTPSErrors"] = json!(true);
             }
-            exit(1);
+
+            if let Some(ref cs) = flags.color_scheme {
+                launch_cmd["colorScheme"] = json!(cs);
+            }
+
+            if let Some(ref dp) = flags.download_path {
+                launch_cmd["downloadPath"] = json!(dp);
+            }
+
+            let err = match send_command(launch_cmd, &flags.session) {
+                Ok(resp) if resp.success => None,
+                Ok(resp) => Some(
+                    resp.error
+                        .unwrap_or_else(|| "CDP connection failed".to_string()),
+                ),
+                Err(e) => Some(e.to_string()),
+            };
+
+            if let Some(msg) = err {
+                if flags.json {
+                    print_json_error(msg);
+                } else {
+                    eprintln!("{} {}", color::error_indicator(), msg);
+                }
+                exit(1);
+            }
         }
     }
 
     // Launch with cloud provider if -p flag is set
+    // Skip when daemon already running — it already holds the provider connection.
     if let Some(ref provider) = flags.provider {
-        let mut launch_cmd = json!({
-            "id": gen_id(),
-            "action": "launch",
-            "provider": provider
-        });
+        if !daemon_result.already_running {
+            let mut launch_cmd = json!({
+                "id": gen_id(),
+                "action": "launch",
+                "provider": provider
+            });
 
-        if let Some(ref cs) = flags.color_scheme {
-            launch_cmd["colorScheme"] = json!(cs);
-        }
-
-        let err = match send_command(launch_cmd, &flags.session) {
-            Ok(resp) if resp.success => None,
-            Ok(resp) => Some(
-                resp.error
-                    .unwrap_or_else(|| "Provider connection failed".to_string()),
-            ),
-            Err(e) => Some(e.to_string()),
-        };
-
-        if let Some(msg) = err {
-            if flags.json {
-                print_json_error(msg);
-            } else {
-                eprintln!("{} {}", color::error_indicator(), msg);
+            if let Some(ref cs) = flags.color_scheme {
+                launch_cmd["colorScheme"] = json!(cs);
             }
-            exit(1);
+
+            let err = match send_command(launch_cmd, &flags.session) {
+                Ok(resp) if resp.success => None,
+                Ok(resp) => Some(
+                    resp.error
+                        .unwrap_or_else(|| "Provider connection failed".to_string()),
+                ),
+                Err(e) => Some(e.to_string()),
+            };
+
+            if let Some(msg) = err {
+                if flags.json {
+                    print_json_error(msg);
+                } else {
+                    eprintln!("{} {}", color::error_indicator(), msg);
+                }
+                exit(1);
+            }
         }
     }
 
@@ -654,12 +1062,16 @@ fn main() {
         }
 
         if let Some(ref proxy_str) = flags.proxy {
-            let mut proxy_obj = parse_proxy(proxy_str);
-            // Add bypass if specified
+            let parsed = parse_proxy(proxy_str);
+            let mut proxy_obj = json!({ "server": parsed.server });
+            if let Some(ref username) = parsed.username {
+                proxy_obj["username"] = json!(username);
+            }
+            if let Some(ref password) = parsed.password {
+                proxy_obj["password"] = json!(password);
+            }
             if let Some(ref bypass) = flags.proxy_bypass {
-                if let Some(obj) = proxy_obj.as_object_mut() {
-                    obj.insert("bypass".to_string(), json!(bypass));
-                }
+                proxy_obj["bypass"] = json!(bypass);
             }
             cmd_obj.insert("proxy".to_string(), proxy_obj);
         }
@@ -744,11 +1156,7 @@ fn main() {
         return;
     }
 
-    let output_opts = OutputOptions {
-        json: flags.json,
-        content_boundaries: flags.content_boundaries,
-        max_output: flags.max_output,
-    };
+    let output_opts = OutputOptions::from_flags(&flags);
 
     match send_command(cmd.clone(), &flags.session) {
         Ok(resp) => {
@@ -863,11 +1271,7 @@ fn run_batch(flags: &Flags, bail: bool) {
         return;
     }
 
-    let output_opts = OutputOptions {
-        json: flags.json,
-        content_boundaries: flags.content_boundaries,
-        max_output: flags.max_output,
-    };
+    let output_opts = OutputOptions::from_flags(flags);
 
     let mut results: Vec<serde_json::Value> = Vec::new();
     let mut had_error = false;
@@ -975,55 +1379,55 @@ mod tests {
     #[test]
     fn test_parse_proxy_simple() {
         let result = parse_proxy("http://proxy.com:8080");
-        assert_eq!(result["server"], "http://proxy.com:8080");
-        assert!(result.get("username").is_none());
-        assert!(result.get("password").is_none());
+        assert_eq!(result.server, "http://proxy.com:8080");
+        assert!(result.username.is_none());
+        assert!(result.password.is_none());
     }
 
     #[test]
     fn test_parse_proxy_with_auth() {
         let result = parse_proxy("http://user:pass@proxy.com:8080");
-        assert_eq!(result["server"], "http://proxy.com:8080");
-        assert_eq!(result["username"], "user");
-        assert_eq!(result["password"], "pass");
+        assert_eq!(result.server, "http://proxy.com:8080");
+        assert_eq!(result.username.as_deref(), Some("user"));
+        assert_eq!(result.password.as_deref(), Some("pass"));
     }
 
     #[test]
     fn test_parse_proxy_username_only() {
         let result = parse_proxy("http://user@proxy.com:8080");
-        assert_eq!(result["server"], "http://proxy.com:8080");
-        assert_eq!(result["username"], "user");
-        assert_eq!(result["password"], "");
+        assert_eq!(result.server, "http://proxy.com:8080");
+        assert_eq!(result.username.as_deref(), Some("user"));
+        assert!(result.password.is_none());
     }
 
     #[test]
     fn test_parse_proxy_no_protocol() {
         let result = parse_proxy("proxy.com:8080");
-        assert_eq!(result["server"], "proxy.com:8080");
-        assert!(result.get("username").is_none());
+        assert_eq!(result.server, "proxy.com:8080");
+        assert!(result.username.is_none());
     }
 
     #[test]
     fn test_parse_proxy_socks5() {
         let result = parse_proxy("socks5://proxy.com:1080");
-        assert_eq!(result["server"], "socks5://proxy.com:1080");
-        assert!(result.get("username").is_none());
+        assert_eq!(result.server, "socks5://proxy.com:1080");
+        assert!(result.username.is_none());
     }
 
     #[test]
     fn test_parse_proxy_socks5_with_auth() {
         let result = parse_proxy("socks5://admin:secret@proxy.com:1080");
-        assert_eq!(result["server"], "socks5://proxy.com:1080");
-        assert_eq!(result["username"], "admin");
-        assert_eq!(result["password"], "secret");
+        assert_eq!(result.server, "socks5://proxy.com:1080");
+        assert_eq!(result.username.as_deref(), Some("admin"));
+        assert_eq!(result.password.as_deref(), Some("secret"));
     }
 
     #[test]
     fn test_parse_proxy_complex_password() {
         let result = parse_proxy("http://user:p@ss:w0rd@proxy.com:8080");
-        assert_eq!(result["server"], "http://proxy.com:8080");
-        assert_eq!(result["username"], "user");
-        assert_eq!(result["password"], "p@ss:w0rd");
+        assert_eq!(result.server, "http://proxy.com:8080");
+        assert_eq!(result.username.as_deref(), Some("user"));
+        assert_eq!(result.password.as_deref(), Some("p@ss:w0rd"));
     }
 
     #[test]

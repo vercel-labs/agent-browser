@@ -533,6 +533,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                         obj.insert("compact".to_string(), json!(true));
                     }
                     "-C" | "--cursor" => {
+                        // deprecated, cursor-interactive elements are referred by default now
                         obj.insert("cursor".to_string(), json!(true));
                     }
                     "-d" | "--depth" => {
@@ -795,6 +796,62 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
             }
         }
 
+        // === Runtime stream control ===
+        "stream" => match rest.first().copied() {
+            Some("enable") => {
+                let mut cmd = json!({ "id": id, "action": "stream_enable" });
+                let mut i = 1;
+                while i < rest.len() {
+                    match rest[i] {
+                        "--port" => {
+                            let value =
+                                rest.get(i + 1)
+                                    .ok_or_else(|| ParseError::MissingArguments {
+                                        context: "stream enable --port".to_string(),
+                                        usage: "stream enable [--port <port>]",
+                                    })?;
+                            let port =
+                                value.parse::<u32>().map_err(|_| ParseError::InvalidValue {
+                                    message: format!(
+                                        "Invalid port: '{}' is not a valid integer",
+                                        value
+                                    ),
+                                    usage: "stream enable [--port <port>]",
+                                })?;
+                            if port > u16::MAX as u32 {
+                                return Err(ParseError::InvalidValue {
+                                    message: format!(
+                                        "Invalid port: {} is out of range (valid range: 0-65535)",
+                                        port
+                                    ),
+                                    usage: "stream enable [--port <port>]",
+                                });
+                            }
+                            cmd["port"] = json!(port);
+                            i += 2;
+                        }
+                        flag => {
+                            return Err(ParseError::InvalidValue {
+                                message: format!("Unknown flag for stream enable: {}", flag),
+                                usage: "stream enable [--port <port>]",
+                            });
+                        }
+                    }
+                }
+                Ok(cmd)
+            }
+            Some("disable") => Ok(json!({ "id": id, "action": "stream_disable" })),
+            Some("status") => Ok(json!({ "id": id, "action": "stream_status" })),
+            Some(sub) => Err(ParseError::UnknownSubcommand {
+                subcommand: sub.to_string(),
+                valid_options: &["enable", "disable", "status"],
+            }),
+            None => Err(ParseError::MissingArguments {
+                context: "stream".to_string(),
+                usage: "stream <enable|disable|status>",
+            }),
+        },
+
         // === Get ===
         "get" => parse_get(&rest, &id),
 
@@ -986,7 +1043,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
 
         // === Dialog ===
         "dialog" => {
-            const VALID: &[&str] = &["accept", "dismiss"];
+            const VALID: &[&str] = &["accept", "dismiss", "status"];
             match rest.first().copied() {
                 Some("accept") => {
                     let mut cmd = json!({ "id": id, "action": "dialog", "response": "accept" });
@@ -1002,13 +1059,14 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                     }
                     Ok(cmd)
                 }
+                Some("status") => Ok(json!({ "id": id, "action": "dialog", "response": "status" })),
                 Some(sub) => Err(ParseError::UnknownSubcommand {
                     subcommand: sub.to_string(),
                     valid_options: VALID,
                 }),
                 None => Err(ParseError::MissingArguments {
                     context: "dialog".to_string(),
-                    usage: "dialog <accept|dismiss> [text]",
+                    usage: "dialog <accept|dismiss|status> [text]",
                 }),
             }
         }
@@ -1222,7 +1280,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                         context: "state show".to_string(),
                         usage: "state show <filename>",
                     })?;
-                    Ok(json!({ "id": id, "action": "state_show", "filename": filename }))
+                    Ok(json!({ "id": id, "action": "state_show", "path": filename }))
                 }
                 Some("clean") => {
                     let mut days: Option<i64> = None;
@@ -1742,10 +1800,6 @@ fn parse_find(rest: &[&str], id: &str) -> Result<Value, ParseError> {
         usage: "find <locator> <value> [action] [text]",
     })?;
 
-    let name_idx = rest.iter().position(|&s| s == "--name");
-    let name = name_idx.and_then(|i| rest.get(i + 1).copied());
-    let exact = rest.contains(&"--exact");
-
     match *locator {
         "role" | "text" | "label" | "placeholder" | "alt" | "title" | "testid" | "first"
         | "last" => {
@@ -1765,10 +1819,41 @@ fn parse_find(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                 },
             })?;
             let subaction = rest.get(2).unwrap_or(&"click");
-            let fill_value = if rest.len() > 3 {
-                Some(rest[3..].join(" "))
-            } else {
+            let mut name: Option<&str> = None;
+            let mut exact = false;
+            let mut fill_parts: Vec<&str> = Vec::new();
+
+            if rest.len() > 3 {
+                let mut i = 3;
+                while i < rest.len() {
+                    match rest[i] {
+                        "--exact" => {
+                            exact = true;
+                            i += 1;
+                        }
+                        "--name" => {
+                            let n =
+                                rest.get(i + 1)
+                                    .ok_or_else(|| ParseError::MissingArguments {
+                                        context: format!("find {}", locator),
+                                        usage:
+                                            "find role <role> [action] [--name <name>] [--exact]",
+                                    })?;
+                            name = Some(*n);
+                            i += 2;
+                        }
+                        token => {
+                            fill_parts.push(token);
+                            i += 1;
+                        }
+                    }
+                }
+            }
+
+            let fill_value = if fill_parts.is_empty() {
                 None
+            } else {
+                Some(fill_parts.join(" "))
             };
 
             match *locator {
@@ -2050,7 +2135,7 @@ fn parse_set(rest: &[&str], id: &str) -> Result<Value, ParseError> {
 
 /// Parse network interception, request inspection, and HAR recording commands.
 fn parse_network(rest: &[&str], id: &str) -> Result<Value, ParseError> {
-    const VALID: &[&str] = &["route", "unroute", "requests", "har"];
+    const VALID: &[&str] = &["route", "unroute", "requests", "request", "har"];
 
     match rest.first().copied() {
         Some("route") => {
@@ -2074,11 +2159,33 @@ fn parse_network(rest: &[&str], id: &str) -> Result<Value, ParseError> {
             let clear = rest.contains(&"--clear");
             let filter_idx = rest.iter().position(|&s| s == "--filter");
             let filter = filter_idx.and_then(|i| rest.get(i + 1).copied());
+            let type_idx = rest.iter().position(|&s| s == "--type");
+            let rtype = type_idx.and_then(|i| rest.get(i + 1).copied());
+            let method_idx = rest.iter().position(|&s| s == "--method");
+            let method = method_idx.and_then(|i| rest.get(i + 1).copied());
+            let status_idx = rest.iter().position(|&s| s == "--status");
+            let status = status_idx.and_then(|i| rest.get(i + 1).copied());
             let mut cmd = json!({ "id": id, "action": "requests", "clear": clear });
             if let Some(f) = filter {
                 cmd["filter"] = json!(f);
             }
+            if let Some(t) = rtype {
+                cmd["type"] = json!(t);
+            }
+            if let Some(m) = method {
+                cmd["method"] = json!(m);
+            }
+            if let Some(s) = status {
+                cmd["status"] = json!(s);
+            }
             Ok(cmd)
+        }
+        Some("request") => {
+            let request_id = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
+                context: "network request".to_string(),
+                usage: "network request <requestId>",
+            })?;
+            Ok(json!({ "id": id, "action": "request_detail", "requestId": request_id }))
         }
         Some("har") => {
             const HAR_VALID: &[&str] = &["start", "stop"];
@@ -2107,7 +2214,7 @@ fn parse_network(rest: &[&str], id: &str) -> Result<Value, ParseError> {
         }),
         None => Err(ParseError::MissingArguments {
             context: "network".to_string(),
-            usage: "network <route|unroute|requests|har> [args...]",
+            usage: "network <route|unroute|requests|request|har> [args...]",
         }),
     }
 }
@@ -2711,6 +2818,54 @@ mod tests {
     #[test]
     fn test_network_har_requires_subcommand() {
         let result = parse_command(&args("network har"), &default_flags());
+        assert!(matches!(result, Err(ParseError::MissingArguments { .. })));
+    }
+
+    #[test]
+    fn test_network_requests_type_filter() {
+        let cmd =
+            parse_command(&args("network requests --type xhr,fetch"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "requests");
+        assert_eq!(cmd["type"], "xhr,fetch");
+    }
+
+    #[test]
+    fn test_network_requests_method_filter() {
+        let cmd = parse_command(&args("network requests --method POST"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "requests");
+        assert_eq!(cmd["method"], "POST");
+    }
+
+    #[test]
+    fn test_network_requests_status_filter() {
+        let cmd = parse_command(&args("network requests --status 2xx"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "requests");
+        assert_eq!(cmd["status"], "2xx");
+    }
+
+    #[test]
+    fn test_network_requests_combined_filters() {
+        let cmd = parse_command(
+            &args("network requests --filter api --type xhr --method GET --status 200"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["filter"], "api");
+        assert_eq!(cmd["type"], "xhr");
+        assert_eq!(cmd["method"], "GET");
+        assert_eq!(cmd["status"], "200");
+    }
+
+    #[test]
+    fn test_network_request_detail() {
+        let cmd = parse_command(&args("network request 1234.5"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "request_detail");
+        assert_eq!(cmd["requestId"], "1234.5");
+    }
+
+    #[test]
+    fn test_network_request_detail_requires_id() {
+        let result = parse_command(&args("network request"), &default_flags());
         assert!(matches!(result, Err(ParseError::MissingArguments { .. })));
     }
 
@@ -3324,6 +3479,21 @@ mod tests {
         assert!(cmd.get("value").is_none());
     }
 
+    #[test]
+    fn test_find_role_fill_does_not_include_flags_in_value() {
+        let cmd = parse_command(
+            &args("find role textbox fill hello --name username --exact"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "getbyrole");
+        assert_eq!(cmd["role"], "textbox");
+        assert_eq!(cmd["subaction"], "fill");
+        assert_eq!(cmd["name"], "username");
+        assert_eq!(cmd["exact"], true);
+        assert_eq!(cmd["value"], "hello");
+    }
+
     // === Download Tests ===
 
     #[test]
@@ -3501,6 +3671,46 @@ mod tests {
         let cmd = parse_command(&args("connect 1"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "launch");
         assert_eq!(cmd["cdpPort"], 1);
+    }
+
+    // === Runtime stream control tests ===
+
+    #[test]
+    fn test_stream_enable_auto_port() {
+        let cmd = parse_command(&args("stream enable"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "stream_enable");
+        assert!(cmd.get("port").is_none());
+    }
+
+    #[test]
+    fn test_stream_enable_with_port() {
+        let cmd = parse_command(&args("stream enable --port 9223"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "stream_enable");
+        assert_eq!(cmd["port"], 9223);
+    }
+
+    #[test]
+    fn test_stream_status() {
+        let cmd = parse_command(&args("stream status"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "stream_status");
+    }
+
+    #[test]
+    fn test_stream_disable() {
+        let cmd = parse_command(&args("stream disable"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "stream_disable");
+    }
+
+    #[test]
+    fn test_stream_enable_invalid_port() {
+        let result = parse_command(&args("stream enable --port abc"), &default_flags());
+        assert!(matches!(result, Err(ParseError::InvalidValue { .. })));
+    }
+
+    #[test]
+    fn test_stream_missing_subcommand() {
+        let result = parse_command(&args("stream"), &default_flags());
+        assert!(matches!(result, Err(ParseError::MissingArguments { .. })));
     }
 
     // === Trace Tests ===

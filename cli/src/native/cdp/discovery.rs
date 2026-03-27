@@ -13,21 +13,30 @@ const DEFAULT_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(2);
 /// Tries three methods in order: `/json/version`, `/json/list`, and a direct
 /// WebSocket connection to `/devtools/browser`. The returned URL has its
 /// host/port rewritten to match the requested target.
-pub async fn discover_cdp_url(host: &str, port: u16) -> Result<String, String> {
-    discover_cdp_url_with_timeout(host, port, DEFAULT_DISCOVERY_TIMEOUT).await
+///
+/// An optional `query` string (without the leading `?`) is appended to the
+/// final WebSocket URL so that user-supplied URL parameters (e.g.
+/// `?mode=Hello`) are forwarded to the remote endpoint.
+pub async fn discover_cdp_url(
+    host: &str,
+    port: u16,
+    query: Option<&str>,
+) -> Result<String, String> {
+    discover_cdp_url_with_timeout(host, port, query, DEFAULT_DISCOVERY_TIMEOUT).await
 }
 
 /// Like [`discover_cdp_url`] but with a custom request timeout.
 pub async fn discover_cdp_url_with_timeout(
     host: &str,
     port: u16,
+    query: Option<&str>,
     timeout: Duration,
 ) -> Result<String, String> {
     // Primary: /json/version (standard path)
     let version_err = match fetch_cdp_info(host, port, timeout).await {
         Ok(info) => {
             if let Some(ws_url) = info.web_socket_debugger_url {
-                return Ok(rewrite_ws_host(&ws_url, host, port));
+                return Ok(append_query(&rewrite_ws_host(&ws_url, host, port), query));
             }
             format!(
                 "No webSocketDebuggerUrl in /json/version at {}:{}",
@@ -39,7 +48,7 @@ pub async fn discover_cdp_url_with_timeout(
 
     // Fallback: /json/list (returns target list; look for the browser target)
     let list_err = match fetch_cdp_list(host, port, timeout).await {
-        Ok(ws_url) => return Ok(rewrite_ws_host(&ws_url, host, port)),
+        Ok(ws_url) => return Ok(append_query(&rewrite_ws_host(&ws_url, host, port), query)),
         Err(e) => e,
     };
 
@@ -47,7 +56,7 @@ pub async fn discover_cdp_url_with_timeout(
     // Chrome 136+ with UI-based remote debugging (chrome://inspect) exposes
     // CDP over WebSocket but does not serve HTTP discovery endpoints.
     match discover_cdp_ws(host, port, timeout).await {
-        Ok(ws_url) => Ok(ws_url),
+        Ok(ws_url) => Ok(append_query(&ws_url, query)),
         Err(ws_err) => Err(format!(
             "All CDP discovery methods failed for {}:{}: /json/version: {}; /json/list: {}; WebSocket: {}",
             host, port, version_err, list_err, ws_err
@@ -91,6 +100,29 @@ fn rewrite_ws_host(ws_url: &str, host: &str, port: u16) -> String {
         parsed.to_string()
     } else {
         ws_url.to_string()
+    }
+}
+
+/// Append a query string to a URL, preserving any existing query parameters.
+fn append_query(url: &str, query: Option<&str>) -> String {
+    match query {
+        Some(q) if !q.is_empty() => {
+            if let Ok(mut parsed) = url::Url::parse(url) {
+                {
+                    let mut pairs = parsed.query_pairs_mut();
+                    pairs.extend_pairs(url::form_urlencoded::parse(q.as_bytes()));
+                }
+                parsed.to_string()
+            } else {
+                // Fallback: raw string append
+                if url.contains('?') {
+                    format!("{}&{}", url, q)
+                } else {
+                    format!("{}?{}", url, q)
+                }
+            }
+        }
+        _ => url.to_string(),
     }
 }
 
@@ -210,7 +242,7 @@ mod tests {
             .await;
         });
 
-        let ws_url = discover_cdp_url("127.0.0.1", port).await.unwrap();
+        let ws_url = discover_cdp_url("127.0.0.1", port, None).await.unwrap();
         assert_eq!(ws_url, format!("ws://127.0.0.1:{}/", port));
         server.await.unwrap();
     }
@@ -224,7 +256,7 @@ mod tests {
             // /json/list and ws fallback both fail (server closes)
         });
 
-        let err = discover_cdp_url("127.0.0.1", port).await.unwrap_err();
+        let err = discover_cdp_url("127.0.0.1", port, None).await.unwrap_err();
         assert!(err.contains("Invalid /json/version response"));
         server.await.unwrap();
     }
@@ -241,7 +273,7 @@ mod tests {
             ).await;
         });
 
-        let ws_url = discover_cdp_url("127.0.0.1", port).await.unwrap();
+        let ws_url = discover_cdp_url("127.0.0.1", port, None).await.unwrap();
         assert!(ws_url.contains("/devtools/browser/abc"));
         assert!(ws_url.contains(&port.to_string()));
         server.await.unwrap();
@@ -271,7 +303,7 @@ mod tests {
             let _ = ws.close(None).await;
         });
 
-        let ws_url = discover_cdp_url("127.0.0.1", port).await.unwrap();
+        let ws_url = discover_cdp_url("127.0.0.1", port, None).await.unwrap();
         assert_eq!(ws_url, format!("ws://127.0.0.1:{}/devtools/browser", port));
         server.await.unwrap();
     }
@@ -288,5 +320,68 @@ mod tests {
         let original = "ws://127.0.0.1:9222/devtools/browser/abc";
         let rewritten = rewrite_ws_host(original, "::1", 9222);
         assert_eq!(rewritten, "ws://[::1]:9222/devtools/browser/abc");
+    }
+
+    #[test]
+    fn append_query_adds_params_to_url_without_query() {
+        let url = "ws://127.0.0.1:9222/devtools/browser/abc";
+        let result = append_query(url, Some("mode=Hello"));
+        assert_eq!(
+            result,
+            "ws://127.0.0.1:9222/devtools/browser/abc?mode=Hello"
+        );
+    }
+
+    #[test]
+    fn append_query_merges_with_existing_query() {
+        let url = "ws://127.0.0.1:9222/devtools/browser/abc?token=xyz";
+        let result = append_query(url, Some("mode=Hello"));
+        assert_eq!(
+            result,
+            "ws://127.0.0.1:9222/devtools/browser/abc?token=xyz&mode=Hello"
+        );
+    }
+
+    #[test]
+    fn append_query_noop_for_none() {
+        let url = "ws://127.0.0.1:9222/devtools/browser/abc";
+        let result = append_query(url, None);
+        assert_eq!(result, url);
+    }
+
+    #[test]
+    fn append_query_noop_for_empty() {
+        let url = "ws://127.0.0.1:9222/devtools/browser/abc";
+        let result = append_query(url, Some(""));
+        assert_eq!(result, url);
+    }
+
+    #[test]
+    fn append_query_handles_multiple_params() {
+        let url = "ws://127.0.0.1:9222/devtools/browser/abc";
+        let result = append_query(url, Some("mode=Hello&token=abc"));
+        assert_eq!(
+            result,
+            "ws://127.0.0.1:9222/devtools/browser/abc?mode=Hello&token=abc"
+        );
+    }
+
+    #[tokio::test]
+    async fn discover_preserves_query_params() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            accept_http(
+                &listener,
+                &http_200(r#"{"webSocketDebuggerUrl":"ws://127.0.0.1:1234/"}"#),
+            )
+            .await;
+        });
+
+        let ws_url = discover_cdp_url("127.0.0.1", port, Some("mode=Hello"))
+            .await
+            .unwrap();
+        assert_eq!(ws_url, format!("ws://127.0.0.1:{}/?mode=Hello", port));
+        server.await.unwrap();
     }
 }

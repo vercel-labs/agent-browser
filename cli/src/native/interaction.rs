@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde_json::Value;
 
 use super::cdp::client::CdpClient;
@@ -11,9 +13,17 @@ pub async fn click(
     selector_or_ref: &str,
     button: &str,
     click_count: i32,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<(), String> {
-    let (x, y) = resolve_element_center(client, session_id, ref_map, selector_or_ref).await?;
-    dispatch_click(client, session_id, x, y, button, click_count).await
+    let (x, y, effective_session_id) = resolve_element_center(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
+    dispatch_click(client, &effective_session_id, x, y, button, click_count).await
 }
 
 pub async fn dblclick(
@@ -21,8 +31,18 @@ pub async fn dblclick(
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<(), String> {
-    click(client, session_id, ref_map, selector_or_ref, "left", 2).await
+    click(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        "left",
+        2,
+        iframe_sessions,
+    )
+    .await
 }
 
 pub async fn hover(
@@ -30,8 +50,16 @@ pub async fn hover(
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<(), String> {
-    let (x, y) = resolve_element_center(client, session_id, ref_map, selector_or_ref).await?;
+    let (x, y, effective_session_id) = resolve_element_center(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
     client
         .send_command_typed::<_, Value>(
             "Input.dispatchMouseEvent",
@@ -46,7 +74,7 @@ pub async fn hover(
                 delta_y: None,
                 modifiers: None,
             },
-            Some(session_id),
+            Some(&effective_session_id),
         )
         .await?;
     Ok(())
@@ -58,8 +86,16 @@ pub async fn fill(
     ref_map: &RefMap,
     selector_or_ref: &str,
     value: &str,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<(), String> {
-    let object_id = resolve_element_object_id(client, session_id, ref_map, selector_or_ref).await?;
+    let (object_id, effective_session_id) = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
 
     // Focus the element
     client
@@ -72,7 +108,7 @@ pub async fn fill(
                 return_by_value: Some(true),
                 await_promise: Some(false),
             },
-            Some(session_id),
+            Some(&effective_session_id),
         )
         .await?;
 
@@ -92,11 +128,11 @@ pub async fn fill(
                 return_by_value: Some(true),
                 await_promise: Some(false),
             },
-            Some(session_id),
+            Some(&effective_session_id),
         )
         .await?;
 
-    // Insert text
+    // Insert text (keyboard input dispatched at page level, use parent session_id)
     client
         .send_command_typed::<_, Value>(
             "Input.insertText",
@@ -119,8 +155,16 @@ pub async fn type_text(
     text: &str,
     clear: bool,
     delay_ms: Option<u64>,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<(), String> {
-    let object_id = resolve_element_object_id(client, session_id, ref_map, selector_or_ref).await?;
+    let (object_id, effective_session_id) = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
 
     // Focus
     client
@@ -133,7 +177,7 @@ pub async fn type_text(
                 return_by_value: Some(true),
                 await_promise: Some(false),
             },
-            Some(session_id),
+            Some(&effective_session_id),
         )
         .await?;
 
@@ -153,30 +197,26 @@ pub async fn type_text(
                     return_by_value: Some(true),
                     await_promise: Some(false),
                 },
-                Some(session_id),
+                Some(&effective_session_id),
             )
             .await?;
     }
 
+    type_text_into_active_context(client, session_id, text, delay_ms).await
+}
+
+pub async fn type_text_into_active_context(
+    client: &CdpClient,
+    session_id: &str,
+    text: &str,
+    delay_ms: Option<u64>,
+) -> Result<(), String> {
     let delay = delay_ms.unwrap_or(0);
 
     for ch in text.chars() {
-        let text_str = ch.to_string();
-        let (key, code, key_code) = char_to_key_info(ch);
-
-        // Characters that have no US-keyboard mapping (key_code == 0 and empty
-        // code) are inserted via `Input.insertText`, matching Playwright's
-        // keyboard.type() fallback behaviour.  This handles emoji, CJK, and
-        // other characters that don't correspond to a physical key.
-        if key_code == 0 && code.is_empty() {
-            client
-                .send_command_typed::<_, Value>(
-                    "Input.insertText",
-                    &InsertTextParams { text: text_str },
-                    Some(session_id),
-                )
-                .await?;
-        } else {
+        if matches!(ch, '\n' | '\r' | '\t') {
+            let (key, code, key_code) = char_to_key_info(ch);
+            let text_str = key_text(&key);
             client
                 .send_command_typed::<_, Value>(
                     "Input.dispatchKeyEvent",
@@ -184,8 +224,8 @@ pub async fn type_text(
                         event_type: "keyDown".to_string(),
                         key: Some(key.clone()),
                         code: Some(code.clone()),
-                        text: Some(text_str.clone()),
-                        unmodified_text: Some(text_str.clone()),
+                        text: text_str.clone(),
+                        unmodified_text: text_str,
                         windows_virtual_key_code: Some(key_code),
                         native_virtual_key_code: Some(key_code),
                         modifiers: None,
@@ -206,6 +246,19 @@ pub async fn type_text(
                         windows_virtual_key_code: Some(key_code),
                         native_virtual_key_code: Some(key_code),
                         modifiers: None,
+                    },
+                    Some(session_id),
+                )
+                .await?;
+        } else {
+            // VS Code/Electron webviews reject repeated dispatchKeyEvent calls
+            // carrying printable `text`. Insert printable characters directly
+            // and reserve key events for controls like Enter and Tab.
+            client
+                .send_command_typed::<_, Value>(
+                    "Input.insertText",
+                    &InsertTextParams {
+                        text: ch.to_string(),
                     },
                     Some(session_id),
                 )
@@ -239,6 +292,15 @@ pub async fn press_key_with_modifiers(
 ) -> Result<(), String> {
     let (key_name, code, key_code) = named_key_info(key);
 
+    // Suppress text insertion when Control (2) or Meta (4) modifiers are active,
+    // since these are command chords (e.g. Ctrl+A = select-all), not text input.
+    let has_command_modifier = modifiers.is_some_and(|m| m & (2 | 4) != 0);
+    let text = if has_command_modifier {
+        None
+    } else {
+        key_text(&key_name)
+    };
+
     client
         .send_command_typed::<_, Value>(
             "Input.dispatchKeyEvent",
@@ -246,8 +308,8 @@ pub async fn press_key_with_modifiers(
                 event_type: "keyDown".to_string(),
                 key: Some(key_name.clone()),
                 code: Some(code.clone()),
-                text: None,
-                unmodified_text: None,
+                text: text.clone(),
+                unmodified_text: text.clone(),
                 windows_virtual_key_code: Some(key_code),
                 native_virtual_key_code: Some(key_code),
                 modifiers,
@@ -283,9 +345,11 @@ pub async fn scroll(
     selector_or_ref: Option<&str>,
     delta_x: f64,
     delta_y: f64,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<(), String> {
     if let Some(sel) = selector_or_ref {
-        let object_id = resolve_element_object_id(client, session_id, ref_map, sel).await?;
+        let (object_id, effective_session_id) =
+            resolve_element_object_id(client, session_id, ref_map, sel, iframe_sessions).await?;
         let js = "function(dx, dy) { this.scrollBy(dx, dy); }".to_string();
         client
             .send_command_typed::<_, Value>(
@@ -306,7 +370,7 @@ pub async fn scroll(
                     return_by_value: Some(true),
                     await_promise: Some(false),
                 },
-                Some(session_id),
+                Some(&effective_session_id),
             )
             .await?;
     } else {
@@ -332,8 +396,16 @@ pub async fn select_option(
     ref_map: &RefMap,
     selector_or_ref: &str,
     values: &[String],
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<(), String> {
-    let object_id = resolve_element_object_id(client, session_id, ref_map, selector_or_ref).await?;
+    let (object_id, effective_session_id) = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
 
     let js = r#"function(vals) {
             const options = Array.from(this.options);
@@ -357,7 +429,7 @@ pub async fn select_option(
                 return_by_value: Some(true),
                 await_promise: Some(false),
             },
-            Some(session_id),
+            Some(&effective_session_id),
         )
         .await?;
 
@@ -369,18 +441,48 @@ pub async fn check(
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<(), String> {
-    let is_checked =
-        super::element::is_element_checked(client, session_id, ref_map, selector_or_ref).await?;
+    let is_checked = super::element::is_element_checked(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
     if !is_checked {
-        click(client, session_id, ref_map, selector_or_ref, "left", 1).await?;
+        click(
+            client,
+            session_id,
+            ref_map,
+            selector_or_ref,
+            "left",
+            1,
+            iframe_sessions,
+        )
+        .await?;
 
         // Verify the click changed the state (Playwright parity: _setChecked re-checks).
         // If the coordinate-based click missed (e.g. hidden input, overlay), retry
         // with a JS .click() on the element and its associated input.
-        if !super::element::is_element_checked(client, session_id, ref_map, selector_or_ref).await?
+        if !super::element::is_element_checked(
+            client,
+            session_id,
+            ref_map,
+            selector_or_ref,
+            iframe_sessions,
+        )
+        .await?
         {
-            js_click_checkbox(client, session_id, ref_map, selector_or_ref).await?;
+            js_click_checkbox(
+                client,
+                session_id,
+                ref_map,
+                selector_or_ref,
+                iframe_sessions,
+            )
+            .await?;
         }
     }
     Ok(())
@@ -391,15 +493,46 @@ pub async fn uncheck(
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<(), String> {
-    let is_checked =
-        super::element::is_element_checked(client, session_id, ref_map, selector_or_ref).await?;
+    let is_checked = super::element::is_element_checked(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
     if is_checked {
-        click(client, session_id, ref_map, selector_or_ref, "left", 1).await?;
+        click(
+            client,
+            session_id,
+            ref_map,
+            selector_or_ref,
+            "left",
+            1,
+            iframe_sessions,
+        )
+        .await?;
 
         // Same verify-and-retry as check().
-        if super::element::is_element_checked(client, session_id, ref_map, selector_or_ref).await? {
-            js_click_checkbox(client, session_id, ref_map, selector_or_ref).await?;
+        if super::element::is_element_checked(
+            client,
+            session_id,
+            ref_map,
+            selector_or_ref,
+            iframe_sessions,
+        )
+        .await?
+        {
+            js_click_checkbox(
+                client,
+                session_id,
+                ref_map,
+                selector_or_ref,
+                iframe_sessions,
+            )
+            .await?;
         }
     }
     Ok(())
@@ -419,8 +552,16 @@ async fn js_click_checkbox(
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<(), String> {
-    let object_id = resolve_element_object_id(client, session_id, ref_map, selector_or_ref).await?;
+    let (object_id, effective_session_id) = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
 
     let js = r#"function() {
             var el = this;
@@ -456,7 +597,7 @@ async fn js_click_checkbox(
                 return_by_value: Some(true),
                 await_promise: Some(false),
             },
-            Some(session_id),
+            Some(&effective_session_id),
         )
         .await?;
 
@@ -468,8 +609,16 @@ pub async fn focus(
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<(), String> {
-    let object_id = resolve_element_object_id(client, session_id, ref_map, selector_or_ref).await?;
+    let (object_id, effective_session_id) = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
 
     client
         .send_command_typed::<_, Value>(
@@ -481,7 +630,7 @@ pub async fn focus(
                 return_by_value: Some(true),
                 await_promise: Some(false),
             },
-            Some(session_id),
+            Some(&effective_session_id),
         )
         .await?;
 
@@ -493,8 +642,16 @@ pub async fn clear(
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<(), String> {
-    let object_id = resolve_element_object_id(client, session_id, ref_map, selector_or_ref).await?;
+    let (object_id, effective_session_id) = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
 
     client
         .send_command_typed::<_, Value>(
@@ -512,7 +669,7 @@ pub async fn clear(
                 return_by_value: Some(true),
                 await_promise: Some(false),
             },
-            Some(session_id),
+            Some(&effective_session_id),
         )
         .await?;
 
@@ -524,8 +681,16 @@ pub async fn select_all(
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<(), String> {
-    let object_id = resolve_element_object_id(client, session_id, ref_map, selector_or_ref).await?;
+    let (object_id, effective_session_id) = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
 
     client
         .send_command_typed::<_, Value>(
@@ -549,7 +714,7 @@ pub async fn select_all(
                 return_by_value: Some(true),
                 await_promise: Some(false),
             },
-            Some(session_id),
+            Some(&effective_session_id),
         )
         .await?;
 
@@ -561,8 +726,16 @@ pub async fn scroll_into_view(
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<(), String> {
-    let object_id = resolve_element_object_id(client, session_id, ref_map, selector_or_ref).await?;
+    let (object_id, effective_session_id) = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
 
     client
         .send_command_typed::<_, Value>(
@@ -576,7 +749,7 @@ pub async fn scroll_into_view(
                 return_by_value: Some(true),
                 await_promise: Some(false),
             },
-            Some(session_id),
+            Some(&effective_session_id),
         )
         .await?;
 
@@ -590,8 +763,16 @@ pub async fn dispatch_event(
     selector_or_ref: &str,
     event_type: &str,
     event_init: Option<&Value>,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<(), String> {
-    let object_id = resolve_element_object_id(client, session_id, ref_map, selector_or_ref).await?;
+    let (object_id, effective_session_id) = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
 
     let init_json = event_init
         .map(|v| serde_json::to_string(v).unwrap_or("{}".to_string()))
@@ -613,7 +794,7 @@ pub async fn dispatch_event(
                 return_by_value: Some(true),
                 await_promise: Some(false),
             },
-            Some(session_id),
+            Some(&effective_session_id),
         )
         .await?;
 
@@ -625,8 +806,16 @@ pub async fn highlight(
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<(), String> {
-    let object_id = resolve_element_object_id(client, session_id, ref_map, selector_or_ref).await?;
+    let (object_id, effective_session_id) = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
 
     client
         .send_command_typed::<_, Value>(
@@ -647,7 +836,7 @@ pub async fn highlight(
                 return_by_value: Some(true),
                 await_promise: Some(false),
             },
-            Some(session_id),
+            Some(&effective_session_id),
         )
         .await?;
 
@@ -659,8 +848,16 @@ pub async fn tap_touch(
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<(), String> {
-    let (x, y) = resolve_element_center(client, session_id, ref_map, selector_or_ref).await?;
+    let (x, y, effective_session_id) = resolve_element_center(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
 
     client
         .send_command(
@@ -669,7 +866,7 @@ pub async fn tap_touch(
                 "type": "touchStart",
                 "touchPoints": [{ "x": x, "y": y }],
             })),
-            Some(session_id),
+            Some(&effective_session_id),
         )
         .await?;
 
@@ -680,7 +877,7 @@ pub async fn tap_touch(
                 "type": "touchEnd",
                 "touchPoints": [],
             })),
-            Some(session_id),
+            Some(&effective_session_id),
         )
         .await?;
 
@@ -821,6 +1018,26 @@ fn punctuation_key_info(ch: char) -> (&'static str, i32) {
     }
 }
 
+/// Return the `text` value that CDP `Input.dispatchKeyEvent` needs on the
+/// `keyDown` event so that Chrome performs the default action for the key.
+/// For example Enter needs `"\r"` to actually submit a form, and Tab needs
+/// `"\t"` to move focus.  Non-printable / navigation keys return `None`.
+fn key_text(key_name: &str) -> Option<String> {
+    match key_name {
+        "Enter" => Some("\r".to_string()),
+        "Tab" => Some("\t".to_string()),
+        " " => Some(" ".to_string()),
+        _ => {
+            // Single printable characters carry themselves as text.
+            if key_name.len() == 1 {
+                Some(key_name.to_string())
+            } else {
+                None
+            }
+        }
+    }
+}
+
 fn named_key_info(key: &str) -> (String, String, i32) {
     match key.to_lowercase().as_str() {
         "enter" | "return" => ("Enter".to_string(), "Enter".to_string(), 13),
@@ -947,5 +1164,20 @@ mod tests {
             );
             assert_eq!(key, ch.to_string());
         }
+    }
+
+    #[test]
+    fn test_key_text_returns_correct_text_for_special_keys() {
+        assert_eq!(key_text("Enter"), Some("\r".to_string()));
+        assert_eq!(key_text("Tab"), Some("\t".to_string()));
+        assert_eq!(key_text(" "), Some(" ".to_string()));
+        // Single printable characters carry themselves.
+        assert_eq!(key_text("a"), Some("a".to_string()));
+        assert_eq!(key_text("Z"), Some("Z".to_string()));
+        // Non-printable named keys return None.
+        assert_eq!(key_text("Escape"), None);
+        assert_eq!(key_text("ArrowUp"), None);
+        assert_eq!(key_text("Backspace"), None);
+        assert_eq!(key_text("Delete"), None);
     }
 }

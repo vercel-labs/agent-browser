@@ -217,7 +217,6 @@ AGENT_BROWSER_COLOR_SCHEME=dark agent-browser connect 9222
 ### Elements not appearing in snapshot
 
 - The app may use multiple webviews. Use `agent-browser tab` to list targets and switch to the right one
-- Use `agent-browser snapshot -i -C` to include cursor-interactive elements (divs with onclick handlers)
 
 ### Cannot type in input fields
 

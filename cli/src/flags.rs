@@ -353,10 +353,20 @@ pub fn parse_flags(args: &[String]) -> Flags {
         extensions,
         profile: env::var("AGENT_BROWSER_PROFILE").ok().or(config.profile),
         state: env::var("AGENT_BROWSER_STATE").ok().or(config.state),
-        proxy: env::var("AGENT_BROWSER_PROXY").ok().or(config.proxy),
+        proxy: env::var("AGENT_BROWSER_PROXY")
+            .ok()
+            .or(config.proxy)
+            .or_else(|| env::var("HTTP_PROXY").ok())
+            .or_else(|| env::var("http_proxy").ok())
+            .or_else(|| env::var("HTTPS_PROXY").ok())
+            .or_else(|| env::var("https_proxy").ok())
+            .or_else(|| env::var("ALL_PROXY").ok())
+            .or_else(|| env::var("all_proxy").ok()),
         proxy_bypass: env::var("AGENT_BROWSER_PROXY_BYPASS")
             .ok()
-            .or(config.proxy_bypass),
+            .or(config.proxy_bypass)
+            .or_else(|| env::var("NO_PROXY").ok())
+            .or_else(|| env::var("no_proxy").ok()),
         args: env::var("AGENT_BROWSER_ARGS").ok().or(config.args),
         user_agent: env::var("AGENT_BROWSER_USER_AGENT")
             .ok()

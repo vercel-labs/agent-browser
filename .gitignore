@@ -6,6 +6,7 @@ dist/
 
 # Native binaries (keep the launcher scripts)
 bin/agent-browser-*
+bin/.install-method
 !bin/agent-browser
 !bin/agent-browser.cmd
 
@@ -56,3 +57,7 @@ docs/package-lock.json
 
 # pnpm
 .pnpm-store/
+
+# next
+.next/
+out/

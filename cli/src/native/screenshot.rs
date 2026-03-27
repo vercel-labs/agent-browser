@@ -2,6 +2,8 @@ use serde::Serialize;
 use serde_json::Value;
 use std::path::PathBuf;
 
+use std::collections::HashMap;
+
 use super::cdp::client::CdpClient;
 use super::cdp::types::*;
 use super::element::RefMap;
@@ -100,10 +102,14 @@ pub async fn take_screenshot(
     session_id: &str,
     ref_map: &RefMap,
     options: &ScreenshotOptions,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<ScreenshotResult, String> {
     let target_rect = if options.annotate {
         match options.selector.as_deref() {
-            Some(selector) => get_rect_for_selector(client, session_id, ref_map, selector).await?,
+            Some(selector) => {
+                get_rect_for_selector(client, session_id, ref_map, selector, iframe_sessions)
+                    .await?
+            }
             None => None,
         }
     } else {
@@ -124,7 +130,8 @@ pub async fn take_screenshot(
         false
     };
 
-    let base64 = capture_screenshot_base64(client, session_id, ref_map, options).await;
+    let base64 =
+        capture_screenshot_base64(client, session_id, ref_map, options, iframe_sessions).await;
 
     if overlay_injected {
         let _ = remove_annotation_overlay(client, session_id).await;
@@ -166,6 +173,7 @@ async fn capture_screenshot_base64(
     session_id: &str,
     ref_map: &RefMap,
     options: &ScreenshotOptions,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<String, String> {
     let mut params = CaptureScreenshotParams {
         format: Some(options.format.clone()),
@@ -200,7 +208,9 @@ async fn capture_screenshot_base64(
             });
         }
     } else if let Some(ref selector) = options.selector {
-        if let Some(rect) = get_rect_for_selector(client, session_id, ref_map, selector).await? {
+        if let Some(rect) =
+            get_rect_for_selector(client, session_id, ref_map, selector, iframe_sessions).await?
+        {
             params.clip = Some(Viewport {
                 x: rect.x,
                 y: rect.y,
@@ -316,10 +326,17 @@ async fn get_rect_for_selector(
     session_id: &str,
     ref_map: &RefMap,
     selector: &str,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<Option<Rect>, String> {
-    let object_id =
-        super::element::resolve_element_object_id(client, session_id, ref_map, selector).await?;
-    get_rect_for_object(client, session_id, &object_id).await
+    let (object_id, effective_session_id) = super::element::resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector,
+        iframe_sessions,
+    )
+    .await?;
+    get_rect_for_object(client, &effective_session_id, &object_id).await
 }
 
 async fn get_rect_for_object(

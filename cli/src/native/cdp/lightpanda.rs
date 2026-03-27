@@ -257,7 +257,9 @@ async fn wait_for_lightpanda_ready(
             ));
         }
 
-        match discover_cdp_url_with_timeout("127.0.0.1", port, LIGHTPANDA_DISCOVERY_TIMEOUT).await {
+        match discover_cdp_url_with_timeout("127.0.0.1", port, None, LIGHTPANDA_DISCOVERY_TIMEOUT)
+            .await
+        {
             Ok(ws_url) => return Ok(ws_url),
             Err(err) => last_probe_error = Some(err),
         }

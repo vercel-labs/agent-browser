@@ -26,6 +26,8 @@ pub struct Response {
     pub success: bool,
     pub data: Option<Value>,
     pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
 }
 
 #[allow(dead_code)]
@@ -120,6 +122,8 @@ fn get_pid_path(session: &str) -> PathBuf {
 fn cleanup_stale_files(session: &str) {
     let pid_path = get_pid_path(session);
     let _ = fs::remove_file(&pid_path);
+    let stream_path = get_socket_dir().join(format!("{}.stream", session));
+    let _ = fs::remove_file(&stream_path);
 
     #[cfg(unix)]
     {
@@ -140,7 +144,7 @@ fn get_port_path(session: &str) -> PathBuf {
 }
 
 #[cfg(windows)]
-fn get_port_for_session(session: &str) -> u16 {
+pub fn get_port_for_session(session: &str) -> u16 {
     let mut hash: i32 = 0;
     for c in session.chars() {
         hash = ((hash << 5).wrapping_sub(hash)).wrapping_add(c as i32);
@@ -150,7 +154,19 @@ fn get_port_for_session(session: &str) -> u16 {
     49152 + ((hash.unsigned_abs() as u32 % 16383) as u16)
 }
 
-fn daemon_ready(session: &str) -> bool {
+/// Read the actual daemon port from the `.port` file written by the daemon.
+/// Falls back to the hash-derived port if the file does not exist or is
+/// unreadable (e.g. daemon has not started yet).
+#[cfg(windows)]
+pub fn resolve_port(session: &str) -> u16 {
+    let port_path = get_port_path(session);
+    fs::read_to_string(&port_path)
+        .ok()
+        .and_then(|s| s.trim().parse::<u16>().ok())
+        .unwrap_or_else(|| get_port_for_session(session))
+}
+
+pub fn daemon_ready(session: &str) -> bool {
     #[cfg(unix)]
     {
         let socket_path = get_socket_path(session);
@@ -158,7 +174,7 @@ fn daemon_ready(session: &str) -> bool {
     }
     #[cfg(windows)]
     {
-        let port = get_port_for_session(session);
+        let port = resolve_port(session);
         TcpStream::connect_timeout(
             &format!("127.0.0.1:{}", port).parse().unwrap(),
             Duration::from_millis(50),
@@ -186,6 +202,8 @@ pub struct DaemonOptions<'a> {
     pub user_agent: Option<&'a str>,
     pub proxy: Option<&'a str>,
     pub proxy_bypass: Option<&'a str>,
+    pub proxy_username: Option<&'a str>,
+    pub proxy_password: Option<&'a str>,
     pub ignore_https_errors: bool,
     pub allow_file_access: bool,
     pub profile: Option<&'a str>,
@@ -230,6 +248,12 @@ fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
     }
     if let Some(pb) = opts.proxy_bypass {
         cmd.env("AGENT_BROWSER_PROXY_BYPASS", pb);
+    }
+    if let Some(pu) = opts.proxy_username {
+        cmd.env("AGENT_BROWSER_PROXY_USERNAME", pu);
+    }
+    if let Some(pp) = opts.proxy_password {
+        cmd.env("AGENT_BROWSER_PROXY_PASSWORD", pp);
     }
     if opts.ignore_https_errors {
         cmd.env("AGENT_BROWSER_IGNORE_HTTPS_ERRORS", "1");
@@ -430,7 +454,7 @@ pub fn ensure_daemon(session: &str, opts: &DaemonOptions) -> Result<DaemonResult
         get_socket_dir().join(format!("{}.sock", session)).display()
     );
     #[cfg(windows)]
-    let endpoint_info = format!("port: 127.0.0.1:{}", get_port_for_session(session));
+    let endpoint_info = format!("port: 127.0.0.1:{}", resolve_port(session));
 
     Err(format!("Daemon failed to start ({})", endpoint_info))
 }
@@ -445,7 +469,7 @@ fn connect(session: &str) -> Result<Connection, String> {
     }
     #[cfg(windows)]
     {
-        let port = get_port_for_session(session);
+        let port = resolve_port(session);
         TcpStream::connect(format!("127.0.0.1:{}", port))
             .map(Connection::Tcp)
             .map_err(|e| format!("Failed to connect: {}", e))
