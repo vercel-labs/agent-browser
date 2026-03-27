@@ -22,6 +22,27 @@ pub async fn run_daemon(session: &str) {
         let _ = fs::create_dir_all(&socket_dir);
     }
 
+    // When debug mode is on, redirect stderr to a log file so daemon
+    // output can be inspected (the daemon normally has stderr piped to its
+    // parent which drops the read end after startup).
+    #[cfg(unix)]
+    if env::var("AGENT_BROWSER_DEBUG").is_ok() {
+        let log_path = socket_dir.join(format!("{}.log", session));
+        if let Ok(file) = fs::File::create(&log_path) {
+            use std::os::unix::io::IntoRawFd;
+            let fd = file.into_raw_fd();
+            unsafe {
+                libc::dup2(fd, 2);
+                libc::close(fd);
+            }
+            let _ = writeln!(
+                std::io::stderr(),
+                "[daemon] Debug logging started for session: {}",
+                session
+            );
+        }
+    }
+
     let pid_path = socket_dir.join(format!("{}.pid", session));
     let _ = fs::write(&pid_path, process::id().to_string());
 
