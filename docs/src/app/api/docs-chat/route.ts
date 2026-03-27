@@ -6,11 +6,12 @@ import { createBashTool } from "bash-tool";
 import { headers } from "next/headers";
 import { allDocsPages } from "@/lib/docs-navigation";
 import { mdxToCleanMarkdown } from "@/lib/mdx-to-markdown";
+import { resolveModel, isAnthropicModel } from "@/lib/model";
 import { minuteRateLimit, dailyRateLimit } from "@/lib/rate-limit";
 
 export const maxDuration = 60;
 
-const DEFAULT_MODEL = "anthropic/claude-haiku-4.5";
+const DEFAULT_MODEL = process.env.DOCS_CHAT_MODEL || "anthropic/claude-haiku-4.5";
 
 const SYSTEM_PROMPT = `You are a helpful documentation assistant for agent-browser, a headless browser automation CLI designed for AI agents.
 
@@ -56,8 +57,11 @@ async function loadDocsFiles(): Promise<Record<string, string>> {
   return files;
 }
 
-function addCacheControl(messages: ModelMessage[]): ModelMessage[] {
-  if (messages.length === 0) return messages;
+function addCacheControl(
+  messages: ModelMessage[],
+  modelId: string,
+): ModelMessage[] {
+  if (messages.length === 0 || !isAnthropicModel(modelId)) return messages;
   return messages.map((message, index) => {
     if (index === messages.length - 1) {
       return {
@@ -104,14 +108,16 @@ export async function POST(req: Request) {
     tools: { bash, readFile },
   } = await createBashTool({ files: docsFiles });
 
+  const model = resolveModel(DEFAULT_MODEL);
+
   const result = streamText({
-    model: DEFAULT_MODEL,
+    model,
     system: SYSTEM_PROMPT,
     messages: await convertToModelMessages(messages),
     stopWhen: stepCountIs(5),
     tools: { bash, readFile },
     prepareStep: ({ messages: stepMessages }) => ({
-      messages: addCacheControl(stepMessages),
+      messages: addCacheControl(stepMessages, DEFAULT_MODEL),
     }),
   });
 
