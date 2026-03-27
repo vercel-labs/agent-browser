@@ -683,10 +683,8 @@ impl DaemonState {
                                         .duration_since(std::time::UNIX_EPOCH)
                                         .map(|d| d.as_millis() as u64)
                                         .unwrap_or(0);
-                                    let mono_start = event
-                                        .params
-                                        .get("timestamp")
-                                        .and_then(|v| v.as_f64());
+                                    let mono_start =
+                                        event.params.get("timestamp").and_then(|v| v.as_f64());
                                     self.tracked_requests.push(TrackedRequest {
                                         url,
                                         method,
@@ -823,8 +821,7 @@ impl DaemonState {
                                     if let Some(len) = encoded_data_length {
                                         entry.encoded_data_length = Some(len);
                                     }
-                                    if let (Some(start), Some(end)) =
-                                        (entry.mono_start, timestamp)
+                                    if let (Some(start), Some(end)) = (entry.mono_start, timestamp)
                                     {
                                         let ms = ((end - start) * 1000.0).round();
                                         if ms >= 0.0 {
