@@ -3608,23 +3608,17 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
             .await
             .ok();
 
-        // Create new browser context
-        let ctx_result = mgr
-            .client
-            .send_command_no_params("Target.createBrowserContext", None)
-            .await?;
-        let context_id = ctx_result
-            .get("browserContextId")
-            .and_then(|v| v.as_str())
-            .ok_or("Failed to get browserContextId")?
-            .to_string();
-
-        // Create page in new context
+        // Create a new TAB in the DEFAULT browser context (no browserContextId).
+        // Previously this used Target.createBrowserContext which creates an
+        // isolated incognito-like context where extensions loaded via
+        // --load-extension are NOT available (Chromium limitation: extensions
+        // require explicit user opt-in for incognito/OTR profiles).
+        // By creating a tab in the default context, extensions work normally.
         let create_result: CreateTargetResult = mgr
             .client
             .send_command_typed(
                 "Target.createTarget",
-                &json!({ "url": "about:blank", "browserContextId": context_id }),
+                &json!({ "url": "about:blank" }),
                 None,
             )
             .await?;
@@ -3644,26 +3638,8 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
         let new_session_id = attach_result.session_id.clone();
         mgr.enable_domains_pub(&new_session_id).await?;
 
-        // Re-apply download behavior to the recording context.
-        // Without this, downloads in the recording context are silently dropped
-        // because Browser.setDownloadBehavior at launch only applies to the default context.
-        if let Some(ref dl_path) = mgr.download_path {
-            let _ = mgr
-                .client
-                .send_command(
-                    "Browser.setDownloadBehavior",
-                    Some(json!({
-                        "behavior": "allow",
-                        "downloadPath": dl_path,
-                        "browserContextId": context_id,
-                        "eventsEnabled": true
-                    })),
-                    None,
-                )
-                .await;
-        }
-
-        // Transfer cookies to new context
+        // Transfer cookies to new tab (same context, but new tab may need them
+        // for navigation to authenticated pages)
         if let Some(ref cr) = cookies_result {
             if let Some(cookie_arr) = cr.get("cookies").and_then(|v| v.as_array()) {
                 if !cookie_arr.is_empty() {
@@ -3711,6 +3687,10 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
         server.set_recording(true, &state.engine).await;
     }
 
+    // Propagate the new session to the screencast stream so the live
+    // preview follows the recording tab.
+    state.update_stream_client().await;
+
     Ok(result)
 }
 
@@ -3721,6 +3701,10 @@ async fn handle_recording_stop(state: &mut DaemonState) -> Result<Value, String>
     if let Some(ref server) = state.stream_server {
         server.set_recording(false, &state.engine).await;
     }
+
+    // Sync the screencast stream back to the current active page
+    // (which may have changed during recording).
+    state.update_stream_client().await;
 
     result
 }

@@ -1,0 +1,9 @@
+The recording function currently:
+1. Creates new BrowserContext
+2. Creates new page in that context
+3. Transfers cookies
+4. Re-applies download behavior
+5. Navigates to URL
+6. Starts recording on the new session
+
+The fix: just record the EXISTING session. No new context needed.
