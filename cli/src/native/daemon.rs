@@ -25,10 +25,18 @@ pub async fn run_daemon(session: &str) {
     let pid_path = socket_dir.join(format!("{}.pid", session));
     let _ = fs::write(&pid_path, process::id().to_string());
 
+    // On Unix the daemon listens on a Unix domain socket; on Windows it uses
+    // TCP, so there is no .sock file — only a .port file written by the server.
     let socket_path = socket_dir.join(format!("{}.sock", session));
 
+    #[cfg(unix)]
     if socket_path.exists() {
         let _ = fs::remove_file(&socket_path);
+    }
+
+    #[cfg(windows)]
+    {
+        let _ = fs::remove_file(socket_dir.join(format!("{}.port", session)));
     }
 
     let stream_path = socket_dir.join(format!("{}.stream", session));
@@ -79,7 +87,14 @@ pub async fn run_daemon(session: &str) {
     )
     .await;
 
-    let _ = fs::remove_file(&socket_path);
+    #[cfg(unix)]
+    {
+        let _ = fs::remove_file(&socket_path);
+    }
+    #[cfg(windows)]
+    {
+        let _ = fs::remove_file(socket_dir.join(format!("{}.port", session)));
+    }
     let _ = fs::remove_file(&pid_path);
     let _ = fs::remove_file(&stream_path);
     let _ = fs::remove_file(socket_dir.join(format!("{}.engine", session)));
@@ -206,14 +221,23 @@ async fn run_socket_server(
 ) -> Result<(), String> {
     use tokio::net::TcpListener;
 
-    let port = get_port_for_session(session);
-    let listener = TcpListener::bind(format!("127.0.0.1:{}", port))
-        .await
-        .map_err(|e| format!("Failed to bind TCP: {}", e))?;
+    let preferred_port = get_port_for_session(session);
+    // Try the hash-derived port first; if it is blocked (e.g. Windows Hyper-V
+    // excluded port range), fall back to an OS-assigned ephemeral port.
+    let listener = match TcpListener::bind(format!("127.0.0.1:{}", preferred_port)).await {
+        Ok(l) => l,
+        Err(_) => TcpListener::bind("127.0.0.1:0")
+            .await
+            .map_err(|e| format!("Failed to bind TCP: {}", e))?,
+    };
+    let actual_port = listener
+        .local_addr()
+        .map_err(|e| format!("Failed to get local address: {}", e))?
+        .port();
 
     let socket_dir = socket_path.parent().unwrap_or(std::path::Path::new("."));
     let port_path = socket_dir.join(format!("{}.port", session));
-    let _ = fs::write(&port_path, port.to_string());
+    let _ = fs::write(&port_path, actual_port.to_string());
 
     let stream_file: Option<PathBuf> = if stream_server.is_some() {
         Some(socket_dir.join(format!("{}.stream", session)))

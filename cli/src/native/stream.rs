@@ -10,9 +10,9 @@ use tokio::sync::{broadcast, watch, Mutex, Notify, RwLock};
 use tokio_tungstenite::tungstenite::Message;
 
 use super::cdp::client::CdpClient;
-#[cfg(windows)]
-use crate::connection::get_port_for_session;
 use crate::connection::get_socket_dir;
+#[cfg(windows)]
+use crate::connection::resolve_port;
 use crate::install::get_dashboard_dir;
 
 /// Frame metadata from CDP Page.screencastFrame events.
@@ -1213,7 +1213,7 @@ async fn relay_command_to_daemon(session_name: &str, body: &str) -> Result<Strin
 
     #[cfg(windows)]
     let stream = {
-        let port = get_port_for_session(session_name);
+        let port = resolve_port(session_name);
         tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
             .await
             .map_err(|e| format!("Failed to connect to daemon: {}", e))?
