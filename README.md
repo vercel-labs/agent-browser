@@ -363,6 +363,19 @@ agent-browser install --with-deps     # Also install system deps (Linux)
 agent-browser upgrade                 # Upgrade agent-browser to the latest version
 ```
 
+### Authentication Vault
+
+```bash
+agent-browser auth save <name> --url <url> --username <user> --password <pass>
+agent-browser auth save <name> --url <url> --username <user> --password-stdin
+agent-browser auth login <name>
+agent-browser auth list
+agent-browser auth show <name>
+agent-browser auth delete <name>
+```
+
+Use these commands to store credentials locally (encrypted), then perform a login flow without exposing passwords to your agent or shell history. For shell safety, prefer `--password-stdin` over `--password` when possible.
+
 ## Authentication
 
 agent-browser provides multiple ways to persist login sessions so you don't re-authenticate every run.
@@ -376,6 +389,8 @@ agent-browser provides multiple ways to persist login sessions so you don't re-a
 | **Import from your browser** | Grab auth from a Chrome session you already logged into | `--auto-connect` + `state save` |
 | **State file** | Load a previously saved state JSON on launch | `--state <path>` / `AGENT_BROWSER_STATE` |
 | **Auth vault** | Store credentials locally (encrypted), login by name | `auth save` / `auth login` |
+
+If you are scanning the command list first, note that the auth vault commands live under `agent-browser auth ...`.
 
 ### Import auth from your browser
 
