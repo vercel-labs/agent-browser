@@ -1,5 +1,10 @@
 # agent-browser
 
+[![CI](https://github.com/vercel-labs/agent-browser/workflows/CI/badge.svg)](https://github.com/vercel-labs/agent-browser/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![npm version](https://badge.fury.io/js/agent-browser.svg)](https://www.npmjs.com/package/agent-browser)
+[![Contributions Welcome](https://img.shields.io/badge/contributions-welcome-brightgreen.svg?style=flat)](https://github.com/vercel-labs/agent-browser/blob/main/CONTRIBUTING.md)
+
 Headless browser automation CLI for AI agents. Fast Rust CLI with Node.js fallback.
 
 ## Installation
