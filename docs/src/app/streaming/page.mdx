@@ -3,27 +3,25 @@
 Stream the browser viewport via WebSocket for live preview or "pair browsing"
 where a human can watch and interact alongside an AI agent.
 
-## Enable streaming
+## Streaming
 
-For an already-running session, enable streaming at runtime:
+Every session automatically starts a WebSocket stream server on an OS-assigned port. The server streams viewport frames and accepts input events (mouse, keyboard, touch).
 
-```bash
-agent-browser stream enable
-agent-browser stream status
-agent-browser stream disable
-```
-
-`stream enable` binds an available localhost port automatically unless you pass `--port <port>`. `stream status` returns the enabled state, active port, browser connection state, and whether screencasting is active. `stream disable` tears the server down and removes the session's `.stream` metadata file.
-
-If you want the WebSocket server to exist from daemon startup, set `AGENT_BROWSER_STREAM_PORT` before the first command in that session:
+To bind to a specific port, set `AGENT_BROWSER_STREAM_PORT`:
 
 ```bash
 AGENT_BROWSER_STREAM_PORT=9223 agent-browser open example.com
 ```
 
-The environment variable only affects daemon startup. For sessions that are already running, use `agent-browser stream enable` instead.
+You can also manage streaming at runtime:
 
-Once enabled, the server streams viewport frames and accepts input events (mouse, keyboard, touch).
+```bash
+agent-browser stream status            # Show streaming state and bound port
+agent-browser stream enable --port 9223  # Re-enable on a specific port
+agent-browser stream disable           # Stop streaming for the session
+```
+
+`stream status` returns the enabled state, active port, browser connection state, and whether screencasting is active. `stream disable` tears the server down and removes the session's `.stream` metadata file.
 
 ## Runtime status response
 

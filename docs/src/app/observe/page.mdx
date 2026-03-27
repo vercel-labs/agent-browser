@@ -1,0 +1,130 @@
+# Observability Dashboard
+
+Monitor agent-browser sessions in real time with a local web dashboard showing a live browser viewport and command activity feed.
+
+## Install
+
+Download the dashboard once:
+
+```bash
+agent-browser dashboard install
+```
+
+This downloads the dashboard to `~/.agent-browser/dashboard/` and is served directly by the daemon when streaming is enabled.
+
+## Usage
+
+Start the dashboard server and open any session -- it appears automatically:
+
+```bash
+agent-browser dashboard start
+agent-browser open example.com
+```
+
+Then open `http://localhost:4848` in your browser to see the live dashboard.
+
+All sessions automatically stream to the dashboard. No extra flags are needed.
+
+### Custom stream port
+
+By default each session binds its WebSocket stream server to an OS-assigned port. To use a specific port, set the `AGENT_BROWSER_STREAM_PORT` environment variable:
+
+```bash
+AGENT_BROWSER_STREAM_PORT=9223 agent-browser open example.com
+```
+
+You can also use the runtime commands to control streaming on a running session:
+
+```bash
+agent-browser stream enable --port 9223
+agent-browser stream status
+agent-browser stream disable
+```
+
+## Dashboard features
+
+The dashboard is a single-page web app with three areas:
+
+<table>
+  <thead>
+    <tr>
+      <th>Area</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>Live viewport</strong></td>
+      <td>Real-time JPEG frames from the browser, rendered to a canvas element</td>
+    </tr>
+    <tr>
+      <td><strong>Activity feed</strong></td>
+      <td>Chronological stream of commands, results, and console messages with expandable details</td>
+    </tr>
+    <tr>
+      <td><strong>Status bar</strong></td>
+      <td>Connection status, viewport dimensions, and WebSocket endpoint</td>
+    </tr>
+  </tbody>
+</table>
+
+## WebSocket protocol
+
+The dashboard connects to the same WebSocket endpoint used by [Streaming](/streaming), with additional message types for observability:
+
+### Command events
+
+Sent when a command begins executing:
+
+```json
+{
+  "type": "command",
+  "action": "click",
+  "id": "r123",
+  "params": { "selector": "@e5" },
+  "timestamp": 1711367000000
+}
+```
+
+### Result events
+
+Sent when a command finishes:
+
+```json
+{
+  "type": "result",
+  "id": "r123",
+  "action": "click",
+  "success": true,
+  "data": {},
+  "duration_ms": 45,
+  "timestamp": 1711367000045
+}
+```
+
+### Console events
+
+Sent when the browser logs to the console:
+
+```json
+{
+  "type": "console",
+  "level": "log",
+  "text": "Page loaded",
+  "timestamp": 1711367000100
+}
+```
+
+These are in addition to the existing `frame`, `status`, and `error` message types documented on the [Streaming](/streaming) page.
+
+## Architecture
+
+The dashboard is a Next.js static export (`output: 'export'`) that produces plain HTML, CSS, and JS. It lives at `packages/dashboard/` in the monorepo and is built with:
+
+```bash
+pnpm build:dashboard
+```
+
+The built files are served by the daemon's stream server on the same port used for WebSocket connections. Plain HTTP requests serve the dashboard, while WebSocket upgrade requests are handled as before.
+
+When the dashboard is not installed, visiting the HTTP endpoint shows instructions to run `agent-browser dashboard install`.

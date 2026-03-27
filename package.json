@@ -24,7 +24,8 @@
     "postinstall": "node scripts/postinstall.js",
     "changeset": "changeset",
     "ci:version": "changeset version && pnpm run version:sync && pnpm install --no-frozen-lockfile",
-    "ci:publish": "pnpm run version:sync && changeset publish"
+    "ci:publish": "pnpm run version:sync && changeset publish",
+    "build:dashboard": "cd packages/dashboard && pnpm build"
   },
   "keywords": [
     "browser",

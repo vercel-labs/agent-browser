@@ -129,6 +129,7 @@ agent-browser stream enable [--port <port>]  # Start runtime WebSocket streaming
 agent-browser stream status           # Show runtime streaming state and bound port
 agent-browser stream disable          # Stop runtime WebSocket streaming
 agent-browser close                   # Close browser (aliases: quit, exit)
+agent-browser close --all             # Close all active sessions
 ```
 
 ### Get Info
@@ -596,6 +597,32 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 | `--config <path>` | Use a custom config file (or `AGENT_BROWSER_CONFIG` env) |
 | `--debug` | Debug output |
 
+## Observability Dashboard
+
+Monitor agent-browser sessions in real time with a local web dashboard showing a live viewport and command activity feed.
+
+```bash
+# Install the dashboard (one time)
+agent-browser dashboard install
+
+# Start the dashboard server (runs in background on port 4848)
+agent-browser dashboard start
+agent-browser dashboard start --port 8080   # Custom port
+
+# All sessions are automatically visible in the dashboard
+agent-browser open example.com
+
+# Stop the dashboard
+agent-browser dashboard stop
+```
+
+The dashboard runs as a standalone background process on port 4848, independent of browser sessions. It stays available even when no sessions are running. All sessions automatically stream to the dashboard.
+
+The dashboard displays:
+- **Live viewport** -- real-time JPEG frames from the browser
+- **Activity feed** -- chronological command/result stream with timing and expandable details
+- **Console output** -- browser console messages (log, warn, error)
+
 ## Configuration
 
 Create an `agent-browser.json` file to set persistent defaults instead of repeating flags on every command.
@@ -926,28 +953,28 @@ This is useful when:
 
 Stream the browser viewport via WebSocket for live preview or "pair browsing" where a human can watch and interact alongside an AI agent.
 
-### Enable Streaming
+### Streaming
 
-For an already-running session, enable streaming at runtime:
+Every session automatically starts a WebSocket stream server on an OS-assigned port. Use `stream status` to see the bound port and connection state:
 
 ```bash
-agent-browser stream enable
 agent-browser stream status
-agent-browser stream disable
 ```
 
-`stream enable` binds an available localhost port automatically unless you pass `--port <port>`.
-Use `stream status` to inspect whether streaming is enabled, which port is active, whether a browser is attached, and whether screencasting is active.
-
-If you want streaming to be available immediately when the daemon starts, set `AGENT_BROWSER_STREAM_PORT` before the first command in that session:
+To bind to a specific port, set `AGENT_BROWSER_STREAM_PORT`:
 
 ```bash
 AGENT_BROWSER_STREAM_PORT=9223 agent-browser open example.com
 ```
 
-The environment variable only affects daemon startup. For sessions that are already running, use `agent-browser stream enable` instead.
+You can also manage streaming at runtime with `stream enable`, `stream disable`, and `stream status`:
 
-Once enabled, the WebSocket server streams the browser viewport and accepts input events.
+```bash
+agent-browser stream enable --port 9223   # Re-enable on a specific port
+agent-browser stream disable              # Stop streaming for the session
+```
+
+The WebSocket server streams the browser viewport and accepts input events.
 
 ### WebSocket Protocol
 

@@ -1596,11 +1596,14 @@ Examples:
             r##"
 agent-browser close - Close the browser
 
-Usage: agent-browser close
+Usage: agent-browser close [options]
 
 Closes the browser instance for the current session.
 
 Aliases: quit, exit
+
+Options:
+  --all                Close all active sessions
 
 Global Options:
   --json               Output as JSON
@@ -1609,6 +1612,7 @@ Global Options:
 Examples:
   agent-browser close
   agent-browser close --session mysession
+  agent-browser close --all
 "##
         }
 
@@ -2388,6 +2392,40 @@ Examples:
 "##
         }
 
+        // === Dashboard ===
+        "dashboard" => {
+            r##"
+agent-browser dashboard - Observability dashboard
+
+Usage: agent-browser dashboard [start|stop|install] [options]
+
+Manage the observability dashboard, a local web UI that shows live
+browser viewports and command activity feeds for all sessions.
+
+Subcommands:
+  start [--port <n>]   Start the dashboard server (default port: 4848)
+  stop                 Stop the dashboard server
+  install              Download and install the dashboard to ~/.agent-browser/dashboard/
+
+Running 'agent-browser dashboard' with no subcommand is equivalent to 'dashboard start'.
+
+The dashboard runs as a standalone background process, independent of
+browser sessions. All sessions automatically stream to the dashboard.
+
+Options:
+  --port <n>           Port for the dashboard server (default: 4848)
+
+Global Options:
+  --json               Output as JSON
+
+Examples:
+  agent-browser dashboard install
+  agent-browser dashboard start
+  agent-browser dashboard start --port 8080
+  agent-browser dashboard stop
+"##
+        }
+
         // === Connect ===
         "connect" => {
             r##"
@@ -2446,8 +2484,8 @@ Notes:
   - 'stream enable' creates the WebSocket server.
   - WebSocket clients trigger frame streaming automatically.
   - 'screencast_start' and 'screencast_stop' still control explicit CDP screencasts.
-  - AGENT_BROWSER_STREAM_PORT only affects daemon startup; use 'stream enable'
-    for sessions that are already running.
+  - Streaming is always enabled. Set AGENT_BROWSER_STREAM_PORT to bind to a
+    specific port instead of the default OS-assigned port.
 
 Global Options:
   --json               Output as JSON
@@ -2652,7 +2690,7 @@ Core Commands:
   snapshot                   Accessibility tree with refs (for AI)
   eval <js>                  Run JavaScript
   connect <port|url>         Connect to browser via CDP
-  close                      Close browser
+  close [--all]              Close browser (--all closes every session)
 
 Navigation:
   back                       Go back
@@ -2729,10 +2767,16 @@ Sessions:
   session                    Show current session name
   session list               List active sessions
 
+Dashboard:
+  dashboard [start]          Start the dashboard server (default port: 4848)
+  dashboard start --port <n> Start on a specific port
+  dashboard stop             Stop the dashboard server
+
 Setup:
   install                    Install browser binaries
   install --with-deps        Also install system dependencies (Linux)
   upgrade                    Upgrade to the latest version
+  dashboard install          Install the observability dashboard
 
 Snapshot Options:
   -i, --interactive          Only interactive elements
@@ -2827,7 +2871,7 @@ Environment:
   AGENT_BROWSER_SESSION_NAME     Auto-save/load state persistence name
   AGENT_BROWSER_STATE_EXPIRE_DAYS Auto-delete saved states older than N days (default: 30)
   AGENT_BROWSER_ENCRYPTION_KEY   64-char hex key for AES-256-GCM session encryption
-  AGENT_BROWSER_STREAM_PORT      Enable WebSocket streaming on port (e.g., 9223)
+  AGENT_BROWSER_STREAM_PORT      Override WebSocket streaming port (default: OS-assigned)
   AGENT_BROWSER_IDLE_TIMEOUT_MS  Auto-shutdown daemon after N ms of inactivity (disabled by default)
   AGENT_BROWSER_IOS_DEVICE       Default iOS device name
   AGENT_BROWSER_IOS_UDID         Default iOS device UDID

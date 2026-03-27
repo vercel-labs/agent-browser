@@ -212,6 +212,8 @@ pub struct DaemonState {
     pub stream_client: Option<Arc<RwLock<Option<Arc<CdpClient>>>>>,
     /// Stream server instance kept alive so the broadcast channel remains open.
     pub stream_server: Option<Arc<StreamServer>>,
+    /// Browser engine name (e.g. "chrome", "lightpanda") for observability.
+    pub engine: String,
 }
 
 impl DaemonState {
@@ -254,6 +256,7 @@ impl DaemonState {
             pending_dialog: None,
             stream_client: None,
             stream_server: None,
+            engine: env::var("AGENT_BROWSER_ENGINE").unwrap_or_else(|_| "chrome".to_string()),
         }
     }
 
@@ -268,6 +271,9 @@ impl DaemonState {
         stream_server: Option<Arc<StreamServer>>,
     ) -> Self {
         let mut s = Self::new();
+        if stream_server.is_some() {
+            s.request_tracking = true;
+        }
         s.stream_client = stream_client;
         s.stream_server = stream_server;
         s
@@ -410,7 +416,14 @@ impl DaemonState {
             let connected = self.browser.is_some();
             let sc = server.is_screencasting().await;
             let (vw, vh) = server.viewport().await;
-            server.broadcast_status(connected, sc, vw, vh);
+            server
+                .broadcast_status(connected, sc, vw, vh, &self.engine)
+                .await;
+            if let Some(ref mgr) = self.browser {
+                server.broadcast_tabs(&mgr.tab_list()).await;
+            } else {
+                server.broadcast_tabs(&[]).await;
+            }
             // Notify the background CDP event loop that the client changed
             server.notify_client_changed();
         }
@@ -439,6 +452,10 @@ impl DaemonState {
 
     async fn stop_recording_task(&mut self) -> Result<(), String> {
         recording::stop_recording_task(&mut self.recording_state).await
+    }
+
+    pub fn drain_cdp_events_background(&mut self) {
+        let _ = self.drain_cdp_events();
     }
 
     fn drain_cdp_events(&mut self) -> DrainedEvents {
@@ -557,6 +574,9 @@ impl DaemonState {
                                     .join(" ");
                                 self.event_tracker
                                     .add_console(&console_event.call_type, &text);
+                                if let Some(ref server) = self.stream_server {
+                                    server.broadcast_console(&console_event.call_type, &text);
+                                }
                             }
                         }
                         "Runtime.exceptionThrown" => {
@@ -575,6 +595,13 @@ impl DaemonState {
                                     details.line_number,
                                     details.column_number,
                                 );
+                                if let Some(ref server) = self.stream_server {
+                                    server.broadcast_page_error(
+                                        text,
+                                        details.line_number,
+                                        details.column_number,
+                                    );
+                                }
                             }
                         }
                         "Network.requestWillBeSent"
@@ -836,6 +863,12 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
+
+    let cmd_start = std::time::Instant::now();
+
+    if let Some(ref server) = state.stream_server {
+        server.broadcast_command(action, &id, cmd);
+    }
 
     // Drain pending CDP events (console, errors, screencast frames, target lifecycle)
     let DrainedEvents {
@@ -1221,6 +1254,31 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         }
     }
 
+    if let Some(ref server) = state.stream_server {
+        let duration_ms = cmd_start.elapsed().as_millis() as u64;
+        let success = resp
+            .get("status")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| s == "success");
+        let data = resp.get("data").cloned().unwrap_or(Value::Null);
+        server.broadcast_result(&id, action, success, &data, duration_ms);
+
+        if let Some(ref mgr) = state.browser {
+            server.broadcast_tabs(&mgr.tab_list()).await;
+
+            // Keep the stream server's CDP session in sync with the active tab
+            // so screencasting always targets the correct page.
+            if matches!(
+                action,
+                "tab_new" | "tab_switch" | "tab_close" | "open" | "navigate"
+            ) {
+                let session_id = mgr.active_session_id().ok().map(|s| s.to_string());
+                server.set_cdp_session_id(session_id).await;
+                server.notify_client_changed();
+            }
+        }
+    }
+
     resp
 }
 
@@ -1254,6 +1312,10 @@ async fn auto_launch(state: &mut DaemonState) -> Result<(), String> {
             options.proxy_password.clone().unwrap_or_default(),
         ));
     }
+
+    state.engine = engine.as_deref().unwrap_or("chrome").to_string();
+    write_engine_file(&state.session_id, &state.engine);
+    write_extensions_file(&state.session_id);
 
     if let Ok(cdp) = env::var("AGENT_BROWSER_CDP") {
         let mgr = BrowserManager::connect_cdp(&cdp).await?;
@@ -1569,6 +1631,9 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         *df = Some(DomainFilter::new(domains));
     }
 
+    state.engine = engine.as_deref().unwrap_or("chrome").to_string();
+    write_engine_file(&state.session_id, &state.engine);
+    write_extensions_file(&state.session_id);
     state.reset_input_state();
     state.browser = Some(BrowserManager::launch(options, engine.as_deref()).await?);
     state.subscribe_to_browser_events();
@@ -1640,6 +1705,9 @@ async fn launch_ios(cmd: &Value, state: &mut DaemonState) -> Result<Value, Strin
 
     state.appium = Some(appium);
     state.backend_type = BackendType::WebDriver;
+    state.engine = "safari".to_string();
+    write_engine_file(&state.session_id, &state.engine);
+    write_extensions_file(&state.session_id);
     state.reset_input_state();
 
     Ok(json!({
@@ -1684,6 +1752,9 @@ async fn launch_safari(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     state.safari_driver = Some(driver);
     state.webdriver_backend = Some(WebDriverBackend::new(client));
     state.backend_type = BackendType::WebDriver;
+    state.engine = "safari".to_string();
+    write_engine_file(&state.session_id, &state.engine);
+    write_extensions_file(&state.session_id);
     state.reset_input_state();
 
     Ok(json!({
@@ -3215,7 +3286,27 @@ async fn handle_tab_switch(cmd: &Value, state: &mut DaemonState) -> Result<Value
     state.ref_map.clear();
     state.iframe_sessions.clear();
     state.active_frame_id = None;
-    mgr.tab_switch(index).await
+    let result = mgr.tab_switch(index).await?;
+
+    if let Some(ref server) = state.stream_server {
+        if let Ok(dims) = mgr
+            .evaluate(
+                "JSON.stringify([window.innerWidth,window.innerHeight])",
+                None,
+            )
+            .await
+        {
+            if let Some(s) = dims.get("result").and_then(|v| v.as_str()) {
+                if let Ok(arr) = serde_json::from_str::<Vec<u32>>(s) {
+                    if arr.len() == 2 && arr[0] > 0 && arr[1] > 0 {
+                        server.set_viewport(arr[0], arr[1]).await;
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(result)
 }
 
 async fn handle_tab_close(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -3264,11 +3355,26 @@ async fn handle_set_media(cmd: &Value, state: &DaemonState) -> Result<Value, Str
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let media = cmd.get("media").and_then(|v| v.as_str());
 
-    let features = cmd.get("features").and_then(|v| v.as_object()).map(|m| {
-        m.iter()
-            .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
-            .collect::<Vec<(String, String)>>()
-    });
+    let mut feat_list: Vec<(String, String)> = Vec::new();
+
+    if let Some(scheme) = cmd.get("colorScheme").and_then(|v| v.as_str()) {
+        feat_list.push(("prefers-color-scheme".to_string(), scheme.to_string()));
+    }
+    if let Some(motion) = cmd.get("reducedMotion").and_then(|v| v.as_str()) {
+        feat_list.push(("prefers-reduced-motion".to_string(), motion.to_string()));
+    }
+
+    if let Some(obj) = cmd.get("features").and_then(|v| v.as_object()) {
+        for (k, v) in obj {
+            feat_list.push((k.clone(), v.as_str().unwrap_or("").to_string()));
+        }
+    }
+
+    let features = if feat_list.is_empty() {
+        None
+    } else {
+        Some(feat_list)
+    };
 
     mgr.set_emulated_media(media, features).await?;
     Ok(json!({ "set": true }))
@@ -3601,12 +3707,22 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
     let result = recording::recording_start(&mut state.recording_state, path)?;
     state.start_recording_task(client, new_session_id).await?;
 
+    if let Some(ref server) = state.stream_server {
+        server.set_recording(true, &state.engine).await;
+    }
+
     Ok(result)
 }
 
 async fn handle_recording_stop(state: &mut DaemonState) -> Result<Value, String> {
     state.stop_recording_task().await?;
-    recording::recording_stop(&mut state.recording_state)
+    let result = recording::recording_stop(&mut state.recording_state);
+
+    if let Some(ref server) = state.stream_server {
+        server.set_recording(false, &state.engine).await;
+    }
+
+    result
 }
 
 async fn handle_recording_restart(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -4256,15 +4372,21 @@ async fn handle_device(cmd: &Value, state: &DaemonState) -> Result<Value, String
         .ok_or("Missing 'name' parameter")?;
 
     let (width, height, scale, mobile, ua) = match name.to_lowercase().as_str() {
+        "iphone 15" | "iphone15" => (393, 852, 3.0, true, "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"),
+        "iphone 16" | "iphone16" => (393, 852, 3.0, true, "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1"),
+        "iphone 16 pro" | "iphone16pro" => (402, 874, 3.0, true, "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1"),
+        "iphone 17" | "iphone17" => (402, 874, 3.0, true, "Mozilla/5.0 (iPhone; CPU iPhone OS 19_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/19.0 Mobile/15E148 Safari/604.1"),
+        "ipad" | "ipad air" => (820, 1180, 2.0, true, "Mozilla/5.0 (iPad; CPU OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/604.1"),
+        "ipad pro" => (1024, 1366, 2.0, true, "Mozilla/5.0 (iPad; CPU OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/604.1"),
+        "pixel 9" | "pixel9" => (412, 923, 2.625, true, "Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36"),
+        "galaxy s25" | "galaxys25" => (360, 800, 3.0, true, "Mozilla/5.0 (Linux; Android 15; SM-S931B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36"),
+        // Legacy aliases
         "iphone 12" | "iphone12" => (390, 844, 3.0, true, "Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15E148 Safari/604.1"),
         "iphone 14" | "iphone14" => (390, 844, 3.0, true, "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1"),
-        "iphone 15" | "iphone15" => (393, 852, 3.0, true, "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"),
-        "ipad" | "ipad air" => (820, 1180, 2.0, true, "Mozilla/5.0 (iPad; CPU OS 14_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Safari/604.1"),
-        "ipad pro" => (1024, 1366, 2.0, true, "Mozilla/5.0 (iPad; CPU OS 14_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Safari/604.1"),
         "pixel 5" | "pixel5" => (393, 851, 2.75, true, "Mozilla/5.0 (Linux; Android 11; Pixel 5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.91 Mobile Safari/537.36"),
         "pixel 7" | "pixel7" => (412, 915, 2.625, true, "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36"),
         "galaxy s21" | "galaxys21" => (360, 800, 3.0, true, "Mozilla/5.0 (Linux; Android 11; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.91 Mobile Safari/537.36"),
-        _ => return Err(format!("Unknown device: {}. Supported: iPhone 12, iPhone 14, iPhone 15, iPad, iPad Pro, Pixel 5, Pixel 7, Galaxy S21", name)),
+        _ => return Err(format!("Unknown device: {}. Supported: iPhone 15, iPhone 16, iPhone 16 Pro, iPhone 17, iPad, iPad Pro, Pixel 9, Galaxy S25", name)),
     };
 
     mgr.set_viewport(width, height, scale, mobile).await?;
@@ -4316,6 +4438,37 @@ fn remove_stream_file(session_id: &str) -> Result<(), String> {
     }
 }
 
+fn engine_file_path(session_id: &str) -> PathBuf {
+    get_socket_dir().join(format!("{}.engine", session_id))
+}
+
+fn write_engine_file(session_id: &str, engine: &str) {
+    let _ = fs::write(engine_file_path(session_id), engine);
+}
+
+fn remove_engine_file(session_id: &str) {
+    let _ = fs::remove_file(engine_file_path(session_id));
+}
+
+fn extensions_file_path(session_id: &str) -> PathBuf {
+    get_socket_dir().join(format!("{}.extensions", session_id))
+}
+
+fn write_extensions_file(session_id: &str) {
+    if let Ok(val) = env::var("AGENT_BROWSER_EXTENSIONS") {
+        let trimmed = val.trim();
+        if !trimmed.is_empty() {
+            let _ = fs::write(extensions_file_path(session_id), trimmed);
+            return;
+        }
+    }
+    let _ = fs::remove_file(extensions_file_path(session_id));
+}
+
+fn remove_extensions_file(session_id: &str) {
+    let _ = fs::remove_file(extensions_file_path(session_id));
+}
+
 async fn current_stream_status(state: &DaemonState) -> Value {
     debug_assert_eq!(
         state.stream_server.is_some(),
@@ -4356,7 +4509,7 @@ async fn handle_stream_enable(cmd: &Value, state: &mut DaemonState) -> Result<Va
     };
 
     let (server, client_slot) =
-        StreamServer::start_without_client(requested_port, state.session_id.clone()).await?;
+        StreamServer::start_without_client(requested_port, state.session_id.clone(), false).await?;
     let port = server.port();
     if let Err(err) = write_stream_file(&state.session_id, port) {
         server.shutdown().await;
@@ -4365,6 +4518,7 @@ async fn handle_stream_enable(cmd: &Value, state: &mut DaemonState) -> Result<Va
 
     state.stream_client = Some(client_slot);
     state.stream_server = Some(Arc::new(server));
+    state.request_tracking = true;
     if state.screencasting {
         if let Some(ref server) = state.stream_server {
             server.set_screencasting(true).await;
@@ -4384,6 +4538,7 @@ async fn handle_stream_disable(state: &mut DaemonState) -> Result<Value, String>
     state.stream_server = None;
     state.stream_client = None;
     remove_stream_file(&state.session_id)?;
+    remove_engine_file(&state.session_id);
 
     Ok(json!({ "disabled": true }))
 }
@@ -4434,7 +4589,15 @@ async fn handle_screencast_start(cmd: &Value, state: &mut DaemonState) -> Result
 
     if let Some(ref server) = state.stream_server {
         server.set_screencasting(true).await;
-        server.broadcast_status(true, true, max_width as u32, max_height as u32);
+        server
+            .broadcast_status(
+                true,
+                true,
+                max_width as u32,
+                max_height as u32,
+                &state.engine,
+            )
+            .await;
     }
 
     Ok(json!({ "started": true }))
@@ -4454,7 +4617,9 @@ async fn handle_screencast_stop(state: &mut DaemonState) -> Result<Value, String
     if let Some(ref server) = state.stream_server {
         server.set_screencasting(false).await;
         let (vw, vh) = server.viewport().await;
-        server.broadcast_status(true, false, vw, vh);
+        server
+            .broadcast_status(true, false, vw, vh, &state.engine)
+            .await;
     }
 
     Ok(json!({ "stopped": true }))

@@ -34,6 +34,7 @@ agent-browser stream enable [--port <port>]  # Start runtime WebSocket streaming
 agent-browser stream status           # Show runtime streaming state and bound port
 agent-browser stream disable          # Stop runtime WebSocket streaming
 agent-browser close                   # Close browser (aliases: quit, exit)
+agent-browser close --all             # Close all active sessions
 ```
 
 ## Get info
@@ -240,7 +241,7 @@ agent-browser stream status           # Show enabled state, port, browser connec
 agent-browser stream disable          # Stop runtime streaming and remove the .stream metadata file
 ```
 
-Use `stream enable` for sessions that are already running. If you need streaming from daemon startup, set `AGENT_BROWSER_STREAM_PORT` before the first command in that session.
+Streaming is enabled automatically for all sessions. Use these commands to check status, re-enable on a specific port, or disable streaming.
 
 ## Debug
 
@@ -323,6 +324,15 @@ agent-browser state clean --older-than <days>  # Delete old states
 ```bash
 agent-browser session                 # Show current session name
 agent-browser session list            # List active sessions
+```
+
+## Dashboard
+
+```bash
+agent-browser dashboard [start]       # Start the dashboard server (default port: 4848)
+agent-browser dashboard start --port <n>  # Start on a specific port
+agent-browser dashboard stop          # Stop the dashboard server
+agent-browser dashboard install       # Install the dashboard files
 ```
 
 ## Navigation

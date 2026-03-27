@@ -110,6 +110,7 @@ See [references/authentication.md](references/authentication.md) for OAuth, 2FA,
 # Navigation
 agent-browser open <url>              # Navigate (aliases: goto, navigate)
 agent-browser close                   # Close browser
+agent-browser close --all             # Close all active sessions
 
 # Snapshot
 agent-browser snapshot -i             # Interactive elements with refs (recommended)
@@ -198,11 +199,9 @@ agent-browser diff url <url1> <url2> --wait-until networkidle  # Custom wait str
 agent-browser diff url <url1> <url2> --selector "#main"  # Scope to element
 ```
 
-## Runtime Streaming
+## Streaming
 
-Use `agent-browser stream enable` when you need a live WebSocket preview for an already-running session. This is the preferred runtime path because it does not require restarting the daemon. `stream enable` creates the server, `stream status` reports the bound port and connection state, and `stream disable` tears it down cleanly.
-
-If streaming must be present from the first daemon command, `AGENT_BROWSER_STREAM_PORT` still works at daemon startup, but that environment variable is not retroactive for sessions that are already running.
+Every session automatically starts a WebSocket stream server on an OS-assigned port. Use `agent-browser stream status` to see the bound port and connection state. Use `stream disable` to tear it down, and `stream enable --port <port>` to re-enable on a specific port.
 
 ## Batch Execution
 
@@ -578,9 +577,10 @@ Always close your browser session when done to avoid leaked processes:
 ```bash
 agent-browser close                    # Close default session
 agent-browser --session agent1 close   # Close specific session
+agent-browser close --all              # Close all active sessions
 ```
 
-If a previous session was not closed properly, the daemon may still be running. Use `agent-browser close` to clean it up before starting new work.
+If a previous session was not closed properly, the daemon may still be running. Use `agent-browser close` to clean it up, or `agent-browser close --all` to shut down every session at once.
 
 To auto-shutdown the daemon after a period of inactivity (useful for ephemeral/CI environments):
 
@@ -711,6 +711,26 @@ Supported engines:
 - `lightpanda` -- Lightpanda headless browser via CDP (10x faster, 10x less memory than Chrome)
 
 Lightpanda does not support `--extension`, `--profile`, `--state`, or `--allow-file-access`. Install Lightpanda from https://lightpanda.io/docs/open-source/installation.
+
+## Observability Dashboard
+
+The dashboard is a standalone background server that shows live browser viewports, command activity, and console output for all sessions.
+
+```bash
+# Install the dashboard once
+agent-browser dashboard install
+
+# Start the dashboard server (background, port 4848)
+agent-browser dashboard start
+
+# All sessions are automatically visible in the dashboard
+agent-browser open example.com
+
+# Stop the dashboard
+agent-browser dashboard stop
+```
+
+The dashboard runs independently of browser sessions on port 4848 (configurable with `--port`). All sessions automatically stream to the dashboard.
 
 ## Ready-to-Use Templates
 

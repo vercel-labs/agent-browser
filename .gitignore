@@ -57,3 +57,7 @@ docs/package-lock.json
 
 # pnpm
 .pnpm-store/
+
+# next
+.next/
+out/

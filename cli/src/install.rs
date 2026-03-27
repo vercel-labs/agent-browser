@@ -643,3 +643,124 @@ fn package_exists_apt(pkg: &str) -> bool {
         .map(|s| s.success())
         .unwrap_or(false)
 }
+
+// ---------------------------------------------------------------------------
+// Dashboard install
+// ---------------------------------------------------------------------------
+
+pub fn get_dashboard_dir() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".agent-browser")
+        .join("dashboard")
+}
+
+const DASHBOARD_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+fn dashboard_download_url() -> String {
+    format!(
+        "https://github.com/vercel-labs/agent-browser/releases/download/v{}/dashboard.zip",
+        DASHBOARD_VERSION
+    )
+}
+
+pub fn run_dashboard_install() {
+    println!("{}", color::cyan("Installing dashboard..."));
+
+    let dest = get_dashboard_dir();
+
+    if dest.join("index.html").exists() {
+        println!(
+            "{} Dashboard is already installed at {}",
+            color::success_indicator(),
+            dest.display()
+        );
+        return;
+    }
+
+    let url = dashboard_download_url();
+    println!("  Downloading dashboard v{}", DASHBOARD_VERSION);
+    println!("  {}", url);
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap_or_else(|e| {
+            eprintln!(
+                "{} Failed to create runtime: {}",
+                color::error_indicator(),
+                e
+            );
+            exit(1);
+        });
+
+    let bytes = match rt.block_on(download_bytes(&url)) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("{} {}", color::error_indicator(), e);
+            eprintln!("  The dashboard may not be available for this version yet.");
+            eprintln!("  You can build it locally: cd packages/dashboard && pnpm build");
+            exit(1);
+        }
+    };
+
+    match extract_dashboard_zip(bytes, &dest) {
+        Ok(()) => {
+            println!(
+                "{} Dashboard v{} installed successfully",
+                color::success_indicator(),
+                DASHBOARD_VERSION
+            );
+            println!("  Location: {}", dest.display());
+        }
+        Err(e) => {
+            let _ = fs::remove_dir_all(&dest);
+            eprintln!("{} {}", color::error_indicator(), e);
+            exit(1);
+        }
+    }
+}
+
+fn extract_dashboard_zip(bytes: Vec<u8>, dest: &Path) -> Result<(), String> {
+    fs::create_dir_all(dest).map_err(|e| format!("Failed to create directory: {}", e))?;
+
+    let cursor = io::Cursor::new(bytes);
+    let mut archive =
+        zip::ZipArchive::new(cursor).map_err(|e| format!("Failed to read zip archive: {}", e))?;
+
+    for i in 0..archive.len() {
+        let mut file = archive
+            .by_index(i)
+            .map_err(|e| format!("Failed to read zip entry: {}", e))?;
+
+        let enclosed = match file.enclosed_name() {
+            Some(name) => name.to_owned(),
+            None => continue,
+        };
+        let rel_path = enclosed.to_string_lossy().to_string();
+
+        if rel_path.is_empty() || file.is_dir() {
+            if file.is_dir() {
+                let out_dir = dest.join(&rel_path);
+                let _ = fs::create_dir_all(&out_dir);
+            }
+            continue;
+        }
+
+        let out_path = dest.join(&rel_path);
+        if !out_path.starts_with(dest) {
+            continue;
+        }
+
+        if let Some(parent) = out_path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create parent dir {}: {}", parent.display(), e))?;
+        }
+        let mut out_file = fs::File::create(&out_path)
+            .map_err(|e| format!("Failed to create file {}: {}", out_path.display(), e))?;
+        io::copy(&mut file, &mut out_file)
+            .map_err(|e| format!("Failed to write {}: {}", out_path.display(), e))?;
+    }
+
+    Ok(())
+}

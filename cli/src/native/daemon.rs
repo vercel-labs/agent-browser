@@ -33,6 +33,8 @@ pub async fn run_daemon(session: &str) {
 
     let stream_path = socket_dir.join(format!("{}.stream", session));
     let _ = fs::remove_file(&stream_path);
+    let _ = fs::remove_file(socket_dir.join(format!("{}.engine", session)));
+    let _ = fs::remove_file(socket_dir.join(format!("{}.extensions", session)));
 
     if let Ok(days_str) = env::var("AGENT_BROWSER_STATE_EXPIRE_DAYS") {
         if let Ok(days) = days_str.parse::<u64>() {
@@ -44,23 +46,20 @@ pub async fn run_daemon(session: &str) {
 
     let mut stream_client: Option<Arc<RwLock<Option<Arc<CdpClient>>>>> = None;
     let mut stream_server_instance: Option<Arc<StreamServer>> = None;
-    if let Ok(port_str) = env::var("AGENT_BROWSER_STREAM_PORT") {
-        if let Ok(port) = port_str.parse::<u16>() {
-            if port > 0 {
-                match StreamServer::start_without_client(port, session.to_string()).await {
-                    Ok((stream_server, client_slot)) => {
-                        stream_client = Some(client_slot.clone());
-                        if let Err(e) = fs::write(&stream_path, stream_server.port().to_string()) {
-                            let _ =
-                                writeln!(std::io::stderr(), "Failed to write .stream file: {}", e);
-                        }
-                        stream_server_instance = Some(Arc::new(stream_server));
-                    }
-                    Err(e) => {
-                        let _ = writeln!(std::io::stderr(), "Stream server failed to start: {}", e);
-                    }
-                }
+    let preferred_port = env::var("AGENT_BROWSER_STREAM_PORT")
+        .ok()
+        .and_then(|s| s.parse::<u16>().ok())
+        .unwrap_or(0);
+    match StreamServer::start_without_client(preferred_port, session.to_string(), true).await {
+        Ok((stream_server, client_slot)) => {
+            stream_client = Some(client_slot.clone());
+            if let Err(e) = fs::write(&stream_path, stream_server.port().to_string()) {
+                let _ = writeln!(std::io::stderr(), "Failed to write .stream file: {}", e);
             }
+            stream_server_instance = Some(Arc::new(stream_server));
+        }
+        Err(e) => {
+            let _ = writeln!(std::io::stderr(), "Stream server failed to start: {}", e);
         }
     }
 
@@ -83,6 +82,8 @@ pub async fn run_daemon(session: &str) {
     let _ = fs::remove_file(&socket_path);
     let _ = fs::remove_file(&pid_path);
     let _ = fs::remove_file(&stream_path);
+    let _ = fs::remove_file(socket_dir.join(format!("{}.engine", session)));
+    let _ = fs::remove_file(socket_dir.join(format!("{}.extensions", session)));
 
     if let Err(e) = result {
         let _ = writeln!(std::io::stderr(), "Daemon error: {}", e);
@@ -93,7 +94,7 @@ pub async fn run_daemon(session: &str) {
 #[cfg(unix)]
 async fn run_socket_server(
     socket_path: &PathBuf,
-    _session: &str,
+    session: &str,
     stream_client: Option<Arc<RwLock<Option<Arc<CdpClient>>>>>,
     stream_server: Option<Arc<StreamServer>>,
     idle_timeout_ms: Option<u64>,
@@ -102,6 +103,13 @@ async fn run_socket_server(
 
     let listener =
         UnixListener::bind(socket_path).map_err(|e| format!("Failed to bind socket: {}", e))?;
+
+    let stream_file: Option<PathBuf> = if stream_server.is_some() {
+        let dir = socket_path.parent().unwrap_or(std::path::Path::new("."));
+        Some(dir.join(format!("{}.stream", session)))
+    } else {
+        None
+    };
 
     let state: std::sync::Arc<tokio::sync::Mutex<DaemonState>> = std::sync::Arc::new(
         tokio::sync::Mutex::new(DaemonState::new_with_stream(stream_client, stream_server)),
@@ -116,6 +124,9 @@ async fn run_socket_server(
     let mut sigchld = signal::unix::signal(signal::unix::SignalKind::child())
         .map_err(|e| format!("Failed to install SIGCHLD handler: {}", e))?;
 
+    let mut drain_interval = tokio::time::interval(Duration::from_millis(500));
+    drain_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
     loop {
         let sleep_future = idle_timeout_ms.map(|ms| tokio::time::sleep(Duration::from_millis(ms)));
         let mut sleep_pin = sleep_future.map(Box::pin);
@@ -126,8 +137,9 @@ async fn run_socket_server(
                     Ok((stream, _)) => {
                         let state = state.clone();
                         let reset_tx = reset_tx.clone();
+                        let sf = stream_file.clone();
                         tokio::spawn(async move {
-                            handle_connection(stream, state, reset_tx).await;
+                            handle_connection(stream, state, reset_tx, sf).await;
                         });
                     }
                     Err(e) => {
@@ -136,10 +148,13 @@ async fn run_socket_server(
                 }
             }
             _ = sigchld.recv() => {
-                // Reap all zombie children. The browser will be re-launched
-                // automatically on the next command via the has_process_exited()
-                // check in execute_command.
                 reap_children();
+            }
+            _ = drain_interval.tick() => {
+                let mut s = state.lock().await;
+                if s.request_tracking || s.har_recording {
+                    s.drain_cdp_events_background();
+                }
             }
             _ = async {
                 if let Some(ref mut s) = sleep_pin {
@@ -200,6 +215,12 @@ async fn run_socket_server(
     let port_path = socket_dir.join(format!("{}.port", session));
     let _ = fs::write(&port_path, port.to_string());
 
+    let stream_file: Option<PathBuf> = if stream_server.is_some() {
+        Some(socket_dir.join(format!("{}.stream", session)))
+    } else {
+        None
+    };
+
     let state: std::sync::Arc<tokio::sync::Mutex<DaemonState>> = std::sync::Arc::new(
         tokio::sync::Mutex::new(DaemonState::new_with_stream(stream_client, stream_server)),
     );
@@ -217,8 +238,9 @@ async fn run_socket_server(
                     Ok((stream, _)) => {
                         let state = state.clone();
                         let reset_tx = reset_tx.clone();
+                        let sf = stream_file.clone();
                         tokio::spawn(async move {
-                            handle_connection(stream, state, reset_tx).await;
+                            handle_connection(stream, state, reset_tx, sf).await;
                         });
                     }
                     Err(e) => {
@@ -261,6 +283,7 @@ async fn handle_connection<S>(
     stream: S,
     state: std::sync::Arc<tokio::sync::Mutex<DaemonState>>,
     idle_reset_tx: Option<Arc<mpsc::Sender<()>>>,
+    stream_file_cleanup: Option<PathBuf>,
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
@@ -314,6 +337,9 @@ async fn handle_connection<S>(
                 }
 
                 if is_close {
+                    if let Some(ref path) = stream_file_cleanup {
+                        let _ = fs::remove_file(path);
+                    }
                     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
                     process::exit(0);
                 }

@@ -198,6 +198,278 @@ fn run_session(args: &[String], session: &str, json_mode: bool) {
     }
 }
 
+fn get_dashboard_pid_path() -> std::path::PathBuf {
+    get_socket_dir().join("dashboard.pid")
+}
+
+fn is_pid_alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        unsafe { libc::kill(pid as i32, 0) == 0 }
+    }
+    #[cfg(windows)]
+    {
+        unsafe {
+            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if handle != 0 {
+                CloseHandle(handle);
+                true
+            } else {
+                false
+            }
+        }
+    }
+}
+
+fn run_dashboard_start(port: u16, json_mode: bool) {
+    let pid_path = get_dashboard_pid_path();
+
+    // Check if already running
+    if let Ok(pid_str) = fs::read_to_string(&pid_path) {
+        if let Ok(pid) = pid_str.trim().parse::<u32>() {
+            if is_pid_alive(pid) {
+                if json_mode {
+                    print_json_value(json!({
+                        "success": true,
+                        "data": { "port": port, "pid": pid, "already_running": true },
+                    }));
+                } else {
+                    println!("Dashboard already running at http://localhost:{}", port);
+                }
+                return;
+            }
+        }
+        let _ = fs::remove_file(&pid_path);
+    }
+
+    let socket_dir = get_socket_dir();
+    if !socket_dir.exists() {
+        let _ = fs::create_dir_all(&socket_dir);
+    }
+
+    let exe_path = match env::current_exe() {
+        Ok(p) => p.canonicalize().unwrap_or(p),
+        Err(e) => {
+            if json_mode {
+                print_json_error(format!("Failed to get executable path: {}", e));
+            } else {
+                eprintln!(
+                    "{} Failed to get executable path: {}",
+                    color::error_indicator(),
+                    e
+                );
+            }
+            exit(1);
+        }
+    };
+
+    let mut cmd = std::process::Command::new(&exe_path);
+    cmd.env("AGENT_BROWSER_DASHBOARD", "1")
+        .env("AGENT_BROWSER_DASHBOARD_PORT", port.to_string());
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
+        const DETACHED_PROCESS: u32 = 0x00000008;
+        cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS);
+    }
+
+    match cmd
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(child) => {
+            let pid = child.id();
+            let _ = fs::write(&pid_path, pid.to_string());
+
+            if json_mode {
+                print_json_value(json!({
+                    "success": true,
+                    "data": { "port": port, "pid": pid },
+                }));
+            } else {
+                println!("Dashboard started at http://localhost:{}", port);
+            }
+        }
+        Err(e) => {
+            if json_mode {
+                print_json_error(format!("Failed to start dashboard: {}", e));
+            } else {
+                eprintln!(
+                    "{} Failed to start dashboard: {}",
+                    color::error_indicator(),
+                    e
+                );
+            }
+            exit(1);
+        }
+    }
+}
+
+fn run_dashboard_stop(json_mode: bool) {
+    let pid_path = get_dashboard_pid_path();
+
+    let pid_str = match fs::read_to_string(&pid_path) {
+        Ok(s) => s,
+        Err(_) => {
+            if json_mode {
+                print_json_value(
+                    json!({ "success": true, "data": { "stopped": false, "reason": "not running" } }),
+                );
+            } else {
+                println!("Dashboard is not running");
+            }
+            return;
+        }
+    };
+
+    let pid: u32 = match pid_str.trim().parse() {
+        Ok(p) => p,
+        Err(_) => {
+            let _ = fs::remove_file(&pid_path);
+            if json_mode {
+                print_json_value(
+                    json!({ "success": true, "data": { "stopped": false, "reason": "invalid pid" } }),
+                );
+            } else {
+                println!("Dashboard is not running");
+            }
+            return;
+        }
+    };
+
+    #[cfg(unix)]
+    {
+        unsafe {
+            libc::kill(pid as i32, libc::SIGTERM);
+        }
+    }
+    #[cfg(windows)]
+    {
+        unsafe {
+            let handle = OpenProcess(1, 0, pid); // PROCESS_TERMINATE = 1
+            if handle != 0 {
+                windows_sys::Win32::System::Threading::TerminateProcess(handle, 0);
+                CloseHandle(handle);
+            }
+        }
+    }
+
+    let _ = fs::remove_file(&pid_path);
+
+    if json_mode {
+        print_json_value(json!({ "success": true, "data": { "stopped": true } }));
+    } else {
+        println!("{} Dashboard stopped", color::green("✓"));
+    }
+}
+
+fn run_close_all(flags: &Flags) {
+    let socket_dir = get_socket_dir();
+    let mut sessions: Vec<String> = Vec::new();
+
+    if let Ok(entries) = fs::read_dir(&socket_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if let Some(session_name) = name.strip_suffix(".pid") {
+                if session_name.is_empty() {
+                    continue;
+                }
+                let pid_path = socket_dir.join(&name);
+                if let Ok(pid_str) = fs::read_to_string(&pid_path) {
+                    if let Ok(pid) = pid_str.trim().parse::<u32>() {
+                        #[cfg(unix)]
+                        let running = unsafe {
+                            libc::kill(pid as i32, 0) == 0
+                                || std::io::Error::last_os_error().raw_os_error()
+                                    != Some(libc::ESRCH)
+                        };
+                        #[cfg(windows)]
+                        let running = unsafe {
+                            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+                            if handle != 0 {
+                                CloseHandle(handle);
+                                true
+                            } else {
+                                false
+                            }
+                        };
+                        if running {
+                            sessions.push(session_name.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if sessions.is_empty() {
+        if flags.json {
+            print_json_value(json!({
+                "success": true,
+                "data": { "closed": 0, "sessions": [] },
+            }));
+        } else {
+            println!("No active sessions");
+        }
+        return;
+    }
+
+    let mut closed: Vec<String> = Vec::new();
+    let mut failed: Vec<(String, String)> = Vec::new();
+
+    for session in &sessions {
+        let cmd = json!({ "id": gen_id(), "action": "close" });
+        match send_command(cmd, session) {
+            Ok(resp) if resp.success => closed.push(session.clone()),
+            Ok(resp) => {
+                let err = resp.error.unwrap_or_else(|| "Unknown error".to_string());
+                failed.push((session.clone(), err));
+            }
+            Err(e) => failed.push((session.clone(), e.to_string())),
+        }
+    }
+
+    if flags.json {
+        print_json_value(json!({
+            "success": failed.is_empty(),
+            "data": {
+                "closed": closed.len(),
+                "sessions": closed,
+                "failed": failed.iter().map(|(s, e)| json!({"session": s, "error": e})).collect::<Vec<_>>(),
+            },
+        }));
+    } else {
+        for s in &closed {
+            println!("{} Closed session: {}", color::green("✓"), s);
+        }
+        for (s, e) in &failed {
+            eprintln!("{} Failed to close {}: {}", color::error_indicator(), s, e);
+        }
+        if closed.is_empty() && !failed.is_empty() {
+            exit(1);
+        }
+    }
+
+    if !failed.is_empty() {
+        exit(1);
+    }
+}
+
 fn main() {
     // Rust ignores SIGPIPE by default, causing println! to panic on broken pipes.
     // Reset to SIG_DFL so the OS terminates the process cleanly instead.
@@ -224,6 +496,17 @@ fn main() {
         let session = env::var("AGENT_BROWSER_SESSION").unwrap_or_else(|_| "default".to_string());
         let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
         rt.block_on(native::daemon::run_daemon(&session));
+        return;
+    }
+
+    // Standalone dashboard server mode
+    if env::var("AGENT_BROWSER_DASHBOARD").is_ok() {
+        let port: u16 = env::var("AGENT_BROWSER_DASHBOARD_PORT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(4848);
+        let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+        rt.block_on(native::stream::run_dashboard_server(port));
         return;
     }
 
@@ -267,9 +550,51 @@ fn main() {
         return;
     }
 
+    // Handle dashboard subcommand
+    if clean.first().map(|s| s.as_str()) == Some("dashboard") {
+        match clean.get(1).map(|s| s.as_str()) {
+            Some("install") => {
+                install::run_dashboard_install();
+                return;
+            }
+            Some("start") | None => {
+                let port = clean
+                    .iter()
+                    .position(|a| a == "--port")
+                    .and_then(|i| clean.get(i + 1))
+                    .and_then(|s| s.parse::<u16>().ok())
+                    .unwrap_or(4848);
+                run_dashboard_start(port, flags.json);
+                return;
+            }
+            Some("stop") => {
+                run_dashboard_stop(flags.json);
+                return;
+            }
+            Some(unknown) => {
+                eprintln!(
+                    "{} Unknown dashboard subcommand: {}",
+                    color::error_indicator(),
+                    unknown
+                );
+                exit(1);
+            }
+        }
+    }
+
     // Handle session separately (doesn't need daemon)
     if clean.first().map(|s| s.as_str()) == Some("session") {
         run_session(&clean, &flags.session, flags.json);
+        return;
+    }
+
+    // Handle close --all: close all active sessions
+    if matches!(
+        clean.first().map(|s| s.as_str()),
+        Some("close") | Some("quit") | Some("exit")
+    ) && clean.iter().any(|a| a == "--all")
+    {
+        run_close_all(&flags);
         return;
     }
 
@@ -397,6 +722,7 @@ fn main() {
         idle_timeout: flags.idle_timeout.as_deref(),
         cdp: flags.cdp.as_deref(),
     };
+
     let daemon_result = match ensure_daemon(&flags.session, &daemon_opts) {
         Ok(result) => result,
         Err(e) => {

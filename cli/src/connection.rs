@@ -144,7 +144,7 @@ fn get_port_path(session: &str) -> PathBuf {
 }
 
 #[cfg(windows)]
-fn get_port_for_session(session: &str) -> u16 {
+pub fn get_port_for_session(session: &str) -> u16 {
     let mut hash: i32 = 0;
     for c in session.chars() {
         hash = ((hash << 5).wrapping_sub(hash)).wrapping_add(c as i32);
@@ -154,7 +154,7 @@ fn get_port_for_session(session: &str) -> u16 {
     49152 + ((hash.unsigned_abs() as u32 % 16383) as u16)
 }
 
-fn daemon_ready(session: &str) -> bool {
+pub fn daemon_ready(session: &str) -> bool {
     #[cfg(unix)]
     {
         let socket_path = get_socket_path(session);
