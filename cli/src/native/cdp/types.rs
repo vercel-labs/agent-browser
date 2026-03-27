@@ -240,6 +240,8 @@ pub struct EvaluateParams {
     pub return_by_value: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub await_promise: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_id: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
