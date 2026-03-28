@@ -1,0 +1,548 @@
+asyncapi: 3.0.0
+
+info:
+  title: agent-browser Stream Server
+  version: 0.23.0
+  description: |
+    WebSocket protocol for streaming the browser viewport and receiving user
+    input events. Enables "pair browsing" where a human can watch and interact
+    with a browser controlled by an AI agent.
+
+    Enable by setting `AGENT_BROWSER_STREAM_PORT=<port>` before running any
+    agent-browser command. The server starts on the specified port and accepts
+    standard WebSocket connections (`ws://localhost:<port>`).
+
+    All messages are JSON-encoded text frames.
+  license:
+    name: Apache-2.0
+
+servers:
+  local:
+    host: "localhost:{port}"
+    protocol: ws
+    description: |
+      The stream server binds to the port specified by the
+      `AGENT_BROWSER_STREAM_PORT` environment variable (default 9223).
+    variables:
+      port:
+        default: "9223"
+        description: WebSocket server port
+
+channels:
+  stream:
+    address: /
+    messages:
+      frame:
+        $ref: "#/components/messages/Frame"
+      status:
+        $ref: "#/components/messages/Status"
+      error:
+        $ref: "#/components/messages/Error"
+      command:
+        $ref: "#/components/messages/Command"
+      result:
+        $ref: "#/components/messages/Result"
+      console:
+        $ref: "#/components/messages/Console"
+      pageError:
+        $ref: "#/components/messages/PageError"
+      tabs:
+        $ref: "#/components/messages/Tabs"
+      url:
+        $ref: "#/components/messages/Url"
+      inputMouse:
+        $ref: "#/components/messages/InputMouse"
+      inputKeyboard:
+        $ref: "#/components/messages/InputKeyboard"
+      inputTouch:
+        $ref: "#/components/messages/InputTouch"
+      statusRequest:
+        $ref: "#/components/messages/StatusRequest"
+
+operations:
+  receiveViewport:
+    action: receive
+    channel:
+      $ref: "#/channels/stream"
+    summary: Receive viewport frames, status updates, and errors from the server
+    messages:
+      - $ref: "#/channels/stream/messages/frame"
+      - $ref: "#/channels/stream/messages/status"
+      - $ref: "#/channels/stream/messages/error"
+      - $ref: "#/channels/stream/messages/command"
+      - $ref: "#/channels/stream/messages/result"
+      - $ref: "#/channels/stream/messages/console"
+      - $ref: "#/channels/stream/messages/pageError"
+      - $ref: "#/channels/stream/messages/tabs"
+      - $ref: "#/channels/stream/messages/url"
+
+  sendInput:
+    action: send
+    channel:
+      $ref: "#/channels/stream"
+    summary: Send user input events and status requests to the server
+    messages:
+      - $ref: "#/channels/stream/messages/inputMouse"
+      - $ref: "#/channels/stream/messages/inputKeyboard"
+      - $ref: "#/channels/stream/messages/inputTouch"
+      - $ref: "#/channels/stream/messages/statusRequest"
+
+components:
+  messages:
+    Frame:
+      name: Frame
+      summary: A screencast frame from the browser viewport
+      contentType: application/json
+      payload:
+        $ref: "#/components/schemas/FrameMessage"
+
+    Status:
+      name: Status
+      summary: Server status update (sent on connect and when screencast state changes)
+      contentType: application/json
+      payload:
+        $ref: "#/components/schemas/StatusMessage"
+
+    Error:
+      name: Error
+      summary: Server error notification
+      contentType: application/json
+      payload:
+        $ref: "#/components/schemas/ErrorMessage"
+
+    Command:
+      name: Command
+      summary: Notification that a command has begun executing
+      contentType: application/json
+      payload:
+        $ref: "#/components/schemas/CommandMessage"
+
+    Result:
+      name: Result
+      summary: Result of a completed command execution
+      contentType: application/json
+      payload:
+        $ref: "#/components/schemas/ResultMessage"
+
+    Console:
+      name: Console
+      summary: Console log message from the browser page
+      contentType: application/json
+      payload:
+        $ref: "#/components/schemas/ConsoleMessage"
+
+    PageError:
+      name: PageError
+      summary: Uncaught exception from the browser page
+      contentType: application/json
+      payload:
+        $ref: "#/components/schemas/PageErrorMessage"
+
+    Tabs:
+      name: Tabs
+      summary: Current browser tab list
+      contentType: application/json
+      payload:
+        $ref: "#/components/schemas/TabsMessage"
+
+    Url:
+      name: Url
+      summary: URL navigation event for the active tab
+      contentType: application/json
+      payload:
+        $ref: "#/components/schemas/UrlMessage"
+
+    InputMouse:
+      name: InputMouse
+      summary: Mouse input event injected into the browser
+      contentType: application/json
+      payload:
+        $ref: "#/components/schemas/InputMouseMessage"
+
+    InputKeyboard:
+      name: InputKeyboard
+      summary: Keyboard input event injected into the browser
+      contentType: application/json
+      payload:
+        $ref: "#/components/schemas/InputKeyboardMessage"
+
+    InputTouch:
+      name: InputTouch
+      summary: Touch input event injected into the browser
+      contentType: application/json
+      payload:
+        $ref: "#/components/schemas/InputTouchMessage"
+
+    StatusRequest:
+      name: StatusRequest
+      summary: Client requests the current server status
+      contentType: application/json
+      payload:
+        $ref: "#/components/schemas/StatusRequestMessage"
+
+  schemas:
+    FrameMessage:
+      type: object
+      required:
+        - type
+        - data
+        - metadata
+      properties:
+        type:
+          type: string
+          const: frame
+        data:
+          type: string
+          description: Base64-encoded JPEG image of the viewport
+        metadata:
+          $ref: "#/components/schemas/FrameMetadata"
+
+    FrameMetadata:
+      type: object
+      required:
+        - offsetTop
+        - pageScaleFactor
+        - deviceWidth
+        - deviceHeight
+        - scrollOffsetX
+        - scrollOffsetY
+      properties:
+        offsetTop:
+          type: number
+          description: Top offset of the viewport in CSS pixels
+        pageScaleFactor:
+          type: number
+          description: Page scale factor (pinch zoom level)
+        deviceWidth:
+          type: integer
+          description: Viewport width in device pixels
+        deviceHeight:
+          type: integer
+          description: Viewport height in device pixels
+        scrollOffsetX:
+          type: number
+          description: Horizontal scroll offset in CSS pixels
+        scrollOffsetY:
+          type: number
+          description: Vertical scroll offset in CSS pixels
+        timestamp:
+          type: number
+          description: Frame timestamp (seconds since epoch)
+
+    StatusMessage:
+      type: object
+      required:
+        - type
+        - connected
+        - screencasting
+        - engine
+        - recording
+      properties:
+        type:
+          type: string
+          const: status
+        connected:
+          type: boolean
+          description: Whether a browser is connected to the daemon
+        screencasting:
+          type: boolean
+          description: Whether screencast is actively streaming frames
+        viewportWidth:
+          type: integer
+          description: Current viewport width in pixels
+        viewportHeight:
+          type: integer
+          description: Current viewport height in pixels
+        engine:
+          type: string
+          description: Browser engine name (e.g. "chromium")
+        recording:
+          type: boolean
+          description: Whether the session is being recorded
+
+    ErrorMessage:
+      type: object
+      required:
+        - type
+        - message
+      properties:
+        type:
+          type: string
+          const: error
+        message:
+          type: string
+          description: Human-readable error description
+
+    StatusRequestMessage:
+      type: object
+      required:
+        - type
+      properties:
+        type:
+          type: string
+          const: status
+
+    InputMouseMessage:
+      type: object
+      required:
+        - type
+        - eventType
+        - x
+        - y
+      properties:
+        type:
+          type: string
+          const: input_mouse
+        eventType:
+          type: string
+          enum:
+            - mousePressed
+            - mouseReleased
+            - mouseMoved
+            - mouseWheel
+          description: CDP Input.dispatchMouseEvent type
+        x:
+          type: number
+          description: X coordinate in viewport pixels
+        y:
+          type: number
+          description: Y coordinate in viewport pixels
+        button:
+          type: string
+          enum:
+            - left
+            - right
+            - middle
+            - none
+          description: Mouse button (default "none" for mouseMoved)
+        clickCount:
+          type: integer
+          description: Number of clicks (1 for single, 2 for double)
+        deltaX:
+          type: number
+          description: Horizontal scroll delta (mouseWheel only)
+        deltaY:
+          type: number
+          description: Vertical scroll delta (mouseWheel only)
+        modifiers:
+          $ref: "#/components/schemas/Modifiers"
+
+    InputKeyboardMessage:
+      type: object
+      required:
+        - type
+        - eventType
+      properties:
+        type:
+          type: string
+          const: input_keyboard
+        eventType:
+          type: string
+          enum:
+            - keyDown
+            - keyUp
+            - char
+          description: CDP Input.dispatchKeyEvent type
+        key:
+          type: string
+          description: Key value (e.g. "Enter", "a", "Control")
+        code:
+          type: string
+          description: Physical key code (e.g. "Enter", "KeyA")
+        text:
+          type: string
+          description: Text to insert (used with "char" eventType)
+        windowsVirtualKeyCode:
+          type: integer
+          description: Windows virtual key code for the key event
+        modifiers:
+          $ref: "#/components/schemas/Modifiers"
+
+    InputTouchMessage:
+      type: object
+      required:
+        - type
+        - eventType
+        - touchPoints
+      properties:
+        type:
+          type: string
+          const: input_touch
+        eventType:
+          type: string
+          enum:
+            - touchStart
+            - touchEnd
+            - touchMove
+            - touchCancel
+          description: CDP Input.dispatchTouchEvent type
+        touchPoints:
+          type: array
+          items:
+            $ref: "#/components/schemas/TouchPoint"
+          description: Active touch points
+        modifiers:
+          $ref: "#/components/schemas/Modifiers"
+
+    TouchPoint:
+      type: object
+      required:
+        - x
+        - y
+      properties:
+        x:
+          type: number
+          description: X coordinate in viewport pixels
+        y:
+          type: number
+          description: Y coordinate in viewport pixels
+        id:
+          type: integer
+          description: Touch point identifier for multi-touch tracking
+
+    CommandMessage:
+      type: object
+      required:
+        - type
+        - action
+        - id
+        - params
+        - timestamp
+      properties:
+        type:
+          type: string
+          const: command
+        action:
+          type: string
+          description: The command action name
+        id:
+          type: string
+          description: Unique command identifier
+        params:
+          type: object
+          description: Command parameters
+        timestamp:
+          type: number
+          description: Unix timestamp in milliseconds
+
+    ResultMessage:
+      type: object
+      required:
+        - type
+        - id
+        - action
+        - success
+        - data
+        - duration_ms
+        - timestamp
+      properties:
+        type:
+          type: string
+          const: result
+        id:
+          type: string
+          description: Command identifier this result corresponds to
+        action:
+          type: string
+          description: The command action name
+        success:
+          type: boolean
+          description: Whether the command completed successfully
+        data:
+          type: object
+          description: Result data from the command
+        duration_ms:
+          type: integer
+          description: Command execution duration in milliseconds
+        timestamp:
+          type: number
+          description: Unix timestamp in milliseconds
+
+    ConsoleMessage:
+      type: object
+      required:
+        - type
+        - level
+        - text
+        - timestamp
+      properties:
+        type:
+          type: string
+          const: console
+        level:
+          type: string
+          description: Console log level (e.g. "log", "warn", "error")
+        text:
+          type: string
+          description: Console message text
+        timestamp:
+          type: number
+          description: Unix timestamp in milliseconds
+
+    PageErrorMessage:
+      type: object
+      required:
+        - type
+        - text
+        - timestamp
+      properties:
+        type:
+          type: string
+          const: page_error
+        text:
+          type: string
+          description: Error description
+        line:
+          type: integer
+          description: Line number where the error occurred
+        column:
+          type: integer
+          description: Column number where the error occurred
+        timestamp:
+          type: number
+          description: Unix timestamp in milliseconds
+
+    TabsMessage:
+      type: object
+      required:
+        - type
+        - tabs
+        - timestamp
+      properties:
+        type:
+          type: string
+          const: tabs
+        tabs:
+          type: array
+          items:
+            type: object
+          description: List of open browser tabs
+        timestamp:
+          type: number
+          description: Unix timestamp in milliseconds
+
+    UrlMessage:
+      type: object
+      required:
+        - type
+        - url
+        - timestamp
+      properties:
+        type:
+          type: string
+          const: url
+        url:
+          type: string
+          description: The URL that was navigated to
+        timestamp:
+          type: number
+          description: Unix timestamp in milliseconds
+
+    Modifiers:
+      type: integer
+      description: |
+        Bitmask of active modifier keys (matches CDP modifier flags):
+        - 1: Alt
+        - 2: Ctrl
+        - 4: Meta (Cmd on macOS)
+        - 8: Shift

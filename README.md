@@ -978,58 +978,29 @@ The WebSocket server streams the browser viewport and accepts input events.
 
 ### WebSocket Protocol
 
-Connect to `ws://localhost:9223` to receive frames and send input:
+Connect to `ws://localhost:9223` to receive frames and send input. The full protocol is defined in an [AsyncAPI 3.0 schema](schemas/stream-server.asyncapi.yaml).
 
-**Receive frames:**
+**Server to client:** `frame` (base64 JPEG viewport), `status` (connection state), `error`
 
-```json
-{
-  "type": "frame",
-  "data": "<base64-encoded-jpeg>",
-  "metadata": {
-    "deviceWidth": 1280,
-    "deviceHeight": 720,
-    "pageScaleFactor": 1,
-    "offsetTop": 0,
-    "scrollOffsetX": 0,
-    "scrollOffsetY": 0
-  }
-}
-```
+**Client to server:** `input_mouse`, `input_keyboard`, `input_touch`, `status` (request)
 
-**Send mouse events:**
+**Quick example:**
 
 ```json
-{
-  "type": "input_mouse",
-  "eventType": "mousePressed",
-  "x": 100,
-  "y": 200,
-  "button": "left",
-  "clickCount": 1
-}
+// Receive viewport frames
+{ "type": "frame", "data": "<base64-jpeg>", "metadata": { "deviceWidth": 1280, "deviceHeight": 720, ... } }
+
+// Send mouse click
+{ "type": "input_mouse", "eventType": "mousePressed", "x": 100, "y": 200, "button": "left", "clickCount": 1 }
+
+// Send keyboard input
+{ "type": "input_keyboard", "eventType": "keyDown", "key": "Enter", "code": "Enter" }
+
+// Send touch event
+{ "type": "input_touch", "eventType": "touchStart", "touchPoints": [{ "x": 100, "y": 200 }] }
 ```
 
-**Send keyboard events:**
-
-```json
-{
-  "type": "input_keyboard",
-  "eventType": "keyDown",
-  "key": "Enter",
-  "code": "Enter"
-}
-```
-
-**Send touch events:**
-
-```json
-{
-  "type": "input_touch",
-  "eventType": "touchStart",
-  "touchPoints": [{ "x": 100, "y": 200 }]
-}
-```
+See [`schemas/stream-server.asyncapi.yaml`](schemas/stream-server.asyncapi.yaml) for the complete message definitions, field types, and constraints.
 
 ## Architecture
 

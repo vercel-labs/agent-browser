@@ -36,6 +36,7 @@ pub mod state;
 pub mod storage;
 #[allow(dead_code)]
 pub mod stream;
+pub mod stream_protocol;
 #[allow(dead_code)]
 pub mod tracing;
 #[allow(dead_code)]
