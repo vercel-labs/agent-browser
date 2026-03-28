@@ -7,6 +7,7 @@ import type { SessionInfo } from "@/types";
 import { execCommand, killSession, sessionArgs } from "@/lib/exec";
 import { tabCacheAtom, engineCacheAtom } from "@/store/tabs";
 import { streamTabsAtom, streamEngineAtom } from "@/store/stream";
+import { getDashboardBaseUrl } from "@/lib/exec";
 
 function getPort(): number {
   if (typeof window === "undefined") return 9223;
@@ -15,16 +16,21 @@ function getPort(): number {
   return p ? parseInt(p, 10) || 9223 : 9223;
 }
 
-const DASHBOARD_PORT = 4848;
-
 function getSessionsUrl(): string {
-  if (typeof window !== "undefined") {
-    const origin = window.location.origin;
-    if (origin.includes(`:${DASHBOARD_PORT}`)) {
-      return "/api/sessions";
-    }
+  if (typeof window !== "undefined" && window.location.port === "4848") {
+    return "/api/sessions";
   }
-  return `http://localhost:${DASHBOARD_PORT}/api/sessions`;
+
+  return `${getDashboardBaseUrl()}/api/sessions`;
+}
+
+function getSessionApiBase(port: number): string {
+  if (typeof window === "undefined") {
+    return `http://127.0.0.1:${port}`;
+  }
+
+  const { protocol, hostname } = window.location;
+  return `${protocol}//${hostname}:${port}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -223,7 +229,7 @@ export function useSessionsSync(pollInterval = 5000) {
             for (const s of data) {
               try {
                 const tabsResp = await fetch(
-                  `http://localhost:${s.port}/api/tabs`,
+                  `${getSessionApiBase(s.port)}/api/tabs`,
                 ).catch(() => null);
                 if (tabsResp?.ok) {
                   const tabs = await tabsResp.json();
@@ -256,3 +262,5 @@ export function useSessionsSync(pollInterval = 5000) {
     };
   }, [fetchSessions, pollInterval]);
 }
+
+export { getSessionsUrl, getSessionApiBase };
