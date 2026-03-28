@@ -7,7 +7,7 @@ import type { SessionInfo } from "@/types";
 import { execCommand, killSession, sessionArgs } from "@/lib/exec";
 import { tabCacheAtom, engineCacheAtom } from "@/store/tabs";
 import { streamTabsAtom, streamEngineAtom } from "@/store/stream";
-import { getDashboardBaseUrl } from "@/lib/exec";
+import { DASHBOARD_PORT, getDashboardBaseUrl } from "@/lib/exec";
 
 function getPort(): number {
   if (typeof window === "undefined") return 9223;
@@ -17,7 +17,7 @@ function getPort(): number {
 }
 
 function getSessionsUrl(): string {
-  if (typeof window !== "undefined" && window.location.port === "4848") {
+  if (typeof window !== "undefined" && window.location.port === String(DASHBOARD_PORT)) {
     return "/api/sessions";
   }
 

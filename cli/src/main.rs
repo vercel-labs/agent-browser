@@ -513,9 +513,8 @@ fn main() {
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(4848);
-        let _host = host;
         let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
-        rt.block_on(native::stream::run_dashboard_server(port));
+        rt.block_on(native::stream::run_dashboard_server(&host, port));
         return;
     }
 

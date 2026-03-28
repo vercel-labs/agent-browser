@@ -1,4 +1,4 @@
-const DASHBOARD_PORT = 4848;
+export const DASHBOARD_PORT = 4848;
 
 function getDashboardBaseUrl(): string {
   if (typeof window === "undefined") {
@@ -10,7 +10,7 @@ function getDashboardBaseUrl(): string {
     return `${protocol}//${hostname}:${DASHBOARD_PORT}`;
   }
 
-  return `http://${hostname}:${DASHBOARD_PORT}`;
+  return `${protocol}//${hostname}:${DASHBOARD_PORT}`;
 }
 
 export interface ExecResult {
