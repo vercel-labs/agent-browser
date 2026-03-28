@@ -2014,6 +2014,48 @@ async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
 
+    // Proactively attach to any iframe targets not yet tracked in iframe_sessions.
+    // This handles the case where Target.attachedToTarget events arrived before
+    // the daemon was ready, or were missed for any reason.
+    let targets_result: Result<Value, String> = mgr
+        .client
+        .send_command("Target.getTargets", None, None)
+        .await;
+    if let Ok(targets_value) = targets_result {
+        if let Some(target_infos) = targets_value.get("targetInfos").and_then(|v| v.as_array()) {
+            let mut to_attach: Vec<String> = Vec::new();
+            for target_info in target_infos {
+                let target_type = target_info
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if target_type == "iframe" {
+                    if let Some(tid) = target_info.get("targetId").and_then(|v| v.as_str()) {
+                        if !state.iframe_sessions.contains_key(tid) {
+                            to_attach.push(tid.to_string());
+                        }
+                    }
+                }
+            }
+            // Drop the immutable borrow of state.browser before mutating state.iframe_sessions
+            let client = mgr.client.clone();
+            for tid in to_attach {
+                let attach_result: Result<Value, String> = client
+                    .send_command(
+                        "Target.attachToTarget",
+                        Some(serde_json::json!({ "targetId": tid, "flatten": true })),
+                        None,
+                    )
+                    .await;
+                if let Ok(resp) = attach_result {
+                    if let Some(iframe_sid) = resp.get("sessionId").and_then(|v| v.as_str()) {
+                        state.iframe_sessions.insert(tid, iframe_sid.to_string());
+                    }
+                }
+            }
+        }
+    }
+
     let options = SnapshotOptions {
         selector: cmd
             .get("selector")

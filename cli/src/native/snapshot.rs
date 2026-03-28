@@ -402,15 +402,20 @@ pub async fn take_snapshot(
                 continue;
             };
             let ref_id = node.ref_id.as_deref().unwrap_or("");
-            if let Ok(child_fid) = resolve_iframe_frame_id(client, session_id, bid).await {
-                // Snapshot the child frame; errors are silently ignored
-                // (e.g. cross-origin iframes)
+
+            // Try to resolve iframe frame ID (works for same-origin iframes).
+            // For cross-origin iframes, contentDocument is null due to the
+            // same-origin policy, so resolve_iframe_frame_id will fail.
+            let child_fid = resolve_iframe_frame_id(client, session_id, bid).await.ok();
+
+            if let Some(fid) = child_fid {
+                // Same-origin iframe: snapshot using the parent session + frameId.
                 if let Ok(child_text) = Box::pin(take_snapshot(
                     client,
                     session_id,
                     options,
                     ref_map,
-                    Some(&child_fid),
+                    Some(&fid),
                     iframe_sessions,
                 ))
                 .await
@@ -420,6 +425,30 @@ pub async fn take_snapshot(
                         && child_text != "(no interactive elements)"
                     {
                         iframe_snapshots.push((ref_id.to_string(), child_text));
+                    }
+                }
+            } else {
+                // Cross-origin iframe: try each dedicated iframe session.
+                // Each cross-origin iframe has its own session in iframe_sessions;
+                // we snapshot without a frameId since the session is already scoped.
+                for (_frame_id, iframe_sid) in iframe_sessions.iter() {
+                    if let Ok(child_text) = Box::pin(take_snapshot(
+                        client,
+                        iframe_sid,
+                        options,
+                        ref_map,
+                        None,
+                        iframe_sessions,
+                    ))
+                    .await
+                    {
+                        if !child_text.is_empty()
+                            && child_text != "(empty page)"
+                            && child_text != "(no interactive elements)"
+                        {
+                            iframe_snapshots.push((ref_id.to_string(), child_text));
+                            break;
+                        }
                     }
                 }
             }
