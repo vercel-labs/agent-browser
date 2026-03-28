@@ -1397,6 +1397,12 @@ fn launch_options_from_env() -> LaunchOptions {
             .unwrap_or(false),
         color_scheme: env::var("AGENT_BROWSER_COLOR_SCHEME").ok(),
         download_path: env::var("AGENT_BROWSER_DOWNLOAD_PATH").ok(),
+        ignore_default_args: env::var("AGENT_BROWSER_IGNORE_DEFAULT_ARGS").ok().map(|s| {
+            s.split(',')
+                .map(|a| a.trim().to_string())
+                .filter(|a| !a.is_empty())
+                .collect()
+        }),
     }
 }
 
@@ -1610,6 +1616,14 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
             .get("downloadPath")
             .and_then(|v| v.as_str())
             .map(String::from),
+        ignore_default_args: cmd
+            .get("ignoreDefaultArgs")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            }),
     };
 
     // Store proxy credentials for Fetch.authRequired handling
