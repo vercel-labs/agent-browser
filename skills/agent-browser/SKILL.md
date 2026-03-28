@@ -53,7 +53,7 @@ When automating a site that requires login, choose the approach that fits:
 **Option 1: Import auth from the user's browser (fastest for one-off tasks)**
 
 ```bash
-# Connect to the user's running Chrome (they're already logged in)
+# Connect to the user's running Chromium-based browser (they're already logged in)
 agent-browser --auto-connect state save ./auth.json
 # Use that auth state
 agent-browser --state ./auth.json open https://app.example.com/dashboard
@@ -345,7 +345,7 @@ agent-browser session list
 ### Connect to Existing Chrome
 
 ```bash
-# Auto-discover running Chrome with remote debugging enabled
+# Auto-discover a running Chromium-based browser with remote debugging enabled
 agent-browser --auto-connect open https://example.com
 agent-browser --auto-connect snapshot
 
@@ -353,7 +353,7 @@ agent-browser --auto-connect snapshot
 agent-browser --cdp 9222 snapshot
 ```
 
-Auto-connect discovers Chrome via `DevToolsActivePort`, common debugging ports (9222, 9229), and falls back to a direct WebSocket connection if HTTP-based CDP discovery fails.
+Auto-connect discovers Chrome, Chromium, Brave, and Helium via `DevToolsActivePort`, common debugging ports (9222, 9229), and falls back to a direct WebSocket connection if HTTP-based CDP discovery fails.
 
 ### Color Scheme (Dark Mode)
 

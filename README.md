@@ -373,19 +373,21 @@ agent-browser provides multiple ways to persist login sessions so you don't re-a
 |----------|----------|------------|
 | **Persistent profile** | Full browser state (cookies, IndexedDB, service workers, cache) across restarts | `--profile <path>` / `AGENT_BROWSER_PROFILE` |
 | **Session persistence** | Auto-save/restore cookies + localStorage by name | `--session-name <name>` / `AGENT_BROWSER_SESSION_NAME` |
-| **Import from your browser** | Grab auth from a Chrome session you already logged into | `--auto-connect` + `state save` |
+| **Import from your browser** | Grab auth from a Chrome/Chromium-family browser session you already logged into | `--auto-connect` + `state save` |
 | **State file** | Load a previously saved state JSON on launch | `--state <path>` / `AGENT_BROWSER_STATE` |
 | **Auth vault** | Store credentials locally (encrypted), login by name | `auth save` / `auth login` |
 
 ### Import auth from your browser
 
-If you are already logged in to a site in Chrome, you can grab that auth state and reuse it:
+If you are already logged in to a site in Chrome, Chromium, Brave, or Helium, you can grab that auth state and reuse it:
 
 ```bash
-# 1. Launch Chrome with remote debugging enabled
+# 1. Launch a Chromium-based browser with remote debugging enabled
 #    macOS:
 "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --remote-debugging-port=9222
-#    Or use --auto-connect to discover an already-running Chrome
+#    Helium:
+open -na "Helium" --args --remote-debugging-port=9222
+#    Or use --auto-connect to discover an already-running browser
 
 # 2. Connect and save the authenticated state
 agent-browser --auto-connect state save ./my-auth.json
@@ -584,7 +586,7 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 | `--screenshot-format <fmt>` | Screenshot format: `png`, `jpeg` (or `AGENT_BROWSER_SCREENSHOT_FORMAT` env) |
 | `--headed` | Show browser window (not headless) (or `AGENT_BROWSER_HEADED` env) |
 | `--cdp <port\|url>` | Connect via Chrome DevTools Protocol (port or WebSocket URL) |
-| `--auto-connect` | Auto-discover and connect to running Chrome (or `AGENT_BROWSER_AUTO_CONNECT` env) |
+| `--auto-connect` | Auto-discover and connect to a running Chromium-based browser, including Helium (or `AGENT_BROWSER_AUTO_CONNECT` env) |
 | `--color-scheme <scheme>` | Color scheme: `dark`, `light`, `no-preference` (or `AGENT_BROWSER_COLOR_SCHEME` env) |
 | `--download-path <path>` | Default download directory (or `AGENT_BROWSER_DOWNLOAD_PATH` env) |
 | `--content-boundaries` | Wrap page output in boundary markers for LLM safety (or `AGENT_BROWSER_CONTENT_BOUNDARIES` env) |
@@ -926,10 +928,10 @@ This enables control of:
 
 ### Auto-Connect
 
-Use `--auto-connect` to automatically discover and connect to a running Chrome instance without specifying a port:
+Use `--auto-connect` to automatically discover and connect to a running Chromium-based browser without specifying a port:
 
 ```bash
-# Auto-discover running Chrome with remote debugging
+# Auto-discover a running Chromium-based browser with remote debugging
 agent-browser --auto-connect open example.com
 agent-browser --auto-connect snapshot
 
@@ -937,17 +939,17 @@ agent-browser --auto-connect snapshot
 AGENT_BROWSER_AUTO_CONNECT=1 agent-browser snapshot
 ```
 
-Auto-connect discovers Chrome by:
+Auto-connect discovers browsers by:
 
-1. Reading Chrome's `DevToolsActivePort` file from the default user data directory
+1. Reading `DevToolsActivePort` from the default user data directories for Chrome, Chrome Canary, Chromium, Brave, and Helium
 2. Falling back to probing common debugging ports (9222, 9229)
 3. If HTTP-based discovery (`/json/version`, `/json/list`) fails, falling back to a direct WebSocket connection
 
 This is useful when:
 
-- Chrome 144+ has remote debugging enabled via `chrome://inspect/#remote-debugging` (which uses a dynamic port)
+- Chrome 144+ or another Chromium-based browser has remote debugging enabled with a dynamic port
 - You want a zero-configuration connection to your existing browser
-- You don't want to track which port Chrome is using
+- You don't want to track which port the browser is using
 
 ## Streaming (Browser Preview)
 
