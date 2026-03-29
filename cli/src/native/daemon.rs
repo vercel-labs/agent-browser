@@ -188,8 +188,8 @@ async fn run_socket_server(
             }
             _ = drain_interval.tick() => {
                 let mut s = state.lock().await;
-                if s.request_tracking || s.har_recording {
-                    s.drain_cdp_events_background();
+                if s.browser.is_some() {
+                    s.drain_cdp_events_background().await;
                 }
             }
             _ = async {

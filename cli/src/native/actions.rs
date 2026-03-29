@@ -1,5 +1,5 @@
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::io::Write;
@@ -454,8 +454,97 @@ impl DaemonState {
         recording::stop_recording_task(&mut self.recording_state).await
     }
 
-    pub fn drain_cdp_events_background(&mut self) {
-        let _ = self.drain_cdp_events();
+    pub async fn drain_cdp_events_background(&mut self) {
+        let drained = self.drain_cdp_events();
+        self.apply_drained_events(drained).await;
+    }
+
+    async fn apply_drained_events(&mut self, drained: DrainedEvents) {
+        // ACK screencast frames
+        if !drained.pending_acks.is_empty() {
+            if let Some(ref browser) = self.browser {
+                if let Ok(session_id) = browser.active_session_id() {
+                    for ack_sid in drained.pending_acks {
+                        let _ = stream::ack_screencast_frame(&browser.client, session_id, ack_sid)
+                            .await;
+                    }
+                }
+            }
+        }
+
+        // Remove destroyed targets
+        for target_id in &drained.destroyed_targets {
+            if let Some(ref mut mgr) = self.browser {
+                mgr.remove_page_by_target_id(target_id);
+            }
+        }
+
+        // Track cross-origin iframe sessions
+        for (frame_id, iframe_sid) in &drained.attached_iframe_sessions {
+            self.iframe_sessions
+                .insert(frame_id.clone(), iframe_sid.clone());
+            if let Some(ref mgr) = self.browser {
+                let _ = mgr
+                    .client
+                    .send_command_no_params("DOM.enable", Some(iframe_sid.as_str()))
+                    .await;
+                let _ = mgr
+                    .client
+                    .send_command_no_params("Accessibility.enable", Some(iframe_sid.as_str()))
+                    .await;
+            }
+        }
+        for sid in &drained.detached_iframe_sessions {
+            self.iframe_sessions.retain(|_, v| v != sid);
+        }
+
+        // Attach and register new targets
+        for te in &drained.new_targets {
+            if let Some(ref mut mgr) = self.browser {
+                let attach_result: Result<AttachToTargetResult, String> = mgr
+                    .client
+                    .send_command_typed(
+                        "Target.attachToTarget",
+                        &AttachToTargetParams {
+                            target_id: te.target_info.target_id.clone(),
+                            flatten: true,
+                        },
+                        None,
+                    )
+                    .await;
+                if let Ok(attach) = attach_result {
+                    let _ = mgr.enable_domains_pub(&attach.session_id).await;
+
+                    // Install domain filter on new pages
+                    let df = self.domain_filter.read().await;
+                    if let Some(ref filter) = *df {
+                        let has_proxy_creds = self.proxy_credentials.read().await.is_some();
+                        let _ = network::install_domain_filter(
+                            &mgr.client,
+                            &attach.session_id,
+                            &filter.allowed_domains,
+                            has_proxy_creds,
+                        )
+                        .await;
+                    }
+
+                    mgr.add_page(super::browser::PageInfo {
+                        target_id: te.target_info.target_id.clone(),
+                        session_id: attach.session_id,
+                        url: te.target_info.url.clone(),
+                        title: te.target_info.title.clone(),
+                        target_type: te.target_info.target_type.clone(),
+                    });
+                }
+            }
+        }
+
+        // Update changed targets
+        for te in &drained.changed_targets {
+            if let Some(ref mut mgr) = self.browser {
+                mgr.update_page_target_info(&te.target_info);
+            }
+        }
     }
 
     fn drain_cdp_events(&mut self) -> DrainedEvents {
@@ -466,6 +555,7 @@ impl DaemonState {
 
         let mut pending_acks: Vec<i64> = Vec::new();
         let mut new_targets: Vec<TargetCreatedEvent> = Vec::new();
+        let mut new_target_ids: HashSet<String> = HashSet::new();
         let mut changed_targets: Vec<TargetInfoChangedEvent> = Vec::new();
         let mut destroyed_targets: Vec<String> = Vec::new();
         let mut attached_iframe_sessions: Vec<(String, String)> = Vec::new();
@@ -486,6 +576,7 @@ impl DaemonState {
                                         .as_ref()
                                         .is_none_or(|b| b.has_target(&te.target_info.target_id));
                                     if !already_tracked {
+                                        new_target_ids.insert(te.target_info.target_id.clone());
                                         new_targets.push(te);
                                     }
                                 }
@@ -497,7 +588,24 @@ impl DaemonState {
                                 event.params.clone(),
                             ) {
                                 if should_track_target(&te.target_info) {
-                                    changed_targets.push(te);
+                                    // If this target is not yet tracked (e.g. it was
+                                    // initially filtered because its URL was
+                                    // chrome://newtab/), promote it to a new target
+                                    // so it gets attached and added to `pages`.
+                                    let already_tracked = self
+                                        .browser
+                                        .as_ref()
+                                        .is_some_and(|b| b.has_target(&te.target_info.target_id));
+                                    if already_tracked
+                                        || new_target_ids.contains(&te.target_info.target_id)
+                                    {
+                                        changed_targets.push(te);
+                                    } else {
+                                        new_target_ids.insert(te.target_info.target_id.clone());
+                                        new_targets.push(TargetCreatedEvent {
+                                            target_info: te.target_info,
+                                        });
+                                    }
                                 }
                             }
                             continue;
@@ -870,97 +978,8 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         server.broadcast_command(action, &id, cmd);
     }
 
-    // Drain pending CDP events (console, errors, screencast frames, target lifecycle)
-    let DrainedEvents {
-        pending_acks,
-        new_targets,
-        changed_targets,
-        destroyed_targets,
-        attached_iframe_sessions,
-        detached_iframe_sessions,
-    } = state.drain_cdp_events();
-    if !pending_acks.is_empty() {
-        if let Some(ref browser) = state.browser {
-            if let Ok(session_id) = browser.active_session_id() {
-                for ack_sid in pending_acks {
-                    let _ =
-                        stream::ack_screencast_frame(&browser.client, session_id, ack_sid).await;
-                }
-            }
-        }
-    }
-
-    for target_id in &destroyed_targets {
-        if let Some(ref mut mgr) = state.browser {
-            mgr.remove_page_by_target_id(target_id);
-        }
-    }
-
-    // Track cross-origin iframe sessions
-    for (frame_id, iframe_sid) in &attached_iframe_sessions {
-        state
-            .iframe_sessions
-            .insert(frame_id.clone(), iframe_sid.clone());
-        if let Some(ref mgr) = state.browser {
-            let _ = mgr
-                .client
-                .send_command_no_params("DOM.enable", Some(iframe_sid.as_str()))
-                .await;
-            let _ = mgr
-                .client
-                .send_command_no_params("Accessibility.enable", Some(iframe_sid.as_str()))
-                .await;
-        }
-    }
-    for sid in &detached_iframe_sessions {
-        state.iframe_sessions.retain(|_, v| v != sid);
-    }
-
-    for te in &new_targets {
-        if let Some(ref mut mgr) = state.browser {
-            let attach_result: Result<AttachToTargetResult, String> = mgr
-                .client
-                .send_command_typed(
-                    "Target.attachToTarget",
-                    &AttachToTargetParams {
-                        target_id: te.target_info.target_id.clone(),
-                        flatten: true,
-                    },
-                    None,
-                )
-                .await;
-            if let Ok(attach) = attach_result {
-                let _ = mgr.enable_domains_pub(&attach.session_id).await;
-
-                // Install domain filter on new pages
-                let df = state.domain_filter.read().await;
-                if let Some(ref filter) = *df {
-                    let has_proxy_creds = state.proxy_credentials.read().await.is_some();
-                    let _ = network::install_domain_filter(
-                        &mgr.client,
-                        &attach.session_id,
-                        &filter.allowed_domains,
-                        has_proxy_creds,
-                    )
-                    .await;
-                }
-
-                mgr.add_page(super::browser::PageInfo {
-                    target_id: te.target_info.target_id.clone(),
-                    session_id: attach.session_id,
-                    url: te.target_info.url.clone(),
-                    title: te.target_info.title.clone(),
-                    target_type: te.target_info.target_type.clone(),
-                });
-            }
-        }
-    }
-
-    for te in &changed_targets {
-        if let Some(ref mut mgr) = state.browser {
-            mgr.update_page_target_info(&te.target_info);
-        }
-    }
+    // Drain and apply pending CDP events (console, errors, screencast frames, target lifecycle)
+    state.drain_cdp_events_background().await;
 
     // Hot-reload and check action policy
     if let Some(ref mut policy) = state.policy {
