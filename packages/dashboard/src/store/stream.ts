@@ -13,6 +13,7 @@ import { activePortAtom } from "@/store/sessions";
 import { tabCacheAtom, engineCacheAtom } from "@/store/tabs";
 
 const MAX_EVENTS = 500;
+const ARIA_POLL_SNAPSHOT_DEPTH = 9999;
 
 // ---------------------------------------------------------------------------
 // Primitive atoms
@@ -94,6 +95,7 @@ export function useStreamSync(port: number) {
   const retryCountRef = useRef(0);
   const eventsRef = useRef<ActivityEvent[]>([]);
   const consoleRef = useRef<ConsoleEntry[]>([]);
+  const ignoredCommandIdsRef = useRef<Set<string>>(new Set());
   const portRef = useRef(port);
 
   // Reset all stream state when port changes
@@ -102,6 +104,7 @@ export function useStreamSync(port: number) {
       portRef.current = port;
       eventsRef.current = [];
       consoleRef.current = [];
+      ignoredCommandIdsRef.current.clear();
       setConnected(false);
       setBrowserConnected(false);
       setScreencasting(false);
@@ -165,6 +168,13 @@ export function useStreamSync(port: number) {
           break;
 
         case "command": {
+          if (
+            msg.action === "snapshot" &&
+            Number(msg.params?.maxDepth) === ARIA_POLL_SNAPSHOT_DEPTH
+          ) {
+            ignoredCommandIdsRef.current.add(msg.id);
+            break;
+          }
           const updated = [...eventsRef.current, msg].slice(-MAX_EVENTS);
           eventsRef.current = updated;
           setEvents(updated);
@@ -186,6 +196,7 @@ export function useStreamSync(port: number) {
         }
 
         case "result": {
+          if (ignoredCommandIdsRef.current.delete(msg.id)) break;
           const cmdIdx = eventsRef.current.findIndex(
             (e) => e.type === "command" && e.id === msg.id,
           );
