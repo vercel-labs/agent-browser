@@ -259,6 +259,14 @@ h1 {{ font-size: 24px; margin-bottom: 8px; color: #fff; }}
 .meta {{ font-size: 14px; color: #888; margin-bottom: 24px; }}
 .meta span {{ color: #aaa; }}
 #player {{ border-radius: 12px; overflow: hidden; box-shadow: 0 8px 32px rgba(0,0,0,0.5); }}
+.actions {{ margin-top: 16px; display: flex; gap: 12px; }}
+.actions button {{
+    padding: 8px 16px; border-radius: 8px; border: 1px solid #333;
+    background: #1a1a2e; color: #e0e0e0; font-size: 14px; cursor: pointer;
+    transition: background 0.2s;
+}}
+.actions button:hover {{ background: #2a2a3e; }}
+.actions button:disabled {{ opacity: 0.5; cursor: not-allowed; }}
 </style>
 </head>
 <body>
@@ -268,22 +276,111 @@ h1 {{ font-size: 24px; margin-bottom: 8px; color: #fff; }}
     <span>{size:.1} KB</span>
 </p>
 <div id="player"></div>
+<div class="actions">
+    <button onclick="exportVideo(this)">Export as video</button>
+</div>
 <script src="https://cdn.jsdelivr.net/npm/rrweb@latest/dist/rrweb.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/rrweb-player@latest/dist/index.js"></script>
 <script>
 var events = {events};
-new rrwebPlayer({{
+var player = new rrwebPlayer({{
     target: document.getElementById("player"),
     props: {{
         events: events,
         width: 1280,
         height: 720,
-        autoPlay: true,
+        autoPlay: false,
         showController: true,
+        skipInactive: true,
         speedOption: [1, 2, 4, 8],
         insertStyleRules: [{css_vars}],
     }},
 }});
+
+// Export replay as WebM video using MediaRecorder + canvas capture
+function exportVideo(btn) {{
+    var iframe = document.querySelector('.rr-player__frame iframe');
+    if (!iframe) {{ alert('Player not ready'); return; }}
+
+    // Find the replay wrapper that contains the iframe
+    var wrapper = document.querySelector('.replayer-wrapper');
+    if (!wrapper) wrapper = iframe.parentElement;
+
+    btn.disabled = true;
+    btn.textContent = 'Recording...';
+
+    // Use html2canvas approach: capture the wrapper element
+    var canvas = document.createElement('canvas');
+    canvas.width = 1280;
+    canvas.height = 720;
+    var ctx = canvas.getContext('2d');
+
+    var stream = canvas.captureStream(30);
+    var recorder = new MediaRecorder(stream, {{
+        mimeType: 'video/webm;codecs=vp9',
+        videoBitsPerSecond: 5000000,
+    }});
+    var chunks = [];
+    recorder.ondataavailable = function(e) {{ if (e.data.size > 0) chunks.push(e.data); }};
+    recorder.onstop = function() {{
+        var blob = new Blob(chunks, {{ type: 'video/webm' }});
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement('a');
+        a.href = url;
+        a.download = 'session-replay.webm';
+        a.click();
+        URL.revokeObjectURL(url);
+        btn.disabled = false;
+        btn.textContent = 'Export as video';
+    }};
+
+    recorder.start();
+
+    // Reset player to beginning and play
+    player.goto(0);
+    player.play();
+
+    // Capture frames by drawing the iframe content
+    var captureInterval = setInterval(function() {{
+        try {{
+            var doc = iframe.contentDocument || iframe.contentWindow.document;
+            // Use foreignObject SVG trick to render HTML to canvas
+            var data = new XMLSerializer().serializeToString(doc.documentElement);
+            var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720">'
+                + '<foreignObject width="100%" height="100%">'
+                + '<div xmlns="http://www.w3.org/1999/xhtml">'
+                + data + '</div></foreignObject></svg>';
+            var img = new Image();
+            var svgBlob = new Blob([svg], {{ type: 'image/svg+xml;charset=utf-8' }});
+            img.onload = function() {{ ctx.drawImage(img, 0, 0, 1280, 720); }};
+            img.src = URL.createObjectURL(svgBlob);
+        }} catch(e) {{
+            // Cross-origin or serialization error -- draw black frame
+            ctx.fillStyle = '#000';
+            ctx.fillRect(0, 0, 1280, 720);
+        }}
+    }}, 33); // ~30fps
+
+    // Stop when replay finishes
+    var checkFinished = setInterval(function() {{
+        var controller = player.getReplayer();
+        if (controller && controller.service) {{
+            var state = controller.service.state;
+            if (state && state.value === 'paused' && controller.getCurrentTime() > 1000) {{
+                clearInterval(captureInterval);
+                clearInterval(checkFinished);
+                setTimeout(function() {{ recorder.stop(); }}, 500);
+            }}
+        }}
+    }}, 500);
+
+    // Safety timeout: stop after 5 minutes max
+    setTimeout(function() {{
+        clearInterval(captureInterval);
+        clearInterval(checkFinished);
+        if (recorder.state === 'recording') recorder.stop();
+    }}, 300000);
+}}
 </script>
 </body>
 </html>"##,
