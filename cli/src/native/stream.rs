@@ -776,32 +776,36 @@ async fn cdp_event_loop(
                 let vw = *viewport_width.lock().await;
                 let vh = *viewport_height.lock().await;
 
-                let _ = client_arc
-                    .send_command(
-                        "Page.startScreencast",
-                        Some(json!({
-                            "format": "jpeg",
-                            "quality": 80,
-                            "maxWidth": vw,
-                            "maxHeight": vh,
-                            "everyNthFrame": 1,
-                        })),
-                        session_id.as_deref(),
-                    )
-                    .await;
+                let eng = last_engine.read().await.clone();
+                let supports_screencast = eng == "chrome";
+
+                if supports_screencast {
+                    let _ = client_arc
+                        .send_command(
+                            "Page.startScreencast",
+                            Some(json!({
+                                "format": "jpeg",
+                                "quality": 80,
+                                "maxWidth": vw,
+                                "maxHeight": vh,
+                                "everyNthFrame": 1,
+                            })),
+                            session_id.as_deref(),
+                        )
+                        .await;
+                }
 
                 {
                     let mut sc = screencasting.lock().await;
-                    *sc = true;
+                    *sc = supports_screencast;
                 }
 
-                // Broadcast screencasting:true status with current viewport
-                let eng = last_engine.read().await.clone();
+                // Broadcast connection status with current viewport
                 let rec = *recording.lock().await;
                 let status = json!({
                     "type": "status",
                     "connected": true,
-                    "screencasting": true,
+                    "screencasting": supports_screencast,
                     "viewportWidth": vw,
                     "viewportHeight": vh,
                     "engine": eng,
@@ -814,10 +818,12 @@ async fn cdp_event_loop(
                     tokio::select! {
                         changed = shutdown_rx.changed() => {
                             if changed.is_err() || *shutdown_rx.borrow() {
-                                let session_id = cdp_session_id.read().await.clone();
-                                let _ = client_arc
-                                    .send_command_no_params("Page.stopScreencast", session_id.as_deref())
-                                    .await;
+                                if supports_screencast {
+                                    let session_id = cdp_session_id.read().await.clone();
+                                    let _ = client_arc
+                                        .send_command_no_params("Page.stopScreencast", session_id.as_deref())
+                                        .await;
+                                }
                                 let mut sc = screencasting.lock().await;
                                 *sc = false;
                                 return;
@@ -943,9 +949,11 @@ async fn cdp_event_loop(
                             let count = *client_count.lock().await;
                             let new_session_id = cdp_session_id.read().await.clone();
                             if count == 0 {
-                                let _ = client_arc
-                                    .send_command_no_params("Page.stopScreencast", session_id.as_deref())
-                                    .await;
+                                if supports_screencast {
+                                    let _ = client_arc
+                                        .send_command_no_params("Page.stopScreencast", session_id.as_deref())
+                                        .await;
+                                }
                                 let mut sc = screencasting.lock().await;
                                 *sc = false;
                                 break;
@@ -962,10 +970,11 @@ async fn cdp_event_loop(
                             let new_vh = *viewport_height.lock().await;
                             let viewport_changed = new_vw != vw || new_vh != vh;
                             if client_changed || session_changed || viewport_changed {
-                                // Stop screencast, restart loop to pick up new settings
-                                let _ = client_arc
-                                    .send_command_no_params("Page.stopScreencast", session_id.as_deref())
-                                    .await;
+                                if supports_screencast {
+                                    let _ = client_arc
+                                        .send_command_no_params("Page.stopScreencast", session_id.as_deref())
+                                        .await;
+                                }
                                 let mut sc = screencasting.lock().await;
                                 *sc = false;
                                 client_notify.notify_one();

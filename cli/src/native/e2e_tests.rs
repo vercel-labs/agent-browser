@@ -1602,6 +1602,142 @@ async fn e2e_state_management() {
 }
 
 // ---------------------------------------------------------------------------
+// Cross-domain state save (issue #1060)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore]
+async fn e2e_save_state_cross_domain() {
+    let mut state = DaemonState::new();
+
+    // Launch
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Navigate to domain A and set cookie + localStorage
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": "https://httpbin.org/html" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "3", "action": "cookies_set",
+            "name": "domainA_cookie", "value": "from_httpbin"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "4", "action": "storage_set",
+            "type": "local", "key": "domainA_key", "value": "domainA_val"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Navigate to domain B and set cookie + localStorage
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "navigate", "url": "https://example.com" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "6", "action": "cookies_set",
+            "name": "domainB_cookie", "value": "from_example"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "7", "action": "storage_set",
+            "type": "local", "key": "domainB_key", "value": "domainB_val"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Save state (currently on example.com)
+    let tmp_state = std::env::temp_dir()
+        .join("agent-browser-e2e-cross-domain-state.json")
+        .to_string_lossy()
+        .to_string();
+    let resp = execute_command(
+        &json!({ "id": "8", "action": "state_save", "path": &tmp_state }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Read and verify saved state
+    let saved = std::fs::read_to_string(&tmp_state).expect("State file should exist");
+    let state_data: serde_json::Value = serde_json::from_str(&saved).unwrap();
+
+    // Verify BOTH domain cookies are present
+    let cookies = state_data["cookies"].as_array().unwrap();
+    let has_domain_a = cookies.iter().any(|c| c["name"] == "domainA_cookie");
+    let has_domain_b = cookies.iter().any(|c| c["name"] == "domainB_cookie");
+    assert!(
+        has_domain_a,
+        "Should include cross-domain cookie from httpbin.org: {:?}",
+        cookies
+    );
+    assert!(
+        has_domain_b,
+        "Should include cookie from example.com: {:?}",
+        cookies
+    );
+
+    // Verify BOTH origins' localStorage are present
+    let origins = state_data["origins"].as_array().unwrap();
+    let has_origin_a = origins.iter().any(|o| {
+        o["origin"].as_str().is_some_and(|s| s.contains("httpbin"))
+            && o["localStorage"]
+                .as_array()
+                .is_some_and(|ls| ls.iter().any(|e| e["name"] == "domainA_key"))
+    });
+    let has_origin_b = origins.iter().any(|o| {
+        o["origin"].as_str().is_some_and(|s| s.contains("example"))
+            && o["localStorage"]
+                .as_array()
+                .is_some_and(|ls| ls.iter().any(|e| e["name"] == "domainB_key"))
+    });
+    assert!(
+        has_origin_a,
+        "Should include localStorage from httpbin.org origin: {:?}",
+        origins
+    );
+    assert!(
+        has_origin_b,
+        "Should include localStorage from example.com origin: {:?}",
+        origins
+    );
+
+    // Clean up
+    let _ = std::fs::remove_file(&tmp_state);
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+// ---------------------------------------------------------------------------
 // Domain filter
 // ---------------------------------------------------------------------------
 

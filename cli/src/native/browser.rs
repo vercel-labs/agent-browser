@@ -204,6 +204,8 @@ pub struct BrowserManager {
     /// (e.g. recording, window_new) must skip `Target.createBrowserContext`
     /// when this is `true`.
     pub has_extensions: bool,
+    /// Origins visited during this session, used by save_state to collect cross-origin localStorage.
+    visited_origins: HashSet<String>,
 }
 
 const LIGHTPANDA_CDP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -279,6 +281,7 @@ impl BrowserManager {
                 default_timeout_ms: 25_000,
                 download_path: download_path.clone(),
                 has_extensions,
+                visited_origins: HashSet::new(),
             };
             manager.discover_and_attach_targets().await?;
             manager
@@ -345,6 +348,7 @@ impl BrowserManager {
             default_timeout_ms: 10_000,
             download_path: None, // CDP connections don't have a launch-time download path
             has_extensions: false,
+            visited_origins: HashSet::new(),
         };
 
         manager.discover_and_attach_targets().await?;
@@ -505,6 +509,14 @@ impl BrowserManager {
 
         let page_url = self.get_url().await.unwrap_or_else(|_| url.to_string());
         let title = self.get_title().await.unwrap_or_default();
+
+        // Track visited origin for cross-origin localStorage collection in save_state
+        if let Ok(parsed) = url::Url::parse(&page_url) {
+            let origin = parsed.origin().ascii_serialization();
+            if origin != "null" {
+                self.visited_origins.insert(origin);
+            }
+        }
 
         if let Some(page) = self.pages.get_mut(self.active_page_index) {
             page.url = page_url.clone();
@@ -1141,6 +1153,10 @@ impl BrowserManager {
         self.pages.clone()
     }
 
+    pub fn visited_origins(&self) -> &HashSet<String> {
+        &self.visited_origins
+    }
+
     pub async fn set_download_behavior(&self, download_path: &str) -> Result<(), String> {
         let session_id = self.active_session_id()?;
         self.client
@@ -1289,6 +1305,7 @@ async fn initialize_lightpanda_manager(
             default_timeout_ms: 25_000,
             download_path: None,
             has_extensions: false,
+            visited_origins: HashSet::new(),
         };
 
         match discover_and_attach_lightpanda_targets(&mut manager, deadline).await {
