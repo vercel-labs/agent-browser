@@ -5,6 +5,11 @@ use std::path::Path;
 /// rrweb CDN URL -- fetched at runtime and cached in-page.
 const RRWEB_CDN_URL: &str = "https://cdn.jsdelivr.net/npm/rrweb@latest/dist/rrweb.min.js";
 
+/// Maximum gap (ms) between events before compression.
+/// Gaps larger than this are compressed down to this value, removing
+/// idle periods caused by navigation redirects, network waits, etc.
+const MAX_EVENT_GAP_MS: i64 = 200;
+
 /// JavaScript that fetches rrweb from CDN, injects it, and starts recording.
 /// Uses `inlineImages`, `collectFonts`, and `inlineStylesheet` for high-fidelity replay.
 /// Safe to call multiple times -- skips if already injected.
@@ -188,7 +193,13 @@ pub async fn replay_stop(
         return Err("Failed to extract events from page.".to_string());
     }
 
-    let size_kb = events_json.len() as f64 / 1024.0;
+    // Compress gaps: remove idle periods caused by navigation, network waits, etc.
+    // This prevents the rrweb-player timeline from showing grey inactive zones
+    // that block the UI controls (a known rrweb-player bug).
+    let compressed_json = compress_event_gaps(events_json);
+    let final_events = compressed_json.as_deref().unwrap_or(events_json);
+
+    let size_kb = final_events.len() as f64 / 1024.0;
     state.event_count = event_count;
 
     // Ensure output directory exists
@@ -206,13 +217,12 @@ pub async fn replay_stop(
     let html_path = format!("{}.html", base_path);
     let json_path = format!("{}.json", base_path);
 
-    // Write recording.json
+    // Write recording.json (raw, uncompressed for programmatic use)
     fs::write(&json_path, events_json)
         .map_err(|e| format!("Failed to write {}: {}", json_path, e))?;
 
-    // Escape </script> sequences in both events and CSS to prevent broken HTML.
-    // Any literal "</script>" inside the JSON would prematurely close the <script> tag.
-    let escaped_events = events_json.replace("</script>", "<\\/script>");
+    // Escape </script> sequences to prevent broken HTML
+    let escaped_events = final_events.replace("</script>", "<\\/script>");
     let escaped_css = css_vars_str.replace("</", "<\\/");
 
     // Generate self-contained replay HTML
@@ -234,6 +244,36 @@ pub async fn replay_stop(
 }
 
 // ---------------------------------------------------------------------------
+// Gap compression
+// ---------------------------------------------------------------------------
+
+/// Compress gaps between events so the replay has no idle periods.
+/// This prevents the rrweb-player timeline from showing grey inactive zones.
+/// Returns None if parsing fails (caller uses original JSON).
+fn compress_event_gaps(events_json: &str) -> Option<String> {
+    let mut events: Vec<Value> = serde_json::from_str(events_json).ok()?;
+    if events.len() < 2 {
+        return None;
+    }
+
+    let mut time_saved: i64 = 0;
+    for i in 1..events.len() {
+        let prev_ts = events[i - 1].get("timestamp")?.as_i64()?;
+        let curr_ts = events[i].get("timestamp")?.as_i64()?;
+        let gap = curr_ts - prev_ts;
+
+        if gap > MAX_EVENT_GAP_MS {
+            time_saved += gap - MAX_EVENT_GAP_MS;
+        }
+
+        let new_ts = curr_ts - time_saved;
+        events[i]["timestamp"] = json!(new_ts);
+    }
+
+    serde_json::to_string(&events).ok()
+}
+
+// ---------------------------------------------------------------------------
 // HTML template
 // ---------------------------------------------------------------------------
 
@@ -248,25 +288,26 @@ fn generate_replay_html(events_json: &str, css_vars: &str, count: u64, size_kb: 
 <style>
 * {{ box-sizing: border-box; }}
 body {{
-    margin: 0; padding: 40px;
+    margin: 0; padding: 24px;
     display: flex; flex-direction: column; align-items: center;
     min-height: 100vh;
     background: #0a0a1a;
     font-family: system-ui, -apple-system, sans-serif;
     color: #e0e0e0;
 }}
-h1 {{ font-size: 24px; margin-bottom: 8px; color: #fff; }}
-.meta {{ font-size: 14px; color: #888; margin-bottom: 24px; }}
+h1 {{ font-size: 20px; margin-bottom: 4px; color: #fff; }}
+.meta {{ font-size: 13px; color: #888; margin-bottom: 16px; }}
 .meta span {{ color: #aaa; }}
 #player {{ border-radius: 12px; overflow: hidden; box-shadow: 0 8px 32px rgba(0,0,0,0.5); }}
-.actions {{ margin-top: 16px; display: flex; gap: 12px; }}
+.actions {{ margin-top: 12px; display: flex; gap: 12px; align-items: center; }}
 .actions button {{
-    padding: 8px 16px; border-radius: 8px; border: 1px solid #333;
-    background: #1a1a2e; color: #e0e0e0; font-size: 14px; cursor: pointer;
+    padding: 6px 14px; border-radius: 8px; border: 1px solid #333;
+    background: #1a1a2e; color: #e0e0e0; font-size: 13px; cursor: pointer;
     transition: background 0.2s;
 }}
 .actions button:hover {{ background: #2a2a3e; }}
 .actions button:disabled {{ opacity: 0.5; cursor: not-allowed; }}
+.actions .hint {{ font-size: 12px; color: #555; }}
 </style>
 </head>
 <body>
@@ -277,7 +318,8 @@ h1 {{ font-size: 24px; margin-bottom: 8px; color: #fff; }}
 </p>
 <div id="player"></div>
 <div class="actions">
-    <button onclick="exportVideo(this)">Export as video</button>
+    <button id="exportBtn" onclick="exportVideo(this)">Record this tab as video</button>
+    <span class="hint" id="exportHint"></span>
 </div>
 <script src="https://cdn.jsdelivr.net/npm/rrweb@latest/dist/rrweb.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/rrweb-player@latest/dist/index.js"></script>
@@ -291,95 +333,72 @@ var player = new rrwebPlayer({{
         height: 720,
         autoPlay: false,
         showController: true,
-        skipInactive: true,
         speedOption: [1, 2, 4, 8],
         insertStyleRules: [{css_vars}],
     }},
 }});
 
-// Export replay as WebM video using MediaRecorder + canvas capture
-function exportVideo(btn) {{
-    var iframe = document.querySelector('.rr-player__frame iframe');
-    if (!iframe) {{ alert('Player not ready'); return; }}
+// Record this tab as video using Screen Capture API.
+// Auto-stops when the replay finishes and downloads the WebM file.
+async function exportVideo(btn) {{
+    var hint = document.getElementById("exportHint");
+    try {{
+        var stream = await navigator.mediaDevices.getDisplayMedia({{
+            video: {{ displaySurface: "browser" }},
+            audio: false,
+            preferCurrentTab: true,
+        }});
 
-    // Find the replay wrapper that contains the iframe
-    var wrapper = document.querySelector('.replayer-wrapper');
-    if (!wrapper) wrapper = iframe.parentElement;
+        btn.disabled = true;
+        btn.textContent = "Recording...";
+        hint.textContent = "Auto-stops when replay finishes";
 
-    btn.disabled = true;
-    btn.textContent = 'Recording...';
+        var recorder = new MediaRecorder(stream, {{
+            mimeType: "video/webm;codecs=vp9",
+            videoBitsPerSecond: 8000000,
+        }});
+        var chunks = [];
+        recorder.ondataavailable = function(e) {{ if (e.data.size > 0) chunks.push(e.data); }};
+        recorder.onstop = function() {{
+            stream.getTracks().forEach(function(t) {{ t.stop(); }});
+            var blob = new Blob(chunks, {{ type: "video/webm" }});
+            var url = URL.createObjectURL(blob);
+            var a = document.createElement("a");
+            a.href = url;
+            a.download = "session-replay.webm";
+            a.click();
+            URL.revokeObjectURL(url);
+            btn.disabled = false;
+            btn.textContent = "Record this tab as video";
+            hint.textContent = "Done! Video downloaded.";
+        }};
 
-    // Use html2canvas approach: capture the wrapper element
-    var canvas = document.createElement('canvas');
-    canvas.width = 1280;
-    canvas.height = 720;
-    var ctx = canvas.getContext('2d');
+        stream.getVideoTracks()[0].onended = function() {{
+            if (recorder.state === "recording") recorder.stop();
+        }};
 
-    var stream = canvas.captureStream(30);
-    var recorder = new MediaRecorder(stream, {{
-        mimeType: 'video/webm;codecs=vp9',
-        videoBitsPerSecond: 5000000,
-    }});
-    var chunks = [];
-    recorder.ondataavailable = function(e) {{ if (e.data.size > 0) chunks.push(e.data); }};
-    recorder.onstop = function() {{
-        var blob = new Blob(chunks, {{ type: 'video/webm' }});
-        var url = URL.createObjectURL(blob);
-        var a = document.createElement('a');
-        a.href = url;
-        a.download = 'session-replay.webm';
-        a.click();
-        URL.revokeObjectURL(url);
-        btn.disabled = false;
-        btn.textContent = 'Export as video';
-    }};
+        recorder.start();
+        player.goto(0);
+        player.play();
 
-    recorder.start();
-
-    // Reset player to beginning and play
-    player.goto(0);
-    player.play();
-
-    // Capture frames by drawing the iframe content
-    var captureInterval = setInterval(function() {{
-        try {{
-            var doc = iframe.contentDocument || iframe.contentWindow.document;
-            // Use foreignObject SVG trick to render HTML to canvas
-            var data = new XMLSerializer().serializeToString(doc.documentElement);
-            var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720">'
-                + '<foreignObject width="100%" height="100%">'
-                + '<div xmlns="http://www.w3.org/1999/xhtml">'
-                + data + '</div></foreignObject></svg>';
-            var img = new Image();
-            var svgBlob = new Blob([svg], {{ type: 'image/svg+xml;charset=utf-8' }});
-            img.onload = function() {{ ctx.drawImage(img, 0, 0, 1280, 720); }};
-            img.src = URL.createObjectURL(svgBlob);
-        }} catch(e) {{
-            // Cross-origin or serialization error -- draw black frame
-            ctx.fillStyle = '#000';
-            ctx.fillRect(0, 0, 1280, 720);
-        }}
-    }}, 33); // ~30fps
-
-    // Stop when replay finishes
-    var checkFinished = setInterval(function() {{
-        var controller = player.getReplayer();
-        if (controller && controller.service) {{
-            var state = controller.service.state;
-            if (state && state.value === 'paused' && controller.getCurrentTime() > 1000) {{
-                clearInterval(captureInterval);
-                clearInterval(checkFinished);
-                setTimeout(function() {{ recorder.stop(); }}, 500);
+        // Auto-stop when replay reaches the end
+        var replayer = player.getReplayer();
+        var checkInterval = setInterval(function() {{
+            if (!replayer || !replayer.service) return;
+            var meta = replayer.getMetaData();
+            var current = replayer.getCurrentTime();
+            if (current >= meta.totalTime - 200) {{
+                clearInterval(checkInterval);
+                setTimeout(function() {{
+                    if (recorder.state === "recording") recorder.stop();
+                }}, 500);
             }}
-        }}
-    }}, 500);
-
-    // Safety timeout: stop after 5 minutes max
-    setTimeout(function() {{
-        clearInterval(captureInterval);
-        clearInterval(checkFinished);
-        if (recorder.state === 'recording') recorder.stop();
-    }}, 300000);
+        }}, 200);
+    }} catch(e) {{
+        btn.disabled = false;
+        hint.textContent = "";
+        if (e.name !== "NotAllowedError") alert("Export failed: " + e.message);
+    }}
 }}
 </script>
 </body>
@@ -422,11 +441,43 @@ mod tests {
         assert!(html.contains("Session Replay"));
         assert!(html.contains("1 events"));
         assert!(html.contains("insertStyleRules"));
+        assert!(html.contains("Record this tab as video"));
     }
 
     #[test]
     fn test_generate_replay_html_escapes_css() {
         let html = generate_replay_html("[]", ":root{--bg: #fff;}", 0, 0.0);
         assert!(html.contains("--bg"));
+    }
+
+    #[test]
+    fn test_compress_event_gaps_removes_idle() {
+        let events = json!([
+            {"type": 4, "timestamp": 1000},
+            {"type": 2, "timestamp": 1050},
+            {"type": 3, "timestamp": 5000},  // 3950ms gap -> compressed
+            {"type": 3, "timestamp": 5100},
+        ]);
+        let json_str = serde_json::to_string(&events).unwrap();
+        let compressed = compress_event_gaps(&json_str).unwrap();
+        let result: Vec<Value> = serde_json::from_str(&compressed).unwrap();
+
+        // Gap between event 1 (1050) and event 2 should be MAX_EVENT_GAP_MS, not 3950
+        let ts2 = result[2]["timestamp"].as_i64().unwrap();
+        let ts1 = result[1]["timestamp"].as_i64().unwrap();
+        assert_eq!(ts2 - ts1, MAX_EVENT_GAP_MS);
+    }
+
+    #[test]
+    fn test_compress_event_gaps_preserves_small_gaps() {
+        let events = json!([
+            {"type": 4, "timestamp": 1000},
+            {"type": 3, "timestamp": 1050},
+            {"type": 3, "timestamp": 1100},
+        ]);
+        let json_str = serde_json::to_string(&events).unwrap();
+        let compressed = compress_event_gaps(&json_str).unwrap();
+        // Small gaps should be unchanged
+        assert_eq!(json_str, compressed);
     }
 }
