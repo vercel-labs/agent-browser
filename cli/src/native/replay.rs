@@ -210,11 +210,13 @@ pub async fn replay_stop(
     fs::write(&json_path, events_json)
         .map_err(|e| format!("Failed to write {}: {}", json_path, e))?;
 
-    // Escape CSS for safe embedding
+    // Escape </script> sequences in both events and CSS to prevent broken HTML.
+    // Any literal "</script>" inside the JSON would prematurely close the <script> tag.
+    let escaped_events = events_json.replace("</script>", "<\\/script>");
     let escaped_css = css_vars_str.replace("</", "<\\/");
 
     // Generate self-contained replay HTML
-    let html = generate_replay_html(events_json, &escaped_css, event_count, size_kb);
+    let html = generate_replay_html(&escaped_events, &escaped_css, event_count, size_kb);
     fs::write(&html_path, &html)
         .map_err(|e| format!("Failed to write {}: {}", html_path, e))?;
 
