@@ -1315,6 +1315,10 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         "request_detail" => handle_request_detail(cmd, state).await,
         "credentials" => handle_http_credentials(cmd, state).await,
         "emulatemedia" => handle_set_media(cmd, state).await,
+        "webauthn_enable" => handle_webauthn_enable(state).await,
+        "webauthn_add_virtual_authenticator" => {
+            handle_webauthn_add_virtual_authenticator(state).await
+        }
         "auth_save" => handle_auth_save(cmd).await,
         "auth_login" => handle_auth_login(cmd, state).await,
         "auth_list" => handle_credentials_list().await,
@@ -4252,6 +4256,18 @@ async fn handle_permissions(cmd: &Value, state: &DaemonState) -> Result<Value, S
 
     mgr.grant_permissions(&permissions).await?;
     Ok(json!({ "granted": permissions }))
+}
+
+async fn handle_webauthn_enable(state: &DaemonState) -> Result<Value, String> {
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    mgr.enable_webauthn().await?;
+    Ok(json!({ "enabled": true }))
+}
+
+async fn handle_webauthn_add_virtual_authenticator(state: &DaemonState) -> Result<Value, String> {
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    mgr.add_virtual_authenticator().await?;
+    Ok(json!({ "added": true }))
 }
 
 async fn handle_dialog(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {

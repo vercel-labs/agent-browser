@@ -200,6 +200,11 @@ agent-browser diff screenshot --baseline before.png  # Visual pixel diff
 agent-browser diff url <url1> <url2>                 # Compare two pages
 agent-browser diff url <url1> <url2> --wait-until networkidle  # Custom wait strategy
 agent-browser diff url <url1> <url2> --selector "#main"  # Scope to element
+
+# Passkeys
+
+agent-browser set webauthn enable                    # Enable WebAuthn
+agent-browser set webauthn add-virtual-authenticator # Add virtual authenticator
 ```
 
 ## Streaming
