@@ -1,10 +1,12 @@
 use std::collections::HashMap;
 
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use super::cdp::client::CdpClient;
 use super::cdp::types::*;
-use super::element::{resolve_element_center, resolve_element_object_id, RefMap};
+use super::element::{
+    get_center_and_viewport, resolve_element_center, resolve_element_object_id, RefMap,
+};
 
 pub async fn click(
     client: &CdpClient,
@@ -15,14 +17,13 @@ pub async fn click(
     click_count: i32,
     iframe_sessions: &HashMap<String, String>,
 ) -> Result<(), String> {
-    let (x, y, effective_session_id) = resolve_element_center(
-        client,
-        session_id,
-        ref_map,
-        selector_or_ref,
-        iframe_sessions,
-    )
-    .await?;
+    let (object_id, effective_session_id) =
+        resolve_element_object_id(client, session_id, ref_map, selector_or_ref, iframe_sessions)
+            .await?;
+    scroll_into_view_if_needed(client, &effective_session_id, &object_id).await?;
+    let (x, y, vw, vh) =
+        get_center_and_viewport(client, &effective_session_id, &object_id).await?;
+    assert_in_viewport(x, y, vw, vh)?;
     dispatch_click(client, &effective_session_id, x, y, button, click_count).await
 }
 
@@ -52,14 +53,13 @@ pub async fn hover(
     selector_or_ref: &str,
     iframe_sessions: &HashMap<String, String>,
 ) -> Result<(), String> {
-    let (x, y, effective_session_id) = resolve_element_center(
-        client,
-        session_id,
-        ref_map,
-        selector_or_ref,
-        iframe_sessions,
-    )
-    .await?;
+    let (object_id, effective_session_id) =
+        resolve_element_object_id(client, session_id, ref_map, selector_or_ref, iframe_sessions)
+            .await?;
+    scroll_into_view_if_needed(client, &effective_session_id, &object_id).await?;
+    let (x, y, vw, vh) =
+        get_center_and_viewport(client, &effective_session_id, &object_id).await?;
+    assert_in_viewport(x, y, vw, vh)?;
     client
         .send_command_typed::<_, Value>(
             "Input.dispatchMouseEvent",
@@ -718,6 +718,52 @@ pub async fn select_all(
         )
         .await?;
 
+    Ok(())
+}
+
+/// Scroll an element into view only if it is not already visible.
+/// Uses CDP `DOM.scrollIntoViewIfNeeded`; falls back to JS `scrollIntoView` if unsupported.
+async fn scroll_into_view_if_needed(
+    client: &CdpClient,
+    session_id: &str,
+    object_id: &str,
+) -> Result<(), String> {
+    if client
+        .send_command(
+            "DOM.scrollIntoViewIfNeeded",
+            Some(json!({ "objectId": object_id })),
+            Some(session_id),
+        )
+        .await
+        .is_err()
+    {
+        let _ = client
+            .send_command_typed::<_, Value>(
+                "Runtime.callFunctionOn",
+                &CallFunctionOnParams {
+                    function_declaration:
+                        "function() { this.scrollIntoView({ block: 'center', inline: 'center' }); }"
+                            .to_string(),
+                    object_id: Some(object_id.to_string()),
+                    arguments: None,
+                    return_by_value: Some(true),
+                    await_promise: Some(false),
+                },
+                Some(session_id),
+            )
+            .await;
+    }
+    Ok(())
+}
+
+fn assert_in_viewport(x: f64, y: f64, vw: f64, vh: f64) -> Result<(), String> {
+    if x < 0.0 || y < 0.0 || x > vw || y > vh {
+        return Err(format!(
+            "Element is outside the viewport at ({:.0}, {:.0}), viewport size is ({:.0}x{:.0}). \
+             The element could not be scrolled into view.",
+            x, y, vw, vh
+        ));
+    }
     Ok(())
 }
 
