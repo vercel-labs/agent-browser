@@ -2200,6 +2200,50 @@ Examples:
 "##
         }
 
+        // === Replay (rrweb DOM recording) ===
+        "replay" => {
+            r##"
+agent-browser replay - Record interactive DOM session replays
+
+Usage: agent-browser replay start
+       agent-browser replay stop [path]
+       agent-browser replay status
+
+Record browser sessions as interactive HTML replays using rrweb.
+Unlike video recording, DOM replays are lightweight, inspectable,
+and produce self-contained HTML files with playback controls.
+
+Operations:
+  start              Inject rrweb recorder into the current page.
+                     Automatically re-injects on navigation.
+  stop [path]        Stop recording and generate replay HTML + JSON.
+                     Default path: /tmp/replay (.html and .json appended)
+  status             Show event count and recording state.
+
+Features:
+  - Captures DOM mutations, mouse movements, scrolls, inputs
+  - Inlines images and stylesheets for self-contained replay
+  - Extracts CSS custom properties for accurate visual replay
+  - Play/pause, timeline scrubbing, speed controls (1x-8x)
+  - No ffmpeg required (unlike video recording)
+
+Global Options:
+  --json             Output as JSON
+  --session <name>   Use specific session
+
+Examples:
+  # Record a user flow
+  agent-browser open https://app.example.com
+  agent-browser replay start
+  agent-browser click @e3
+  agent-browser fill @e5 "hello"
+  agent-browser replay stop ./my-session
+
+  # Open the replay
+  open ./my-session.html
+"##
+        }
+
         // === Console/Errors ===
         "console" => {
             r##"
@@ -2737,6 +2781,9 @@ Debug:
   profiler start|stop [path] Record Chrome DevTools profile
   record start <path> [url]  Start video recording (WebM)
   record stop                Stop and save video
+  replay start               Start DOM replay recording (rrweb)
+  replay stop [path]         Stop and save interactive replay HTML
+  replay status              Show replay event count
   console [--clear]          View console logs
   errors [--clear]           View page errors
   highlight <sel>            Highlight element
