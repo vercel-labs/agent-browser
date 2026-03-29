@@ -30,6 +30,7 @@ socket2 = "0.6"
 similar = "2"
 zip = { version = "8.2.0", default-features = false, features = ["deflate"] }
 time = { version = "0.3", features = ["formatting"] }
+regex = "1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

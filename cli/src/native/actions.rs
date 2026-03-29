@@ -2769,16 +2769,82 @@ async fn wait_for_selector(
     poll_until_true(client, session_id, &check_fn, timeout_ms).await
 }
 
+fn url_glob_to_regex(pattern: &str) -> String {
+    let mut regex = String::from("^");
+    let mut chars = pattern.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '*' => {
+                if matches!(chars.peek(), Some('*')) {
+                    chars.next();
+                    regex.push_str(".*");
+                } else {
+                    regex.push_str("[^/]*");
+                }
+            }
+            // Minimal brace alternation support for patterns like {a,b}.
+            '{' => {
+                let mut alt = String::new();
+                let mut found_closing = false;
+                while let Some(next) = chars.next() {
+                    if next == '}' {
+                        found_closing = true;
+                        break;
+                    }
+                    alt.push(next);
+                }
+
+                if found_closing {
+                    let variants = alt
+                        .split(',')
+                        .map(regex::escape)
+                        .collect::<Vec<_>>()
+                        .join("|");
+                    regex.push('(');
+                    regex.push_str(&variants);
+                    regex.push(')');
+                } else {
+                    regex.push_str("\\{");
+                    regex.push_str(&regex::escape(&alt));
+                }
+            }
+            '.' | '+' | '(' | ')' | '|' | '^' | '$' | '[' | ']' | '\\' | '?' => {
+                regex.push('\\');
+                regex.push(ch);
+            }
+            _ => regex.push(ch),
+        }
+    }
+
+    regex.push('$');
+    regex
+}
+
+fn url_matches_pattern(url: &str, pattern: &str) -> bool {
+    if !pattern.contains('*') && !pattern.contains('{') {
+        return url == pattern;
+    }
+
+    regex::Regex::new(&url_glob_to_regex(pattern))
+        .map(|re| re.is_match(url))
+        .unwrap_or(false)
+}
+
 async fn wait_for_url(
     client: &super::cdp::client::CdpClient,
     session_id: &str,
     pattern: &str,
     timeout_ms: u64,
 ) -> Result<(), String> {
-    let check_fn = format!(
-        "location.href.includes({})",
-        serde_json::to_string(pattern).unwrap_or_default()
-    );
+    let pattern_json = serde_json::to_string(pattern).unwrap_or_default();
+    let regex_json = serde_json::to_string(&url_glob_to_regex(pattern)).unwrap_or_default();
+    let exact_match = !pattern.contains('*') && !pattern.contains('{');
+    let check_fn = if exact_match {
+        format!("location.href === {}", pattern_json)
+    } else {
+        format!("(new RegExp({})).test(location.href)", regex_json)
+    };
     poll_until_true(client, session_id, &check_fn, timeout_ms).await
 }
 
@@ -8137,5 +8203,57 @@ mod tests {
         let (key, mods) = parse_key_chord("+");
         assert_eq!(key, "+");
         assert_eq!(mods, None);
+    }
+
+    #[test]
+    fn test_url_matches_pattern_exact_match_without_wildcards() {
+        assert!(url_matches_pattern(
+            "https://example.com/settings/profile",
+            "https://example.com/settings/profile"
+        ));
+        assert!(!url_matches_pattern(
+            "https://example.com/settings/profile?tab=1",
+            "https://example.com/settings/profile"
+        ));
+    }
+
+    #[test]
+    fn test_url_matches_pattern_single_star_does_not_cross_slashes() {
+        assert!(url_matches_pattern(
+            "https://example.com/settings",
+            "https://example.com/*"
+        ));
+        assert!(!url_matches_pattern(
+            "https://example.com/settings/profile",
+            "https://example.com/*"
+        ));
+    }
+
+    #[test]
+    fn test_url_matches_pattern_double_star_crosses_slashes() {
+        assert!(url_matches_pattern(
+            "https://github.com/settings/profile",
+            "**/settings/profile"
+        ));
+        assert!(url_matches_pattern(
+            "https://example.com/a/b/c",
+            "https://example.com/**"
+        ));
+    }
+
+    #[test]
+    fn test_url_matches_pattern_brace_alternation() {
+        assert!(url_matches_pattern(
+            "https://example.com/login",
+            "https://example.com/{login,signup}"
+        ));
+        assert!(url_matches_pattern(
+            "https://example.com/signup",
+            "https://example.com/{login,signup}"
+        ));
+        assert!(!url_matches_pattern(
+            "https://example.com/logout",
+            "https://example.com/{login,signup}"
+        ));
     }
 }
