@@ -10,6 +10,8 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
 use futures_util::StreamExt;
 use serde_json::{json, Value};
+use std::fs;
+use std::path::PathBuf;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::test_utils::EnvGuard;
@@ -3598,4 +3600,158 @@ async fn e2e_headers_case_insensitive_no_duplicates() {
 
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     assert_success(&resp);
+}
+
+// ---------------------------------------------------------------------------
+// Recording + extensions: extension must be active in the recorded tab
+// Regression test for vercel-labs/agent-browser#890
+// ---------------------------------------------------------------------------
+
+/// Creates a temporary MV3 extension that sets a `data-test-ext` attribute on
+/// the document element of every page, and returns the path to the extension directory.
+fn create_test_extension() -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("agent-browser-test-ext-{}", uuid::Uuid::new_v4()));
+    fs::create_dir_all(&dir).expect("create test extension dir");
+
+    fs::write(
+        dir.join("manifest.json"),
+        r#"{
+  "manifest_version": 3,
+  "name": "Test Extension",
+  "version": "1.0",
+  "content_scripts": [{
+    "matches": ["<all_urls>"],
+    "js": ["content.js"],
+    "run_at": "document_idle"
+  }]
+}"#,
+    )
+    .expect("write manifest.json");
+
+    fs::write(
+        dir.join("content.js"),
+        "document.documentElement.setAttribute('data-test-ext', 'true');",
+    )
+    .expect("write content.js");
+
+    dir
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_record_start_loads_extension_in_recorded_tab() {
+    let ext_dir = create_test_extension();
+    let ext_path = ext_dir.to_str().unwrap().to_string();
+    let mut state = DaemonState::new();
+
+    // Launch headed (required for extensions) with the test extension
+    let resp = execute_command(
+        &json!({
+            "id": "1",
+            "action": "launch",
+            "headless": false,
+            "extensions": [ext_path]
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Start recording — this creates a new page for recording
+    let rec_path = std::env::temp_dir().join(format!("test-rec-{}.webm", uuid::Uuid::new_v4()));
+    let resp = execute_command(
+        &json!({
+            "id": "2",
+            "action": "recording_start",
+            "path": rec_path.to_str().unwrap(),
+            "url": "https://example.com"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Wait for content script to inject
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+    // Evaluate in the recorded tab — extension should have set data-test-ext
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "evaluate", "script": "document.documentElement.getAttribute('data-test-ext')" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["result"],
+        "true",
+        "Extension content script was not injected into the recorded tab"
+    );
+
+    // Stop recording
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "recording_stop" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Cleanup
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+    let _ = fs::remove_dir_all(&ext_dir);
+    let _ = fs::remove_file(&rec_path);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_window_new_loads_extension() {
+    let ext_dir = create_test_extension();
+    let ext_path = ext_dir.to_str().unwrap().to_string();
+    let mut state = DaemonState::new();
+
+    // Launch with extension
+    let resp = execute_command(
+        &json!({
+            "id": "1",
+            "action": "launch",
+            "headless": false,
+            "extensions": [ext_path]
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Open a new window — also creates a new browser context
+    let resp = execute_command(&json!({ "id": "2", "action": "window_new" }), &mut state).await;
+    assert_success(&resp);
+
+    // Navigate to a page so the content script fires
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "navigate", "url": "https://example.com" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Wait for content script
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+    // Verify extension is active in the new window
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "evaluate", "script": "document.documentElement.getAttribute('data-test-ext')" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["result"],
+        "true",
+        "Extension content script was not injected into the new window"
+    );
+
+    // Cleanup
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+    let _ = fs::remove_dir_all(&ext_dir);
 }
