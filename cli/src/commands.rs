@@ -138,18 +138,22 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
         // === Core Actions ===
         "click" => {
             let new_tab = rest.contains(&"--new-tab");
+            let js_click = rest.contains(&"--js-click");
             let sel = rest
                 .iter()
-                .find(|arg| **arg != "--new-tab")
+                .find(|arg| **arg != "--new-tab" && **arg != "--js-click")
                 .ok_or_else(|| ParseError::MissingArguments {
                     context: "click".to_string(),
-                    usage: "click <selector> [--new-tab]",
+                    usage: "click <selector> [--new-tab] [--js-click]",
                 })?;
+            let mut cmd = json!({ "id": id, "action": "click", "selector": sel });
             if new_tab {
-                Ok(json!({ "id": id, "action": "click", "selector": sel, "newTab": true }))
-            } else {
-                Ok(json!({ "id": id, "action": "click", "selector": sel }))
+                cmd["newTab"] = json!(true);
             }
+            if js_click {
+                cmd["jsClick"] = json!(true);
+            }
+            Ok(cmd)
         }
         "dblclick" => {
             let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
