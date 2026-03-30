@@ -5,26 +5,19 @@ import { useCallback, useEffect, useRef } from "react";
 import { useAtomCallback } from "jotai/utils";
 import type { SessionInfo } from "@/types";
 import { type ExecResult, execCommand, killSession, sessionArgs } from "@/lib/exec";
+import { getDashboardApiPath, getSessionTabsPath } from "@/lib/dashboard-routes";
 import { tabCacheAtom, engineCacheAtom } from "@/store/tabs";
 import { streamTabsAtom, streamEngineAtom } from "@/store/stream";
 
 function getPort(): number {
-  if (typeof window === "undefined") return 9223;
+  if (typeof window === "undefined") return 0;
   const params = new URLSearchParams(window.location.search);
   const p = params.get("port");
-  return p ? parseInt(p, 10) || 9223 : 9223;
+  return p ? parseInt(p, 10) || 0 : 0;
 }
 
-const DASHBOARD_PORT = 4848;
-
 function getSessionsUrl(): string {
-  if (typeof window !== "undefined") {
-    const origin = window.location.origin;
-    if (origin.includes(`:${DASHBOARD_PORT}`)) {
-      return "/api/sessions";
-    }
-  }
-  return `http://localhost:${DASHBOARD_PORT}/api/sessions`;
+  return getDashboardApiPath("/api/sessions");
 }
 
 // ---------------------------------------------------------------------------
@@ -249,9 +242,9 @@ export function useSessionsSync(pollInterval = 5000) {
             // Poll tabs for all sessions
             for (const s of data) {
               try {
-                const tabsResp = await fetch(
-                  `http://localhost:${s.port}/api/tabs`,
-                ).catch(() => null);
+                const tabsResp = await fetch(getSessionTabsPath(s.port)).catch(
+                  () => null,
+                );
                 if (tabsResp?.ok) {
                   const tabs = await tabsResp.json();
                   if (tabs.length > 0) {
