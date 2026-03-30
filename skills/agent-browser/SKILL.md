@@ -762,7 +762,7 @@ agent-browser open example.com
 agent-browser dashboard stop
 ```
 
-The dashboard runs independently of browser sessions on port 4848 (configurable with `--port`). All sessions automatically stream to the dashboard, and sessions can also be created from the dashboard UI with local engines or cloud providers. It works from `http://localhost:4848` or a forwarded/proxied URL that reaches the dashboard server, such as a Coder workspace URL. Agents should connect only to the dashboard origin: session tabs, status, and stream traffic are proxied internally to loopback-only session ports, so there is no need to expose per-session ports.
+The dashboard runs independently of browser sessions on port 4848 (configurable with `--port`). All sessions automatically stream to the dashboard, and sessions can also be created from the dashboard UI with local engines or cloud providers. It works from `http://localhost:4848` or a forwarded/proxied URL that reaches the dashboard server, such as a Portless (https://github.com/vercel-labs/portless) URL. Agents should connect only to the dashboard origin: session tabs, status, and stream traffic are proxied internally to loopback-only session ports, so there is no need to expose per-session ports.
 
 ## Ready-to-Use Templates
 

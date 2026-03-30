@@ -21,7 +21,7 @@ agent-browser dashboard start
 agent-browser open example.com
 ```
 
-Then open `http://localhost:4848` or your forwarded/proxied dashboard URL, such as a Coder workspace URL, in a browser to see the live dashboard.
+Then open `http://localhost:4848` or your forwarded/proxied dashboard URL, such as a [Portless](https://github.com/vercel-labs/portless) URL, in a browser to see the live dashboard.
 
 All sessions automatically stream to the dashboard. No extra flags are needed. The dashboard uses a same-origin proxy model, so the browser talks only to the dashboard origin while the server proxies session traffic internally to `127.0.0.1:<session-port>`. Per-session ports remain loopback-only implementation details.
 
