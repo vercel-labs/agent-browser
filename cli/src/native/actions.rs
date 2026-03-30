@@ -2873,14 +2873,10 @@ async fn wait_for_selector(
     poll_until_true(client, session_id, &check_fn, timeout_ms).await
 }
 
-/// Returns `true` if `pattern` contains glob meta-characters.
 fn is_glob_pattern(pattern: &str) -> bool {
     pattern.contains('*') || pattern.contains('?') || pattern.contains('{')
 }
 
-/// Check whether a URL matches a Playwright-style glob/substring pattern (Rust-side).
-///
-/// Uses the `glob-match` crate for O(P*T) non-backtracking matching.
 fn url_matches_pattern(url: &str, pattern: &str) -> bool {
     if is_glob_pattern(pattern) {
         glob_match::glob_match(pattern, url)
@@ -8341,10 +8337,6 @@ mod tests {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Glob pattern matching tests
-    // -----------------------------------------------------------------------
-
     #[test]
     fn test_glob_match_double_star() {
         use glob_match::glob_match;
@@ -8398,7 +8390,6 @@ mod tests {
 
     #[test]
     fn test_url_matches_pattern_substring_fallback() {
-        // No glob chars → substring match
         assert!(url_matches_pattern("https://example.com/page", "example.com"));
         assert!(!url_matches_pattern(
             "https://example.com/page",
