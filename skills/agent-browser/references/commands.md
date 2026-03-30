@@ -209,9 +209,12 @@ The `frame` command accepts:
 
 ## Dialogs
 
+By default, `alert` and `beforeunload` dialogs are automatically accepted so they never block the agent. `confirm` and `prompt` dialogs still require explicit handling. Use `--no-auto-dialog` to disable this behavior.
+
 ```bash
 agent-browser dialog accept [text]  # Accept dialog
 agent-browser dialog dismiss        # Dismiss dialog
+agent-browser dialog status         # Check if a dialog is currently open
 ```
 
 ## JavaScript

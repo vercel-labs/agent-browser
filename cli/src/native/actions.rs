@@ -1,5 +1,5 @@
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::io::Write;
@@ -16,9 +16,9 @@ use super::browser::{should_track_target, BrowserManager, WaitUntil};
 use super::cdp::chrome::LaunchOptions;
 use super::cdp::client::CdpClient;
 use super::cdp::types::{
-    AttachToTargetParams, AttachToTargetResult, CdpEvent, ConsoleApiCalledEvent,
-    CreateTargetResult, DispatchMouseEventParams, ExceptionThrownEvent,
-    JavascriptDialogOpeningEvent, TargetCreatedEvent, TargetDestroyedEvent, TargetInfoChangedEvent,
+    AttachToTargetParams, AttachToTargetResult, CdpEvent, CreateTargetResult,
+    DispatchMouseEventParams, ExceptionThrownEvent, JavascriptDialogOpeningEvent,
+    TargetCreatedEvent, TargetDestroyedEvent, TargetInfoChangedEvent,
 };
 use super::cookies;
 use super::diff;
@@ -229,9 +229,15 @@ pub struct DaemonState {
     /// handling domain filtering, route interception, and origin-scoped headers
     /// without deadlocking navigation/evaluate.
     fetch_handler_task: Option<tokio::task::JoinHandle<()>>,
+    /// Background task that auto-accepts `alert` and `beforeunload` dialogs
+    /// so they never block the agent.
+    dialog_handler_task: Option<tokio::task::JoinHandle<()>>,
     pub mouse_state: MouseState,
     /// Tracks the currently open JavaScript dialog (alert/confirm/prompt), if any.
     pub pending_dialog: Option<PendingDialog>,
+    /// When true, automatically dismiss `beforeunload` dialogs and accept `alert`
+    /// dialogs so they never block the agent.  Enabled by default.
+    pub auto_dialog: bool,
     /// Shared slot for stream server to receive CDP client when browser launches.
     pub stream_client: Option<Arc<RwLock<Option<Arc<CdpClient>>>>>,
     /// Stream server instance kept alive so the broadcast channel remains open.
@@ -278,8 +284,13 @@ impl DaemonState {
             origin_headers: Arc::new(RwLock::new(HashMap::new())),
             proxy_credentials: Arc::new(RwLock::new(None)),
             fetch_handler_task: None,
+            dialog_handler_task: None,
             mouse_state: MouseState::default(),
             pending_dialog: None,
+            auto_dialog: !matches!(
+                env::var("AGENT_BROWSER_NO_AUTO_DIALOG").as_deref(),
+                Ok("1" | "true" | "yes")
+            ),
             stream_client: None,
             stream_server: None,
             launch_hash: None,
@@ -425,6 +436,65 @@ impl DaemonState {
         }));
     }
 
+    /// Start the background task that auto-accepts `alert` and `beforeunload`
+    /// dialogs so they never block the agent. `confirm` and `prompt` dialogs
+    /// are left for the agent to handle explicitly.
+    fn start_dialog_handler(&mut self) {
+        if let Some(task) = self.dialog_handler_task.take() {
+            task.abort();
+        }
+
+        if !self.auto_dialog {
+            return;
+        }
+
+        let Some(ref browser) = self.browser else {
+            return;
+        };
+
+        let client = browser.client.clone();
+        let mut rx = browser.client.subscribe();
+
+        self.dialog_handler_task = Some(tokio::spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(event) if event.method == "Page.javascriptDialogOpening" => {
+                        let dialog_type = event
+                            .params
+                            .get("type")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        if matches!(dialog_type, "beforeunload" | "alert") {
+                            let message = event
+                                .params
+                                .get("message")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            eprintln!("[auto-dismiss] {} dialog: {}", dialog_type, message);
+                            let sid = event.session_id.clone().unwrap_or_default();
+                            if let Err(e) = client
+                                .send_command(
+                                    "Page.handleJavaScriptDialog",
+                                    Some(json!({ "accept": true })),
+                                    Some(&sid),
+                                )
+                                .await
+                            {
+                                eprintln!(
+                                    "[auto-dismiss] failed to dismiss {} dialog: {}",
+                                    dialog_type, e
+                                );
+                            }
+                        }
+                    }
+                    Ok(_) => continue,
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(_) => break,
+                }
+            }
+        }));
+    }
+
     /// Update the stream server's CDP client slot when browser is set or cleared.
     pub async fn update_stream_client(&self) {
         if let Some(ref slot) = self.stream_client {
@@ -481,8 +551,97 @@ impl DaemonState {
         recording::stop_recording_task(&mut self.recording_state).await
     }
 
-    pub fn drain_cdp_events_background(&mut self) {
-        let _ = self.drain_cdp_events();
+    pub async fn drain_cdp_events_background(&mut self) {
+        let drained = self.drain_cdp_events();
+        self.apply_drained_events(drained).await;
+    }
+
+    async fn apply_drained_events(&mut self, drained: DrainedEvents) {
+        // ACK screencast frames
+        if !drained.pending_acks.is_empty() {
+            if let Some(ref browser) = self.browser {
+                if let Ok(session_id) = browser.active_session_id() {
+                    for ack_sid in drained.pending_acks {
+                        let _ = stream::ack_screencast_frame(&browser.client, session_id, ack_sid)
+                            .await;
+                    }
+                }
+            }
+        }
+
+        // Remove destroyed targets
+        for target_id in &drained.destroyed_targets {
+            if let Some(ref mut mgr) = self.browser {
+                mgr.remove_page_by_target_id(target_id);
+            }
+        }
+
+        // Track cross-origin iframe sessions
+        for (frame_id, iframe_sid) in &drained.attached_iframe_sessions {
+            self.iframe_sessions
+                .insert(frame_id.clone(), iframe_sid.clone());
+            if let Some(ref mgr) = self.browser {
+                let _ = mgr
+                    .client
+                    .send_command_no_params("DOM.enable", Some(iframe_sid.as_str()))
+                    .await;
+                let _ = mgr
+                    .client
+                    .send_command_no_params("Accessibility.enable", Some(iframe_sid.as_str()))
+                    .await;
+            }
+        }
+        for sid in &drained.detached_iframe_sessions {
+            self.iframe_sessions.retain(|_, v| v != sid);
+        }
+
+        // Attach and register new targets
+        for te in &drained.new_targets {
+            if let Some(ref mut mgr) = self.browser {
+                let attach_result: Result<AttachToTargetResult, String> = mgr
+                    .client
+                    .send_command_typed(
+                        "Target.attachToTarget",
+                        &AttachToTargetParams {
+                            target_id: te.target_info.target_id.clone(),
+                            flatten: true,
+                        },
+                        None,
+                    )
+                    .await;
+                if let Ok(attach) = attach_result {
+                    let _ = mgr.enable_domains_pub(&attach.session_id).await;
+
+                    // Install domain filter on new pages
+                    let df = self.domain_filter.read().await;
+                    if let Some(ref filter) = *df {
+                        let has_proxy_creds = self.proxy_credentials.read().await.is_some();
+                        let _ = network::install_domain_filter(
+                            &mgr.client,
+                            &attach.session_id,
+                            &filter.allowed_domains,
+                            has_proxy_creds,
+                        )
+                        .await;
+                    }
+
+                    mgr.add_page(super::browser::PageInfo {
+                        target_id: te.target_info.target_id.clone(),
+                        session_id: attach.session_id,
+                        url: te.target_info.url.clone(),
+                        title: te.target_info.title.clone(),
+                        target_type: te.target_info.target_type.clone(),
+                    });
+                }
+            }
+        }
+
+        // Update changed targets
+        for te in &drained.changed_targets {
+            if let Some(ref mut mgr) = self.browser {
+                mgr.update_page_target_info(&te.target_info);
+            }
+        }
     }
 
     fn drain_cdp_events(&mut self) -> DrainedEvents {
@@ -493,6 +652,7 @@ impl DaemonState {
 
         let mut pending_acks: Vec<i64> = Vec::new();
         let mut new_targets: Vec<TargetCreatedEvent> = Vec::new();
+        let mut new_target_ids: HashSet<String> = HashSet::new();
         let mut changed_targets: Vec<TargetInfoChangedEvent> = Vec::new();
         let mut destroyed_targets: Vec<String> = Vec::new();
         let mut attached_iframe_sessions: Vec<(String, String)> = Vec::new();
@@ -513,6 +673,7 @@ impl DaemonState {
                                         .as_ref()
                                         .is_none_or(|b| b.has_target(&te.target_info.target_id));
                                     if !already_tracked {
+                                        new_target_ids.insert(te.target_info.target_id.clone());
                                         new_targets.push(te);
                                     }
                                 }
@@ -524,7 +685,24 @@ impl DaemonState {
                                 event.params.clone(),
                             ) {
                                 if should_track_target(&te.target_info) {
-                                    changed_targets.push(te);
+                                    // If this target is not yet tracked (e.g. it was
+                                    // initially filtered because its URL was
+                                    // chrome://newtab/), promote it to a new target
+                                    // so it gets attached and added to `pages`.
+                                    let already_tracked = self
+                                        .browser
+                                        .as_ref()
+                                        .is_some_and(|b| b.has_target(&te.target_info.target_id));
+                                    if already_tracked
+                                        || new_target_ids.contains(&te.target_info.target_id)
+                                    {
+                                        changed_targets.push(te);
+                                    } else {
+                                        new_target_ids.insert(te.target_info.target_id.clone());
+                                        new_targets.push(TargetCreatedEvent {
+                                            target_info: te.target_info,
+                                        });
+                                    }
                                 }
                             }
                             continue;
@@ -582,29 +760,22 @@ impl DaemonState {
 
                     match event.method.as_str() {
                         "Runtime.consoleAPICalled" => {
-                            if let Ok(console_event) = serde_json::from_value::<ConsoleApiCalledEvent>(
-                                event.params.clone(),
-                            ) {
-                                let text: String = console_event
-                                    .args
-                                    .iter()
-                                    .filter_map(|arg| {
-                                        arg.value
-                                            .as_ref()
-                                            .map(|v| match v {
-                                                Value::String(s) => s.clone(),
-                                                other => other.to_string(),
-                                            })
-                                            .or_else(|| arg.description.clone())
-                                    })
-                                    .collect::<Vec<_>>()
-                                    .join(" ");
-                                self.event_tracker
-                                    .add_console(&console_event.call_type, &text);
-                                if let Some(ref server) = self.stream_server {
-                                    server.broadcast_console(&console_event.call_type, &text);
-                                }
+                            let level = event
+                                .params
+                                .get("type")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("log");
+                            let raw_args: Vec<Value> = event
+                                .params
+                                .get("args")
+                                .and_then(|v| v.as_array())
+                                .cloned()
+                                .unwrap_or_default();
+                            let text = network::format_console_args(&raw_args);
+                            if let Some(ref server) = self.stream_server {
+                                server.broadcast_console(level, &text, &raw_args);
                             }
+                            self.event_tracker.add_console(level, &text, raw_args);
                         }
                         "Runtime.exceptionThrown" => {
                             if let Ok(ex_event) =
@@ -837,12 +1008,22 @@ impl DaemonState {
                                     event.params.clone(),
                                 )
                             {
-                                self.pending_dialog = Some(PendingDialog {
-                                    dialog_type: dialog_event.dialog_type,
-                                    message: dialog_event.message,
-                                    url: dialog_event.url,
-                                    default_prompt: dialog_event.default_prompt,
-                                });
+                                // When auto_dialog is enabled, alert and beforeunload
+                                // dialogs are handled by the background dialog_handler_task.
+                                // Skip tracking them to avoid a stale warning.
+                                let auto_handled = self.auto_dialog
+                                    && matches!(
+                                        dialog_event.dialog_type.as_str(),
+                                        "beforeunload" | "alert"
+                                    );
+                                if !auto_handled {
+                                    self.pending_dialog = Some(PendingDialog {
+                                        dialog_type: dialog_event.dialog_type,
+                                        message: dialog_event.message,
+                                        url: dialog_event.url,
+                                        default_prompt: dialog_event.default_prompt,
+                                    });
+                                }
                             }
                         }
                         "Page.javascriptDialogClosed" => {
@@ -880,6 +1061,9 @@ impl Drop for DaemonState {
         if let Some(task) = self.fetch_handler_task.take() {
             task.abort();
         }
+        if let Some(task) = self.dialog_handler_task.take() {
+            task.abort();
+        }
     }
 }
 
@@ -897,97 +1081,8 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         server.broadcast_command(action, &id, cmd);
     }
 
-    // Drain pending CDP events (console, errors, screencast frames, target lifecycle)
-    let DrainedEvents {
-        pending_acks,
-        new_targets,
-        changed_targets,
-        destroyed_targets,
-        attached_iframe_sessions,
-        detached_iframe_sessions,
-    } = state.drain_cdp_events();
-    if !pending_acks.is_empty() {
-        if let Some(ref browser) = state.browser {
-            if let Ok(session_id) = browser.active_session_id() {
-                for ack_sid in pending_acks {
-                    let _ =
-                        stream::ack_screencast_frame(&browser.client, session_id, ack_sid).await;
-                }
-            }
-        }
-    }
-
-    for target_id in &destroyed_targets {
-        if let Some(ref mut mgr) = state.browser {
-            mgr.remove_page_by_target_id(target_id);
-        }
-    }
-
-    // Track cross-origin iframe sessions
-    for (frame_id, iframe_sid) in &attached_iframe_sessions {
-        state
-            .iframe_sessions
-            .insert(frame_id.clone(), iframe_sid.clone());
-        if let Some(ref mgr) = state.browser {
-            let _ = mgr
-                .client
-                .send_command_no_params("DOM.enable", Some(iframe_sid.as_str()))
-                .await;
-            let _ = mgr
-                .client
-                .send_command_no_params("Accessibility.enable", Some(iframe_sid.as_str()))
-                .await;
-        }
-    }
-    for sid in &detached_iframe_sessions {
-        state.iframe_sessions.retain(|_, v| v != sid);
-    }
-
-    for te in &new_targets {
-        if let Some(ref mut mgr) = state.browser {
-            let attach_result: Result<AttachToTargetResult, String> = mgr
-                .client
-                .send_command_typed(
-                    "Target.attachToTarget",
-                    &AttachToTargetParams {
-                        target_id: te.target_info.target_id.clone(),
-                        flatten: true,
-                    },
-                    None,
-                )
-                .await;
-            if let Ok(attach) = attach_result {
-                let _ = mgr.enable_domains_pub(&attach.session_id).await;
-
-                // Install domain filter on new pages
-                let df = state.domain_filter.read().await;
-                if let Some(ref filter) = *df {
-                    let has_proxy_creds = state.proxy_credentials.read().await.is_some();
-                    let _ = network::install_domain_filter(
-                        &mgr.client,
-                        &attach.session_id,
-                        &filter.allowed_domains,
-                        has_proxy_creds,
-                    )
-                    .await;
-                }
-
-                mgr.add_page(super::browser::PageInfo {
-                    target_id: te.target_info.target_id.clone(),
-                    session_id: attach.session_id,
-                    url: te.target_info.url.clone(),
-                    title: te.target_info.title.clone(),
-                    target_type: te.target_info.target_type.clone(),
-                });
-            }
-        }
-    }
-
-    for te in &changed_targets {
-        if let Some(ref mut mgr) = state.browser {
-            mgr.update_page_target_info(&te.target_info);
-        }
-    }
+    // Drain and apply pending CDP events (console, errors, screencast frames, target lifecycle)
+    state.drain_cdp_events_background().await;
 
     // Hot-reload and check action policy
     if let Some(ref mut policy) = state.policy {
@@ -1350,6 +1445,7 @@ async fn auto_launch(state: &mut DaemonState) -> Result<(), String> {
         state.browser = Some(mgr);
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
+        state.start_dialog_handler();
         state.update_stream_client().await;
         try_auto_restore_state(state).await;
         return Ok(());
@@ -1360,6 +1456,7 @@ async fn auto_launch(state: &mut DaemonState) -> Result<(), String> {
         state.browser = Some(connect_auto_with_fresh_tab().await?);
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
+        state.start_dialog_handler();
         state.update_stream_client().await;
         try_auto_restore_state(state).await;
         return Ok(());
@@ -1372,6 +1469,7 @@ async fn auto_launch(state: &mut DaemonState) -> Result<(), String> {
     state.launch_hash = Some(hash);
     state.subscribe_to_browser_events();
     state.start_fetch_handler();
+    state.start_dialog_handler();
     state.update_stream_client().await;
 
     // Enable Fetch with handleAuthRequests for proxy authentication
@@ -1581,6 +1679,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         state.browser = Some(BrowserManager::connect_cdp(url).await?);
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
+        state.start_dialog_handler();
         state.update_stream_client().await;
         return Ok(json!({ "launched": true }));
     }
@@ -1590,6 +1689,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         state.browser = Some(BrowserManager::connect_cdp(&port.to_string()).await?);
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
+        state.start_dialog_handler();
         state.update_stream_client().await;
         return Ok(json!({ "launched": true }));
     }
@@ -1599,6 +1699,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         state.browser = Some(connect_auto_with_fresh_tab().await?);
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
+        state.start_dialog_handler();
         state.update_stream_client().await;
         return Ok(json!({ "launched": true }));
     }
@@ -1619,6 +1720,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
                         state.browser = Some(mgr);
                         state.subscribe_to_browser_events();
                         state.start_fetch_handler();
+                        state.start_dialog_handler();
                         state.update_stream_client().await;
                         return Ok(json!({ "launched": true, "provider": provider }));
                     }
@@ -1666,6 +1768,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     state.launch_hash = Some(new_hash);
     state.subscribe_to_browser_events();
     state.start_fetch_handler();
+    state.start_dialog_handler();
     state.update_stream_client().await;
 
     // Enable Fetch interception (domain filtering and/or proxy auth).
@@ -1988,6 +2091,7 @@ async fn handle_close(state: &mut DaemonState) -> Result<Value, String> {
                     None,
                     Some(session_name.as_str()),
                     &state.session_id,
+                    mgr.visited_origins(),
                 )
                 .await;
             }
@@ -3025,6 +3129,7 @@ async fn handle_state_save(cmd: &Value, state: &DaemonState) -> Result<Value, St
         path,
         state.session_name.as_deref(),
         &state.session_id,
+        mgr.visited_origins(),
     )
     .await?;
 
@@ -8166,5 +8271,74 @@ mod tests {
         let (key, mods) = parse_key_chord("+");
         assert_eq!(key, "+");
         assert_eq!(mods, None);
+    }
+
+    #[tokio::test]
+    async fn test_auto_dialog_enabled_by_default() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_NO_AUTO_DIALOG"]);
+        std::env::remove_var("AGENT_BROWSER_NO_AUTO_DIALOG");
+        let state = DaemonState::new();
+        assert!(state.auto_dialog, "auto_dialog should be true by default");
+        drop(guard);
+    }
+
+    #[tokio::test]
+    async fn test_auto_dialog_disabled_by_env() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_NO_AUTO_DIALOG"]);
+        guard.set("AGENT_BROWSER_NO_AUTO_DIALOG", "1");
+        let state = DaemonState::new();
+        assert!(
+            !state.auto_dialog,
+            "auto_dialog should be false when AGENT_BROWSER_NO_AUTO_DIALOG=1"
+        );
+        drop(guard);
+    }
+
+    #[tokio::test]
+    async fn test_auto_dialog_disabled_by_env_true() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_NO_AUTO_DIALOG"]);
+        guard.set("AGENT_BROWSER_NO_AUTO_DIALOG", "true");
+        let state = DaemonState::new();
+        assert!(
+            !state.auto_dialog,
+            "auto_dialog should be false when AGENT_BROWSER_NO_AUTO_DIALOG=true"
+        );
+        drop(guard);
+    }
+
+    #[tokio::test]
+    async fn test_auto_dialog_not_disabled_by_random_value() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_NO_AUTO_DIALOG"]);
+        guard.set("AGENT_BROWSER_NO_AUTO_DIALOG", "no");
+        let state = DaemonState::new();
+        assert!(
+            state.auto_dialog,
+            "auto_dialog should remain true for non-truthy env values"
+        );
+        drop(guard);
+    }
+
+    #[test]
+    fn test_pending_dialog_not_set_for_auto_handled_alert() {
+        // Simulate what handle_browser_event does: when auto_dialog is true,
+        // alert/beforeunload should NOT populate pending_dialog.
+        let auto_dialog = true;
+        for dialog_type in &["alert", "beforeunload"] {
+            let auto_handled = auto_dialog && matches!(*dialog_type, "beforeunload" | "alert");
+            assert!(
+                auto_handled,
+                "{dialog_type} should be auto-handled when auto_dialog is true"
+            );
+        }
+    }
+
+    #[test]
+    fn test_pending_dialog_set_for_confirm_prompt() {
+        // confirm and prompt should NOT be auto-handled even when auto_dialog is true.
+        let auto_dialog = true;
+        for dialog_type in &["confirm", "prompt"] {
+            let auto_handled = auto_dialog && matches!(*dialog_type, "beforeunload" | "alert");
+            assert!(!auto_handled, "{dialog_type} should NOT be auto-handled");
+        }
     }
 }

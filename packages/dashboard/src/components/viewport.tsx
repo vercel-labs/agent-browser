@@ -194,14 +194,20 @@ export function Viewport() {
     addressRef.current?.blur();
 
     const target = normalizeUrl(addressValue);
+    const previousUrl = url;
     setAddressValue(target);
     setNavigating(true);
     try {
-      await runCmd("navigate", target);
+      const result = await runCmd("navigate", target);
+      if (!result.success) {
+        setAddressValue(previousUrl || "about:blank");
+      }
+    } catch {
+      setAddressValue(previousUrl || "about:blank");
     } finally {
       setNavigating(false);
     }
-  }, [addressValue, navigating, runCmd]);
+  }, [addressValue, navigating, runCmd, url]);
 
   const drawFrame = useCallback((base64: string) => {
     const canvas = canvasRef.current;

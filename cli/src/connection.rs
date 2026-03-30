@@ -154,6 +154,18 @@ pub fn get_port_for_session(session: &str) -> u16 {
     49152 + ((hash.unsigned_abs() as u32 % 16383) as u16)
 }
 
+/// Read the actual daemon port from the `.port` file written by the daemon.
+/// Falls back to the hash-derived port if the file does not exist or is
+/// unreadable (e.g. daemon has not started yet).
+#[cfg(windows)]
+pub fn resolve_port(session: &str) -> u16 {
+    let port_path = get_port_path(session);
+    fs::read_to_string(&port_path)
+        .ok()
+        .and_then(|s| s.trim().parse::<u16>().ok())
+        .unwrap_or_else(|| get_port_for_session(session))
+}
+
 pub fn daemon_ready(session: &str) -> bool {
     #[cfg(unix)]
     {
@@ -162,7 +174,7 @@ pub fn daemon_ready(session: &str) -> bool {
     }
     #[cfg(windows)]
     {
-        let port = get_port_for_session(session);
+        let port = resolve_port(session);
         TcpStream::connect_timeout(
             &format!("127.0.0.1:{}", port).parse().unwrap(),
             Duration::from_millis(50),
@@ -207,6 +219,7 @@ pub struct DaemonOptions<'a> {
     pub auto_connect: bool,
     pub idle_timeout: Option<&'a str>,
     pub cdp: Option<&'a str>,
+    pub no_auto_dialog: bool,
 }
 
 fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
@@ -287,6 +300,9 @@ fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
     }
     if let Some(cdp) = opts.cdp {
         cmd.env("AGENT_BROWSER_CDP", cdp);
+    }
+    if opts.no_auto_dialog {
+        cmd.env("AGENT_BROWSER_NO_AUTO_DIALOG", "1");
     }
 }
 
@@ -442,7 +458,7 @@ pub fn ensure_daemon(session: &str, opts: &DaemonOptions) -> Result<DaemonResult
         get_socket_dir().join(format!("{}.sock", session)).display()
     );
     #[cfg(windows)]
-    let endpoint_info = format!("port: 127.0.0.1:{}", get_port_for_session(session));
+    let endpoint_info = format!("port: 127.0.0.1:{}", resolve_port(session));
 
     Err(format!("Daemon failed to start ({})", endpoint_info))
 }
@@ -457,7 +473,7 @@ fn connect(session: &str) -> Result<Connection, String> {
     }
     #[cfg(windows)]
     {
-        let port = get_port_for_session(session);
+        let port = resolve_port(session);
         TcpStream::connect(format!("127.0.0.1:{}", port))
             .map(Connection::Tcp)
             .map_err(|e| format!("Failed to connect: {}", e))

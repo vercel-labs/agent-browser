@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::io::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -90,10 +91,25 @@ impl CdpClient {
                         Ok(text) => text,
                         Err(_) => continue,
                     },
-                    Ok(Message::Close(_)) => break,
+                    Ok(Message::Close(frame)) => {
+                        if std::env::var("AGENT_BROWSER_DEBUG").is_ok() {
+                            let reason = frame
+                                .as_ref()
+                                .map(|f| format!("code={}, reason={}", f.code, f.reason))
+                                .unwrap_or_else(|| "no frame".to_string());
+                            let _ =
+                                writeln!(std::io::stderr(), "[cdp] WebSocket Close: {}", reason);
+                        }
+                        break;
+                    }
                     Ok(Message::Pong(_)) => continue,
                     Ok(_) => continue,
-                    Err(_) => break,
+                    Err(e) => {
+                        if std::env::var("AGENT_BROWSER_DEBUG").is_ok() {
+                            let _ = writeln!(std::io::stderr(), "[cdp] WebSocket Error: {}", e);
+                        }
+                        break;
+                    }
                 };
 
                 // Broadcast raw message for inspect proxy subscribers before typed parse,
