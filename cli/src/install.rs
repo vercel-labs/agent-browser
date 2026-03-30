@@ -215,58 +215,75 @@ fn extract_zip(bytes: Vec<u8>, dest: &Path) -> Result<(), String> {
     let mut archive =
         zip::ZipArchive::new(cursor).map_err(|e| format!("Failed to read zip archive: {}", e))?;
 
-    for i in 0..archive.len() {
-        let mut file = archive
-            .by_index(i)
-            .map_err(|e| format!("Failed to read zip entry: {}", e))?;
+    archive
+        .extract_unwrapped_root_dir(dest, zip::read::root_dir_common_filter)
+        .map_err(|e| format!("Failed to extract archive: {}", e))
+}
 
-        let enclosed = match file.enclosed_name() {
-            Some(name) => name.to_owned(),
-            None => continue,
-        };
-        let raw_name = enclosed.to_string_lossy().to_string();
-        let rel_path = raw_name
-            .strip_prefix("chrome-")
-            .and_then(|s| s.split_once('/'))
-            .map(|(_, rest)| rest.to_string())
-            .unwrap_or(raw_name.clone());
+#[cfg(test)]
+mod tests {
+    use super::extract_zip;
+    use std::fs;
+    use std::io::{Cursor, Write};
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use zip::write::SimpleFileOptions;
+    use zip::ZipWriter;
 
-        if rel_path.is_empty() {
-            continue;
-        }
-
-        let out_path = dest.join(&rel_path);
-
-        // Defense-in-depth: ensure the resolved path is inside dest
-        if !out_path.starts_with(dest) {
-            continue;
-        }
-
-        if file.is_dir() {
-            fs::create_dir_all(&out_path)
-                .map_err(|e| format!("Failed to create dir {}: {}", out_path.display(), e))?;
-        } else {
-            if let Some(parent) = out_path.parent() {
-                fs::create_dir_all(parent).map_err(|e| {
-                    format!("Failed to create parent dir {}: {}", parent.display(), e)
-                })?;
-            }
-            let mut out_file = fs::File::create(&out_path)
-                .map_err(|e| format!("Failed to create file {}: {}", out_path.display(), e))?;
-            io::copy(&mut file, &mut out_file)
-                .map_err(|e| format!("Failed to write {}: {}", out_path.display(), e))?;
-
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                if let Some(mode) = file.unix_mode() {
-                    let _ = fs::set_permissions(&out_path, fs::Permissions::from_mode(mode));
-                }
-            }
-        }
+    fn make_temp_dir(label: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before unix epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("agent-browser-{label}-{unique}"));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        dir
     }
 
-    Ok(())
+    #[test]
+    fn extract_zip_unwraps_archive_root_dir() -> Result<(), Box<dyn std::error::Error>> {
+        let cursor = Cursor::new(Vec::new());
+        let mut writer = ZipWriter::new(cursor);
+        let options = SimpleFileOptions::default();
+
+        writer.add_directory("chrome-mac-arm64/", options)?;
+        writer.start_file("chrome-mac-arm64/ABOUT", options)?;
+        writer.write_all(b"about")?;
+        let bytes = writer.finish()?.into_inner();
+
+        let dest = make_temp_dir("install-unwrapped-root");
+        extract_zip(bytes, &dest)?;
+
+        assert!(dest.join("ABOUT").is_file());
+        assert!(!dest.join("chrome-mac-arm64").exists());
+
+        fs::remove_dir_all(dest)?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extract_zip_preserves_symlinks() -> Result<(), Box<dyn std::error::Error>> {
+        let cursor = Cursor::new(Vec::new());
+        let mut writer = ZipWriter::new(cursor);
+        let options = SimpleFileOptions::default();
+
+        writer.start_file("chrome-mac-arm64/target.txt", options)?;
+        writer.write_all(b"target")?;
+        writer.add_symlink("chrome-mac-arm64/link.txt", "target.txt", options)?;
+        let bytes = writer.finish()?.into_inner();
+
+        let dest = make_temp_dir("install-symlink");
+        extract_zip(bytes, &dest)?;
+
+        let link = dest.join("link.txt");
+        let metadata = fs::symlink_metadata(&link)?;
+        assert!(metadata.file_type().is_symlink());
+        assert_eq!(fs::read_link(&link)?, PathBuf::from("target.txt"));
+
+        fs::remove_dir_all(dest)?;
+        Ok(())
+    }
 }
 
 pub fn run_install(with_deps: bool) {
