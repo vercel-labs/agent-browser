@@ -5,8 +5,8 @@ use serde_json::{json, Value};
 use super::cdp::client::CdpClient;
 use super::cdp::types::*;
 use super::element::{
-    get_center_and_viewport, resolve_element_object_id,
-    resolve_element_object_id_fresh, CenterResult, RefMap,
+    get_center_and_viewport, resolve_element_object_id, resolve_element_object_id_fresh,
+    CenterResult, RefMap,
 };
 
 pub async fn click(
@@ -784,7 +784,7 @@ async fn scroll_into_view_if_needed(
         .await
         .is_err()
     {
-        let _ = client
+        client
             .send_command_typed::<_, Value>(
                 "Runtime.callFunctionOn",
                 &CallFunctionOnParams {
@@ -798,7 +798,8 @@ async fn scroll_into_view_if_needed(
                 },
                 Some(session_id),
             )
-            .await;
+            .await
+            .map_err(|e| format!("Failed to scroll element into view: {}", e))?;
     }
     Ok(())
 }

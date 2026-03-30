@@ -494,17 +494,6 @@ async fn resolve_by_selector(
     }
 }
 
-fn box_model_center(model: &BoxModel) -> (f64, f64) {
-    // content quad: [x1,y1, x2,y2, x3,y3, x4,y4]
-    if model.content.len() >= 8 {
-        let x = (model.content[0] + model.content[2] + model.content[4] + model.content[6]) / 4.0;
-        let y = (model.content[1] + model.content[3] + model.content[5] + model.content[7]) / 4.0;
-        (x, y)
-    } else {
-        (0.0, 0.0)
-    }
-}
-
 pub async fn get_element_text(
     client: &CdpClient,
     session_id: &str,
@@ -1083,21 +1072,6 @@ mod tests {
         let js = build_count_elements_js("xpath=//li");
         assert!(js.contains("document.evaluate(\"//li\", document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null).snapshotLength"));
         assert!(!js.contains("querySelectorAll"));
-    }
-
-    #[test]
-    fn test_box_model_center() {
-        let model = BoxModel {
-            content: vec![10.0, 20.0, 110.0, 20.0, 110.0, 60.0, 10.0, 60.0],
-            padding: vec![],
-            border: vec![],
-            margin: vec![],
-            width: 100,
-            height: 40,
-        };
-        let (x, y) = box_model_center(&model);
-        assert!((x - 60.0).abs() < 0.01);
-        assert!((y - 40.0).abs() < 0.01);
     }
 
     // -----------------------------------------------------------------------
