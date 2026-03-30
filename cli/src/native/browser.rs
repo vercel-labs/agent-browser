@@ -935,7 +935,7 @@ impl BrowserManager {
                         )
                         .await
                     {
-                        log::debug!("Browser.setContentsSize failed (experimental CDP): {e}");
+                        eprintln!("Browser.setContentsSize failed (experimental CDP): {e}");
                     }
                 }
             }
