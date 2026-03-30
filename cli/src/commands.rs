@@ -2322,6 +2322,7 @@ mod tests {
             screenshot_quality: None,
             screenshot_format: None,
             idle_timeout: None,
+            no_auto_dialog: false,
         }
     }
 

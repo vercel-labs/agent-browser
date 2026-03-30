@@ -10,9 +10,12 @@ use tokio::sync::{broadcast, watch, Mutex, Notify, RwLock};
 use tokio_tungstenite::tungstenite::Message;
 
 use super::cdp::client::CdpClient;
+use super::network;
 #[cfg(windows)]
 use crate::connection::get_port_for_session;
 use crate::connection::get_socket_dir;
+#[cfg(windows)]
+use crate::connection::resolve_port;
 use crate::install::get_dashboard_dir;
 
 /// Frame metadata from CDP Page.screencastFrame events.
@@ -400,13 +403,18 @@ impl StreamServer {
     }
 
     /// Broadcast a console event from the browser.
-    pub fn broadcast_console(&self, level: &str, text: &str) {
-        let msg = json!({
+    pub fn broadcast_console(&self, level: &str, text: &str, args: &[Value]) {
+        let mut msg = json!({
             "type": "console",
             "level": level,
             "text": text,
             "timestamp": timestamp_ms(),
         });
+        if !args.is_empty() {
+            msg.as_object_mut()
+                .unwrap()
+                .insert("args".to_string(), Value::Array(args.to_vec()));
+        }
         let _ = self.frame_tx.send(msg.to_string());
     }
 
@@ -783,32 +791,36 @@ async fn cdp_event_loop(
                 let vw = *viewport_width.lock().await;
                 let vh = *viewport_height.lock().await;
 
-                let _ = client_arc
-                    .send_command(
-                        "Page.startScreencast",
-                        Some(json!({
-                            "format": "jpeg",
-                            "quality": 80,
-                            "maxWidth": vw,
-                            "maxHeight": vh,
-                            "everyNthFrame": 1,
-                        })),
-                        session_id.as_deref(),
-                    )
-                    .await;
+                let eng = last_engine.read().await.clone();
+                let supports_screencast = eng == "chrome";
+
+                if supports_screencast {
+                    let _ = client_arc
+                        .send_command(
+                            "Page.startScreencast",
+                            Some(json!({
+                                "format": "jpeg",
+                                "quality": 80,
+                                "maxWidth": vw,
+                                "maxHeight": vh,
+                                "everyNthFrame": 1,
+                            })),
+                            session_id.as_deref(),
+                        )
+                        .await;
+                }
 
                 {
                     let mut sc = screencasting.lock().await;
-                    *sc = true;
+                    *sc = supports_screencast;
                 }
 
-                // Broadcast screencasting:true status with current viewport
-                let eng = last_engine.read().await.clone();
+                // Broadcast connection status with current viewport
                 let rec = *recording.lock().await;
                 let status = json!({
                     "type": "status",
                     "connected": true,
-                    "screencasting": true,
+                    "screencasting": supports_screencast,
                     "viewportWidth": vw,
                     "viewportHeight": vh,
                     "engine": eng,
@@ -821,10 +833,12 @@ async fn cdp_event_loop(
                     tokio::select! {
                         changed = shutdown_rx.changed() => {
                             if changed.is_err() || *shutdown_rx.borrow() {
-                                let session_id = cdp_session_id.read().await.clone();
-                                let _ = client_arc
-                                    .send_command_no_params("Page.stopScreencast", session_id.as_deref())
-                                    .await;
+                                if supports_screencast {
+                                    let session_id = cdp_session_id.read().await.clone();
+                                    let _ = client_arc
+                                        .send_command_no_params("Page.stopScreencast", session_id.as_deref())
+                                        .await;
+                                }
                                 let mut sc = screencasting.lock().await;
                                 *sc = false;
                                 return;
@@ -894,29 +908,24 @@ async fn cdp_event_loop(
                                         let level = evt.params.get("type")
                                             .and_then(|v| v.as_str())
                                             .unwrap_or("log");
-                                        let text = evt.params.get("args")
+                                        let raw_args = evt.params.get("args")
                                             .and_then(|v| v.as_array())
-                                            .map(|args| {
-                                                args.iter()
-                                                    .filter_map(|arg| {
-                                                        arg.get("value")
-                                                            .map(|v| match v {
-                                                                Value::String(s) => s.clone(),
-                                                                other => other.to_string(),
-                                                            })
-                                                            .or_else(|| arg.get("description").and_then(|v| v.as_str()).map(|s| s.to_string()))
-                                                    })
-                                                    .collect::<Vec<_>>()
-                                                    .join(" ")
-                                            })
+                                            .cloned()
                                             .unwrap_or_default();
+                                        let text = network::format_console_args(&raw_args);
                                         if !text.is_empty() {
-                                            let msg = json!({
+                                            let mut msg = json!({
                                                 "type": "console",
                                                 "level": level,
                                                 "text": text,
                                                 "timestamp": timestamp_ms(),
                                             });
+                                            if !raw_args.is_empty() {
+                                                msg.as_object_mut().unwrap().insert(
+                                                    "args".to_string(),
+                                                    Value::Array(raw_args),
+                                                );
+                                            }
                                             let _ = frame_tx.send(msg.to_string());
                                         }
                                     } else if evt.method == "Runtime.exceptionThrown" {
@@ -950,9 +959,11 @@ async fn cdp_event_loop(
                             let count = *client_count.lock().await;
                             let new_session_id = cdp_session_id.read().await.clone();
                             if count == 0 {
-                                let _ = client_arc
-                                    .send_command_no_params("Page.stopScreencast", session_id.as_deref())
-                                    .await;
+                                if supports_screencast {
+                                    let _ = client_arc
+                                        .send_command_no_params("Page.stopScreencast", session_id.as_deref())
+                                        .await;
+                                }
                                 let mut sc = screencasting.lock().await;
                                 *sc = false;
                                 break;
@@ -969,10 +980,11 @@ async fn cdp_event_loop(
                             let new_vh = *viewport_height.lock().await;
                             let viewport_changed = new_vw != vw || new_vh != vh;
                             if client_changed || session_changed || viewport_changed {
-                                // Stop screencast, restart loop to pick up new settings
-                                let _ = client_arc
-                                    .send_command_no_params("Page.stopScreencast", session_id.as_deref())
-                                    .await;
+                                if supports_screencast {
+                                    let _ = client_arc
+                                        .send_command_no_params("Page.stopScreencast", session_id.as_deref())
+                                        .await;
+                                }
                                 let mut sc = screencasting.lock().await;
                                 *sc = false;
                                 client_notify.notify_one();
@@ -1232,7 +1244,7 @@ async fn relay_command_to_daemon(session_name: &str, body: &str) -> Result<Strin
 
     #[cfg(windows)]
     let stream = {
-        let port = get_port_for_session(session_name);
+        let port = resolve_port(session_name);
         tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
             .await
             .map_err(|e| format!("Failed to connect to daemon: {}", e))?
@@ -1499,14 +1511,7 @@ pub async fn run_dashboard_server(port: u16) {
         }
     };
 
-    let dashboard_dir = {
-        let dir = get_dashboard_dir();
-        if dir.join("index.html").exists() {
-            Some(Arc::from(dir))
-        } else {
-            None
-        }
-    };
+    let dashboard_dir: Arc<PathBuf> = Arc::from(get_dashboard_dir());
 
     loop {
         let Ok((stream, _addr)) = listener.accept().await else {
@@ -1521,7 +1526,7 @@ pub async fn run_dashboard_server(port: u16) {
 
 async fn handle_dashboard_connection(
     mut stream: tokio::net::TcpStream,
-    dashboard_dir: Option<Arc<PathBuf>>,
+    dashboard_dir: Arc<PathBuf>,
 ) {
     use tokio::io::AsyncReadExt;
 
@@ -1576,22 +1581,20 @@ async fn handle_dashboard_connection(
         return;
     }
 
-    let dir_ref = dashboard_dir.as_deref();
     let (status, content_type, body): (&str, &str, Vec<u8>) = if path == "/api/sessions" {
         (
             "200 OK",
             "application/json; charset=utf-8",
             discover_sessions().into_bytes(),
         )
+    } else if dashboard_dir.join("index.html").exists() {
+        serve_static_file(&dashboard_dir, path)
     } else {
-        match dir_ref {
-            Some(dir) => serve_static_file(dir, path),
-            None => (
-                "200 OK",
-                "text/html; charset=utf-8",
-                DASHBOARD_NOT_INSTALLED_HTML.as_bytes().to_vec(),
-            ),
-        }
+        (
+            "200 OK",
+            "text/html; charset=utf-8",
+            DASHBOARD_NOT_INSTALLED_HTML.as_bytes().to_vec(),
+        )
     };
 
     let response = format!(
