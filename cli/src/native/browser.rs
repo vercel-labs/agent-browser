@@ -425,9 +425,54 @@ impl BrowserManager {
                 });
             }
 
+            // Try to enable domains on the first page with a timeout.
+            // Discarded/frozen tabs (Chrome Memory Saver) have no renderer,
+            // so Page.enable hangs forever. Fall back to a new tab if needed.
             self.active_page_index = 0;
             let session_id = self.pages[0].session_id.clone();
-            self.enable_domains(&session_id).await?;
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                self.enable_domains(&session_id),
+            )
+            .await
+            {
+                Ok(Ok(())) => {}
+                _ => {
+                    // First tab is likely discarded — create a new tab
+                    let result: CreateTargetResult = self
+                        .client
+                        .send_command_typed(
+                            "Target.createTarget",
+                            &CreateTargetParams {
+                                url: "about:blank".to_string(),
+                            },
+                            None,
+                        )
+                        .await?;
+
+                    let attach_result: AttachToTargetResult = self
+                        .client
+                        .send_command_typed(
+                            "Target.attachToTarget",
+                            &AttachToTargetParams {
+                                target_id: result.target_id.clone(),
+                                flatten: true,
+                            },
+                            None,
+                        )
+                        .await?;
+
+                    self.pages.push(PageInfo {
+                        target_id: result.target_id,
+                        session_id: attach_result.session_id.clone(),
+                        url: "about:blank".to_string(),
+                        title: String::new(),
+                        target_type: "page".to_string(),
+                    });
+                    self.active_page_index = self.pages.len() - 1;
+                    self.enable_domains(&attach_result.session_id).await?;
+                }
+            }
         }
 
         Ok(())
