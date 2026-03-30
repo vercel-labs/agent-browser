@@ -92,6 +92,7 @@ async fn connect_browserbase() -> Result<(String, Option<ProviderSession>), Stri
     let response = client
         .post("https://api.browserbase.com/v1/sessions")
         .header("X-BB-API-Key", &api_key)
+        .json(&json!({}))
         .send()
         .await
         .map_err(|e| format!("Browserbase request failed: {}", e))?;
