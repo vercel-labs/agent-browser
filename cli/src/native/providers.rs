@@ -88,10 +88,53 @@ async fn connect_browserbase() -> Result<(String, Option<ProviderSession>), Stri
     let api_key = env::var("BROWSERBASE_API_KEY")
         .map_err(|_| "BROWSERBASE_API_KEY environment variable is not set")?;
 
+    let mut session_body = json!({});
+    let mut browser_settings = json!({});
+
+    // Enable Browserbase proxy when BROWSERBASE_PROXY=1 or BROWSERBASE_PROXY=true
+    if env::var("BROWSERBASE_PROXY")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+    {
+        session_body.as_object_mut().unwrap().insert(
+            "proxies".to_string(),
+            json!([{ "type": "browserbase" }]),
+        );
+    }
+
+    // Enable advanced stealth mode via BROWSERBASE_ADVANCED_STEALTH=1
+    // Basic stealth is enabled by default on Browserbase; advanced uses a
+    // custom Chromium build that mimics human-like environmental signals.
+    if env::var("BROWSERBASE_ADVANCED_STEALTH")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+    {
+        browser_settings
+            .as_object_mut()
+            .unwrap()
+            .insert("advancedStealth".to_string(), json!(true));
+    }
+
+    // Set OS for stealth fingerprint via BROWSERBASE_OS (windows, mac, linux, mobile, tablet)
+    if let Ok(os) = env::var("BROWSERBASE_OS") {
+        browser_settings
+            .as_object_mut()
+            .unwrap()
+            .insert("os".to_string(), json!(os));
+    }
+
+    if browser_settings.as_object().map_or(false, |o| !o.is_empty()) {
+        session_body
+            .as_object_mut()
+            .unwrap()
+            .insert("browserSettings".to_string(), browser_settings);
+    }
+
     let client = reqwest::Client::new();
     let response = client
         .post("https://api.browserbase.com/v1/sessions")
         .header("X-BB-API-Key", &api_key)
+        .json(&session_body)
         .send()
         .await
         .map_err(|e| format!("Browserbase request failed: {}", e))?;
