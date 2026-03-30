@@ -1108,18 +1108,38 @@ fn build_json_error_body(error: &str) -> String {
     format!(r#"{{"success":false,"error":{escaped}}}"#)
 }
 
+async fn write_http_response_inner(
+    stream: &mut tokio::net::TcpStream,
+    status: &str,
+    content_type: &str,
+    body: &[u8],
+    include_cors: bool,
+) {
+    let cors_headers = if include_cors { CORS_HEADERS } else { "" };
+    let response = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n{cors_headers}\r\n",
+        body.len()
+    );
+    let _ = stream.write_all(response.as_bytes()).await;
+    let _ = stream.write_all(body).await;
+}
+
 async fn write_http_response(
     stream: &mut tokio::net::TcpStream,
     status: &str,
     content_type: &str,
     body: &[u8],
 ) {
-    let response = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n{CORS_HEADERS}\r\n",
-        body.len()
-    );
-    let _ = stream.write_all(response.as_bytes()).await;
-    let _ = stream.write_all(body).await;
+    write_http_response_inner(stream, status, content_type, body, true).await;
+}
+
+async fn write_http_response_no_cors(
+    stream: &mut tokio::net::TcpStream,
+    status: &str,
+    content_type: &str,
+    body: &[u8],
+) {
+    write_http_response_inner(stream, status, content_type, body, false).await;
 }
 
 async fn write_json_error_response(
@@ -1137,11 +1157,68 @@ async fn write_json_error_response(
     .await;
 }
 
+async fn write_json_error_response_no_cors(
+    stream: &mut tokio::net::TcpStream,
+    status: &'static str,
+    error: &str,
+) {
+    let body = build_json_error_body(error);
+    write_http_response_no_cors(
+        stream,
+        status,
+        "application/json; charset=utf-8",
+        body.as_bytes(),
+    )
+    .await;
+}
+
 fn parse_request_method_and_path(request: &str) -> (&str, &str) {
     let first_line = request.lines().next().unwrap_or("");
     let method = first_line.split_whitespace().next().unwrap_or("GET");
     let path = first_line.split_whitespace().nth(1).unwrap_or("/");
     (method, path)
+}
+
+const PROXY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const PROXY_MAX_RESPONSE_SIZE: u64 = 16 * 1024 * 1024;
+
+fn request_header_value<'a>(request: &'a str, name: &str) -> Option<&'a str> {
+    request.lines().find_map(|line| {
+        let (header_name, value) = line.split_once(':')?;
+        if header_name.trim().eq_ignore_ascii_case(name) {
+            Some(value.trim())
+        } else {
+            None
+        }
+    })
+}
+
+fn normalize_origin_authority(origin: &str) -> Option<String> {
+    let url = url::Url::parse(origin).ok()?;
+    let host = url.host_str()?.to_ascii_lowercase();
+    let host = if host.contains(':') {
+        format!("[{host}]")
+    } else {
+        host
+    };
+    Some(match url.port() {
+        Some(port) => format!("{host}:{port}"),
+        None => host,
+    })
+}
+
+/// Validates that a proxied WebSocket request either has no Origin header or
+/// presents an Origin whose authority matches the request Host header.
+fn is_same_origin_ws_request(request: &str) -> bool {
+    let origin_authority = request_header_value(request, "origin").map(normalize_origin_authority);
+    let host = request_header_value(request, "host").map(|value| value.trim().to_ascii_lowercase());
+
+    match (origin_authority, host) {
+        (None, _) => true,
+        (Some(None), _) => false,
+        (Some(Some(_)), None) => false,
+        (Some(Some(origin)), Some(host)) => origin == host,
+    }
 }
 
 /// Parse a dashboard route of the form `/api/session/<port>/<endpoint>`.
@@ -1269,27 +1346,47 @@ async fn proxy_session_http_route(
         SessionProxyEndpoint::Status => "/api/status",
         SessionProxyEndpoint::Stream => unreachable!("stream routes use the WebSocket proxy"),
     };
-
-    let mut upstream = tokio::net::TcpStream::connect(("127.0.0.1", port))
-        .await
-        .map_err(|e| {
-            DashboardProxyError::bad_gateway(format!(
-                "Failed to connect to session {port}: {e}"
-            ))
-        })?;
     let request = format!(
         "GET {upstream_path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
     );
-    upstream.write_all(request.as_bytes()).await.map_err(|e| {
-        DashboardProxyError::bad_gateway(format!("Failed to proxy request to session {port}: {e}"))
-    })?;
 
-    let mut response = Vec::new();
-    upstream.read_to_end(&mut response).await.map_err(|e| {
-        DashboardProxyError::bad_gateway(format!("Failed to read session {port} response: {e}"))
-    })?;
+    tokio::time::timeout(PROXY_TIMEOUT, async {
+        let mut upstream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .map_err(|e| {
+                DashboardProxyError::bad_gateway(format!(
+                    "Failed to connect to session {port}: {e}"
+                ))
+            })?;
+        upstream.write_all(request.as_bytes()).await.map_err(|e| {
+            DashboardProxyError::bad_gateway(format!("Failed to proxy request to session {port}: {e}"))
+        })?;
 
-    parse_upstream_http_response(&response).map_err(DashboardProxyError::bad_gateway)
+        let mut response = Vec::new();
+        (&mut upstream)
+            .take(PROXY_MAX_RESPONSE_SIZE + 1)
+            .read_to_end(&mut response)
+            .await
+            .map_err(|e| {
+                DashboardProxyError::bad_gateway(format!(
+                    "Failed to read session {port} response: {e}"
+                ))
+            })?;
+        if response.len() as u64 > PROXY_MAX_RESPONSE_SIZE {
+            return Err(DashboardProxyError::bad_gateway(format!(
+                "Session {port} response exceeded {PROXY_MAX_RESPONSE_SIZE} bytes."
+            )));
+        }
+
+        parse_upstream_http_response(&response).map_err(DashboardProxyError::bad_gateway)
+    })
+    .await
+    .map_err(|_| {
+        DashboardProxyError::bad_gateway(format!(
+            "Session {port} proxy request timed out after {}s.",
+            PROXY_TIMEOUT.as_secs()
+        ))
+    })?
 }
 
 /// Bridge a dashboard-origin WebSocket upgrade to the loopback session stream.
@@ -1298,7 +1395,7 @@ async fn proxy_session_stream(mut stream: tokio::net::TcpStream, port: u16) {
     let (upstream_ws, _) = match tokio_tungstenite::connect_async(&upstream_url).await {
         Ok(ws) => ws,
         Err(error) => {
-            write_json_error_response(
+            write_json_error_response_no_cors(
                 &mut stream,
                 "502 Bad Gateway",
                 &format!("Failed to connect to session {port}: {error}"),
@@ -1813,7 +1910,7 @@ async fn handle_dashboard_connection(
         let (port, endpoint) = match parse_session_proxy_route(peeked_path) {
             Ok(route) => route,
             Err(error) => {
-                write_json_error_response(&mut stream, "400 Bad Request", error).await;
+                write_json_error_response_no_cors(&mut stream, "400 Bad Request", error).await;
                 return;
             }
         };
@@ -1821,7 +1918,7 @@ async fn handle_dashboard_connection(
         match endpoint {
             SessionProxyEndpoint::Stream => {
                 if peeked_method != "GET" {
-                    write_json_error_response(
+                    write_json_error_response_no_cors(
                         &mut stream,
                         "400 Bad Request",
                         "Session stream proxy only supports GET WebSocket upgrades.",
@@ -1830,7 +1927,7 @@ async fn handle_dashboard_connection(
                     return;
                 }
                 if !is_websocket_upgrade(&peeked_request) {
-                    write_json_error_response(
+                    write_json_error_response_no_cors(
                         &mut stream,
                         "400 Bad Request",
                         "Session stream proxy requires a WebSocket upgrade request.",
@@ -1838,8 +1935,18 @@ async fn handle_dashboard_connection(
                     .await;
                     return;
                 }
+                if !is_same_origin_ws_request(&peeked_request) {
+                    write_json_error_response_no_cors(
+                        &mut stream,
+                        "403 Forbidden",
+                        "Origin does not match Host header.",
+                    )
+                    .await;
+                    return;
+                }
                 if let Err(error) = require_active_session_port(port) {
-                    write_json_error_response(&mut stream, error.status, &error.message).await;
+                    write_json_error_response_no_cors(&mut stream, error.status, &error.message)
+                        .await;
                     return;
                 }
                 proxy_session_stream(stream, port).await;
@@ -1847,7 +1954,7 @@ async fn handle_dashboard_connection(
             }
             SessionProxyEndpoint::Tabs | SessionProxyEndpoint::Status => {
                 if peeked_method != "GET" {
-                    write_json_error_response(
+                    write_json_error_response_no_cors(
                         &mut stream,
                         "400 Bad Request",
                         "Session proxy routes only support GET requests.",
@@ -1902,7 +2009,7 @@ async fn handle_dashboard_connection(
         let (port, endpoint) = match parse_session_proxy_route(path) {
             Ok(route) => route,
             Err(error) => {
-                write_json_error_response(&mut stream, "400 Bad Request", error).await;
+                write_json_error_response_no_cors(&mut stream, "400 Bad Request", error).await;
                 return;
             }
         };
@@ -1911,16 +2018,17 @@ async fn handle_dashboard_connection(
             SessionProxyEndpoint::Tabs | SessionProxyEndpoint::Status => {
                 match proxy_session_http_route(port, endpoint).await {
                     Ok((status, content_type, body)) => {
-                        write_http_response(&mut stream, &status, &content_type, &body).await;
+                        write_http_response_no_cors(&mut stream, &status, &content_type, &body).await;
                     }
                     Err(error) => {
-                        write_json_error_response(&mut stream, error.status, &error.message).await;
+                        write_json_error_response_no_cors(&mut stream, error.status, &error.message)
+                            .await;
                     }
                 }
                 return;
             }
             SessionProxyEndpoint::Stream => {
-                write_json_error_response(
+                write_json_error_response_no_cors(
                     &mut stream,
                     "400 Bad Request",
                     "Session stream proxy requires a WebSocket upgrade request.",
@@ -2127,6 +2235,36 @@ mod tests {
     #[test]
     fn test_disallowed_origin() {
         assert!(!is_allowed_origin(Some("http://evil.com")));
+    }
+
+    #[test]
+    fn test_same_origin_ws_request_matching() {
+        let req = "GET /api/session/9222/stream HTTP/1.1\r\nHost: localhost:4848\r\nOrigin: http://localhost:4848\r\nUpgrade: websocket\r\n\r\n";
+        assert!(is_same_origin_ws_request(req));
+    }
+
+    #[test]
+    fn test_same_origin_ws_request_proxied() {
+        let req = "GET /api/session/9222/stream HTTP/1.1\r\nHost: dashboard.localhost:1355\r\nOrigin: http://dashboard.localhost:1355\r\nUpgrade: websocket\r\n\r\n";
+        assert!(is_same_origin_ws_request(req));
+    }
+
+    #[test]
+    fn test_same_origin_ws_request_coder() {
+        let req = "GET /api/session/9222/stream HTTP/1.1\r\nHost: workspace.coder.com\r\nOrigin: https://workspace.coder.com\r\nUpgrade: websocket\r\n\r\n";
+        assert!(is_same_origin_ws_request(req));
+    }
+
+    #[test]
+    fn test_cross_origin_ws_request_rejected() {
+        let req = "GET /api/session/9222/stream HTTP/1.1\r\nHost: localhost:4848\r\nOrigin: https://evil.com\r\nUpgrade: websocket\r\n\r\n";
+        assert!(!is_same_origin_ws_request(req));
+    }
+
+    #[test]
+    fn test_no_origin_header_allowed() {
+        let req = "GET /api/session/9222/stream HTTP/1.1\r\nHost: localhost:4848\r\nUpgrade: websocket\r\n\r\n";
+        assert!(is_same_origin_ws_request(req));
     }
 
     #[test]
