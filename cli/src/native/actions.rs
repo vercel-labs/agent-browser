@@ -8206,7 +8206,10 @@ mod tests {
 
     #[test]
     fn test_glob_to_regex_exact_match() {
-        assert_eq!(super::glob_to_regex("https://example.com"), "^https://example\\.com$");
+        assert_eq!(
+            super::glob_to_regex("https://example.com"),
+            "^https://example\\.com$"
+        );
     }
 
     #[test]
