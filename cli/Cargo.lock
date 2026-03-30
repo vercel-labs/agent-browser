@@ -53,6 +53,7 @@ dependencies = [
  "dirs",
  "futures-util",
  "getrandom 0.2.17",
+ "glob-match",
  "image",
  "libc",
  "reqwest",
@@ -678,6 +679,12 @@ dependencies = [
  "color_quant",
  "weezl",
 ]
+
+[[package]]
+name = "glob-match"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9985c9503b412198aa4197559e9a318524ebc4519c229bfa05a535828c950b9d"
 
 [[package]]
 name = "half"

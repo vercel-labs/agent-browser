@@ -2873,17 +2873,56 @@ async fn wait_for_selector(
     poll_until_true(client, session_id, &check_fn, timeout_ms).await
 }
 
+/// Returns `true` if `pattern` contains glob meta-characters.
+fn is_glob_pattern(pattern: &str) -> bool {
+    pattern.contains('*') || pattern.contains('?') || pattern.contains('{')
+}
+
+/// Check whether a URL matches a Playwright-style glob/substring pattern (Rust-side).
+///
+/// Uses the `glob-match` crate for O(P*T) non-backtracking matching.
+fn url_matches_pattern(url: &str, pattern: &str) -> bool {
+    if is_glob_pattern(pattern) {
+        glob_match::glob_match(pattern, url)
+    } else {
+        url.contains(pattern)
+    }
+}
+
 async fn wait_for_url(
     client: &super::cdp::client::CdpClient,
     session_id: &str,
     pattern: &str,
     timeout_ms: u64,
 ) -> Result<(), String> {
-    let check_fn = format!(
-        "location.href.includes({})",
-        serde_json::to_string(pattern).unwrap_or_default()
-    );
-    poll_until_true(client, session_id, &check_fn, timeout_ms).await
+    let deadline =
+        tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
+
+    loop {
+        let result: super::cdp::types::EvaluateResult = client
+            .send_command_typed(
+                "Runtime.evaluate",
+                &super::cdp::types::EvaluateParams {
+                    expression: "location.href".to_string(),
+                    return_by_value: Some(true),
+                    await_promise: Some(false),
+                },
+                Some(session_id),
+            )
+            .await?;
+
+        if let Some(url) = result.result.value.as_ref().and_then(|v| v.as_str()) {
+            if url_matches_pattern(url, pattern) {
+                return Ok(());
+            }
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            return Err(format!("Wait timed out after {}ms", timeout_ms));
+        }
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    }
 }
 
 async fn wait_for_text(
@@ -5550,7 +5589,7 @@ async fn handle_responsebody(cmd: &Value, state: &DaemonState) -> Result<Value, 
                         .and_then(|r| r.get("url"))
                         .and_then(|u| u.as_str())
                     {
-                        if resp_url.contains(url_pattern) {
+                        if url_matches_pattern(resp_url, url_pattern) {
                             let request_id = event
                                 .params
                                 .get("requestId")
@@ -6252,18 +6291,7 @@ async fn resolve_fetch_paused(
 
     // Route matching
     for route in routes {
-        let matches = if route.url_pattern == "*" {
-            true
-        } else if route.url_pattern.contains('*') {
-            let parts: Vec<&str> = route.url_pattern.split('*').collect();
-            if parts.len() == 2 {
-                paused.url.starts_with(parts[0]) && paused.url.ends_with(parts[1])
-            } else {
-                paused.url.contains(&route.url_pattern)
-            }
-        } else {
-            paused.url.contains(&route.url_pattern)
-        };
+        let matches = url_matches_pattern(&paused.url, &route.url_pattern);
 
         if matches {
             if route.abort {
@@ -8311,5 +8339,99 @@ mod tests {
             let auto_handled = auto_dialog && matches!(*dialog_type, "beforeunload" | "alert");
             assert!(!auto_handled, "{dialog_type} should NOT be auto-handled");
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Glob pattern matching tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_glob_match_double_star() {
+        use glob_match::glob_match;
+        assert!(glob_match("**/dashboard", "https://example.com/dashboard"));
+        assert!(glob_match("**/dashboard", "https://example.com/a/b/dashboard"));
+        assert!(glob_match(
+            "https://**/dashboard",
+            "https://example.com/dashboard"
+        ));
+    }
+
+    #[test]
+    fn test_glob_match_single_star() {
+        use glob_match::glob_match;
+        assert!(glob_match("https://example.com/*", "https://example.com/foo"));
+        assert!(!glob_match(
+            "https://example.com/*",
+            "https://example.com/foo/bar"
+        ));
+    }
+
+    #[test]
+    fn test_glob_match_question_mark() {
+        use glob_match::glob_match;
+        assert!(glob_match(
+            "https://example.com/ab?",
+            "https://example.com/abc"
+        ));
+        assert!(!glob_match(
+            "https://example.com/ab?",
+            "https://example.com/ab"
+        ));
+    }
+
+    #[test]
+    fn test_glob_match_alternation() {
+        use glob_match::glob_match;
+        assert!(glob_match(
+            "https://example.com/{foo,bar}",
+            "https://example.com/foo"
+        ));
+        assert!(glob_match(
+            "https://example.com/{foo,bar}",
+            "https://example.com/bar"
+        ));
+        assert!(!glob_match(
+            "https://example.com/{foo,bar}",
+            "https://example.com/baz"
+        ));
+    }
+
+    #[test]
+    fn test_url_matches_pattern_substring_fallback() {
+        // No glob chars → substring match
+        assert!(url_matches_pattern("https://example.com/page", "example.com"));
+        assert!(!url_matches_pattern(
+            "https://example.com/page",
+            "other.com"
+        ));
+    }
+
+    #[test]
+    fn test_url_matches_pattern_glob() {
+        assert!(url_matches_pattern(
+            "https://example.com/settings/profile",
+            "**/settings/profile"
+        ));
+        assert!(url_matches_pattern(
+            "https://example.com/dashboard",
+            "**/example.com/**"
+        ));
+        assert!(url_matches_pattern(
+            "https://example.com/foo",
+            "https://*.com/foo"
+        ));
+        assert!(!url_matches_pattern(
+            "https://example.com/settings",
+            "**/dashboard"
+        ));
+    }
+
+    #[test]
+    fn test_is_glob_pattern() {
+        assert!(is_glob_pattern("**/foo"));
+        assert!(is_glob_pattern("*.js"));
+        assert!(is_glob_pattern("ab?c"));
+        assert!(is_glob_pattern("{a,b}"));
+        assert!(!is_glob_pattern("example.com"));
     }
 }
