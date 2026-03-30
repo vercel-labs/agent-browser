@@ -626,7 +626,7 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 
 ## Observability Dashboard
 
-Monitor agent-browser sessions in real time with a local web dashboard showing a live viewport and command activity feed.
+Monitor agent-browser sessions in real time with a web dashboard showing a live viewport and command activity feed.
 
 ```bash
 # Install the dashboard (one time)
@@ -643,7 +643,7 @@ agent-browser open example.com
 agent-browser dashboard stop
 ```
 
-The dashboard runs as a standalone background process on port 4848, independent of browser sessions. It stays available even when no sessions are running. All sessions automatically stream to the dashboard.
+The dashboard runs as a standalone background process on port 4848, independent of browser sessions. It stays available even when no sessions are running, and it works from `http://localhost:4848` or a forwarded/proxied URL that reaches the dashboard server, such as a Coder workspace URL. The browser talks only to the dashboard origin; session-specific tabs, status, and stream traffic are proxied internally to loopback-only session ports, which remain implementation details.
 
 The dashboard displays:
 - **Live viewport** -- real-time JPEG frames from the browser

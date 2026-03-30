@@ -1073,6 +1073,7 @@ async fn handle_client_message(msg: &str, client: &CdpClient, session_id: Option
 
 const CORS_HEADERS: &str = "Access-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\n";
 
+/// Dashboard same-origin proxy endpoints for session metadata and streams.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SessionProxyEndpoint {
     Tabs,
@@ -1143,6 +1144,7 @@ fn parse_request_method_and_path(request: &str) -> (&str, &str) {
     (method, path)
 }
 
+/// Parse a dashboard route of the form `/api/session/<port>/<endpoint>`.
 fn parse_session_proxy_route(path: &str) -> Result<(u16, SessionProxyEndpoint), &'static str> {
     debug_assert!(path.starts_with("/api/session/"));
 
@@ -1245,6 +1247,7 @@ fn parse_upstream_http_response(response: &[u8]) -> Result<(String, String, Vec<
     Ok((status, content_type, body.to_vec()))
 }
 
+/// Proxy dashboard-origin HTTP requests for session tabs or status to the loopback session server.
 async fn proxy_session_http_route(
     port: u16,
     endpoint: SessionProxyEndpoint,
@@ -1284,6 +1287,7 @@ async fn proxy_session_http_route(
     parse_upstream_http_response(&response).map_err(DashboardProxyError::bad_gateway)
 }
 
+/// Bridge a dashboard-origin WebSocket upgrade to the loopback session stream.
 async fn proxy_session_stream(mut stream: tokio::net::TcpStream, port: u16) {
     let upstream_url = format!("ws://127.0.0.1:{port}");
     let (upstream_ws, _) = match tokio_tungstenite::connect_async(&upstream_url).await {

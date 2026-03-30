@@ -1,6 +1,6 @@
 # Observability Dashboard
 
-Monitor agent-browser sessions in real time with a local web dashboard showing a live browser viewport and command activity feed.
+Monitor agent-browser sessions in real time with a web dashboard showing a live browser viewport and command activity feed.
 
 ## Install
 
@@ -10,7 +10,7 @@ Download the dashboard once:
 agent-browser dashboard install
 ```
 
-This downloads the dashboard to `~/.agent-browser/dashboard/` and is served directly by the daemon when streaming is enabled.
+This downloads the dashboard to `~/.agent-browser/dashboard/`. The files are served by the dashboard server once it is running.
 
 ## Usage
 
@@ -21,9 +21,17 @@ agent-browser dashboard start
 agent-browser open example.com
 ```
 
-Then open `http://localhost:4848` in your browser to see the live dashboard.
+Then open `http://localhost:4848` or your forwarded/proxied dashboard URL, such as a Coder workspace URL, in a browser to see the live dashboard.
 
-All sessions automatically stream to the dashboard. No extra flags are needed.
+All sessions automatically stream to the dashboard. No extra flags are needed. The dashboard uses a same-origin proxy model, so the browser talks only to the dashboard origin while the server proxies session traffic internally to `127.0.0.1:<session-port>`. Per-session ports remain loopback-only implementation details.
+
+### Session proxy routes
+
+The dashboard server exposes these same-origin proxy routes:
+
+- `GET /api/session/<port>/tabs` -> proxied to the session's `/api/tabs`
+- `GET /api/session/<port>/status` -> proxied to the session's `/api/status`
+- `WS /api/session/<port>/stream` -> proxied to the session's WebSocket stream
 
 ### Custom stream port
 
@@ -74,7 +82,7 @@ The dashboard is a single-page web app with three areas:
 
 ## WebSocket protocol
 
-The dashboard connects to the same WebSocket endpoint used by [Streaming](/streaming), with additional message types for observability:
+The dashboard uses the same message types as [Streaming](/streaming), but it reaches session streams through the dashboard server's same-origin proxy routes:
 
 ### Command events
 
@@ -132,6 +140,6 @@ The dashboard is a Next.js static export (`output: 'export'`) that produces plai
 pnpm build:dashboard
 ```
 
-The built files are served by the daemon's stream server on the same port used for WebSocket connections. Plain HTTP requests serve the dashboard, while WebSocket upgrade requests are handled as before.
+The built files are served by the dashboard server. The browser stays on the dashboard origin for both HTTP and WebSocket traffic, and the server proxies session-specific requests to `127.0.0.1:<session-port>` internally. This is why the dashboard works from local URLs and forwarded/proxied HTTPS workspace URLs without exposing per-session ports.
 
 When the dashboard is not installed, visiting the HTTP endpoint shows instructions to run `agent-browser dashboard install`.

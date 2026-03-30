@@ -2399,8 +2399,8 @@ agent-browser dashboard - Observability dashboard
 
 Usage: agent-browser dashboard [start|stop|install] [options]
 
-Manage the observability dashboard, a local web UI that shows live
-browser viewports and command activity feeds for all sessions.
+Manage the observability dashboard, a web UI that shows live browser
+viewports and command activity feeds for all sessions.
 
 Subcommands:
   start [--port <n>]   Start the dashboard server (default port: 4848)
@@ -2411,6 +2411,11 @@ Running 'agent-browser dashboard' with no subcommand is equivalent to 'dashboard
 
 The dashboard runs as a standalone background process, independent of
 browser sessions. All sessions automatically stream to the dashboard.
+It works from http://localhost:4848 or a forwarded/proxied URL that
+reaches the dashboard server, such as a Coder workspace URL. Browsers
+connect only to the dashboard origin; session-specific HTTP and
+WebSocket traffic is proxied internally to loopback-only session
+ports.
 
 Options:
   --port <n>           Port for the dashboard server (default: 4848)
