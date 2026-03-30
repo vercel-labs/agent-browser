@@ -119,8 +119,7 @@ fn glob_to_regex(pattern: &str) -> String {
                     regex.push_str("[^/]*");
                 }
             }
-            '?' => regex.push('.'),
-            '\\' | '.' | '+' | '(' | ')' | '|' | '^' | '$' | '{' | '}' | '[' | ']' => {
+            '?' | '\\' | '.' | '+' | '(' | ')' | '|' | '^' | '$' | '{' | '}' | '[' | ']' => {
                 regex.push('\\');
                 regex.push(ch);
             }
@@ -8253,14 +8252,16 @@ mod tests {
     }
 
     #[test]
-    fn test_glob_matches_question_matches_single_character() {
+    fn test_glob_matches_question_mark_is_literal() {
+        // ? is the query string separator in URLs, not a glob wildcard
+        // Playwright's URL glob only supports * and **
         assert!(super::glob_matches(
-            "https://example.com/file?.txt",
-            "https://example.com/file1.txt"
+            "https://example.com/page?id=1",
+            "https://example.com/page?id=1"
         ));
         assert!(!super::glob_matches(
-            "https://example.com/file?.txt",
-            "https://example.com/file10.txt"
+            "https://example.com/page?id=1",
+            "https://example.com/pageXid=1"
         ));
     }
 
