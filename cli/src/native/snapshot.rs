@@ -145,12 +145,38 @@ impl TreeNode {
     }
 }
 
+/// The type of a hidden form input found inside a cursor-interactive element.
+#[derive(Clone, Copy)]
+enum HiddenInputKind {
+    Radio,
+    Checkbox,
+}
+
+impl HiddenInputKind {
+    fn parse(s: &str) -> Option<Self> {
+        match s {
+            "radio" => Some(Self::Radio),
+            "checkbox" => Some(Self::Checkbox),
+            _ => None,
+        }
+    }
+
+    fn as_role(&self) -> &str {
+        match self {
+            Self::Radio => "radio",
+            Self::Checkbox => "checkbox",
+        }
+    }
+}
+
 /// Information about a cursor-interactive element (elements with cursor:pointer, onclick, tabindex, etc.)
 #[derive(Clone)]
 struct CursorElementInfo {
     kind: String, // "clickable", "focusable", "editable"
     hints: Vec<String>,
     text: String, // textContent from the DOM element (fallback when ARIA name is empty)
+    hidden_input_kind: Option<HiddenInputKind>,
+    hidden_input_checked: Option<String>, // "true", "false", or "mixed" (tristate)
 }
 
 struct RoleNameTracker {
@@ -274,7 +300,7 @@ pub async fn take_snapshot(
         )
         .await?;
 
-    let (tree_nodes, root_indices) = build_tree(&ax_tree.nodes);
+    let (mut tree_nodes, root_indices) = build_tree(&ax_tree.nodes);
 
     // When a selector is given, find AX nodes whose backendDOMNodeId falls
     // within the target DOM subtree and pick the top-level ones as roots.
@@ -320,6 +346,8 @@ pub async fn take_snapshot(
             .await
             .unwrap_or_default();
 
+    promote_hidden_inputs(&mut tree_nodes, &cursor_elements);
+
     for (idx, node) in tree_nodes.iter().enumerate() {
         let role = node.role.as_str();
         let mut should_ref = if INTERACTIVE_ROLES.contains(&role) {
@@ -346,7 +374,6 @@ pub async fn take_snapshot(
 
     let duplicates = tracker.get_duplicates();
 
-    let mut tree_nodes = tree_nodes;
     for (idx, nth) in &nodes_with_refs {
         let node = &tree_nodes[*idx];
         let key = format!("{}:{}", node.role, node.name);
@@ -567,6 +594,23 @@ async fn find_cursor_interactive_elements(
         var rect = el.getBoundingClientRect();
         if (rect.width === 0 || rect.height === 0) continue;
 
+        // Detect hidden radio/checkbox inputs inside this element (common pattern:
+        // <label> wrapping a display:none <input type="radio"> styled as a card).
+        // Note: we only check display/visibility/hidden, NOT opacity:0 or sr-only,
+        // because those inputs remain in Chrome's AX tree and already appear as
+        // role="radio" without promotion.
+        var hiddenInputType = null;
+        var hiddenInputChecked = null;
+        var hiddenInput = el.querySelector('input[type="radio"], input[type="checkbox"]');
+        if (hiddenInput) {
+            var hiddenInputStyle = getComputedStyle(hiddenInput);
+            var isInputHidden = hiddenInputStyle.display === 'none' || hiddenInputStyle.visibility === 'hidden' || hiddenInput.hidden;
+            if (isInputHidden) {
+                hiddenInputType = hiddenInput.type;
+                hiddenInputChecked = hiddenInput.indeterminate ? 'mixed' : String(hiddenInput.checked);
+            }
+        }
+
         el.setAttribute('data-__ab-ci', String(results.length));
         results.push({
             text: text,
@@ -574,7 +618,9 @@ async fn find_cursor_interactive_elements(
             hasOnClick: hasOnClick,
             hasCursorPointer: hasCursorPointer,
             hasTabIndex: hasTabIndex,
-            isEditable: isEditable
+            isEditable: isEditable,
+            hiddenInputType: hiddenInputType,
+            hiddenInputChecked: hiddenInputChecked
         });
     }
     return results;
@@ -747,6 +793,15 @@ async fn find_cursor_interactive_elements(
             .trim()
             .to_string();
 
+        let hidden_input_kind = elem
+            .get("hiddenInputType")
+            .and_then(|v| v.as_str())
+            .and_then(HiddenInputKind::parse);
+        let hidden_input_checked = elem
+            .get("hiddenInputChecked")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
         if let Some(bid) = backend_node_id {
             map.insert(
                 bid,
@@ -754,12 +809,43 @@ async fn find_cursor_interactive_elements(
                     kind: kind.to_string(),
                     hints,
                     text,
+                    hidden_input_kind,
+                    hidden_input_checked,
                 },
             );
         }
     }
 
     Ok(map)
+}
+
+/// Promote LabelText/generic nodes that wrap a hidden radio/checkbox input.
+/// When a `<label>` contains a `display:none` `<input type="radio">`, Chrome excludes
+/// the input from the AX tree entirely, leaving only the label with role="LabelText"
+/// and an empty name. We detect these via cursor-interactive scanning and promote
+/// the label to the correct input role so consumers see role="radio" in data.refs.
+fn promote_hidden_inputs(
+    tree_nodes: &mut [TreeNode],
+    cursor_elements: &HashMap<i64, CursorElementInfo>,
+) {
+    for node in tree_nodes.iter_mut() {
+        if !matches!(node.role.as_str(), "LabelText" | "generic") {
+            continue;
+        }
+        let cursor_info = match node.backend_node_id.and_then(|bid| cursor_elements.get(&bid)) {
+            Some(info) => info,
+            None => continue,
+        };
+        if let Some(input_kind) = cursor_info.hidden_input_kind {
+            node.role = input_kind.as_role().to_string();
+            if node.name.is_empty() && !cursor_info.text.is_empty() {
+                node.name = cursor_info.text.clone();
+            }
+            if let Some(ref checked) = cursor_info.hidden_input_checked {
+                node.checked = Some(checked.clone());
+            }
+        }
+    }
 }
 
 fn build_tree(nodes: &[AXNode]) -> (Vec<TreeNode>, Vec<usize>) {
@@ -1334,4 +1420,88 @@ mod tests {
         assert_eq!(session, parent_session);
         assert_eq!(params, serde_json::json!({}));
     }
+
+    // -----------------------------------------------------------------------
+    // promote_hidden_inputs
+    // -----------------------------------------------------------------------
+
+    fn make_node(role: &str, name: &str, backend_node_id: Option<i64>) -> TreeNode {
+        let mut node = TreeNode::empty();
+        node.role = role.to_string();
+        node.name = name.to_string();
+        node.backend_node_id = backend_node_id;
+        node
+    }
+
+    fn make_cursor_info(
+        hidden_kind: Option<HiddenInputKind>,
+        hidden_checked: Option<&str>,
+        text: &str,
+    ) -> CursorElementInfo {
+        CursorElementInfo {
+            kind: "clickable".to_string(),
+            hints: vec!["cursor:pointer".to_string()],
+            text: text.to_string(),
+            hidden_input_kind: hidden_kind,
+            hidden_input_checked: hidden_checked.map(|s| s.to_string()),
+        }
+    }
+
+    #[test]
+    fn test_promote_label_with_hidden_radio() {
+        let mut nodes = vec![
+            make_node("LabelText", "", Some(1)),
+            make_node("LabelText", "", Some(2)),
+            make_node("button", "Submit", Some(3)),
+        ];
+        let mut cursor_elements = HashMap::new();
+        cursor_elements.insert(
+            1,
+            make_cursor_info(Some(HiddenInputKind::Radio), Some("false"), "Option A"),
+        );
+        cursor_elements.insert(
+            2,
+            make_cursor_info(Some(HiddenInputKind::Radio), Some("true"), "Option B"),
+        );
+
+        promote_hidden_inputs(&mut nodes, &cursor_elements);
+
+        assert_eq!(nodes[0].role, "radio");
+        assert_eq!(nodes[0].name, "Option A");
+        assert_eq!(nodes[0].checked, Some("false".to_string()));
+        assert_eq!(nodes[1].role, "radio");
+        assert_eq!(nodes[1].name, "Option B");
+        assert_eq!(nodes[1].checked, Some("true".to_string()));
+        // button should be untouched
+        assert_eq!(nodes[2].role, "button");
+    }
+
+    #[test]
+    fn test_promote_preserves_existing_name() {
+        // If AX tree already has a name, don't overwrite with textContent
+        let mut nodes = vec![make_node("LabelText", "AX Name", Some(1))];
+        let mut cursor_elements = HashMap::new();
+        cursor_elements.insert(
+            1,
+            make_cursor_info(Some(HiddenInputKind::Radio), Some("false"), "Text Content"),
+        );
+
+        promote_hidden_inputs(&mut nodes, &cursor_elements);
+
+        assert_eq!(nodes[0].role, "radio");
+        assert_eq!(nodes[0].name, "AX Name"); // preserved, not overwritten
+    }
+
+    #[test]
+    fn test_promote_skips_without_hidden_input() {
+        // Cursor-interactive label WITHOUT a hidden input should not be promoted
+        let mut nodes = vec![make_node("LabelText", "", Some(1))];
+        let mut cursor_elements = HashMap::new();
+        cursor_elements.insert(1, make_cursor_info(None, None, "Click me"));
+
+        promote_hidden_inputs(&mut nodes, &cursor_elements);
+
+        assert_eq!(nodes[0].role, "LabelText"); // unchanged
+    }
+
 }
