@@ -2294,6 +2294,57 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_session_proxy_route_path_traversal() {
+        // Path traversal attempts must be rejected
+        assert!(parse_session_proxy_route("/api/session/9222/tabs/..").is_err());
+        assert!(parse_session_proxy_route("/api/session/9222/tabs/../status").is_err());
+        assert!(parse_session_proxy_route("/api/session/9222/../../etc/passwd").is_err());
+        assert!(parse_session_proxy_route("/api/session/../session/9222/tabs").is_err());
+    }
+
+    #[test]
+    fn test_parse_session_proxy_route_double_slashes() {
+        // Double slashes in the routed suffix produce empty segments that fail parsing.
+        assert!(parse_session_proxy_route("/api/session//9222/tabs").is_err());
+
+        // Paths that do not satisfy the `/api/session/` prefix contract are rejected by
+        // the caller gate before reaching the parser. In debug builds, calling the parser
+        // directly with those paths trips the parser precondition.
+        #[cfg(debug_assertions)]
+        {
+            assert!(std::panic::catch_unwind(|| {
+                parse_session_proxy_route("/api//session/9222/tabs")
+            })
+            .is_err());
+            assert!(std::panic::catch_unwind(|| {
+                parse_session_proxy_route("//api/session/9222/tabs")
+            })
+            .is_err());
+        }
+
+        #[cfg(not(debug_assertions))]
+        {
+            assert!(parse_session_proxy_route("/api//session/9222/tabs").is_err());
+            assert!(parse_session_proxy_route("//api/session/9222/tabs").is_err());
+        }
+    }
+
+    #[test]
+    fn test_parse_session_proxy_route_trailing_slash() {
+        // Trailing slash creates an extra empty segment
+        assert!(parse_session_proxy_route("/api/session/9222/tabs/").is_err());
+        assert!(parse_session_proxy_route("/api/session/9222/status/").is_err());
+        assert!(parse_session_proxy_route("/api/session/9222/stream/").is_err());
+    }
+
+    #[test]
+    fn test_parse_session_proxy_route_encoded_paths() {
+        // URL-encoded paths are not decoded, so they fail endpoint matching
+        assert!(parse_session_proxy_route("/api/session/9222/tabs%20extra").is_err());
+        assert!(parse_session_proxy_route("/api/session/%39%32%32%32/tabs").is_err());
+    }
+
+    #[test]
     fn test_sessions_json_has_active_port() {
         let sessions_json = r#"[
             {"session":"alpha","port":9222,"engine":"chrome"},
