@@ -1149,7 +1149,12 @@ fn parse_session_proxy_route(path: &str) -> Result<(u16, SessionProxyEndpoint), 
     debug_assert!(path.starts_with("/api/session/"));
 
     let mut parts = path.split('/');
-    debug_assert_eq!(parts.next(), Some(""));
+    let _leading = parts.next();
+    debug_assert_eq!(
+        _leading,
+        Some(""),
+        "path should start with / producing a leading empty split"
+    );
     if parts.next() != Some("api") || parts.next() != Some("session") {
         return Err("Invalid session proxy route.");
     }
