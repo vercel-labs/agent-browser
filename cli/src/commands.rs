@@ -237,7 +237,14 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                 });
             }
             let first = &rest[0];
-            let first_is_path = first.contains('/') || first.contains('\\');
+            let first_is_selector = first.starts_with('@')
+                || first.starts_with('#')
+                || (first.starts_with('.')
+                    && !first.starts_with("./")
+                    && !first.starts_with(".\\"))
+                || first.starts_with("xpath=")
+                || first.starts_with("text=");
+            let first_is_path = !first_is_selector && (first.contains('/') || first.contains('\\'));
             if first_is_path {
                 Ok(json!({ "id": id, "action": "upload", "files": &rest[..] }))
             } else {
@@ -4313,5 +4320,17 @@ mod tests {
         assert_eq!(cmd["action"], "upload");
         assert!(cmd.get("selector").is_none());
         assert_eq!(cmd["files"][0], "/tmp/file.txt");
+    }
+
+    #[test]
+    fn test_upload_xpath_selector_not_misclassified_as_path() {
+        let cmd = parse_command(
+            &args("upload xpath=/html/body/input ./file.txt"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "upload");
+        assert_eq!(cmd["selector"], "xpath=/html/body/input");
+        assert_eq!(cmd["files"][0], "./file.txt");
     }
 }
