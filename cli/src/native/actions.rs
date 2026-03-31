@@ -1,3 +1,4 @@
+use regex::Regex;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::env;
@@ -102,6 +103,38 @@ pub struct RouteResponse {
     pub body: Option<String>,
     pub content_type: Option<String>,
     pub headers: Option<HashMap<String, String>>,
+}
+
+fn glob_to_regex(pattern: &str) -> String {
+    let mut regex = String::from("^");
+    let mut chars = pattern.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '*' => {
+                if chars.peek() == Some(&'*') {
+                    chars.next();
+                    regex.push_str(".*");
+                } else {
+                    regex.push_str("[^/]*");
+                }
+            }
+            '?' | '\\' | '.' | '+' | '(' | ')' | '|' | '^' | '$' | '{' | '}' | '[' | ']' => {
+                regex.push('\\');
+                regex.push(ch);
+            }
+            _ => regex.push(ch),
+        }
+    }
+
+    regex.push('$');
+    regex
+}
+
+fn glob_matches(pattern: &str, text: &str) -> bool {
+    Regex::new(&glob_to_regex(pattern))
+        .map(|regex| regex.is_match(text))
+        .unwrap_or(false)
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -2887,9 +2920,10 @@ async fn wait_for_url(
     pattern: &str,
     timeout_ms: u64,
 ) -> Result<(), String> {
+    let regex = glob_to_regex(pattern);
     let check_fn = format!(
-        "location.href.includes({})",
-        serde_json::to_string(pattern).unwrap_or_default()
+        "new RegExp({}).test(location.href)",
+        serde_json::to_string(&regex).unwrap_or_default()
     );
     poll_until_true(client, session_id, &check_fn, timeout_ms).await
 }
@@ -5572,7 +5606,7 @@ async fn handle_responsebody(cmd: &Value, state: &DaemonState) -> Result<Value, 
                         .and_then(|r| r.get("url"))
                         .and_then(|u| u.as_str())
                     {
-                        if resp_url.contains(url_pattern) {
+                        if glob_matches(url_pattern, resp_url) {
                             let request_id = event
                                 .params
                                 .get("requestId")
@@ -6274,18 +6308,7 @@ async fn resolve_fetch_paused(
 
     // Route matching
     for route in routes {
-        let matches = if route.url_pattern == "*" {
-            true
-        } else if route.url_pattern.contains('*') {
-            let parts: Vec<&str> = route.url_pattern.split('*').collect();
-            if parts.len() == 2 {
-                paused.url.starts_with(parts[0]) && paused.url.ends_with(parts[1])
-            } else {
-                paused.url.contains(&route.url_pattern)
-            }
-        } else {
-            paused.url.contains(&route.url_pattern)
-        };
+        let matches = glob_matches(&route.url_pattern, &paused.url);
 
         if matches {
             if route.abort {
@@ -8200,6 +8223,68 @@ mod tests {
             "auth_login should navigate with Load and then wait for form \
              selectors explicitly"
         );
+    }
+
+    #[test]
+    fn test_glob_to_regex_exact_match() {
+        assert_eq!(
+            super::glob_to_regex("https://example.com"),
+            "^https://example\\.com$"
+        );
+    }
+
+    #[test]
+    fn test_glob_to_regex_escapes_regex_metacharacters() {
+        assert_eq!(
+            super::glob_to_regex("https://example.com/a+b(c)[d]{e}|f^g$"),
+            "^https://example\\.com/a\\+b\\(c\\)\\[d\\]\\{e\\}\\|f\\^g\\$$"
+        );
+    }
+
+    #[test]
+    fn test_glob_matches_exact_match() {
+        assert!(super::glob_matches(
+            "https://example.com/path",
+            "https://example.com/path"
+        ));
+        assert!(!super::glob_matches(
+            "https://example.com/path",
+            "https://example.com/path/extra"
+        ));
+    }
+
+    #[test]
+    fn test_glob_matches_single_star_does_not_cross_slash() {
+        assert!(super::glob_matches(
+            "https://example.com/*.js",
+            "https://example.com/app.js"
+        ));
+        assert!(!super::glob_matches(
+            "https://example.com/*.js",
+            "https://example.com/assets/app.js"
+        ));
+    }
+
+    #[test]
+    fn test_glob_matches_double_star_crosses_slash() {
+        assert!(super::glob_matches(
+            "https://example.com/**/*.js",
+            "https://example.com/assets/app.js"
+        ));
+    }
+
+    #[test]
+    fn test_glob_matches_question_mark_is_literal() {
+        // ? is the query string separator in URLs, not a glob wildcard
+        // Playwright's URL glob only supports * and **
+        assert!(super::glob_matches(
+            "https://example.com/page?id=1",
+            "https://example.com/page?id=1"
+        ));
+        assert!(!super::glob_matches(
+            "https://example.com/page?id=1",
+            "https://example.com/pageXid=1"
+        ));
     }
 
     #[test]
