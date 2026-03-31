@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html>
+<head><title>File Chooser Test</title></head>
+<body>
+  <button id="dynamic-upload" style="width:200px;height:50px;">Upload (dynamic)</button>
+  <input type="file" id="static-upload" />
+  <pre id="result"></pre>
+  <script>
+    document.getElementById('dynamic-upload').addEventListener('click', () => {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.addEventListener('change', (e) => {
+        const names = Array.from(e.target.files).map(f => f.name);
+        document.getElementById('result').textContent = JSON.stringify(names);
+      });
+      input.click();
+    });
+    document.getElementById('static-upload').addEventListener('change', (e) => {
+      const names = Array.from(e.target.files).map(f => f.name);
+      document.getElementById('result').textContent = JSON.stringify(names);
+    });
+  </script>
+</body>
+</html>
