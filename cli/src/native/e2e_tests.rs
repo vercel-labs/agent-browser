@@ -3896,7 +3896,10 @@ async fn e2e_console_and_error_tracking() {
     // Verify console messages are captured (log, warn, error from page load)
     let resp = execute_command(&json!({ "id": "3", "action": "console" }), &mut state).await;
     assert_success(&resp);
-    let messages = get_data(&resp).get("messages").and_then(|v| v.as_array()).expect("should have messages array");
+    let messages = get_data(&resp)
+        .get("messages")
+        .and_then(|v| v.as_array())
+        .expect("should have messages array");
 
     let message_types: Vec<&str> = messages
         .iter()
@@ -3922,8 +3925,14 @@ async fn e2e_console_and_error_tracking() {
     // Verify errors are captured (uncaught exception from page load)
     let resp = execute_command(&json!({ "id": "4", "action": "errors" }), &mut state).await;
     assert_success(&resp);
-    let errors = get_data(&resp).get("errors").and_then(|v| v.as_array()).expect("should have errors array");
-    assert!(!errors.is_empty(), "should have captured uncaught exception error");
+    let errors = get_data(&resp)
+        .get("errors")
+        .and_then(|v| v.as_array())
+        .expect("should have errors array");
+    assert!(
+        !errors.is_empty(),
+        "should have captured uncaught exception error"
+    );
 
     // Verify error content has the thrown error message
     let error_texts: Vec<&str> = errors
@@ -3931,7 +3940,9 @@ async fn e2e_console_and_error_tracking() {
         .filter_map(|e| e.get("text").and_then(|v| v.as_str()))
         .collect();
     assert!(
-        error_texts.iter().any(|&t| t.contains("Uncaught exception") || t.contains("Error")),
+        error_texts
+            .iter()
+            .any(|&t| t.contains("Uncaught exception") || t.contains("Error")),
         "should contain uncaught exception error, got: {:?}",
         error_texts
     );
