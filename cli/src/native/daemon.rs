@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::signal;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, Notify, RwLock};
 
 use super::actions::{execute_command, DaemonState};
 use super::cdp::client::CdpClient;
@@ -132,7 +132,7 @@ pub async fn run_daemon(session: &str) {
 #[cfg(unix)]
 async fn run_socket_server(
     socket_path: &PathBuf,
-    session: &str,
+    _session: &str,
     stream_client: Option<Arc<RwLock<Option<Arc<CdpClient>>>>>,
     stream_server: Option<Arc<StreamServer>>,
     idle_timeout_ms: Option<u64>,
@@ -142,19 +142,13 @@ async fn run_socket_server(
     let listener =
         UnixListener::bind(socket_path).map_err(|e| format!("Failed to bind socket: {}", e))?;
 
-    let stream_file: Option<PathBuf> = if stream_server.is_some() {
-        let dir = socket_path.parent().unwrap_or(std::path::Path::new("."));
-        Some(dir.join(format!("{}.stream", session)))
-    } else {
-        None
-    };
-
     let state: std::sync::Arc<tokio::sync::Mutex<DaemonState>> = std::sync::Arc::new(
         tokio::sync::Mutex::new(DaemonState::new_with_stream(stream_client, stream_server)),
     );
 
     let (reset_tx, mut reset_rx) = mpsc::channel::<()>(64);
     let reset_tx = idle_timeout_ms.map(|_| Arc::new(reset_tx));
+    let shutdown_notify = Arc::new(Notify::new());
 
     let mut drain_interval = tokio::time::interval(Duration::from_millis(500));
     drain_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -169,9 +163,9 @@ async fn run_socket_server(
                     Ok((stream, _)) => {
                         let state = state.clone();
                         let reset_tx = reset_tx.clone();
-                        let sf = stream_file.clone();
+                        let shutdown_notify = shutdown_notify.clone();
                         tokio::spawn(async move {
-                            handle_connection(stream, state, reset_tx, sf).await;
+                            handle_connection(stream, state, reset_tx, shutdown_notify).await;
                         });
                     }
                     Err(e) => {
@@ -207,6 +201,13 @@ async fn run_socket_server(
             }
             _ = reset_rx.recv(), if idle_timeout_ms.is_some() => {
                 continue;
+            }
+            _ = shutdown_notify.notified() => {
+                let mut s = state.lock().await;
+                if let Some(ref mut mgr) = s.browser {
+                    let _ = mgr.close().await;
+                }
+                break;
             }
             _ = shutdown_signal() => {
                 let mut s = state.lock().await;
@@ -249,18 +250,13 @@ async fn run_socket_server(
     let port_path = socket_dir.join(format!("{}.port", session));
     let _ = fs::write(&port_path, actual_port.to_string());
 
-    let stream_file: Option<PathBuf> = if stream_server.is_some() {
-        Some(socket_dir.join(format!("{}.stream", session)))
-    } else {
-        None
-    };
-
     let state: std::sync::Arc<tokio::sync::Mutex<DaemonState>> = std::sync::Arc::new(
         tokio::sync::Mutex::new(DaemonState::new_with_stream(stream_client, stream_server)),
     );
 
     let (reset_tx, mut reset_rx) = mpsc::channel::<()>(64);
     let reset_tx = idle_timeout_ms.map(|_| Arc::new(reset_tx));
+    let shutdown_notify = Arc::new(Notify::new());
 
     loop {
         let sleep_future = idle_timeout_ms.map(|ms| tokio::time::sleep(Duration::from_millis(ms)));
@@ -272,9 +268,9 @@ async fn run_socket_server(
                     Ok((stream, _)) => {
                         let state = state.clone();
                         let reset_tx = reset_tx.clone();
-                        let sf = stream_file.clone();
+                        let shutdown_notify = shutdown_notify.clone();
                         tokio::spawn(async move {
-                            handle_connection(stream, state, reset_tx, sf).await;
+                            handle_connection(stream, state, reset_tx, shutdown_notify).await;
                         });
                     }
                     Err(e) => {
@@ -299,6 +295,14 @@ async fn run_socket_server(
             _ = reset_rx.recv(), if idle_timeout_ms.is_some() => {
                 continue;
             }
+            _ = shutdown_notify.notified() => {
+                let mut s = state.lock().await;
+                if let Some(ref mut mgr) = s.browser {
+                    let _ = mgr.close().await;
+                }
+                let _ = fs::remove_file(&port_path);
+                break;
+            }
             _ = shutdown_signal() => {
                 let mut s = state.lock().await;
                 if let Some(ref mut mgr) = s.browser {
@@ -317,7 +321,7 @@ async fn handle_connection<S>(
     stream: S,
     state: std::sync::Arc<tokio::sync::Mutex<DaemonState>>,
     idle_reset_tx: Option<Arc<mpsc::Sender<()>>>,
-    stream_file_cleanup: Option<PathBuf>,
+    shutdown_notify: Arc<Notify>,
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
@@ -371,11 +375,9 @@ async fn handle_connection<S>(
                 }
 
                 if is_close {
-                    if let Some(ref path) = stream_file_cleanup {
-                        let _ = fs::remove_file(path);
-                    }
-                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                    process::exit(0);
+                    let _ = writer.flush().await;
+                    shutdown_notify.notify_one();
+                    break;
                 }
             }
             Err(_) => break,
@@ -502,6 +504,61 @@ mod tests {
              Use Child::try_wait() via has_process_exited() instead. \
              See issue #1035."
         );
+    }
+
+    #[test]
+    fn test_no_process_exit_zero_in_daemon_production_code() {
+        let source = include_str!("daemon.rs");
+        let production_code = source.split("#[cfg(test)]").next().unwrap_or(source);
+        assert!(
+            !production_code.contains("process::exit(0)"),
+            "daemon.rs production code must not hard-exit with status 0. \
+             Graceful shutdown is required so session metadata files are cleaned up."
+        );
+    }
+
+    #[tokio::test]
+    async fn test_close_command_notifies_shutdown_and_returns_cleanly() {
+        use serde_json::Value;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let state = Arc::new(tokio::sync::Mutex::new(DaemonState::new()));
+        let shutdown_notify = Arc::new(Notify::new());
+        let (client, server) = tokio::io::duplex(1024);
+
+        let handler = tokio::spawn(handle_connection(
+            server,
+            state,
+            None,
+            shutdown_notify.clone(),
+        ));
+
+        let notified = shutdown_notify.notified();
+        let mut writer = client;
+        writer
+            .write_all(b"{\"id\":\"test-close\",\"action\":\"close\"}\n")
+            .await
+            .expect("close command should be written");
+
+        let mut reader = BufReader::new(writer);
+        let mut response_line = String::new();
+        reader
+            .read_line(&mut response_line)
+            .await
+            .expect("close response should be readable");
+
+        let response: Value =
+            serde_json::from_str(&response_line).expect("close response should be valid JSON");
+        assert_eq!(response["success"], true);
+        assert_eq!(response["data"]["closed"], true);
+
+        tokio::time::timeout(Duration::from_secs(1), notified)
+            .await
+            .expect("close command should notify daemon shutdown");
+        tokio::time::timeout(Duration::from_secs(1), handler)
+            .await
+            .expect("connection handler should exit after close")
+            .expect("connection handler task should not panic");
     }
 
     /// Verify that `Child::try_wait()` correctly detects a crashed child
