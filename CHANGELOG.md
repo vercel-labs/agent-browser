@@ -66,6 +66,7 @@
   ### Bug Fixes
 
   - Fixed **Lightpanda engine** compatibility (#1050)
+  - Fixed **Helium auto-connect discovery** by scanning Helium user data directories on macOS and updating CDP guidance/help to treat Helium as a supported Chromium-based browser
   - Fixed **Windows daemon TCP bind** failing when Hyper-V reserves the port by falling back to an OS-assigned port and writing it to a `.port` file (#1041)
   - Fixed **Windows dashboard relay** using Unix socket instead of TCP (#1038)
   - Fixed **radio/checkbox elements** being dropped from compact snapshot tree because the `ref=` check required a leading `[` that those elements lack (#1008)

@@ -21,13 +21,16 @@ Login flows, session persistence, OAuth, 2FA, and authenticated browsing.
 
 ## Import Auth from Your Browser
 
-The fastest way to authenticate is to reuse cookies from a Chrome session you are already logged into.
+The fastest way to authenticate is to reuse cookies from a Chromium-based browser session you are already logged into.
 
-**Step 1: Start Chrome with remote debugging**
+**Step 1: Start a Chromium-based browser with remote debugging**
 
 ```bash
 # macOS
 "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --remote-debugging-port=9222
+
+# macOS (Helium)
+open -na "Helium" --args --remote-debugging-port=9222
 
 # Linux
 google-chrome --remote-debugging-port=9222
@@ -43,7 +46,7 @@ Log in to your target site(s) in this Chrome window as you normally would.
 **Step 2: Grab the auth state**
 
 ```bash
-# Auto-discover the running Chrome and save its cookies + localStorage
+# Auto-discover the running browser and save its cookies + localStorage
 agent-browser --auto-connect state save ./my-auth.json
 ```
 
@@ -58,7 +61,7 @@ agent-browser state load ./my-auth.json
 agent-browser open https://app.example.com/dashboard
 ```
 
-This works for any site, including those with complex OAuth flows, SSO, or 2FA -- as long as Chrome already has valid session cookies.
+This works for any site, including those with complex OAuth flows, SSO, or 2FA -- as long as the browser already has valid session cookies.
 
 > **Security note:** State files contain session tokens in plaintext. Add them to `.gitignore`, delete when no longer needed, and set `AGENT_BROWSER_ENCRYPTION_KEY` for encryption at rest. See [Security Best Practices](#security-best-practices).
 

@@ -577,7 +577,9 @@ pub async fn auto_connect_cdp() -> Result<String, String> {
         }
     }
 
-    Err("No running Chrome instance found. Launch Chrome with --remote-debugging-port or use --cdp.".to_string())
+    Err(
+        "No running Chromium-based browser instance found. Launch Chrome, Chromium, Brave, or Helium with --remote-debugging-port or use --cdp.".to_string(),
+    )
 }
 
 fn is_port_reachable(port: u16) -> bool {
@@ -598,6 +600,8 @@ fn get_chrome_user_data_dirs() -> Vec<PathBuf> {
                 "Google/Chrome Canary",
                 "Chromium",
                 "BraveSoftware/Brave-Browser",
+                "net.imput.helium",
+                "net.imput.helium-cdp",
             ] {
                 dirs.push(base.join(name));
             }
@@ -1143,5 +1147,22 @@ mod tests {
         }
 
         assert!(!dir.exists(), "Temp dir should be cleaned up on drop");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_get_chrome_user_data_dirs_includes_helium() {
+        let dirs = get_chrome_user_data_dirs();
+        let paths: Vec<String> = dirs
+            .iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect();
+
+        assert!(paths
+            .iter()
+            .any(|p| p.ends_with("Library/Application Support/net.imput.helium")));
+        assert!(paths
+            .iter()
+            .any(|p| p.ends_with("Library/Application Support/net.imput.helium-cdp")));
     }
 }

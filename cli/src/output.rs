@@ -2791,7 +2791,7 @@ Authentication:
                              (or AGENT_BROWSER_SESSION_NAME env)
   --state <path>             Load saved auth state (cookies + storage) from JSON file
                              (or AGENT_BROWSER_STATE env)
-  --auto-connect             Connect to a running Chrome to reuse its auth state
+  --auto-connect             Connect to a running Chromium-based browser to reuse auth state
                              Tip: agent-browser --auto-connect state save ./auth.json
   --headers <json>           HTTP headers scoped to URL's origin (e.g., Authorization bearer token)
 
@@ -2864,7 +2864,7 @@ Environment:
   AGENT_BROWSER_DEBUG            Debug output
   AGENT_BROWSER_IGNORE_HTTPS_ERRORS Ignore HTTPS certificate errors
   AGENT_BROWSER_PROVIDER         Browser provider (ios, browserbase, kernel, browseruse, browserless)
-  AGENT_BROWSER_AUTO_CONNECT     Auto-discover and connect to running Chrome
+  AGENT_BROWSER_AUTO_CONNECT     Auto-discover and connect to a running Chromium-based browser
   AGENT_BROWSER_ALLOW_FILE_ACCESS Allow file:// URLs to access local files
   AGENT_BROWSER_COLOR_SCHEME     Color scheme preference (dark, light, no-preference)
   AGENT_BROWSER_DOWNLOAD_PATH    Default download directory for browser downloads
@@ -2908,7 +2908,7 @@ Examples:
   agent-browser screenshot --annotate    # Labeled screenshot for vision models
   agent-browser wait --load networkidle  # Wait for slow pages to load
   agent-browser --cdp 9222 snapshot      # Connect via CDP port
-  agent-browser --auto-connect snapshot  # Auto-discover running Chrome
+  agent-browser --auto-connect snapshot  # Auto-discover running Chrome/Chromium/Brave/Helium
   agent-browser stream enable            # Start runtime streaming on an auto-selected port
   agent-browser stream status            # Inspect runtime streaming state
   agent-browser --color-scheme dark open example.com  # Dark mode

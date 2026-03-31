@@ -4,6 +4,7 @@ Connect to an existing browser via Chrome DevTools Protocol:
 
 ```bash
 # Start Chrome with: google-chrome --remote-debugging-port=9222
+# Or on macOS: open -na "Helium" --args --remote-debugging-port=9222
 
 # Connect once, then run commands without --cdp
 agent-browser connect 9222
@@ -34,10 +35,10 @@ The `--cdp` flag accepts either:
 
 ## Auto-Connect
 
-Use `--auto-connect` to automatically discover and connect to a running Chrome instance without specifying a port:
+Use `--auto-connect` to automatically discover and connect to a running Chromium-based browser without specifying a port:
 
 ```bash
-# Auto-discover running Chrome with remote debugging
+# Auto-discover a running Chromium-based browser with remote debugging
 agent-browser --auto-connect open example.com
 agent-browser --auto-connect snapshot
 
@@ -45,17 +46,17 @@ agent-browser --auto-connect snapshot
 AGENT_BROWSER_AUTO_CONNECT=1 agent-browser snapshot
 ```
 
-Auto-connect discovers Chrome by:
+Auto-connect discovers browsers by:
 
-1. Reading Chrome's `DevToolsActivePort` file from the default user data directory
+1. Reading `DevToolsActivePort` from the default user data directories for Chrome, Chrome Canary, Chromium, Brave, and Helium
 2. Falling back to probing common debugging ports (9222, 9229)
 3. If HTTP-based discovery (`/json/version`, `/json/list`) fails, falling back to a direct WebSocket connection
 
 This is useful when:
 
-- Chrome 144+ has remote debugging enabled via `chrome://inspect/#remote-debugging` (which uses a dynamic port)
+- Chrome 144+ or another Chromium-based browser has remote debugging enabled with a dynamic port
 - You want a zero-configuration connection to your existing browser
-- You don't want to track which port Chrome is using
+- You don't want to track which port the browser is using
 
 ## Color scheme
 
@@ -77,7 +78,7 @@ AGENT_BROWSER_COLOR_SCHEME=dark agent-browser --cdp 9222 open https://example.co
 This enables control of:
 
 - Electron apps
-- Chrome/Chromium with remote debugging
+- Chrome/Chromium/Brave/Helium with remote debugging
 - WebView2 applications
 - Remote browser services (via WebSocket URL)
 - Any browser exposing a CDP endpoint
@@ -103,7 +104,7 @@ This enables control of:
     <tr><td><code>--exact</code></td><td>Exact text match</td></tr>
     <tr><td><code>--headed</code></td><td>Show browser window</td></tr>
     <tr><td><code>{"--cdp <port|url>"}</code></td><td>CDP connection (port or WebSocket URL)</td></tr>
-    <tr><td><code>--auto-connect</code></td><td>Auto-discover and connect to running Chrome</td></tr>
+    <tr><td><code>--auto-connect</code></td><td>Auto-discover and connect to a running Chromium-based browser, including Helium</td></tr>
     <tr><td><code>--color-scheme &lt;scheme&gt;</code></td><td>Persistent color scheme (<code>dark</code>, <code>light</code>, <code>no-preference</code>)</td></tr>
     <tr><td><code>--debug</code></td><td>Debug output</td></tr>
   </tbody>
