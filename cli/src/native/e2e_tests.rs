@@ -3822,3 +3822,120 @@ async fn e2e_externally_opened_tab_detected() {
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     assert_success(&resp);
 }
+
+// ---------------------------------------------------------------------------
+// Console and Error Tracking
+// ---------------------------------------------------------------------------
+
+/// Starts a tiny HTTP server that serves an HTML page with console messages
+/// and an uncaught JavaScript exception.
+async fn start_console_test_server() -> (String, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let url = format!("http://127.0.0.1:{}", port);
+
+    let handle = tokio::spawn(async move {
+        for _ in 0..5 {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                let html = r#"<!DOCTYPE html>
+<html>
+<head><title>Console Test</title></head>
+<body>
+<h1>Console and Error Test</h1>
+<script>
+console.log('Info: page loaded');
+console.warn('Warning: deprecated feature used');
+console.error('Error: something went wrong');
+throw new Error('Uncaught exception from server');
+</script>
+</body>
+</html>"#;
+
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    html.len(),
+                    html,
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.flush().await;
+            });
+        }
+    });
+
+    (url, handle)
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_console_and_error_tracking() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Start HTTP server that serves page with console messages and uncaught exception
+    let (server_url, _server_handle) = start_console_test_server().await;
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": server_url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Give CDP events time to propagate
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+    // Verify console messages are captured (log, warn, error from page load)
+    let resp = execute_command(&json!({ "id": "3", "action": "console" }), &mut state).await;
+    assert_success(&resp);
+    let messages = get_data(&resp).get("messages").and_then(|v| v.as_array()).expect("should have messages array");
+
+    let message_types: Vec<&str> = messages
+        .iter()
+        .filter_map(|m| m.get("type").and_then(|v| v.as_str()))
+        .collect();
+
+    assert!(
+        message_types.iter().any(|&t| t == "log"),
+        "should have a log message, got types: {:?}",
+        message_types
+    );
+    assert!(
+        message_types.iter().any(|&t| t == "warning"),
+        "should have a warning message, got types: {:?}",
+        message_types
+    );
+    assert!(
+        message_types.iter().any(|&t| t == "error"),
+        "should have an error message, got types: {:?}",
+        message_types
+    );
+
+    // Verify errors are captured (uncaught exception from page load)
+    let resp = execute_command(&json!({ "id": "4", "action": "errors" }), &mut state).await;
+    assert_success(&resp);
+    let errors = get_data(&resp).get("errors").and_then(|v| v.as_array()).expect("should have errors array");
+    assert!(!errors.is_empty(), "should have captured uncaught exception error");
+
+    // Verify error content has the thrown error message
+    let error_texts: Vec<&str> = errors
+        .iter()
+        .filter_map(|e| e.get("text").and_then(|v| v.as_str()))
+        .collect();
+    assert!(
+        error_texts.iter().any(|&t| t.contains("Uncaught exception") || t.contains("Error")),
+        "should contain uncaught exception error, got: {:?}",
+        error_texts
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
