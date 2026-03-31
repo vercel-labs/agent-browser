@@ -1666,9 +1666,9 @@ async fn e2e_drag_action_sends_buttons_during_move() {
     // The mousemove events emitted while the button is held should carry
     // buttons == 1 so the browser recognises the gesture as a drag.
     assert!(
-        events.iter().any(|event| {
-            event["type"] == "mousemove" && event["buttons"].as_i64() == Some(1)
-        }),
+        events
+            .iter()
+            .any(|event| { event["type"] == "mousemove" && event["buttons"].as_i64() == Some(1) }),
         "Expected at least one mousemove with buttons == 1 during drag"
     );
 
