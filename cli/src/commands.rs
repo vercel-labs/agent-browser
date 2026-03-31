@@ -4292,11 +4292,8 @@ mod tests {
 
     #[test]
     fn test_upload_with_selector_and_file() {
-        let cmd = parse_command(
-            &args("upload #file-input ./document.pdf"),
-            &default_flags(),
-        )
-        .unwrap();
+        let cmd =
+            parse_command(&args("upload #file-input ./document.pdf"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "upload");
         assert_eq!(cmd["selector"], "#file-input");
         assert_eq!(cmd["files"][0], "./document.pdf");
@@ -4304,11 +4301,7 @@ mod tests {
 
     #[test]
     fn test_upload_without_selector_path_with_slash() {
-        let cmd = parse_command(
-            &args("upload ./document.pdf"),
-            &default_flags(),
-        )
-        .unwrap();
+        let cmd = parse_command(&args("upload ./document.pdf"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "upload");
         assert!(cmd.get("selector").is_none());
         assert_eq!(cmd["files"][0], "./document.pdf");
@@ -4316,11 +4309,7 @@ mod tests {
 
     #[test]
     fn test_upload_without_selector_absolute_path() {
-        let cmd = parse_command(
-            &args("upload /tmp/file.txt"),
-            &default_flags(),
-        )
-        .unwrap();
+        let cmd = parse_command(&args("upload /tmp/file.txt"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "upload");
         assert!(cmd.get("selector").is_none());
         assert_eq!(cmd["files"][0], "/tmp/file.txt");

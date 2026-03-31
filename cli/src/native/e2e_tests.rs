@@ -3896,4 +3896,3 @@ async fn e2e_file_chooser_upload_dynamic_input() {
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     assert_success(&resp);
 }
-

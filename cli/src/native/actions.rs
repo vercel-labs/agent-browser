@@ -1007,10 +1007,8 @@ impl DaemonState {
                             self.pending_dialog = None;
                         }
                         "Page.fileChooserOpened" => {
-                            self.pending_file_chooser = event
-                                .params
-                                .get("backendNodeId")
-                                .and_then(|v| v.as_i64());
+                            self.pending_file_chooser =
+                                event.params.get("backendNodeId").and_then(|v| v.as_i64());
                         }
                         // Fetch.requestPaused is handled by the background
                         // fetch_handler_task — no need to collect here.
