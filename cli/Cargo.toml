@@ -28,6 +28,7 @@ aes-gcm = "0.10"
 async-trait = "0.1"
 socket2 = "0.6"
 similar = "2"
+glob-match = "0.2"
 zip = { version = "8.2.0", default-features = false, features = ["deflate"] }
 time = { version = "0.3", features = ["formatting"] }
 
