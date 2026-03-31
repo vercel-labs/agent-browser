@@ -1,3 +1,4 @@
+use std::fmt::Display;
 use std::sync::OnceLock;
 
 use crate::color;
@@ -100,7 +101,7 @@ fn format_error_entry(err: &serde_json::Value) -> String {
             "{} {} ({}:{}{})",
             color::error_indicator(),
             msg,
-            url.unwrap(),
+            url.unwrap_or(""),
             line.unwrap_or(0),
             col_str
         )
