@@ -1181,3 +1181,183 @@ mod tests {
         assert_eq!(key_text("Delete"), None);
     }
 }
+
+/// Returns `true` for custom ARIA combobox widgets (Radix UI, Headless UI, etc.),
+/// `false` for native `<select>` elements.
+///
+/// Chrome reports `role="combobox"` for both; we disambiguate via DOM `nodeName`.
+/// Only ref selectors are supported — CSS selectors return `false` (safe fallback).
+pub async fn is_custom_combobox(
+    client: &CdpClient,
+    session_id: &str,
+    ref_map: &super::element::RefMap,
+    selector_or_ref: &str,
+) -> bool {
+    let ref_id = super::element::parse_ref(selector_or_ref);
+    // Prefer ref_map lookup to avoid a CDP round-trip.
+    let role = if let Some(ref id) = ref_id {
+        ref_map
+            .get(id)
+            .map(|e| e.role.to_lowercase())
+            .unwrap_or_default()
+    } else {
+        client
+            .send_command(
+                "Runtime.evaluate",
+                Some(serde_json::json!({
+                    "expression": format!(
+                        "document.querySelector({})?.getAttribute('role')",
+                        serde_json::to_string(selector_or_ref).unwrap_or_default()
+                    ),
+                    "returnByValue": true,
+                })),
+                Some(session_id),
+            )
+            .await
+            .unwrap_or(Value::Null)
+            .get("result")
+            .and_then(|r| r.get("value"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_lowercase()
+    };
+
+    if role != "combobox" {
+        return false;
+    }
+
+    // DOM.describeNode returns nodeName without creating a JS RemoteObject, matching the pattern used in snapshot.rs.
+    let Some(bid) = ref_id
+        .and_then(|id| ref_map.get(&id))
+        .and_then(|e| e.backend_node_id)
+    else {
+        return false;
+    };
+    let node_name = client
+        .send_command(
+            "DOM.describeNode",
+            Some(serde_json::json!({ "backendNodeId": bid })),
+            Some(session_id),
+        )
+        .await
+        .ok()
+        .and_then(|v| {
+            v.get("node")?
+                .get("nodeName")?
+                .as_str()
+                .map(str::to_uppercase)
+        })
+        .unwrap_or_default();
+
+    !node_name.is_empty() && node_name != "SELECT"
+}
+
+/// Select an option in a custom ARIA combobox (Radix UI, Headless UI, etc.).
+///
+/// Avoids `take_snapshot` because `find_cursor_interactive_elements` mutates
+/// the DOM (`setAttribute('data-__ab-ci', ...)`), which triggers React's
+/// reconciler and closes the dropdown.
+pub async fn select_combobox(
+    client: &CdpClient,
+    session_id: &str,
+    ref_map: &super::element::RefMap,
+    selector_or_ref: &str,
+    values: &[String],
+    iframe_sessions: &HashMap<String, String>,
+) -> Result<(), String> {
+    // Open the dropdown via a real click to trigger framework event handlers.
+    click(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        "left",
+        1,
+        iframe_sessions,
+    )
+    .await?;
+
+    let target_value = values
+        .first()
+        .ok_or_else(|| "No value specified".to_string())?;
+
+    // Poll for [role=option] elements (up to 2 s).
+    let poll_js = r#"(function() {
+        var opts = document.querySelectorAll('[role=option]');
+        if (opts.length === 0) return null;
+        var texts = [];
+        for (var i = 0; i < opts.length; i++) {
+            var t = opts[i].textContent.trim();
+            if (t) texts.push(t);
+        }
+        return texts;
+    })()"#;
+
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(2000);
+    let available: Vec<String> = loop {
+        let texts: Vec<String> = client
+            .send_command(
+                "Runtime.evaluate",
+                Some(serde_json::json!({ "expression": poll_js, "returnByValue": true })),
+                Some(session_id),
+            )
+            .await
+            .unwrap_or(Value::Null)
+            .get("result")
+            .and_then(|r| r.get("value"))
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !texts.is_empty() {
+            break texts;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            let _ = press_key(client, session_id, "Escape").await;
+            return Err(
+                "Combobox opened but no [role=option] elements appeared within 2 s".to_string(),
+            );
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+    };
+
+    // Click the matching option via JS to fire React's synthetic event system.
+    let escaped = serde_json::to_string(target_value).unwrap_or_default();
+    let click_js = format!(
+        r#"(function() {{
+            var opts = document.querySelectorAll('[role=option]');
+            for (var i = 0; i < opts.length; i++) {{
+                if (opts[i].textContent.trim() === {escaped}) {{
+                    opts[i].click();
+                    return true;
+                }}
+            }}
+            return false;
+        }})()"#
+    );
+    let clicked = client
+        .send_command(
+            "Runtime.evaluate",
+            Some(serde_json::json!({ "expression": click_js, "returnByValue": true })),
+            Some(session_id),
+        )
+        .await?
+        .get("result")
+        .and_then(|r| r.get("value"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    if !clicked {
+        let _ = press_key(client, session_id, "Escape").await;
+        return Err(format!(
+            "Option '{}' not found in combobox. Available options: [{}]",
+            target_value,
+            available.join(", ")
+        ));
+    }
+
+    Ok(())
+}

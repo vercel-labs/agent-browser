@@ -2728,15 +2728,32 @@ async fn handle_select(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
             .unwrap_or_default(),
     };
 
-    interaction::select_option(
-        &mgr.client,
-        &session_id,
-        &state.ref_map,
-        selector,
-        &values,
-        &state.iframe_sessions,
-    )
-    .await?;
+    // tagName == "SELECT" → native select; anything else with role="combobox" → custom widget.
+    let is_custom_combobox =
+        interaction::is_custom_combobox(&mgr.client, &session_id, &state.ref_map, selector).await;
+
+    if is_custom_combobox {
+        interaction::select_combobox(
+            &mgr.client,
+            &session_id,
+            &state.ref_map,
+            selector,
+            &values,
+            &state.iframe_sessions,
+        )
+        .await?;
+    } else {
+        interaction::select_option(
+            &mgr.client,
+            &session_id,
+            &state.ref_map,
+            selector,
+            &values,
+            &state.iframe_sessions,
+        )
+        .await?;
+    }
+
     Ok(json!({ "selected": values }))
 }
 
