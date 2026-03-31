@@ -3828,7 +3828,9 @@ async fn e2e_externally_opened_tab_detected() {
 // File chooser: dynamic input upload without selector
 // ---------------------------------------------------------------------------
 
-async fn setup_file_chooser_fixture() -> DaemonState {
+#[tokio::test]
+#[ignore]
+async fn e2e_file_chooser_upload_dynamic_input() {
     let mut state = DaemonState::new();
     let resp = execute_command(
         &json!({ "id": "1", "action": "launch", "headless": true }),
@@ -3843,13 +3845,6 @@ async fn setup_file_chooser_fixture() -> DaemonState {
     )
     .await;
     assert_success(&resp);
-    state
-}
-
-#[tokio::test]
-#[ignore]
-async fn e2e_file_chooser_upload_dynamic_input() {
-    let mut state = setup_file_chooser_fixture().await;
 
     let tmp_file = std::env::temp_dir().join("e2e_upload_test.txt");
     std::fs::write(&tmp_file, "test content").expect("Failed to create temp file");
