@@ -199,7 +199,7 @@ impl CdpClient {
             id,
             method: method.to_string(),
             params,
-            session_id: session_id.map(|s| s.to_string()),
+            session_id: session_id.filter(|s| !s.is_empty()).map(|s| s.to_string()),
         };
 
         let json = serde_json::to_string(&cmd)

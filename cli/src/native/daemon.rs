@@ -63,6 +63,7 @@ pub async fn run_daemon(session: &str) {
     let stream_path = socket_dir.join(format!("{}.stream", session));
     let _ = fs::remove_file(&stream_path);
     let _ = fs::remove_file(socket_dir.join(format!("{}.engine", session)));
+    let _ = fs::remove_file(socket_dir.join(format!("{}.provider", session)));
     let _ = fs::remove_file(socket_dir.join(format!("{}.extensions", session)));
 
     if let Ok(days_str) = env::var("AGENT_BROWSER_STATE_EXPIRE_DAYS") {
@@ -119,6 +120,7 @@ pub async fn run_daemon(session: &str) {
     let _ = fs::remove_file(&pid_path);
     let _ = fs::remove_file(&stream_path);
     let _ = fs::remove_file(socket_dir.join(format!("{}.engine", session)));
+    let _ = fs::remove_file(socket_dir.join(format!("{}.provider", session)));
     let _ = fs::remove_file(socket_dir.join(format!("{}.extensions", session)));
 
     if let Err(e) = result {
@@ -154,12 +156,6 @@ async fn run_socket_server(
     let (reset_tx, mut reset_rx) = mpsc::channel::<()>(64);
     let reset_tx = idle_timeout_ms.map(|_| Arc::new(reset_tx));
 
-    // Listen for SIGCHLD to reap zombie child processes (e.g. crashed Chrome).
-    // Without this, a crashed Chrome becomes <defunct> and is never reaped until
-    // the daemon exits.
-    let mut sigchld = signal::unix::signal(signal::unix::SignalKind::child())
-        .map_err(|e| format!("Failed to install SIGCHLD handler: {}", e))?;
-
     let mut drain_interval = tokio::time::interval(Duration::from_millis(500));
     drain_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -183,13 +179,17 @@ async fn run_socket_server(
                     }
                 }
             }
-            _ = sigchld.recv() => {
-                reap_children();
-            }
             _ = drain_interval.tick() => {
                 let mut s = state.lock().await;
-                if s.browser.is_some() {
-                    s.drain_cdp_events_background().await;
+                if let Some(ref mut mgr) = s.browser {
+                    if mgr.has_process_exited() {
+                        let _ = mgr.close().await;
+                        s.browser = None;
+                        s.screencasting = false;
+                        s.update_stream_client().await;
+                    } else {
+                        s.drain_cdp_events_background().await;
+                    }
                 }
             }
             _ = async {
@@ -219,17 +219,6 @@ async fn run_socket_server(
     }
 
     Ok(())
-}
-
-/// Reap all zombie child processes by calling waitpid(-1, WNOHANG) in a loop.
-#[cfg(unix)]
-fn reap_children() {
-    loop {
-        let result = unsafe { libc::waitpid(-1, std::ptr::null_mut(), libc::WNOHANG) };
-        if result <= 0 {
-            break;
-        }
-    }
 }
 
 #[cfg(windows)]
@@ -476,18 +465,111 @@ fn get_port_for_session(session: &str) -> u16 {
 }
 
 #[cfg(test)]
-#[cfg(windows)]
 mod tests {
+    #[allow(unused_imports)]
     use super::*;
 
+    #[cfg(windows)]
     #[test]
     fn test_port_matches_client_algorithm() {
-        // These values are computed by the identical djb2 implementation in
-        // connection.rs. Both sides must agree on the port for the daemon to
-        // start successfully.
         assert_eq!(get_port_for_session("default"), 50838);
         assert_eq!(get_port_for_session("my-session"), 63105);
         assert_eq!(get_port_for_session("work"), 51184);
         assert_eq!(get_port_for_session(""), 49152);
+    }
+
+    /// Guard against re-introducing `waitpid(-1)` in daemon code.
+    ///
+    /// Issue #1035: a SIGCHLD handler that called `waitpid(-1, WNOHANG)` was
+    /// added in v0.22.3 to reap zombie Chrome processes. This races with
+    /// Rust's `Child::try_wait()` / `Child::wait()` because `waitpid(-1)`
+    /// reaps *any* child, stealing the exit status before Rust can collect
+    /// it. The result is ECHILD errors in `BrowserManager::has_process_exited()`
+    /// and `ChromeProcess::kill()`, which can leave the daemon in a broken
+    /// state or cause hangs on certain Linux configurations.
+    ///
+    /// The fix uses the existing 500ms drain interval to call
+    /// `has_process_exited()` (which delegates to `Child::try_wait()`)
+    /// for targeted, race-free zombie detection.
+    #[test]
+    fn test_no_waitpid_minus_one_in_daemon() {
+        let source = include_str!("daemon.rs");
+        // Only check production code (everything before `#[cfg(test)]`)
+        let production_code = source.split("#[cfg(test)]").next().unwrap_or(source);
+        assert!(
+            !production_code.contains("waitpid(-1"),
+            "daemon.rs production code must not call waitpid(-1, ...). \
+             Use Child::try_wait() via has_process_exited() instead. \
+             See issue #1035."
+        );
+    }
+
+    /// Verify that `Child::try_wait()` correctly detects a crashed child
+    /// without needing a global SIGCHLD handler or `waitpid(-1)`.
+    /// This is what `has_process_exited()` uses in the fixed code.
+    #[cfg(unix)]
+    #[test]
+    fn test_child_try_wait_detects_exit_without_sigchld_handler() {
+        use std::process::{Command, Stdio};
+
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "exit 42"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("failed to spawn child");
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                assert!(
+                    !status.success(),
+                    "child exited with code 42, should not be success"
+                );
+            }
+            Ok(None) => panic!("try_wait() returned None but child should have exited"),
+            Err(e) => panic!("try_wait() should succeed without waitpid(-1): {}", e),
+        }
+    }
+
+    /// Verify that `ChromeProcess::has_exited()` (which uses `Child::try_wait()`)
+    /// correctly detects a killed child, the same way the drain interval does
+    /// in the fixed daemon code. This ensures crash detection works without
+    /// a SIGCHLD handler.
+    #[cfg(unix)]
+    #[test]
+    fn test_has_exited_detects_killed_process() {
+        use std::process::{Command, Stdio};
+
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "sleep 60"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("failed to spawn child");
+
+        // Process should be running
+        match child.try_wait() {
+            Ok(None) => {} // expected
+            other => panic!("expected Ok(None) for running process, got {:?}", other),
+        }
+
+        // Kill it (simulates Chrome crash)
+        child.kill().expect("failed to kill child");
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // try_wait should detect the exit
+        match child.try_wait() {
+            Ok(Some(_)) => {} // expected: detected the crash
+            other => panic!(
+                "expected Ok(Some(_)) after kill, got {:?}. \
+                 Crash detection via try_wait() must work for the drain \
+                 interval fix (issue #1035) to function correctly.",
+                other
+            ),
+        }
     }
 }

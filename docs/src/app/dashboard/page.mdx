@@ -62,6 +62,10 @@ The dashboard is a single-page web app with three areas:
       <td>Chronological stream of commands, results, and console messages with expandable details</td>
     </tr>
     <tr>
+      <td><strong>Session creation</strong></td>
+      <td>Create new sessions from the dashboard with local engines (Chrome, Lightpanda) or cloud providers (Browserbase, Browserless, Browser Use, Kernel)</td>
+    </tr>
+    <tr>
       <td><strong>Status bar</strong></td>
       <td>Connection status, viewport dimensions, and WebSocket endpoint</td>
     </tr>
@@ -111,9 +115,12 @@ Sent when the browser logs to the console:
   "type": "console",
   "level": "log",
   "text": "Page loaded",
+  "args": [{"type": "string", "value": "Page loaded"}],
   "timestamp": 1711367000100
 }
 ```
+
+The `args` array contains the raw CDP `Runtime.consoleAPICalled` arguments for programmatic access. Object arguments include preview data (e.g. `{userId: "abc", count: 42}` instead of `"Object"`).
 
 These are in addition to the existing `frame`, `status`, and `error` message types documented on the [Streaming](/streaming) page.
 

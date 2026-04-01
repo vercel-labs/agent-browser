@@ -10,12 +10,40 @@ concurrency: ${{ github.workflow }}-${{ github.ref }}
 
 permissions:
   contents: write
-  pull-requests: write
 
 jobs:
-  # Build native binaries for all platforms first
+  check-release:
+    name: Check for new version
+    runs-on: ubuntu-latest
+    outputs:
+      should_release: ${{ steps.check.outputs.should_release }}
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Compare package.json version to npm
+        id: check
+        run: |
+          LOCAL_VERSION=$(node -p "require('./package.json').version")
+          echo "Local version: $LOCAL_VERSION"
+
+          NPM_VERSION=$(npm view agent-browser version 2>/dev/null || echo "0.0.0")
+          echo "npm version: $NPM_VERSION"
+
+          if [ "$LOCAL_VERSION" != "$NPM_VERSION" ]; then
+            echo "Version changed: $NPM_VERSION -> $LOCAL_VERSION"
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Version unchanged, skipping release"
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "version=$LOCAL_VERSION" >> "$GITHUB_OUTPUT"
+
   build-binaries:
     name: Build ${{ matrix.name }}
+    needs: check-release
+    if: needs.check-release.outputs.should_release == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -137,19 +165,13 @@ jobs:
           path: artifacts/${{ matrix.binary }}
           retention-days: 7
 
-  # Create release PR or publish to npm (with binaries)
-  release:
-    name: Release
-    needs: build-binaries
+  publish:
+    name: Publish to npm
+    needs: [check-release, build-binaries]
     runs-on: ubuntu-latest
-    outputs:
-      published: ${{ steps.changesets.outputs.published }}
-      publishedPackages: ${{ steps.changesets.outputs.publishedPackages }}
     steps:
-      - name: Checkout Repo
+      - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
@@ -163,7 +185,7 @@ jobs:
           cache: pnpm
           registry-url: 'https://registry.npmjs.org'
 
-      - name: Install Dependencies
+      - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
       - name: Download all binary artifacts
@@ -191,7 +213,7 @@ jobs:
             "agent-browser-darwin-x64"
             "agent-browser-darwin-arm64"
           )
-          MIN_SIZE=100000  # Binaries should be at least 100KB
+          MIN_SIZE=100000
           ERRORS=0
           for binary in "${EXPECTED_BINARIES[@]}"; do
             if [ ! -f "bin/$binary" ]; then
@@ -213,29 +235,18 @@ jobs:
           fi
           echo "All 7 platform binaries present and valid"
 
-      - name: Create Release Pull Request or Publish to npm
-        id: changesets
-        uses: changesets/action@v1
-        with:
-          version: pnpm ci:version
-          publish: pnpm ci:publish
-          title: 'chore: version packages'
-          commit: 'chore: version packages'
+      - name: Publish to npm
+        run: pnpm publish --no-git-checks
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_VERCEL_TOKEN_ELEVATED }}
 
-  # Create GitHub release with binaries after npm publish
   github-release:
     name: Create GitHub Release
-    needs: release
-    if: needs.release.outputs.published == 'true'
+    needs: [check-release, publish]
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Repo
+      - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          ref: main
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -280,12 +291,23 @@ jobs:
       - name: Create dashboard.zip
         run: cd packages/dashboard/out && zip -r ../../../dashboard.zip .
 
+      - name: Extract changelog entry
+        run: |
+          VERSION="${{ needs.check-release.outputs.version }}"
+          awk '/<!-- release:start -->/{found=1; next} /<!-- release:end -->/{found=0} found{print}' CHANGELOG.md > /tmp/release-notes.md
+
+          LINES=$(wc -l < /tmp/release-notes.md | tr -d ' ')
+          if [ "$LINES" -lt 2 ]; then
+            echo "Error: No release notes found between <!-- release:start --> and <!-- release:end --> markers in CHANGELOG.md"
+            exit 1
+          fi
+          echo "Extracted release notes for $VERSION ($LINES lines)"
+
       - name: Create GitHub Release
         run: |
-          VERSION=$(node -p "require('./package.json').version")
+          VERSION="${{ needs.check-release.outputs.version }}"
           TAG="v$VERSION"
-          
-          # Check if release already exists
+
           if gh release view "$TAG" &>/dev/null; then
             echo "Release $TAG already exists, uploading assets..."
             gh release upload "$TAG" bin/agent-browser-* dashboard.zip --clobber
@@ -293,7 +315,7 @@ jobs:
             echo "Creating release $TAG..."
             gh release create "$TAG" \
               --title "$TAG" \
-              --generate-notes \
+              --notes-file /tmp/release-notes.md \
               bin/agent-browser-* dashboard.zip
           fi
         env:

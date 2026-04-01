@@ -27,10 +27,22 @@ if (!cargoVersionMatch) {
 
 const cargoVersion = cargoVersionMatch[1];
 
+// Read dashboard package.json version
+const dashboardPkg = JSON.parse(readFileSync(join(rootDir, 'packages/dashboard/package.json'), 'utf-8'));
+const dashboardVersion = dashboardPkg.version;
+
+const mismatches = [];
 if (packageVersion !== cargoVersion) {
+  mismatches.push(`  cli/Cargo.toml:              ${cargoVersion}`);
+}
+if (packageVersion !== dashboardVersion) {
+  mismatches.push(`  packages/dashboard:          ${dashboardVersion}`);
+}
+
+if (mismatches.length > 0) {
   console.error('Version mismatch detected!');
-  console.error(`  package.json:    ${packageVersion}`);
-  console.error(`  cli/Cargo.toml:  ${cargoVersion}`);
+  console.error(`  package.json:                ${packageVersion}`);
+  for (const m of mismatches) console.error(m);
   console.error('');
   console.error("Run 'pnpm run version:sync' to fix this.");
   process.exit(1);
