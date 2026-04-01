@@ -4,7 +4,7 @@ import { atom } from "jotai";
 import { useCallback, useEffect, useRef } from "react";
 import { useAtomCallback } from "jotai/utils";
 import type { SessionInfo } from "@/types";
-import { execCommand, killSession, sessionArgs } from "@/lib/exec";
+import { type ExecResult, execCommand, killSession, sessionArgs } from "@/lib/exec";
 import { tabCacheAtom, engineCacheAtom } from "@/store/tabs";
 import { streamTabsAtom, streamEngineAtom } from "@/store/stream";
 
@@ -35,7 +35,7 @@ export const activePortAtom = atom(getPort());
 
 export const polledSessionsAtom = atom<SessionInfo[]>([]);
 
-export const pendingSessionsAtom = atom<{ session: string; engine: string }[]>(
+export const pendingSessionsAtom = atom<{ session: string; engine: string; provider?: string }[]>(
   [],
 );
 
@@ -57,6 +57,7 @@ export const sessionsAtom = atom((get) => {
       session: p.session,
       port: 0,
       engine: p.engine,
+      provider: p.provider,
       pending: true as const,
     }));
   const merged = polled.map((s) =>
@@ -88,15 +89,41 @@ export const activeExtensionsAtom = atom((get) => {
 
 export const createSessionAtom = atom(
   null,
-  (
+  async (
     _get,
     set,
-    { name, engine }: { name: string; engine: string },
-  ) => {
-    set(pendingSessionsAtom, (prev) => [...prev, { session: name, engine }]);
-    execCommand(["--session", name, "--engine", engine, "open", "about:blank"]);
+    { name, engine, provider }: { name: string; engine: string; provider?: string },
+  ): Promise<string | null> => {
+    set(pendingSessionsAtom, (prev) => [...prev, { session: name, engine, provider }]);
+    const args = ["--session", name];
+    if (provider) {
+      args.push("--provider", provider);
+    } else {
+      args.push("--engine", engine);
+    }
+    args.push("open", "https://agent-browser.dev");
+    const result = await execCommand(args);
+    if (!result.success) {
+      set(pendingSessionsAtom, (prev) => prev.filter((p) => p.session !== name));
+      killSession(name);
+      return parseExecError(result) || "Failed to create session";
+    }
+    return null;
   },
 );
+
+function parseExecError(result: ExecResult): string {
+  if (result.stderr) return result.stderr;
+  if (result.stdout) {
+    try {
+      const json = JSON.parse(result.stdout);
+      if (json.error) return json.error;
+    } catch {
+      // stdout wasn't JSON
+    }
+  }
+  return "";
+}
 
 export const closeSessionAtom = atom(null, (get, set, port: number) => {
   const sessions = get(sessionsAtom);

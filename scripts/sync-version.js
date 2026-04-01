@@ -44,6 +44,18 @@ if (cargoVersionRegex.test(cargoToml)) {
   process.exit(1);
 }
 
+// Update packages/dashboard/package.json
+const dashboardPkgPath = join(rootDir, "packages", "dashboard", "package.json");
+const dashboardPkg = JSON.parse(readFileSync(dashboardPkgPath, "utf-8"));
+if (dashboardPkg.version !== version) {
+  const oldVersion = dashboardPkg.version;
+  dashboardPkg.version = version;
+  writeFileSync(dashboardPkgPath, JSON.stringify(dashboardPkg, null, 2) + "\n");
+  console.log(`  Updated packages/dashboard/package.json: ${oldVersion} -> ${version}`);
+} else {
+  console.log(`  packages/dashboard/package.json already up to date`);
+}
+
 // Update Cargo.lock to match Cargo.toml
 if (cargoTomlUpdated) {
   try {

@@ -149,6 +149,7 @@ pub enum WaitUntil {
     Load,
     DomContentLoaded,
     NetworkIdle,
+    None,
 }
 
 impl WaitUntil {
@@ -156,6 +157,7 @@ impl WaitUntil {
         match s {
             "domcontentloaded" => Self::DomContentLoaded,
             "networkidle" => Self::NetworkIdle,
+            "none" => Self::None,
             _ => Self::Load,
         }
     }
@@ -326,6 +328,16 @@ impl BrowserManager {
     }
 
     pub async fn connect_cdp(url: &str) -> Result<Self, String> {
+        Self::connect_cdp_inner(url, false).await
+    }
+
+    /// Connect to a provider CDP proxy where the WebSocket IS the page session.
+    /// Skips browser-level Target.* commands that most proxies don't support.
+    pub async fn connect_cdp_direct(url: &str) -> Result<Self, String> {
+        Self::connect_cdp_inner(url, true).await
+    }
+
+    async fn connect_cdp_inner(url: &str, direct_page: bool) -> Result<Self, String> {
         let ws_url = resolve_cdp_url(url).await?;
         let client = Arc::new(CdpClient::connect(&ws_url).await?);
         let mut manager = Self {
@@ -334,12 +346,24 @@ impl BrowserManager {
             ws_url,
             pages: Vec::new(),
             active_page_index: 0,
-            default_timeout_ms: 10_000,
-            download_path: None, // CDP connections don't have a launch-time download path
+            default_timeout_ms: 25_000,
+            download_path: None,
             visited_origins: HashSet::new(),
         };
 
-        manager.discover_and_attach_targets().await?;
+        if direct_page {
+            manager.pages.push(PageInfo {
+                target_id: "provider-page".to_string(),
+                session_id: String::new(),
+                url: String::new(),
+                title: String::new(),
+                target_type: "page".to_string(),
+            });
+            manager.active_page_index = 0;
+            manager.enable_domains_direct().await?;
+        } else {
+            manager.discover_and_attach_targets().await?;
+        }
         Ok(manager)
     }
 
@@ -465,6 +489,20 @@ impl BrowserManager {
         Ok(())
     }
 
+    /// Enable domains on a direct page connection (no session_id needed).
+    async fn enable_domains_direct(&self) -> Result<(), String> {
+        self.client
+            .send_command_no_params("Page.enable", None)
+            .await?;
+        self.client
+            .send_command_no_params("Runtime.enable", None)
+            .await?;
+        self.client
+            .send_command_no_params("Network.enable", None)
+            .await?;
+        Ok(())
+    }
+
     pub fn active_session_id(&self) -> Result<&str, String> {
         self.pages
             .get(self.active_page_index)
@@ -495,7 +533,7 @@ impl BrowserManager {
         // Only wait for lifecycle events if Chrome created a new loader (full navigation).
         // If loader_id is None, it was a same-document navigation (e.g., hash routing)
         // which does not fire Page.loadEventFired or Page.domContentEventFired.
-        if nav_result.loader_id.is_some() {
+        if nav_result.loader_id.is_some() && wait_until != WaitUntil::None {
             self.wait_for_lifecycle(wait_until, &session_id, &mut lifecycle_rx)
                 .await?;
         }
@@ -529,6 +567,7 @@ impl BrowserManager {
             WaitUntil::Load => "Page.loadEventFired",
             WaitUntil::DomContentLoaded => "Page.domContentEventFired",
             WaitUntil::NetworkIdle => return self.wait_for_network_idle(session_id, rx).await,
+            WaitUntil::None => return Ok(()),
         };
 
         let timeout = tokio::time::Duration::from_millis(self.default_timeout_ms);
@@ -1366,6 +1405,19 @@ async fn resolve_cdp_url(input: &str) -> Result<String, String> {
 
     if input.starts_with("http://") || input.starts_with("https://") {
         let parsed = url::Url::parse(input).map_err(|e| format!("Invalid CDP URL: {}", e))?;
+        // If no explicit port and path is empty/root, this is likely a provider
+        // WebSocket endpoint (e.g. https://xxx.cdp0.browser-use.com). Convert
+        // the scheme to ws/wss and connect directly instead of probing :9222.
+        if parsed.port().is_none() && (parsed.path().is_empty() || parsed.path() == "/") {
+            let ws_scheme = if input.starts_with("https://") {
+                "wss"
+            } else {
+                "ws"
+            };
+            let mut ws_url = parsed.clone();
+            let _ = ws_url.set_scheme(ws_scheme);
+            return Ok(ws_url.to_string());
+        }
         let host = parsed
             .host_str()
             .ok_or_else(|| format!("No host in CDP URL: {}", input))?;

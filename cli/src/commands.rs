@@ -112,7 +112,9 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                 format!("https://{}", url)
             };
             let mut nav_cmd = json!({ "id": id, "action": "navigate", "url": url });
-            // If --headers flag is set, include headers (scoped to this origin)
+            if flags.provider.is_some() {
+                nav_cmd["waitUntil"] = json!("none");
+            }
             if let Some(ref headers_json) = flags.headers {
                 let headers =
                     serde_json::from_str::<serde_json::Value>(headers_json).map_err(|_| {

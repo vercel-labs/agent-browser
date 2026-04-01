@@ -12,7 +12,7 @@ export const maxDuration = 60;
 
 const DEFAULT_MODEL = "anthropic/claude-haiku-4.5";
 
-const SYSTEM_PROMPT = `You are a helpful documentation assistant for agent-browser, a headless browser automation CLI designed for AI agents.
+const SYSTEM_PROMPT = `You are a helpful documentation assistant for agent-browser, a browser automation CLI designed for AI agents.
 
 GitHub repository: https://github.com/vercel-labs/agent-browser
 Documentation: https://agent-browser.dev

@@ -46,6 +46,9 @@ yarn.lock
 .env
 .env.local
 
+# Windows debug instance config
+scripts/windows-debug/.instance
+
 # opensrc - source code for packages
 opensrc/
 

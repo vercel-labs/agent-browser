@@ -16,30 +16,85 @@ pub fn get_browsers_dir() -> PathBuf {
 
 pub fn find_installed_chrome() -> Option<PathBuf> {
     let browsers_dir = get_browsers_dir();
+    let debug = std::env::var("AGENT_BROWSER_DEBUG").is_ok();
+
+    if debug {
+        let _ = writeln!(
+            io::stderr(),
+            "[chrome-search] home_dir={:?} browsers_dir={}",
+            dirs::home_dir(),
+            browsers_dir.display()
+        );
+    }
+
     if !browsers_dir.exists() {
+        if debug {
+            let _ = writeln!(io::stderr(), "[chrome-search] browsers_dir does not exist");
+        }
         return None;
     }
 
-    let mut versions: Vec<_> = fs::read_dir(&browsers_dir)
-        .ok()?
+    let entries = match fs::read_dir(&browsers_dir) {
+        Ok(entries) => entries,
+        Err(e) => {
+            let _ = writeln!(
+                io::stderr(),
+                "Warning: cannot read Chrome cache directory {}: {}",
+                browsers_dir.display(),
+                e
+            );
+            return None;
+        }
+    };
+
+    let mut versions: Vec<_> = entries
         .filter_map(|e| e.ok())
         .filter(|e| {
-            e.file_name()
+            let matches = e
+                .file_name()
                 .to_str()
-                .is_some_and(|n| n.starts_with("chrome-"))
+                .is_some_and(|n| n.starts_with("chrome-"));
+            if debug {
+                let _ = writeln!(
+                    io::stderr(),
+                    "[chrome-search] entry {:?} matches={}",
+                    e.file_name(),
+                    matches
+                );
+            }
+            matches
         })
         .collect();
 
     versions.sort_by_key(|b| std::cmp::Reverse(b.file_name()));
 
     for entry in versions {
-        if let Some(bin) = chrome_binary_in_dir(&entry.path()) {
-            if bin.exists() {
+        let dir = entry.path();
+        if let Some(bin) = chrome_binary_in_dir(&dir) {
+            let exists = bin.exists();
+            if debug {
+                let _ = writeln!(
+                    io::stderr(),
+                    "[chrome-search] candidate {} exists={}",
+                    bin.display(),
+                    exists
+                );
+            }
+            if exists {
                 return Some(bin);
             }
+        } else if debug {
+            let _ = writeln!(
+                io::stderr(),
+                "[chrome-search] no binary found in {}",
+                dir.display()
+            );
         }
     }
 
+    if debug {
+        let _ = writeln!(io::stderr(), "[chrome-search] no installed Chrome found");
+    }
     None
 }
 
@@ -225,10 +280,14 @@ fn extract_zip(bytes: Vec<u8>, dest: &Path) -> Result<(), String> {
             None => continue,
         };
         let raw_name = enclosed.to_string_lossy().to_string();
+        // Strip the top-level "chrome-<platform>/" directory from zip entries.
+        // On Windows, enclosed_name() normalizes paths to backslashes, so we
+        // must split on either separator.
         let rel_path = raw_name
             .strip_prefix("chrome-")
-            .and_then(|s| s.split_once('/'))
-            .map(|(_, rest)| rest.to_string())
+            .and_then(|s| s.find(['/', '\\']).map(|i| &s[i + 1..]))
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
             .unwrap_or(raw_name.clone());
 
         if rel_path.is_empty() {

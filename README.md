@@ -1,6 +1,6 @@
 # agent-browser
 
-Headless browser automation CLI for AI agents. Fast native Rust CLI.
+Browser automation CLI for AI agents. Fast native Rust CLI.
 
 ## Installation
 
@@ -70,7 +70,7 @@ Detects your installation method (npm, Homebrew, or Cargo) and runs the appropri
 
 ### Requirements
 
-- **Chrome** - Run `agent-browser install` to download Chrome from [Chrome for Testing](https://developer.chrome.com/blog/chrome-for-testing/) (Google's official automation channel). No Playwright or Node.js required for the daemon.
+- **Chrome** - Run `agent-browser install` to download Chrome from [Chrome for Testing](https://developer.chrome.com/blog/chrome-for-testing/) (Google's official automation channel). Existing Chrome, Brave, Playwright, and Puppeteer installations are detected automatically. No Playwright or Node.js required for the daemon.
 - **Rust** - Only needed when building from source (see From Source above).
 
 ## Quick Start
@@ -334,6 +334,7 @@ agent-browser trace stop [path]       # Stop and save trace
 agent-browser profiler start          # Start Chrome DevTools profiling
 agent-browser profiler stop [path]    # Stop and save profile (.json)
 agent-browser console                 # View console messages (log, error, warn, info)
+agent-browser console --json          # JSON output with raw CDP args for programmatic access
 agent-browser console --clear         # Clear console
 agent-browser errors                  # View page errors (uncaught JavaScript exceptions)
 agent-browser errors --clear          # Clear errors
@@ -625,6 +626,7 @@ The dashboard displays:
 - **Live viewport** -- real-time JPEG frames from the browser
 - **Activity feed** -- chronological command/result stream with timing and expandable details
 - **Console output** -- browser console messages (log, warn, error)
+- **Session creation** -- create new sessions from the UI with local engines (Chrome, Lightpanda) or cloud providers (Browserbase, Browserless, Browser Use, Kernel)
 
 ## Configuration
 

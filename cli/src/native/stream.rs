@@ -1322,6 +1322,11 @@ fn discover_sessions() -> String {
                                 .filter(|s| !s.trim().is_empty())
                                 .unwrap_or_else(|| "chrome".to_string());
 
+                            let provider_path = dir.join(format!("{}.provider", session));
+                            let provider = std::fs::read_to_string(&provider_path)
+                                .ok()
+                                .filter(|s| !s.trim().is_empty());
+
                             let extensions = read_extensions_metadata(&dir, session);
 
                             let mut entry = json!({
@@ -1329,6 +1334,9 @@ fn discover_sessions() -> String {
                                 "port": port,
                                 "engine": engine.trim(),
                             });
+                            if let Some(ref p) = provider {
+                                entry["provider"] = json!(p.trim());
+                            }
                             if !extensions.is_empty() {
                                 entry["extensions"] = json!(extensions);
                             }

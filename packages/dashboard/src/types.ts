@@ -105,6 +105,7 @@ export interface SessionInfo {
   session: string;
   port: number;
   engine?: string;
+  provider?: string;
   extensions?: ExtensionInfo[];
   pending?: boolean;
   closing?: boolean;
