@@ -1,0 +1,36 @@
+# Lightpanda Cloud
+
+[Lightpanda Cloud](https://lightpanda.io) provides cloud-hosted Lightpanda browser instances accessible via CDP. Use it when running agent-browser in environments where a local browser isn't available.
+
+## Setup
+
+```bash
+export LIGHTPANDA_CLOUD_TOKEN="your-api-token"
+agent-browser -p lightpanda-cloud open https://example.com
+```
+
+Or use environment variables for CI/scripts:
+
+```bash
+export AGENT_BROWSER_PROVIDER=lightpanda-cloud
+export LIGHTPANDA_CLOUD_TOKEN="your-api-token"
+agent-browser open https://example.com
+```
+
+The `-p` flag takes precedence over `AGENT_BROWSER_PROVIDER`.
+
+## Configuration
+
+<table>
+  <thead>
+    <tr><th>Variable</th><th>Description</th><th>Default</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>LIGHTPANDA_CLOUD_TOKEN</code></td><td>API token (required)</td><td></td></tr>
+    <tr><td><code>LIGHTPANDA_CLOUD_REGION</code></td><td>Cloud region (<code>euwest</code> or <code>uswest</code>)</td><td><code>euwest</code></td></tr>
+  </tbody>
+</table>
+
+When enabled, agent-browser connects to a Lightpanda Cloud session instead of launching a local browser. All commands work identically to the local Lightpanda engine.
+
+Get your API token from the [Lightpanda Console](https://console.lightpanda.io).

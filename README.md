@@ -1456,6 +1456,35 @@ Optional configuration via environment variables:
 
 When enabled, agent-browser connects to an AgentCore cloud browser session instead of launching a local browser. All commands work identically.
 
+### Lightpanda Cloud
+
+[Lightpanda Cloud](https://lightpanda.io) provides cloud-hosted Lightpanda browser instances accessible via CDP. Use it when running agent-browser in environments where a local browser isn't available.
+
+To enable Lightpanda Cloud, use the `-p` flag:
+
+```bash
+export LIGHTPANDA_CLOUD_TOKEN="your-api-token"
+agent-browser -p lightpanda-cloud open https://example.com
+```
+
+Or use environment variables for CI/scripts:
+
+```bash
+export AGENT_BROWSER_PROVIDER=lightpanda-cloud
+export LIGHTPANDA_CLOUD_TOKEN="your-api-token"
+agent-browser open https://example.com
+```
+
+Optional configuration via environment variables:
+
+| Variable                   | Description                                         | Default  |
+| -------------------------- | --------------------------------------------------- | -------- |
+| `LIGHTPANDA_CLOUD_REGION`  | Cloud region (`euwest` or `uswest`)                 | `euwest` |
+
+When enabled, agent-browser connects to a Lightpanda Cloud session instead of launching a local browser. All commands work identically to the local Lightpanda engine.
+
+Get your API token from the [Lightpanda Console](https://console.lightpanda.io).
+
 ## License
 
 Apache-2.0
