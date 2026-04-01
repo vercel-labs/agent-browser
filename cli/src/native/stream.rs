@@ -1359,7 +1359,9 @@ async fn proxy_session_http_route(
                 ))
             })?;
         upstream.write_all(request.as_bytes()).await.map_err(|e| {
-            DashboardProxyError::bad_gateway(format!("Failed to proxy request to session {port}: {e}"))
+            DashboardProxyError::bad_gateway(format!(
+                "Failed to proxy request to session {port}: {e}"
+            ))
         })?;
 
         let mut response = Vec::new();
@@ -2018,11 +2020,16 @@ async fn handle_dashboard_connection(
             SessionProxyEndpoint::Tabs | SessionProxyEndpoint::Status => {
                 match proxy_session_http_route(port, endpoint).await {
                     Ok((status, content_type, body)) => {
-                        write_http_response_no_cors(&mut stream, &status, &content_type, &body).await;
+                        write_http_response_no_cors(&mut stream, &status, &content_type, &body)
+                            .await;
                     }
                     Err(error) => {
-                        write_json_error_response_no_cors(&mut stream, error.status, &error.message)
-                            .await;
+                        write_json_error_response_no_cors(
+                            &mut stream,
+                            error.status,
+                            &error.message,
+                        )
+                        .await;
                     }
                 }
                 return;
@@ -2352,7 +2359,10 @@ mod tests {
         ]"#;
 
         assert_eq!(sessions_json_has_active_port(sessions_json, 9222), Ok(true));
-        assert_eq!(sessions_json_has_active_port(sessions_json, 9444), Ok(false));
+        assert_eq!(
+            sessions_json_has_active_port(sessions_json, 9444),
+            Ok(false)
+        );
     }
 
     #[test]
