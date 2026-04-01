@@ -188,7 +188,8 @@ pub async fn take_snapshot(
     client: &CdpClient,
     session_id: &str,
     options: &SnapshotOptions,
-    ref_map: &mut RefMap,
+    previous_ref_map: &RefMap,
+    next_ref_map: &mut RefMap,
     frame_id: Option<&str>,
     iframe_sessions: &HashMap<String, String>,
 ) -> Result<String, String> {
@@ -310,7 +311,7 @@ pub async fn take_snapshot(
     };
 
     let mut tracker = RoleNameTracker::new();
-    let mut next_ref: usize = ref_map.next_ref_num();
+    let mut next_ref: usize = next_ref_map.next_ref_num();
 
     let mut nodes_with_refs: Vec<(usize, usize)> = Vec::new();
 
@@ -356,10 +357,18 @@ pub async fn take_snapshot(
             None
         };
 
-        let ref_id = format!("e{}", next_ref);
-        next_ref += 1;
+        let ref_id = tree_nodes[*idx]
+            .backend_node_id
+            .and_then(|backend_node_id| {
+                previous_ref_map.ref_id_for_backend_node(backend_node_id, frame_id)
+            })
+            .unwrap_or_else(|| {
+                let ref_id = format!("e{}", next_ref);
+                next_ref += 1;
+                ref_id
+            });
 
-        ref_map.add_with_frame(
+        next_ref_map.add_with_frame(
             ref_id.clone(),
             tree_nodes[*idx].backend_node_id,
             &tree_nodes[*idx].role,
@@ -381,7 +390,7 @@ pub async fn take_snapshot(
         }
     }
 
-    ref_map.set_next_ref_num(next_ref);
+    next_ref_map.set_next_ref_num(next_ref);
 
     let mut output = String::new();
     for &root_idx in &effective_roots {
@@ -409,7 +418,8 @@ pub async fn take_snapshot(
                     client,
                     session_id,
                     options,
-                    ref_map,
+                    previous_ref_map,
+                    next_ref_map,
                     Some(&child_fid),
                     iframe_sessions,
                 ))

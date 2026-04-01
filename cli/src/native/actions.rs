@@ -2144,16 +2144,20 @@ async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
             .map(|d| d as usize),
     };
 
-    state.ref_map.clear();
+    let previous_ref_map = state.ref_map.clone();
+    let mut next_ref_map = RefMap::new();
+    next_ref_map.set_next_ref_num(previous_ref_map.next_ref_num());
     let tree = snapshot::take_snapshot(
         &mgr.client,
         &session_id,
         &options,
-        &mut state.ref_map,
+        &previous_ref_map,
+        &mut next_ref_map,
         state.active_frame_id.as_deref(),
         &state.iframe_sessions,
     )
     .await?;
+    state.ref_map = next_ref_map;
 
     let url = mgr.get_url().await.unwrap_or_default();
 
@@ -2247,7 +2251,9 @@ async fn handle_screenshot(cmd: &Value, state: &mut DaemonState) -> Result<Value
     };
 
     if annotate {
-        state.ref_map.clear();
+        let previous_ref_map = state.ref_map.clone();
+        let mut annotate_ref_map = RefMap::new();
+        annotate_ref_map.set_next_ref_num(previous_ref_map.next_ref_num());
         let _ = snapshot::take_snapshot(
             &mgr.client,
             &session_id,
@@ -2255,11 +2261,28 @@ async fn handle_screenshot(cmd: &Value, state: &mut DaemonState) -> Result<Value
                 interactive: true,
                 ..SnapshotOptions::default()
             },
-            &mut state.ref_map,
+            &previous_ref_map,
+            &mut annotate_ref_map,
             state.active_frame_id.as_deref(),
             &state.iframe_sessions,
         )
         .await?;
+        let result = screenshot::take_screenshot(
+            &mgr.client,
+            &session_id,
+            &annotate_ref_map,
+            &options,
+            &state.iframe_sessions,
+        )
+        .await?;
+
+        let mut response = json!({ "path": result.path });
+        if !result.annotations.is_empty() {
+            response["annotations"] = serde_json::to_value(&result.annotations)
+                .map_err(|e| format!("Failed to serialize annotations: {}", e))?;
+        }
+
+        return Ok(response);
     }
 
     let result = screenshot::take_screenshot(
@@ -3154,11 +3177,15 @@ async fn handle_diff_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Va
         selector,
         ..SnapshotOptions::default()
     };
+    let previous_ref_map = state.ref_map.clone();
+    let mut diff_ref_map = RefMap::new();
+    diff_ref_map.set_next_ref_num(previous_ref_map.next_ref_num());
     let current = snapshot::take_snapshot(
         &mgr.client,
         &session_id,
         &options,
-        &mut state.ref_map,
+        &previous_ref_map,
+        &mut diff_ref_map,
         state.active_frame_id.as_deref(),
         &state.iframe_sessions,
     )
@@ -3206,11 +3233,15 @@ async fn handle_diff_url(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     mgr.navigate(url1, wait_until).await?;
     let session_id = mgr.active_session_id()?.to_string();
     let options = SnapshotOptions::default();
+    let previous_ref_map = state.ref_map.clone();
+    let mut first_ref_map = RefMap::new();
+    first_ref_map.set_next_ref_num(previous_ref_map.next_ref_num());
     let snap1 = snapshot::take_snapshot(
         &mgr.client,
         &session_id,
         &options,
-        &mut state.ref_map,
+        &previous_ref_map,
+        &mut first_ref_map,
         None,
         &state.iframe_sessions,
     )
@@ -3218,12 +3249,13 @@ async fn handle_diff_url(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
 
     // Navigate to URL2 and snapshot
     mgr.navigate(url2, wait_until).await?;
-    state.ref_map.clear();
+    let mut second_ref_map = RefMap::new();
     let snap2 = snapshot::take_snapshot(
         &mgr.client,
         &session_id,
         &options,
-        &mut state.ref_map,
+        &first_ref_map,
+        &mut second_ref_map,
         None,
         &state.iframe_sessions,
     )

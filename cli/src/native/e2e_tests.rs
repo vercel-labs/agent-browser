@@ -2411,13 +2411,13 @@ async fn e2e_inspect() {
 }
 
 // ---------------------------------------------------------------------------
-// Stale ref fallback (#805): clicking a ref after the DOM has been replaced
-// should fall back to role/name lookup instead of failing.
+// Strict refs: clicking a ref after the DOM has been replaced should fail
+// rather than silently rebinding to a different element.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 #[ignore]
-async fn e2e_click_stale_ref_falls_back_to_role_name() {
+async fn e2e_click_stale_ref_requires_new_snapshot() {
     let mut state = DaemonState::new();
 
     let resp = execute_command(
@@ -2478,24 +2478,64 @@ async fn e2e_click_stale_ref_falls_back_to_role_name() {
     assert_success(&resp);
     assert_eq!(get_data(&resp)["title"], "replaced");
 
-    // Now click the stale "Target" ref. Before the fix this returned:
-    //   "CDP error (DOM.getBoxModel): Could not compute box model."
-    // After the fix it falls back to role/name lookup and succeeds.
+    // Now click the stale "Target" ref. Strict refs should fail and require
+    // the caller to capture a fresh snapshot.
     let resp = execute_command(
         &json!({ "id": "6", "action": "click", "selector": "e2" }),
         &mut state,
     )
     .await;
-    assert_success(&resp);
-    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    assert_eq!(resp.get("success").and_then(|v| v.as_bool()), Some(false));
+    let error = resp.get("error").and_then(|v| v.as_str()).unwrap_or("");
+    assert_eq!(
+        error,
+        "Ref e2 is stale because the page changed. Capture a new snapshot before interacting again."
+    );
 
-    // Verify the fallback click hit the right (recreated) button.
     let resp = execute_command(&json!({ "id": "7", "action": "title" }), &mut state).await;
     assert_success(&resp);
+    assert_eq!(get_data(&resp)["title"], "replaced");
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_snapshot_preserves_refs_for_same_dom_nodes() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = r##"data:text/html,<body>
+        <button>Images</button>
+        <button>Videos</button>
+        <a href="#cats">Cats</a>
+    </body>"##;
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(&json!({ "id": "3", "action": "snapshot" }), &mut state).await;
+    assert_success(&resp);
+    let refs_before = get_data(&resp)["refs"].clone();
+
+    let resp = execute_command(&json!({ "id": "4", "action": "snapshot" }), &mut state).await;
+    assert_success(&resp);
+    let refs_after = get_data(&resp)["refs"].clone();
+
     assert_eq!(
-        get_data(&resp)["title"],
-        "clicked",
-        "Stale ref should have been resolved via role/name fallback"
+        refs_after, refs_before,
+        "Repeated snapshots should keep the same ref ids for surviving DOM nodes"
     );
 
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;

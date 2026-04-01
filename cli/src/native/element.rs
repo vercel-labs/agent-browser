@@ -15,6 +15,7 @@ pub struct RefEntry {
     pub frame_id: Option<String>,
 }
 
+#[derive(Clone)]
 pub struct RefMap {
     map: HashMap<String, RefEntry>,
     next_ref: usize,
@@ -84,6 +85,22 @@ impl RefMap {
 
     pub fn get(&self, ref_id: &str) -> Option<&RefEntry> {
         self.map.get(ref_id)
+    }
+
+    pub fn ref_id_for_backend_node(
+        &self,
+        backend_node_id: i64,
+        frame_id: Option<&str>,
+    ) -> Option<String> {
+        self.map.iter().find_map(|(ref_id, entry)| {
+            let same_backend_node = entry.backend_node_id == Some(backend_node_id);
+            let same_frame = entry.frame_id.as_deref() == frame_id;
+            if same_backend_node && same_frame {
+                Some(ref_id.clone())
+            } else {
+                None
+            }
+        })
     }
 
     pub fn entries_sorted(&self) -> Vec<(String, RefEntry)> {
@@ -175,33 +192,10 @@ pub async fn resolve_element_center(
                 let (x, y) = box_model_center(&r.model);
                 return Ok((x, y, effective_session_id.to_string()));
             }
-            // backend_node_id is stale; re-query the accessibility tree below
+            return Err(stale_ref_error(&ref_id));
         }
 
-        // Fallback: re-query the accessibility tree to find a fresh node by role/name
-        let fresh_id = find_node_id_by_role_name(
-            client,
-            session_id,
-            &entry.role,
-            &entry.name,
-            entry.nth,
-            entry.frame_id.as_deref(),
-            iframe_sessions,
-        )
-        .await?;
-        let result: DomGetBoxModelResult = client
-            .send_command_typed(
-                "DOM.getBoxModel",
-                &DomGetBoxModelParams {
-                    backend_node_id: Some(fresh_id),
-                    node_id: None,
-                    object_id: None,
-                },
-                Some(effective_session_id),
-            )
-            .await?;
-        let (x, y) = box_model_center(&result.model);
-        return Ok((x, y, effective_session_id.to_string()));
+        return Err(stale_ref_error(&ref_id));
     }
 
     // CSS selector
@@ -243,36 +237,10 @@ pub async fn resolve_element_object_id(
                     return Ok((object_id, effective_session_id.to_string()));
                 }
             }
-            // backend_node_id is stale; re-query the accessibility tree below
+            return Err(stale_ref_error(&ref_id));
         }
 
-        // Fallback: re-query the accessibility tree to find a fresh node by role/name
-        let fresh_id = find_node_id_by_role_name(
-            client,
-            session_id,
-            &entry.role,
-            &entry.name,
-            entry.nth,
-            entry.frame_id.as_deref(),
-            iframe_sessions,
-        )
-        .await?;
-        let result: DomResolveNodeResult = client
-            .send_command_typed(
-                "DOM.resolveNode",
-                &DomResolveNodeParams {
-                    backend_node_id: Some(fresh_id),
-                    node_id: None,
-                    object_group: Some("agent-browser".to_string()),
-                },
-                Some(effective_session_id),
-            )
-            .await?;
-        let object_id = result
-            .object
-            .object_id
-            .ok_or_else(|| format!("No objectId for ref {}", ref_id))?;
-        return Ok((object_id, effective_session_id.to_string()));
+        return Err(stale_ref_error(&ref_id));
     }
 
     // Selector fallback (CSS or XPath)
@@ -329,55 +297,11 @@ fn resolve_frame_session<'a>(
         .unwrap_or(session_id)
 }
 
-/// Re-query the accessibility tree to find a node matching role+name+nth,
-/// returning its fresh backendDOMNodeId. This uses the same data source
-/// (Accessibility.getFullAXTree) that built the ref map during snapshot,
-/// so role/name matching is guaranteed to be consistent.
-async fn find_node_id_by_role_name(
-    client: &CdpClient,
-    session_id: &str,
-    role: &str,
-    name: &str,
-    nth: Option<usize>,
-    frame_id: Option<&str>,
-    iframe_sessions: &HashMap<String, String>,
-) -> Result<i64, String> {
-    let (ax_params, effective_session_id) =
-        resolve_ax_session(frame_id, session_id, iframe_sessions);
-    let ax_tree: GetFullAXTreeResult = client
-        .send_command_typed(
-            "Accessibility.getFullAXTree",
-            &ax_params,
-            Some(effective_session_id),
-        )
-        .await?;
-
-    let nth_index = nth.unwrap_or(0);
-    let mut match_count: usize = 0;
-
-    for node in &ax_tree.nodes {
-        if node.ignored.unwrap_or(false) {
-            continue;
-        }
-        let node_role = extract_ax_string(&node.role);
-        let node_name = extract_ax_string(&node.name);
-        if node_role == role && node_name == name {
-            if match_count == nth_index {
-                return node.backend_d_o_m_node_id.ok_or_else(|| {
-                    format!(
-                        "AX node has no backendDOMNodeId for role={} name={}",
-                        role, name
-                    )
-                });
-            }
-            match_count += 1;
-        }
-    }
-
-    Err(format!(
-        "Could not locate element with role={} name={}",
-        role, name
-    ))
+fn stale_ref_error(ref_id: &str) -> String {
+    format!(
+        "Ref {} is stale because the page changed. Capture a new snapshot before interacting again.",
+        ref_id
+    )
 }
 
 fn extract_ax_string(value: &Option<AXValue>) -> String {
