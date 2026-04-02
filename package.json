@@ -1,20 +1,9 @@
 {
   "name": "agent-browser",
-  "version": "0.19.0",
-  "description": "Headless browser automation CLI for AI agents",
+  "version": "0.23.4",
+  "description": "Browser automation CLI for AI agents",
   "type": "module",
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
-  "exports": {
-    ".": {
-      "import": "./dist/index.js",
-      "types": "./dist/index.d.ts",
-      "default": "./dist/index.js"
-    },
-    "./package.json": "./package.json"
-  },
   "files": [
-    "dist",
     "bin",
     "scripts",
     "skills"
@@ -23,39 +12,24 @@
     "agent-browser": "./bin/agent-browser.js"
   },
   "scripts": {
-    "prepare": "husky",
     "version:sync": "node scripts/sync-version.js",
     "version": "npm run version:sync && git add cli/Cargo.toml",
-    "build": "tsc",
     "build:native": "npm run version:sync && cargo build --release --manifest-path cli/Cargo.toml && node scripts/copy-native.js",
     "build:linux": "npm run version:sync && docker compose -f docker/docker-compose.yml run --rm build-linux",
     "build:macos": "npm run version:sync && (cargo build --release --manifest-path cli/Cargo.toml --target aarch64-apple-darwin & cargo build --release --manifest-path cli/Cargo.toml --target x86_64-apple-darwin & wait) && cp cli/target/aarch64-apple-darwin/release/agent-browser bin/agent-browser-darwin-arm64 && cp cli/target/x86_64-apple-darwin/release/agent-browser bin/agent-browser-darwin-x64",
     "build:windows": "npm run version:sync && docker compose -f docker/docker-compose.yml run --rm build-windows",
     "build:all-platforms": "npm run version:sync && (npm run build:linux & npm run build:windows & wait) && npm run build:macos",
     "build:docker": "docker build -t agent-browser-builder -f docker/Dockerfile.build .",
-    "release": "npm run version:sync && npm run build && npm run build:all-platforms && npm publish",
-    "start": "node dist/daemon.js",
-    "dev": "tsx src/daemon.ts",
-    "typecheck": "tsc --noEmit",
-    "format": "prettier --write 'src/**/*.ts'",
-    "format:check": "prettier --check 'src/**/*.ts'",
-    "test": "vitest run",
-    "test:watch": "vitest",
-    "test:e2e:dogfood": "vitest run test/e2e/dogfood.eval.ts",
-    "bench": "pnpm build && tsx test/benchmarks/run.ts",
-    "bench:node": "pnpm build && tsx test/benchmarks/run.ts --node-only",
-    "bench:native": "pnpm build && tsx test/benchmarks/run.ts --native-only",
-    "bench:engine": "pnpm build && tsx test/benchmarks/run.ts --engine",
+    "release": "npm run version:sync && npm run build:all-platforms && npm publish",
     "postinstall": "node scripts/postinstall.js",
-    "changeset": "changeset",
-    "ci:version": "changeset version && pnpm run version:sync && pnpm install --no-frozen-lockfile",
-    "ci:publish": "pnpm run version:sync && pnpm run build && changeset publish"
+    "build:dashboard": "cd packages/dashboard && pnpm build"
   },
   "keywords": [
     "browser",
     "automation",
     "headless",
-    "playwright",
+    "chrome",
+    "cdp",
     "cli",
     "agent"
   ],
@@ -67,28 +41,6 @@
   "bugs": {
     "url": "https://github.com/vercel-labs/agent-browser/issues"
   },
-  "homepage": "https://github.com/vercel-labs/agent-browser#readme",
-  "dependencies": {
-    "node-simctl": "^7.4.0",
-    "playwright-core": "^1.57.0",
-    "webdriverio": "^9.15.0",
-    "ws": "^8.19.0",
-    "zod": "^3.22.4"
-  },
-  "devDependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.2.52",
-    "@changesets/cli": "^2.29.8",
-    "@types/node": "^20.10.0",
-    "@types/ws": "^8.18.1",
-    "husky": "^9.1.7",
-    "lint-staged": "^15.2.11",
-    "playwright": "^1.57.0",
-    "prettier": "^3.7.4",
-    "tsx": "^4.6.0",
-    "typescript": "^5.3.0",
-    "vitest": "^4.0.16"
-  },
-  "lint-staged": {
-    "src/**/*.ts": "prettier --write"
-  }
+  "homepage": "https://agent-browser.dev",
+  "devDependencies": {}
 }

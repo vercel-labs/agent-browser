@@ -2,6 +2,8 @@ use serde::Serialize;
 use serde_json::Value;
 use std::path::PathBuf;
 
+use std::collections::HashMap;
+
 use super::cdp::client::CdpClient;
 use super::cdp::types::*;
 use super::element::RefMap;
@@ -100,10 +102,14 @@ pub async fn take_screenshot(
     session_id: &str,
     ref_map: &RefMap,
     options: &ScreenshotOptions,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<ScreenshotResult, String> {
     let target_rect = if options.annotate {
         match options.selector.as_deref() {
-            Some(selector) => get_rect_for_selector(client, session_id, ref_map, selector).await?,
+            Some(selector) => {
+                get_rect_for_selector(client, session_id, ref_map, selector, iframe_sessions)
+                    .await?
+            }
             None => None,
         }
     } else {
@@ -124,7 +130,8 @@ pub async fn take_screenshot(
         false
     };
 
-    let base64 = capture_screenshot_base64(client, session_id, ref_map, options).await;
+    let base64 =
+        capture_screenshot_base64(client, session_id, ref_map, options, iframe_sessions).await;
 
     if overlay_injected {
         let _ = remove_annotation_overlay(client, session_id).await;
@@ -166,6 +173,7 @@ async fn capture_screenshot_base64(
     session_id: &str,
     ref_map: &RefMap,
     options: &ScreenshotOptions,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<String, String> {
     let mut params = CaptureScreenshotParams {
         format: Some(options.format.clone()),
@@ -200,7 +208,9 @@ async fn capture_screenshot_base64(
             });
         }
     } else if let Some(ref selector) = options.selector {
-        if let Some(rect) = get_rect_for_selector(client, session_id, ref_map, selector).await? {
+        if let Some(rect) =
+            get_rect_for_selector(client, session_id, ref_map, selector, iframe_sessions).await?
+        {
             params.clip = Some(Viewport {
                 x: rect.x,
                 y: rect.y,
@@ -223,35 +233,87 @@ async fn collect_annotations(
     session_id: &str,
     ref_map: &RefMap,
 ) -> Result<Vec<RawAnnotation>, String> {
-    let mut annotations = Vec::new();
+    let entries = ref_map.entries_sorted();
+    if entries.is_empty() {
+        return Ok(Vec::new());
+    }
 
-    for (ref_id, entry) in ref_map.entries_sorted() {
-        let object_id =
-            match super::element::resolve_element_object_id(client, session_id, ref_map, &ref_id)
-                .await
+    // Collect entries that have backend_node_ids for batch resolution.
+    let with_backend_ids: Vec<(String, super::element::RefEntry, i64)> = entries
+        .iter()
+        .filter_map(|(ref_id, entry)| {
+            entry
+                .backend_node_id
+                .map(|bid| (ref_id.clone(), entry.clone(), bid))
+        })
+        .collect();
+
+    if with_backend_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Batch-resolve all backend_node_ids to object IDs using concurrent CDP calls.
+    let resolve_futures: Vec<_> = with_backend_ids
+        .iter()
+        .map(|(_, _, backend_node_id)| {
+            client.send_command(
+                "DOM.resolveNode",
+                Some(serde_json::json!({
+                    "backendNodeId": backend_node_id,
+                    "objectGroup": "agent-browser-annotate"
+                })),
+                Some(session_id),
+            )
+        })
+        .collect();
+
+    let resolve_results = futures_util::future::join_all(resolve_futures).await;
+
+    // Collect resolved object IDs paired with their ref info.
+    let mut resolved: Vec<(String, super::element::RefEntry, String)> = Vec::new();
+    for (i, result) in resolve_results.into_iter().enumerate() {
+        if let Ok(val) = result {
+            if let Some(oid) = val
+                .get("object")
+                .and_then(|o| o.get("objectId"))
+                .and_then(|v| v.as_str())
             {
-                Ok(id) => id,
-                Err(_) => continue,
-            };
+                let (ref_id, entry, _) = &with_backend_ids[i];
+                resolved.push((ref_id.clone(), entry.clone(), oid.to_string()));
+            }
+        }
+    }
 
-        let Some(rect) = get_rect_for_object(client, session_id, &object_id).await? else {
-            continue;
+    if resolved.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Batch-get bounding rects for all resolved elements using concurrent CDP calls.
+    let rect_futures: Vec<_> = resolved
+        .iter()
+        .map(|(_, _, object_id)| get_rect_for_object(client, session_id, object_id))
+        .collect();
+
+    let rect_results = futures_util::future::join_all(rect_futures).await;
+
+    let mut annotations = Vec::new();
+    for (i, rect_result) in rect_results.into_iter().enumerate() {
+        let rect = match rect_result {
+            Ok(Some(r)) if r.width > 0.0 && r.height > 0.0 => r,
+            _ => continue,
         };
 
-        if rect.width <= 0.0 || rect.height <= 0.0 {
-            continue;
-        }
-
+        let (ref_id, entry, _) = &resolved[i];
         let number = ref_id
             .strip_prefix('e')
             .and_then(|n| n.parse::<u64>().ok())
             .unwrap_or(0);
 
         annotations.push(RawAnnotation {
-            ref_id,
+            ref_id: ref_id.clone(),
             number,
-            role: entry.role,
-            name: (!entry.name.is_empty()).then_some(entry.name),
+            role: entry.role.clone(),
+            name: (!entry.name.is_empty()).then_some(entry.name.clone()),
             rect,
         });
     }
@@ -264,10 +326,17 @@ async fn get_rect_for_selector(
     session_id: &str,
     ref_map: &RefMap,
     selector: &str,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<Option<Rect>, String> {
-    let object_id =
-        super::element::resolve_element_object_id(client, session_id, ref_map, selector).await?;
-    get_rect_for_object(client, session_id, &object_id).await
+    let (object_id, effective_session_id) = super::element::resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector,
+        iframe_sessions,
+    )
+    .await?;
+    get_rect_for_object(client, &effective_session_id, &object_id).await
 }
 
 async fn get_rect_for_object(

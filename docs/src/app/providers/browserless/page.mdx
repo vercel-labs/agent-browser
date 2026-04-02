@@ -1,0 +1,39 @@
+# Browserless
+
+[Browserless](https://browserless.io) provides cloud browser infrastructure with a Sessions API. Use it when running agent-browser in environments where a local browser isn't available.
+
+## Setup
+
+```bash
+export BROWSERLESS_API_KEY="your-api-token"
+agent-browser -p browserless open https://example.com
+```
+
+Or use environment variables for CI/scripts:
+
+```bash
+export AGENT_BROWSER_PROVIDER=browserless
+export BROWSERLESS_API_KEY="your-api-token"
+agent-browser open https://example.com
+```
+
+The `-p` flag takes precedence over `AGENT_BROWSER_PROVIDER`.
+
+## Configuration
+
+<table>
+  <thead>
+    <tr><th>Variable</th><th>Description</th><th>Default</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>BROWSERLESS_API_KEY</code></td><td>API token (required)</td><td></td></tr>
+    <tr><td><code>BROWSERLESS_API_URL</code></td><td>Base API URL (for custom regions or self-hosted)</td><td><code>https://production-sfo.browserless.io</code></td></tr>
+    <tr><td><code>BROWSERLESS_BROWSER_TYPE</code></td><td>Type of browser to use (<code>chromium</code> or <code>chrome</code>)</td><td><code>chromium</code></td></tr>
+    <tr><td><code>BROWSERLESS_TTL</code></td><td>Session TTL in milliseconds</td><td><code>300000</code></td></tr>
+    <tr><td><code>BROWSERLESS_STEALTH</code></td><td>Enable stealth mode</td><td><code>true</code></td></tr>
+  </tbody>
+</table>
+
+When enabled, agent-browser connects to a Browserless cloud session instead of launching a local browser. All commands work identically.
+
+Get your API token from the [Browserless Dashboard](https://browserless.io).

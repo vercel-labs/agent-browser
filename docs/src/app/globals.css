@@ -16,6 +16,7 @@
   --color-muted-foreground: var(--muted-foreground);
   --color-primary: var(--primary);
   --color-primary-foreground: var(--primary-foreground);
+  --color-sidebar: var(--sidebar);
 }
 
 :root {
@@ -26,6 +27,7 @@
   --muted-foreground: #737373;
   --primary: #171717;
   --primary-foreground: #fff;
+  --sidebar: #f5f5f5;
 }
 
 .dark {
@@ -36,6 +38,7 @@
   --muted-foreground: #a3a3a3;
   --primary: #f5f5f5;
   --primary-foreground: #0a0a0a;
+  --sidebar: #171717;
 }
 
 html {
@@ -127,6 +130,23 @@ pre:not(.shiki) {
   padding: 0.125rem 0.375rem;
   border-radius: 3px;
   font-size: 0.875em;
+}
+
+/* Diff line highlighting */
+.diff-add {
+  color: #00952d;
+}
+
+.diff-remove {
+  color: #f32e40;
+}
+
+.dark .diff-add {
+  color: #00ca50;
+}
+
+.dark .diff-remove {
+  color: #f32e40;
 }
 
 /* Shiki dual theme support */

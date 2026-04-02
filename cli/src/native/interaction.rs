@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde_json::Value;
 
 use super::cdp::client::CdpClient;
@@ -11,9 +13,17 @@ pub async fn click(
     selector_or_ref: &str,
     button: &str,
     click_count: i32,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<(), String> {
-    let (x, y) = resolve_element_center(client, session_id, ref_map, selector_or_ref).await?;
-    dispatch_click(client, session_id, x, y, button, click_count).await
+    let (x, y, effective_session_id) = resolve_element_center(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
+    dispatch_click(client, &effective_session_id, x, y, button, click_count).await
 }
 
 pub async fn dblclick(
@@ -21,8 +31,18 @@ pub async fn dblclick(
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<(), String> {
-    click(client, session_id, ref_map, selector_or_ref, "left", 2).await
+    click(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        "left",
+        2,
+        iframe_sessions,
+    )
+    .await
 }
 
 pub async fn hover(
@@ -30,8 +50,16 @@ pub async fn hover(
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<(), String> {
-    let (x, y) = resolve_element_center(client, session_id, ref_map, selector_or_ref).await?;
+    let (x, y, effective_session_id) = resolve_element_center(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
     client
         .send_command_typed::<_, Value>(
             "Input.dispatchMouseEvent",
@@ -46,7 +74,7 @@ pub async fn hover(
                 delta_y: None,
                 modifiers: None,
             },
-            Some(session_id),
+            Some(&effective_session_id),
         )
         .await?;
     Ok(())
@@ -58,8 +86,16 @@ pub async fn fill(
     ref_map: &RefMap,
     selector_or_ref: &str,
     value: &str,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<(), String> {
-    let object_id = resolve_element_object_id(client, session_id, ref_map, selector_or_ref).await?;
+    let (object_id, effective_session_id) = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
 
     // Focus the element
     client
@@ -72,7 +108,7 @@ pub async fn fill(
                 return_by_value: Some(true),
                 await_promise: Some(false),
             },
-            Some(session_id),
+            Some(&effective_session_id),
         )
         .await?;
 
@@ -92,11 +128,11 @@ pub async fn fill(
                 return_by_value: Some(true),
                 await_promise: Some(false),
             },
-            Some(session_id),
+            Some(&effective_session_id),
         )
         .await?;
 
-    // Insert text
+    // Insert text (keyboard input dispatched at page level, use parent session_id)
     client
         .send_command_typed::<_, Value>(
             "Input.insertText",
@@ -110,6 +146,7 @@ pub async fn fill(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn type_text(
     client: &CdpClient,
     session_id: &str,
@@ -118,8 +155,16 @@ pub async fn type_text(
     text: &str,
     clear: bool,
     delay_ms: Option<u64>,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<(), String> {
-    let object_id = resolve_element_object_id(client, session_id, ref_map, selector_or_ref).await?;
+    let (object_id, effective_session_id) = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
 
     // Focus
     client
@@ -132,7 +177,7 @@ pub async fn type_text(
                 return_by_value: Some(true),
                 await_promise: Some(false),
             },
-            Some(session_id),
+            Some(&effective_session_id),
         )
         .await?;
 
@@ -152,50 +197,73 @@ pub async fn type_text(
                     return_by_value: Some(true),
                     await_promise: Some(false),
                 },
-                Some(session_id),
+                Some(&effective_session_id),
             )
             .await?;
     }
 
+    type_text_into_active_context(client, session_id, text, delay_ms).await
+}
+
+pub async fn type_text_into_active_context(
+    client: &CdpClient,
+    session_id: &str,
+    text: &str,
+    delay_ms: Option<u64>,
+) -> Result<(), String> {
     let delay = delay_ms.unwrap_or(0);
 
     for ch in text.chars() {
-        let text_str = ch.to_string();
-        let (key, code, key_code) = char_to_key_info(ch);
+        if matches!(ch, '\n' | '\r' | '\t') {
+            let (key, code, key_code) = char_to_key_info(ch);
+            let text_str = key_text(&key);
+            client
+                .send_command_typed::<_, Value>(
+                    "Input.dispatchKeyEvent",
+                    &DispatchKeyEventParams {
+                        event_type: "keyDown".to_string(),
+                        key: Some(key.clone()),
+                        code: Some(code.clone()),
+                        text: text_str.clone(),
+                        unmodified_text: text_str,
+                        windows_virtual_key_code: Some(key_code),
+                        native_virtual_key_code: Some(key_code),
+                        modifiers: None,
+                    },
+                    Some(session_id),
+                )
+                .await?;
 
-        client
-            .send_command_typed::<_, Value>(
-                "Input.dispatchKeyEvent",
-                &DispatchKeyEventParams {
-                    event_type: "keyDown".to_string(),
-                    key: Some(key.clone()),
-                    code: Some(code.clone()),
-                    text: Some(text_str.clone()),
-                    unmodified_text: Some(text_str.clone()),
-                    windows_virtual_key_code: Some(key_code),
-                    native_virtual_key_code: Some(key_code),
-                    modifiers: None,
-                },
-                Some(session_id),
-            )
-            .await?;
-
-        client
-            .send_command_typed::<_, Value>(
-                "Input.dispatchKeyEvent",
-                &DispatchKeyEventParams {
-                    event_type: "keyUp".to_string(),
-                    key: Some(key),
-                    code: Some(code),
-                    text: None,
-                    unmodified_text: None,
-                    windows_virtual_key_code: Some(key_code),
-                    native_virtual_key_code: Some(key_code),
-                    modifiers: None,
-                },
-                Some(session_id),
-            )
-            .await?;
+            client
+                .send_command_typed::<_, Value>(
+                    "Input.dispatchKeyEvent",
+                    &DispatchKeyEventParams {
+                        event_type: "keyUp".to_string(),
+                        key: Some(key),
+                        code: Some(code),
+                        text: None,
+                        unmodified_text: None,
+                        windows_virtual_key_code: Some(key_code),
+                        native_virtual_key_code: Some(key_code),
+                        modifiers: None,
+                    },
+                    Some(session_id),
+                )
+                .await?;
+        } else {
+            // VS Code/Electron webviews reject repeated dispatchKeyEvent calls
+            // carrying printable `text`. Insert printable characters directly
+            // and reserve key events for controls like Enter and Tab.
+            client
+                .send_command_typed::<_, Value>(
+                    "Input.insertText",
+                    &InsertTextParams {
+                        text: ch.to_string(),
+                    },
+                    Some(session_id),
+                )
+                .await?;
+        }
 
         if delay > 0 {
             tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
@@ -224,6 +292,15 @@ pub async fn press_key_with_modifiers(
 ) -> Result<(), String> {
     let (key_name, code, key_code) = named_key_info(key);
 
+    // Suppress text insertion when Control (2) or Meta (4) modifiers are active,
+    // since these are command chords (e.g. Ctrl+A = select-all), not text input.
+    let has_command_modifier = modifiers.is_some_and(|m| m & (2 | 4) != 0);
+    let text = if has_command_modifier {
+        None
+    } else {
+        key_text(&key_name)
+    };
+
     client
         .send_command_typed::<_, Value>(
             "Input.dispatchKeyEvent",
@@ -231,8 +308,8 @@ pub async fn press_key_with_modifiers(
                 event_type: "keyDown".to_string(),
                 key: Some(key_name.clone()),
                 code: Some(code.clone()),
-                text: None,
-                unmodified_text: None,
+                text: text.clone(),
+                unmodified_text: text.clone(),
                 windows_virtual_key_code: Some(key_code),
                 native_virtual_key_code: Some(key_code),
                 modifiers,
@@ -268,9 +345,11 @@ pub async fn scroll(
     selector_or_ref: Option<&str>,
     delta_x: f64,
     delta_y: f64,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<(), String> {
     if let Some(sel) = selector_or_ref {
-        let object_id = resolve_element_object_id(client, session_id, ref_map, sel).await?;
+        let (object_id, effective_session_id) =
+            resolve_element_object_id(client, session_id, ref_map, sel, iframe_sessions).await?;
         let js = "function(dx, dy) { this.scrollBy(dx, dy); }".to_string();
         client
             .send_command_typed::<_, Value>(
@@ -291,7 +370,7 @@ pub async fn scroll(
                     return_by_value: Some(true),
                     await_promise: Some(false),
                 },
-                Some(session_id),
+                Some(&effective_session_id),
             )
             .await?;
     } else {
@@ -317,8 +396,16 @@ pub async fn select_option(
     ref_map: &RefMap,
     selector_or_ref: &str,
     values: &[String],
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<(), String> {
-    let object_id = resolve_element_object_id(client, session_id, ref_map, selector_or_ref).await?;
+    let (object_id, effective_session_id) = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
 
     let js = r#"function(vals) {
             const options = Array.from(this.options);
@@ -342,7 +429,7 @@ pub async fn select_option(
                 return_by_value: Some(true),
                 await_promise: Some(false),
             },
-            Some(session_id),
+            Some(&effective_session_id),
         )
         .await?;
 
@@ -354,11 +441,49 @@ pub async fn check(
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<(), String> {
-    let is_checked =
-        super::element::is_element_checked(client, session_id, ref_map, selector_or_ref).await?;
+    let is_checked = super::element::is_element_checked(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
     if !is_checked {
-        click(client, session_id, ref_map, selector_or_ref, "left", 1).await?;
+        click(
+            client,
+            session_id,
+            ref_map,
+            selector_or_ref,
+            "left",
+            1,
+            iframe_sessions,
+        )
+        .await?;
+
+        // Verify the click changed the state (Playwright parity: _setChecked re-checks).
+        // If the coordinate-based click missed (e.g. hidden input, overlay), retry
+        // with a JS .click() on the element and its associated input.
+        if !super::element::is_element_checked(
+            client,
+            session_id,
+            ref_map,
+            selector_or_ref,
+            iframe_sessions,
+        )
+        .await?
+        {
+            js_click_checkbox(
+                client,
+                session_id,
+                ref_map,
+                selector_or_ref,
+                iframe_sessions,
+            )
+            .await?;
+        }
     }
     Ok(())
 }
@@ -368,12 +493,114 @@ pub async fn uncheck(
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<(), String> {
-    let is_checked =
-        super::element::is_element_checked(client, session_id, ref_map, selector_or_ref).await?;
+    let is_checked = super::element::is_element_checked(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
     if is_checked {
-        click(client, session_id, ref_map, selector_or_ref, "left", 1).await?;
+        click(
+            client,
+            session_id,
+            ref_map,
+            selector_or_ref,
+            "left",
+            1,
+            iframe_sessions,
+        )
+        .await?;
+
+        // Same verify-and-retry as check().
+        if super::element::is_element_checked(
+            client,
+            session_id,
+            ref_map,
+            selector_or_ref,
+            iframe_sessions,
+        )
+        .await?
+        {
+            js_click_checkbox(
+                client,
+                session_id,
+                ref_map,
+                selector_or_ref,
+                iframe_sessions,
+            )
+            .await?;
+        }
     }
+    Ok(())
+}
+
+/// Fallback for when the coordinate-based CDP click did not toggle the
+/// checkbox/radio state. This mirrors how Playwright dispatches clicks
+/// through the DOM rather than via raw Input.dispatchMouseEvent coordinates.
+///
+/// Uses the same follow-label resolution as `is_element_checked`:
+/// 1. If the element is a native input → `.click()` it directly.
+/// 2. If the element is inside a `<label>` → `.click()` the label's `.control`.
+/// 3. If the element has a nested `<input>` → `.click()` that input.
+/// 4. Otherwise → `.click()` the element itself (handles ARIA role controls).
+async fn js_click_checkbox(
+    client: &CdpClient,
+    session_id: &str,
+    ref_map: &RefMap,
+    selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
+) -> Result<(), String> {
+    let (object_id, effective_session_id) = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
+
+    let js = r#"function() {
+            var el = this;
+            var tag = el.tagName && el.tagName.toUpperCase();
+            // 1. Native input — click it directly
+            if (tag === 'INPUT' && (el.type === 'checkbox' || el.type === 'radio')) {
+                el.click();
+                return;
+            }
+            // 2. Follow label → control association
+            var label = tag === 'LABEL' ? el : (el.closest && el.closest('label'));
+            if (label && label.tagName && label.tagName.toUpperCase() === 'LABEL' && label.control) {
+                label.control.click();
+                return;
+            }
+            // 3. Nested native input
+            var input = el.querySelector && el.querySelector('input[type="checkbox"], input[type="radio"]');
+            if (input) {
+                input.click();
+                return;
+            }
+            // 4. ARIA role control — click the element itself
+            el.click();
+        }"#;
+
+    client
+        .send_command_typed::<_, Value>(
+            "Runtime.callFunctionOn",
+            &CallFunctionOnParams {
+                function_declaration: js.to_string(),
+                object_id: Some(object_id),
+                arguments: None,
+                return_by_value: Some(true),
+                await_promise: Some(false),
+            },
+            Some(&effective_session_id),
+        )
+        .await?;
+
     Ok(())
 }
 
@@ -382,8 +609,16 @@ pub async fn focus(
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<(), String> {
-    let object_id = resolve_element_object_id(client, session_id, ref_map, selector_or_ref).await?;
+    let (object_id, effective_session_id) = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
 
     client
         .send_command_typed::<_, Value>(
@@ -395,7 +630,7 @@ pub async fn focus(
                 return_by_value: Some(true),
                 await_promise: Some(false),
             },
-            Some(session_id),
+            Some(&effective_session_id),
         )
         .await?;
 
@@ -407,8 +642,16 @@ pub async fn clear(
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<(), String> {
-    let object_id = resolve_element_object_id(client, session_id, ref_map, selector_or_ref).await?;
+    let (object_id, effective_session_id) = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
 
     client
         .send_command_typed::<_, Value>(
@@ -426,7 +669,7 @@ pub async fn clear(
                 return_by_value: Some(true),
                 await_promise: Some(false),
             },
-            Some(session_id),
+            Some(&effective_session_id),
         )
         .await?;
 
@@ -438,8 +681,16 @@ pub async fn select_all(
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<(), String> {
-    let object_id = resolve_element_object_id(client, session_id, ref_map, selector_or_ref).await?;
+    let (object_id, effective_session_id) = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
 
     client
         .send_command_typed::<_, Value>(
@@ -463,7 +714,7 @@ pub async fn select_all(
                 return_by_value: Some(true),
                 await_promise: Some(false),
             },
-            Some(session_id),
+            Some(&effective_session_id),
         )
         .await?;
 
@@ -475,8 +726,16 @@ pub async fn scroll_into_view(
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<(), String> {
-    let object_id = resolve_element_object_id(client, session_id, ref_map, selector_or_ref).await?;
+    let (object_id, effective_session_id) = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
 
     client
         .send_command_typed::<_, Value>(
@@ -490,7 +749,7 @@ pub async fn scroll_into_view(
                 return_by_value: Some(true),
                 await_promise: Some(false),
             },
-            Some(session_id),
+            Some(&effective_session_id),
         )
         .await?;
 
@@ -504,8 +763,16 @@ pub async fn dispatch_event(
     selector_or_ref: &str,
     event_type: &str,
     event_init: Option<&Value>,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<(), String> {
-    let object_id = resolve_element_object_id(client, session_id, ref_map, selector_or_ref).await?;
+    let (object_id, effective_session_id) = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
 
     let init_json = event_init
         .map(|v| serde_json::to_string(v).unwrap_or("{}".to_string()))
@@ -527,7 +794,7 @@ pub async fn dispatch_event(
                 return_by_value: Some(true),
                 await_promise: Some(false),
             },
-            Some(session_id),
+            Some(&effective_session_id),
         )
         .await?;
 
@@ -539,8 +806,16 @@ pub async fn highlight(
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<(), String> {
-    let object_id = resolve_element_object_id(client, session_id, ref_map, selector_or_ref).await?;
+    let (object_id, effective_session_id) = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
 
     client
         .send_command_typed::<_, Value>(
@@ -561,7 +836,7 @@ pub async fn highlight(
                 return_by_value: Some(true),
                 await_promise: Some(false),
             },
-            Some(session_id),
+            Some(&effective_session_id),
         )
         .await?;
 
@@ -573,8 +848,16 @@ pub async fn tap_touch(
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<(), String> {
-    let (x, y) = resolve_element_center(client, session_id, ref_map, selector_or_ref).await?;
+    let (x, y, effective_session_id) = resolve_element_center(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
 
     client
         .send_command(
@@ -583,7 +866,7 @@ pub async fn tap_touch(
                 "type": "touchStart",
                 "touchPoints": [{ "x": x, "y": y }],
             })),
-            Some(session_id),
+            Some(&effective_session_id),
         )
         .await?;
 
@@ -594,7 +877,7 @@ pub async fn tap_touch(
                 "type": "touchEnd",
                 "touchPoints": [],
             })),
-            Some(session_id),
+            Some(&effective_session_id),
         )
         .await?;
 
@@ -682,15 +965,75 @@ fn char_to_key_info(ch: char) -> (String, String, i32) {
         ' ' => (" ".to_string(), "Space".to_string(), 32),
         _ => {
             let key = ch.to_string();
-            let code = if ch.is_ascii_alphabetic() {
-                format!("Key{}", ch.to_uppercase())
+            if ch.is_ascii_alphabetic() {
+                // For letters the Windows VK code equals the uppercase ASCII value.
+                let upper = ch.to_ascii_uppercase();
+                let code = format!("Key{}", upper);
+                let key_code = upper as i32;
+                (key, code, key_code)
             } else if ch.is_ascii_digit() {
-                format!("Digit{}", ch)
+                let code = format!("Digit{}", ch);
+                let key_code = ch as i32;
+                (key, code, key_code)
             } else {
-                String::new()
-            };
-            let key_code = ch as i32;
-            (key, code, key_code)
+                let (code, key_code) = punctuation_key_info(ch);
+                (key, code.to_string(), key_code)
+            }
+        }
+    }
+}
+
+/// Return the DOM `KeyboardEvent.code` value and Windows virtual-key code for
+/// a punctuation / symbol character assuming a US keyboard layout.
+///
+/// The Windows virtual-key codes (VK_OEM_*) differ from ASCII values for
+/// punctuation.  Using the raw ASCII code would misidentify characters – e.g.
+/// '.' (ASCII 46) collides with VK_DELETE (0x2E = 46), causing the period to
+/// be swallowed.
+fn punctuation_key_info(ch: char) -> (&'static str, i32) {
+    match ch {
+        // VK_OEM_1 (0xBA = 186) — ";:" key on US layout
+        ';' | ':' => ("Semicolon", 186),
+        // VK_OEM_PLUS (0xBB = 187) — "=+" key
+        '=' | '+' => ("Equal", 187),
+        // VK_OEM_COMMA (0xBC = 188) — ",<" key
+        ',' | '<' => ("Comma", 188),
+        // VK_OEM_MINUS (0xBD = 189) — "-_" key
+        '-' | '_' => ("Minus", 189),
+        // VK_OEM_PERIOD (0xBE = 190) — ".>" key
+        '.' | '>' => ("Period", 190),
+        // VK_OEM_2 (0xBF = 191) — "/?" key
+        '/' | '?' => ("Slash", 191),
+        // VK_OEM_3 (0xC0 = 192) — "`~" key
+        '`' | '~' => ("Backquote", 192),
+        // VK_OEM_4 (0xDB = 219) — "[{" key
+        '[' | '{' => ("BracketLeft", 219),
+        // VK_OEM_5 (0xDC = 220) — "\\|" key
+        '\\' | '|' => ("Backslash", 220),
+        // VK_OEM_6 (0xDD = 221) — "]}" key
+        ']' | '}' => ("BracketRight", 221),
+        // VK_OEM_7 (0xDE = 222) — "'\""" key
+        '\'' | '"' => ("Quote", 222),
+        _ => ("", 0),
+    }
+}
+
+/// Return the `text` value that CDP `Input.dispatchKeyEvent` needs on the
+/// `keyDown` event so that Chrome performs the default action for the key.
+/// For example Enter needs `"\r"` to actually submit a form, and Tab needs
+/// `"\t"` to move focus.  Non-printable / navigation keys return `None`.
+fn key_text(key_name: &str) -> Option<String> {
+    match key_name {
+        "Enter" => Some("\r".to_string()),
+        "Tab" => Some("\t".to_string()),
+        " " => Some(" ".to_string()),
+        _ => {
+            // Single printable characters carry themselves as text.
+            if key_name.len() == 1 {
+                Some(key_name.to_string())
+            } else {
+                None
+            }
         }
     }
 }
@@ -719,5 +1062,122 @@ fn named_key_info(key: &str) -> (String, String, i32) {
                 (key.to_string(), key.to_string(), 0)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Verify that `char_to_key_info` returns the correct (key, code,
+    /// windowsVirtualKeyCode) triple for every character in Playwright's
+    /// USKeyboardLayout.  The expected values below are taken verbatim from
+    /// playwright-core/lib/server/usKeyboardLayout.js so that any drift from
+    /// Playwright's behaviour is caught immediately.
+    #[test]
+    fn test_char_to_key_info_matches_playwright_layout() {
+        // (character, expected_code, expected_vk_code)
+        let cases: &[(char, &str, i32)] = &[
+            // Letters – VK code must equal the uppercase ASCII value.
+            ('a', "KeyA", 65),
+            ('z', "KeyZ", 90),
+            ('A', "KeyA", 65),
+            // Digits
+            ('0', "Digit0", 48),
+            ('9', "Digit9", 57),
+            // Punctuation – these are the values from Playwright's layout.
+            // The bug that prompted this test sent '.' as VK 46 (= VK_DELETE).
+            ('.', "Period", 190),
+            (',', "Comma", 188),
+            ('/', "Slash", 191),
+            (';', "Semicolon", 186),
+            ('\'', "Quote", 222),
+            ('[', "BracketLeft", 219),
+            (']', "BracketRight", 221),
+            ('\\', "Backslash", 220),
+            ('`', "Backquote", 192),
+            ('-', "Minus", 189),
+            ('=', "Equal", 187),
+            // Shifted variants produced by the same physical keys.
+            ('>', "Period", 190),
+            ('<', "Comma", 188),
+            ('?', "Slash", 191),
+            (':', "Semicolon", 186),
+            ('"', "Quote", 222),
+            ('{', "BracketLeft", 219),
+            ('}', "BracketRight", 221),
+            ('|', "Backslash", 220),
+            ('~', "Backquote", 192),
+            ('_', "Minus", 189),
+            ('+', "Equal", 187),
+            // Whitespace / control
+            (' ', "Space", 32),
+            ('\n', "Enter", 13),
+            ('\t', "Tab", 9),
+        ];
+
+        for &(ch, expected_code, expected_vk) in cases {
+            let (key, code, vk) = char_to_key_info(ch);
+            assert_eq!(
+                code, expected_code,
+                "char {:?}: expected code {:?}, got {:?}",
+                ch, expected_code, code
+            );
+            assert_eq!(
+                vk, expected_vk,
+                "char {:?}: expected VK {}, got {} (ASCII would be {})",
+                ch, expected_vk, vk, ch as i32
+            );
+            // key should be the character itself (except control chars).
+            if !ch.is_control() {
+                assert_eq!(key, ch.to_string(), "char {:?}: key mismatch", ch);
+            }
+        }
+    }
+
+    /// Regression test: period must NEVER map to VK 46 (VK_DELETE).
+    #[test]
+    fn test_period_is_not_vk_delete() {
+        let (_, _, vk) = char_to_key_info('.');
+        assert_ne!(
+            vk, 46,
+            "Period must not use VK code 46 (VK_DELETE); expected 190 (VK_OEM_PERIOD)"
+        );
+        assert_eq!(vk, 190);
+    }
+
+    /// Characters outside the US keyboard layout should return (key, "", 0)
+    /// so that `type_text` falls back to `Input.insertText`.
+    #[test]
+    fn test_unmapped_chars_return_zero_keycode() {
+        for ch in ['@', '#', '$', '%', '^', '&', '*', '(', ')', '€', '£', '你'] {
+            let (key, code, vk) = char_to_key_info(ch);
+            assert_eq!(
+                code, "",
+                "char {:?}: unmapped char should have empty code, got {:?}",
+                ch, code
+            );
+            assert_eq!(
+                vk, 0,
+                "char {:?}: unmapped char should have VK 0, got {}",
+                ch, vk
+            );
+            assert_eq!(key, ch.to_string());
+        }
+    }
+
+    #[test]
+    fn test_key_text_returns_correct_text_for_special_keys() {
+        assert_eq!(key_text("Enter"), Some("\r".to_string()));
+        assert_eq!(key_text("Tab"), Some("\t".to_string()));
+        assert_eq!(key_text(" "), Some(" ".to_string()));
+        // Single printable characters carry themselves.
+        assert_eq!(key_text("a"), Some("a".to_string()));
+        assert_eq!(key_text("Z"), Some("Z".to_string()));
+        // Non-printable named keys return None.
+        assert_eq!(key_text("Escape"), None);
+        assert_eq!(key_text("ArrowUp"), None);
+        assert_eq!(key_text("Backspace"), None);
+        assert_eq!(key_text("Delete"), None);
     }
 }

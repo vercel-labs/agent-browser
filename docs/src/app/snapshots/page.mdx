@@ -1,7 +1,3 @@
-import { pageMetadata } from "@/lib/page-metadata"
-
-export const metadata = pageMetadata("snapshots")
-
 # Snapshots
 
 The `snapshot` command returns a compact accessibility tree with refs for element interaction.
@@ -13,7 +9,6 @@ Filter output to reduce size:
 ```bash
 agent-browser snapshot                    # Full accessibility tree
 agent-browser snapshot -i                 # Interactive elements only (recommended)
-agent-browser snapshot -i -C              # Include cursor-interactive elements
 agent-browser snapshot -c                 # Compact (remove empty elements)
 agent-browser snapshot -d 3               # Limit depth to 3 levels
 agent-browser snapshot -s "#main"         # Scope to CSS selector
@@ -26,31 +21,11 @@ agent-browser snapshot -i -c -d 5         # Combine options
   </thead>
   <tbody>
     <tr><td><code>-i, --interactive</code></td><td>Only interactive elements (buttons, links, inputs)</td></tr>
-    <tr><td><code>-C, --cursor</code></td><td>Include cursor-interactive elements (cursor:pointer, onclick, tabindex)</td></tr>
     <tr><td><code>-c, --compact</code></td><td>Remove empty structural elements</td></tr>
     <tr><td><code>-d, --depth</code></td><td>Limit tree depth</td></tr>
     <tr><td><code>-s, --selector</code></td><td>Scope to CSS selector</td></tr>
   </tbody>
 </table>
-
-## Cursor-interactive elements
-
-Many modern web apps use custom clickable elements (divs, spans) instead of standard buttons or links.
-The `-C` flag detects these by looking for:
-
-- `cursor: pointer` CSS style
-- `onclick` attribute or handler
-- `tabindex` attribute (keyboard focusable)
-
-```bash
-agent-browser snapshot -i -C
-# Output includes:
-# @e1 [button] "Submit"
-# @e2 [link] "Learn more"
-# Cursor-interactive elements:
-# @e3 [clickable] "Menu Item" [cursor:pointer, onclick]
-# @e4 [clickable] "Card" [cursor:pointer]
-```
 
 ## Output format
 
@@ -101,6 +76,31 @@ agent-browser click @e2
 ```
 
 Annotated screenshots also cache refs, so you can interact with elements immediately. This is useful when the text snapshot is insufficient -- unlabeled icons, canvas content, or visual layout verification.
+
+## Iframes
+
+Snapshots automatically detect and inline iframe content. Each `Iframe` node in the main frame is resolved and its child accessibility tree is included directly beneath it. Refs assigned to elements inside iframes carry frame context, so interactions work without switching frames first.
+
+```bash
+agent-browser snapshot -i
+# @e1 [heading] "Checkout"
+# @e2 [Iframe] "payment-frame"
+#   @e3 [input] "Card number"
+#   @e4 [button] "Pay"
+
+agent-browser fill @e3 "4111111111111111"
+agent-browser click @e4
+```
+
+Only one level of iframe nesting is expanded. Cross-origin iframes that block accessibility tree access and empty iframes are silently omitted.
+
+To scope a snapshot to a single iframe, switch into it first:
+
+```bash
+agent-browser frame @e2
+agent-browser snapshot -i       # Only elements inside that iframe
+agent-browser frame main        # Return to main frame
+```
 
 ## Best practices
 

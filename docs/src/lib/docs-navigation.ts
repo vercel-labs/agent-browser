@@ -31,6 +31,7 @@ export const navigation: NavSection[] = [
     title: "Features",
     items: [
       { name: "Sessions", href: "/sessions" },
+      { name: "Dashboard", href: "/dashboard" },
       { name: "Diffing", href: "/diffing" },
       { name: "CDP Mode", href: "/cdp-mode" },
       { name: "Streaming", href: "/streaming" },
@@ -38,7 +39,16 @@ export const navigation: NavSection[] = [
       { name: "iOS Simulator", href: "/ios" },
       { name: "Security", href: "/security" },
       { name: "Next.js + Vercel", href: "/next" },
-      { name: "Native Mode (Experimental)", href: "/native-mode" },
+      { name: "Native Mode", href: "/native-mode" },
+    ],
+  },
+  {
+    title: "Providers",
+    items: [
+      { name: "Browser Use", href: "/providers/browser-use" },
+      { name: "Browserbase", href: "/providers/browserbase" },
+      { name: "Browserless", href: "/providers/browserless" },
+      { name: "Kernel", href: "/providers/kernel" },
     ],
   },
   {

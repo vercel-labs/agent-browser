@@ -12,16 +12,49 @@ pub struct ProviderSession {
     pub session_id: String,
 }
 
+pub struct ProviderConnection {
+    pub ws_url: String,
+    pub session: Option<ProviderSession>,
+    /// If true, the WebSocket IS the page session (no Target.* commands).
+    pub direct_page: bool,
+}
+
 /// Connects to the specified browser provider and returns a CDP WebSocket URL
 /// along with session info for cleanup on failure.
-pub async fn connect_provider(
-    provider_name: &str,
-) -> Result<(String, Option<ProviderSession>), String> {
+pub async fn connect_provider(provider_name: &str) -> Result<ProviderConnection, String> {
     match provider_name.to_lowercase().as_str() {
-        "browserbase" => connect_browserbase().await,
-        "browserless" => connect_browserless().await,
-        "browser-use" | "browseruse" => connect_browser_use().await,
-        "kernel" => connect_kernel().await,
+        "browserbase" => {
+            let (url, session) = connect_browserbase().await?;
+            Ok(ProviderConnection {
+                ws_url: url,
+                session,
+                direct_page: false,
+            })
+        }
+        "browserless" => {
+            let (url, session) = connect_browserless().await?;
+            Ok(ProviderConnection {
+                ws_url: url,
+                session,
+                direct_page: false,
+            })
+        }
+        "browser-use" | "browseruse" => {
+            let (url, session) = connect_browser_use().await?;
+            Ok(ProviderConnection {
+                ws_url: url,
+                session,
+                direct_page: false,
+            })
+        }
+        "kernel" => {
+            let (url, session) = connect_kernel().await?;
+            Ok(ProviderConnection {
+                ws_url: url,
+                session,
+                direct_page: false,
+            })
+        }
         _ => Err(format!(
             "Unknown provider '{}'. Supported: browserbase, browserless, browser-use, kernel",
             provider_name
@@ -91,7 +124,9 @@ async fn connect_browserbase() -> Result<(String, Option<ProviderSession>), Stri
     let client = reqwest::Client::new();
     let response = client
         .post("https://api.browserbase.com/v1/sessions")
-        .header("X-BB-API-Key", &api_key)
+        .header("content-type", "application/json")
+        .header("x-bb-api-key", &api_key)
+        .body("{}")
         .send()
         .await
         .map_err(|e| format!("Browserbase request failed: {}", e))?;
@@ -219,53 +254,9 @@ async fn connect_browser_use() -> Result<(String, Option<ProviderSession>), Stri
     let api_key = env::var("BROWSER_USE_API_KEY")
         .map_err(|_| "BROWSER_USE_API_KEY environment variable is not set")?;
 
-    let client = reqwest::Client::new();
-    let response = client
-        .post("https://api.browser-use.com/api/v2/browsers")
-        .header("Content-Type", "application/json")
-        .header("X-Browser-Use-API-Key", &api_key)
-        .json(&json!({}))
-        .send()
-        .await
-        .map_err(|e| format!("Browser Use request failed: {}", e))?;
+    let ws_url = format!("wss://connect.browser-use.com?apiKey={}", api_key);
 
-    let status = response.status();
-    let body = response
-        .text()
-        .await
-        .map_err(|e| format!("Failed to read Browser Use response: {}", e))?;
-
-    if !status.is_success() {
-        return Err(format!(
-            "Browser Use API error ({}): {}",
-            status.as_u16(),
-            body
-        ));
-    }
-
-    let json: Value =
-        serde_json::from_str(&body).map_err(|e| format!("Invalid Browser Use response: {}", e))?;
-
-    let session_id = json
-        .get("id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-
-    let ws_url = json
-        .get("cdp_url")
-        .or_else(|| json.get("cdpUrl"))
-        .and_then(|v| v.as_str())
-        .map(String::from)
-        .ok_or_else(|| "Browser Use response missing cdp_url or cdpUrl".to_string())?;
-
-    Ok((
-        ws_url,
-        Some(ProviderSession {
-            provider: "browser-use".to_string(),
-            session_id,
-        }),
-    ))
+    Ok((ws_url, None))
 }
 
 async fn connect_kernel() -> Result<(String, Option<ProviderSession>), String> {

@@ -261,7 +261,7 @@ export function DocsChat({
   // Cmd+K to open sidebar and focus prompt, Escape to close
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "k" && (e.metaKey || e.ctrlKey)) {
+      if (e.key === "i" && (e.metaKey || e.ctrlKey)) {
         e.preventDefault();
         setOpen((prev) => {
           if (!prev) {
@@ -327,7 +327,7 @@ export function DocsChat({
   const chatPanel = (
     <>
       {/* Header */}
-      <div className="flex items-center justify-between px-4 py-3 border-b shrink-0">
+      <div className="flex items-center justify-between px-4 py-3 border-b border-border/50 shrink-0">
         <span className="text-sm font-medium">agent-browser Docs</span>
         <div className="flex items-center gap-3">
           {showMessages && (
@@ -443,7 +443,7 @@ export function DocsChat({
       {/* Input bar */}
       <form
         onSubmit={handleSubmit}
-        className="flex items-end gap-2 px-4 py-3 border-t shrink-0"
+        className="flex items-end gap-2 px-4 py-3 border-t border-border/50 shrink-0"
       >
         <textarea
           ref={inputRef}
@@ -499,14 +499,14 @@ export function DocsChat({
         >
           Ask AI
           <kbd className="hidden sm:inline-flex items-center gap-0.5 text-xs opacity-60 font-mono">
-            <span>&#8984;</span>K
+            <span>&#8984;</span>I
           </kbd>
         </button>
       )}
 
       {/* Desktop: resizable side pane -- always rendered, hidden on mobile via CSS */}
       <aside
-        className={`hidden sm:flex fixed top-0 right-0 bottom-0 z-40 border-l bg-background transition-transform duration-150 ease-in-out ${open ? "translate-x-0" : "translate-x-full"}`}
+        className={`hidden sm:flex fixed top-0 right-0 bottom-0 z-40 border-l border-border/50 bg-background transition-transform duration-150 ease-in-out ${open ? "translate-x-0" : "translate-x-full"}`}
         style={{ width: desktopWidth }}
         aria-hidden={!open}
       >
@@ -525,7 +525,7 @@ export function DocsChat({
             side="right"
             showCloseButton={false}
             overlayClassName="bg-background!"
-            className="inset-0! w-full! h-full! max-w-none! p-0 flex flex-col"
+            className="inset-0! w-full! h-full! max-w-none! border-l-0! p-0 flex flex-col"
             style={{ backgroundColor: "var(--background)", opacity: 1 }}
           >
             <SheetTitle className="sr-only">AI Chat</SheetTitle>

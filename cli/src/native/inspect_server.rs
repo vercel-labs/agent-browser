@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 
@@ -87,7 +88,7 @@ async fn accept_loop(
 
         tokio::spawn(async move {
             if let Err(e) = handle_connection(stream, proxy, tid, chp, proxy_port).await {
-                eprintln!("[inspect] connection error: {}", e);
+                let _ = writeln!(std::io::stderr(), "[inspect] connection error: {}", e);
             }
         });
     }
@@ -233,7 +234,8 @@ async fn handle_ws_proxy(
             let raw_msg = match raw_rx.recv().await {
                 Ok(msg) => msg,
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                    eprintln!(
+                    let _ = writeln!(
+                        std::io::stderr(),
                         "[inspect] warning: dropped {} CDP messages (channel lag)",
                         n
                     );
