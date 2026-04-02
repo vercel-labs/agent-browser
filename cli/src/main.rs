@@ -869,6 +869,10 @@ fn main() {
             launch_cmd["downloadPath"] = json!(dp);
         }
 
+        if let Some(ref ctx) = flags.context {
+            launch_cmd["contextName"] = json!(ctx);
+        }
+
         let err = match send_command(launch_cmd, &flags.session) {
             Ok(resp) if resp.success => None,
             Ok(resp) => Some(
@@ -965,6 +969,10 @@ fn main() {
                 launch_cmd["downloadPath"] = json!(dp);
             }
 
+            if let Some(ref ctx) = flags.context {
+                launch_cmd["contextName"] = json!(ctx);
+            }
+
             let err = match send_command(launch_cmd, &flags.session) {
                 Ok(resp) if resp.success => None,
                 Ok(resp) => Some(
@@ -997,6 +1005,10 @@ fn main() {
 
             if let Some(ref cs) = flags.color_scheme {
                 launch_cmd["colorScheme"] = json!(cs);
+            }
+
+            if let Some(ref ctx) = flags.context {
+                launch_cmd["contextName"] = json!(ctx);
             }
 
             let err = match send_command(launch_cmd, &flags.session) {
@@ -1117,6 +1129,10 @@ fn main() {
 
         if let Some(ref engine) = flags.engine {
             launch_cmd["engine"] = json!(engine);
+        }
+
+        if let Some(ref ctx) = flags.context {
+            launch_cmd["contextName"] = json!(ctx);
         }
 
         match send_command(launch_cmd, &flags.session) {

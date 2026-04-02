@@ -492,6 +492,7 @@ agent-browser --session-name secure open example.com
 
 | Variable                          | Description                                        |
 | --------------------------------- | -------------------------------------------------- |
+| `AGENT_BROWSER_CONTEXT`           | BrowserContext name for shared CDP isolation       |
 | `AGENT_BROWSER_SESSION_NAME`      | Auto-save/load state persistence name              |
 | `AGENT_BROWSER_ENCRYPTION_KEY`    | 64-char hex key for AES-256-GCM encryption         |
 | `AGENT_BROWSER_STATE_EXPIRE_DAYS` | Auto-delete states older than N days (default: 30) |
@@ -566,6 +567,7 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 | Option | Description |
 |--------|-------------|
 | `--session <name>` | Use isolated session (or `AGENT_BROWSER_SESSION` env) |
+| `--context <name>` | Create isolated BrowserContext for shared CDP connections (or `AGENT_BROWSER_CONTEXT` env) |
 | `--session-name <name>` | Auto-save/restore session state (or `AGENT_BROWSER_SESSION_NAME` env) |
 | `--profile <path>` | Persistent browser profile directory (or `AGENT_BROWSER_PROFILE` env) |
 | `--state <path>` | Load storage state from JSON file (or `AGENT_BROWSER_STATE` env) |

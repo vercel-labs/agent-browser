@@ -55,6 +55,8 @@ When automating a site that requires login, choose the approach that fits:
 ```bash
 # Connect to the user's running Chrome (they're already logged in)
 agent-browser --auto-connect state save ./auth.json
+# Optional: isolate automation in a dedicated BrowserContext while sharing the same Chrome process
+agent-browser --auto-connect --context my-task open https://app.example.com
 # Use that auth state
 agent-browser --state ./auth.json open https://app.example.com/dashboard
 ```

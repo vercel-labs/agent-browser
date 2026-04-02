@@ -985,6 +985,7 @@ Aliases: goto, navigate
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
+  --context <name>     Create isolated BrowserContext in shared Chrome
   --headers <json>     Set HTTP headers (scoped to this origin)
   --headed             Show browser window
 
@@ -2797,6 +2798,7 @@ Authentication:
 
 Options:
   --session <name>           Isolated session (or AGENT_BROWSER_SESSION env)
+  --context <name>           Create isolated BrowserContext (cookie/storage isolation)
   --executable-path <path>   Custom browser executable (or AGENT_BROWSER_EXECUTABLE_PATH)
   --extension <path>         Load browser extensions (repeatable)
   --args <args>              Browser launch args, comma or newline separated (or AGENT_BROWSER_ARGS)
@@ -2853,6 +2855,7 @@ Configuration:
 Environment:
   AGENT_BROWSER_CONFIG           Path to config file (or use --config)
   AGENT_BROWSER_SESSION          Session name (default: "default")
+  AGENT_BROWSER_CONTEXT          BrowserContext name for cookie/storage isolation
   AGENT_BROWSER_SESSION_NAME     Auto-save/restore state persistence name
   AGENT_BROWSER_ENCRYPTION_KEY   64-char hex key for AES-256-GCM state encryption
   AGENT_BROWSER_STATE_EXPIRE_DAYS Auto-delete states older than N days (default: 30)
