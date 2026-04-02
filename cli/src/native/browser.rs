@@ -1,12 +1,14 @@
 use serde_json::{json, Value};
 use std::collections::HashSet;
+use std::future::Future;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use std::time::{Duration, Instant};
+use tokio::sync::{broadcast, Mutex};
 
-use super::cdp::chrome::{
-    auto_connect_cdp, discover_cdp_url, launch_chrome, ChromeProcess, LaunchOptions,
-};
+use super::cdp::chrome::{auto_connect_cdp, launch_chrome, ChromeProcess, LaunchOptions};
 use super::cdp::client::CdpClient;
+use super::cdp::discovery::discover_cdp_url;
+use super::cdp::lightpanda::{launch_lightpanda, LightpandaLaunchOptions, LightpandaProcess};
 use super::cdp::types::*;
 
 // ---------------------------------------------------------------------------
@@ -55,6 +57,59 @@ pub fn validate_launch_options(
     Ok(())
 }
 
+/// Validates that Chrome-only options are not used with Lightpanda.
+fn validate_lightpanda_options(options: &LaunchOptions) -> Result<(), String> {
+    if options
+        .extensions
+        .as_ref()
+        .map(|e| !e.is_empty())
+        .unwrap_or(false)
+    {
+        return Err("Extensions are not supported with Lightpanda".to_string());
+    }
+    if options.profile.is_some() {
+        return Err("Profiles are not supported with Lightpanda".to_string());
+    }
+    if options.storage_state.is_some() {
+        return Err("Storage state is not supported with Lightpanda".to_string());
+    }
+    if options.allow_file_access {
+        return Err("File access is not supported with Lightpanda".to_string());
+    }
+    if !options.headless {
+        return Err("Headed mode is not supported with Lightpanda (headless only)".to_string());
+    }
+    if !options.args.is_empty() {
+        return Err(
+            "Custom Chrome arguments (--args) are not supported with Lightpanda".to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// Returns true for Chrome internal targets that should not be selected
+/// during auto-connect (e.g. chrome://, chrome-extension://, devtools://).
+fn is_internal_chrome_target(url: &str) -> bool {
+    url.starts_with("chrome://")
+        || url.starts_with("chrome-extension://")
+        || url.starts_with("devtools://")
+}
+
+pub(crate) fn should_track_target(target: &TargetInfo) -> bool {
+    (target.target_type == "page" || target.target_type == "webview")
+        && (target.url.is_empty() || !is_internal_chrome_target(&target.url))
+}
+
+fn update_page_target_info_in_pages(pages: &mut [PageInfo], target: &TargetInfo) -> bool {
+    if let Some(page) = pages.iter_mut().find(|p| p.target_id == target.target_id) {
+        page.url = target.url.clone();
+        page.title = target.title.clone();
+        page.target_type = target.target_type.clone();
+        return true;
+    }
+    false
+}
+
 /// Converts common error messages into AI-friendly, actionable descriptions.
 pub fn to_ai_friendly_error(error: &str) -> String {
     let lower = error.to_lowercase();
@@ -73,7 +128,7 @@ pub fn to_ai_friendly_error(error: &str) -> String {
         return "Operation timed out. The page may still be loading or the element may not exist."
             .to_string();
     }
-    if lower.contains("not found") || lower.contains("no element") {
+    if lower.contains("element not found") || lower.contains("no element") {
         return "Element not found. Verify the selector is correct and the element exists in the DOM."
             .to_string();
     }
@@ -86,13 +141,15 @@ pub struct PageInfo {
     pub session_id: String,
     pub url: String,
     pub title: String,
+    pub target_type: String, // "page" or "webview"
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WaitUntil {
     Load,
     DomContentLoaded,
     NetworkIdle,
+    None,
 }
 
 impl WaitUntil {
@@ -100,48 +157,126 @@ impl WaitUntil {
         match s {
             "domcontentloaded" => Self::DomContentLoaded,
             "networkidle" => Self::NetworkIdle,
+            "none" => Self::None,
             _ => Self::Load,
         }
     }
 }
 
+pub enum BrowserProcess {
+    Chrome(ChromeProcess),
+    Lightpanda(LightpandaProcess),
+}
+
+impl BrowserProcess {
+    pub fn kill(&mut self) {
+        match self {
+            BrowserProcess::Chrome(p) => p.kill(),
+            BrowserProcess::Lightpanda(p) => p.kill(),
+        }
+    }
+
+    pub fn wait_or_kill(&mut self, timeout: std::time::Duration) {
+        match self {
+            BrowserProcess::Chrome(p) => p.wait_or_kill(timeout),
+            BrowserProcess::Lightpanda(p) => p.kill(),
+        }
+    }
+
+    /// Non-blocking check whether the browser process has exited.
+    pub fn has_exited(&mut self) -> bool {
+        match self {
+            BrowserProcess::Chrome(p) => p.has_exited(),
+            BrowserProcess::Lightpanda(_) => false,
+        }
+    }
+}
+
 pub struct BrowserManager {
-    pub client: CdpClient,
-    chrome_process: Option<ChromeProcess>,
+    pub client: Arc<CdpClient>,
+    browser_process: Option<BrowserProcess>,
+    ws_url: String,
     pages: Vec<PageInfo>,
     active_page_index: usize,
     default_timeout_ms: u64,
+    /// Stored download path from launch options, re-applied to new contexts (e.g., recording)
+    pub download_path: Option<String>,
+    /// Origins visited during this session, used by save_state to collect cross-origin localStorage.
+    visited_origins: HashSet<String>,
 }
 
+const LIGHTPANDA_CDP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const LIGHTPANDA_CDP_CONNECT_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const LIGHTPANDA_TARGET_INIT_TIMEOUT: Duration = Duration::from_secs(10);
+
 impl BrowserManager {
-    pub async fn launch(options: LaunchOptions) -> Result<Self, String> {
-        validate_launch_options(
-            options.extensions.as_deref(),
-            false,
-            options.profile.as_deref(),
-            options.storage_state.as_deref(),
-            options.allow_file_access,
-            options.executable_path.as_deref(),
-        )?;
+    pub async fn launch(options: LaunchOptions, engine: Option<&str>) -> Result<Self, String> {
+        let engine = engine.unwrap_or("chrome");
+
+        match engine {
+            "chrome" => {
+                validate_launch_options(
+                    options.extensions.as_deref(),
+                    false,
+                    options.profile.as_deref(),
+                    options.storage_state.as_deref(),
+                    options.allow_file_access,
+                    options.executable_path.as_deref(),
+                )?;
+            }
+            "lightpanda" => {
+                validate_lightpanda_options(&options)?;
+            }
+            _ => {
+                return Err(format!(
+                    "Unknown engine '{}'. Supported engines: chrome, lightpanda",
+                    engine
+                ));
+            }
+        }
 
         let ignore_https_errors = options.ignore_https_errors;
         let user_agent = options.user_agent.clone();
         let color_scheme = options.color_scheme.clone();
         let download_path = options.download_path.clone();
 
-        let chrome = launch_chrome(&options)?;
-        let ws_url = chrome.ws_url.clone();
-
-        let client = CdpClient::connect(&ws_url).await?;
-        let mut manager = Self {
-            client,
-            chrome_process: Some(chrome),
-            pages: Vec::new(),
-            active_page_index: 0,
-            default_timeout_ms: 25_000,
+        let (ws_url, process) = match engine {
+            "lightpanda" => {
+                let lp_options = LightpandaLaunchOptions {
+                    executable_path: options.executable_path.clone(),
+                    proxy: options.proxy.clone(),
+                    port: None,
+                };
+                let lp = launch_lightpanda(&lp_options).await?;
+                let url = lp.ws_url.clone();
+                (url, BrowserProcess::Lightpanda(lp))
+            }
+            _ => {
+                let chrome = tokio::task::spawn_blocking(move || launch_chrome(&options))
+                    .await
+                    .map_err(|e| format!("Chrome launch task failed: {}", e))??;
+                let url = chrome.ws_url.clone();
+                (url, BrowserProcess::Chrome(chrome))
+            }
         };
 
-        manager.discover_and_attach_targets().await?;
+        let manager = if engine == "lightpanda" {
+            initialize_lightpanda_manager(ws_url, process).await?
+        } else {
+            let client = Arc::new(CdpClient::connect(&ws_url).await?);
+            let mut manager = Self {
+                client,
+                browser_process: Some(process),
+                ws_url,
+                pages: Vec::new(),
+                active_page_index: 0,
+                default_timeout_ms: 25_000,
+                download_path: download_path.clone(),
+                visited_origins: HashSet::new(),
+            };
+            manager.discover_and_attach_targets().await?;
+            manager
+        };
 
         let session_id = manager.active_session_id()?.to_string();
 
@@ -193,24 +328,53 @@ impl BrowserManager {
     }
 
     pub async fn connect_cdp(url: &str) -> Result<Self, String> {
-        Self::connect_cdp_with_headers(url, None).await
+        Self::connect_cdp_inner(url, false, None).await
+    }
+
+    /// Connect to a provider CDP proxy where the WebSocket IS the page session.
+    /// Skips browser-level Target.* commands that most proxies don't support.
+    pub async fn connect_cdp_direct(url: &str) -> Result<Self, String> {
+        Self::connect_cdp_inner(url, true, None).await
     }
 
     pub async fn connect_cdp_with_headers(
         url: &str,
         headers: Option<Vec<(String, String)>>,
     ) -> Result<Self, String> {
+        Self::connect_cdp_inner(url, false, headers).await
+    }
+
+    async fn connect_cdp_inner(
+        url: &str,
+        direct_page: bool,
+        headers: Option<Vec<(String, String)>>,
+    ) -> Result<Self, String> {
         let ws_url = resolve_cdp_url(url).await?;
-        let client = CdpClient::connect_with_headers(&ws_url, headers).await?;
+        let client = Arc::new(CdpClient::connect_with_headers(&ws_url, headers).await?);
         let mut manager = Self {
             client,
-            chrome_process: None,
+            browser_process: None,
+            ws_url,
             pages: Vec::new(),
             active_page_index: 0,
-            default_timeout_ms: 60_000, // AgentCore needs longer timeout
+            default_timeout_ms: 25_000,
+            download_path: None,
+            visited_origins: HashSet::new(),
         };
 
-        manager.discover_and_attach_targets().await?;
+        if direct_page {
+            manager.pages.push(PageInfo {
+                target_id: "provider-page".to_string(),
+                session_id: String::new(),
+                url: String::new(),
+                title: String::new(),
+                target_type: "page".to_string(),
+            });
+            manager.active_page_index = 0;
+            manager.enable_domains_direct().await?;
+        } else {
+            manager.discover_and_attach_targets().await?;
+        }
         Ok(manager)
     }
 
@@ -236,7 +400,7 @@ impl BrowserManager {
         let page_targets: Vec<TargetInfo> = result
             .target_infos
             .into_iter()
-            .filter(|t| t.target_type == "page" && !t.url.is_empty())
+            .filter(should_track_target)
             .collect();
 
         if page_targets.is_empty() {
@@ -269,6 +433,7 @@ impl BrowserManager {
                 session_id: attach_result.session_id.clone(),
                 url: "about:blank".to_string(),
                 title: String::new(),
+                target_type: "page".to_string(),
             });
             self.active_page_index = 0;
             self.enable_domains(&attach_result.session_id).await?;
@@ -291,6 +456,7 @@ impl BrowserManager {
                     session_id: attach_result.session_id.clone(),
                     url: target.url.clone(),
                     title: target.title.clone(),
+                    target_type: target.target_type.clone(),
                 });
             }
 
@@ -316,6 +482,35 @@ impl BrowserManager {
         self.client
             .send_command_no_params("Network.enable", Some(session_id))
             .await?;
+        // Enable auto-attach for cross-origin iframe support.
+        // flatten: true gives each iframe its own session_id.
+        // Ignored on engines that don't support it (e.g. Lightpanda).
+        let _ = self
+            .client
+            .send_command(
+                "Target.setAutoAttach",
+                Some(json!({
+                    "autoAttach": true,
+                    "waitForDebuggerOnStart": false,
+                    "flatten": true
+                })),
+                Some(session_id),
+            )
+            .await;
+        Ok(())
+    }
+
+    /// Enable domains on a direct page connection (no session_id needed).
+    async fn enable_domains_direct(&self) -> Result<(), String> {
+        self.client
+            .send_command_no_params("Page.enable", None)
+            .await?;
+        self.client
+            .send_command_no_params("Runtime.enable", None)
+            .await?;
+        self.client
+            .send_command_no_params("Network.enable", None)
+            .await?;
         Ok(())
     }
 
@@ -328,6 +523,7 @@ impl BrowserManager {
 
     pub async fn navigate(&mut self, url: &str, wait_until: WaitUntil) -> Result<Value, String> {
         let session_id = self.active_session_id()?.to_string();
+        let mut lifecycle_rx = self.client.subscribe();
 
         let nav_result: PageNavigateResult = self
             .client
@@ -345,10 +541,24 @@ impl BrowserManager {
             return Err(format!("Navigation failed: {}", error_text));
         }
 
-        self.wait_for_lifecycle(wait_until, &session_id).await?;
+        // Only wait for lifecycle events if Chrome created a new loader (full navigation).
+        // If loader_id is None, it was a same-document navigation (e.g., hash routing)
+        // which does not fire Page.loadEventFired or Page.domContentEventFired.
+        if nav_result.loader_id.is_some() && wait_until != WaitUntil::None {
+            self.wait_for_lifecycle(wait_until, &session_id, &mut lifecycle_rx)
+                .await?;
+        }
 
         let page_url = self.get_url().await.unwrap_or_else(|_| url.to_string());
         let title = self.get_title().await.unwrap_or_default();
+
+        // Track visited origin for cross-origin localStorage collection in save_state
+        if let Ok(parsed) = url::Url::parse(&page_url) {
+            let origin = parsed.origin().ascii_serialization();
+            if origin != "null" {
+                self.visited_origins.insert(origin);
+            }
+        }
 
         if let Some(page) = self.pages.get_mut(self.active_page_index) {
             page.url = page_url.clone();
@@ -362,20 +572,29 @@ impl BrowserManager {
         &self,
         wait_until: WaitUntil,
         session_id: &str,
+        rx: &mut broadcast::Receiver<CdpEvent>,
     ) -> Result<(), String> {
         let event_name = match wait_until {
             WaitUntil::Load => "Page.loadEventFired",
             WaitUntil::DomContentLoaded => "Page.domContentEventFired",
-            WaitUntil::NetworkIdle => return self.wait_for_network_idle(session_id).await,
+            WaitUntil::NetworkIdle => return self.wait_for_network_idle(session_id, rx).await,
+            WaitUntil::None => return Ok(()),
         };
 
-        let mut rx = self.client.subscribe();
         let timeout = tokio::time::Duration::from_millis(self.default_timeout_ms);
 
         tokio::time::timeout(timeout, async {
-            while let Ok(event) = rx.recv().await {
-                if event.method == event_name && event.session_id.as_deref() == Some(session_id) {
-                    return Ok(());
+            loop {
+                match rx.recv().await {
+                    Ok(event) => {
+                        if event.method == event_name
+                            && event.session_id.as_deref() == Some(session_id)
+                        {
+                            return Ok(());
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
             }
             Err("Event stream closed".to_string())
@@ -384,70 +603,13 @@ impl BrowserManager {
         .map_err(|_| format!("Timeout waiting for {}", event_name))?
     }
 
-    async fn wait_for_network_idle(&self, session_id: &str) -> Result<(), String> {
-        let mut rx = self.client.subscribe();
-        let pending = Arc::new(Mutex::new(HashSet::<String>::new()));
+    async fn wait_for_network_idle(
+        &self,
+        session_id: &str,
+        rx: &mut broadcast::Receiver<CdpEvent>,
+    ) -> Result<(), String> {
         let timeout = tokio::time::Duration::from_millis(self.default_timeout_ms);
-
-        tokio::time::timeout(timeout, async {
-            let mut idle_start: Option<tokio::time::Instant> = None;
-
-            loop {
-                let recv_result =
-                    tokio::time::timeout(tokio::time::Duration::from_millis(600), rx.recv()).await;
-
-                match recv_result {
-                    Ok(Ok(event)) if event.session_id.as_deref() == Some(session_id) => {
-                        let mut p = pending.lock().await;
-                        match event.method.as_str() {
-                            "Network.requestWillBeSent" => {
-                                if let Some(id) =
-                                    event.params.get("requestId").and_then(|v| v.as_str())
-                                {
-                                    p.insert(id.to_string());
-                                    idle_start = None;
-                                }
-                            }
-                            "Network.loadingFinished" | "Network.loadingFailed" => {
-                                if let Some(id) =
-                                    event.params.get("requestId").and_then(|v| v.as_str())
-                                {
-                                    p.remove(id);
-                                    if p.is_empty() {
-                                        idle_start = Some(tokio::time::Instant::now());
-                                    }
-                                }
-                            }
-                            "Page.loadEventFired" => {
-                                if p.is_empty() {
-                                    idle_start = Some(tokio::time::Instant::now());
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                    Ok(Ok(_)) => {}
-                    Ok(Err(_)) => break,
-                    Err(_) => {
-                        // Timeout on recv -- check if idle long enough
-                        let p = pending.lock().await;
-                        if p.is_empty() {
-                            return Ok(());
-                        }
-                    }
-                }
-
-                if let Some(start) = idle_start {
-                    if start.elapsed() >= tokio::time::Duration::from_millis(500) {
-                        return Ok(());
-                    }
-                }
-            }
-
-            Ok(())
-        })
-        .await
-        .map_err(|_| "Timeout waiting for networkidle".to_string())?
+        poll_network_idle(session_id, rx, timeout).await
     }
 
     pub async fn get_url(&self) -> Result<String, String> {
@@ -504,19 +666,28 @@ impl BrowserManager {
         wait_until: WaitUntil,
         session_id: &str,
     ) -> Result<(), String> {
-        self.wait_for_lifecycle(wait_until, session_id).await
+        let mut rx = self.client.subscribe();
+        self.wait_for_lifecycle(wait_until, session_id, &mut rx)
+            .await
     }
 
     pub async fn close(&mut self) -> Result<(), String> {
-        // Close the browser via CDP if possible
-        let _ = self
-            .client
-            .send_command_no_params("Browser.close", None)
-            .await;
+        if self.browser_process.is_some() {
+            // Only send Browser.close when we launched the browser ourselves.
+            // For external connections (--auto-connect, --cdp) we just disconnect
+            // without shutting down the user's browser.
+            let _ = self
+                .client
+                .send_command_no_params("Browser.close", None)
+                .await;
+        }
 
-        // Kill Chrome process if we own it
-        if let Some(ref mut chrome) = self.chrome_process {
-            chrome.kill();
+        if let Some(mut process) = self.browser_process.take() {
+            let timeout = std::time::Duration::from_secs(5);
+            let _ = tokio::task::spawn_blocking(move || {
+                process.wait_or_kill(timeout);
+            })
+            .await;
         }
 
         Ok(())
@@ -524,6 +695,10 @@ impl BrowserManager {
 
     pub fn has_pages(&self) -> bool {
         !self.pages.is_empty()
+    }
+
+    pub fn default_timeout_ms(&self) -> u64 {
+        self.default_timeout_ms
     }
 
     /// Checks if the CDP connection is alive by sending a simple command.
@@ -543,9 +718,41 @@ impl BrowserManager {
         }
     }
 
+    /// Non-blocking check whether the locally-launched browser process has exited
+    /// (crashed or terminated). Also reaps the zombie if it has exited.
+    /// Returns false for external CDP connections (no child process to monitor).
+    pub fn has_process_exited(&mut self) -> bool {
+        if let Some(ref mut process) = self.browser_process {
+            process.has_exited()
+        } else {
+            false
+        }
+    }
+
+    pub fn get_cdp_url(&self) -> &str {
+        &self.ws_url
+    }
+
+    /// Returns the Chrome debug server address as "host:port".
+    pub fn chrome_host_port(&self) -> &str {
+        let stripped = self
+            .ws_url
+            .strip_prefix("ws://")
+            .or_else(|| self.ws_url.strip_prefix("wss://"))
+            .unwrap_or(&self.ws_url);
+        stripped.split('/').next().unwrap_or(stripped)
+    }
+
+    pub fn active_target_id(&self) -> Result<&str, String> {
+        self.pages
+            .get(self.active_page_index)
+            .map(|p| p.target_id.as_str())
+            .ok_or_else(|| "No active page".to_string())
+    }
+
     /// Returns true if this manager was connected via CDP (as opposed to local launch).
     pub fn is_cdp_connection(&self) -> bool {
-        self.chrome_process.is_none()
+        self.browser_process.is_none()
     }
 
     /// Ensures the browser has at least one page. If `pages` is empty, creates a new
@@ -583,6 +790,7 @@ impl BrowserManager {
             session_id: attach_result.session_id.clone(),
             url: "about:blank".to_string(),
             title: String::new(),
+            target_type: "page".to_string(),
         });
         self.active_page_index = 0;
         self.enable_domains(&attach_result.session_id).await?;
@@ -615,6 +823,7 @@ impl BrowserManager {
                     "index": i,
                     "title": p.title,
                     "url": p.url,
+                    "type": p.target_type,
                     "active": i == self.active_page_index,
                 })
             })
@@ -655,6 +864,7 @@ impl BrowserManager {
             session_id: attach.session_id,
             url: target_url.to_string(),
             title: String::new(),
+            target_type: "page".to_string(),
         });
         self.active_page_index = index;
 
@@ -963,6 +1173,10 @@ impl BrowserManager {
         self.active_page_index = index;
     }
 
+    pub fn update_page_target_info(&mut self, target: &TargetInfo) -> bool {
+        update_page_target_info_in_pages(&mut self.pages, target)
+    }
+
     pub fn remove_page_by_target_id(&mut self, target_id: &str) {
         if let Some(pos) = self.pages.iter().position(|p| p.target_id == target_id) {
             self.pages.remove(pos);
@@ -982,6 +1196,10 @@ impl BrowserManager {
         self.pages.clone()
     }
 
+    pub fn visited_origins(&self) -> &HashSet<String> {
+        &self.visited_origins
+    }
+
     pub async fn set_download_behavior(&self, download_path: &str) -> Result<(), String> {
         let session_id = self.active_session_id()?;
         self.client
@@ -999,21 +1217,229 @@ impl BrowserManager {
     }
 }
 
+/// Core network-idle polling loop, extracted so it can be unit-tested without a
+/// full `BrowserManager` / CDP connection.
+///
+/// Returns `Ok(())` once no network requests have been in-flight for at least
+/// 500 ms, or `Err` if `overall_timeout` elapses first.
+async fn poll_network_idle(
+    session_id: &str,
+    rx: &mut broadcast::Receiver<CdpEvent>,
+    overall_timeout: tokio::time::Duration,
+) -> Result<(), String> {
+    let pending = Arc::new(Mutex::new(HashSet::<String>::new()));
+
+    tokio::time::timeout(overall_timeout, async {
+        let mut idle_start: Option<tokio::time::Instant> = None;
+
+        loop {
+            let recv_result =
+                tokio::time::timeout(tokio::time::Duration::from_millis(600), rx.recv()).await;
+
+            match recv_result {
+                Ok(Ok(event)) if event.session_id.as_deref() == Some(session_id) => {
+                    let mut p = pending.lock().await;
+                    match event.method.as_str() {
+                        "Network.requestWillBeSent" => {
+                            if let Some(id) = event.params.get("requestId").and_then(|v| v.as_str())
+                            {
+                                p.insert(id.to_string());
+                                idle_start = None;
+                            }
+                        }
+                        "Network.loadingFinished" | "Network.loadingFailed" => {
+                            if let Some(id) = event.params.get("requestId").and_then(|v| v.as_str())
+                            {
+                                p.remove(id);
+                                if p.is_empty() {
+                                    idle_start = Some(tokio::time::Instant::now());
+                                }
+                            }
+                        }
+                        "Page.loadEventFired" => {
+                            if p.is_empty() {
+                                idle_start = Some(tokio::time::Instant::now());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                Ok(Ok(_)) => {}
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
+                Ok(Err(_)) => break,
+                Err(_) => {
+                    // Timeout on recv -- if no pending requests, start (or
+                    // continue) the idle timer instead of returning
+                    // immediately.  This prevents false-positive idle
+                    // detection when the subscription starts after the page
+                    // has already loaded (e.g. cached pages).
+                    let p = pending.lock().await;
+                    if p.is_empty() && idle_start.is_none() {
+                        idle_start = Some(tokio::time::Instant::now());
+                    }
+                }
+            }
+
+            if let Some(start) = idle_start {
+                if start.elapsed() >= tokio::time::Duration::from_millis(500) {
+                    return Ok(());
+                }
+            }
+        }
+
+        Ok(())
+    })
+    .await
+    .map_err(|_| "Timeout waiting for networkidle".to_string())?
+}
+
+async fn connect_cdp_with_retry(
+    ws_url: &str,
+    total_timeout: Duration,
+    poll_interval: Duration,
+) -> Result<CdpClient, String> {
+    let deadline = Instant::now() + total_timeout;
+
+    loop {
+        match CdpClient::connect(ws_url).await {
+            Ok(client) => return Ok(client),
+            Err(err) => {
+                if Instant::now() >= deadline {
+                    return Err(err);
+                }
+            }
+        }
+
+        tokio::time::sleep(poll_interval).await;
+    }
+}
+
+async fn initialize_lightpanda_manager(
+    ws_url: String,
+    process: BrowserProcess,
+) -> Result<BrowserManager, String> {
+    let deadline = Instant::now() + LIGHTPANDA_TARGET_INIT_TIMEOUT;
+    let mut process = Some(process);
+
+    loop {
+        let client = match connect_cdp_with_retry(
+            &ws_url,
+            LIGHTPANDA_CDP_CONNECT_TIMEOUT,
+            LIGHTPANDA_CDP_CONNECT_POLL_INTERVAL,
+        )
+        .await
+        {
+            Ok(client) => client,
+            Err(err) => {
+                if Instant::now() >= deadline {
+                    return Err(lightpanda_target_init_timeout(Some(&err)));
+                }
+                tokio::time::sleep(LIGHTPANDA_CDP_CONNECT_POLL_INTERVAL).await;
+                continue;
+            }
+        };
+
+        let mut manager = BrowserManager {
+            client: Arc::new(client),
+            browser_process: None,
+            ws_url: ws_url.clone(),
+            pages: Vec::new(),
+            active_page_index: 0,
+            default_timeout_ms: 25_000,
+            download_path: None,
+            visited_origins: HashSet::new(),
+        };
+
+        match discover_and_attach_lightpanda_targets(&mut manager, deadline).await {
+            Ok(()) => {
+                manager.browser_process = process.take();
+                return Ok(manager);
+            }
+            Err(err) => {
+                if Instant::now() >= deadline {
+                    return Err(lightpanda_target_init_timeout(Some(&err)));
+                }
+                tokio::time::sleep(LIGHTPANDA_CDP_CONNECT_POLL_INTERVAL).await;
+            }
+        }
+    }
+}
+
+async fn discover_and_attach_lightpanda_targets(
+    manager: &mut BrowserManager,
+    deadline: Instant,
+) -> Result<(), String> {
+    run_with_lightpanda_deadline(
+        deadline,
+        manager.discover_and_attach_targets(),
+        "Target domain initialization attempt exceeded the remaining startup deadline",
+    )
+    .await
+}
+
+fn remaining_until(deadline: Instant) -> Option<Duration> {
+    deadline.checked_duration_since(Instant::now())
+}
+
+async fn run_with_lightpanda_deadline<F, T>(
+    deadline: Instant,
+    operation: F,
+    timeout_context: &'static str,
+) -> Result<T, String>
+where
+    F: Future<Output = Result<T, String>>,
+{
+    let remaining = remaining_until(deadline)
+        .ok_or_else(|| lightpanda_target_init_timeout(Some("deadline expired before retry")))?;
+
+    match tokio::time::timeout(remaining, operation).await {
+        Ok(result) => result,
+        Err(_) => Err(lightpanda_target_init_timeout(Some(timeout_context))),
+    }
+}
+
+fn lightpanda_target_init_timeout(last_error: Option<&str>) -> String {
+    let mut message = format!(
+        "Timed out after {}ms waiting for Lightpanda Target domain to initialize",
+        LIGHTPANDA_TARGET_INIT_TIMEOUT.as_millis(),
+    );
+    if let Some(last_error) = last_error {
+        message.push_str(&format!("\nLast error: {}", last_error));
+    }
+    message
+}
+
 async fn resolve_cdp_url(input: &str) -> Result<String, String> {
     if input.starts_with("ws://") || input.starts_with("wss://") {
         return Ok(input.to_string());
     }
 
     if input.starts_with("http://") || input.starts_with("https://") {
-        // Parse out the port and discover
         let parsed = url::Url::parse(input).map_err(|e| format!("Invalid CDP URL: {}", e))?;
+        // If no explicit port and path is empty/root, this is likely a provider
+        // WebSocket endpoint (e.g. https://xxx.cdp0.browser-use.com). Convert
+        // the scheme to ws/wss and connect directly instead of probing :9222.
+        if parsed.port().is_none() && (parsed.path().is_empty() || parsed.path() == "/") {
+            let ws_scheme = if input.starts_with("https://") {
+                "wss"
+            } else {
+                "ws"
+            };
+            let mut ws_url = parsed.clone();
+            let _ = ws_url.set_scheme(ws_scheme);
+            return Ok(ws_url.to_string());
+        }
+        let host = parsed
+            .host_str()
+            .ok_or_else(|| format!("No host in CDP URL: {}", input))?;
         let port = parsed.port().unwrap_or(9222);
-        return discover_cdp_url(port).await;
+        let query = parsed.query().map(|q| q.to_string());
+        return discover_cdp_url(host, port, query.as_deref()).await;
     }
 
     // Try as numeric port
     if let Ok(port) = input.parse::<u16>() {
-        return discover_cdp_url(port).await;
+        return discover_cdp_url("127.0.0.1", port, None).await;
     }
 
     Err(format!(
@@ -1025,6 +1451,58 @@ async fn resolve_cdp_url(input: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::time::sleep;
+
+    #[test]
+    fn test_should_track_popup_target_with_empty_url() {
+        let target = TargetInfo {
+            target_id: "popup-1".to_string(),
+            target_type: "page".to_string(),
+            title: String::new(),
+            url: String::new(),
+            attached: None,
+            browser_context_id: None,
+        };
+
+        assert!(should_track_target(&target));
+    }
+
+    #[test]
+    fn test_should_not_track_internal_chrome_target() {
+        let target = TargetInfo {
+            target_id: "chrome-tab".to_string(),
+            target_type: "page".to_string(),
+            title: "New Tab".to_string(),
+            url: "chrome://newtab/".to_string(),
+            attached: None,
+            browser_context_id: None,
+        };
+
+        assert!(!should_track_target(&target));
+    }
+
+    #[test]
+    fn test_update_page_target_info_in_pages_updates_existing_page() {
+        let mut pages = vec![PageInfo {
+            target_id: "popup-1".to_string(),
+            session_id: "session-1".to_string(),
+            url: String::new(),
+            title: String::new(),
+            target_type: "page".to_string(),
+        }];
+        let target = TargetInfo {
+            target_id: "popup-1".to_string(),
+            target_type: "page".to_string(),
+            title: "Popup".to_string(),
+            url: "https://example.com/popup".to_string(),
+            attached: None,
+            browser_context_id: None,
+        };
+
+        assert!(update_page_target_info_in_pages(&mut pages, &target));
+        assert_eq!(pages[0].url, "https://example.com/popup");
+        assert_eq!(pages[0].title, "Popup");
+    }
 
     #[test]
     fn test_validate_launch_options_extensions_and_cdp() {
@@ -1116,5 +1594,249 @@ mod tests {
     fn test_to_ai_friendly_error_unknown() {
         let msg = "Some custom error message";
         assert_eq!(to_ai_friendly_error(msg), msg);
+    }
+
+    /// Errors containing "not found" but NOT "element" should pass through unchanged.
+    #[test]
+    fn test_to_ai_friendly_error_ignores_non_element_not_found() {
+        let err = "Chrome not found. Install Chrome or use --executable-path.";
+        assert_eq!(to_ai_friendly_error(err), err);
+    }
+
+    #[test]
+    fn test_to_ai_friendly_error_catches_no_element() {
+        let mapped =
+            "Element not found. Verify the selector is correct and the element exists in the DOM.";
+        assert_eq!(to_ai_friendly_error("No element found for css 'x'"), mapped);
+    }
+
+    #[test]
+    fn test_remaining_until_returns_none_for_past_deadline() {
+        let deadline = Instant::now()
+            .checked_sub(Duration::from_millis(1))
+            .expect("past instant should be representable");
+        assert!(remaining_until(deadline).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_run_with_lightpanda_deadline_enforces_timeout() {
+        let deadline = Instant::now() + Duration::from_millis(25);
+        let err = tokio::time::timeout(
+            Duration::from_secs(1),
+            run_with_lightpanda_deadline(
+                deadline,
+                async {
+                    sleep(Duration::from_millis(100)).await;
+                    Ok::<(), String>(())
+                },
+                "Target domain initialization attempt exceeded the remaining startup deadline",
+            ),
+        )
+        .await
+        .expect("outer timeout should not fire")
+        .unwrap_err();
+
+        assert!(err.contains(
+            "Timed out after 10000ms waiting for Lightpanda Target domain to initialize"
+        ));
+        assert!(err.contains("remaining startup deadline"));
+    }
+
+    #[tokio::test]
+    async fn test_run_with_lightpanda_deadline_returns_operation_error() {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let err = run_with_lightpanda_deadline(
+            deadline,
+            async { Err::<(), String>("Target.getTargets failed".to_string()) },
+            "unused timeout context",
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err, "Target.getTargets failed");
+    }
+
+    #[test]
+    fn test_lightpanda_target_init_timeout_includes_last_error() {
+        let err = lightpanda_target_init_timeout(Some("Target.setDiscoverTargets failed"));
+        assert!(err.contains(
+            "Timed out after 10000ms waiting for Lightpanda Target domain to initialize"
+        ));
+        assert!(err.contains("Target.setDiscoverTargets failed"));
+    }
+
+    #[test]
+    fn test_is_internal_chrome_target() {
+        assert!(is_internal_chrome_target("chrome://newtab/"));
+        assert!(is_internal_chrome_target(
+            "chrome://omnibox-popup.top-chrome/"
+        ));
+        assert!(is_internal_chrome_target(
+            "chrome-extension://abc123/popup.html"
+        ));
+        assert!(is_internal_chrome_target(
+            "devtools://devtools/bundled/inspector.html"
+        ));
+        assert!(!is_internal_chrome_target("https://example.com"));
+        assert!(!is_internal_chrome_target("http://localhost:3000"));
+        assert!(!is_internal_chrome_target("about:blank"));
+    }
+
+    // -----------------------------------------------------------------------
+    // poll_network_idle tests
+    // -----------------------------------------------------------------------
+
+    fn cdp_event(method: &str, session_id: &str, params: Value) -> CdpEvent {
+        CdpEvent {
+            method: method.to_string(),
+            params,
+            session_id: Some(session_id.to_string()),
+        }
+    }
+
+    /// Regression test for #846: when no network events arrive at all (e.g.
+    /// page fully served from cache), poll_network_idle must NOT return
+    /// instantly.  It should observe at least 500 ms of idle before resolving.
+    #[tokio::test]
+    async fn test_network_idle_no_events_does_not_return_instantly() {
+        let (tx, mut rx) = broadcast::channel::<CdpEvent>(16);
+        let session = "s1";
+
+        let start = tokio::time::Instant::now();
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            poll_network_idle(session, &mut rx, Duration::from_secs(5)),
+        )
+        .await
+        .expect("outer timeout should not fire");
+
+        assert!(result.is_ok());
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(500),
+            "network idle returned in {:?}, expected >= 500ms",
+            elapsed
+        );
+
+        drop(tx);
+    }
+
+    /// Normal flow: requests start and finish, idle is detected after the last
+    /// request completes and 500 ms of silence passes.
+    #[tokio::test]
+    async fn test_network_idle_after_requests_complete() {
+        let (tx, mut rx) = broadcast::channel::<CdpEvent>(16);
+        let session = "s1";
+
+        let _keep_alive = tx.clone();
+        tokio::spawn(async move {
+            sleep(Duration::from_millis(50)).await;
+            let _ = tx.send(cdp_event(
+                "Network.requestWillBeSent",
+                session,
+                json!({ "requestId": "r1" }),
+            ));
+            sleep(Duration::from_millis(100)).await;
+            let _ = tx.send(cdp_event(
+                "Network.loadingFinished",
+                session,
+                json!({ "requestId": "r1" }),
+            ));
+        });
+
+        let start = tokio::time::Instant::now();
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            poll_network_idle(session, &mut rx, Duration::from_secs(5)),
+        )
+        .await
+        .expect("outer timeout should not fire");
+
+        assert!(result.is_ok());
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(500),
+            "should wait >= 500ms after last request finishes, got {:?}",
+            elapsed
+        );
+    }
+
+    /// A new request arriving during the idle window resets the timer.
+    #[tokio::test]
+    async fn test_network_idle_resets_on_new_request() {
+        let (tx, mut rx) = broadcast::channel::<CdpEvent>(16);
+        let session = "s1";
+
+        let _keep_alive = tx.clone();
+        tokio::spawn(async move {
+            sleep(Duration::from_millis(50)).await;
+            let _ = tx.send(cdp_event(
+                "Network.requestWillBeSent",
+                session,
+                json!({ "requestId": "r1" }),
+            ));
+            sleep(Duration::from_millis(50)).await;
+            let _ = tx.send(cdp_event(
+                "Network.loadingFinished",
+                session,
+                json!({ "requestId": "r1" }),
+            ));
+            // Wait 200ms (< 500ms idle window), then fire another request
+            sleep(Duration::from_millis(200)).await;
+            let _ = tx.send(cdp_event(
+                "Network.requestWillBeSent",
+                session,
+                json!({ "requestId": "r2" }),
+            ));
+            sleep(Duration::from_millis(100)).await;
+            let _ = tx.send(cdp_event(
+                "Network.loadingFinished",
+                session,
+                json!({ "requestId": "r2" }),
+            ));
+        });
+
+        let start = tokio::time::Instant::now();
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            poll_network_idle(session, &mut rx, Duration::from_secs(5)),
+        )
+        .await
+        .expect("outer timeout should not fire");
+
+        assert!(result.is_ok());
+        let elapsed = start.elapsed();
+        // r2 finishes at ~400ms; idle should be detected at ~900ms
+        assert!(
+            elapsed >= Duration::from_millis(800),
+            "should wait for idle after second request, got {:?}",
+            elapsed
+        );
+    }
+
+    /// When the overall timeout expires before idle is reached, the function
+    /// returns an error.
+    #[tokio::test]
+    async fn test_network_idle_overall_timeout() {
+        let (tx, mut rx) = broadcast::channel::<CdpEvent>(16);
+        let session = "s1";
+
+        // Keep sending requests so idle is never reached
+        tokio::spawn(async move {
+            for i in 0u64.. {
+                let _ = tx.send(cdp_event(
+                    "Network.requestWillBeSent",
+                    session,
+                    json!({ "requestId": format!("r{}", i) }),
+                ));
+                sleep(Duration::from_millis(100)).await;
+            }
+        });
+
+        let result = poll_network_idle(session, &mut rx, Duration::from_millis(800)).await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .contains("Timeout waiting for networkidle"));
     }
 }

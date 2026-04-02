@@ -184,7 +184,7 @@ pub async fn install_domain_filter_script(
             const OrigWS = window.WebSocket;
             window.WebSocket = function(url, protocols) {{
                 try {{
-                    const u = new URL(url);
+                    const u = new URL(url, location.href);
                     if (!_isDomainAllowed(u.hostname)) throw new DOMException('WebSocket blocked: ' + u.hostname, 'SecurityError');
                 }} catch(e) {{ if (e instanceof DOMException) throw e; }}
                 return new OrigWS(url, protocols);
@@ -233,15 +233,16 @@ pub async fn install_domain_filter_script(
 pub async fn install_domain_filter_fetch(
     client: &CdpClient,
     session_id: &str,
+    handle_auth_requests: bool,
 ) -> Result<(), String> {
+    let mut params = json!({
+        "patterns": [{ "urlPattern": "*" }]
+    });
+    if handle_auth_requests {
+        params["handleAuthRequests"] = json!(true);
+    }
     client
-        .send_command(
-            "Fetch.enable",
-            Some(json!({
-                "patterns": [{ "urlPattern": "*" }]
-            })),
-            Some(session_id),
-        )
+        .send_command("Fetch.enable", Some(params), Some(session_id))
         .await?;
     Ok(())
 }
@@ -253,10 +254,101 @@ pub async fn install_domain_filter(
     client: &CdpClient,
     session_id: &str,
     allowed_domains: &[String],
+    handle_auth_requests: bool,
 ) -> Result<(), String> {
     install_domain_filter_script(client, session_id, allowed_domains).await?;
-    install_domain_filter_fetch(client, session_id).await?;
+    install_domain_filter_fetch(client, session_id, handle_auth_requests).await?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Console arg formatting (CDP RemoteObject → human-readable string)
+// ---------------------------------------------------------------------------
+
+/// Format a single CDP RemoteObject arg into a human-readable string.
+/// Priority: value → preview → description.
+pub fn format_console_arg(arg: &Value) -> Option<String> {
+    let obj_type = arg.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    let subtype = arg.get("subtype").and_then(|v| v.as_str());
+
+    if obj_type == "undefined" {
+        return Some("undefined".to_string());
+    }
+
+    if subtype == Some("null") {
+        return Some("null".to_string());
+    }
+
+    // Primitive value
+    if let Some(v) = arg.get("value") {
+        return Some(match v {
+            Value::String(s) => s.clone(),
+            Value::Null => "null".to_string(),
+            other => other.to_string(),
+        });
+    }
+
+    // Skip preview for Map/Set — their description ("Map(1)", "Set(3)") is more useful
+    // than their preview properties (which only show "size")
+    if let Some(preview) = arg.get("preview") {
+        let preview_subtype = preview.get("subtype").and_then(|v| v.as_str());
+        if matches!(preview_subtype, Some("map" | "set" | "weakmap" | "weakset")) {
+            return arg
+                .get("description")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+        }
+        let is_array = subtype == Some("array") || preview_subtype == Some("array");
+        if let Some(props) = preview.get("properties").and_then(|v| v.as_array()) {
+            let overflow = preview
+                .get("overflow")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let formatted_props: Vec<String> = props
+                .iter()
+                .filter_map(|p| {
+                    let value_str = p.get("value").and_then(|v| v.as_str())?;
+                    let prop_type = p.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                    let formatted_value = if prop_type == "string" {
+                        format!("\"{}\"", value_str)
+                    } else {
+                        value_str.to_string()
+                    };
+                    if is_array {
+                        Some(formatted_value)
+                    } else {
+                        let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+                        Some(format!("{}: {}", name, formatted_value))
+                    }
+                })
+                .collect();
+
+            let inner = if overflow {
+                format!("{}, ...", formatted_props.join(", "))
+            } else {
+                formatted_props.join(", ")
+            };
+
+            return if is_array {
+                Some(format!("[{}]", inner))
+            } else {
+                Some(format!("{{{}}}", inner))
+            };
+        }
+    }
+
+    // Fallback to description
+    arg.get("description")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
+/// Format an array of CDP RemoteObject args into a single space-separated string.
+pub fn format_console_args(args: &[Value]) -> String {
+    args.iter()
+        .filter_map(format_console_arg)
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 // ---------------------------------------------------------------------------
@@ -267,6 +359,7 @@ pub async fn install_domain_filter(
 pub struct ConsoleEntry {
     pub level: String,
     pub text: String,
+    pub args: Vec<Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -292,13 +385,14 @@ impl EventTracker {
         }
     }
 
-    pub fn add_console(&mut self, level: &str, text: &str) {
+    pub fn add_console(&mut self, level: &str, text: &str, args: Vec<Value>) {
         if self.console_entries.len() >= self.max_entries {
             self.console_entries.remove(0);
         }
         self.console_entries.push(ConsoleEntry {
             level: level.to_string(),
             text: text.to_string(),
+            args,
         });
     }
 
@@ -320,13 +414,25 @@ impl EventTracker {
         });
     }
 
+    pub fn clear_console(&mut self) {
+        self.console_entries.clear();
+    }
+
     pub fn get_console_json(&self) -> Value {
-        let entries: Vec<Value> = self
+        let messages: Vec<Value> = self
             .console_entries
             .iter()
-            .map(|e| json!({ "level": e.level, "text": e.text }))
+            .map(|e| {
+                let mut msg = json!({ "type": e.level, "text": e.text });
+                if !e.args.is_empty() {
+                    msg.as_object_mut()
+                        .unwrap()
+                        .insert("args".to_string(), Value::Array(e.args.clone()));
+                }
+                msg
+            })
             .collect();
-        json!({ "entries": entries })
+        json!({ "messages": messages })
     }
 
     pub fn get_errors_json(&self) -> Value {
@@ -390,10 +496,177 @@ mod tests {
     #[test]
     fn test_event_tracker() {
         let mut tracker = EventTracker::new();
-        tracker.add_console("log", "hello");
+        tracker.add_console("log", "hello", vec![]);
         tracker.add_error("oops", Some("test.js"), Some(1), Some(5));
 
         assert_eq!(tracker.console_entries.len(), 1);
         assert_eq!(tracker.error_entries.len(), 1);
+    }
+
+    #[test]
+    fn test_console_json_includes_args() {
+        let mut tracker = EventTracker::new();
+        let raw_args = vec![
+            json!({"type": "string", "value": "hello"}),
+            json!({"type": "number", "value": 42}),
+        ];
+        tracker.add_console("log", "hello 42", raw_args);
+
+        let result = tracker.get_console_json();
+        let messages = result.get("messages").unwrap().as_array().unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].get("text").unwrap(), "hello 42");
+        let args = messages[0].get("args").unwrap().as_array().unwrap();
+        assert_eq!(args.len(), 2);
+        assert_eq!(args[0], json!({"type": "string", "value": "hello"}));
+        assert_eq!(args[1], json!({"type": "number", "value": 42}));
+    }
+
+    #[test]
+    fn test_console_json_empty_args_omits_field() {
+        let mut tracker = EventTracker::new();
+        tracker.add_console("log", "text only", vec![]);
+
+        let result = tracker.get_console_json();
+        let messages = result.get("messages").unwrap().as_array().unwrap();
+        assert!(messages[0].get("args").is_none());
+    }
+
+    // -- format_console_arg: primitives --
+
+    #[test]
+    fn test_format_arg_string() {
+        let arg = json!({"type": "string", "value": "hello"});
+        assert_eq!(format_console_arg(&arg), Some("hello".to_string()));
+    }
+
+    #[test]
+    fn test_format_arg_number() {
+        let arg = json!({"type": "number", "value": 42});
+        assert_eq!(format_console_arg(&arg), Some("42".to_string()));
+    }
+
+    #[test]
+    fn test_format_arg_null() {
+        let arg = json!({"type": "object", "subtype": "null", "value": null});
+        assert_eq!(format_console_arg(&arg), Some("null".to_string()));
+    }
+
+    #[test]
+    fn test_format_arg_undefined() {
+        let arg = json!({"type": "undefined"});
+        assert_eq!(format_console_arg(&arg), Some("undefined".to_string()));
+    }
+
+    // -- format_console_arg: objects with preview --
+
+    #[test]
+    fn test_format_arg_object_preview() {
+        let arg = json!({
+            "type": "object",
+            "preview": {
+                "properties": [
+                    {"name": "userId", "type": "string", "value": "abc123"},
+                    {"name": "count", "type": "number", "value": "42"}
+                ],
+                "overflow": false
+            }
+        });
+        assert_eq!(
+            format_console_arg(&arg),
+            Some("{userId: \"abc123\", count: 42}".to_string())
+        );
+    }
+
+    #[test]
+    fn test_format_arg_object_preview_overflow() {
+        let arg = json!({
+            "type": "object",
+            "preview": {
+                "properties": [
+                    {"name": "a", "type": "number", "value": "1"}
+                ],
+                "overflow": true
+            }
+        });
+        assert_eq!(format_console_arg(&arg), Some("{a: 1, ...}".to_string()));
+    }
+
+    // -- format_console_arg: arrays with preview --
+
+    #[test]
+    fn test_format_arg_array_preview() {
+        let arg = json!({
+            "type": "object",
+            "subtype": "array",
+            "preview": {
+                "subtype": "array",
+                "properties": [
+                    {"name": "0", "type": "number", "value": "1"},
+                    {"name": "1", "type": "number", "value": "2"},
+                    {"name": "2", "type": "number", "value": "3"}
+                ],
+                "overflow": false
+            }
+        });
+        assert_eq!(format_console_arg(&arg), Some("[1, 2, 3]".to_string()));
+    }
+
+    // -- format_console_arg: map/set use description --
+
+    #[test]
+    fn test_format_arg_map_uses_description() {
+        let arg = json!({
+            "type": "object",
+            "subtype": "map",
+            "description": "Map(1)",
+            "preview": {
+                "subtype": "map",
+                "properties": [{"name": "size", "type": "number", "value": "1"}]
+            }
+        });
+        assert_eq!(format_console_arg(&arg), Some("Map(1)".to_string()));
+    }
+
+    // -- format_console_arg: fallback --
+
+    #[test]
+    fn test_format_arg_description_fallback() {
+        let arg = json!({"type": "object", "description": "RegExp"});
+        assert_eq!(format_console_arg(&arg), Some("RegExp".to_string()));
+    }
+
+    #[test]
+    fn test_format_arg_no_value_no_preview_no_description() {
+        let arg = json!({"type": "object"});
+        assert_eq!(format_console_arg(&arg), None);
+    }
+
+    // -- format_console_args --
+
+    #[test]
+    fn test_format_console_args_join() {
+        let args = vec![
+            json!({"type": "string", "value": "user"}),
+            json!({
+                "type": "object",
+                "preview": {
+                    "properties": [{"name": "id", "type": "number", "value": "1"}],
+                    "overflow": false
+                }
+            }),
+        ];
+        assert_eq!(format_console_args(&args), "user {id: 1}");
+    }
+
+    #[test]
+    fn test_format_console_args_filters_none() {
+        // An arg that returns None should be skipped, not produce empty string
+        let args = vec![
+            json!({"type": "string", "value": "before"}),
+            json!({"type": "object"}), // no value, preview, or description → None
+            json!({"type": "string", "value": "after"}),
+        ];
+        assert_eq!(format_console_args(&args), "before after");
     }
 }

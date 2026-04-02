@@ -6,6 +6,7 @@ dist/
 
 # Native binaries (keep the launcher scripts)
 bin/agent-browser-*
+bin/.install-method
 !bin/agent-browser
 !bin/agent-browser.cmd
 
@@ -45,6 +46,9 @@ yarn.lock
 .env
 .env.local
 
+# Windows debug instance config
+scripts/windows-debug/.instance
+
 # opensrc - source code for packages
 opensrc/
 
@@ -56,3 +60,7 @@ docs/package-lock.json
 
 # pnpm
 .pnpm-store/
+
+# next
+.next/
+out/

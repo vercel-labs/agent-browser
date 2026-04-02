@@ -10,12 +10,40 @@ concurrency: ${{ github.workflow }}-${{ github.ref }}
 
 permissions:
   contents: write
-  pull-requests: write
 
 jobs:
-  # Build native binaries for all platforms first
+  check-release:
+    name: Check for new version
+    runs-on: ubuntu-latest
+    outputs:
+      should_release: ${{ steps.check.outputs.should_release }}
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Compare package.json version to npm
+        id: check
+        run: |
+          LOCAL_VERSION=$(node -p "require('./package.json').version")
+          echo "Local version: $LOCAL_VERSION"
+
+          NPM_VERSION=$(npm view agent-browser version 2>/dev/null || echo "0.0.0")
+          echo "npm version: $NPM_VERSION"
+
+          if [ "$LOCAL_VERSION" != "$NPM_VERSION" ]; then
+            echo "Version changed: $NPM_VERSION -> $LOCAL_VERSION"
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Version unchanged, skipping release"
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "version=$LOCAL_VERSION" >> "$GITHUB_OUTPUT"
+
   build-binaries:
     name: Build ${{ matrix.name }}
+    needs: check-release
+    if: needs.check-release.outputs.should_release == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -30,6 +58,16 @@ jobs:
             os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
             binary: agent-browser-linux-arm64
+            use_zigbuild: true
+          - name: Linux musl x64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            binary: agent-browser-linux-musl-x64
+            use_zigbuild: true
+          - name: Linux musl ARM64
+            os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            binary: agent-browser-linux-musl-arm64
             use_zigbuild: true
           - name: Windows x64
             os: ubuntu-latest
@@ -127,19 +165,13 @@ jobs:
           path: artifacts/${{ matrix.binary }}
           retention-days: 7
 
-  # Create release PR or publish to npm (with binaries)
-  release:
-    name: Release
-    needs: build-binaries
+  publish:
+    name: Publish to npm
+    needs: [check-release, build-binaries]
     runs-on: ubuntu-latest
-    outputs:
-      published: ${{ steps.changesets.outputs.published }}
-      publishedPackages: ${{ steps.changesets.outputs.publishedPackages }}
     steps:
-      - name: Checkout Repo
+      - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
@@ -153,7 +185,7 @@ jobs:
           cache: pnpm
           registry-url: 'https://registry.npmjs.org'
 
-      - name: Install Dependencies
+      - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
       - name: Download all binary artifacts
@@ -175,11 +207,13 @@ jobs:
           EXPECTED_BINARIES=(
             "agent-browser-linux-x64"
             "agent-browser-linux-arm64"
+            "agent-browser-linux-musl-x64"
+            "agent-browser-linux-musl-arm64"
             "agent-browser-win32-x64.exe"
             "agent-browser-darwin-x64"
             "agent-browser-darwin-arm64"
           )
-          MIN_SIZE=100000  # Binaries should be at least 100KB
+          MIN_SIZE=100000
           ERRORS=0
           for binary in "${EXPECTED_BINARIES[@]}"; do
             if [ ! -f "bin/$binary" ]; then
@@ -199,31 +233,20 @@ jobs:
             echo "Error: $ERRORS binary issues found"
             exit 1
           fi
-          echo "All 5 platform binaries present and valid"
+          echo "All 7 platform binaries present and valid"
 
-      - name: Create Release Pull Request or Publish to npm
-        id: changesets
-        uses: changesets/action@v1
-        with:
-          version: pnpm ci:version
-          publish: pnpm ci:publish
-          title: 'chore: version packages'
-          commit: 'chore: version packages'
+      - name: Publish to npm
+        run: pnpm publish --no-git-checks
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_VERCEL_TOKEN_ELEVATED }}
 
-  # Create GitHub release with binaries after npm publish
   github-release:
     name: Create GitHub Release
-    needs: release
-    if: needs.release.outputs.published == 'true'
+    needs: [check-release, publish]
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Repo
+      - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          ref: main
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -241,28 +264,59 @@ jobs:
       - name: Verify binaries exist
         run: |
           BINARY_COUNT=$(ls bin/agent-browser-* 2>/dev/null | wc -l)
-          if [ "$BINARY_COUNT" -lt 5 ]; then
-            echo "Error: Expected 5 binaries, found $BINARY_COUNT"
+          if [ "$BINARY_COUNT" -lt 7 ]; then
+            echo "Error: Expected 7 binaries, found $BINARY_COUNT"
             ls -la bin/
             exit 1
           fi
           echo "Found $BINARY_COUNT binaries"
 
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build dashboard
+        run: pnpm --filter dashboard build
+
+      - name: Create dashboard.zip
+        run: cd packages/dashboard/out && zip -r ../../../dashboard.zip .
+
+      - name: Extract changelog entry
+        run: |
+          VERSION="${{ needs.check-release.outputs.version }}"
+          awk '/<!-- release:start -->/{found=1; next} /<!-- release:end -->/{found=0} found{print}' CHANGELOG.md > /tmp/release-notes.md
+
+          LINES=$(wc -l < /tmp/release-notes.md | tr -d ' ')
+          if [ "$LINES" -lt 2 ]; then
+            echo "Error: No release notes found between <!-- release:start --> and <!-- release:end --> markers in CHANGELOG.md"
+            exit 1
+          fi
+          echo "Extracted release notes for $VERSION ($LINES lines)"
+
       - name: Create GitHub Release
         run: |
-          VERSION=$(node -p "require('./package.json').version")
+          VERSION="${{ needs.check-release.outputs.version }}"
           TAG="v$VERSION"
-          
-          # Check if release already exists
+
           if gh release view "$TAG" &>/dev/null; then
-            echo "Release $TAG already exists, uploading binaries..."
-            gh release upload "$TAG" bin/agent-browser-* --clobber
+            echo "Release $TAG already exists, uploading assets..."
+            gh release upload "$TAG" bin/agent-browser-* dashboard.zip --clobber
           else
             echo "Creating release $TAG..."
             gh release create "$TAG" \
               --title "$TAG" \
-              --generate-notes \
-              bin/agent-browser-*
+              --notes-file /tmp/release-notes.md \
+              bin/agent-browser-* dashboard.zip
           fi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

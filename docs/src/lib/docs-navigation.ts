@@ -31,13 +31,31 @@ export const navigation: NavSection[] = [
     title: "Features",
     items: [
       { name: "Sessions", href: "/sessions" },
+      { name: "Dashboard", href: "/dashboard" },
       { name: "Diffing", href: "/diffing" },
       { name: "CDP Mode", href: "/cdp-mode" },
       { name: "Streaming", href: "/streaming" },
       { name: "Profiler", href: "/profiler" },
       { name: "iOS Simulator", href: "/ios" },
       { name: "Security", href: "/security" },
-      { name: "Native Mode (Experimental)", href: "/native-mode" },
+      { name: "Next.js + Vercel", href: "/next" },
+      { name: "Native Mode", href: "/native-mode" },
+    ],
+  },
+  {
+    title: "Providers",
+    items: [
+      { name: "Browser Use", href: "/providers/browser-use" },
+      { name: "Browserbase", href: "/providers/browserbase" },
+      { name: "Browserless", href: "/providers/browserless" },
+      { name: "Kernel", href: "/providers/kernel" },
+    ],
+  },
+  {
+    title: "Engines",
+    items: [
+      { name: "Chrome", href: "/engines/chrome" },
+      { name: "Lightpanda", href: "/engines/lightpanda" },
     ],
   },
   {

@@ -1,5 +1,5 @@
 export const PAGE_TITLES: Record<string, string> = {
-  "": "Headless Browser\nAutomation for AI",
+  "": "Browser\nAutomation for AI",
   installation: "Installation",
   "quick-start": "Quick Start",
   skills: "Skills",
@@ -10,11 +10,19 @@ export const PAGE_TITLES: Record<string, string> = {
   sessions: "Sessions",
   diffing: "Diffing",
   "cdp-mode": "CDP Mode",
+  dashboard: "Dashboard",
   streaming: "Streaming",
   profiler: "Profiler",
   ios: "iOS Simulator",
   security: "Security",
-  "native-mode": "Native Mode (Experimental)",
+  "engines/chrome": "Chrome",
+  "engines/lightpanda": "Lightpanda",
+  next: "Next.js + Vercel",
+  "native-mode": "Native Mode",
+  "providers/browser-use": "Browser Use",
+  "providers/browserbase": "Browserbase",
+  "providers/browserless": "Browserless",
+  "providers/kernel": "Kernel",
   changelog: "Changelog",
 };
 

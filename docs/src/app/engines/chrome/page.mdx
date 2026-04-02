@@ -1,0 +1,104 @@
+# Chrome
+
+Chrome (and Chromium) is the default browser engine. agent-browser discovers, launches, and manages the Chrome process automatically via the Chrome DevTools Protocol (CDP).
+
+## Binary Discovery
+
+When no `--executable-path` is provided, agent-browser searches for Chrome in this order:
+
+<table>
+  <thead>
+    <tr><th>Platform</th><th>Locations checked</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>macOS</td>
+      <td>
+        <code>/Applications/Google Chrome.app</code>,
+        <code>/Applications/Google Chrome Canary.app</code>,
+        <code>/Applications/Chromium.app</code>,
+        <code>/Applications/Brave Browser.app</code>,
+        Puppeteer cache (<code>~/.cache/puppeteer/chrome/</code> or <code>PUPPETEER_CACHE_DIR</code>),
+        Chrome for Testing cache
+      </td>
+    </tr>
+    <tr>
+      <td>Linux</td>
+      <td>
+        <code>google-chrome</code>,
+        <code>google-chrome-stable</code>,
+        <code>chromium-browser</code>,
+        <code>chromium</code> in PATH,
+        Puppeteer cache (<code>~/.cache/puppeteer/chrome/</code> or <code>PUPPETEER_CACHE_DIR</code>),
+        Chrome for Testing cache
+      </td>
+    </tr>
+    <tr>
+      <td>Windows</td>
+      <td>
+        <code>%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe</code>,
+        <code>C:\Program Files\Google\Chrome\Application\chrome.exe</code>,
+        <code>C:\Program Files (x86)\...\chrome.exe</code>
+      </td>
+    </tr>
+  </tbody>
+</table>
+
+If Chrome is not found, run `agent-browser install` to download Chrome from Chrome for Testing.
+
+## Usage
+
+Chrome is the default engine -- no `--engine` flag is needed:
+
+```bash
+agent-browser open example.com
+```
+
+To be explicit:
+
+```bash
+agent-browser --engine chrome open example.com
+```
+
+## Custom Binary
+
+Point to any Chromium-based browser with `--executable-path`:
+
+```bash
+agent-browser --executable-path /path/to/chromium open example.com
+```
+
+Or via environment variable:
+
+```bash
+export AGENT_BROWSER_EXECUTABLE_PATH=/path/to/chromium
+agent-browser open example.com
+```
+
+## Chrome-Specific Features
+
+These features are available only with Chrome:
+
+<table>
+  <thead>
+    <tr><th>Feature</th><th>Flag</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Browser extensions</td><td><code>--extension &lt;path&gt;</code></td></tr>
+    <tr><td>Persistent profiles</td><td><code>--profile &lt;path&gt;</code> (sets Chrome's <code>--user-data-dir</code>)</td></tr>
+    <tr><td>Storage state</td><td><code>--state &lt;path&gt;</code></td></tr>
+    <tr><td>File URL access</td><td><code>--allow-file-access</code></td></tr>
+    <tr><td>Headed mode</td><td><code>--headed</code></td></tr>
+    <tr><td>Custom launch args</td><td><code>--args &lt;args&gt;</code></td></tr>
+  </tbody>
+</table>
+
+## Containers and CI
+
+In Docker, CI runners, or other sandboxed environments, Chrome's user namespace sandbox may need to be disabled:
+
+```bash
+agent-browser --args "--no-sandbox" open example.com
+```
+
+agent-browser automatically adds `--no-sandbox` when it detects a container environment (Docker, Podman, running as root).
