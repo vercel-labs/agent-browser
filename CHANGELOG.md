@@ -1,16 +1,27 @@
 # agent-browser
 
-## 0.23.4
+## 0.24.0
 
 <!-- release:start -->
-### Bug Fixes
+### New Features
 
-- Fixed **daemon hang on Linux** caused by a `waitpid(-1)` race condition in the SIGCHLD handler that stole exit statuses from Rust's `Child` handles, leaving the daemon in a broken state. Replaced the global signal handler with targeted crash detection via the existing drain interval (#1098)
+- **AWS Bedrock AgentCore provider** - Added AWS Bedrock AgentCore as a cloud browser provider. Connect with `--provider agentcore` or `AGENT_BROWSER_PROVIDER=agentcore`. Uses lightweight manual SigV4 signing for authentication with support for the full AWS credential provider chain (environment variables, AWS CLI, SSO, IAM roles). Configure with `AGENTCORE_REGION`, `AGENTCORE_PROFILE_ID`, and `AGENTCORE_BROWSER_ID` environment variables. Returns session ID and Live View URL in the launch response (#397)
+
+### Documentation
+
+- Added AgentCore provider page to docs site, README options table, SKILL.md, and dashboard provider icons (#1120)
 
 ### Contributors
 
 - @ctate
+- @pahud
 <!-- release:end -->
+
+## 0.23.4
+
+### Bug Fixes
+
+- Fixed **daemon hang on Linux** caused by a `waitpid(-1)` race condition in the SIGCHLD handler that stole exit statuses from Rust's `Child` handles, leaving the daemon in a broken state. Replaced the global signal handler with targeted crash detection via the existing drain interval (#1098)
 
 ## 0.23.3
 

@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.24.0
+
+<p className="text-[#888] text-sm">April 2, 2026</p>
+
+### New Features
+
+- **AWS Bedrock AgentCore provider** - Added AWS Bedrock AgentCore as a cloud browser provider. Connect with `--provider agentcore` or `AGENT_BROWSER_PROVIDER=agentcore`. Uses lightweight manual SigV4 signing for authentication with support for the full AWS credential provider chain (environment variables, AWS CLI, SSO, IAM roles). Configure with `AGENTCORE_REGION`, `AGENTCORE_PROFILE_ID`, and `AGENTCORE_BROWSER_ID` environment variables. Returns session ID and Live View URL in the launch response (#397)
+
+### Documentation
+
+- Added AgentCore provider page to docs site, README options table, SKILL.md, and dashboard provider icons (#1120)
+
+---
+
 ## v0.23.4
 
 <p className="text-[#888] text-sm">March 31, 2026</p>
