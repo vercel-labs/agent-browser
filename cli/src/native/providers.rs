@@ -364,12 +364,19 @@ async fn connect_kernel() -> Result<(String, Option<ProviderSession>), String> {
 
 // ============================================================================
 // AgentCore Provider (AWS Bedrock AgentCore Browser)
+// Requires: cargo build --features agentcore
 // ============================================================================
 
+#[cfg(feature = "agentcore")]
 mod agentcore {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
 
-    /// AgentCore-specific session info for Live View URL
+    /// AgentCore-specific session info for Live View URL.
+    ///
+    /// This must be shared across runtime worker threads because Tokio may move
+    /// a task between OS threads across `.await` points.
+    #[derive(Clone)]
     pub struct AgentCoreSessionInfo {
         pub session_id: String,
         pub browser_identifier: String,
@@ -377,32 +384,41 @@ mod agentcore {
         pub live_view_url: String,
     }
 
-    thread_local! {
-        static AGENTCORE_INFO: std::cell::RefCell<Option<AgentCoreSessionInfo>> = const { std::cell::RefCell::new(None) };
-        static AGENTCORE_WS_HEADERS: std::cell::RefCell<Option<Vec<(String, String)>>> = const { std::cell::RefCell::new(None) };
+    fn agentcore_info_store() -> &'static Mutex<Option<AgentCoreSessionInfo>> {
+        static AGENTCORE_INFO: OnceLock<Mutex<Option<AgentCoreSessionInfo>>> = OnceLock::new();
+        AGENTCORE_INFO.get_or_init(|| Mutex::new(None))
+    }
+
+    fn agentcore_ws_headers_store() -> &'static Mutex<Option<Vec<(String, String)>>> {
+        static AGENTCORE_WS_HEADERS: OnceLock<Mutex<Option<Vec<(String, String)>>>> =
+            OnceLock::new();
+        AGENTCORE_WS_HEADERS.get_or_init(|| Mutex::new(None))
     }
 
     pub fn set_agentcore_info(info: AgentCoreSessionInfo) {
-        AGENTCORE_INFO.with(|cell| *cell.borrow_mut() = Some(info));
+        *agentcore_info_store()
+            .lock()
+            .expect("agentcore info mutex poisoned") = Some(info);
     }
 
     pub fn get_agentcore_info() -> Option<AgentCoreSessionInfo> {
-        AGENTCORE_INFO.with(|cell| {
-            cell.borrow().as_ref().map(|i| AgentCoreSessionInfo {
-                session_id: i.session_id.clone(),
-                browser_identifier: i.browser_identifier.clone(),
-                region: i.region.clone(),
-                live_view_url: i.live_view_url.clone(),
-            })
-        })
+        agentcore_info_store()
+            .lock()
+            .expect("agentcore info mutex poisoned")
+            .clone()
     }
 
     pub fn set_agentcore_ws_headers(headers: Vec<(String, String)>) {
-        AGENTCORE_WS_HEADERS.with(|cell| *cell.borrow_mut() = Some(headers));
+        *agentcore_ws_headers_store()
+            .lock()
+            .expect("agentcore ws headers mutex poisoned") = Some(headers);
     }
 
     pub fn take_agentcore_ws_headers() -> Option<Vec<(String, String)>> {
-        AGENTCORE_WS_HEADERS.with(|cell| cell.borrow_mut().take())
+        agentcore_ws_headers_store()
+            .lock()
+            .expect("agentcore ws headers mutex poisoned")
+            .take()
     }
 
     pub async fn connect() -> Result<(String, Option<ProviderSession>), String> {
@@ -791,6 +807,31 @@ mod tests {
         assert!(retrieved.is_some());
         let retrieved = retrieved.unwrap();
         assert_eq!(retrieved.session_id, "test-session");
+        assert_eq!(retrieved.region, "us-east-1");
+    }
+
+    #[test]
+    fn test_agentcore_session_info_storage_across_threads() {
+        let info = agentcore::AgentCoreSessionInfo {
+            session_id: "cross-thread-session".to_string(),
+            browser_identifier: "aws.browser.v1".to_string(),
+            region: "us-east-1".to_string(),
+            live_view_url: "https://example.com/live".to_string(),
+        };
+
+        std::thread::spawn(move || {
+            agentcore::set_agentcore_info(info);
+        })
+        .join()
+        .expect("agentcore setter thread panicked");
+
+        let retrieved = std::thread::spawn(|| {
+            get_agentcore_info().expect("agentcore info should be visible across threads")
+        })
+        .join()
+        .expect("agentcore getter thread panicked");
+
+        assert_eq!(retrieved.session_id, "cross-thread-session");
         assert_eq!(retrieved.region, "us-east-1");
     }
 
