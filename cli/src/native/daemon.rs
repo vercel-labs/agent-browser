@@ -41,6 +41,22 @@ pub async fn run_daemon(session: &str) {
                 session
             );
         }
+    } else {
+        // Redirect stderr to /dev/null to prevent daemon crash when the
+        // parent CLI drops the piped stderr handle after startup.  Cloud
+        // providers (AgentCore, Browserbase, etc.) may write to stderr
+        // during connection setup; a broken pipe would kill the daemon.
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::IntoRawFd;
+            if let Ok(devnull) = fs::File::create("/dev/null") {
+                let fd = devnull.into_raw_fd();
+                unsafe {
+                    libc::dup2(fd, 2);
+                    libc::close(fd);
+                }
+            }
+        }
     }
 
     let pid_path = socket_dir.join(format!("{}.pid", session));
