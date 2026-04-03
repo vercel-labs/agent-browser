@@ -395,11 +395,24 @@ impl DaemonState {
                             request_headers,
                         };
 
-                        let df = domain_filter.read().await;
-                        let rt = routes.read().await;
-                        let oh = origin_headers.read().await;
-
-                        resolve_fetch_paused(&client, df.as_ref(), &rt, &oh, &paused).await;
+                        // Spawn each resolution concurrently so that paused
+                        // requests are continued without blocking the event
+                        // loop.  Previously this was awaited inline, which
+                        // meant a burst of Fetch.requestPaused events during
+                        // page load would queue up — Chrome stalls the page
+                        // until each paused request is resolved, so the
+                        // sequential processing could cause the page to never
+                        // finish loading within the navigation timeout.
+                        let c = client.clone();
+                        let df = domain_filter.clone();
+                        let rt = routes.clone();
+                        let oh = origin_headers.clone();
+                        tokio::spawn(async move {
+                            let df = df.read().await;
+                            let rt = rt.read().await;
+                            let oh = oh.read().await;
+                            resolve_fetch_paused(&c, df.as_ref(), &rt, &oh, &paused).await;
+                        });
                     }
                     Ok(_) => continue,
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,

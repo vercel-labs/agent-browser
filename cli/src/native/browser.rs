@@ -581,7 +581,16 @@ impl BrowserManager {
             WaitUntil::None => return Ok(()),
         };
 
+        // The ready-state value that indicates the target lifecycle
+        // milestone has already been reached (used for lag recovery).
+        let ready_state_target = match wait_until {
+            WaitUntil::Load => "complete",
+            WaitUntil::DomContentLoaded => "interactive",
+            _ => unreachable!(),
+        };
+
         let timeout = tokio::time::Duration::from_millis(self.default_timeout_ms);
+        let client = &self.client;
 
         tokio::time::timeout(timeout, async {
             loop {
@@ -593,7 +602,33 @@ impl BrowserManager {
                             return Ok(());
                         }
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        // Events were dropped — the lifecycle event may have
+                        // already fired.  Check document.readyState to see
+                        // if the page has already reached the target state.
+                        if let Ok(result) = client
+                            .send_command(
+                                "Runtime.evaluate",
+                                Some(serde_json::json!({
+                                    "expression": "document.readyState",
+                                    "returnByValue": true,
+                                })),
+                                Some(session_id),
+                            )
+                            .await
+                        {
+                            let state = result
+                                .pointer("/result/value")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            if state == "complete"
+                                || (ready_state_target == "interactive" && state == "interactive")
+                            {
+                                return Ok(());
+                            }
+                        }
+                        continue;
+                    }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
             }
@@ -1265,7 +1300,16 @@ async fn poll_network_idle(
                     }
                 }
                 Ok(Ok(_)) => {}
-                Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {
+                    // Events were dropped — our pending-request tracking is
+                    // now unreliable.  Clear the set and start the idle timer
+                    // so we don't get stuck waiting for completion events
+                    // that were already dropped.
+                    let mut p = pending.lock().await;
+                    p.clear();
+                    idle_start = Some(tokio::time::Instant::now());
+                    continue;
+                }
                 Ok(Err(_)) => break,
                 Err(_) => {
                     // Timeout on recv -- if no pending requests, start (or
