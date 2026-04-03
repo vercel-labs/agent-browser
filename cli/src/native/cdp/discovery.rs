@@ -62,10 +62,10 @@ pub async fn discover_cdp_url_with_timeout(
     // Chrome 136+ with UI-based remote debugging (chrome://inspect) exposes
     // CDP over WebSocket but does not serve HTTP discovery endpoints.
     // Chrome M144+ shows a user-approval dialog before allowing the connection,
-    // so we use a longer timeout and print a hint to the user.
-    let ws_timeout = WS_DISCOVERY_TIMEOUT;
+    // so we ensure the timeout is long enough for the user to respond.
+    let ws_timeout = timeout.max(WS_DISCOVERY_TIMEOUT);
     eprintln!(
-        "Waiting for Chrome CDP connection... If a prompt appears in Chrome, click \"Allow\"."
+        "Waiting for CDP WebSocket connection... If a prompt appears in the browser, click \"Allow\"."
     );
     match discover_cdp_ws(host, port, ws_timeout).await {
         Ok(ws_url) => Ok(append_query(&ws_url, query)),
