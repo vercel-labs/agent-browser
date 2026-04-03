@@ -10,10 +10,6 @@ readme = "../README.md"
 keywords = ["browser", "automation", "ai", "cdp", "chrome"]
 categories = ["command-line-utilities", "web-programming"]
 
-[features]
-default = ["agentcore"]
-agentcore = ["hmac", "hex", "chrono", "urlencoding"]
-
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -34,12 +30,10 @@ socket2 = "0.6"
 similar = "2"
 zip = { version = "8.2.0", default-features = false, features = ["deflate"] }
 time = { version = "0.3", features = ["formatting"] }
-
-# AgentCore provider (optional - lightweight SigV4 signing)
-hmac = { version = "0.12", optional = true }
-hex = { version = "0.4", optional = true }
-chrono = { version = "0.4", optional = true }
-urlencoding = { version = "2", optional = true }
+hmac = "0.12"
+hex = "0.4"
+chrono = "0.4"
+urlencoding = "2"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

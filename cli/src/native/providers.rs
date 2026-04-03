@@ -364,10 +364,8 @@ async fn connect_kernel() -> Result<(String, Option<ProviderSession>), String> {
 
 // ============================================================================
 // AgentCore Provider (AWS Bedrock AgentCore Browser)
-// Requires: cargo build --features agentcore
 // ============================================================================
 
-#[cfg(feature = "agentcore")]
 mod agentcore {
     use super::*;
 
@@ -389,12 +387,14 @@ mod agentcore {
     }
 
     pub fn get_agentcore_info() -> Option<AgentCoreSessionInfo> {
-        AGENTCORE_INFO.with(|cell| cell.borrow().as_ref().map(|i| AgentCoreSessionInfo {
-            session_id: i.session_id.clone(),
-            browser_identifier: i.browser_identifier.clone(),
-            region: i.region.clone(),
-            live_view_url: i.live_view_url.clone(),
-        }))
+        AGENTCORE_INFO.with(|cell| {
+            cell.borrow().as_ref().map(|i| AgentCoreSessionInfo {
+                session_id: i.session_id.clone(),
+                browser_identifier: i.browser_identifier.clone(),
+                region: i.region.clone(),
+                live_view_url: i.live_view_url.clone(),
+            })
+        })
     }
 
     pub fn set_agentcore_ws_headers(headers: Vec<(String, String)>) {
@@ -410,15 +410,18 @@ mod agentcore {
             .or_else(|_| env::var("AWS_REGION"))
             .or_else(|_| env::var("AWS_DEFAULT_REGION"))
             .unwrap_or_else(|_| "us-east-1".to_string());
-        let browser_id = env::var("AGENTCORE_BROWSER_ID")
-            .unwrap_or_else(|_| "aws.browser.v1".to_string());
+        let browser_id =
+            env::var("AGENTCORE_BROWSER_ID").unwrap_or_else(|_| "aws.browser.v1".to_string());
         let timeout_secs: u64 = env::var("AGENTCORE_SESSION_TIMEOUT")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(3600);
 
         let host = format!("bedrock-agentcore.{}.amazonaws.com", region);
-        let path = format!("/browsers/{}/sessions/start", urlencoding::encode(&browser_id));
+        let path = format!(
+            "/browsers/{}/sessions/start",
+            urlencoding::encode(&browser_id)
+        );
         let url = format!("https://{}{}", host, path);
 
         // Generate a unique session name
@@ -432,7 +435,7 @@ mod agentcore {
             if !profile_id.is_empty() {
                 body_json.as_object_mut().unwrap().insert(
                     "profileConfiguration".to_string(),
-                    json!({ "profileIdentifier": profile_id })
+                    json!({ "profileIdentifier": profile_id }),
                 );
             }
         }
@@ -447,26 +450,36 @@ mod agentcore {
             req = req.header(key.as_str(), value.as_str());
         }
 
-        let response = req.send().await
+        let response = req
+            .send()
+            .await
             .map_err(|e| format!("AgentCore request failed: {}", e))?;
 
         let status = response.status();
-        let resp_body = response.text().await
+        let resp_body = response
+            .text()
+            .await
             .map_err(|e| format!("Failed to read AgentCore response: {}", e))?;
 
         if !status.is_success() {
-            return Err(format!("AgentCore API error ({}): {}", status.as_u16(), resp_body));
+            return Err(format!(
+                "AgentCore API error ({}): {}",
+                status.as_u16(),
+                resp_body
+            ));
         }
 
         let json: Value = serde_json::from_str(&resp_body)
             .map_err(|e| format!("Invalid AgentCore response: {}", e))?;
 
-        let session_id = json.get("sessionId")
+        let session_id = json
+            .get("sessionId")
             .and_then(|v| v.as_str())
             .ok_or_else(|| "AgentCore response missing sessionId".to_string())?
             .to_string();
 
-        let browser_identifier = json.get("browserIdentifier")
+        let browser_identifier = json
+            .get("browserIdentifier")
             .and_then(|v| v.as_str())
             .unwrap_or(&browser_id)
             .to_string();
@@ -486,10 +499,19 @@ mod agentcore {
         eprintln!("Session: {}", session_id);
         eprintln!("Live View: {}", live_view_url);
 
-        let ws_path = format!("/browser-streams/{}/sessions/{}/automation", browser_identifier, session_id);
+        let ws_path = format!(
+            "/browser-streams/{}/sessions/{}/automation",
+            browser_identifier, session_id
+        );
         let ws_url = format!("wss://{}{}", host, ws_path);
 
-        let ws_headers = sign_request("GET", &format!("https://{}{}", host, ws_path), &region, None).await?;
+        let ws_headers = sign_request(
+            "GET",
+            &format!("https://{}{}", host, ws_path),
+            &region,
+            None,
+        )
+        .await?;
         set_agentcore_ws_headers(ws_headers);
 
         Ok((
@@ -514,7 +536,7 @@ mod agentcore {
         // Fall back to AWS CLI
         let mut cmd = std::process::Command::new("aws");
         cmd.args(["configure", "export-credentials", "--format", "env"]);
-        
+
         // Honor AWS_PROFILE
         if let Ok(profile) = env::var("AWS_PROFILE") {
             cmd.args(["--profile", &profile]);
@@ -525,7 +547,10 @@ mod agentcore {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("AWS CLI failed: {}. Run 'aws sso login' or set credentials", stderr.trim()));
+            return Err(format!(
+                "AWS CLI failed: {}. Run 'aws sso login' or set credentials",
+                stderr.trim()
+            ));
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -556,13 +581,12 @@ mod agentcore {
         body: Option<&str>,
     ) -> Result<Vec<(String, String)>, String> {
         use hmac::{Hmac, Mac};
-        use sha2::{Sha256, Digest};
+        use sha2::{Digest, Sha256};
 
         // Get credentials from environment or AWS CLI
         let (access_key, secret_key, session_token) = get_aws_credentials()?;
 
-        let parsed_url = url::Url::parse(url)
-            .map_err(|e| format!("Invalid URL: {}", e))?;
+        let parsed_url = url::Url::parse(url).map_err(|e| format!("Invalid URL: {}", e))?;
         let host = parsed_url.host_str().unwrap_or("");
 
         // Get current time
@@ -576,7 +600,8 @@ mod agentcore {
             hasher.update(b.as_bytes());
             hex::encode(hasher.finalize())
         } else {
-            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string() // empty string hash
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string()
+            // empty string hash
         };
 
         let canonical_uri = parsed_url.path();
@@ -590,7 +615,8 @@ mod agentcore {
 
         if session_token.is_some() {
             signed_headers = "content-type;host;x-amz-date;x-amz-security-token".to_string();
-            canonical_headers = format!(
+            canonical_headers =
+                format!(
                 "content-type:application/json\nhost:{}\nx-amz-date:{}\nx-amz-security-token:{}\n",
                 host, amz_date, session_token.as_ref().unwrap()
             );
@@ -598,8 +624,12 @@ mod agentcore {
 
         let canonical_request = format!(
             "{}\n{}\n{}\n{}\n{}\n{}",
-            method, canonical_uri, canonical_querystring,
-            canonical_headers, signed_headers, payload_hash
+            method,
+            canonical_uri,
+            canonical_querystring,
+            canonical_headers,
+            signed_headers,
+            payload_hash
         );
 
         // Create string to sign
@@ -647,7 +677,7 @@ mod agentcore {
                 .unwrap()
                 .chain_update(string_to_sign.as_bytes())
                 .finalize()
-                .into_bytes()
+                .into_bytes(),
         );
 
         // Build authorization header
@@ -686,7 +716,10 @@ mod agentcore {
         };
 
         let host = format!("bedrock-agentcore.{}.amazonaws.com", region);
-        let path = format!("/browsers/{}/sessions/stop", urlencoding::encode(&browser_id));
+        let path = format!(
+            "/browsers/{}/sessions/stop",
+            urlencoding::encode(&browser_id)
+        );
         let url = format!("https://{}{}", host, path);
 
         let body = serde_json::to_string(&json!({ "sessionId": session_id }))
@@ -705,36 +738,15 @@ mod agentcore {
     }
 }
 
-#[cfg(feature = "agentcore")]
 pub use agentcore::{get_agentcore_info, take_agentcore_ws_headers};
 
-#[cfg(feature = "agentcore")]
 async fn connect_agentcore() -> Result<(String, Option<ProviderSession>), String> {
     agentcore::connect().await
 }
 
-#[cfg(not(feature = "agentcore"))]
-async fn connect_agentcore() -> Result<(String, Option<ProviderSession>), String> {
-    Err("AgentCore provider requires the 'agentcore' feature. Rebuild with: cargo build --features agentcore".to_string())
-}
-
-#[cfg(feature = "agentcore")]
 async fn close_agentcore_session(session_id: &str) -> Result<(), String> {
     agentcore::close_session(session_id).await
 }
-
-#[cfg(not(feature = "agentcore"))]
-async fn close_agentcore_session(_session_id: &str) -> Result<(), String> {
-    Ok(())
-}
-
-// Stub functions when agentcore feature is disabled
-#[cfg(not(feature = "agentcore"))]
-pub fn get_agentcore_info() -> Option<()> { None }
-
-#[cfg(not(feature = "agentcore"))]
-pub fn take_agentcore_ws_headers() -> Option<Vec<(String, String)>> { None }
-
 
 #[cfg(test)]
 mod tests {
@@ -749,19 +761,6 @@ mod tests {
     }
 
     #[test]
-    fn test_connect_provider_agentcore_without_feature() {
-        // Without agentcore feature, should return helpful error
-        #[cfg(not(feature = "agentcore"))]
-        {
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            let result = rt.block_on(connect_provider("agentcore"));
-            assert!(result.is_err());
-            assert!(result.unwrap_err().contains("agentcore"));
-        }
-    }
-
-    #[cfg(feature = "agentcore")]
-    #[test]
     fn test_agentcore_env_defaults() {
         // Test that default values are used when env vars not set
         std::env::remove_var("AGENTCORE_REGION");
@@ -774,12 +773,11 @@ mod tests {
             .unwrap_or_else(|_| "us-east-1".to_string());
         assert_eq!(region, "us-east-1");
 
-        let browser_id = std::env::var("AGENTCORE_BROWSER_ID")
-            .unwrap_or_else(|_| "aws.browser.v1".to_string());
+        let browser_id =
+            std::env::var("AGENTCORE_BROWSER_ID").unwrap_or_else(|_| "aws.browser.v1".to_string());
         assert_eq!(browser_id, "aws.browser.v1");
     }
 
-    #[cfg(feature = "agentcore")]
     #[test]
     fn test_agentcore_session_info_storage() {
         let info = agentcore::AgentCoreSessionInfo {
@@ -797,11 +795,13 @@ mod tests {
         assert_eq!(retrieved.region, "us-east-1");
     }
 
-    #[cfg(feature = "agentcore")]
     #[test]
     fn test_agentcore_ws_headers_storage() {
         let headers = vec![
-            ("Authorization".to_string(), "AWS4-HMAC-SHA256...".to_string()),
+            (
+                "Authorization".to_string(),
+                "AWS4-HMAC-SHA256...".to_string(),
+            ),
             ("X-Amz-Date".to_string(), "20260304T180000Z".to_string()),
         ];
 

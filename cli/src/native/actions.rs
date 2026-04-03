@@ -1629,8 +1629,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
                 let connect_result = if conn.direct_page {
                     BrowserManager::connect_cdp_direct(&conn.ws_url).await
                 } else if ws_headers.is_some() {
-                    BrowserManager::connect_cdp_with_headers(&conn.ws_url, ws_headers)
-                        .await
+                    BrowserManager::connect_cdp_with_headers(&conn.ws_url, ws_headers).await
                 } else {
                     BrowserManager::connect_cdp(&conn.ws_url).await
                 };
@@ -1644,7 +1643,6 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
                         state.update_stream_client().await;
                         write_provider_file(&state.session_id, provider);
 
-                        #[cfg(feature = "agentcore")]
                         if let Some(info) = providers::get_agentcore_info() {
                             return Ok(json!({
                                 "launched": true,
