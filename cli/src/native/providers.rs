@@ -364,10 +364,8 @@ async fn connect_kernel() -> Result<(String, Option<ProviderSession>), String> {
 
 // ============================================================================
 // AgentCore Provider (AWS Bedrock AgentCore Browser)
-// Requires: cargo build --features agentcore
 // ============================================================================
 
-#[cfg(feature = "agentcore")]
 mod agentcore {
     use super::*;
     use std::sync::{Mutex, OnceLock};
@@ -384,14 +382,16 @@ mod agentcore {
         pub live_view_url: String,
     }
 
-    fn agentcore_info_store() -> &'static Mutex<Option<AgentCoreSessionInfo>> {
-        static AGENTCORE_INFO: OnceLock<Mutex<Option<AgentCoreSessionInfo>>> = OnceLock::new();
+    type AgentCoreInfoStore = Mutex<Option<AgentCoreSessionInfo>>;
+    type AgentCoreWsHeadersStore = Mutex<Option<Vec<(String, String)>>>;
+
+    fn agentcore_info_store() -> &'static AgentCoreInfoStore {
+        static AGENTCORE_INFO: OnceLock<AgentCoreInfoStore> = OnceLock::new();
         AGENTCORE_INFO.get_or_init(|| Mutex::new(None))
     }
 
-    fn agentcore_ws_headers_store() -> &'static Mutex<Option<Vec<(String, String)>>> {
-        static AGENTCORE_WS_HEADERS: OnceLock<Mutex<Option<Vec<(String, String)>>>> =
-            OnceLock::new();
+    fn agentcore_ws_headers_store() -> &'static AgentCoreWsHeadersStore {
+        static AGENTCORE_WS_HEADERS: OnceLock<AgentCoreWsHeadersStore> = OnceLock::new();
         AGENTCORE_WS_HEADERS.get_or_init(|| Mutex::new(None))
     }
 
