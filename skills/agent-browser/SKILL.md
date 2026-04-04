@@ -61,7 +61,17 @@ agent-browser --state ./auth.json open https://app.example.com/dashboard
 
 State files contain session tokens in plaintext -- add to `.gitignore` and delete when no longer needed. Set `AGENT_BROWSER_ENCRYPTION_KEY` for encryption at rest.
 
-**Option 2: Persistent profile (simplest for recurring tasks)**
+**Option 2: Chrome profile reuse (zero setup)**
+
+```bash
+# List available Chrome profiles
+agent-browser profiles
+
+# Reuse the user's existing Chrome login state
+agent-browser --profile Default open https://gmail.com
+```
+
+**Option 3: Persistent profile (for recurring tasks)**
 
 ```bash
 # First run: login manually or via automation
@@ -72,7 +82,7 @@ agent-browser --profile ~/.myapp open https://app.example.com/login
 agent-browser --profile ~/.myapp open https://app.example.com/dashboard
 ```
 
-**Option 3: Session name (auto-save/restore cookies + localStorage)**
+**Option 4: Session name (auto-save/restore cookies + localStorage)**
 
 ```bash
 agent-browser --session-name myapp open https://app.example.com/login

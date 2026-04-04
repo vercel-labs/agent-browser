@@ -633,6 +633,8 @@ fn is_port_reachable(port: u16) -> bool {
     TcpStream::connect_timeout(&addr.parse().unwrap(), Duration::from_millis(500)).is_ok()
 }
 
+/// Returns the default Chrome user-data directory paths for the current platform.
+/// Includes Chrome, Chrome Canary, Chromium, and Brave.
 pub fn get_chrome_user_data_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
 

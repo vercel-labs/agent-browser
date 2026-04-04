@@ -374,6 +374,7 @@ agent-browser provides multiple ways to persist login sessions so you don't re-a
 
 | Approach | Best for | Flag / Env |
 |----------|----------|------------|
+| **Chrome profile reuse** | Reuse your existing Chrome login state (cookies, sessions) with zero setup | `--profile <name>` / `AGENT_BROWSER_PROFILE` |
 | **Persistent profile** | Full browser state (cookies, IndexedDB, service workers, cache) across restarts | `--profile <path>` / `AGENT_BROWSER_PROFILE` |
 | **Session persistence** | Auto-save/restore cookies + localStorage by name | `--session-name <name>` / `AGENT_BROWSER_SESSION_NAME` |
 | **Import from your browser** | Grab auth from a Chrome session you already logged into | `--auto-connect` + `state save` |
@@ -437,9 +438,31 @@ Each session has its own:
 - Navigation history
 - Authentication state
 
+## Chrome Profile Reuse
+
+The fastest way to use your existing login state: pass a Chrome profile name to `--profile`:
+
+```bash
+# List available Chrome profiles
+agent-browser profiles
+
+# Reuse your default Chrome profile's login state
+agent-browser --profile Default open https://gmail.com
+
+# Use a named profile (by display name or directory name)
+agent-browser --profile "Work" open https://app.example.com
+
+# Or via environment variable
+AGENT_BROWSER_PROFILE=Default agent-browser open https://gmail.com
+```
+
+This copies your Chrome profile to a temp directory (read-only snapshot, no changes to your original profile), so the browser launches with your existing cookies and sessions.
+
+> **Note:** On Windows, close Chrome before using `--profile <name>` if Chrome is running, as some profile files may be locked.
+
 ## Persistent Profiles
 
-By default, browser state (cookies, localStorage, login sessions) is ephemeral and lost when the browser closes. Use `--profile` to persist state across browser restarts:
+For a persistent custom profile directory that stores state across browser restarts, pass a path to `--profile`:
 
 ```bash
 # Use a persistent profile directory
@@ -567,7 +590,7 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 |--------|-------------|
 | `--session <name>` | Use isolated session (or `AGENT_BROWSER_SESSION` env) |
 | `--session-name <name>` | Auto-save/restore session state (or `AGENT_BROWSER_SESSION_NAME` env) |
-| `--profile <path>` | Persistent browser profile directory (or `AGENT_BROWSER_PROFILE` env) |
+| `--profile <name\|path>` | Chrome profile name or persistent directory path (or `AGENT_BROWSER_PROFILE` env) |
 | `--state <path>` | Load storage state from JSON file (or `AGENT_BROWSER_STATE` env) |
 | `--headers <json>` | Set HTTP headers scoped to the URL's origin |
 | `--executable-path <path>` | Custom browser executable (or `AGENT_BROWSER_EXECUTABLE_PATH` env) |

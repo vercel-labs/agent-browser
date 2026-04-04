@@ -2806,7 +2806,8 @@ Snapshot Options:
   -s, --selector <sel>       Scope to CSS selector
 
 Authentication:
-  --profile <path>           Persist login sessions across restarts (cookies, IndexedDB, cache)
+  --profile <name|path>      Chrome profile name (e.g., Default) to reuse login state,
+                             or a directory path for a persistent custom profile
                              (or AGENT_BROWSER_PROFILE env)
   --session-name <name>      Auto-save/restore cookies and localStorage by name
                              (or AGENT_BROWSER_SESSION_NAME env)
@@ -2933,7 +2934,9 @@ Examples:
   agent-browser stream enable            # Start runtime streaming on an auto-selected port
   agent-browser stream status            # Inspect runtime streaming state
   agent-browser --color-scheme dark open example.com  # Dark mode
-  agent-browser --profile ~/.myapp open example.com    # Persistent profile
+  agent-browser --profile Default open gmail.com        # Reuse Chrome login state
+  agent-browser --profile ~/.myapp open example.com    # Persistent custom profile
+  agent-browser profiles                               # List available Chrome profiles
   agent-browser --session-name myapp open example.com  # Auto-save/restore state
 
 Command Chaining:
