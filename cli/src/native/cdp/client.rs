@@ -87,8 +87,8 @@ impl CdpClient {
         let ws_tx = Arc::new(Mutex::new(ws_tx));
 
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
-        let (event_tx, _) = broadcast::channel(256);
-        let (raw_tx, _) = broadcast::channel(512);
+        let (event_tx, _) = broadcast::channel(4096);
+        let (raw_tx, _) = broadcast::channel(4096);
 
         let pending_clone = pending.clone();
         let event_tx_clone = event_tx.clone();
