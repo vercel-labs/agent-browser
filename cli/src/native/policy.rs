@@ -19,7 +19,7 @@ pub fn action_category(action: &str) -> Option<&'static str> {
         "isvisible" | "isenabled" | "ischecked" => Some("is"),
         // find <sub>
         "getbyrole" | "getbytext" | "getbylabel" | "getbyplaceholder"
-        | "getbyalttext" | "getbytitle" | "getbytestid" | "first" => Some("find"),
+        | "getbyalttext" | "getbytitle" | "getbytestid" | "nth" => Some("find"),
         // diff <sub>
         "diff_snapshot" | "diff_screenshot" | "diff_url" => Some("diff"),
         _ => None,
@@ -255,6 +255,7 @@ mod tests {
         assert_eq!(action_category("ischecked"), Some("is"));
         assert_eq!(action_category("getbyrole"), Some("find"));
         assert_eq!(action_category("getbytitle"), Some("find"));
+        assert_eq!(action_category("nth"), Some("find"));
         assert_eq!(action_category("click"), None);
         assert_eq!(action_category("fill"), None);
         assert_eq!(action_category("open"), None);
