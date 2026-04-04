@@ -3822,3 +3822,65 @@ async fn e2e_externally_opened_tab_detected() {
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     assert_success(&resp);
 }
+
+// ---------------------------------------------------------------------------
+// Regression: issue #993 — launch options change must trigger relaunch
+// ---------------------------------------------------------------------------
+
+/// When the browser is already running and a second launch command arrives with
+/// different options (e.g., extensions added), the daemon must relaunch the
+/// browser instead of silently reusing the old one.
+///
+/// Before the fix, `handle_launch` only checked connection type and liveness,
+/// so changed options like extensions were ignored and the old browser was reused.
+#[tokio::test]
+#[ignore]
+async fn e2e_relaunch_on_options_change() {
+    let mut state = DaemonState::new();
+
+    // First launch — headless, no extensions.
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["launched"], true);
+    assert!(
+        get_data(&resp).get("reused").is_none(),
+        "first launch must not be a reuse"
+    );
+
+    // Second launch — same options → should reuse.
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["reused"],
+        true,
+        "identical options must reuse the browser"
+    );
+
+    // Third launch — different options (extensions added) → must relaunch, not reuse.
+    let resp = execute_command(
+        &json!({
+            "id": "3",
+            "action": "launch",
+            "headless": false,
+            "extensions": ["/tmp/fake-extension"]
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert!(
+        get_data(&resp).get("reused").is_none(),
+        "changed options must trigger a relaunch, not reuse (issue #993)"
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}

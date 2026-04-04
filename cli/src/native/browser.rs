@@ -479,6 +479,13 @@ impl BrowserManager {
         self.client
             .send_command_no_params("Runtime.enable", Some(session_id))
             .await?;
+        // Resume the target if it is paused waiting for the debugger.
+        // This is needed for real browser sessions (Chrome 144+) where targets
+        // are paused after attach until explicitly resumed. No-op otherwise.
+        let _ = self
+            .client
+            .send_command_no_params("Runtime.runIfWaitingForDebugger", Some(session_id))
+            .await;
         self.client
             .send_command_no_params("Network.enable", Some(session_id))
             .await?;
@@ -508,6 +515,10 @@ impl BrowserManager {
         self.client
             .send_command_no_params("Runtime.enable", None)
             .await?;
+        let _ = self
+            .client
+            .send_command_no_params("Runtime.runIfWaitingForDebugger", None)
+            .await;
         self.client
             .send_command_no_params("Network.enable", None)
             .await?;
