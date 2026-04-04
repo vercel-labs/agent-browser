@@ -9,11 +9,24 @@ pub struct ChromeProcess {
     child: Child,
     pub ws_url: String,
     temp_user_data_dir: Option<PathBuf>,
+    /// On Unix, the process group ID used to kill the entire Chrome process tree.
+    #[cfg(unix)]
+    pgid: Option<i32>,
 }
 
 impl ChromeProcess {
     pub fn kill(&mut self) {
         let _ = self.child.kill();
+        // On Unix, kill the entire process group to ensure Chrome helper
+        // processes (GPU, renderer, utility, crashpad) are also terminated.
+        // This prevents orphaned Chrome processes from blocking the user's
+        // normal Chrome (issue #1113).
+        #[cfg(unix)]
+        if let Some(pgid) = self.pgid {
+            unsafe {
+                libc::kill(-pgid, libc::SIGKILL);
+            }
+        }
         let _ = self.child.wait();
     }
 
@@ -276,16 +289,42 @@ fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<Chro
         }
     };
 
-    let mut child = Command::new(chrome_path)
-        .args(&args)
+    let mut cmd = Command::new(chrome_path);
+    cmd.args(&args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| {
-            cleanup_temp_dir(&temp_user_data_dir);
-            format!("Failed to launch Chrome at {:?}: {}", chrome_path, e)
-        })?;
+        .stderr(Stdio::piped());
+
+    // Place Chrome in its own process group so we can kill the entire tree
+    // (main process + GPU/renderer/utility/crashpad helpers) with a single
+    // killpg(), preventing orphaned processes (issue #1113).
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: pre_exec runs between fork() and exec() in the child.
+        // Both prctl and setpgid are async-signal-safe.
+        unsafe {
+            cmd.pre_exec(|| {
+                // On Linux, ask the kernel to send SIGKILL to this process
+                // when the parent (daemon) dies for any reason, including
+                // SIGKILL. This is the most robust orphan prevention
+                // available and has no macOS equivalent.
+                #[cfg(target_os = "linux")]
+                {
+                    libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+                }
+                // Create a new process group (PGID = own PID) so the
+                // daemon can kill the entire Chrome tree in one call.
+                libc::setpgid(0, 0);
+                Ok(())
+            });
+        }
+    }
+
+    let mut child = cmd.spawn().map_err(|e| {
+        cleanup_temp_dir(&temp_user_data_dir);
+        format!("Failed to launch Chrome at {:?}: {}", chrome_path, e)
+    })?;
 
     // Shared overall deadline so we don't double-wait (poll + stderr fallback).
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
@@ -317,10 +356,20 @@ fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<Chro
         }
     };
 
+    #[cfg(unix)]
+    let pgid = {
+        let pid = child.id() as i32;
+        // The child called setpgid(0,0) via process_group(0), so its PGID
+        // equals its own PID.
+        Some(pid)
+    };
+
     Ok(ChromeProcess {
         child,
         ws_url,
         temp_user_data_dir,
+        #[cfg(unix)]
+        pgid,
     })
 }
 
@@ -1138,6 +1187,8 @@ mod tests {
                 child,
                 ws_url: String::new(),
                 temp_user_data_dir: Some(dir.clone()),
+                #[cfg(unix)]
+                pgid: None,
             };
             // _process dropped here
         }
