@@ -53,6 +53,7 @@ const ENGINE_LOGOS: Record<string, string> = {
 };
 
 const PROVIDER_LOGOS: Record<string, string> = {
+  agentcore: "/providers/agentcore.svg",
   browserbase: "/providers/browserbase.svg",
   browserless: "/providers/browserless.svg",
   "browser-use": "/providers/browser-use.svg",
@@ -64,6 +65,7 @@ const SUPPORTED_ENGINES = ["chrome", "lightpanda"] as const;
 const BROWSER_OPTIONS: { id: string; label: string; engine?: string; provider?: string }[] = [
   { id: "chrome", label: "Chrome", engine: "chrome" },
   { id: "lightpanda", label: "Lightpanda", engine: "lightpanda" },
+  { id: "agentcore", label: "AgentCore", provider: "agentcore" },
   { id: "browserbase", label: "Browserbase", provider: "browserbase" },
   { id: "browserless", label: "Browserless", provider: "browserless" },
   { id: "browser-use", label: "Browser Use", provider: "browser-use" },

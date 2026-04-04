@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::signal;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, Notify, RwLock};
 
 use super::actions::{execute_command, DaemonState};
 use super::cdp::client::CdpClient;
@@ -41,10 +41,29 @@ pub async fn run_daemon(session: &str) {
                 session
             );
         }
+    } else {
+        // Redirect stderr to /dev/null to prevent daemon crash when the
+        // parent CLI drops the piped stderr handle after startup.  Cloud
+        // providers (AgentCore, Browserbase, etc.) may write to stderr
+        // during connection setup; a broken pipe would kill the daemon.
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::IntoRawFd;
+            if let Ok(devnull) = fs::File::create("/dev/null") {
+                let fd = devnull.into_raw_fd();
+                unsafe {
+                    libc::dup2(fd, 2);
+                    libc::close(fd);
+                }
+            }
+        }
     }
 
     let pid_path = socket_dir.join(format!("{}.pid", session));
     let _ = fs::write(&pid_path, process::id().to_string());
+
+    let version_path = socket_dir.join(format!("{}.version", session));
+    let _ = fs::write(&version_path, env!("CARGO_PKG_VERSION"));
 
     // On Unix the daemon listens on a Unix domain socket; on Windows it uses
     // TCP, so there is no .sock file — only a .port file written by the server.
@@ -118,6 +137,7 @@ pub async fn run_daemon(session: &str) {
         let _ = fs::remove_file(socket_dir.join(format!("{}.port", session)));
     }
     let _ = fs::remove_file(&pid_path);
+    let _ = fs::remove_file(&version_path);
     let _ = fs::remove_file(&stream_path);
     let _ = fs::remove_file(socket_dir.join(format!("{}.engine", session)));
     let _ = fs::remove_file(socket_dir.join(format!("{}.provider", session)));
@@ -156,13 +176,18 @@ async fn run_socket_server(
     let (reset_tx, mut reset_rx) = mpsc::channel::<()>(64);
     let reset_tx = idle_timeout_ms.map(|_| Arc::new(reset_tx));
 
-    let mut drain_interval = tokio::time::interval(Duration::from_millis(500));
+    // Notifier used by handle_connection to signal the daemon loop to exit
+    // after a "close" command, instead of calling process::exit() which skips
+    // destructors and can leave Chrome processes orphaned (issue #1113).
+    let close_notify = Arc::new(Notify::new());
+
+    let mut drain_interval = tokio::time::interval(Duration::from_millis(100));
     drain_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-    loop {
-        let sleep_future = idle_timeout_ms.map(|ms| tokio::time::sleep(Duration::from_millis(ms)));
-        let mut sleep_pin = sleep_future.map(Box::pin);
+    let idle_sleep = idle_timeout_ms.map(|ms| tokio::time::sleep(Duration::from_millis(ms)));
+    let mut idle_sleep_pin = idle_sleep.map(Box::pin);
 
+    loop {
         tokio::select! {
             accept_result = listener.accept() => {
                 match accept_result {
@@ -170,8 +195,9 @@ async fn run_socket_server(
                         let state = state.clone();
                         let reset_tx = reset_tx.clone();
                         let sf = stream_file.clone();
+                        let cn = close_notify.clone();
                         tokio::spawn(async move {
-                            handle_connection(stream, state, reset_tx, sf).await;
+                            handle_connection(stream, state, reset_tx, sf, cn).await;
                         });
                     }
                     Err(e) => {
@@ -193,10 +219,9 @@ async fn run_socket_server(
                 }
             }
             _ = async {
-                if let Some(ref mut s) = sleep_pin {
-                    s.as_mut().await
-                } else {
-                    std::future::pending::<()>().await
+                match idle_sleep_pin {
+                    Some(ref mut s) => s.as_mut().await,
+                    None => std::future::pending::<()>().await,
                 }
             }, if idle_timeout_ms.is_some() => {
                 let mut s = state.lock().await;
@@ -206,7 +231,15 @@ async fn run_socket_server(
                 break;
             }
             _ = reset_rx.recv(), if idle_timeout_ms.is_some() => {
+                idle_sleep_pin = idle_timeout_ms
+                    .map(|ms| Box::pin(tokio::time::sleep(Duration::from_millis(ms))));
                 continue;
+            }
+            _ = close_notify.notified() => {
+                // "close" command was handled; browser already closed by
+                // handle_close(). Break to run cleanup and exit gracefully
+                // so destructors fire.
+                break;
             }
             _ = shutdown_signal() => {
                 let mut s = state.lock().await;
@@ -262,10 +295,12 @@ async fn run_socket_server(
     let (reset_tx, mut reset_rx) = mpsc::channel::<()>(64);
     let reset_tx = idle_timeout_ms.map(|_| Arc::new(reset_tx));
 
-    loop {
-        let sleep_future = idle_timeout_ms.map(|ms| tokio::time::sleep(Duration::from_millis(ms)));
-        let mut sleep_pin = sleep_future.map(Box::pin);
+    let close_notify = Arc::new(Notify::new());
 
+    let idle_sleep = idle_timeout_ms.map(|ms| tokio::time::sleep(Duration::from_millis(ms)));
+    let mut idle_sleep_pin = idle_sleep.map(Box::pin);
+
+    loop {
         tokio::select! {
             accept_result = listener.accept() => {
                 match accept_result {
@@ -273,8 +308,9 @@ async fn run_socket_server(
                         let state = state.clone();
                         let reset_tx = reset_tx.clone();
                         let sf = stream_file.clone();
+                        let cn = close_notify.clone();
                         tokio::spawn(async move {
-                            handle_connection(stream, state, reset_tx, sf).await;
+                            handle_connection(stream, state, reset_tx, sf, cn).await;
                         });
                     }
                     Err(e) => {
@@ -283,10 +319,9 @@ async fn run_socket_server(
                 }
             }
             _ = async {
-                if let Some(ref mut s) = sleep_pin {
-                    s.as_mut().await
-                } else {
-                    std::future::pending::<()>().await
+                match idle_sleep_pin {
+                    Some(ref mut s) => s.as_mut().await,
+                    None => std::future::pending::<()>().await,
                 }
             }, if idle_timeout_ms.is_some() => {
                 let mut s = state.lock().await;
@@ -297,7 +332,13 @@ async fn run_socket_server(
                 break;
             }
             _ = reset_rx.recv(), if idle_timeout_ms.is_some() => {
+                idle_sleep_pin = idle_timeout_ms
+                    .map(|ms| Box::pin(tokio::time::sleep(Duration::from_millis(ms))));
                 continue;
+            }
+            _ = close_notify.notified() => {
+                let _ = fs::remove_file(&port_path);
+                break;
             }
             _ = shutdown_signal() => {
                 let mut s = state.lock().await;
@@ -318,6 +359,7 @@ async fn handle_connection<S>(
     state: std::sync::Arc<tokio::sync::Mutex<DaemonState>>,
     idle_reset_tx: Option<Arc<mpsc::Sender<()>>>,
     stream_file_cleanup: Option<PathBuf>,
+    close_notify: Arc<Notify>,
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
@@ -374,8 +416,12 @@ async fn handle_connection<S>(
                     if let Some(ref path) = stream_file_cleanup {
                         let _ = fs::remove_file(path);
                     }
+                    // Signal the daemon loop to exit gracefully instead of
+                    // calling process::exit(), which skips destructors and
+                    // can leave Chrome processes orphaned (issue #1113).
                     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                    process::exit(0);
+                    close_notify.notify_one();
+                    return;
                 }
             }
             Err(_) => break,
@@ -532,6 +578,64 @@ mod tests {
             Ok(None) => panic!("try_wait() returned None but child should have exited"),
             Err(e) => panic!("try_wait() should succeed without waitpid(-1): {}", e),
         }
+    }
+
+    /// Regression test for #1101: idle timeout must fire even while the
+    /// drain interval ticks every 500 ms.  The bug was that `sleep_future`
+    /// was created **inside** the loop, so each drain tick dropped the
+    /// in-progress sleep and replaced it with a fresh one – the timer
+    /// could never reach its deadline.
+    #[tokio::test]
+    async fn test_idle_timeout_fires_despite_drain_interval() {
+        use tokio::sync::mpsc;
+
+        let idle_timeout_ms: u64 = 1000;
+        let mut drain_interval = tokio::time::interval(Duration::from_millis(500));
+        drain_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        let (_reset_tx, mut reset_rx) = mpsc::channel::<()>(64);
+
+        let start = tokio::time::Instant::now();
+
+        let exited = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut idle_sleep_pin = Some(Box::pin(tokio::time::sleep(Duration::from_millis(
+                idle_timeout_ms,
+            ))));
+
+            loop {
+                tokio::select! {
+                    _ = drain_interval.tick() => {}
+                    _ = async {
+                        match idle_sleep_pin {
+                            Some(ref mut s) => s.as_mut().await,
+                            None => std::future::pending::<()>().await,
+                        }
+                    } => {
+                        break;
+                    }
+                    _ = reset_rx.recv() => {
+                        idle_sleep_pin = Some(Box::pin(
+                            tokio::time::sleep(Duration::from_millis(idle_timeout_ms)),
+                        ));
+                        continue;
+                    }
+                }
+            }
+        })
+        .await;
+
+        let elapsed = start.elapsed();
+
+        assert!(
+            exited.is_ok(),
+            "idle timeout never fired – loop ran for >5 s (bug #1101)"
+        );
+        assert!(
+            elapsed < Duration::from_millis(idle_timeout_ms + 500),
+            "idle timeout took too long: {:?} (expected ~{} ms)",
+            elapsed,
+            idle_timeout_ms,
+        );
     }
 
     /// Verify that `ChromeProcess::has_exited()` (which uses `Child::try_wait()`)

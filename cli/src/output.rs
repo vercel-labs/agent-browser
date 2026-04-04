@@ -2661,6 +2661,26 @@ Examples:
 "##
         }
 
+        "profiles" => {
+            r##"
+agent-browser profiles - List available Chrome profiles
+
+Usage: agent-browser profiles
+
+Lists all Chrome profiles found in your Chrome user data directory, showing
+the directory name and display name for each profile. Use the directory name
+with --profile to launch Chrome with that profile's login state.
+
+Global Options:
+  --json               Output as JSON
+
+Examples:
+  agent-browser profiles
+  agent-browser profiles --json
+  agent-browser --profile Default open https://gmail.com
+"##
+        }
+
         _ => return false,
     };
     println!("{}", help.trim());
@@ -2786,6 +2806,7 @@ Setup:
   install --with-deps        Also install system dependencies (Linux)
   upgrade                    Upgrade to the latest version
   dashboard install          Install the observability dashboard
+  profiles                   List available Chrome profiles
 
 Snapshot Options:
   -i, --interactive          Only interactive elements
@@ -2794,7 +2815,8 @@ Snapshot Options:
   -s, --selector <sel>       Scope to CSS selector
 
 Authentication:
-  --profile <path>           Persist login sessions across restarts (cookies, IndexedDB, cache)
+  --profile <name|path>      Chrome profile name (e.g., Default) to reuse login state,
+                             or a directory path for a persistent custom profile
                              (or AGENT_BROWSER_PROFILE env)
   --session-name <name>      Auto-save/restore cookies and localStorage by name
                              (or AGENT_BROWSER_SESSION_NAME env)
@@ -2817,7 +2839,7 @@ Options:
                              e.g., --proxy-bypass "localhost,*.internal.com"
   --ignore-https-errors      Ignore HTTPS certificate errors
   --allow-file-access        Allow file:// URLs to access local files (Chromium only)
-  -p, --provider <name>      Browser provider: ios, browserbase, kernel, browseruse, browserless
+  -p, --provider <name>      Browser provider: ios, browserbase, kernel, browseruse, browserless, agentcore
   --device <name>            iOS device name (e.g., "iPhone 15 Pro")
   --json                     JSON output
   --annotate                 Annotated screenshot with numbered labels and legend
@@ -2872,7 +2894,7 @@ Environment:
   AGENT_BROWSER_ANNOTATE         Annotated screenshot with numbered labels and legend
   AGENT_BROWSER_DEBUG            Debug output
   AGENT_BROWSER_IGNORE_HTTPS_ERRORS Ignore HTTPS certificate errors
-  AGENT_BROWSER_PROVIDER         Browser provider (ios, browserbase, kernel, browseruse, browserless)
+  AGENT_BROWSER_PROVIDER         Browser provider (ios, browserbase, kernel, browseruse, browserless, agentcore)
   AGENT_BROWSER_AUTO_CONNECT     Auto-discover and connect to running Chrome
   AGENT_BROWSER_ALLOW_FILE_ACCESS Allow file:// URLs to access local files
   AGENT_BROWSER_COLOR_SCHEME     Color scheme preference (dark, light, no-preference)
@@ -2921,7 +2943,9 @@ Examples:
   agent-browser stream enable            # Start runtime streaming on an auto-selected port
   agent-browser stream status            # Inspect runtime streaming state
   agent-browser --color-scheme dark open example.com  # Dark mode
-  agent-browser --profile ~/.myapp open example.com    # Persistent profile
+  agent-browser --profile Default open gmail.com        # Reuse Chrome login state
+  agent-browser --profile ~/.myapp open example.com    # Persistent custom profile
+  agent-browser profiles                               # List available Chrome profiles
   agent-browser --session-name myapp open example.com  # Auto-save/restore state
 
 Command Chaining:

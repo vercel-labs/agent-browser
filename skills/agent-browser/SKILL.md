@@ -61,7 +61,17 @@ agent-browser --state ./auth.json open https://app.example.com/dashboard
 
 State files contain session tokens in plaintext -- add to `.gitignore` and delete when no longer needed. Set `AGENT_BROWSER_ENCRYPTION_KEY` for encryption at rest.
 
-**Option 2: Persistent profile (simplest for recurring tasks)**
+**Option 2: Chrome profile reuse (zero setup)**
+
+```bash
+# List available Chrome profiles
+agent-browser profiles
+
+# Reuse the user's existing Chrome login state
+agent-browser --profile Default open https://gmail.com
+```
+
+**Option 3: Persistent profile (for recurring tasks)**
 
 ```bash
 # First run: login manually or via automation
@@ -72,7 +82,7 @@ agent-browser --profile ~/.myapp open https://app.example.com/login
 agent-browser --profile ~/.myapp open https://app.example.com/dashboard
 ```
 
-**Option 3: Session name (auto-save/restore cookies + localStorage)**
+**Option 4: Session name (auto-save/restore cookies + localStorage)**
 
 ```bash
 agent-browser --session-name myapp open https://app.example.com/login
@@ -692,6 +702,25 @@ Priority (lowest to highest): `~/.agent-browser/config.json` < `./agent-browser.
 | [references/video-recording.md](references/video-recording.md)       | Recording workflows for debugging and documentation       |
 | [references/profiling.md](references/profiling.md)                   | Chrome DevTools profiling for performance analysis        |
 | [references/proxy-support.md](references/proxy-support.md)           | Proxy configuration, geo-testing, rotating proxies        |
+
+## Cloud Providers
+
+Use `-p <provider>` (or `AGENT_BROWSER_PROVIDER`) to run against a cloud browser instead of launching a local Chrome instance. Supported providers: `agentcore`, `browserbase`, `browserless`, `browseruse`, `kernel`.
+
+### AgentCore (AWS Bedrock)
+
+```bash
+# Credentials auto-resolved from env vars or AWS CLI (SSO, IAM roles, etc.)
+agent-browser -p agentcore open https://example.com
+
+# With persistent browser profile
+AGENTCORE_PROFILE_ID=my-profile agent-browser -p agentcore open https://example.com
+
+# With explicit region
+AGENTCORE_REGION=eu-west-1 agent-browser -p agentcore open https://example.com
+```
+
+Set `AWS_PROFILE` to select a named AWS profile.
 
 ## Browser Engine Selection
 
