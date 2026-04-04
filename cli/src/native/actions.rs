@@ -1403,6 +1403,10 @@ async fn maybe_create_browser_context(cmd: &Value, state: &mut DaemonState) -> R
                         "Created BrowserContext: {} (name: {})",
                         ctx_id, context_name
                     );
+                    // Create a fresh tab inside the isolated context and switch to it.
+                    // The pages discovered by connect_cdp() belong to the default context,
+                    // so we must replace them with a page in the new context for real isolation.
+                    mgr.replace_pages_with_context_tab().await?;
                 }
                 Err(e) => {
                     return Err(format!("Failed to create BrowserContext: {}", e));
@@ -1760,6 +1764,14 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     {
         let mut df = state.domain_filter.write().await;
         *df = Some(DomainFilter::new(domains));
+    }
+
+    if cmd.get("contextName").and_then(|v| v.as_str()).is_some() {
+        eprintln!(
+            "Warning: --context is ignored when launching Chrome directly. \
+             Use --cdp-url or --auto-connect to share a Chrome instance with \
+             context isolation."
+        );
     }
 
     state.engine = engine.as_deref().unwrap_or("chrome").to_string();
