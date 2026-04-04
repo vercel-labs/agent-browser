@@ -2652,6 +2652,26 @@ Examples:
 "##
         }
 
+        "profiles" => {
+            r##"
+agent-browser profiles - List available Chrome profiles
+
+Usage: agent-browser profiles
+
+Lists all Chrome profiles found in your Chrome user data directory, showing
+the directory name and display name for each profile. Use the directory name
+with --profile to launch Chrome with that profile's login state.
+
+Global Options:
+  --json               Output as JSON
+
+Examples:
+  agent-browser profiles
+  agent-browser profiles --json
+  agent-browser --profile Default open https://gmail.com
+"##
+        }
+
         _ => return false,
     };
     println!("{}", help.trim());
@@ -2777,6 +2797,7 @@ Setup:
   install --with-deps        Also install system dependencies (Linux)
   upgrade                    Upgrade to the latest version
   dashboard install          Install the observability dashboard
+  profiles                   List available Chrome profiles
 
 Snapshot Options:
   -i, --interactive          Only interactive elements

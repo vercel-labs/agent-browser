@@ -117,6 +117,64 @@ fn parse_proxy(proxy_str: &str) -> ParsedProxy {
     }
 }
 
+fn run_profiles(json_mode: bool) {
+    use crate::native::cdp::chrome::{find_chrome_user_data_dir, list_chrome_profiles};
+
+    let user_data_dir = match find_chrome_user_data_dir() {
+        Some(dir) => dir,
+        None => {
+            if json_mode {
+                print_json_error("No Chrome user data directory found");
+            } else {
+                eprintln!("{}", color::red("No Chrome user data directory found"));
+            }
+            exit(1);
+        }
+    };
+
+    let profiles = list_chrome_profiles(&user_data_dir);
+    if profiles.is_empty() {
+        if json_mode {
+            print_json_value(json!({
+                "success": true,
+                "data": []
+            }));
+        } else {
+            println!("No Chrome profiles found");
+        }
+        return;
+    }
+
+    if json_mode {
+        let items: Vec<serde_json::Value> = profiles
+            .iter()
+            .map(|p| {
+                json!({
+                    "directory": p.directory,
+                    "name": p.name
+                })
+            })
+            .collect();
+        print_json_value(json!({
+            "success": true,
+            "data": items
+        }));
+    } else {
+        println!(
+            "{} ({}):\n",
+            color::bold("Chrome profiles"),
+            user_data_dir.display()
+        );
+        for p in &profiles {
+            println!(
+                "  {}  {}",
+                color::bold(&p.directory),
+                color::dim(&format!("({})", p.name))
+            );
+        }
+    }
+}
+
 fn run_session(args: &[String], session: &str, json_mode: bool) {
     let subcommand = args.get(1).map(|s| s.as_str());
 
@@ -580,6 +638,12 @@ fn main() {
                 exit(1);
             }
         }
+    }
+
+    // Handle profiles command (doesn't need daemon)
+    if clean.first().map(|s| s.as_str()) == Some("profiles") {
+        run_profiles(flags.json);
+        return;
     }
 
     // Handle session separately (doesn't need daemon)
