@@ -834,7 +834,10 @@ const PROFILE_COPY_EXCLUDE_DIRS: &[&str] = &[
 /// The copy is best-effort: individual file failures (e.g., `SingletonLock`)
 /// are skipped with a warning. If the source profile directory is missing or
 /// the temp dir cannot be created, returns an error after cleaning up.
-pub fn copy_chrome_profile(user_data_dir: &Path, profile_directory: &str) -> Result<PathBuf, String> {
+pub fn copy_chrome_profile(
+    user_data_dir: &Path,
+    profile_directory: &str,
+) -> Result<PathBuf, String> {
     let temp_dir =
         std::env::temp_dir().join(format!("agent-browser-profile-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&temp_dir)
@@ -922,15 +925,13 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
                 continue;
             }
             copy_dir_recursive(&src_path, &dst_path)?;
-        } else {
-            if let Err(e) = std::fs::copy(&src_path, &dst_path) {
-                let _ = writeln!(
-                    std::io::stderr(),
-                    "Warning: failed to copy {}: {}",
-                    src_path.display(),
-                    e
-                );
-            }
+        } else if let Err(e) = std::fs::copy(&src_path, &dst_path) {
+            let _ = writeln!(
+                std::io::stderr(),
+                "Warning: failed to copy {}: {}",
+                src_path.display(),
+                e
+            );
         }
     }
 
@@ -1463,10 +1464,7 @@ mod tests {
     }
 
     /// Helper to create a fake Chrome user-data dir with a `Local State` file.
-    fn create_fake_local_state(
-        base: &Path,
-        profiles: &[(&str, &str)],
-    ) {
+    fn create_fake_local_state(base: &Path, profiles: &[(&str, &str)]) {
         let mut info_cache = serde_json::Map::new();
         for (dir_name, display_name) in profiles {
             let mut entry = serde_json::Map::new();
@@ -1474,10 +1472,7 @@ mod tests {
                 "name".to_string(),
                 serde_json::Value::String(display_name.to_string()),
             );
-            info_cache.insert(
-                dir_name.to_string(),
-                serde_json::Value::Object(entry),
-            );
+            info_cache.insert(dir_name.to_string(), serde_json::Value::Object(entry));
         }
 
         let local_state = serde_json::json!({
@@ -1601,13 +1596,7 @@ mod tests {
     #[test]
     fn test_resolve_chrome_profile_ambiguous_display_name() {
         let dir = temp_test_dir("resolve-ambiguous");
-        create_fake_local_state(
-            &dir,
-            &[
-                ("Default", "Work"),
-                ("Profile 1", "Work"),
-            ],
-        );
+        create_fake_local_state(&dir, &[("Default", "Work"), ("Profile 1", "Work")]);
 
         let result = resolve_chrome_profile(&dir, "Work");
         assert!(result.is_err());
