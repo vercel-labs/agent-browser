@@ -5,8 +5,14 @@ use tokio_tungstenite::tungstenite::Message;
 
 use super::types::BrowserVersionInfo;
 
-/// Default timeout for CDP discovery HTTP requests.
+/// Default timeout for CDP discovery HTTP requests (/json/version, /json/list).
 const DEFAULT_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Timeout for the WebSocket fallback discovery step.
+/// Chrome M144+ with chrome://inspect remote debugging shows a user-approval
+/// dialog before allowing CDP connections. This longer timeout gives the user
+/// time to click "Allow" in Chrome.
+const WS_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Discover the CDP WebSocket URL for the given host and port.
 ///
@@ -55,7 +61,13 @@ pub async fn discover_cdp_url_with_timeout(
     // Final fallback: direct WebSocket at /devtools/browser.
     // Chrome 136+ with UI-based remote debugging (chrome://inspect) exposes
     // CDP over WebSocket but does not serve HTTP discovery endpoints.
-    match discover_cdp_ws(host, port, timeout).await {
+    // Chrome M144+ shows a user-approval dialog before allowing the connection,
+    // so we ensure the timeout is long enough for the user to respond.
+    let ws_timeout = timeout.max(WS_DISCOVERY_TIMEOUT);
+    eprintln!(
+        "Waiting for CDP WebSocket connection... If a prompt appears in the browser, click \"Allow\"."
+    );
+    match discover_cdp_ws(host, port, ws_timeout).await {
         Ok(ws_url) => Ok(append_query(&ws_url, query)),
         Err(ws_err) => Err(format!(
             "All CDP discovery methods failed for {}:{}: /json/version: {}; /json/list: {}; WebSocket: {}",
