@@ -245,7 +245,7 @@ pub fn launch_chrome(options: &LaunchOptions) -> Result<ChromeProcess, String> {
     // Profile name preprocessing: if --profile is a Chrome profile name (not a
     // path), resolve it to a directory, copy the profile to a temp dir, and
     // rewrite options so the retry loop uses the copied profile.
-    let mut effective_options = options.clone();
+    let mut resolved_options: Option<LaunchOptions> = None;
     let mut profile_temp_dir: Option<PathBuf> = None;
 
     if let Some(ref profile) = options.profile {
@@ -258,20 +258,22 @@ pub fn launch_chrome(options: &LaunchOptions) -> Result<ChromeProcess, String> {
             let resolved = resolve_chrome_profile(&user_data_dir, profile)?;
             let temp_path = copy_chrome_profile(&user_data_dir, &resolved)?;
 
-            effective_options.profile = Some(temp_path.display().to_string());
-            effective_options.use_real_keychain = true;
-            effective_options
-                .args
-                .push(format!("--profile-directory={}", resolved));
+            let mut opts = options.clone();
+            opts.profile = Some(temp_path.display().to_string());
+            opts.use_real_keychain = true;
+            opts.args.push(format!("--profile-directory={}", resolved));
             profile_temp_dir = Some(temp_path);
+            resolved_options = Some(opts);
         }
     }
+
+    let effective_options = resolved_options.as_ref().unwrap_or(options);
 
     let max_attempts = 3;
     let mut last_err = String::new();
 
     for attempt in 1..=max_attempts {
-        match try_launch_chrome(&chrome_path, &effective_options) {
+        match try_launch_chrome(&chrome_path, effective_options) {
             Ok(mut process) => {
                 // Transfer profile temp dir ownership to ChromeProcess for cleanup on Drop.
                 // The try_launch_chrome temp_user_data_dir is None here because we set profile
@@ -777,15 +779,11 @@ pub fn resolve_chrome_profile(user_data_dir: &Path, input: &str) -> Result<Strin
     match display_matches.len() {
         1 => return Ok(display_matches[0].directory.clone()),
         n if n > 1 => {
-            let list: Vec<String> = display_matches
-                .iter()
-                .map(|p| format!("  {} ({})", p.directory, p.name))
-                .collect();
             return Err(format!(
                 "Ambiguous profile name \"{}\". Multiple profiles match:\n{}\n\
                  Use the directory name instead.",
                 input,
-                list.join("\n")
+                format_profile_list(&display_matches)
             ));
         }
         _ => {}
@@ -799,17 +797,21 @@ pub fn resolve_chrome_profile(user_data_dir: &Path, input: &str) -> Result<Strin
         return Ok(p.directory.clone());
     }
 
-    // Not found
-    let available: Vec<String> = profiles
-        .iter()
-        .map(|p| format!("  {} ({})", p.directory, p.name))
-        .collect();
+    let all_profiles: Vec<&ChromeProfile> = profiles.iter().collect();
     Err(format!(
         "Chrome profile \"{}\" not found. Available profiles:\n{}\n\
          If you meant a directory path, use a full path (e.g., /path/to/profile).",
         input,
-        available.join("\n")
+        format_profile_list(&all_profiles)
     ))
+}
+
+fn format_profile_list(profiles: &[&ChromeProfile]) -> String {
+    profiles
+        .iter()
+        .map(|p| format!("  {} ({})", p.directory, p.name))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Directories to exclude when copying a Chrome profile. These are large
@@ -843,21 +845,14 @@ pub fn copy_chrome_profile(
     std::fs::create_dir_all(&temp_dir)
         .map_err(|e| format!("Failed to create temp profile dir: {}", e))?;
 
-    // Copy Local State (non-fatal if missing)
+    // Copy Local State (non-fatal if missing or unreadable)
     let local_state_src = user_data_dir.join("Local State");
-    if local_state_src.is_file() {
-        if let Err(e) = std::fs::copy(&local_state_src, temp_dir.join("Local State")) {
-            let _ = writeln!(
-                std::io::stderr(),
-                "Warning: failed to copy Local State: {}",
-                e
-            );
-        }
-    } else {
+    if let Err(e) = std::fs::copy(&local_state_src, temp_dir.join("Local State")) {
         let _ = writeln!(
             std::io::stderr(),
-            "Warning: Local State not found in {}, continuing without it",
-            user_data_dir.display()
+            "Warning: could not copy Local State from {}: {}",
+            local_state_src.display(),
+            e
         );
     }
 
@@ -1446,8 +1441,6 @@ mod tests {
         assert!(!dir.exists(), "Temp dir should be cleaned up on drop");
     }
 
-    // --- Unit 1: Profile resolution tests ---
-
     #[test]
     fn test_is_chrome_profile_name_simple() {
         assert!(is_chrome_profile_name("Default"));
@@ -1608,8 +1601,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // --- Unit 2: Profile copy tests ---
-
     /// Helper to create a fake Chrome profile directory with some files.
     fn create_fake_profile(user_data_dir: &Path, profile_dir: &str) {
         let profile_path = user_data_dir.join(profile_dir);
@@ -1719,8 +1710,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&src);
         let _ = std::fs::remove_dir_all(&dst);
     }
-
-    // --- Unit 3: Launch integration tests ---
 
     #[test]
     fn test_build_args_use_real_keychain_true() {
