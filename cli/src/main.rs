@@ -21,7 +21,7 @@ use windows_sys::Win32::Foundation::CloseHandle;
 use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
 
 use commands::{gen_id, parse_command, ParseError};
-use connection::{ensure_daemon, get_socket_dir, send_command, DaemonOptions};
+use connection::{cleanup_stale_files, ensure_daemon, get_socket_dir, send_command, DaemonOptions};
 use flags::{clean_args, parse_flags, Flags};
 use install::run_install;
 use output::{
@@ -114,6 +114,64 @@ fn parse_proxy(proxy_str: &str) -> ParsedProxy {
         server,
         username,
         password,
+    }
+}
+
+fn run_profiles(json_mode: bool) {
+    use crate::native::cdp::chrome::{find_chrome_user_data_dir, list_chrome_profiles};
+
+    let user_data_dir = match find_chrome_user_data_dir() {
+        Some(dir) => dir,
+        None => {
+            if json_mode {
+                print_json_error("No Chrome user data directory found");
+            } else {
+                eprintln!("{}", color::red("No Chrome user data directory found"));
+            }
+            exit(1);
+        }
+    };
+
+    let profiles = list_chrome_profiles(&user_data_dir);
+    if profiles.is_empty() {
+        if json_mode {
+            print_json_value(json!({
+                "success": true,
+                "data": []
+            }));
+        } else {
+            println!("No Chrome profiles found");
+        }
+        return;
+    }
+
+    if json_mode {
+        let items: Vec<serde_json::Value> = profiles
+            .iter()
+            .map(|p| {
+                json!({
+                    "directory": p.directory,
+                    "name": p.name
+                })
+            })
+            .collect();
+        print_json_value(json!({
+            "success": true,
+            "data": items
+        }));
+    } else {
+        println!(
+            "{} ({}):\n",
+            color::bold("Chrome profiles"),
+            user_data_dir.display()
+        );
+        for p in &profiles {
+            println!(
+                "  {}  {}",
+                color::bold(&p.directory),
+                color::dim(&format!("({})", p.name))
+            );
+        }
     }
 }
 
@@ -380,7 +438,7 @@ fn run_dashboard_stop(json_mode: bool) {
 
 fn run_close_all(flags: &Flags) {
     let socket_dir = get_socket_dir();
-    let mut sessions: Vec<String> = Vec::new();
+    let mut sessions: Vec<(String, u32)> = Vec::new();
 
     if let Ok(entries) = fs::read_dir(&socket_dir) {
         for entry in entries.flatten() {
@@ -409,9 +467,33 @@ fn run_close_all(flags: &Flags) {
                             }
                         };
                         if running {
-                            sessions.push(session_name.to_string());
+                            sessions.push((session_name.to_string(), pid));
+                        } else {
+                            // Process is gone but stale files remain; clean them up
+                            cleanup_stale_files(session_name);
                         }
                     }
+                } else {
+                    // PID file exists but is unreadable; clean up stale files
+                    cleanup_stale_files(session_name);
+                }
+            }
+        }
+    }
+
+    // Also scan for orphaned .sock files without corresponding .pid files
+    #[cfg(unix)]
+    if let Ok(entries) = fs::read_dir(&socket_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if let Some(session_name) = name.strip_suffix(".sock") {
+                if session_name.is_empty() {
+                    continue;
+                }
+                let pid_path = socket_dir.join(format!("{}.pid", session_name));
+                if !pid_path.exists() {
+                    // Orphaned socket file with no PID file; remove it
+                    cleanup_stale_files(session_name);
                 }
             }
         }
@@ -432,7 +514,7 @@ fn run_close_all(flags: &Flags) {
     let mut closed: Vec<String> = Vec::new();
     let mut failed: Vec<(String, String)> = Vec::new();
 
-    for session in &sessions {
+    for (session, pid) in &sessions {
         let cmd = json!({ "id": gen_id(), "action": "close" });
         match send_command(cmd, session) {
             Ok(resp) if resp.success => closed.push(session.clone()),
@@ -440,7 +522,25 @@ fn run_close_all(flags: &Flags) {
                 let err = resp.error.unwrap_or_else(|| "Unknown error".to_string());
                 failed.push((session.clone(), err));
             }
-            Err(e) => failed.push((session.clone(), e.to_string())),
+            Err(_) => {
+                // Daemon is unreachable despite its process existing.
+                // Force-kill the process and clean up stale files so future
+                // sessions are not poisoned.
+                #[cfg(unix)]
+                unsafe {
+                    libc::kill(*pid as i32, libc::SIGKILL);
+                }
+                #[cfg(windows)]
+                unsafe {
+                    let handle = OpenProcess(1, 0, *pid); // PROCESS_TERMINATE = 1
+                    if handle != 0 {
+                        windows_sys::Win32::System::Threading::TerminateProcess(handle, 1);
+                        CloseHandle(handle);
+                    }
+                }
+                cleanup_stale_files(session);
+                closed.push(session.clone());
+            }
         }
     }
 
@@ -580,6 +680,12 @@ fn main() {
                 exit(1);
             }
         }
+    }
+
+    // Handle profiles command (doesn't need daemon)
+    if clean.first().map(|s| s.as_str()) == Some("profiles") {
+        run_profiles(flags.json);
+        return;
     }
 
     // Handle session separately (doesn't need daemon)
