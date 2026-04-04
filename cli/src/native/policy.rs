@@ -4,6 +4,28 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 
+/// Map an internal action name back to its CLI parent command.
+///
+/// When a user writes `get title`, the parser emits `{ "action": "title" }`.
+/// Policy files use CLI-facing names like `"get"`, so the policy check must
+/// also match the parent command.  Returns `None` for actions that are
+/// already top-level commands (e.g. `click`, `fill`, `open`).
+pub fn action_category(action: &str) -> Option<&'static str> {
+    match action {
+        // get <sub>
+        "title" | "url" | "cdp_url" | "gettext" | "innerhtml" | "inputvalue"
+        | "getattribute" | "count" | "boundingbox" | "styles" => Some("get"),
+        // is <sub>
+        "isvisible" | "isenabled" | "ischecked" => Some("is"),
+        // find <sub>
+        "getbyrole" | "getbytext" | "getbylabel" | "getbyplaceholder"
+        | "getbyalttext" | "getbytitle" | "getbytestid" | "first" => Some("find"),
+        // diff <sub>
+        "diff_snapshot" | "diff_screenshot" | "diff_url" => Some("diff"),
+        _ => None,
+    }
+}
+
 /// Result of a policy check for an action.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PolicyResult {
@@ -56,6 +78,7 @@ impl ConfirmActions {
 
     pub fn requires_confirmation(&self, action: &str) -> bool {
         self.categories.contains(action)
+            || action_category(action).map_or(false, |cat| self.categories.contains(cat))
     }
 }
 
@@ -81,21 +104,33 @@ impl ActionPolicy {
     }
 
     /// Check whether an action is allowed, denied, or requires confirmation.
+    ///
+    /// Both the exact internal action name (e.g. `"title"`) and its CLI parent
+    /// category (e.g. `"get"`) are tested.  This lets users write
+    /// `"allow": ["get"]` and have it cover `get title`, `get url`, etc.
     pub fn check(&self, action: &str) -> PolicyResult {
+        let category = action_category(action);
+
+        // Helper: true if the action OR its parent category appears in `list`.
+        let matches = |list: &[String]| -> bool {
+            list.iter().any(|a| a == action)
+                || category.map_or(false, |cat| list.iter().any(|a| a == cat))
+        };
+
         if let Some(deny) = &self.deny {
-            if deny.iter().any(|a| a == action) {
+            if matches(deny) {
                 return PolicyResult::Deny(format!("Action '{}' is denied by policy", action));
             }
         }
 
         if let Some(confirm) = &self.confirm {
-            if confirm.iter().any(|a| a == action) {
+            if matches(confirm) {
                 return PolicyResult::RequiresConfirmation;
             }
         }
 
         if let Some(allow) = &self.allow {
-            if !allow.is_empty() && !allow.iter().any(|a| a == action) {
+            if !allow.is_empty() && !matches(allow) {
                 let is_default_deny = self
                     .default
                     .as_deref()
@@ -205,6 +240,67 @@ mod tests {
     }
 
     #[test]
+    fn test_action_category_mapping() {
+        assert_eq!(action_category("title"), Some("get"));
+        assert_eq!(action_category("url"), Some("get"));
+        assert_eq!(action_category("gettext"), Some("get"));
+        assert_eq!(action_category("innerhtml"), Some("get"));
+        assert_eq!(action_category("inputvalue"), Some("get"));
+        assert_eq!(action_category("getattribute"), Some("get"));
+        assert_eq!(action_category("count"), Some("get"));
+        assert_eq!(action_category("boundingbox"), Some("get"));
+        assert_eq!(action_category("styles"), Some("get"));
+        assert_eq!(action_category("isvisible"), Some("is"));
+        assert_eq!(action_category("isenabled"), Some("is"));
+        assert_eq!(action_category("ischecked"), Some("is"));
+        assert_eq!(action_category("getbyrole"), Some("find"));
+        assert_eq!(action_category("getbytitle"), Some("find"));
+        assert_eq!(action_category("click"), None);
+        assert_eq!(action_category("fill"), None);
+        assert_eq!(action_category("open"), None);
+    }
+
+    #[test]
+    fn test_policy_allow_category_covers_subactions() {
+        let json = r#"{"allow": ["get", "click"]}"#;
+        let policy: ActionPolicy = serde_json::from_str(json).unwrap();
+        assert_eq!(policy.check("click"), PolicyResult::Allow);
+        assert_eq!(policy.check("title"), PolicyResult::Allow);
+        assert_eq!(policy.check("url"), PolicyResult::Allow);
+        assert_eq!(policy.check("gettext"), PolicyResult::Allow);
+        assert_eq!(policy.check("innerhtml"), PolicyResult::Allow);
+        assert_eq!(policy.check("boundingbox"), PolicyResult::Allow);
+        assert!(matches!(policy.check("fill"), PolicyResult::Deny(_)));
+        assert!(matches!(policy.check("isvisible"), PolicyResult::Deny(_)));
+    }
+
+    #[test]
+    fn test_policy_deny_category_blocks_subactions() {
+        let json = r#"{"deny": ["get"]}"#;
+        let policy: ActionPolicy = serde_json::from_str(json).unwrap();
+        assert!(matches!(policy.check("title"), PolicyResult::Deny(_)));
+        assert!(matches!(policy.check("url"), PolicyResult::Deny(_)));
+        assert!(matches!(policy.check("gettext"), PolicyResult::Deny(_)));
+        assert_eq!(policy.check("click"), PolicyResult::Allow);
+    }
+
+    #[test]
+    fn test_policy_confirm_category_covers_subactions() {
+        let json = r#"{"confirm": ["get"]}"#;
+        let policy: ActionPolicy = serde_json::from_str(json).unwrap();
+        assert_eq!(policy.check("title"), PolicyResult::RequiresConfirmation);
+        assert_eq!(policy.check("url"), PolicyResult::RequiresConfirmation);
+        assert_eq!(policy.check("click"), PolicyResult::Allow);
+    }
+
+    #[test]
+    fn test_policy_deny_category_overrides_allow_subaction() {
+        let json = r#"{"allow": ["title"], "deny": ["get"]}"#;
+        let policy: ActionPolicy = serde_json::from_str(json).unwrap();
+        assert!(matches!(policy.check("title"), PolicyResult::Deny(_)));
+    }
+
+    #[test]
     fn test_confirm_actions_from_env() {
         let _guard = EnvGuard::new(&["AGENT_BROWSER_CONFIRM_ACTIONS"]);
         _guard.set("AGENT_BROWSER_CONFIRM_ACTIONS", "navigate,click,fill");
@@ -213,5 +309,17 @@ mod tests {
         assert!(ca.requires_confirmation("click"));
         assert!(ca.requires_confirmation("fill"));
         assert!(!ca.requires_confirmation("screenshot"));
+    }
+
+    #[test]
+    fn test_confirm_actions_category_covers_subactions() {
+        let _guard = EnvGuard::new(&["AGENT_BROWSER_CONFIRM_ACTIONS"]);
+        _guard.set("AGENT_BROWSER_CONFIRM_ACTIONS", "get");
+        let ca = ConfirmActions::from_env().unwrap();
+        assert!(ca.requires_confirmation("title"));
+        assert!(ca.requires_confirmation("url"));
+        assert!(ca.requires_confirmation("gettext"));
+        assert!(!ca.requires_confirmation("click"));
+        assert!(!ca.requires_confirmation("fill"));
     }
 }
