@@ -1482,21 +1482,39 @@ mod tests {
         .unwrap();
     }
 
-    fn temp_test_dir(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "agent-browser-test-{}-{}-{}",
-            name,
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ))
+    /// RAII guard that removes the temp directory on drop (even on panic).
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(name: &str) -> Self {
+            Self(std::env::temp_dir().join(format!(
+                "agent-browser-test-{}-{}-{}",
+                name,
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            )))
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    impl std::ops::Deref for TempDir {
+        type Target = PathBuf;
+        fn deref(&self) -> &PathBuf {
+            &self.0
+        }
     }
 
     #[test]
     fn test_list_chrome_profiles_valid() {
-        let dir = temp_test_dir("list-profiles");
+        let dir = TempDir::new("list-profiles");
         create_fake_local_state(&dir, &[("Default", "Person 1"), ("Profile 1", "Work")]);
 
         let profiles = list_chrome_profiles(&dir);
@@ -1505,75 +1523,64 @@ mod tests {
         assert_eq!(profiles[0].name, "Person 1");
         assert_eq!(profiles[1].directory, "Profile 1");
         assert_eq!(profiles[1].name, "Work");
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_list_chrome_profiles_missing_local_state() {
-        let dir = temp_test_dir("list-profiles-missing");
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = TempDir::new("list-profiles-missing");
+        std::fs::create_dir_all(&*dir).unwrap();
         let profiles = list_chrome_profiles(&dir);
         assert!(profiles.is_empty());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_list_chrome_profiles_malformed_json() {
-        let dir = temp_test_dir("list-profiles-malformed");
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = TempDir::new("list-profiles-malformed");
+        std::fs::create_dir_all(&*dir).unwrap();
         std::fs::write(dir.join("Local State"), "not json").unwrap();
         let profiles = list_chrome_profiles(&dir);
         assert!(profiles.is_empty());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_list_chrome_profiles_missing_info_cache() {
-        let dir = temp_test_dir("list-profiles-no-cache");
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = TempDir::new("list-profiles-no-cache");
+        std::fs::create_dir_all(&*dir).unwrap();
         std::fs::write(dir.join("Local State"), r#"{"profile": {}}"#).unwrap();
         let profiles = list_chrome_profiles(&dir);
         assert!(profiles.is_empty());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_resolve_chrome_profile_exact_directory() {
-        let dir = temp_test_dir("resolve-exact");
+        let dir = TempDir::new("resolve-exact");
         create_fake_local_state(&dir, &[("Default", "Person 1"), ("Profile 1", "Work")]);
 
         let result = resolve_chrome_profile(&dir, "Default");
         assert_eq!(result.unwrap(), "Default");
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_resolve_chrome_profile_display_name_case_insensitive() {
-        let dir = temp_test_dir("resolve-display");
+        let dir = TempDir::new("resolve-display");
         create_fake_local_state(&dir, &[("Default", "Person 1"), ("Profile 1", "Work")]);
 
         let result = resolve_chrome_profile(&dir, "work");
         assert_eq!(result.unwrap(), "Profile 1");
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_resolve_chrome_profile_directory_name_case_insensitive() {
-        let dir = temp_test_dir("resolve-dir-ci");
+        let dir = TempDir::new("resolve-dir-ci");
         create_fake_local_state(&dir, &[("Default", "Person 1"), ("Profile 1", "Work")]);
 
         let result = resolve_chrome_profile(&dir, "default");
         assert_eq!(result.unwrap(), "Default");
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_resolve_chrome_profile_not_found() {
-        let dir = temp_test_dir("resolve-notfound");
+        let dir = TempDir::new("resolve-notfound");
         create_fake_local_state(&dir, &[("Default", "Person 1")]);
 
         let result = resolve_chrome_profile(&dir, "Nonexistent");
@@ -1582,13 +1589,11 @@ mod tests {
         assert!(err.contains("not found"));
         assert!(err.contains("Default"));
         assert!(err.contains("full path"));
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_resolve_chrome_profile_ambiguous_display_name() {
-        let dir = temp_test_dir("resolve-ambiguous");
+        let dir = TempDir::new("resolve-ambiguous");
         create_fake_local_state(&dir, &[("Default", "Work"), ("Profile 1", "Work")]);
 
         let result = resolve_chrome_profile(&dir, "Work");
@@ -1597,8 +1602,6 @@ mod tests {
         assert!(err.contains("Ambiguous"));
         assert!(err.contains("Default"));
         assert!(err.contains("Profile 1"));
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Helper to create a fake Chrome profile directory with some files.
@@ -1618,20 +1621,16 @@ mod tests {
 
     #[test]
     fn test_copy_chrome_profile_structure() {
-        let src = temp_test_dir("copy-src");
+        let src = TempDir::new("copy-src");
         create_fake_local_state(&src, &[("Default", "Person 1")]);
         create_fake_profile(&src, "Default");
 
-        let result = copy_chrome_profile(&src, "Default");
-        assert!(result.is_ok());
-        let temp = result.unwrap();
+        let temp_path = copy_chrome_profile(&src, "Default").unwrap();
+        let temp = TempDir(temp_path);
 
-        // Verify two-level structure
         assert!(temp.join("Local State").is_file());
         assert!(temp.join("Default/Cookies").is_file());
         assert!(temp.join("Default/Local Storage/leveldb/CURRENT").is_file());
-
-        // Verify file contents
         assert_eq!(
             std::fs::read_to_string(temp.join("Default/Cookies")).unwrap(),
             "fake-cookies"
@@ -1640,54 +1639,37 @@ mod tests {
             std::fs::read_to_string(temp.join("Default/Local Storage/leveldb/CURRENT")).unwrap(),
             "fake-leveldb"
         );
-
-        // Verify excluded directory is NOT copied
         assert!(!temp.join("Default/Cache").exists());
-
-        let _ = std::fs::remove_dir_all(&src);
-        let _ = std::fs::remove_dir_all(&temp);
     }
 
     #[test]
     fn test_copy_chrome_profile_missing_source() {
-        let src = temp_test_dir("copy-missing-src");
-        std::fs::create_dir_all(&src).unwrap();
+        let src = TempDir::new("copy-missing-src");
+        std::fs::create_dir_all(&*src).unwrap();
 
         let result = copy_chrome_profile(&src, "Nonexistent");
         assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(err.contains("Profile directory not found"));
-
-        // Verify no temp dir left behind
-        // (We can't check the exact temp path since the function cleaned it up,
-        // but we can verify the function returned an error cleanly.)
-
-        let _ = std::fs::remove_dir_all(&src);
+        assert!(result.unwrap_err().contains("Profile directory not found"));
     }
 
     #[test]
     fn test_copy_chrome_profile_missing_local_state() {
-        let src = temp_test_dir("copy-no-ls");
+        let src = TempDir::new("copy-no-ls");
         let profile_path = src.join("Default");
         std::fs::create_dir_all(&profile_path).unwrap();
         std::fs::write(profile_path.join("Cookies"), "data").unwrap();
 
-        let result = copy_chrome_profile(&src, "Default");
-        assert!(result.is_ok());
-        let temp = result.unwrap();
+        let temp_path = copy_chrome_profile(&src, "Default").unwrap();
+        let temp = TempDir(temp_path);
 
-        // Local State was missing but copy should still succeed
         assert!(!temp.join("Local State").exists());
         assert!(temp.join("Default/Cookies").is_file());
-
-        let _ = std::fs::remove_dir_all(&src);
-        let _ = std::fs::remove_dir_all(&temp);
     }
 
     #[test]
     fn test_copy_dir_recursive_excludes() {
-        let src = temp_test_dir("copy-excludes-src");
-        let dst = temp_test_dir("copy-excludes-dst");
+        let src = TempDir::new("copy-excludes-src");
+        let dst = TempDir::new("copy-excludes-dst");
         std::fs::create_dir_all(src.join("keep")).unwrap();
         std::fs::write(src.join("keep/data"), "keep-data").unwrap();
         for excluded in PROFILE_COPY_EXCLUDE_DIRS {
@@ -1695,8 +1677,7 @@ mod tests {
             std::fs::write(src.join(excluded).join("file"), "excluded").unwrap();
         }
 
-        let result = copy_dir_recursive(&src, &dst);
-        assert!(result.is_ok());
+        copy_dir_recursive(&src, &dst).unwrap();
 
         assert!(dst.join("keep/data").is_file());
         for excluded in PROFILE_COPY_EXCLUDE_DIRS {
@@ -1706,9 +1687,6 @@ mod tests {
                 excluded
             );
         }
-
-        let _ = std::fs::remove_dir_all(&src);
-        let _ = std::fs::remove_dir_all(&dst);
     }
 
     #[test]
