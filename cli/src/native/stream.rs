@@ -2252,8 +2252,16 @@ mod tests {
 
     #[test]
     fn test_same_origin_ws_request_proxied() {
-        let req = "GET /api/session/9222/stream HTTP/1.1\r\nHost: dashboard.localhost:1355\r\nOrigin: http://dashboard.localhost:1355\r\nUpgrade: websocket\r\n\r\n";
+        let req = "GET /api/session/9222/stream HTTP/1.1\r\nHost: dashboard.agent-browser.localhost\r\nOrigin: https://dashboard.agent-browser.localhost\r\nUpgrade: websocket\r\n\r\n";
         assert!(is_same_origin_ws_request(req));
+    }
+
+    #[test]
+    fn test_normalize_origin_authority_https_without_port() {
+        assert_eq!(
+            normalize_origin_authority("https://dashboard.agent-browser.localhost"),
+            Some("dashboard.agent-browser.localhost".to_string())
+        );
     }
 
     #[test]

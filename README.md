@@ -643,7 +643,7 @@ agent-browser open example.com
 agent-browser dashboard stop
 ```
 
-The dashboard runs as a standalone background process on port 4848, independent of browser sessions. It stays available even when no sessions are running, and it works from `http://localhost:4848` or a forwarded/proxied URL that reaches the dashboard server, such as a [Portless](https://github.com/vercel-labs/portless) URL or a Coder workspace URL. The browser talks only to the dashboard origin; session-specific tabs, status, and stream traffic are proxied internally to loopback-only session ports, which remain implementation details.
+The dashboard runs as a standalone background process on port 4848, independent of browser sessions. It stays available even when no sessions are running, and it works from `http://localhost:4848` or a forwarded/proxied URL that reaches the dashboard server, such as Portless at `https://dashboard.agent-browser.localhost` or a Coder workspace URL. The browser talks only to the dashboard origin; session-specific tabs, status, and stream traffic are proxied internally to loopback-only session ports, which remain implementation details.
 
 The dashboard displays:
 - **Live viewport** -- real-time JPEG frames from the browser
