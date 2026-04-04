@@ -1262,7 +1262,7 @@ Get your API token from the [Browserless Dashboard](https://browserless.io).
 
 ### Browserbase
 
-[Browserbase](https://browserbase.com) provides remote browser infrastructure to make deployment of agentic browsing agents easy. Use it when running the agent-browser CLI in an environment where a local browser isn't feasible.
+[Browserbase](https://browserbase.com) provides managed, remote browser infrastructure purpose-built for AI agents with session recording, stealth mode, residential proxies, and captcha solving.
 
 To enable Browserbase, use the `-p` flag:
 
@@ -1279,7 +1279,20 @@ export BROWSERBASE_API_KEY="your-api-key"
 agent-browser open https://example.com
 ```
 
-When enabled, agent-browser connects to a Browserbase session instead of launching a local browser. All commands work identically.
+Optional configuration via environment variables:
+
+| Variable                       | Description                                                  | Default                       |
+| ------------------------------ | ------------------------------------------------------------ | ----------------------------- |
+| `BROWSERBASE_CONTEXT_ID`       | Context ID for persistent cookies, localStorage, and logins  | (none)                        |
+| `BROWSERBASE_CONTEXT_PERSIST`  | Save context changes back after session ends                 | `true` when context ID is set |
+| `BROWSERBASE_STEALTH`          | Enable advanced stealth mode to avoid bot detection          | `false`                       |
+| `BROWSERBASE_TIMEOUT`          | Session timeout in seconds (60–21600)                        | Browserbase default           |
+| `BROWSERBASE_PROXY`            | Enable Browserbase residential proxies                       | `false`                       |
+| `BROWSERBASE_KEEP_ALIVE`       | Keep session alive after disconnect for resumption           | `false`                       |
+
+When enabled, agent-browser connects to a Browserbase cloud session instead of launching a local browser. All commands work identically.
+
+**Persistent Context:** When `BROWSERBASE_CONTEXT_ID` is set, browser state (cookies, localStorage, logins) is saved back when the session ends, making it available for future sessions. Set `BROWSERBASE_CONTEXT_PERSIST=false` to load state without saving changes.
 
 Get your API key from the [Browserbase Dashboard](https://browserbase.com/overview).
 
