@@ -1101,14 +1101,9 @@ impl BrowserManager {
     ) -> Result<(), String> {
         let session_id = self.active_session_id()?;
 
-        let (object_id, effective_session_id) = resolve_element_object_id(
-            &self.client,
-            session_id,
-            ref_map,
-            selector,
-            iframe_sessions,
-        )
-        .await?;
+        let (object_id, effective_session_id) =
+            resolve_element_object_id(&self.client, session_id, ref_map, selector, iframe_sessions)
+                .await?;
 
         let describe: Value = self
             .client
