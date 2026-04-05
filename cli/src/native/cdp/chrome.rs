@@ -355,17 +355,9 @@ fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<Chro
     {
         use std::os::unix::process::CommandExt;
         // SAFETY: pre_exec runs between fork() and exec() in the child.
-        // Both prctl and setpgid are async-signal-safe.
+        // setpgid is async-signal-safe.
         unsafe {
             cmd.pre_exec(|| {
-                // On Linux, ask the kernel to send SIGKILL to this process
-                // when the parent (daemon) dies for any reason, including
-                // SIGKILL. This is the most robust orphan prevention
-                // available and has no macOS equivalent.
-                #[cfg(target_os = "linux")]
-                {
-                    libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
-                }
                 // Create a new process group (PGID = own PID) so the
                 // daemon can kill the entire Chrome tree in one call.
                 libc::setpgid(0, 0);
@@ -378,6 +370,60 @@ fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<Chro
         cleanup_temp_dir(&temp_user_data_dir);
         format!("Failed to launch Chrome at {:?}: {}", chrome_path, e)
     })?;
+
+    // Orphan prevention when the daemon is SIGKILL'd:
+    //
+    // Previously used PR_SET_PDEATHSIG(SIGKILL) in pre_exec, but that tracks
+    // the THREAD that called fork(), not the PROCESS (documented in prctl(2)).
+    // In tokio's multi-threaded runtime, the worker thread that spawns Chrome
+    // gets recycled after idle time, causing the kernel to kill Chrome even
+    // though the daemon process is still alive. See issue #1148.
+    //
+    // Fix: a sentinel process joins Chrome's process group and monitors a
+    // keepalive pipe. The daemon holds the write end (process-scoped fd,
+    // shared by all threads, survives worker recycling). When the daemon
+    // dies for ANY reason (including SIGKILL), the kernel closes all fds,
+    // the pipe breaks, the sentinel reads EOF, and kills Chrome's group.
+    #[cfg(unix)]
+    {
+        let chrome_pgid = child.id() as i32;
+        let mut fds = [0i32; 2];
+        if unsafe { libc::pipe(fds.as_mut_ptr()) } == 0 {
+            let read_fd = fds[0];
+            let write_fd = fds[1];
+            let sentinel_pid = unsafe { libc::fork() };
+            if sentinel_pid == 0 {
+                // Sentinel process: join Chrome's group, monitor pipe
+                unsafe {
+                    libc::setpgid(0, chrome_pgid);
+                    libc::close(write_fd);
+                    // Minimize resource usage
+                    libc::close(0);
+                    libc::close(1);
+                    let devnull = libc::open(
+                        b"/dev/null\0".as_ptr() as *const _,
+                        libc::O_WRONLY,
+                    );
+                    if devnull >= 0 {
+                        libc::dup2(devnull, 2);
+                        libc::close(devnull);
+                    }
+                    // Block until pipe breaks (daemon died)
+                    let mut buf = [0u8; 1];
+                    libc::read(read_fd, buf.as_mut_ptr() as *mut libc::c_void, 1);
+                    libc::close(read_fd);
+                    // Kill Chrome's entire process group
+                    libc::kill(-chrome_pgid, libc::SIGKILL);
+                    libc::_exit(0);
+                }
+            } else if sentinel_pid > 0 {
+                // Daemon: close read end, intentionally leak write end.
+                // The write fd stays open as long as the daemon process lives.
+                unsafe { libc::close(read_fd); }
+            }
+            // If fork fails, process group kill in Drop is the fallback.
+        }
+    }
 
     // Shared overall deadline so we don't double-wait (poll + stderr fallback).
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
