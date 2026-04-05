@@ -4456,7 +4456,8 @@ async fn handle_upload(cmd: &Value, state: &DaemonState) -> Result<Value, String
         })
         .unwrap_or_default();
 
-    mgr.upload_files(selector, &files).await?;
+    mgr.upload_files(selector, &files, &state.ref_map, &state.iframe_sessions)
+        .await?;
     Ok(json!({ "uploaded": files.len(), "selector": selector }))
 }
 
