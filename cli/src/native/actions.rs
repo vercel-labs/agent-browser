@@ -5310,9 +5310,9 @@ fn find_ax_node_by_role(
 
         // If no name filter requested, accept the first role match.
         let Some(target_name) = name else {
-            return node.backend_d_o_m_node_id.ok_or_else(|| {
-                format!("AX node has no backendDOMNodeId for role={}", role)
-            });
+            return node
+                .backend_d_o_m_node_id
+                .ok_or_else(|| format!("AX node has no backendDOMNodeId for role={}", role));
         };
 
         let node_name = super::element::extract_ax_string(&node.name);
@@ -8624,5 +8624,4 @@ mod tests {
         let result = find_ax_node_by_role(&nodes, "link", Some("Visible Link"), true);
         assert_eq!(result.unwrap(), 100);
     }
-
 }
