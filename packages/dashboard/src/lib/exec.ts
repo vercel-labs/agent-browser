@@ -5,11 +5,7 @@ function getDashboardBaseUrl(): string {
     return `http://127.0.0.1:${DASHBOARD_PORT}`;
   }
 
-  const { protocol, hostname, port } = window.location;
-  if (!port || port === String(DASHBOARD_PORT)) {
-    return `${protocol}//${hostname}:${DASHBOARD_PORT}`;
-  }
-
+  const { protocol, hostname } = window.location;
   return `${protocol}//${hostname}:${DASHBOARD_PORT}`;
 }
 
