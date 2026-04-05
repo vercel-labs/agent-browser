@@ -159,10 +159,10 @@ async fn connect_browserbase() -> Result<(String, Option<ProviderSession>), Stri
     if stealth || context_id.is_some() {
         let mut settings = json!({});
         if stealth {
-            settings.as_object_mut().unwrap().insert(
-                "advancedStealth".to_string(),
-                json!(true),
-            );
+            settings
+                .as_object_mut()
+                .unwrap()
+                .insert("advancedStealth".to_string(), json!(true));
         }
         if let Some(ref id) = context_id {
             settings.as_object_mut().unwrap().insert(
@@ -186,10 +186,9 @@ async fn connect_browserbase() -> Result<(String, Option<ProviderSession>), Stri
             .insert("keepAlive".to_string(), json!(true));
     }
     if proxy {
-        body.as_object_mut().unwrap().insert(
-            "proxies".to_string(),
-            json!([{ "type": "browserbase" }]),
-        );
+        body.as_object_mut()
+            .unwrap()
+            .insert("proxies".to_string(), json!([{ "type": "browserbase" }]));
     }
 
     let client = reqwest::Client::new();
