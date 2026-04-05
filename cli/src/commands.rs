@@ -501,9 +501,11 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
             }
             if let Some(q) = flags.screenshot_quality {
                 cmd["quality"] = json!(q);
-                if flags.screenshot_format.as_deref() != Some("jpeg") {
+                if flags.screenshot_format.as_deref() != Some("jpeg")
+                    && flags.screenshot_format.as_deref() != Some("webp")
+                {
                     eprintln!(
-                        "{} --screenshot-quality is ignored for PNG; use --screenshot-format jpeg",
+                        "{} --screenshot-quality is ignored for PNG; use --screenshot-format jpeg or webp",
                         color::warning_indicator()
                     );
                 }

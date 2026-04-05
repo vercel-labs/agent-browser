@@ -1493,9 +1493,9 @@ Options:
                        Supported on Chromium and Lightpanda.
   --screenshot-dir <path>  Default output directory for screenshots
                        (or AGENT_BROWSER_SCREENSHOT_DIR env)
-  --screenshot-quality <0-100>  JPEG quality (0-100, only applies to jpeg format)
+  --screenshot-quality <0-100>  JPEG/WebP quality (0-100, only applies to jpeg/webp format)
                        (or AGENT_BROWSER_SCREENSHOT_QUALITY env)
-  --screenshot-format <fmt>  Image format: png (default) or jpeg
+  --screenshot-format <fmt>  Image format: png (default), jpeg, or webp
                        (or AGENT_BROWSER_SCREENSHOT_FORMAT env)
 
 Global Options:
@@ -2835,8 +2835,8 @@ Options:
   --json                     JSON output
   --annotate                 Annotated screenshot with numbered labels and legend
   --screenshot-dir <path>    Default screenshot output directory (or AGENT_BROWSER_SCREENSHOT_DIR)
-  --screenshot-quality <n>   JPEG quality 0-100; ignored for PNG (or AGENT_BROWSER_SCREENSHOT_QUALITY)
-  --screenshot-format <fmt>  Screenshot format: png, jpeg (or AGENT_BROWSER_SCREENSHOT_FORMAT)
+  --screenshot-quality <n>   JPEG/WebP quality 0-100; ignored for PNG (or AGENT_BROWSER_SCREENSHOT_QUALITY)
+  --screenshot-format <fmt>  Screenshot format: png, jpeg, webp (or AGENT_BROWSER_SCREENSHOT_FORMAT)
   --headed                   Show browser window (not headless) (or AGENT_BROWSER_HEADED env)
   --cdp <port>               Connect via CDP (Chrome DevTools Protocol)
   --color-scheme <scheme>    Color scheme: dark, light, no-preference (or AGENT_BROWSER_COLOR_SCHEME)
