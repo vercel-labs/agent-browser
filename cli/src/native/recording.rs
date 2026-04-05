@@ -104,10 +104,15 @@ fn build_ffmpeg_command(output_path: &str) -> tokio::process::Command {
         ])
         .args(["-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2"]);
 
+    // -g 30: insert a keyframe every 30 frames (every 3 seconds at 10fps).
+    // Without this, the video has only 1 keyframe at the start, making it
+    // impossible to seek in browser video players — they show no duration
+    // and can't fast-forward/rewind. A keyframe every 3 seconds is a good
+    // balance between seekability and file size (~3.5x vs no keyframes).
     if output_path.ends_with(".webm") {
-        cmd.args(["-c:v", "libvpx", "-crf", "30", "-b:v", "1M"]);
+        cmd.args(["-c:v", "libvpx", "-g", "30", "-crf", "30", "-b:v", "1M"]);
     } else {
-        cmd.args(["-c:v", "libx264", "-preset", "ultrafast"]);
+        cmd.args(["-c:v", "libx264", "-g", "30", "-preset", "ultrafast"]);
     }
 
     cmd.args(["-pix_fmt", "yuv420p", "-threads", "1"])
