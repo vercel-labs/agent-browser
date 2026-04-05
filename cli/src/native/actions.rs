@@ -300,7 +300,7 @@ impl DaemonState {
             default_timeout_ms: env::var("AGENT_BROWSER_DEFAULT_TIMEOUT")
                 .ok()
                 .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(25_000),
+                .unwrap_or(30_000),
         }
     }
 
@@ -8189,10 +8189,10 @@ mod tests {
 
     #[test]
     fn test_default_timeout_ms_fallback() {
-        // When AGENT_BROWSER_DEFAULT_TIMEOUT is unset, DaemonState uses 25000
+        // When AGENT_BROWSER_DEFAULT_TIMEOUT is unset, DaemonState uses 30000
         env::remove_var("AGENT_BROWSER_DEFAULT_TIMEOUT");
         let state = DaemonState::new();
-        assert_eq!(state.default_timeout_ms, 25_000);
+        assert_eq!(state.default_timeout_ms, 30_000);
     }
 
     #[tokio::test]
