@@ -1,7 +1,7 @@
 {
   "name": "agent-browser",
-  "version": "0.23.0",
-  "description": "Headless browser automation CLI for AI agents",
+  "version": "0.24.1",
+  "description": "Browser automation CLI for AI agents",
   "type": "module",
   "files": [
     "bin",
@@ -22,9 +22,6 @@
     "build:docker": "docker build -t agent-browser-builder -f docker/Dockerfile.build .",
     "release": "npm run version:sync && npm run build:all-platforms && npm publish",
     "postinstall": "node scripts/postinstall.js",
-    "changeset": "changeset",
-    "ci:version": "changeset version && pnpm run version:sync && pnpm install --no-frozen-lockfile",
-    "ci:publish": "pnpm run version:sync && changeset publish",
     "build:dashboard": "cd packages/dashboard && pnpm build"
   },
   "keywords": [
@@ -44,8 +41,6 @@
   "bugs": {
     "url": "https://github.com/vercel-labs/agent-browser/issues"
   },
-  "homepage": "https://github.com/vercel-labs/agent-browser#readme",
-  "devDependencies": {
-    "@changesets/cli": "^2.29.8"
-  }
+  "homepage": "https://agent-browser.dev",
+  "devDependencies": {}
 }

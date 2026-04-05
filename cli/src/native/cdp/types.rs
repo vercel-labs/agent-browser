@@ -260,6 +260,7 @@ pub struct RemoteObject {
     pub object_id: Option<String>,
     pub class_name: Option<String>,
     pub unserializable_value: Option<String>,
+    pub preview: Option<Value>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

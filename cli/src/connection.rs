@@ -118,10 +118,16 @@ fn get_pid_path(session: &str) -> PathBuf {
     get_socket_dir().join(format!("{}.pid", session))
 }
 
+fn get_version_path(session: &str) -> PathBuf {
+    get_socket_dir().join(format!("{}.version", session))
+}
+
 /// Clean up stale socket and PID files for a session
-fn cleanup_stale_files(session: &str) {
+pub fn cleanup_stale_files(session: &str) {
     let pid_path = get_pid_path(session);
     let _ = fs::remove_file(&pid_path);
+    let version_path = get_version_path(session);
+    let _ = fs::remove_file(&version_path);
     let stream_path = get_socket_dir().join(format!("{}.stream", session));
     let _ = fs::remove_file(&stream_path);
 
@@ -219,6 +225,7 @@ pub struct DaemonOptions<'a> {
     pub auto_connect: bool,
     pub idle_timeout: Option<&'a str>,
     pub cdp: Option<&'a str>,
+    pub no_auto_dialog: bool,
 }
 
 fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
@@ -300,6 +307,71 @@ fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
     if let Some(cdp) = opts.cdp {
         cmd.env("AGENT_BROWSER_CDP", cdp);
     }
+    if opts.no_auto_dialog {
+        cmd.env("AGENT_BROWSER_NO_AUTO_DIALOG", "1");
+    }
+}
+
+/// Check if the running daemon's version matches this CLI binary.
+/// Returns false when the version file is missing — an unversioned daemon
+/// is most likely a stale leftover from before version tracking was added
+/// (or from the Node.js era), and silently reusing it is the exact bug
+/// this check exists to prevent. The one-time cost of an unnecessary
+/// restart on the first upgrade is preferable to silent failures.
+fn daemon_version_matches(session: &str) -> bool {
+    let version_path = get_version_path(session);
+    match fs::read_to_string(&version_path) {
+        Ok(v) => v.trim() == env!("CARGO_PKG_VERSION"),
+        Err(_) => false,
+    }
+}
+
+/// Kill a running daemon by reading its PID file and sending a kill signal.
+fn kill_stale_daemon(session: &str) {
+    // Remove the socket first so no new connections reach the old daemon
+    #[cfg(unix)]
+    {
+        let socket_path = get_socket_path(session);
+        let _ = fs::remove_file(&socket_path);
+    }
+
+    let pid_path = get_pid_path(session);
+    if let Ok(pid_str) = fs::read_to_string(&pid_path) {
+        if let Ok(pid) = pid_str.trim().parse::<u32>() {
+            #[cfg(unix)]
+            {
+                unsafe {
+                    libc::kill(pid as i32, libc::SIGTERM);
+                }
+                // Wait up to 1s for graceful shutdown, then force-kill
+                for _ in 0..10 {
+                    thread::sleep(Duration::from_millis(100));
+                    if unsafe { libc::kill(pid as i32, 0) } != 0 {
+                        break;
+                    }
+                }
+                // Force-kill if still alive
+                if unsafe { libc::kill(pid as i32, 0) } == 0 {
+                    unsafe {
+                        libc::kill(pid as i32, libc::SIGKILL);
+                    }
+                    thread::sleep(Duration::from_millis(100));
+                }
+            }
+            #[cfg(windows)]
+            {
+                let _ = Command::new("taskkill")
+                    .args(["/PID", &pid.to_string(), "/F"])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
+                thread::sleep(Duration::from_millis(500));
+            }
+        }
+    }
+
+    // Clean up leftover files regardless
+    cleanup_stale_files(session);
 }
 
 pub fn ensure_daemon(session: &str, opts: &DaemonOptions) -> Result<DaemonResult, String> {
@@ -312,9 +384,20 @@ pub fn ensure_daemon(session: &str, opts: &DaemonOptions) -> Result<DaemonResult
         // (daemon has a 100ms shutdown delay, so we wait longer)
         thread::sleep(Duration::from_millis(150));
         if daemon_ready(session) {
-            return Ok(DaemonResult {
-                already_running: true,
-            });
+            // Check version: if the running daemon is from a different CLI
+            // version (e.g. after an upgrade), kill it and start a fresh one.
+            if !daemon_version_matches(session) {
+                eprintln!(
+                    "{} Daemon version mismatch detected, restarting...",
+                    crate::color::warning_indicator()
+                );
+                kill_stale_daemon(session);
+                // Fall through to spawn a new daemon below
+            } else {
+                return Ok(DaemonResult {
+                    already_running: true,
+                });
+            }
         }
     }
 
@@ -425,6 +508,21 @@ pub fn ensure_daemon(session: &str, opts: &DaemonOptions) -> Result<DaemonResult
                     let _ = stderr.read_to_string(&mut stderr_output);
                 }
                 let stderr_trimmed = stderr_output.trim();
+
+                // If the daemon failed because another instance won the bind
+                // race ("Address already in use"), check whether that winner is
+                // now accepting connections and piggyback on it.
+                if stderr_trimmed.contains("Address already in use")
+                    || stderr_trimmed.contains("Failed to bind")
+                {
+                    thread::sleep(Duration::from_millis(200));
+                    if daemon_ready(session) {
+                        return Ok(DaemonResult {
+                            already_running: true,
+                        });
+                    }
+                }
+
                 if !stderr_trimmed.is_empty() {
                     let msg = if stderr_trimmed.len() > 500 {
                         let mut end = 500;
@@ -734,5 +832,70 @@ mod tests {
         assert_eq!(get_port_for_session("my-session"), 63105);
         assert_eq!(get_port_for_session("work"), 51184);
         assert_eq!(get_port_for_session(""), 49152);
+    }
+
+    // === Daemon Version Mismatch Detection Tests ===
+
+    #[test]
+    fn test_daemon_version_matches_same_version() {
+        let dir = std::env::temp_dir().join("ab-test-version-match");
+        let _ = fs::create_dir_all(&dir);
+        let _guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
+        _guard.set("AGENT_BROWSER_SOCKET_DIR", dir.to_str().unwrap());
+
+        let version_path = dir.join("test-session.version");
+        let _ = fs::write(&version_path, env!("CARGO_PKG_VERSION"));
+
+        assert!(daemon_version_matches("test-session"));
+
+        let _ = fs::remove_file(&version_path);
+        let _ = fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn test_daemon_version_matches_different_version() {
+        let dir = std::env::temp_dir().join("ab-test-version-mismatch");
+        let _ = fs::create_dir_all(&dir);
+        let _guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
+        _guard.set("AGENT_BROWSER_SOCKET_DIR", dir.to_str().unwrap());
+
+        let version_path = dir.join("test-session.version");
+        let _ = fs::write(&version_path, "0.0.0-old");
+
+        assert!(!daemon_version_matches("test-session"));
+
+        let _ = fs::remove_file(&version_path);
+        let _ = fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn test_daemon_version_matches_no_file() {
+        let dir = std::env::temp_dir().join("ab-test-version-nofile");
+        let _ = fs::create_dir_all(&dir);
+        let _guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
+        _guard.set("AGENT_BROWSER_SOCKET_DIR", dir.to_str().unwrap());
+
+        // No version file: treated as mismatch so stale pre-version-tracking
+        // daemons (including Node.js era) are always restarted.
+        assert!(!daemon_version_matches("test-session"));
+
+        let _ = fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn test_cleanup_stale_files_removes_version() {
+        let dir = std::env::temp_dir().join("ab-test-cleanup-version");
+        let _ = fs::create_dir_all(&dir);
+        let _guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
+        _guard.set("AGENT_BROWSER_SOCKET_DIR", dir.to_str().unwrap());
+
+        let version_path = dir.join("test-session.version");
+        let _ = fs::write(&version_path, "0.1.0");
+        assert!(version_path.exists());
+
+        cleanup_stale_files("test-session");
+        assert!(!version_path.exists());
+
+        let _ = fs::remove_dir(&dir);
     }
 }

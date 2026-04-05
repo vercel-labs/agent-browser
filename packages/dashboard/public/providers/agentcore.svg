@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" id="Layer_1" version="1.1" viewBox="0 0 200 200" width="200"  height="200" >
+  <!-- Generator: Adobe Illustrator 29.5.1, SVG Export Plug-In . SVG Version: 2.1.0 Build 141)  -->
+  <defs>
+    <!-- <style>
+      .st0 {
+        fill: #fff;
+      }
+
+      .st1 {
+        stroke: #fff;
+        stroke-linejoin: round;
+        stroke-width: 6px;
+      }
+
+      .st1, .st2 {
+        fill: none;
+      }
+
+      .st3 {
+        fill: url(#linear-gradient1);
+      }
+
+      .st4 {
+        fill: url(#linear-gradient);
+      }
+
+      .st5 {
+        clip-path: url(#clippath);
+      }
+    </style> -->
+    <linearGradient id="linear-gradient" x1="-332.91" y1="-2554.29" x2="-598.06" y2="-2502.11" gradientTransform="translate(564 2628.67)" gradientUnits="userSpaceOnUse">
+      <stop offset=".38" stop-color="#7638fa"/>
+      <stop offset="1" stop-color="#341478" stop-opacity=".68"/>
+    </linearGradient>
+    <linearGradient id="linear-gradient1" x1="-332.91" y1="-2554.29" x2="-598.06" y2="-2502.11" gradientTransform="translate(564 2628.67)" gradientUnits="userSpaceOnUse">
+      <stop offset=".38" stop-color="#7638fa"/>
+      <stop offset="1" stop-color="#341478" stop-opacity=".68"/>
+    </linearGradient>
+    <clipPath id="clippath">
+      <rect fill="none" x="102.77" y="37.56" width="93.05" height="122.85"/>
+    </clipPath>
+  </defs>
+  <rect fill="url(#linear-gradient)" y=".18" width="200" height="200"/>
+  <rect fill="url(#linear-gradient1)" y=".18" width="200" height="200"/>
+  <polygon fill="none" stroke="#fff" stroke-linejoin="round" stroke-width="6px" points="102.77 37.56 102.77 163.02 78.76 171.14 46.56 152.18 46.56 126.84 27.9 115.86 27.9 84.72 46.33 73.81 46.33 48.4 78.84 29.72 102.77 37.56"/>
+  <line fill="none" stroke="#fff" stroke-linejoin="round" stroke-width="6px" x1="65.33" y1="63.71" x2="65.33" y2="38.73"/>
+  <line fill="none" stroke="#fff" stroke-linejoin="round" stroke-width="6px" x1="62.74" y1="139.69" x2="103.32" y2="115.79"/>
+  <line fill="none" stroke="#fff" stroke-linejoin="round" stroke-width="6px" x1="86.53" y1="149.78" x2="65.71" y2="162.9"/>
+  <line fill="none" stroke="#fff" stroke-linejoin="round" stroke-width="6px" x1="63.28" y1="115.79" x2="45.93" y2="126.73"/>
+  <polyline fill="none" stroke="#fff" stroke-linejoin="round" stroke-width="6px" points="81.06 55.86 81.06 73.81 65.33 84.88 46.33 73.81"/>
+  <polyline fill="none" stroke="#fff" stroke-linejoin="round" stroke-width="6px" points="51.94 105.49 65.33 97.45 65.33 85.58"/>
+  <line fill="none" stroke="#fff" stroke-linejoin="round" stroke-width="6px" x1="78.72" y1="105.49" x2="65.33" y2="97.45"/>
+  <g clip-path="url(#clippath)">
+    <g>
+      <path fill="none" stroke="#fff" stroke-linejoin="round" stroke-width="6px" d="M139.93,88.57l25.05,10.04c1.49.6,1.48,2.71-.02,3.29l-24.51,9.47-10.2,25.29c-.61,1.5-2.74,1.47-3.3-.05l-9.22-24.93-25.52-9.76c-1.51-.58-1.52-2.72,0-3.3l24.84-9.63,9.86-25.14c.59-1.5,2.7-1.5,3.29,0l9.75,24.73h-.02Z"/>
+      <path fill="#fff" d="M165.25,66.92l9.5,3.81c.41.16.4.74,0,.9l-9.3,3.59-3.87,9.59c-.17.41-.75.4-.9-.01l-3.5-9.46-9.68-3.7c-.41-.16-.41-.74,0-.9l9.43-3.66,3.74-9.53c.16-.41.74-.41.9,0l3.7,9.38h-.02Z"/>
+    </g>
+  </g>
+</svg>

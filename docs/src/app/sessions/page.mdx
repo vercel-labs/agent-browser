@@ -30,9 +30,40 @@ Each session has its own:
 - Navigation history
 - Authentication state
 
+## Chrome profile reuse
+
+The simplest way to reuse your existing login state: pass a Chrome profile name to `--profile`. agent-browser copies the profile to a temp directory (read-only snapshot) and launches Chrome with your existing cookies and sessions.
+
+```bash
+# List available Chrome profiles
+agent-browser profiles
+
+# Reuse your default Chrome profile's login state
+agent-browser --profile Default open https://gmail.com
+
+# Use a named profile (by display name or directory name)
+agent-browser --profile "Work" open https://app.example.com
+
+# Or via environment variable
+AGENT_BROWSER_PROFILE=Default agent-browser open https://gmail.com
+```
+
+<table>
+  <thead>
+    <tr><th>Detail</th><th>Description</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Supported browsers</td><td>Chrome, Chrome Canary, Chromium, Brave</td></tr>
+    <tr><td>What's copied</td><td>Cookies, local storage, extensions state (cache dirs excluded for speed)</td></tr>
+    <tr><td>Original profile</td><td>Never modified (read-only snapshot)</td></tr>
+    <tr><td>Cleanup</td><td>Temp copy deleted when browser closes</td></tr>
+    <tr><td>Windows note</td><td>Close Chrome before using <code>--profile &lt;name&gt;</code> if Chrome is running</td></tr>
+  </tbody>
+</table>
+
 ## Persistent profiles
 
-By default, browser state is lost when the browser closes. Use `--profile` to persist state across restarts:
+For a custom profile directory that persists state across browser restarts, pass a path to `--profile`:
 
 ```bash
 # Use a persistent profile directory

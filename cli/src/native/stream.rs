@@ -10,6 +10,9 @@ use tokio::sync::{broadcast, watch, Mutex, Notify, RwLock};
 use tokio_tungstenite::tungstenite::Message;
 
 use super::cdp::client::CdpClient;
+use super::network;
+#[cfg(windows)]
+use crate::connection::get_port_for_session;
 use crate::connection::get_socket_dir;
 #[cfg(windows)]
 use crate::connection::resolve_port;
@@ -393,13 +396,18 @@ impl StreamServer {
     }
 
     /// Broadcast a console event from the browser.
-    pub fn broadcast_console(&self, level: &str, text: &str) {
-        let msg = json!({
+    pub fn broadcast_console(&self, level: &str, text: &str, args: &[Value]) {
+        let mut msg = json!({
             "type": "console",
             "level": level,
             "text": text,
             "timestamp": timestamp_ms(),
         });
+        if !args.is_empty() {
+            msg.as_object_mut()
+                .unwrap()
+                .insert("args".to_string(), Value::Array(args.to_vec()));
+        }
         let _ = self.frame_tx.send(msg.to_string());
     }
 
@@ -893,29 +901,24 @@ async fn cdp_event_loop(
                                         let level = evt.params.get("type")
                                             .and_then(|v| v.as_str())
                                             .unwrap_or("log");
-                                        let text = evt.params.get("args")
+                                        let raw_args = evt.params.get("args")
                                             .and_then(|v| v.as_array())
-                                            .map(|args| {
-                                                args.iter()
-                                                    .filter_map(|arg| {
-                                                        arg.get("value")
-                                                            .map(|v| match v {
-                                                                Value::String(s) => s.clone(),
-                                                                other => other.to_string(),
-                                                            })
-                                                            .or_else(|| arg.get("description").and_then(|v| v.as_str()).map(|s| s.to_string()))
-                                                    })
-                                                    .collect::<Vec<_>>()
-                                                    .join(" ")
-                                            })
+                                            .cloned()
                                             .unwrap_or_default();
+                                        let text = network::format_console_args(&raw_args);
                                         if !text.is_empty() {
-                                            let msg = json!({
+                                            let mut msg = json!({
                                                 "type": "console",
                                                 "level": level,
                                                 "text": text,
                                                 "timestamp": timestamp_ms(),
                                             });
+                                            if !raw_args.is_empty() {
+                                                msg.as_object_mut().unwrap().insert(
+                                                    "args".to_string(),
+                                                    Value::Array(raw_args),
+                                                );
+                                            }
                                             let _ = frame_tx.send(msg.to_string());
                                         }
                                     } else if evt.method == "Runtime.exceptionThrown" {
@@ -1319,6 +1322,11 @@ fn discover_sessions() -> String {
                                 .filter(|s| !s.trim().is_empty())
                                 .unwrap_or_else(|| "chrome".to_string());
 
+                            let provider_path = dir.join(format!("{}.provider", session));
+                            let provider = std::fs::read_to_string(&provider_path)
+                                .ok()
+                                .filter(|s| !s.trim().is_empty());
+
                             let extensions = read_extensions_metadata(&dir, session);
 
                             let mut entry = json!({
@@ -1326,6 +1334,9 @@ fn discover_sessions() -> String {
                                 "port": port,
                                 "engine": engine.trim(),
                             });
+                            if let Some(ref p) = provider {
+                                entry["provider"] = json!(p.trim());
+                            }
                             if !extensions.is_empty() {
                                 entry["extensions"] = json!(extensions);
                             }
@@ -1489,14 +1500,7 @@ pub async fn run_dashboard_server(host: &str, port: u16) {
         }
     };
 
-    let dashboard_dir = {
-        let dir = get_dashboard_dir();
-        if dir.join("index.html").exists() {
-            Some(Arc::from(dir))
-        } else {
-            None
-        }
-    };
+    let dashboard_dir: Arc<PathBuf> = Arc::from(get_dashboard_dir());
 
     loop {
         let Ok((stream, _addr)) = listener.accept().await else {
@@ -1511,7 +1515,7 @@ pub async fn run_dashboard_server(host: &str, port: u16) {
 
 async fn handle_dashboard_connection(
     mut stream: tokio::net::TcpStream,
-    dashboard_dir: Option<Arc<PathBuf>>,
+    dashboard_dir: Arc<PathBuf>,
 ) {
     use tokio::io::AsyncReadExt;
 
@@ -1566,22 +1570,20 @@ async fn handle_dashboard_connection(
         return;
     }
 
-    let dir_ref = dashboard_dir.as_deref();
     let (status, content_type, body): (&str, &str, Vec<u8>) = if path == "/api/sessions" {
         (
             "200 OK",
             "application/json; charset=utf-8",
             discover_sessions().into_bytes(),
         )
+    } else if dashboard_dir.join("index.html").exists() {
+        serve_static_file(&dashboard_dir, path)
     } else {
-        match dir_ref {
-            Some(dir) => serve_static_file(dir, path),
-            None => (
-                "200 OK",
-                "text/html; charset=utf-8",
-                DASHBOARD_NOT_INSTALLED_HTML.as_bytes().to_vec(),
-            ),
-        }
+        (
+            "200 OK",
+            "text/html; charset=utf-8",
+            DASHBOARD_NOT_INSTALLED_HTML.as_bytes().to_vec(),
+        )
     };
 
     let response = format!(

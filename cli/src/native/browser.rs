@@ -149,6 +149,7 @@ pub enum WaitUntil {
     Load,
     DomContentLoaded,
     NetworkIdle,
+    None,
 }
 
 impl WaitUntil {
@@ -156,6 +157,7 @@ impl WaitUntil {
         match s {
             "domcontentloaded" => Self::DomContentLoaded,
             "networkidle" => Self::NetworkIdle,
+            "none" => Self::None,
             _ => Self::Load,
         }
     }
@@ -199,6 +201,8 @@ pub struct BrowserManager {
     default_timeout_ms: u64,
     /// Stored download path from launch options, re-applied to new contexts (e.g., recording)
     pub download_path: Option<String>,
+    /// Origins visited during this session, used by save_state to collect cross-origin localStorage.
+    visited_origins: HashSet<String>,
 }
 
 const LIGHTPANDA_CDP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -268,6 +272,7 @@ impl BrowserManager {
                 active_page_index: 0,
                 default_timeout_ms: 25_000,
                 download_path: download_path.clone(),
+                visited_origins: HashSet::new(),
             };
             manager.discover_and_attach_targets().await?;
             manager
@@ -323,19 +328,53 @@ impl BrowserManager {
     }
 
     pub async fn connect_cdp(url: &str) -> Result<Self, String> {
+        Self::connect_cdp_inner(url, false, None).await
+    }
+
+    /// Connect to a provider CDP proxy where the WebSocket IS the page session.
+    /// Skips browser-level Target.* commands that most proxies don't support.
+    pub async fn connect_cdp_direct(url: &str) -> Result<Self, String> {
+        Self::connect_cdp_inner(url, true, None).await
+    }
+
+    pub async fn connect_cdp_with_headers(
+        url: &str,
+        headers: Option<Vec<(String, String)>>,
+    ) -> Result<Self, String> {
+        Self::connect_cdp_inner(url, false, headers).await
+    }
+
+    async fn connect_cdp_inner(
+        url: &str,
+        direct_page: bool,
+        headers: Option<Vec<(String, String)>>,
+    ) -> Result<Self, String> {
         let ws_url = resolve_cdp_url(url).await?;
-        let client = Arc::new(CdpClient::connect(&ws_url).await?);
+        let client = Arc::new(CdpClient::connect_with_headers(&ws_url, headers).await?);
         let mut manager = Self {
             client,
             browser_process: None,
             ws_url,
             pages: Vec::new(),
             active_page_index: 0,
-            default_timeout_ms: 10_000,
-            download_path: None, // CDP connections don't have a launch-time download path
+            default_timeout_ms: 25_000,
+            download_path: None,
+            visited_origins: HashSet::new(),
         };
 
-        manager.discover_and_attach_targets().await?;
+        if direct_page {
+            manager.pages.push(PageInfo {
+                target_id: "provider-page".to_string(),
+                session_id: String::new(),
+                url: String::new(),
+                title: String::new(),
+                target_type: "page".to_string(),
+            });
+            manager.active_page_index = 0;
+            manager.enable_domains_direct().await?;
+        } else {
+            manager.discover_and_attach_targets().await?;
+        }
         Ok(manager)
     }
 
@@ -440,6 +479,13 @@ impl BrowserManager {
         self.client
             .send_command_no_params("Runtime.enable", Some(session_id))
             .await?;
+        // Resume the target if it is paused waiting for the debugger.
+        // This is needed for real browser sessions (Chrome 144+) where targets
+        // are paused after attach until explicitly resumed. No-op otherwise.
+        let _ = self
+            .client
+            .send_command_no_params("Runtime.runIfWaitingForDebugger", Some(session_id))
+            .await;
         self.client
             .send_command_no_params("Network.enable", Some(session_id))
             .await?;
@@ -458,6 +504,24 @@ impl BrowserManager {
                 Some(session_id),
             )
             .await;
+        Ok(())
+    }
+
+    /// Enable domains on a direct page connection (no session_id needed).
+    async fn enable_domains_direct(&self) -> Result<(), String> {
+        self.client
+            .send_command_no_params("Page.enable", None)
+            .await?;
+        self.client
+            .send_command_no_params("Runtime.enable", None)
+            .await?;
+        let _ = self
+            .client
+            .send_command_no_params("Runtime.runIfWaitingForDebugger", None)
+            .await;
+        self.client
+            .send_command_no_params("Network.enable", None)
+            .await?;
         Ok(())
     }
 
@@ -488,11 +552,24 @@ impl BrowserManager {
             return Err(format!("Navigation failed: {}", error_text));
         }
 
-        self.wait_for_lifecycle(wait_until, &session_id, &mut lifecycle_rx)
-            .await?;
+        // Only wait for lifecycle events if Chrome created a new loader (full navigation).
+        // If loader_id is None, it was a same-document navigation (e.g., hash routing)
+        // which does not fire Page.loadEventFired or Page.domContentEventFired.
+        if nav_result.loader_id.is_some() && wait_until != WaitUntil::None {
+            self.wait_for_lifecycle(wait_until, &session_id, &mut lifecycle_rx)
+                .await?;
+        }
 
         let page_url = self.get_url().await.unwrap_or_else(|_| url.to_string());
         let title = self.get_title().await.unwrap_or_default();
+
+        // Track visited origin for cross-origin localStorage collection in save_state
+        if let Ok(parsed) = url::Url::parse(&page_url) {
+            let origin = parsed.origin().ascii_serialization();
+            if origin != "null" {
+                self.visited_origins.insert(origin);
+            }
+        }
 
         if let Some(page) = self.pages.get_mut(self.active_page_index) {
             page.url = page_url.clone();
@@ -512,6 +589,7 @@ impl BrowserManager {
             WaitUntil::Load => "Page.loadEventFired",
             WaitUntil::DomContentLoaded => "Page.domContentEventFired",
             WaitUntil::NetworkIdle => return self.wait_for_network_idle(session_id, rx).await,
+            WaitUntil::None => return Ok(()),
         };
 
         let timeout = tokio::time::Duration::from_millis(self.default_timeout_ms);
@@ -1129,6 +1207,10 @@ impl BrowserManager {
         self.pages.clone()
     }
 
+    pub fn visited_origins(&self) -> &HashSet<String> {
+        &self.visited_origins
+    }
+
     pub async fn set_download_behavior(&self, download_path: &str) -> Result<(), String> {
         let session_id = self.active_session_id()?;
         self.client
@@ -1276,6 +1358,7 @@ async fn initialize_lightpanda_manager(
             active_page_index: 0,
             default_timeout_ms: 25_000,
             download_path: None,
+            visited_origins: HashSet::new(),
         };
 
         match discover_and_attach_lightpanda_targets(&mut manager, deadline).await {
@@ -1344,6 +1427,19 @@ async fn resolve_cdp_url(input: &str) -> Result<String, String> {
 
     if input.starts_with("http://") || input.starts_with("https://") {
         let parsed = url::Url::parse(input).map_err(|e| format!("Invalid CDP URL: {}", e))?;
+        // If no explicit port and path is empty/root, this is likely a provider
+        // WebSocket endpoint (e.g. https://xxx.cdp0.browser-use.com). Convert
+        // the scheme to ws/wss and connect directly instead of probing :9222.
+        if parsed.port().is_none() && (parsed.path().is_empty() || parsed.path() == "/") {
+            let ws_scheme = if input.starts_with("https://") {
+                "wss"
+            } else {
+                "ws"
+            };
+            let mut ws_url = parsed.clone();
+            let _ = ws_url.set_scheme(ws_scheme);
+            return Ok(ws_url.to_string());
+        }
         let host = parsed
             .host_str()
             .ok_or_else(|| format!("No host in CDP URL: {}", input))?;

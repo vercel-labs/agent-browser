@@ -1074,6 +1074,88 @@ async fn e2e_wait() {
 }
 
 // ---------------------------------------------------------------------------
+// Same-document navigation regression test
+// ---------------------------------------------------------------------------
+//
+// Chrome may perform a same-document navigation when it determines the target
+// URL is the same document as the current page (ignoring fragment). This
+// causes Page.loadEventFired to not fire, making wait_for_lifecycle
+// hang forever waiting for an event that never comes.
+//
+// The fix checks loader_id in the Page.navigate response - if None,
+// it's a same-document navigation and we skip waiting for lifecycle events.
+
+#[tokio::test]
+#[ignore]
+async fn e2e_navigate_same_url_twice_should_not_hang() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Navigate to about:blank first to start from a known state
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": "about:blank" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Create a simple HTML page that changes its own URL via history.pushState
+    // This simulates SPA routing behavior which triggers same-document navigation
+    let base_page = "data:text/html,<html><body><script>
+        // On first load, change URL via pushState without navigation
+        history.pushState({}, '', '/#/home');
+    </script><h1>Test</h1></body></html>";
+
+    // Navigate to the page (first time)
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "navigate", "url": base_page }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Verify URL changed due to pushState
+    let resp = execute_command(&json!({ "id": "4", "action": "url" }), &mut state).await;
+    assert_success(&resp);
+    let url_after_push = get_data(&resp)["url"].as_str().unwrap();
+    // URL should have changed to include /#/home due to pushState
+    assert!(
+        url_after_push.contains("/%23/home") || url_after_push.contains("/#/home"),
+        "URL should have changed via pushState, got: {}",
+        url_after_push
+    );
+
+    // Navigate to the SAME base URL again
+    // Without fix: Chrome may do same-document nav, wait_for_lifecycle hangs
+    // With fix: We detect loader_id is None and skip waiting
+    let start = std::time::Instant::now();
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "navigate", "url": base_page }),
+        &mut state,
+    )
+    .await;
+    let elapsed = start.elapsed().as_secs();
+
+    // Should complete quickly (< 5 seconds) without hanging
+    // Without fix, this times out after 25 seconds (default_timeout_ms)
+    assert!(
+        elapsed < 5,
+        "Second navigation should not hang, but took {}s",
+        elapsed
+    );
+    assert_success(&resp);
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+// ---------------------------------------------------------------------------
 // Viewport with deviceScaleFactor (retina)
 // ---------------------------------------------------------------------------
 
@@ -1533,6 +1615,73 @@ async fn e2e_mouse_drag_reaches_pointer_capture_target() {
     assert_success(&resp);
 }
 
+#[tokio::test]
+#[ignore]
+async fn e2e_drag_action_sends_buttons_during_move() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "2",
+            "action": "navigate",
+            "url": native_test_fixture_url("html5_drag_probe")
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "3",
+            "action": "drag",
+            "source": "#source",
+            "target": "#dest"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["dragged"].as_bool(), Some(true));
+
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "evaluate", "script": "window.__html5DragProbe" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let probe = &get_data(&resp)["result"];
+    let events = probe["events"]
+        .as_array()
+        .expect("html5 drag probe should expose events");
+
+    // The mousemove events emitted while the button is held should carry
+    // buttons == 1 so the browser recognises the gesture as a drag.
+    assert!(
+        events
+            .iter()
+            .any(|event| { event["type"] == "mousemove" && event["buttons"].as_i64() == Some(1) }),
+        "Expected at least one mousemove with buttons == 1 during drag"
+    );
+
+    // dragstart must fire on the source element.
+    assert!(
+        events.iter().any(|event| event["type"] == "dragstart"),
+        "Expected dragstart to fire on the source element"
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 // ---------------------------------------------------------------------------
 // State save/load, state management
 // ---------------------------------------------------------------------------
@@ -1591,6 +1740,142 @@ async fn e2e_state_management() {
     let resp = execute_command(&json!({ "id": "6", "action": "state_list" }), &mut state).await;
     assert_success(&resp);
     assert!(get_data(&resp)["files"].is_array());
+
+    // Clean up
+    let _ = std::fs::remove_file(&tmp_state);
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+// ---------------------------------------------------------------------------
+// Cross-domain state save (issue #1060)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore]
+async fn e2e_save_state_cross_domain() {
+    let mut state = DaemonState::new();
+
+    // Launch
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Navigate to domain A and set cookie + localStorage
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": "https://httpbin.org/html" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "3", "action": "cookies_set",
+            "name": "domainA_cookie", "value": "from_httpbin"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "4", "action": "storage_set",
+            "type": "local", "key": "domainA_key", "value": "domainA_val"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Navigate to domain B and set cookie + localStorage
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "navigate", "url": "https://example.com" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "6", "action": "cookies_set",
+            "name": "domainB_cookie", "value": "from_example"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "7", "action": "storage_set",
+            "type": "local", "key": "domainB_key", "value": "domainB_val"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Save state (currently on example.com)
+    let tmp_state = std::env::temp_dir()
+        .join("agent-browser-e2e-cross-domain-state.json")
+        .to_string_lossy()
+        .to_string();
+    let resp = execute_command(
+        &json!({ "id": "8", "action": "state_save", "path": &tmp_state }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Read and verify saved state
+    let saved = std::fs::read_to_string(&tmp_state).expect("State file should exist");
+    let state_data: serde_json::Value = serde_json::from_str(&saved).unwrap();
+
+    // Verify BOTH domain cookies are present
+    let cookies = state_data["cookies"].as_array().unwrap();
+    let has_domain_a = cookies.iter().any(|c| c["name"] == "domainA_cookie");
+    let has_domain_b = cookies.iter().any(|c| c["name"] == "domainB_cookie");
+    assert!(
+        has_domain_a,
+        "Should include cross-domain cookie from httpbin.org: {:?}",
+        cookies
+    );
+    assert!(
+        has_domain_b,
+        "Should include cookie from example.com: {:?}",
+        cookies
+    );
+
+    // Verify BOTH origins' localStorage are present
+    let origins = state_data["origins"].as_array().unwrap();
+    let has_origin_a = origins.iter().any(|o| {
+        o["origin"].as_str().is_some_and(|s| s.contains("httpbin"))
+            && o["localStorage"]
+                .as_array()
+                .is_some_and(|ls| ls.iter().any(|e| e["name"] == "domainA_key"))
+    });
+    let has_origin_b = origins.iter().any(|o| {
+        o["origin"].as_str().is_some_and(|s| s.contains("example"))
+            && o["localStorage"]
+                .as_array()
+                .is_some_and(|ls| ls.iter().any(|e| e["name"] == "domainB_key"))
+    });
+    assert!(
+        has_origin_a,
+        "Should include localStorage from httpbin.org origin: {:?}",
+        origins
+    );
+    assert!(
+        has_origin_b,
+        "Should include localStorage from example.com origin: {:?}",
+        origins
+    );
 
     // Clean up
     let _ = std::fs::remove_file(&tmp_state);
@@ -2810,7 +3095,7 @@ async fn start_delayed_login_server(
 #[tokio::test]
 #[ignore]
 async fn e2e_auth_login_waits_for_delayed_spa_form_render() {
-    let (base_url, _server) = start_delayed_login_server(1200, 100).await;
+    let (base_url, _server) = start_delayed_login_server(800, 100).await;
     let mut state = DaemonState::new();
 
     let profile_name = format!(
@@ -3458,6 +3743,142 @@ async fn e2e_headers_case_insensitive_no_duplicates() {
         accept_val, "application/test",
         "Case-insensitive merge should replace Chrome's Accept header, got headers: {}",
         result,
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+// ---------------------------------------------------------------------------
+// Regression: externally opened tabs must appear in tab_list (#1037)
+//
+// When connected to Chrome (launched or via --cdp), a tab opened outside of
+// agent-browser (e.g. by the user or another CDP client) should be detected
+// and listed. Previously, chrome://newtab/ was filtered by
+// is_internal_chrome_target, and Target.targetInfoChanged for untracked
+// targets was silently ignored.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore]
+async fn e2e_externally_opened_tab_detected() {
+    let mut state = DaemonState::new();
+
+    // Launch headless Chrome
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Verify initial tab count
+    let resp = execute_command(&json!({ "id": "2", "action": "tab_list" }), &mut state).await;
+    assert_success(&resp);
+    let initial_count = get_data(&resp)["tabs"].as_array().unwrap().len();
+
+    // Simulate an external client opening a new tab via the browser-level CDP
+    // session (no sessionId). This mirrors what happens when a user manually
+    // opens a tab while agent-browser is connected via --cdp.
+    let browser = state.browser.as_ref().expect("browser should be launched");
+    let _: Value = browser
+        .client
+        .send_command(
+            "Target.createTarget",
+            Some(json!({ "url": "data:text/html,<h1>External Tab</h1>" })),
+            None, // browser-level session
+        )
+        .await
+        .expect("Target.createTarget should succeed");
+
+    // Give Chrome a moment to fire targetCreated / targetInfoChanged events
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    // Drain events by issuing tab_list — this triggers execute_command's
+    // drain_cdp_events path which processes new and changed targets.
+    let resp = execute_command(&json!({ "id": "3", "action": "tab_list" }), &mut state).await;
+    assert_success(&resp);
+    let tabs = get_data(&resp)["tabs"].as_array().unwrap();
+
+    assert_eq!(
+        tabs.len(),
+        initial_count + 1,
+        "Externally opened tab should appear in tab_list, got: {:?}",
+        tabs,
+    );
+
+    // Verify the new tab's URL is the data URL we navigated to
+    let new_tab = tabs.iter().find(|t| {
+        t["url"]
+            .as_str()
+            .is_some_and(|u| u.starts_with("data:text/html"))
+    });
+    assert!(
+        new_tab.is_some(),
+        "Should find the externally opened tab by URL, tabs: {:?}",
+        tabs,
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+// ---------------------------------------------------------------------------
+// Regression: issue #993 — launch options change must trigger relaunch
+// ---------------------------------------------------------------------------
+
+/// When the browser is already running and a second launch command arrives with
+/// different options (e.g., extensions added), the daemon must relaunch the
+/// browser instead of silently reusing the old one.
+///
+/// Before the fix, `handle_launch` only checked connection type and liveness,
+/// so changed options like extensions were ignored and the old browser was reused.
+#[tokio::test]
+#[ignore]
+async fn e2e_relaunch_on_options_change() {
+    let mut state = DaemonState::new();
+
+    // First launch — headless, no extensions.
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["launched"], true);
+    assert!(
+        get_data(&resp).get("reused").is_none(),
+        "first launch must not be a reuse"
+    );
+
+    // Second launch — same options → should reuse.
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["reused"],
+        true,
+        "identical options must reuse the browser"
+    );
+
+    // Third launch — different options (extensions added) → must relaunch, not reuse.
+    let resp = execute_command(
+        &json!({
+            "id": "3",
+            "action": "launch",
+            "headless": true,
+            "extensions": ["/tmp/fake-extension"]
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert!(
+        get_data(&resp).get("reused").is_none(),
+        "changed options must trigger a relaunch, not reuse (issue #993)"
     );
 
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
