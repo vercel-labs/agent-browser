@@ -5219,74 +5219,31 @@ async fn handle_getbyrole(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         &session_id,
         &state.iframe_sessions,
     );
-    // Own the session id so it survives the &mut borrow in execute_subaction.
-    let effective_session_id = effective_session_id.to_string();
 
     let ax_tree: super::cdp::types::GetFullAXTreeResult = mgr
         .client
         .send_command_typed(
             "Accessibility.getFullAXTree",
             &ax_params,
-            Some(&effective_session_id),
+            Some(effective_session_id),
         )
         .await?;
 
     let backend_node_id = find_ax_node_by_role(&ax_tree.nodes, role, name, exact)?;
 
-    let resolve_result: super::cdp::types::DomResolveNodeResult = mgr
-        .client
-        .send_command_typed(
-            "DOM.resolveNode",
-            &super::cdp::types::DomResolveNodeParams {
-                backend_node_id: Some(backend_node_id),
-                node_id: None,
-                object_group: Some("agent-browser".to_string()),
-            },
-            Some(&effective_session_id),
-        )
-        .await?;
+    // Register a temporary ref so execute_subaction can resolve the element
+    // via backendNodeId directly — no marker attribute needed.
+    let temp_ref = format!("e{}", state.ref_map.next_ref_num());
+    state.ref_map.add_with_frame(
+        temp_ref.clone(),
+        Some(backend_node_id),
+        role,
+        name.unwrap_or(""),
+        None,
+        state.active_frame_id.as_deref(),
+    );
 
-    let object_id = resolve_result
-        .object
-        .object_id
-        .ok_or("Could not resolve DOM node for matched AX element")?;
-
-    let _: super::cdp::types::EvaluateResult = mgr
-        .client
-        .send_command_typed(
-            "Runtime.callFunctionOn",
-            &super::cdp::types::CallFunctionOnParams {
-                function_declaration:
-                    "function() { this.setAttribute('data-agent-browser-located', 'true'); }"
-                        .to_string(),
-                object_id: Some(object_id),
-                arguments: None,
-                return_by_value: Some(true),
-                await_promise: Some(false),
-            },
-            Some(&effective_session_id),
-        )
-        .await?;
-
-    let selector = "[data-agent-browser-located='true']";
-    let result = execute_subaction(cmd, state, selector).await;
-
-    if let Some(ref browser) = state.browser {
-        let _cleanup: Result<super::cdp::types::EvaluateResult, _> = browser
-            .client
-            .send_command_typed(
-                "Runtime.evaluate",
-                &super::cdp::types::EvaluateParams {
-                    expression: "document.querySelector('[data-agent-browser-located]')?.removeAttribute('data-agent-browser-located')".to_string(),
-                    return_by_value: Some(true),
-                    await_promise: Some(false),
-                },
-                Some(&effective_session_id),
-            )
-            .await;
-    }
-
-    result
+    execute_subaction(cmd, state, &format!("@{}", temp_ref)).await
 }
 
 /// Search the accessibility tree for a node matching the given role and
