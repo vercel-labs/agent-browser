@@ -1490,8 +1490,8 @@ pub async fn ack_screencast_frame(
 
 /// Standalone dashboard HTTP server (no browser, no WebSocket streaming).
 /// Serves static files and `/api/sessions` for session discovery.
-pub async fn run_dashboard_server(port: u16) {
-    let addr = format!("127.0.0.1:{}", port);
+pub async fn run_dashboard_server(host: &str, port: u16) {
+    let addr = format!("{}:{}", host, port);
     let listener = match TcpListener::bind(&addr).await {
         Ok(l) => l,
         Err(e) => {

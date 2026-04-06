@@ -969,6 +969,14 @@ fn print_warning(resp: &Response) {
 
 /// Print command-specific help. Returns true if help was printed, false if command unknown.
 pub fn print_command_help(command: &str) -> bool {
+    let Some(help) = command_help(command) else {
+        return false;
+    };
+    println!("{}", help.trim());
+    true
+}
+
+fn command_help(command: &str) -> Option<&'static str> {
     let help = match command {
         // === Navigation ===
         "open" | "goto" | "navigate" => {
@@ -2403,7 +2411,7 @@ Manage the observability dashboard, a local web UI that shows live
 browser viewports and command activity feeds for all sessions.
 
 Subcommands:
-  start [--port <n>]   Start the dashboard server (default port: 4848)
+  start [--port <n>] [--host <host>]   Start the dashboard server (default port: 4848)
   stop                 Stop the dashboard server
   install              Download and install the dashboard to ~/.agent-browser/dashboard/
 
@@ -2414,6 +2422,7 @@ browser sessions. All sessions automatically stream to the dashboard.
 
 Options:
   --port <n>           Port for the dashboard server (default: 4848)
+  --host <host>        Host interface to bind the dashboard server to (default: 127.0.0.1)
 
 Global Options:
   --json               Output as JSON
@@ -2421,6 +2430,7 @@ Global Options:
 Examples:
   agent-browser dashboard install
   agent-browser dashboard start
+  agent-browser dashboard start --host 0.0.0.0
   agent-browser dashboard start --port 8080
   agent-browser dashboard stop
 "##
@@ -2672,10 +2682,9 @@ Examples:
 "##
         }
 
-        _ => return false,
+        _ => return None,
     };
-    println!("{}", help.trim());
-    true
+    Some(help)
 }
 
 pub fn print_help() {
@@ -3066,6 +3075,13 @@ mod tests {
         let rendered = super::format_stream_status_text(Some("stream_status"), &data).unwrap();
 
         assert_eq!(rendered, "Streaming disabled");
+    }
+
+    #[test]
+    fn test_dashboard_help_mentions_host_option() {
+        let help = super::command_help("dashboard").expect("dashboard help should exist");
+        assert!(help.contains("--host <host>"));
+        assert!(help.contains("default: 127.0.0.1"));
     }
 
     #[test]

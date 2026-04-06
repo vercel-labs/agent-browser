@@ -9,6 +9,7 @@ import type {
   StreamMessage,
   TabInfo,
 } from "@/types";
+import { getSessionApiBase } from "@/store/sessions";
 import { activePortAtom } from "@/store/sessions";
 import { tabCacheAtom, engineCacheAtom } from "@/store/tabs";
 
@@ -119,7 +120,8 @@ export function useStreamSync(port: number) {
   const connect = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
 
-    const ws = new WebSocket(`ws://localhost:${port}`);
+    const wsBase = getSessionApiBase(port).replace(/^http/, "ws");
+    const ws = new WebSocket(wsBase);
     wsRef.current = ws;
     setWsRef(ws);
 

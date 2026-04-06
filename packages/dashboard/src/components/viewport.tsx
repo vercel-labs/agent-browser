@@ -550,7 +550,9 @@ export function Viewport() {
         </span>
         {browserConnected && (
           <span className="text-xs text-muted-foreground/60 font-mono">
-            ws://localhost:{streamPort}
+            {typeof window !== "undefined"
+              ? `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.hostname}:${streamPort}`
+              : `ws://127.0.0.1:${streamPort}`}
           </span>
         )}
         <div className="ml-auto flex items-center gap-2">
