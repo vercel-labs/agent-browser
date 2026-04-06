@@ -132,6 +132,12 @@ pub(crate) fn get_system_prompt() -> &'static str {
             sections.push_str(&format!("\n\n<skill name=\"{}\">\n{}\n</skill>", name, body.trim()));
         }
 
+        let exa_section = if std::env::var("EXA_API_KEY").is_ok() {
+            "\n\nWEB SEARCH:\n- You have access to the exa_web_search tool for fast web search.\n- Use exa_web_search when the user wants to find information, look something up, or discover pages. It returns clean results with titles and text snippets.\n- After searching, you can use agent_browser to open any of the result URLs for deeper exploration.\n- Do NOT navigate to google.com or other search engines — use exa_web_search instead."
+        } else {
+            ""
+        };
+
         format!(
             r#"You are an AI assistant that controls a browser through agent-browser. You have an active browser session, but you can also create new sessions.
 
@@ -148,18 +154,22 @@ RULES:
 - To use a different browser engine: add `--engine <engine>` (e.g. `agent-browser --session lp-session --engine lightpanda open https://example.com`). Supported engines: chrome (default), lightpanda.
 
 The following skill references describe agent-browser capabilities in detail. Use them when deciding which commands to run and how to approach tasks.
-
-WEB SEARCH:
-- If EXA_API_KEY is set, you have access to the exa_web_search tool for fast web search.
-- Use exa_web_search when the user wants to find information, look something up, or discover pages. It returns clean results with titles and text snippets.
-- After searching, you can use agent_browser to open any of the result URLs for deeper exploration.
-- Do NOT navigate to google.com or other search engines when exa_web_search is available.
-{sections}"#,
+{exa_section}{sections}"#,
         )
     })
 }
 
-pub(crate) const CHAT_TOOLS: &str = r#"[{"type":"function","function":{"name":"agent_browser","description":"Execute an agent-browser command. Runs against the active session by default. Add --session <name> to target or create a different session, and --engine <engine> to choose a browser engine.","parameters":{"type":"object","properties":{"command":{"type":"string","description":"The command to execute, e.g. 'agent-browser open https://google.com' or 'agent-browser --session new-session open https://example.com' or 'agent-browser snapshot -i' or 'agent-browser click @e3'"}},"required":["command"]}}},{"type":"function","function":{"name":"exa_web_search","description":"Search the web using Exa AI. Returns relevant URLs with titles and text snippets. Use this instead of navigating to a search engine when the user needs to find information, look something up, or discover relevant pages. Requires EXA_API_KEY environment variable.","parameters":{"type":"object","properties":{"query":{"type":"string","description":"The search query"},"numResults":{"type":"integer","description":"Number of results to return (default 5, max 20)"}},"required":["query"]}}}]"#;
+const AGENT_BROWSER_TOOL: &str = r#"{"type":"function","function":{"name":"agent_browser","description":"Execute an agent-browser command. Runs against the active session by default. Add --session <name> to target or create a different session, and --engine <engine> to choose a browser engine.","parameters":{"type":"object","properties":{"command":{"type":"string","description":"The command to execute, e.g. 'agent-browser open https://google.com' or 'agent-browser --session new-session open https://example.com' or 'agent-browser snapshot -i' or 'agent-browser click @e3'"}},"required":["command"]}}}"#;
+
+const EXA_SEARCH_TOOL: &str = r#"{"type":"function","function":{"name":"exa_web_search","description":"Search the web using Exa AI. Returns relevant URLs with titles and text snippets. Use this instead of navigating to a search engine when the user needs to find information, look something up, or discover relevant pages.","parameters":{"type":"object","properties":{"query":{"type":"string","description":"The search query"},"numResults":{"type":"integer","description":"Number of results to return (default 5, max 20)"}},"required":["query"]}}}"#;
+
+pub(crate) fn chat_tools_json() -> String {
+    if std::env::var("EXA_API_KEY").is_ok() {
+        format!("[{},{}]", AGENT_BROWSER_TOOL, EXA_SEARCH_TOOL)
+    } else {
+        format!("[{}]", AGENT_BROWSER_TOOL)
+    }
+}
 
 pub(crate) const COMPACT_THRESHOLD_CHARS: usize = 200_000;
 pub(crate) const KEEP_RECENT_MESSAGES: usize = 6;
@@ -514,7 +524,10 @@ pub(crate) async fn execute_exa_search(query: &str, num_results: Option<u64>) ->
 
     let mut output = String::new();
     for (i, result) in results.iter().enumerate() {
-        let title = result.get("title").and_then(|t| t.as_str()).unwrap_or("(no title)");
+        let title = result
+            .get("title")
+            .and_then(|t| t.as_str())
+            .unwrap_or("(no title)");
         let url = result.get("url").and_then(|u| u.as_str()).unwrap_or("");
         output.push_str(&format!("{}. {} - {}\n", i + 1, title, url));
 
@@ -860,7 +873,7 @@ pub(super) async fn handle_chat_request(
         }
     }
 
-    let tools: Value = serde_json::from_str(CHAT_TOOLS).unwrap();
+    let tools: Value = serde_json::from_str(&chat_tools_json()).unwrap();
     let url = format!("{}/v1/chat/completions", gateway_url);
     let client = http_client();
 
@@ -1028,11 +1041,7 @@ pub(super) async fn handle_chat_request(
                 }
             } else {
                 let command = input.get("command").and_then(|c| c.as_str()).unwrap_or("");
-                match tokio::time::timeout(
-                    TOOL_TIMEOUT,
-                    execute_chat_tool(&session, command),
-                )
-                .await
+                match tokio::time::timeout(TOOL_TIMEOUT, execute_chat_tool(&session, command)).await
                 {
                     Ok(r) => r,
                     Err(_) => "Tool execution timed out after 60 seconds.".to_string(),

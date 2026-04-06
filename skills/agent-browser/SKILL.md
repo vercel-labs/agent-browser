@@ -813,6 +813,14 @@ export AI_GATEWAY_URL=https://ai-gateway.vercel.sh           # optional default
 
 The Chat tab is always visible in the dashboard. Set `AI_GATEWAY_API_KEY` to enable AI responses.
 
+#### Exa Web Search
+
+Set `EXA_API_KEY` to give the AI chat a built-in web search tool powered by [Exa](https://exa.ai). When available, the AI uses Exa to look things up instead of navigating to a search engine. Results include titles, URLs, and text snippets. The AI can then open any result URL with agent-browser for deeper exploration.
+
+```bash
+export EXA_API_KEY=your_exa_api_key_here
+```
+
 ## Ready-to-Use Templates
 
 | Template                                                                 | Description                         |

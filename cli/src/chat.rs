@@ -218,7 +218,7 @@ async fn run_chat_turn(
         }
     };
 
-    let tools: Value = serde_json::from_str(chat::CHAT_TOOLS).unwrap();
+    let tools: Value = serde_json::from_str(&chat::chat_tools_json()).unwrap();
     let url = format!("{}/v1/chat/completions", gateway_url);
     let client = chat::http_client();
 
@@ -352,8 +352,7 @@ async fn run_chat_turn(
                     eprintln!("{}", color::dim(&format!("> exa search: {}", query)));
                 }
 
-                match tokio::time::timeout(tool_timeout, chat::execute_exa_search(query, num))
-                    .await
+                match tokio::time::timeout(tool_timeout, chat::execute_exa_search(query, num)).await
                 {
                     Ok(r) => r,
                     Err(_) => "Exa search timed out after 60 seconds.".to_string(),
