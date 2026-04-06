@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
+    "build": "node ./scripts/build-dashboard.mjs",
     "start": "next start"
   },
   "dependencies": {

@@ -12,10 +12,8 @@ use tokio_tungstenite::tungstenite::Message;
 use super::cdp::client::CdpClient;
 use super::network;
 #[cfg(windows)]
-use crate::connection::get_port_for_session;
-use crate::connection::get_socket_dir;
-#[cfg(windows)]
 use crate::connection::resolve_port;
+use crate::connection::get_socket_dir;
 use crate::install::get_dashboard_dir;
 
 /// Frame metadata from CDP Page.screencastFrame events.
@@ -1179,6 +1177,161 @@ fn parse_request_method_and_path(request: &str) -> (&str, &str) {
     (method, path)
 }
 
+fn strip_query_and_fragment(path: &str) -> &str {
+    path.split(['?', '#']).next().unwrap_or(path)
+}
+
+fn dashboard_path_suffixes(path: &str) -> Vec<&str> {
+    let clean = strip_query_and_fragment(path);
+    if !clean.starts_with('/') {
+        return vec![clean];
+    }
+
+    let mut suffixes = Vec::new();
+    let mut current = clean;
+    loop {
+        suffixes.push(current);
+        let Some(next_index) = current[1..].find('/') else {
+            break;
+        };
+        current = &current[next_index + 1..];
+    }
+    suffixes
+}
+
+fn extract_prefixed_route<'a>(path: &'a str, route_prefix: &str) -> Option<&'a str> {
+    dashboard_path_suffixes(path)
+        .into_iter()
+        .find(|candidate| candidate.starts_with(route_prefix))
+}
+
+fn matches_prefixed_route(path: &str, route: &str) -> bool {
+    dashboard_path_suffixes(path)
+        .into_iter()
+        .any(|candidate| candidate == route)
+}
+
+fn sanitize_relative_path(path: &str) -> Option<PathBuf> {
+    let mut sanitized = PathBuf::new();
+    for component in Path::new(path).components() {
+        match component {
+            std::path::Component::Normal(segment) => sanitized.push(segment),
+            std::path::Component::CurDir => continue,
+            _ => return None,
+        }
+    }
+    Some(sanitized)
+}
+
+const DASHBOARD_INDEX_HTML_SUFFIX: &str = "/index.html";
+const DASHBOARD_BASE_PATH_TOKEN: &str =
+    include_str!("../../../packages/dashboard/base-path-token.txt");
+
+fn dashboard_base_path_token() -> &'static str {
+    DASHBOARD_BASE_PATH_TOKEN.trim()
+}
+
+fn normalize_dashboard_mount_prefix(path: &str) -> String {
+    if path.is_empty() || path == "/" {
+        return String::new();
+    }
+
+    let mut normalized = if path.starts_with('/') {
+        path.to_string()
+    } else {
+        format!("/{path}")
+    };
+
+    if normalized.ends_with(DASHBOARD_INDEX_HTML_SUFFIX) {
+        normalized.truncate(normalized.len() - DASHBOARD_INDEX_HTML_SUFFIX.len());
+        if normalized.is_empty() {
+            normalized.push('/');
+        }
+    }
+
+    let last_slash = normalized.rfind('/').unwrap_or(0);
+    let last_segment = &normalized[last_slash + 1..];
+    if !normalized.ends_with('/') && last_segment.contains('.') {
+        if last_slash == 0 {
+            normalized = "/".to_string();
+        } else {
+            normalized.truncate(last_slash);
+        }
+    }
+
+    while normalized.ends_with('/') && normalized.len() > 1 {
+        normalized.pop();
+    }
+
+    if normalized == "/" {
+        String::new()
+    } else {
+        normalized
+    }
+}
+
+fn relative_dashboard_path(file_path: &Path, dashboard_dir: &Path) -> Option<String> {
+    let relative = file_path.strip_prefix(dashboard_dir).ok()?;
+    let mut parts = Vec::new();
+    for component in relative.components() {
+        match component {
+            std::path::Component::Normal(segment) => parts.push(segment.to_str()?),
+            std::path::Component::CurDir => continue,
+            _ => return None,
+        }
+    }
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("/"))
+    }
+}
+
+fn infer_dashboard_mount_prefix(url_path: &str, file_path: &Path, dashboard_dir: &Path) -> String {
+    let clean = strip_query_and_fragment(url_path);
+
+    if let Some(relative_path) = relative_dashboard_path(file_path, dashboard_dir) {
+        if relative_path != "index.html" {
+            let suffix = format!("/{relative_path}");
+            if let Some(prefix) = clean.strip_suffix(&suffix) {
+                return normalize_dashboard_mount_prefix(prefix);
+            }
+        }
+    }
+
+    normalize_dashboard_mount_prefix(clean)
+}
+
+fn rewrite_dashboard_text_asset(content: &str, mount_prefix: &str) -> String {
+    content.replace(
+        dashboard_base_path_token(),
+        &normalize_dashboard_mount_prefix(mount_prefix),
+    )
+}
+
+fn should_rewrite_dashboard_text_asset(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|ext| ext.to_str()).unwrap_or(""),
+        "html" | "js" | "css" | "json" | "txt" | "map"
+    )
+}
+
+fn content_type_for_path(path: &Path) -> &'static str {
+    match path.extension().and_then(|ext| ext.to_str()).unwrap_or("") {
+        "html" => "text/html; charset=utf-8",
+        "js" => "application/javascript; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "json" | "map" => "application/json; charset=utf-8",
+        "txt" => "text/plain; charset=utf-8",
+        "svg" => "image/svg+xml",
+        "png" => "image/png",
+        "ico" => "image/x-icon",
+        "woff2" => "font/woff2",
+        _ => "application/octet-stream",
+    }
+}
+
 const PROXY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const PROXY_MAX_RESPONSE_SIZE: u64 = 16 * 1024 * 1024;
 
@@ -1469,7 +1622,8 @@ async fn handle_http_request(
 
     let first_line = request.lines().next().unwrap_or("");
     let method = first_line.split_whitespace().next().unwrap_or("GET");
-    let path = first_line.split_whitespace().nth(1).unwrap_or("/");
+    let raw_path = first_line.split_whitespace().nth(1).unwrap_or("/");
+    let path = strip_query_and_fragment(raw_path);
 
     // Handle CORS preflight
     if method == "OPTIONS" {
@@ -1481,7 +1635,7 @@ async fn handle_http_request(
     }
 
     // Handle POST /api/sessions (spawn new session)
-    if method == "POST" && path == "/api/sessions" {
+    if method == "POST" && matches_prefixed_route(path, "/api/sessions") {
         let body_str = extract_http_body(request).unwrap_or("");
         let result = spawn_session(body_str).await;
         let (status, resp_body) = match result {
@@ -1504,7 +1658,7 @@ async fn handle_http_request(
     }
 
     // Handle POST /api/command
-    if method == "POST" && path == "/api/command" {
+    if method == "POST" && matches_prefixed_route(path, "/api/command") {
         let body = extract_http_body(request).unwrap_or("");
         let result = relay_command_to_daemon(session_name, body).await;
         let (status, resp_body) = match result {
@@ -1526,13 +1680,16 @@ async fn handle_http_request(
         return;
     }
 
-    let (status, content_type, body): (&str, &str, Vec<u8>) = if path == "/api/sessions" {
+    let (status, content_type, body): (&str, &str, Vec<u8>) = if matches_prefixed_route(
+        path,
+        "/api/sessions",
+    ) {
         (
             "200 OK",
             "application/json; charset=utf-8",
             discover_sessions().into_bytes(),
         )
-    } else if path == "/api/tabs" {
+    } else if matches_prefixed_route(path, "/api/tabs") {
         let tabs = last_tabs.read().await;
         (
             "200 OK",
@@ -1541,7 +1698,7 @@ async fn handle_http_request(
                 .unwrap_or_else(|_| "[]".to_string())
                 .into_bytes(),
         )
-    } else if path == "/api/status" {
+    } else if matches_prefixed_route(path, "/api/status") {
         let engine = last_engine.read().await;
         (
             "200 OK",
@@ -1630,32 +1787,32 @@ async fn relay_command_to_daemon(session_name: &str, body: &str) -> Result<Strin
 }
 
 fn serve_static_file(dir: &Path, url_path: &str) -> (&'static str, &'static str, Vec<u8>) {
-    let clean = url_path.trim_start_matches('/');
-    let file_path = if clean.is_empty() {
-        dir.join("index.html")
-    } else {
-        let joined = dir.join(clean);
-        if joined.is_file() {
-            joined
-        } else {
-            dir.join("index.html")
-        }
-    };
+    let file_path = dashboard_path_suffixes(url_path)
+        .into_iter()
+        .filter_map(|candidate| {
+            let relative = candidate.trim_start_matches('/');
+            if relative.is_empty() {
+                return None;
+            }
+            let sanitized = sanitize_relative_path(relative)?;
+            let joined = dir.join(sanitized);
+            joined.is_file().then_some(joined)
+        })
+        .next()
+        .unwrap_or_else(|| dir.join("index.html"));
+    let mount_prefix = infer_dashboard_mount_prefix(url_path, &file_path, dir);
 
     match std::fs::read(&file_path) {
         Ok(content) => {
-            let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
-            let ct = match ext {
-                "html" => "text/html; charset=utf-8",
-                "js" => "application/javascript; charset=utf-8",
-                "css" => "text/css; charset=utf-8",
-                "json" => "application/json; charset=utf-8",
-                "svg" => "image/svg+xml",
-                "png" => "image/png",
-                "ico" => "image/x-icon",
-                _ => "application/octet-stream",
+            let body = if should_rewrite_dashboard_text_asset(&file_path) {
+                match std::str::from_utf8(&content) {
+                    Ok(text) => rewrite_dashboard_text_asset(text, &mount_prefix).into_bytes(),
+                    Err(_) => content,
+                }
+            } else {
+                content
             };
-            ("200 OK", ct, content)
+            ("200 OK", content_type_for_path(&file_path), body)
         }
         Err(_) => (
             "404 Not Found",
@@ -1908,8 +2065,8 @@ async fn handle_dashboard_connection(
     let peeked_request = String::from_utf8_lossy(&buf[..peeked_len]);
     let (peeked_method, peeked_path) = parse_request_method_and_path(&peeked_request);
 
-    if peeked_path.starts_with("/api/session/") {
-        let (port, endpoint) = match parse_session_proxy_route(peeked_path) {
+    if let Some(session_path) = extract_prefixed_route(peeked_path, "/api/session/") {
+        let (port, endpoint) = match parse_session_proxy_route(session_path) {
             Ok(route) => route,
             Err(error) => {
                 write_json_error_response_no_cors(&mut stream, "400 Bad Request", error).await;
@@ -1974,7 +2131,8 @@ async fn handle_dashboard_connection(
     };
 
     let request = String::from_utf8_lossy(&buf[..n]).to_string();
-    let (method, path) = parse_request_method_and_path(&request);
+    let (method, raw_path) = parse_request_method_and_path(&request);
+    let path = strip_query_and_fragment(raw_path);
 
     if method == "OPTIONS" {
         let response = format!(
@@ -1984,11 +2142,15 @@ async fn handle_dashboard_connection(
         return;
     }
 
-    if method == "POST" && (path == "/api/sessions" || path == "/api/exec" || path == "/api/kill") {
+    if method == "POST"
+        && (matches_prefixed_route(path, "/api/sessions")
+            || matches_prefixed_route(path, "/api/exec")
+            || matches_prefixed_route(path, "/api/kill"))
+    {
         let body_str = read_post_body(&mut stream, &buf, n).await;
-        let result = if path == "/api/exec" {
+        let result = if matches_prefixed_route(path, "/api/exec") {
             exec_cli(&body_str).await
-        } else if path == "/api/kill" {
+        } else if matches_prefixed_route(path, "/api/kill") {
             kill_session(&body_str).await
         } else {
             spawn_session(&body_str).await
@@ -2007,8 +2169,8 @@ async fn handle_dashboard_connection(
         return;
     }
 
-    if path.starts_with("/api/session/") {
-        let (port, endpoint) = match parse_session_proxy_route(path) {
+    if let Some(session_path) = extract_prefixed_route(path, "/api/session/") {
+        let (port, endpoint) = match parse_session_proxy_route(session_path) {
             Ok(route) => route,
             Err(error) => {
                 write_json_error_response_no_cors(&mut stream, "400 Bad Request", error).await;
@@ -2046,7 +2208,10 @@ async fn handle_dashboard_connection(
         }
     }
 
-    let (status, content_type, body): (&str, &str, Vec<u8>) = if path == "/api/sessions" {
+    let (status, content_type, body): (&str, &str, Vec<u8>) = if matches_prefixed_route(
+        path,
+        "/api/sessions",
+    ) {
         (
             "200 OK",
             "application/json; charset=utf-8",
@@ -2271,6 +2436,49 @@ mod tests {
     }
 
     #[test]
+    fn test_dashboard_path_suffixes_strip_base_path_and_query() {
+        assert_eq!(
+            dashboard_path_suffixes("/agent-browser/api/sessions?port=9222"),
+            vec!["/agent-browser/api/sessions", "/api/sessions", "/sessions"]
+        );
+        assert_eq!(
+            dashboard_path_suffixes("/nested/agent-browser/_next/static/app.js"),
+            vec![
+                "/nested/agent-browser/_next/static/app.js",
+                "/agent-browser/_next/static/app.js",
+                "/_next/static/app.js",
+                "/static/app.js",
+                "/app.js"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_matches_prefixed_route() {
+        assert!(matches_prefixed_route(
+            "/agent-browser/api/sessions",
+            "/api/sessions"
+        ));
+        assert!(matches_prefixed_route("/api/sessions", "/api/sessions"));
+        assert!(!matches_prefixed_route(
+            "/agent-browser/api/sessions/extra",
+            "/api/sessions"
+        ));
+    }
+
+    #[test]
+    fn test_extract_prefixed_route() {
+        assert_eq!(
+            extract_prefixed_route("/agent-browser/api/session/9222/tabs", "/api/session/"),
+            Some("/api/session/9222/tabs")
+        );
+        assert_eq!(
+            extract_prefixed_route("/api/session/9222/stream?port=9222", "/api/session/"),
+            Some("/api/session/9222/stream")
+        );
+    }
+
+    #[test]
     fn test_cross_origin_ws_request_rejected() {
         let req = "GET /api/session/9222/stream HTTP/1.1\r\nHost: localhost:4848\r\nOrigin: https://evil.com\r\nUpgrade: websocket\r\n\r\n";
         assert!(!is_same_origin_ws_request(req));
@@ -2357,6 +2565,112 @@ mod tests {
         // URL-encoded paths are not decoded, so they fail endpoint matching
         assert!(parse_session_proxy_route("/api/session/9222/tabs%20extra").is_err());
         assert!(parse_session_proxy_route("/api/session/%39%32%32%32/tabs").is_err());
+    }
+
+    #[test]
+    fn test_serve_static_file_accepts_prefixed_base_path() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "agent-browser-dashboard-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(temp_dir.join("_next/static")).unwrap();
+        std::fs::write(temp_dir.join("index.html"), "<html>dashboard</html>").unwrap();
+        std::fs::write(temp_dir.join("_next/static/app.js"), "console.log('ok');").unwrap();
+
+        let (status, content_type, body) =
+            serve_static_file(&temp_dir, "/agent-browser/_next/static/app.js");
+        assert_eq!(status, "200 OK");
+        assert_eq!(content_type, "application/javascript; charset=utf-8");
+        assert_eq!(body, b"console.log('ok');".to_vec());
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_serve_static_file_rewrites_dashboard_placeholder() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "agent-browser-dashboard-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        std::fs::write(
+            temp_dir.join("index.html"),
+            format!(
+                r#"<script src="{}/_next/static/app.js"></script>"#,
+                dashboard_base_path_token()
+            ),
+        )
+        .unwrap();
+
+        let (_, _, root_body) = serve_static_file(&temp_dir, "/");
+        let root_html = String::from_utf8(root_body).unwrap();
+        assert!(root_html.contains(r#"src="/_next/static/app.js""#));
+
+        let (_, _, prefixed_body) = serve_static_file(&temp_dir, "/agent-browser/");
+        let prefixed_html = String::from_utf8(prefixed_body).unwrap();
+        assert!(prefixed_html.contains(r#"src="/agent-browser/_next/static/app.js""#));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_infer_dashboard_mount_prefix() {
+        let dashboard_dir = PathBuf::from("dashboard");
+
+        assert_eq!(
+            infer_dashboard_mount_prefix("/", &dashboard_dir.join("index.html"), &dashboard_dir),
+            ""
+        );
+        assert_eq!(
+            infer_dashboard_mount_prefix(
+                "/agent-browser/",
+                &dashboard_dir.join("index.html"),
+                &dashboard_dir,
+            ),
+            "/agent-browser"
+        );
+        assert_eq!(
+            infer_dashboard_mount_prefix(
+                "/nested/tools/agent-browser/_next/static/app.js",
+                &dashboard_dir.join("_next/static/app.js"),
+                &dashboard_dir,
+            ),
+            "/nested/tools/agent-browser"
+        );
+        assert_eq!(
+            infer_dashboard_mount_prefix(
+                "/nested/tools/agent-browser/providers/chrome.svg",
+                &dashboard_dir.join("providers/chrome.svg"),
+                &dashboard_dir,
+            ),
+            "/nested/tools/agent-browser"
+        );
+    }
+
+    #[test]
+    fn test_rewrite_dashboard_text_asset_for_mount_prefix() {
+        let token = dashboard_base_path_token();
+        let html = format!(
+            r#"<script src="{token}/_next/static/app.js"></script><script>window.__PATH__="{token}/_next/static/app.js"</script>"#
+        );
+
+        let root = rewrite_dashboard_text_asset(&html, "");
+        assert!(!root.contains(token));
+        assert!(root.contains(r#"src="/_next/static/app.js""#));
+        assert!(root.contains(r#""/_next/static/app.js""#));
+
+        let prefixed = rewrite_dashboard_text_asset(&html, "/agent-browser");
+        assert!(!prefixed.contains(token));
+        assert!(prefixed.contains(r#"src="/agent-browser/_next/static/app.js""#));
+        assert!(prefixed.contains(r#""/agent-browser/_next/static/app.js""#));
     }
 
     #[test]

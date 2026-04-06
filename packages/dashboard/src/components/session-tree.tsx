@@ -15,6 +15,7 @@ import {
   switchTabAtom,
 } from "@/store/sessions";
 import { tabsForPortAtom, engineForPortAtom } from "@/store/tabs";
+import { getDashboardAssetPath } from "@/lib/dashboard-routes";
 import { ChevronRight, Loader2, Plus, Trash2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
@@ -84,9 +85,10 @@ function BrandLogo({ name, logos }: { name: string; logos: Record<string, string
       </span>
     );
   }
+  const resolvedSrc = src.startsWith("/") ? getDashboardAssetPath(src) : src;
   return (
     <img
-      src={src}
+      src={resolvedSrc}
       alt={name}
       width={16}
       height={16}
