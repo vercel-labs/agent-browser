@@ -1,5 +1,5 @@
 mod cdp_loop;
-mod chat;
+pub(crate) mod chat;
 mod dashboard;
 mod discovery;
 mod http;
