@@ -246,6 +246,8 @@ pub struct DaemonState {
     launch_hash: Option<u64>,
     /// Browser engine name (e.g. "chrome", "lightpanda") for observability.
     pub engine: String,
+    /// Default timeout for wait operations, from AGENT_BROWSER_DEFAULT_TIMEOUT env var.
+    pub default_timeout_ms: u64,
 }
 
 impl DaemonState {
@@ -295,7 +297,21 @@ impl DaemonState {
             stream_server: None,
             launch_hash: None,
             engine: env::var("AGENT_BROWSER_ENGINE").unwrap_or_else(|_| "chrome".to_string()),
+            default_timeout_ms: env::var("AGENT_BROWSER_DEFAULT_TIMEOUT")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(30_000),
         }
+    }
+
+    /// Extract the timeout from a command JSON, falling back to the
+    /// configured `default_timeout_ms` (from `AGENT_BROWSER_DEFAULT_TIMEOUT`).
+    /// All wait-family handlers should use this instead of reading the
+    /// timeout field and providing their own fallback.
+    fn timeout_ms(&self, cmd: &Value) -> u64 {
+        cmd.get("timeout")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(self.default_timeout_ms)
     }
 
     fn reset_input_state(&mut self) {
@@ -2288,6 +2304,7 @@ async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
             .get("maxDepth")
             .and_then(|v| v.as_u64())
             .map(|d| d as usize),
+        urls: cmd.get("urls").and_then(|v| v.as_bool()).unwrap_or(false),
     };
 
     state.ref_map.clear();
@@ -2764,7 +2781,7 @@ async fn handle_uncheck(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
 async fn handle_wait(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
-    let timeout_ms = cmd.get("timeout").and_then(|v| v.as_u64()).unwrap_or(30000);
+    let timeout_ms = state.timeout_ms(cmd);
 
     if let Some(text) = cmd.get("text").and_then(|v| v.as_str()) {
         wait_for_text(&mgr.client, &session_id, text, timeout_ms).await?;
@@ -4456,7 +4473,8 @@ async fn handle_upload(cmd: &Value, state: &DaemonState) -> Result<Value, String
         })
         .unwrap_or_default();
 
-    mgr.upload_files(selector, &files).await?;
+    mgr.upload_files(selector, &files, &state.ref_map, &state.iframe_sessions)
+        .await?;
     Ok(json!({ "uploaded": files.len(), "selector": selector }))
 }
 
@@ -4908,7 +4926,7 @@ async fn handle_waitforurl(cmd: &Value, state: &DaemonState) -> Result<Value, St
         .get("url")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'url' parameter")?;
-    let timeout_ms = cmd.get("timeout").and_then(|v| v.as_u64()).unwrap_or(30000);
+    let timeout_ms = state.timeout_ms(cmd);
 
     wait_for_url(&mgr.client, &session_id, url_pattern, timeout_ms).await?;
     let url = mgr.get_url().await.unwrap_or_default();
@@ -4919,7 +4937,7 @@ async fn handle_waitforloadstate(cmd: &Value, state: &DaemonState) -> Result<Val
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
     let load_state = cmd.get("state").and_then(|v| v.as_str()).unwrap_or("load");
-    let timeout_ms = cmd.get("timeout").and_then(|v| v.as_u64()).unwrap_or(30000);
+    let timeout_ms = state.timeout_ms(cmd);
 
     let wait_until = WaitUntil::from_str(load_state);
     let _ = tokio::time::timeout(
@@ -4939,7 +4957,7 @@ async fn handle_waitforfunction(cmd: &Value, state: &DaemonState) -> Result<Valu
         .get("expression")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'expression' parameter")?;
-    let timeout_ms = cmd.get("timeout").and_then(|v| v.as_u64()).unwrap_or(30000);
+    let timeout_ms = state.timeout_ms(cmd);
 
     wait_for_function(&mgr.client, &session_id, expression, timeout_ms).await?;
 
@@ -5695,7 +5713,7 @@ async fn handle_responsebody(cmd: &Value, state: &DaemonState) -> Result<Value, 
         .get("url")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'url' parameter")?;
-    let timeout_ms = cmd.get("timeout").and_then(|v| v.as_u64()).unwrap_or(30000);
+    let timeout_ms = state.timeout_ms(cmd);
 
     let mut rx = mgr.client.subscribe();
     let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
@@ -5774,7 +5792,7 @@ async fn handle_responsebody(cmd: &Value, state: &DaemonState) -> Result<Value, 
 async fn handle_waitfordownload(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
-    let timeout_ms = cmd.get("timeout").and_then(|v| v.as_u64()).unwrap_or(30000);
+    let timeout_ms = state.timeout_ms(cmd);
 
     let mut rx = mgr.client.subscribe();
     let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
@@ -8162,6 +8180,23 @@ mod tests {
 
         assert_eq!(metadata["name"], "HeadlessChrome");
         assert_eq!(metadata["version"], "123.0.6312.0");
+    }
+
+    #[test]
+    fn test_default_timeout_ms_from_env() {
+        // When AGENT_BROWSER_DEFAULT_TIMEOUT is set, DaemonState should use it
+        env::set_var("AGENT_BROWSER_DEFAULT_TIMEOUT", "3000");
+        let state = DaemonState::new();
+        assert_eq!(state.default_timeout_ms, 3000);
+        env::remove_var("AGENT_BROWSER_DEFAULT_TIMEOUT");
+    }
+
+    #[test]
+    fn test_default_timeout_ms_fallback() {
+        // When AGENT_BROWSER_DEFAULT_TIMEOUT is unset, DaemonState uses 30000
+        env::remove_var("AGENT_BROWSER_DEFAULT_TIMEOUT");
+        let state = DaemonState::new();
+        assert_eq!(state.default_timeout_ms, 30_000);
     }
 
     #[tokio::test]

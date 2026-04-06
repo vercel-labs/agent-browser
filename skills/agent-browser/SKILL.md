@@ -25,7 +25,7 @@ agent-browser snapshot -i
 agent-browser fill @e1 "user@example.com"
 agent-browser fill @e2 "password123"
 agent-browser click @e3
-agent-browser wait --load networkidle
+agent-browser wait 2000
 agent-browser snapshot -i  # Check result
 ```
 
@@ -34,14 +34,14 @@ agent-browser snapshot -i  # Check result
 Commands can be chained with `&&` in a single shell invocation. The browser persists between commands via a background daemon, so chaining is safe and more efficient than separate calls.
 
 ```bash
-# Chain open + wait + snapshot in one call
-agent-browser open https://example.com && agent-browser wait --load networkidle && agent-browser snapshot -i
+# Chain open + snapshot in one call (open already waits for page load)
+agent-browser open https://example.com && agent-browser snapshot -i
 
 # Chain multiple interactions
 agent-browser fill @e1 "user@example.com" && agent-browser fill @e2 "password123" && agent-browser click @e3
 
 # Navigate and capture
-agent-browser open https://example.com && agent-browser wait --load networkidle && agent-browser screenshot page.png
+agent-browser open https://example.com && agent-browser screenshot
 ```
 
 **When to chain:** Use `&&` when you don't need to read the output of an intermediate command before proceeding (e.g., open + wait + screenshot). Run commands separately when you need to parse the output first (e.g., snapshot to discover refs, then interact using those refs).
@@ -117,6 +117,11 @@ See [references/authentication.md](references/authentication.md) for OAuth, 2FA,
 ## Essential Commands
 
 ```bash
+# Batch: ALWAYS use batch for 2+ sequential commands. Commands run in order.
+agent-browser batch "open https://example.com" "snapshot -i"
+agent-browser batch "open https://example.com" "screenshot"
+agent-browser batch "click @e1" "wait 1000" "screenshot"
+
 # Navigation
 agent-browser open <url>              # Navigate (aliases: goto, navigate)
 agent-browser close                   # Close browser
@@ -124,6 +129,7 @@ agent-browser close --all             # Close all active sessions
 
 # Snapshot
 agent-browser snapshot -i             # Interactive elements with refs (recommended)
+agent-browser snapshot -i --urls      # Include href URLs for links
 agent-browser snapshot -s "#selector" # Scope to CSS selector
 
 # Interaction (use @refs from snapshot)
@@ -147,10 +153,10 @@ agent-browser get cdp-url             # Get CDP WebSocket URL
 
 # Wait
 agent-browser wait @e1                # Wait for element
-agent-browser wait --load networkidle # Wait for network idle
-agent-browser wait --url "**/page"    # Wait for URL pattern
 agent-browser wait 2000               # Wait milliseconds
-agent-browser wait --text "Welcome"    # Wait for text to appear (substring match)
+agent-browser wait --url "**/page"    # Wait for URL pattern
+agent-browser wait --text "Welcome"   # Wait for text to appear (substring match)
+agent-browser wait --load networkidle # Wait for network idle (caution: see Pitfalls)
 agent-browser wait --fn "!document.body.innerText.includes('Loading...')"  # Wait for text to disappear
 agent-browser wait "#spinner" --state hidden  # Wait for element to disappear
 
@@ -158,6 +164,14 @@ agent-browser wait "#spinner" --state hidden  # Wait for element to disappear
 agent-browser download @e1 ./file.pdf          # Click element to trigger download
 agent-browser wait --download ./output.zip     # Wait for any download to complete
 agent-browser --download-path ./downloads open <url>  # Set default download directory
+
+# Tab management
+agent-browser tab list                         # List all open tabs
+agent-browser tab new                          # Open a blank new tab
+agent-browser tab new https://example.com      # Open URL in a new tab
+agent-browser tab 2                            # Switch to tab by index (0-based)
+agent-browser tab close                        # Close the current tab
+agent-browser tab close 2                      # Close tab by index
 
 # Network
 agent-browser network requests                 # Inspect tracked requests
@@ -210,6 +224,13 @@ agent-browser diff screenshot --baseline before.png  # Visual pixel diff
 agent-browser diff url <url1> <url2>                 # Compare two pages
 agent-browser diff url <url1> <url2> --wait-until networkidle  # Custom wait strategy
 agent-browser diff url <url1> <url2> --selector "#main"  # Scope to element
+
+# Chat (AI natural language control)
+agent-browser chat "open google.com and search for cats"  # Single-shot instruction
+agent-browser chat                                        # Interactive REPL mode
+agent-browser -q chat "summarize this page"               # Quiet (text only, no tool calls)
+agent-browser -v chat "fill in the login form"            # Verbose (show command output)
+agent-browser --model openai/gpt-4o chat "take a screenshot"  # Override model
 ```
 
 ## Streaming
@@ -218,35 +239,62 @@ Every session automatically starts a WebSocket stream server on an OS-assigned p
 
 ## Batch Execution
 
-Execute multiple commands in a single invocation by piping a JSON array of string arrays to `batch`. This avoids per-command process startup overhead when running multi-step workflows.
+ALWAYS use `batch` when running 2+ commands in sequence. Batch executes commands in order, so dependent commands (like navigate then screenshot) work correctly. Each quoted argument is a separate command.
 
 ```bash
-echo '[
-  ["open", "https://example.com"],
-  ["snapshot", "-i"],
-  ["click", "@e1"],
-  ["screenshot", "result.png"]
-]' | agent-browser batch --json
+# Navigate and take a snapshot
+agent-browser batch "open https://example.com" "snapshot -i"
 
-# Stop on first error
+# Navigate, snapshot, and screenshot in one call
+agent-browser batch "open https://example.com" "snapshot -i" "screenshot"
+
+# Click, wait, then screenshot
+agent-browser batch "click @e1" "wait 1000" "screenshot"
+
+# With --bail to stop on first error
+agent-browser batch --bail "open https://example.com" "click @e1" "screenshot"
+```
+
+Only use a single command (not batch) when you need to read the output before deciding the next command. For example, you must run `snapshot -i` as a single command when you need to read the refs to decide what to click. After reading the snapshot, batch the remaining steps.
+
+Stdin mode is also supported for programmatic use:
+
+```bash
+echo '[["open","https://example.com"],["screenshot"]]' | agent-browser batch --json
 agent-browser batch --bail < commands.json
 ```
 
-Use `batch` when you have a known sequence of commands that don't depend on intermediate output. Use separate commands or `&&` chaining when you need to parse output between steps (e.g., snapshot to discover refs, then interact).
+## Efficiency Strategies
+
+These patterns minimize tool calls and token usage.
+
+**Use `--urls` to avoid re-navigation.** When you need to visit links from a page, use `snapshot -i --urls` to get all href URLs upfront. Then `open` each URL directly instead of clicking refs and navigating back.
+
+**Snapshot once, act many times.** Never re-snapshot the same page. Extract all needed info (refs, URLs, text) from a single snapshot, then batch the remaining actions.
+
+**Multi-page workflow (e.g. "visit N sites and screenshot each"):**
+
+```bash
+# 1. Get all URLs in one call
+agent-browser batch "open https://news.ycombinator.com" "snapshot -i --urls"
+# Read output to extract URLs, then visit each directly:
+# 2. One batch per target site
+agent-browser batch "open https://github.com/example/repo" "screenshot"
+agent-browser batch "open https://example.com/article" "screenshot"
+agent-browser batch "open https://other.com/page" "screenshot"
+```
+
+This approach uses 4 tool calls instead of 14+. Never go back to the listing page between visits.
 
 ## Common Patterns
 
 ### Form Submission
 
 ```bash
-agent-browser open https://example.com/signup
-agent-browser snapshot -i
-agent-browser fill @e1 "Jane Doe"
-agent-browser fill @e2 "jane@example.com"
-agent-browser select @e3 "California"
-agent-browser check @e4
-agent-browser click @e5
-agent-browser wait --load networkidle
+# Navigate and get the form structure
+agent-browser batch "open https://example.com/signup" "snapshot -i"
+# Read the snapshot output to identify form refs, then fill and submit
+agent-browser batch "fill @e1 \"Jane Doe\"" "fill @e2 \"jane@example.com\"" "select @e3 \"California\"" "check @e4" "click @e5" "wait 2000"
 ```
 
 ### Authentication with Auth Vault (Recommended)
@@ -271,17 +319,12 @@ agent-browser auth delete github
 
 ```bash
 # Login once and save state
-agent-browser open https://app.example.com/login
-agent-browser snapshot -i
-agent-browser fill @e1 "$USERNAME"
-agent-browser fill @e2 "$PASSWORD"
-agent-browser click @e3
-agent-browser wait --url "**/dashboard"
-agent-browser state save auth.json
+agent-browser batch "open https://app.example.com/login" "snapshot -i"
+# Read snapshot to find form refs, then fill and submit
+agent-browser batch "fill @e1 \"$USERNAME\"" "fill @e2 \"$PASSWORD\"" "click @e3" "wait --url **/dashboard" "state save auth.json"
 
 # Reuse in future sessions
-agent-browser state load auth.json
-agent-browser open https://app.example.com/dashboard
+agent-browser batch "state load auth.json" "open https://app.example.com/dashboard"
 ```
 
 ### Session Persistence
@@ -311,8 +354,7 @@ agent-browser state clean --older-than 7
 Iframe content is automatically inlined in snapshots. Refs inside iframes carry frame context, so you can interact with them directly.
 
 ```bash
-agent-browser open https://example.com/checkout
-agent-browser snapshot -i
+agent-browser batch "open https://example.com/checkout" "snapshot -i"
 # @e1 [heading] "Checkout"
 # @e2 [Iframe] "payment-frame"
 #   @e3 [input] "Card number"
@@ -320,23 +362,19 @@ agent-browser snapshot -i
 #   @e5 [button] "Pay"
 
 # Interact directly — no frame switch needed
-agent-browser fill @e3 "4111111111111111"
-agent-browser fill @e4 "12/28"
-agent-browser click @e5
+agent-browser batch "fill @e3 \"4111111111111111\"" "fill @e4 \"12/28\"" "click @e5"
 
 # To scope a snapshot to one iframe:
-agent-browser frame @e2
-agent-browser snapshot -i         # Only iframe content
+agent-browser batch "frame @e2" "snapshot -i"
 agent-browser frame main          # Return to main frame
 ```
 
 ### Data Extraction
 
 ```bash
-agent-browser open https://example.com/products
-agent-browser snapshot -i
+agent-browser batch "open https://example.com/products" "snapshot -i"
+# Read snapshot to find element refs, then extract
 agent-browser get text @e5           # Get specific element text
-agent-browser get text body > page.txt  # Get all page text
 
 # JSON output for parsing
 agent-browser snapshot -i --json
@@ -530,27 +568,29 @@ agent-browser diff url https://staging.example.com https://prod.example.com --sc
 
 ## Timeouts and Slow Pages
 
-The default timeout is 25 seconds. This can be overridden with the `AGENT_BROWSER_DEFAULT_TIMEOUT` environment variable (value in milliseconds). For slow websites or large pages, use explicit waits instead of relying on the default timeout:
+The default timeout is 25 seconds. This can be overridden with the `AGENT_BROWSER_DEFAULT_TIMEOUT` environment variable (value in milliseconds).
+
+**Important:** `open` already waits for the page `load` event before returning. In most cases, no additional wait is needed before taking a snapshot or screenshot. Only add an explicit wait when content loads asynchronously after the initial page load.
 
 ```bash
-# Wait for network activity to settle (best for slow pages)
-agent-browser wait --load networkidle
-
-# Wait for a specific element to appear
+# Wait for a specific element to appear (preferred for dynamic content)
 agent-browser wait "#content"
 agent-browser wait @e1
+
+# Wait a fixed duration (good default for slow SPAs)
+agent-browser wait 2000
 
 # Wait for a specific URL pattern (useful after redirects)
 agent-browser wait --url "**/dashboard"
 
-# Wait for a JavaScript condition
-agent-browser wait --fn "document.readyState === 'complete'"
+# Wait for text to appear on the page
+agent-browser wait --text "Results loaded"
 
-# Wait a fixed duration (milliseconds) as a last resort
-agent-browser wait 5000
+# Wait for a JavaScript condition
+agent-browser wait --fn "document.querySelectorAll('.item').length > 0"
 ```
 
-When dealing with consistently slow websites, use `wait --load networkidle` after `open` to ensure the page is fully loaded before taking a snapshot. If a specific element is slow to render, wait for it directly with `wait <selector>` or `wait @ref`.
+**Avoid `wait --load networkidle`** unless you are certain the site has no persistent network activity. Ad-heavy sites, sites with analytics/tracking, and sites with websockets will cause `networkidle` to hang indefinitely. Prefer `wait 2000` or `wait <selector>` instead.
 
 ## JavaScript Dialogs (alert / confirm / prompt)
 
@@ -749,9 +789,6 @@ Lightpanda does not support `--extension`, `--profile`, `--state`, or `--allow-f
 The dashboard is a standalone background server that shows live browser viewports, command activity, and console output for all sessions.
 
 ```bash
-# Install the dashboard once
-agent-browser dashboard install
-
 # Start the dashboard server (background, port 4848)
 agent-browser dashboard start
 
@@ -763,6 +800,18 @@ agent-browser dashboard stop
 ```
 
 The dashboard runs independently of browser sessions on port 4848 (configurable with `--port`). All sessions automatically stream to the dashboard. Sessions can also be created from the dashboard UI with local engines or cloud providers.
+
+### Dashboard AI Chat
+
+The dashboard has an optional AI chat tab powered by the Vercel AI Gateway. Enable it by setting:
+
+```bash
+export AI_GATEWAY_API_KEY=gw_your_key_here
+export AI_GATEWAY_MODEL=anthropic/claude-sonnet-4.6           # optional default
+export AI_GATEWAY_URL=https://ai-gateway.vercel.sh           # optional default
+```
+
+The Chat tab is always visible in the dashboard. Set `AI_GATEWAY_API_KEY` to enable AI responses.
 
 ## Ready-to-Use Templates
 

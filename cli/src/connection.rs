@@ -224,6 +224,7 @@ pub struct DaemonOptions<'a> {
     pub engine: Option<&'a str>,
     pub auto_connect: bool,
     pub idle_timeout: Option<&'a str>,
+    pub default_timeout: Option<u64>,
     pub cdp: Option<&'a str>,
     pub no_auto_dialog: bool,
 }
@@ -303,6 +304,9 @@ fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
     }
     if let Some(idle) = opts.idle_timeout {
         cmd.env("AGENT_BROWSER_IDLE_TIMEOUT_MS", idle);
+    }
+    if let Some(timeout) = opts.default_timeout {
+        cmd.env("AGENT_BROWSER_DEFAULT_TIMEOUT", timeout.to_string());
     }
     if let Some(cdp) = opts.cdp {
         cmd.env("AGENT_BROWSER_CDP", cdp);
