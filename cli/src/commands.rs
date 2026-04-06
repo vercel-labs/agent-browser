@@ -72,6 +72,23 @@ pub fn gen_id() -> String {
 }
 
 pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError> {
+    let mut result = parse_command_inner(args, flags)?;
+
+    // Inject AGENT_BROWSER_DEFAULT_TIMEOUT into any wait-family command that
+    // doesn't already carry an explicit timeout. Centralised here so that new
+    // wait variants automatically inherit the default without per-variant wiring.
+    if let Some(action) = result.get("action").and_then(|a| a.as_str()) {
+        if action.starts_with("wait") && result.get("timeout").is_none() {
+            if let Some(t) = flags.default_timeout {
+                result["timeout"] = json!(t);
+            }
+        }
+    }
+
+    Ok(result)
+}
+
+fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseError> {
     if args.is_empty() {
         return Err(ParseError::MissingArguments {
             context: "".to_string(),
@@ -555,8 +572,10 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                         obj.insert("compact".to_string(), json!(true));
                     }
                     "-C" | "--cursor" => {
-                        // deprecated, cursor-interactive elements are referred by default now
                         obj.insert("cursor".to_string(), json!(true));
+                    }
+                    "-u" | "--urls" => {
+                        obj.insert("urls".to_string(), json!(true));
                     }
                     "-d" | "--depth" => {
                         if let Some(d) = rest.get(i + 1) {
@@ -1412,7 +1431,12 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
         // === Batch ===
         "batch" => {
             let bail = rest.contains(&"--bail");
-            Ok(json!({ "id": id, "action": "batch", "bail": bail }))
+            let commands: Vec<&str> = rest.iter().filter(|a| **a != "--bail").copied().collect();
+            let mut cmd = json!({ "id": id, "action": "batch", "bail": bail });
+            if !commands.is_empty() {
+                cmd["commands"] = json!(commands);
+            }
+            Ok(cmd)
         }
 
         _ => Err(ParseError::UnknownCommand {
@@ -2292,6 +2316,38 @@ fn parse_storage(rest: &[&str], id: &str) -> Result<Value, ParseError> {
     }
 }
 
+/// Split a string into arguments respecting shell quoting (double/single quotes, backslash escapes).
+pub fn shell_words_split(s: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut in_double = false;
+    let mut in_single = false;
+    let mut chars = s.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' if !in_single => {
+                if let Some(&next) = chars.peek() {
+                    chars.next();
+                    current.push(next);
+                }
+            }
+            '"' if !in_single => in_double = !in_double,
+            '\'' if !in_double => in_single = !in_single,
+            ' ' if !in_double && !in_single => {
+                if !current.is_empty() {
+                    args.push(std::mem::take(&mut current));
+                }
+            }
+            _ => current.push(c),
+        }
+    }
+    if !current.is_empty() {
+        args.push(current);
+    }
+    args
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2344,7 +2400,11 @@ mod tests {
             screenshot_quality: None,
             screenshot_format: None,
             idle_timeout: None,
+            default_timeout: None,
             no_auto_dialog: false,
+            model: None,
+            verbose: false,
+            quiet: false,
         }
     }
 
@@ -3007,6 +3067,21 @@ mod tests {
         assert_eq!(cmd["maxDepth"], 3);
     }
 
+    #[test]
+    fn test_snapshot_urls() {
+        let cmd = parse_command(&args("snapshot -i --urls"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "snapshot");
+        assert_eq!(cmd["interactive"], true);
+        assert_eq!(cmd["urls"], true);
+    }
+
+    #[test]
+    fn test_snapshot_urls_short() {
+        let cmd = parse_command(&args("snapshot -i -u"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "snapshot");
+        assert_eq!(cmd["urls"], true);
+    }
+
     // === Wait ===
 
     #[test]
@@ -3596,6 +3671,77 @@ mod tests {
         let cmd = parse_command(&args("wait -d ./file.pdf"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "waitfordownload");
         assert_eq!(cmd["path"], "./file.pdf");
+    }
+
+    // === Default timeout (AGENT_BROWSER_DEFAULT_TIMEOUT) tests ===
+
+    fn flags_with_default_timeout(ms: u64) -> Flags {
+        let mut f = default_flags();
+        f.default_timeout = Some(ms);
+        f
+    }
+
+    #[test]
+    fn test_wait_selector_inherits_default_timeout() {
+        let flags = flags_with_default_timeout(3000);
+        let cmd = parse_command(&args("wait #element"), &flags).unwrap();
+        assert_eq!(cmd["action"], "wait");
+        assert_eq!(cmd["selector"], "#element");
+        assert_eq!(cmd["timeout"], 3000);
+    }
+
+    #[test]
+    fn test_wait_url_inherits_default_timeout() {
+        let flags = flags_with_default_timeout(4000);
+        let cmd = parse_command(&args("wait --url **/dashboard"), &flags).unwrap();
+        assert_eq!(cmd["action"], "waitforurl");
+        assert_eq!(cmd["timeout"], 4000);
+    }
+
+    #[test]
+    fn test_wait_load_inherits_default_timeout() {
+        let flags = flags_with_default_timeout(4000);
+        let cmd = parse_command(&args("wait --load networkidle"), &flags).unwrap();
+        assert_eq!(cmd["action"], "waitforloadstate");
+        assert_eq!(cmd["timeout"], 4000);
+    }
+
+    #[test]
+    fn test_wait_fn_inherits_default_timeout() {
+        let flags = flags_with_default_timeout(4000);
+        let cmd = parse_command(&args("wait --fn window.ready"), &flags).unwrap();
+        assert_eq!(cmd["action"], "waitforfunction");
+        assert_eq!(cmd["timeout"], 4000);
+    }
+
+    #[test]
+    fn test_wait_text_inherits_default_timeout() {
+        let flags = flags_with_default_timeout(2000);
+        let cmd = parse_command(&args("wait --text Welcome"), &flags).unwrap();
+        assert_eq!(cmd["action"], "wait");
+        assert_eq!(cmd["text"], "Welcome");
+        assert_eq!(cmd["timeout"], 2000);
+    }
+
+    #[test]
+    fn test_wait_download_inherits_default_timeout() {
+        let flags = flags_with_default_timeout(5000);
+        let cmd = parse_command(&args("wait --download"), &flags).unwrap();
+        assert_eq!(cmd["action"], "waitfordownload");
+        assert_eq!(cmd["timeout"], 5000);
+    }
+
+    #[test]
+    fn test_wait_explicit_timeout_overrides_default() {
+        let flags = flags_with_default_timeout(5000);
+        let cmd = parse_command(&args("wait --text Welcome --timeout 1000"), &flags).unwrap();
+        assert_eq!(cmd["timeout"], 1000);
+    }
+
+    #[test]
+    fn test_wait_no_default_timeout_omits_field() {
+        let cmd = parse_command(&args("wait #element"), &default_flags()).unwrap();
+        assert!(cmd.get("timeout").is_none());
     }
 
     // === Connect (CDP) tests ===
@@ -4329,5 +4475,42 @@ mod tests {
         assert_eq!(cmd["action"], "upload");
         assert_eq!(cmd["selector"], "xpath=/html/body/input");
         assert_eq!(cmd["files"][0], "./file.txt");
+    }
+
+    #[test]
+    fn test_batch_with_args() {
+        let cmd_args = vec![
+            "batch".to_string(),
+            "open https://example.com".to_string(),
+            "screenshot".to_string(),
+        ];
+        let cmd = parse_command(&cmd_args, &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "batch");
+        assert_eq!(cmd["bail"], false);
+        let commands = cmd["commands"].as_array().unwrap();
+        assert_eq!(commands.len(), 2);
+        assert_eq!(commands[0], "open https://example.com");
+        assert_eq!(commands[1], "screenshot");
+    }
+
+    #[test]
+    fn test_batch_with_args_and_bail() {
+        let cmd_args = vec![
+            "batch".to_string(),
+            "--bail".to_string(),
+            "open https://example.com".to_string(),
+            "screenshot".to_string(),
+        ];
+        let cmd = parse_command(&cmd_args, &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "batch");
+        assert_eq!(cmd["bail"], true);
+        let commands = cmd["commands"].as_array().unwrap();
+        assert_eq!(commands.len(), 2);
+    }
+
+    #[test]
+    fn test_batch_no_args_no_commands_field() {
+        let cmd = parse_command(&args("batch"), &default_flags()).unwrap();
+        assert!(cmd.get("commands").is_none());
     }
 }

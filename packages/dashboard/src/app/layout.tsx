@@ -4,6 +4,7 @@ import { Geist } from "next/font/google";
 import { cn } from "@/lib/utils";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { JotaiProvider } from "@/store/provider";
+import { ThemeProvider } from "@/components/theme-provider";
 
 const geist = Geist({ subsets: ["latin"], variable: "--font-sans" });
 
@@ -18,11 +19,13 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en" className={cn("dark font-sans antialiased", geist.variable)}>
+    <html lang="en" className={cn("font-sans antialiased", geist.variable)} suppressHydrationWarning>
       <body>
-        <JotaiProvider>
-          <TooltipProvider>{children}</TooltipProvider>
-        </JotaiProvider>
+        <ThemeProvider attribute="class" defaultTheme="dark" enableSystem disableTransitionOnChange>
+          <JotaiProvider>
+            <TooltipProvider>{children}</TooltipProvider>
+          </JotaiProvider>
+        </ThemeProvider>
       </body>
     </html>
   );
