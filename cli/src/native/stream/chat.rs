@@ -612,7 +612,7 @@ async fn stream_gateway_response(
 
                 for tc in tcs {
                     let idx = tc.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
-                    if !tool_call_args.contains_key(&idx) {
+                    if let std::collections::hash_map::Entry::Vacant(e) = tool_call_args.entry(idx) {
                         let id = tc
                             .get("id")
                             .and_then(|i| i.as_str())
@@ -629,7 +629,7 @@ async fn stream_gateway_response(
                             json!({"type":"tool-input-start","toolCallId":id,"toolName":name})
                         );
                         let _ = stream.write_all(ev.as_bytes()).await;
-                        tool_call_args.insert(idx, (id, name, String::new()));
+                        e.insert((id, name, String::new()));
                     }
                     if let Some(arg_delta) = tc
                         .get("function")

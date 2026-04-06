@@ -6,6 +6,9 @@ const config: NextConfig = {
   output: "export",
   images: { unoptimized: true },
   devIndicators: false,
+  env: {
+    NEXT_PUBLIC_DAEMON_URL: DAEMON_ORIGIN,
+  },
   async rewrites() {
     return [
       {

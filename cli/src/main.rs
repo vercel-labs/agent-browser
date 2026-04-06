@@ -1263,7 +1263,7 @@ fn main() {
         let arg_commands = cmd.get("commands").and_then(|v| v.as_array()).map(|arr| {
             arr.iter()
                 .filter_map(|v| v.as_str())
-                .map(|s| commands::shell_words_split(s))
+                .map(commands::shell_words_split)
                 .collect::<Vec<Vec<String>>>()
         });
         run_batch(&flags, bail, arg_commands);
