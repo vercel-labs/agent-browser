@@ -8,11 +8,6 @@ use super::types::BrowserVersionInfo;
 /// Default timeout for CDP discovery HTTP requests (/json/version, /json/list).
 const DEFAULT_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// Timeout for the WebSocket fallback discovery step.
-/// Chrome M144+ with chrome://inspect remote debugging shows a user-approval
-/// dialog before allowing CDP connections. This longer timeout gives the user
-/// time to click "Allow" in Chrome.
-const WS_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Discover the CDP WebSocket URL for the given host and port.
 ///
@@ -38,6 +33,18 @@ pub async fn discover_cdp_url_with_timeout(
     query: Option<&str>,
     timeout: Duration,
 ) -> Result<String, String> {
+    discover_cdp_url_with_timeout_and_message(host, port, query, timeout, None).await
+}
+
+/// Like [`discover_cdp_url_with_timeout`] but allows callers to provide an
+/// optional message before attempting the final direct WebSocket fallback.
+pub async fn discover_cdp_url_with_timeout_and_message(
+    host: &str,
+    port: u16,
+    query: Option<&str>,
+    timeout: Duration,
+    ws_fallback_message: Option<&str>,
+) -> Result<String, String> {
     // Primary: /json/version (standard path)
     let version_err = match fetch_cdp_info(host, port, timeout).await {
         Ok(info) => {
@@ -59,15 +66,12 @@ pub async fn discover_cdp_url_with_timeout(
     };
 
     // Final fallback: direct WebSocket at /devtools/browser.
-    // Chrome 136+ with UI-based remote debugging (chrome://inspect) exposes
-    // CDP over WebSocket but does not serve HTTP discovery endpoints.
-    // Chrome M144+ shows a user-approval dialog before allowing the connection,
-    // so we ensure the timeout is long enough for the user to respond.
-    let ws_timeout = timeout.max(WS_DISCOVERY_TIMEOUT);
-    eprintln!(
-        "Waiting for CDP WebSocket connection... If a prompt appears in the browser, click \"Allow\"."
-    );
-    match discover_cdp_ws(host, port, ws_timeout).await {
+    // Some browsers expose CDP over WebSocket but do not serve HTTP discovery
+    // endpoints. Callers control the timeout for this step.
+    if let Some(message) = ws_fallback_message {
+        eprintln!("{}", message);
+    }
+    match discover_cdp_ws(host, port, timeout).await {
         Ok(ws_url) => Ok(append_query(&ws_url, query)),
         Err(ws_err) => Err(format!(
             "All CDP discovery methods failed for {}:{}: /json/version: {}; /json/list: {}; WebSocket: {}",

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
-use super::discovery::discover_cdp_url;
+use super::discovery::{discover_cdp_url, discover_cdp_url_with_timeout_and_message};
 
 pub struct ChromeProcess {
     child: Child,
@@ -547,14 +547,26 @@ pub fn read_devtools_active_port(user_data_dir: &Path) -> Option<(u16, String)> 
     Some((port, ws_path))
 }
 
+const CHROME_WS_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
+const CHROME_WS_FALLBACK_MESSAGE: &str =
+    "Waiting for Chrome CDP WebSocket connection... If Chrome shows a prompt, click \"Allow\".";
+
 pub async fn auto_connect_cdp() -> Result<String, String> {
     let user_data_dirs = get_chrome_user_data_dirs();
 
     for dir in &user_data_dirs {
         if let Some((port, _ws_path)) = read_devtools_active_port(dir) {
-            // Use discover_cdp_url which handles both pre-M144 HTTP discovery
-            // and M144+ WebSocket fallback (with approval dialog wait).
-            if let Ok(ws_url) = discover_cdp_url("127.0.0.1", port, None).await {
+            // Chrome M144+ may require a user approval dialog before allowing
+            // the direct WebSocket fallback, so give it a longer timeout here.
+            if let Ok(ws_url) = discover_cdp_url_with_timeout_and_message(
+                "127.0.0.1",
+                port,
+                None,
+                CHROME_WS_DISCOVERY_TIMEOUT,
+                Some(CHROME_WS_FALLBACK_MESSAGE),
+            )
+            .await
+            {
                 return Ok(ws_url);
             }
             // Port is unreachable — remove the stale file so future runs skip it.
@@ -565,7 +577,15 @@ pub async fn auto_connect_cdp() -> Result<String, String> {
 
     // Fallback: probe common ports
     for port in [9222u16, 9229] {
-        if let Ok(ws_url) = discover_cdp_url("127.0.0.1", port, None).await {
+        if let Ok(ws_url) = discover_cdp_url_with_timeout_and_message(
+            "127.0.0.1",
+            port,
+            None,
+            CHROME_WS_DISCOVERY_TIMEOUT,
+            Some(CHROME_WS_FALLBACK_MESSAGE),
+        )
+        .await
+        {
             return Ok(ws_url);
         }
     }
