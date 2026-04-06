@@ -522,7 +522,11 @@ pub(crate) async fn execute_exa_search(query: &str, num_results: Option<u64>) ->
             for highlight in highlights {
                 if let Some(text) = highlight.as_str() {
                     let trimmed = if text.len() > 300 {
-                        format!("{}...", &text[..300])
+                        let mut end = 300;
+                        while !text.is_char_boundary(end) {
+                            end -= 1;
+                        }
+                        format!("{}...", &text[..end])
                     } else {
                         text.to_string()
                     };
