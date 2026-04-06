@@ -93,7 +93,7 @@ agent-browser close  # State auto-saved
 agent-browser --session-name myapp open https://app.example.com/dashboard
 ```
 
-**Option 4: Auth vault (credentials stored encrypted, login by name)**
+**Option 5: Auth vault (credentials stored encrypted, login by name)**
 
 ```bash
 echo "$PASSWORD" | agent-browser auth save myapp --url https://app.example.com/login --username user --password-stdin
@@ -102,7 +102,7 @@ agent-browser auth login myapp
 
 `auth login` navigates with `load` and then waits for login form selectors to appear before filling/clicking, which is more reliable on delayed SPA login screens.
 
-**Option 5: State file (manual save/load)**
+**Option 6: State file (manual save/load)**
 
 ```bash
 # After logging in:
