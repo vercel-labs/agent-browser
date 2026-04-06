@@ -685,6 +685,27 @@ The `chat` command translates natural language instructions into agent-browser c
 
 The Chat tab is always visible in the dashboard. When `AI_GATEWAY_API_KEY` is set, the Rust server proxies requests to the gateway and streams responses back using the Vercel AI SDK's UI Message Stream protocol. Without the key, sending a message shows an error inline.
 
+### Exa Web Search
+
+The `chat` command supports [Exa](https://exa.ai) as a built-in web search tool. When `EXA_API_KEY` is set, the AI can search the web using Exa instead of navigating to a search engine. This is faster and returns cleaner results with titles and text snippets.
+
+```bash
+export EXA_API_KEY=your_exa_api_key_here
+```
+
+Once configured, the AI will automatically use Exa when it needs to look something up. You can also ask it directly:
+
+```bash
+agent-browser chat "search for the latest news about AI agents"
+agent-browser chat "find me some good rust CLI libraries"
+```
+
+The AI can combine Exa search with browser automation -- for example, searching for pages and then opening the results for deeper exploration.
+
+| Variable      | Description                          |
+| ------------- | ------------------------------------ |
+| `EXA_API_KEY` | Exa API key for web search in chat   |
+
 ## Configuration
 
 Create an `agent-browser.json` file to set persistent defaults instead of repeating flags on every command.

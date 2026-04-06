@@ -2963,6 +2963,7 @@ Environment:
   AI_GATEWAY_URL                 Vercel AI Gateway base URL (default: https://ai-gateway.vercel.sh)
   AI_GATEWAY_API_KEY             API key for the AI Gateway (enables chat command and dashboard AI chat)
   AI_GATEWAY_MODEL               Default AI model (default: anthropic/claude-sonnet-4.6, or --model flag)
+  EXA_API_KEY                    Exa API key for web search in chat (https://exa.ai)
 
 Install:
   npm install -g agent-browser           # npm
