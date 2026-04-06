@@ -492,7 +492,7 @@ pub(crate) async fn execute_exa_search(query: &str, num_results: Option<u64>) ->
         .post(EXA_API_URL)
         .header("x-api-key", &api_key)
         .header("Content-Type", "application/json")
-        .header("x-exa-integration", "agent-browser")
+        .header("x-exa-integration", "vercel-agent-browser")
         .body(body.to_string())
         .send()
         .await;
