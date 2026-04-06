@@ -756,6 +756,7 @@ fn main() {
         default_timeout: flags.default_timeout,
         cdp: flags.cdp.as_deref(),
         no_auto_dialog: flags.no_auto_dialog,
+        ignore_default_args: flags.ignore_default_args.as_deref(),
     };
 
     let daemon_result = match ensure_daemon(&flags.session, &daemon_opts) {
@@ -815,6 +816,7 @@ fn main() {
             flags.cli_allow_file_access.then_some("--allow-file-access"),
             flags.cli_download_path.then_some("--download-path"),
             flags.cli_headed.then_some("--headed"),
+            flags.cli_ignore_default_args.then_some("--ignore-default-args"),
         ]
         .into_iter()
         .flatten()
