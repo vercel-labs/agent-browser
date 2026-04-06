@@ -12,10 +12,8 @@ use tokio_tungstenite::tungstenite::Message;
 use super::cdp::client::CdpClient;
 use super::network;
 #[cfg(windows)]
-use crate::connection::get_port_for_session;
-use crate::connection::get_socket_dir;
-#[cfg(windows)]
 use crate::connection::resolve_port;
+use crate::connection::get_socket_dir;
 use crate::install::get_dashboard_dir;
 
 /// Frame metadata from CDP Page.screencastFrame events.
@@ -1073,6 +1071,542 @@ async fn handle_client_message(msg: &str, client: &CdpClient, session_id: Option
 
 const CORS_HEADERS: &str = "Access-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\n";
 
+/// Dashboard same-origin proxy endpoints for session metadata and streams.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionProxyEndpoint {
+    Tabs,
+    Status,
+    Stream,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DashboardProxyError {
+    status: &'static str,
+    message: String,
+}
+
+impl DashboardProxyError {
+    fn not_found(message: impl Into<String>) -> Self {
+        Self {
+            status: "404 Not Found",
+            message: message.into(),
+        }
+    }
+
+    fn bad_gateway(message: impl Into<String>) -> Self {
+        Self {
+            status: "502 Bad Gateway",
+            message: message.into(),
+        }
+    }
+}
+
+fn build_json_error_body(error: &str) -> String {
+    let escaped = serde_json::to_string(error).unwrap_or_else(|_| format!("\"{}\"", error));
+    format!(r#"{{"success":false,"error":{escaped}}}"#)
+}
+
+async fn write_http_response_inner(
+    stream: &mut tokio::net::TcpStream,
+    status: &str,
+    content_type: &str,
+    body: &[u8],
+    include_cors: bool,
+) {
+    let cors_headers = if include_cors { CORS_HEADERS } else { "" };
+    let response = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n{cors_headers}\r\n",
+        body.len()
+    );
+    let _ = stream.write_all(response.as_bytes()).await;
+    let _ = stream.write_all(body).await;
+}
+
+async fn write_http_response(
+    stream: &mut tokio::net::TcpStream,
+    status: &str,
+    content_type: &str,
+    body: &[u8],
+) {
+    write_http_response_inner(stream, status, content_type, body, true).await;
+}
+
+async fn write_http_response_no_cors(
+    stream: &mut tokio::net::TcpStream,
+    status: &str,
+    content_type: &str,
+    body: &[u8],
+) {
+    write_http_response_inner(stream, status, content_type, body, false).await;
+}
+
+async fn write_json_error_response(
+    stream: &mut tokio::net::TcpStream,
+    status: &'static str,
+    error: &str,
+) {
+    let body = build_json_error_body(error);
+    write_http_response(
+        stream,
+        status,
+        "application/json; charset=utf-8",
+        body.as_bytes(),
+    )
+    .await;
+}
+
+async fn write_json_error_response_no_cors(
+    stream: &mut tokio::net::TcpStream,
+    status: &'static str,
+    error: &str,
+) {
+    let body = build_json_error_body(error);
+    write_http_response_no_cors(
+        stream,
+        status,
+        "application/json; charset=utf-8",
+        body.as_bytes(),
+    )
+    .await;
+}
+
+fn parse_request_method_and_path(request: &str) -> (&str, &str) {
+    let first_line = request.lines().next().unwrap_or("");
+    let method = first_line.split_whitespace().next().unwrap_or("GET");
+    let path = first_line.split_whitespace().nth(1).unwrap_or("/");
+    (method, path)
+}
+
+fn strip_query_and_fragment(path: &str) -> &str {
+    path.split(['?', '#']).next().unwrap_or(path)
+}
+
+fn dashboard_path_suffixes(path: &str) -> Vec<&str> {
+    let clean = strip_query_and_fragment(path);
+    if !clean.starts_with('/') {
+        return vec![clean];
+    }
+
+    let mut suffixes = Vec::new();
+    let mut current = clean;
+    loop {
+        suffixes.push(current);
+        let Some(next_index) = current[1..].find('/') else {
+            break;
+        };
+        current = &current[next_index + 1..];
+    }
+    suffixes
+}
+
+fn extract_prefixed_route<'a>(path: &'a str, route_prefix: &str) -> Option<&'a str> {
+    dashboard_path_suffixes(path)
+        .into_iter()
+        .find(|candidate| candidate.starts_with(route_prefix))
+}
+
+fn matches_prefixed_route(path: &str, route: &str) -> bool {
+    dashboard_path_suffixes(path)
+        .into_iter()
+        .any(|candidate| candidate == route)
+}
+
+fn sanitize_relative_path(path: &str) -> Option<PathBuf> {
+    let mut sanitized = PathBuf::new();
+    for component in Path::new(path).components() {
+        match component {
+            std::path::Component::Normal(segment) => sanitized.push(segment),
+            std::path::Component::CurDir => continue,
+            _ => return None,
+        }
+    }
+    Some(sanitized)
+}
+
+const DASHBOARD_INDEX_HTML_SUFFIX: &str = "/index.html";
+const DASHBOARD_BASE_PATH_TOKEN: &str =
+    include_str!("../../../packages/dashboard/base-path-token.txt");
+
+fn dashboard_base_path_token() -> &'static str {
+    DASHBOARD_BASE_PATH_TOKEN.trim()
+}
+
+fn normalize_dashboard_mount_prefix(path: &str) -> String {
+    if path.is_empty() || path == "/" {
+        return String::new();
+    }
+
+    let mut normalized = if path.starts_with('/') {
+        path.to_string()
+    } else {
+        format!("/{path}")
+    };
+
+    if normalized.ends_with(DASHBOARD_INDEX_HTML_SUFFIX) {
+        normalized.truncate(normalized.len() - DASHBOARD_INDEX_HTML_SUFFIX.len());
+        if normalized.is_empty() {
+            normalized.push('/');
+        }
+    }
+
+    let last_slash = normalized.rfind('/').unwrap_or(0);
+    let last_segment = &normalized[last_slash + 1..];
+    if !normalized.ends_with('/') && last_segment.contains('.') {
+        if last_slash == 0 {
+            normalized = "/".to_string();
+        } else {
+            normalized.truncate(last_slash);
+        }
+    }
+
+    while normalized.ends_with('/') && normalized.len() > 1 {
+        normalized.pop();
+    }
+
+    if normalized == "/" {
+        String::new()
+    } else {
+        normalized
+    }
+}
+
+fn relative_dashboard_path(file_path: &Path, dashboard_dir: &Path) -> Option<String> {
+    let relative = file_path.strip_prefix(dashboard_dir).ok()?;
+    let mut parts = Vec::new();
+    for component in relative.components() {
+        match component {
+            std::path::Component::Normal(segment) => parts.push(segment.to_str()?),
+            std::path::Component::CurDir => continue,
+            _ => return None,
+        }
+    }
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("/"))
+    }
+}
+
+fn infer_dashboard_mount_prefix(url_path: &str, file_path: &Path, dashboard_dir: &Path) -> String {
+    let clean = strip_query_and_fragment(url_path);
+
+    if let Some(relative_path) = relative_dashboard_path(file_path, dashboard_dir) {
+        if relative_path != "index.html" {
+            let suffix = format!("/{relative_path}");
+            if let Some(prefix) = clean.strip_suffix(&suffix) {
+                return normalize_dashboard_mount_prefix(prefix);
+            }
+        }
+    }
+
+    normalize_dashboard_mount_prefix(clean)
+}
+
+fn rewrite_dashboard_text_asset(content: &str, mount_prefix: &str) -> String {
+    content.replace(
+        dashboard_base_path_token(),
+        &normalize_dashboard_mount_prefix(mount_prefix),
+    )
+}
+
+fn should_rewrite_dashboard_text_asset(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|ext| ext.to_str()).unwrap_or(""),
+        "html" | "js" | "css" | "json" | "txt" | "map"
+    )
+}
+
+fn content_type_for_path(path: &Path) -> &'static str {
+    match path.extension().and_then(|ext| ext.to_str()).unwrap_or("") {
+        "html" => "text/html; charset=utf-8",
+        "js" => "application/javascript; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "json" | "map" => "application/json; charset=utf-8",
+        "txt" => "text/plain; charset=utf-8",
+        "svg" => "image/svg+xml",
+        "png" => "image/png",
+        "ico" => "image/x-icon",
+        "woff2" => "font/woff2",
+        _ => "application/octet-stream",
+    }
+}
+
+const PROXY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const PROXY_MAX_RESPONSE_SIZE: u64 = 16 * 1024 * 1024;
+
+fn request_header_value<'a>(request: &'a str, name: &str) -> Option<&'a str> {
+    request.lines().find_map(|line| {
+        let (header_name, value) = line.split_once(':')?;
+        if header_name.trim().eq_ignore_ascii_case(name) {
+            Some(value.trim())
+        } else {
+            None
+        }
+    })
+}
+
+fn normalize_origin_authority(origin: &str) -> Option<String> {
+    let url = url::Url::parse(origin).ok()?;
+    let host = url.host_str()?.to_ascii_lowercase();
+    let host = if host.contains(':') {
+        format!("[{host}]")
+    } else {
+        host
+    };
+    Some(match url.port() {
+        Some(port) => format!("{host}:{port}"),
+        None => host,
+    })
+}
+
+/// Validates that a proxied WebSocket request either has no Origin header or
+/// presents an Origin whose authority matches the request Host header.
+fn is_same_origin_ws_request(request: &str) -> bool {
+    let origin_authority = request_header_value(request, "origin").map(normalize_origin_authority);
+    let host = request_header_value(request, "host").map(|value| value.trim().to_ascii_lowercase());
+
+    match (origin_authority, host) {
+        (None, _) => true,
+        (Some(None), _) => false,
+        (Some(Some(_)), None) => false,
+        (Some(Some(origin)), Some(host)) => origin == host,
+    }
+}
+
+/// Parse a dashboard route of the form `/api/session/<port>/<endpoint>`.
+fn parse_session_proxy_route(path: &str) -> Result<(u16, SessionProxyEndpoint), &'static str> {
+    debug_assert!(path.starts_with("/api/session/"));
+
+    let mut parts = path.split('/');
+    let _leading = parts.next();
+    debug_assert_eq!(
+        _leading,
+        Some(""),
+        "path should start with / producing a leading empty split"
+    );
+    if parts.next() != Some("api") || parts.next() != Some("session") {
+        return Err("Invalid session proxy route.");
+    }
+
+    let port_str = parts.next().ok_or("Missing session proxy port.")?;
+    if port_str.is_empty() {
+        return Err("Missing session proxy port.");
+    }
+
+    let endpoint = match parts.next().ok_or("Missing session proxy endpoint.")? {
+        "tabs" => SessionProxyEndpoint::Tabs,
+        "status" => SessionProxyEndpoint::Status,
+        "stream" => SessionProxyEndpoint::Stream,
+        _ => return Err("Unknown session proxy endpoint."),
+    };
+
+    if parts.next().is_some() {
+        return Err("Unexpected path segments in session proxy route.");
+    }
+
+    let port = port_str
+        .parse::<u16>()
+        .map_err(|_| "Session proxy port must be a valid TCP port.")?;
+    if port == 0 {
+        return Err("Session proxy port must be a valid TCP port.");
+    }
+
+    Ok((port, endpoint))
+}
+
+fn sessions_json_has_active_port(sessions_json: &str, port: u16) -> Result<bool, String> {
+    let sessions: Vec<Value> = serde_json::from_str(sessions_json)
+        .map_err(|e| format!("Failed to parse active sessions: {e}"))?;
+    Ok(sessions.iter().any(|session| {
+        session
+            .get("port")
+            .and_then(|value| value.as_u64())
+            .map(|value| value == u64::from(port))
+            .unwrap_or(false)
+    }))
+}
+
+fn require_active_session_port(port: u16) -> Result<(), DashboardProxyError> {
+    let sessions_json = discover_sessions();
+    let is_active = sessions_json_has_active_port(&sessions_json, port)
+        .map_err(DashboardProxyError::bad_gateway)?;
+    if is_active {
+        Ok(())
+    } else {
+        Err(DashboardProxyError::not_found(format!(
+            "No active session is listening on port {port}."
+        )))
+    }
+}
+
+fn split_http_response(response: &[u8]) -> Result<(&[u8], &[u8]), String> {
+    if let Some(header_end) = response.windows(4).position(|window| window == b"\r\n\r\n") {
+        let body_start = header_end + 4;
+        return Ok((&response[..header_end], &response[body_start..]));
+    }
+
+    if let Some(header_end) = response.windows(2).position(|window| window == b"\n\n") {
+        let body_start = header_end + 2;
+        return Ok((&response[..header_end], &response[body_start..]));
+    }
+
+    Err("Upstream response was missing an HTTP header terminator.".to_string())
+}
+
+fn parse_upstream_http_response(response: &[u8]) -> Result<(String, String, Vec<u8>), String> {
+    let (header_bytes, body) = split_http_response(response)?;
+    let header_str = std::str::from_utf8(header_bytes)
+        .map_err(|e| format!("Upstream response headers were not valid UTF-8: {e}"))?;
+
+    let mut lines = header_str.lines();
+    let status_line = lines
+        .next()
+        .ok_or_else(|| "Upstream response was missing a status line.".to_string())?;
+    let status = status_line
+        .split_once(' ')
+        .map(|(_, status)| status.trim().to_string())
+        .filter(|status| !status.is_empty())
+        .ok_or_else(|| "Upstream response status line was malformed.".to_string())?;
+    let content_type = lines
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            if name.trim().eq_ignore_ascii_case("content-type") {
+                Some(value.trim().to_string())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| "application/json; charset=utf-8".to_string());
+
+    Ok((status, content_type, body.to_vec()))
+}
+
+/// Proxy dashboard-origin HTTP requests for session tabs or status to the loopback session server.
+async fn proxy_session_http_route(
+    port: u16,
+    endpoint: SessionProxyEndpoint,
+) -> Result<(String, String, Vec<u8>), DashboardProxyError> {
+    debug_assert!(matches!(
+        endpoint,
+        SessionProxyEndpoint::Tabs | SessionProxyEndpoint::Status
+    ));
+
+    require_active_session_port(port)?;
+
+    let upstream_path = match endpoint {
+        SessionProxyEndpoint::Tabs => "/api/tabs",
+        SessionProxyEndpoint::Status => "/api/status",
+        SessionProxyEndpoint::Stream => unreachable!("stream routes use the WebSocket proxy"),
+    };
+    let request = format!(
+        "GET {upstream_path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+    );
+
+    tokio::time::timeout(PROXY_TIMEOUT, async {
+        let mut upstream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .map_err(|e| {
+                DashboardProxyError::bad_gateway(format!(
+                    "Failed to connect to session {port}: {e}"
+                ))
+            })?;
+        upstream.write_all(request.as_bytes()).await.map_err(|e| {
+            DashboardProxyError::bad_gateway(format!(
+                "Failed to proxy request to session {port}: {e}"
+            ))
+        })?;
+
+        let mut response = Vec::new();
+        (&mut upstream)
+            .take(PROXY_MAX_RESPONSE_SIZE + 1)
+            .read_to_end(&mut response)
+            .await
+            .map_err(|e| {
+                DashboardProxyError::bad_gateway(format!(
+                    "Failed to read session {port} response: {e}"
+                ))
+            })?;
+        if response.len() as u64 > PROXY_MAX_RESPONSE_SIZE {
+            return Err(DashboardProxyError::bad_gateway(format!(
+                "Session {port} response exceeded {PROXY_MAX_RESPONSE_SIZE} bytes."
+            )));
+        }
+
+        parse_upstream_http_response(&response).map_err(DashboardProxyError::bad_gateway)
+    })
+    .await
+    .map_err(|_| {
+        DashboardProxyError::bad_gateway(format!(
+            "Session {port} proxy request timed out after {}s.",
+            PROXY_TIMEOUT.as_secs()
+        ))
+    })?
+}
+
+/// Bridge a dashboard-origin WebSocket upgrade to the loopback session stream.
+async fn proxy_session_stream(mut stream: tokio::net::TcpStream, port: u16) {
+    let upstream_url = format!("ws://127.0.0.1:{port}");
+    let (upstream_ws, _) = match tokio_tungstenite::connect_async(&upstream_url).await {
+        Ok(ws) => ws,
+        Err(error) => {
+            write_json_error_response_no_cors(
+                &mut stream,
+                "502 Bad Gateway",
+                &format!("Failed to connect to session {port}: {error}"),
+            )
+            .await;
+            return;
+        }
+    };
+    let client_ws = match tokio_tungstenite::accept_async(stream).await {
+        Ok(ws) => ws,
+        Err(_) => return,
+    };
+
+    let (mut client_tx, mut client_rx) = client_ws.split();
+    let (mut upstream_tx, mut upstream_rx) = upstream_ws.split();
+
+    loop {
+        tokio::select! {
+            message = client_rx.next() => {
+                match message {
+                    Some(Ok(message)) => {
+                        let is_close = matches!(message, Message::Close(_));
+                        if upstream_tx.send(message).await.is_err() {
+                            break;
+                        }
+                        if is_close {
+                            break;
+                        }
+                    }
+                    Some(Err(_)) | None => {
+                        let _ = upstream_tx.send(Message::Close(None)).await;
+                        break;
+                    }
+                }
+            }
+            message = upstream_rx.next() => {
+                match message {
+                    Some(Ok(message)) => {
+                        let is_close = matches!(message, Message::Close(_));
+                        if client_tx.send(message).await.is_err() {
+                            break;
+                        }
+                        if is_close {
+                            break;
+                        }
+                    }
+                    Some(Err(_)) | None => {
+                        let _ = client_tx.send(Message::Close(None)).await;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Serve an HTTP request for dashboard static files or the fallback page.
 async fn handle_http_request(
     mut stream: tokio::net::TcpStream,
@@ -1088,7 +1622,8 @@ async fn handle_http_request(
 
     let first_line = request.lines().next().unwrap_or("");
     let method = first_line.split_whitespace().next().unwrap_or("GET");
-    let path = first_line.split_whitespace().nth(1).unwrap_or("/");
+    let raw_path = first_line.split_whitespace().nth(1).unwrap_or("/");
+    let path = strip_query_and_fragment(raw_path);
 
     // Handle CORS preflight
     if method == "OPTIONS" {
@@ -1100,7 +1635,7 @@ async fn handle_http_request(
     }
 
     // Handle POST /api/sessions (spawn new session)
-    if method == "POST" && path == "/api/sessions" {
+    if method == "POST" && matches_prefixed_route(path, "/api/sessions") {
         let body_str = extract_http_body(request).unwrap_or("");
         let result = spawn_session(body_str).await;
         let (status, resp_body) = match result {
@@ -1123,7 +1658,7 @@ async fn handle_http_request(
     }
 
     // Handle POST /api/command
-    if method == "POST" && path == "/api/command" {
+    if method == "POST" && matches_prefixed_route(path, "/api/command") {
         let body = extract_http_body(request).unwrap_or("");
         let result = relay_command_to_daemon(session_name, body).await;
         let (status, resp_body) = match result {
@@ -1145,13 +1680,16 @@ async fn handle_http_request(
         return;
     }
 
-    let (status, content_type, body): (&str, &str, Vec<u8>) = if path == "/api/sessions" {
+    let (status, content_type, body): (&str, &str, Vec<u8>) = if matches_prefixed_route(
+        path,
+        "/api/sessions",
+    ) {
         (
             "200 OK",
             "application/json; charset=utf-8",
             discover_sessions().into_bytes(),
         )
-    } else if path == "/api/tabs" {
+    } else if matches_prefixed_route(path, "/api/tabs") {
         let tabs = last_tabs.read().await;
         (
             "200 OK",
@@ -1160,7 +1698,7 @@ async fn handle_http_request(
                 .unwrap_or_else(|_| "[]".to_string())
                 .into_bytes(),
         )
-    } else if path == "/api/status" {
+    } else if matches_prefixed_route(path, "/api/status") {
         let engine = last_engine.read().await;
         (
             "200 OK",
@@ -1249,32 +1787,32 @@ async fn relay_command_to_daemon(session_name: &str, body: &str) -> Result<Strin
 }
 
 fn serve_static_file(dir: &Path, url_path: &str) -> (&'static str, &'static str, Vec<u8>) {
-    let clean = url_path.trim_start_matches('/');
-    let file_path = if clean.is_empty() {
-        dir.join("index.html")
-    } else {
-        let joined = dir.join(clean);
-        if joined.is_file() {
-            joined
-        } else {
-            dir.join("index.html")
-        }
-    };
+    let file_path = dashboard_path_suffixes(url_path)
+        .into_iter()
+        .filter_map(|candidate| {
+            let relative = candidate.trim_start_matches('/');
+            if relative.is_empty() {
+                return None;
+            }
+            let sanitized = sanitize_relative_path(relative)?;
+            let joined = dir.join(sanitized);
+            joined.is_file().then_some(joined)
+        })
+        .next()
+        .unwrap_or_else(|| dir.join("index.html"));
+    let mount_prefix = infer_dashboard_mount_prefix(url_path, &file_path, dir);
 
     match std::fs::read(&file_path) {
         Ok(content) => {
-            let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
-            let ct = match ext {
-                "html" => "text/html; charset=utf-8",
-                "js" => "application/javascript; charset=utf-8",
-                "css" => "text/css; charset=utf-8",
-                "json" => "application/json; charset=utf-8",
-                "svg" => "image/svg+xml",
-                "png" => "image/png",
-                "ico" => "image/x-icon",
-                _ => "application/octet-stream",
+            let body = if should_rewrite_dashboard_text_asset(&file_path) {
+                match std::str::from_utf8(&content) {
+                    Ok(text) => rewrite_dashboard_text_asset(text, &mount_prefix).into_bytes(),
+                    Err(_) => content,
+                }
+            } else {
+                content
             };
-            ("200 OK", ct, content)
+            ("200 OK", content_type_for_path(&file_path), body)
         }
         Err(_) => (
             "404 Not Found",
@@ -1520,19 +2058,81 @@ async fn handle_dashboard_connection(
     use tokio::io::AsyncReadExt;
 
     let mut buf = vec![0u8; 8192];
+    let peeked_len = match stream.peek(&mut buf).await {
+        Ok(n) if n > 0 => n,
+        _ => return,
+    };
+    let peeked_request = String::from_utf8_lossy(&buf[..peeked_len]);
+    let (peeked_method, peeked_path) = parse_request_method_and_path(&peeked_request);
+
+    if let Some(session_path) = extract_prefixed_route(peeked_path, "/api/session/") {
+        let (port, endpoint) = match parse_session_proxy_route(session_path) {
+            Ok(route) => route,
+            Err(error) => {
+                write_json_error_response_no_cors(&mut stream, "400 Bad Request", error).await;
+                return;
+            }
+        };
+
+        match endpoint {
+            SessionProxyEndpoint::Stream => {
+                if peeked_method != "GET" {
+                    write_json_error_response_no_cors(
+                        &mut stream,
+                        "400 Bad Request",
+                        "Session stream proxy only supports GET WebSocket upgrades.",
+                    )
+                    .await;
+                    return;
+                }
+                if !is_websocket_upgrade(&peeked_request) {
+                    write_json_error_response_no_cors(
+                        &mut stream,
+                        "400 Bad Request",
+                        "Session stream proxy requires a WebSocket upgrade request.",
+                    )
+                    .await;
+                    return;
+                }
+                if !is_same_origin_ws_request(&peeked_request) {
+                    write_json_error_response_no_cors(
+                        &mut stream,
+                        "403 Forbidden",
+                        "Origin does not match Host header.",
+                    )
+                    .await;
+                    return;
+                }
+                if let Err(error) = require_active_session_port(port) {
+                    write_json_error_response_no_cors(&mut stream, error.status, &error.message)
+                        .await;
+                    return;
+                }
+                proxy_session_stream(stream, port).await;
+                return;
+            }
+            SessionProxyEndpoint::Tabs | SessionProxyEndpoint::Status => {
+                if peeked_method != "GET" {
+                    write_json_error_response_no_cors(
+                        &mut stream,
+                        "400 Bad Request",
+                        "Session proxy routes only support GET requests.",
+                    )
+                    .await;
+                    return;
+                }
+            }
+        }
+    }
+
     let n = match stream.read(&mut buf).await {
         Ok(n) if n > 0 => n,
         _ => return,
     };
 
-    let first_line = std::str::from_utf8(&buf[..n])
-        .unwrap_or("")
-        .lines()
-        .next()
-        .unwrap_or("")
-        .to_string();
-    let method = first_line.split_whitespace().next().unwrap_or("GET");
-    let path = first_line.split_whitespace().nth(1).unwrap_or("/");
+    let request = String::from_utf8_lossy(&buf[..n]).to_string();
+    let (method, raw_path) = parse_request_method_and_path(&request);
+    let path = strip_query_and_fragment(raw_path);
 
     if method == "OPTIONS" {
         let response = format!(
@@ -1542,35 +2142,76 @@ async fn handle_dashboard_connection(
         return;
     }
 
-    if method == "POST" && (path == "/api/sessions" || path == "/api/exec" || path == "/api/kill") {
+    if method == "POST"
+        && (matches_prefixed_route(path, "/api/sessions")
+            || matches_prefixed_route(path, "/api/exec")
+            || matches_prefixed_route(path, "/api/kill"))
+    {
         let body_str = read_post_body(&mut stream, &buf, n).await;
-        let result = if path == "/api/exec" {
+        let result = if matches_prefixed_route(path, "/api/exec") {
             exec_cli(&body_str).await
-        } else if path == "/api/kill" {
+        } else if matches_prefixed_route(path, "/api/kill") {
             kill_session(&body_str).await
         } else {
             spawn_session(&body_str).await
         };
         let (status, resp_body) = match result {
             Ok(msg) => ("200 OK", msg),
-            Err(e) => (
-                "400 Bad Request",
-                format!(
-                    r#"{{"success":false,"error":{}}}"#,
-                    serde_json::to_string(&e).unwrap_or_else(|_| format!("\"{}\"", e))
-                ),
-            ),
+            Err(e) => ("400 Bad Request", build_json_error_body(&e)),
         };
-        let response = format!(
-            "HTTP/1.1 {status}\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n{CORS_HEADERS}\r\n",
-            resp_body.len()
-        );
-        let _ = stream.write_all(response.as_bytes()).await;
-        let _ = stream.write_all(resp_body.as_bytes()).await;
+        write_http_response(
+            &mut stream,
+            status,
+            "application/json; charset=utf-8",
+            resp_body.as_bytes(),
+        )
+        .await;
         return;
     }
 
-    let (status, content_type, body): (&str, &str, Vec<u8>) = if path == "/api/sessions" {
+    if let Some(session_path) = extract_prefixed_route(path, "/api/session/") {
+        let (port, endpoint) = match parse_session_proxy_route(session_path) {
+            Ok(route) => route,
+            Err(error) => {
+                write_json_error_response_no_cors(&mut stream, "400 Bad Request", error).await;
+                return;
+            }
+        };
+
+        match endpoint {
+            SessionProxyEndpoint::Tabs | SessionProxyEndpoint::Status => {
+                match proxy_session_http_route(port, endpoint).await {
+                    Ok((status, content_type, body)) => {
+                        write_http_response_no_cors(&mut stream, &status, &content_type, &body)
+                            .await;
+                    }
+                    Err(error) => {
+                        write_json_error_response_no_cors(
+                            &mut stream,
+                            error.status,
+                            &error.message,
+                        )
+                        .await;
+                    }
+                }
+                return;
+            }
+            SessionProxyEndpoint::Stream => {
+                write_json_error_response_no_cors(
+                    &mut stream,
+                    "400 Bad Request",
+                    "Session stream proxy requires a WebSocket upgrade request.",
+                )
+                .await;
+                return;
+            }
+        }
+    }
+
+    let (status, content_type, body): (&str, &str, Vec<u8>) = if matches_prefixed_route(
+        path,
+        "/api/sessions",
+    ) {
         (
             "200 OK",
             "application/json; charset=utf-8",
@@ -1586,14 +2227,7 @@ async fn handle_dashboard_connection(
         )
     };
 
-    let response = format!(
-        "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n{CORS_HEADERS}\r\n",
-        status,
-        content_type,
-        body.len()
-    );
-    let _ = stream.write_all(response.as_bytes()).await;
-    let _ = stream.write_all(&body).await;
+    write_http_response(&mut stream, status, content_type, &body).await;
 }
 
 /// Read the full POST body from a request. First checks if the body is already
@@ -1773,6 +2407,299 @@ mod tests {
     #[test]
     fn test_disallowed_origin() {
         assert!(!is_allowed_origin(Some("http://evil.com")));
+    }
+
+    #[test]
+    fn test_same_origin_ws_request_matching() {
+        let req = "GET /api/session/9222/stream HTTP/1.1\r\nHost: localhost:4848\r\nOrigin: http://localhost:4848\r\nUpgrade: websocket\r\n\r\n";
+        assert!(is_same_origin_ws_request(req));
+    }
+
+    #[test]
+    fn test_same_origin_ws_request_proxied() {
+        let req = "GET /api/session/9222/stream HTTP/1.1\r\nHost: dashboard.agent-browser.localhost\r\nOrigin: https://dashboard.agent-browser.localhost\r\nUpgrade: websocket\r\n\r\n";
+        assert!(is_same_origin_ws_request(req));
+    }
+
+    #[test]
+    fn test_normalize_origin_authority_https_without_port() {
+        assert_eq!(
+            normalize_origin_authority("https://dashboard.agent-browser.localhost"),
+            Some("dashboard.agent-browser.localhost".to_string())
+        );
+    }
+
+    #[test]
+    fn test_same_origin_ws_request_coder() {
+        let req = "GET /api/session/9222/stream HTTP/1.1\r\nHost: workspace.coder.com\r\nOrigin: https://workspace.coder.com\r\nUpgrade: websocket\r\n\r\n";
+        assert!(is_same_origin_ws_request(req));
+    }
+
+    #[test]
+    fn test_dashboard_path_suffixes_strip_base_path_and_query() {
+        assert_eq!(
+            dashboard_path_suffixes("/agent-browser/api/sessions?port=9222"),
+            vec!["/agent-browser/api/sessions", "/api/sessions", "/sessions"]
+        );
+        assert_eq!(
+            dashboard_path_suffixes("/nested/agent-browser/_next/static/app.js"),
+            vec![
+                "/nested/agent-browser/_next/static/app.js",
+                "/agent-browser/_next/static/app.js",
+                "/_next/static/app.js",
+                "/static/app.js",
+                "/app.js"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_matches_prefixed_route() {
+        assert!(matches_prefixed_route(
+            "/agent-browser/api/sessions",
+            "/api/sessions"
+        ));
+        assert!(matches_prefixed_route("/api/sessions", "/api/sessions"));
+        assert!(!matches_prefixed_route(
+            "/agent-browser/api/sessions/extra",
+            "/api/sessions"
+        ));
+    }
+
+    #[test]
+    fn test_extract_prefixed_route() {
+        assert_eq!(
+            extract_prefixed_route("/agent-browser/api/session/9222/tabs", "/api/session/"),
+            Some("/api/session/9222/tabs")
+        );
+        assert_eq!(
+            extract_prefixed_route("/api/session/9222/stream?port=9222", "/api/session/"),
+            Some("/api/session/9222/stream")
+        );
+    }
+
+    #[test]
+    fn test_cross_origin_ws_request_rejected() {
+        let req = "GET /api/session/9222/stream HTTP/1.1\r\nHost: localhost:4848\r\nOrigin: https://evil.com\r\nUpgrade: websocket\r\n\r\n";
+        assert!(!is_same_origin_ws_request(req));
+    }
+
+    #[test]
+    fn test_no_origin_header_allowed() {
+        let req = "GET /api/session/9222/stream HTTP/1.1\r\nHost: localhost:4848\r\nUpgrade: websocket\r\n\r\n";
+        assert!(is_same_origin_ws_request(req));
+    }
+
+    #[test]
+    fn test_parse_session_proxy_route_valid() {
+        assert_eq!(
+            parse_session_proxy_route("/api/session/9222/tabs"),
+            Ok((9222, SessionProxyEndpoint::Tabs))
+        );
+        assert_eq!(
+            parse_session_proxy_route("/api/session/1337/status"),
+            Ok((1337, SessionProxyEndpoint::Status))
+        );
+        assert_eq!(
+            parse_session_proxy_route("/api/session/65535/stream"),
+            Ok((65535, SessionProxyEndpoint::Stream))
+        );
+    }
+
+    #[test]
+    fn test_parse_session_proxy_route_invalid() {
+        assert!(parse_session_proxy_route("/api/session/0/tabs").is_err());
+        assert!(parse_session_proxy_route("/api/session/not-a-port/tabs").is_err());
+        assert!(parse_session_proxy_route("/api/session/70000/tabs").is_err());
+        assert!(parse_session_proxy_route("/api/session/9222").is_err());
+        assert!(parse_session_proxy_route("/api/session/9222/unknown").is_err());
+        assert!(parse_session_proxy_route("/api/session/9222/tabs/extra").is_err());
+    }
+
+    #[test]
+    fn test_parse_session_proxy_route_path_traversal() {
+        // Path traversal attempts must be rejected
+        assert!(parse_session_proxy_route("/api/session/9222/tabs/..").is_err());
+        assert!(parse_session_proxy_route("/api/session/9222/tabs/../status").is_err());
+        assert!(parse_session_proxy_route("/api/session/9222/../../etc/passwd").is_err());
+        assert!(parse_session_proxy_route("/api/session/../session/9222/tabs").is_err());
+    }
+
+    #[test]
+    fn test_parse_session_proxy_route_double_slashes() {
+        // Double slashes in the routed suffix produce empty segments that fail parsing.
+        assert!(parse_session_proxy_route("/api/session//9222/tabs").is_err());
+
+        // Paths that do not satisfy the `/api/session/` prefix contract are rejected by
+        // the caller gate before reaching the parser. In debug builds, calling the parser
+        // directly with those paths trips the parser precondition.
+        #[cfg(debug_assertions)]
+        {
+            assert!(std::panic::catch_unwind(|| {
+                parse_session_proxy_route("/api//session/9222/tabs")
+            })
+            .is_err());
+            assert!(std::panic::catch_unwind(|| {
+                parse_session_proxy_route("//api/session/9222/tabs")
+            })
+            .is_err());
+        }
+
+        #[cfg(not(debug_assertions))]
+        {
+            assert!(parse_session_proxy_route("/api//session/9222/tabs").is_err());
+            assert!(parse_session_proxy_route("//api/session/9222/tabs").is_err());
+        }
+    }
+
+    #[test]
+    fn test_parse_session_proxy_route_trailing_slash() {
+        // Trailing slash creates an extra empty segment
+        assert!(parse_session_proxy_route("/api/session/9222/tabs/").is_err());
+        assert!(parse_session_proxy_route("/api/session/9222/status/").is_err());
+        assert!(parse_session_proxy_route("/api/session/9222/stream/").is_err());
+    }
+
+    #[test]
+    fn test_parse_session_proxy_route_encoded_paths() {
+        // URL-encoded paths are not decoded, so they fail endpoint matching
+        assert!(parse_session_proxy_route("/api/session/9222/tabs%20extra").is_err());
+        assert!(parse_session_proxy_route("/api/session/%39%32%32%32/tabs").is_err());
+    }
+
+    #[test]
+    fn test_serve_static_file_accepts_prefixed_base_path() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "agent-browser-dashboard-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(temp_dir.join("_next/static")).unwrap();
+        std::fs::write(temp_dir.join("index.html"), "<html>dashboard</html>").unwrap();
+        std::fs::write(temp_dir.join("_next/static/app.js"), "console.log('ok');").unwrap();
+
+        let (status, content_type, body) =
+            serve_static_file(&temp_dir, "/agent-browser/_next/static/app.js");
+        assert_eq!(status, "200 OK");
+        assert_eq!(content_type, "application/javascript; charset=utf-8");
+        assert_eq!(body, b"console.log('ok');".to_vec());
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_serve_static_file_rewrites_dashboard_placeholder() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "agent-browser-dashboard-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        std::fs::write(
+            temp_dir.join("index.html"),
+            format!(
+                r#"<script src="{}/_next/static/app.js"></script>"#,
+                dashboard_base_path_token()
+            ),
+        )
+        .unwrap();
+
+        let (_, _, root_body) = serve_static_file(&temp_dir, "/");
+        let root_html = String::from_utf8(root_body).unwrap();
+        assert!(root_html.contains(r#"src="/_next/static/app.js""#));
+
+        let (_, _, prefixed_body) = serve_static_file(&temp_dir, "/agent-browser/");
+        let prefixed_html = String::from_utf8(prefixed_body).unwrap();
+        assert!(prefixed_html.contains(r#"src="/agent-browser/_next/static/app.js""#));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_infer_dashboard_mount_prefix() {
+        let dashboard_dir = PathBuf::from("dashboard");
+
+        assert_eq!(
+            infer_dashboard_mount_prefix("/", &dashboard_dir.join("index.html"), &dashboard_dir),
+            ""
+        );
+        assert_eq!(
+            infer_dashboard_mount_prefix(
+                "/agent-browser/",
+                &dashboard_dir.join("index.html"),
+                &dashboard_dir,
+            ),
+            "/agent-browser"
+        );
+        assert_eq!(
+            infer_dashboard_mount_prefix(
+                "/nested/tools/agent-browser/_next/static/app.js",
+                &dashboard_dir.join("_next/static/app.js"),
+                &dashboard_dir,
+            ),
+            "/nested/tools/agent-browser"
+        );
+        assert_eq!(
+            infer_dashboard_mount_prefix(
+                "/nested/tools/agent-browser/providers/chrome.svg",
+                &dashboard_dir.join("providers/chrome.svg"),
+                &dashboard_dir,
+            ),
+            "/nested/tools/agent-browser"
+        );
+    }
+
+    #[test]
+    fn test_rewrite_dashboard_text_asset_for_mount_prefix() {
+        let token = dashboard_base_path_token();
+        let html = format!(
+            r#"<script src="{token}/_next/static/app.js"></script><script>window.__PATH__="{token}/_next/static/app.js"</script>"#
+        );
+
+        let root = rewrite_dashboard_text_asset(&html, "");
+        assert!(!root.contains(token));
+        assert!(root.contains(r#"src="/_next/static/app.js""#));
+        assert!(root.contains(r#""/_next/static/app.js""#));
+
+        let prefixed = rewrite_dashboard_text_asset(&html, "/agent-browser");
+        assert!(!prefixed.contains(token));
+        assert!(prefixed.contains(r#"src="/agent-browser/_next/static/app.js""#));
+        assert!(prefixed.contains(r#""/agent-browser/_next/static/app.js""#));
+    }
+
+    #[test]
+    fn test_sessions_json_has_active_port() {
+        let sessions_json = r#"[
+            {"session":"alpha","port":9222,"engine":"chrome"},
+            {"session":"beta","port":9333,"engine":"chrome"}
+        ]"#;
+
+        assert_eq!(sessions_json_has_active_port(sessions_json, 9222), Ok(true));
+        assert_eq!(
+            sessions_json_has_active_port(sessions_json, 9444),
+            Ok(false)
+        );
+    }
+
+    #[test]
+    fn test_sessions_json_has_active_port_invalid_json() {
+        assert!(sessions_json_has_active_port("{", 9222).is_err());
+    }
+
+    #[test]
+    fn test_parse_upstream_http_response() {
+        let response = b"HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nConnection: close\r\n\r\n{\"ok\":true}";
+        let parsed = parse_upstream_http_response(response).expect("response should parse");
+
+        assert_eq!(parsed.0, "200 OK");
+        assert_eq!(parsed.1, "application/json; charset=utf-8");
+        assert_eq!(parsed.2, b"{\"ok\":true}".to_vec());
     }
 
     #[test]

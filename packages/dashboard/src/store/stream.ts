@@ -9,6 +9,7 @@ import type {
   StreamMessage,
   TabInfo,
 } from "@/types";
+import { getSessionStreamUrl } from "@/lib/dashboard-routes";
 import { activePortAtom } from "@/store/sessions";
 import { tabCacheAtom, engineCacheAtom } from "@/store/tabs";
 
@@ -117,9 +118,10 @@ export function useStreamSync(port: number) {
   }, [port, setConnected, setBrowserConnected, setScreencasting, setRecording, setVpWidth, setVpHeight, setFrame, setEvents, setConsoleLogs, setTabs, setEngine]);
 
   const connect = useCallback(() => {
+    if (port <= 0) return;
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
 
-    const ws = new WebSocket(`ws://localhost:${port}`);
+    const ws = new WebSocket(getSessionStreamUrl(port));
     wsRef.current = ws;
     setWsRef(ws);
 
@@ -220,11 +222,16 @@ export function useStreamSync(port: number) {
   }, [port, setWsRef, setConnected, setBrowserConnected, setScreencasting, setRecording, setVpWidth, setVpHeight, setFrame, setEvents, setConsoleLogs, setTabs, setEngine, setTabCache, setEngineCache]);
 
   useEffect(() => {
+    if (port <= 0) return;
+
     connect();
     return () => {
       if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
-      wsRef.current?.close();
+      if (wsRef.current) {
+        wsRef.current.onclose = null;
+        wsRef.current.close();
+      }
       setWsRef(null);
     };
-  }, [connect, setWsRef]);
+  }, [port, connect, setWsRef]);
 }
