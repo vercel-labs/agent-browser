@@ -1,6 +1,7 @@
 "use client";
 
-import { useCallback, useRef, useState, type SyntheticEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type SyntheticEvent } from "react";
+import { useAtom } from "jotai/react";
 import { useAtomValue, useSetAtom } from "jotai/react";
 import type { SessionInfo, TabInfo } from "@/types";
 import {
@@ -13,9 +14,11 @@ import {
   closeTabAtom,
   addTabAtom,
   switchTabAtom,
+  newSessionDialogAtom,
 } from "@/store/sessions";
 import { tabsForPortAtom, engineForPortAtom } from "@/store/tabs";
 import { ChevronRight, Loader2, Plus, Trash2 } from "lucide-react";
+import { ThemeToggle } from "@/components/theme-toggle";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -52,29 +55,55 @@ const ENGINE_LOGOS: Record<string, string> = {
   lightpanda: "/lightpanda.svg",
 };
 
+const PROVIDER_LOGOS: Record<string, string> = {
+  agentcore: "/providers/agentcore.svg",
+  browserbase: "/providers/browserbase.svg",
+  browserless: "/providers/browserless.svg",
+  "browser-use": "/providers/browser-use.svg",
+  kernel: "/providers/kernel.svg",
+};
+
 const SUPPORTED_ENGINES = ["chrome", "lightpanda"] as const;
 
-function EngineLogo({ engine }: { engine: string }) {
-  const src = ENGINE_LOGOS[engine];
+const BROWSER_OPTIONS: { id: string; label: string; engine?: string; provider?: string }[] = [
+  { id: "chrome", label: "Chrome", engine: "chrome" },
+  { id: "lightpanda", label: "Lightpanda", engine: "lightpanda" },
+  { id: "agentcore", label: "AgentCore", provider: "agentcore" },
+  { id: "browserbase", label: "Browserbase", provider: "browserbase" },
+  { id: "browserless", label: "Browserless", provider: "browserless" },
+  { id: "browser-use", label: "Browser Use", provider: "browser-use" },
+  { id: "kernel", label: "Kernel", provider: "kernel" },
+];
+
+function BrandLogo({ name, logos }: { name: string; logos: Record<string, string> }) {
+  const src = logos[name];
   if (!src) {
-    if (!engine) {
+    if (!name) {
       return <span className="size-4 shrink-0" />;
     }
     return (
       <span className="flex size-4 shrink-0 items-center justify-center rounded bg-muted text-[8px] font-bold text-muted-foreground uppercase">
-        {engine.charAt(0)}
+        {name.charAt(0)}
       </span>
     );
   }
   return (
     <img
       src={src}
-      alt={engine}
+      alt={name}
       width={16}
       height={16}
       className="size-4 shrink-0"
     />
   );
+}
+
+function EngineLogo({ engine }: { engine: string }) {
+  return <BrandLogo name={engine} logos={ENGINE_LOGOS} />;
+}
+
+function ProviderLogo({ provider }: { provider: string }) {
+  return <BrandLogo name={provider} logos={PROVIDER_LOGOS} />;
 }
 
 function getFaviconUrl(url: string): string | null {
@@ -90,7 +119,7 @@ function getFaviconUrl(url: string): string | null {
 function TabFavicon({ url }: { url: string }) {
   const src = getFaviconUrl(url);
   if (!src) {
-    return <span className="flex size-3.5 shrink-0 items-center justify-center rounded-sm bg-muted text-[8px] text-muted-foreground">&#9679;</span>;
+    return <span className="flex size-4 shrink-0 items-center justify-center rounded-sm bg-muted text-[8px] text-muted-foreground">&#9679;</span>;
   }
   const handleError = (e: SyntheticEvent<HTMLImageElement>) => {
     (e.target as HTMLImageElement).style.display = "none";
@@ -99,9 +128,9 @@ function TabFavicon({ url }: { url: string }) {
     <img
       src={src}
       alt=""
-      width={14}
-      height={14}
-      className="size-3.5 shrink-0 rounded-sm"
+      width={16}
+      height={16}
+      className="size-4 shrink-0 rounded-sm"
       onError={handleError}
     />
   );
@@ -123,7 +152,7 @@ function TabNode({ tab, isViewed, isSessionActive, onClose, onSwitch, onSelectSe
         <button
           onClick={isClickable ? handleClick : undefined}
           className={cn(
-            "flex w-full min-w-0 items-center gap-1.5 py-1 pr-1 pl-7 text-left text-xs",
+            "flex w-full min-w-0 items-center gap-2 py-1 pr-1 pl-7 text-left text-xs",
             isViewed
               ? "bg-card text-foreground"
               : "text-muted-foreground cursor-pointer hover:text-foreground",
@@ -152,6 +181,7 @@ function SessionNode({
   isActive,
   tabs,
   engine,
+  provider,
   expanded,
   onSelect,
   onToggle,
@@ -165,6 +195,7 @@ function SessionNode({
   isActive: boolean;
   tabs: TabInfo[];
   engine: string;
+  provider: string;
   expanded: boolean;
   onSelect: () => void;
   onToggle: () => void;
@@ -184,7 +215,9 @@ function SessionNode({
           <Loader2 className="size-3 animate-spin" />
         </span>
         <span className="flex flex-1 min-w-0 items-center gap-2 py-1.5 pr-3 pl-1">
-          <EngineLogo engine={session.engine ?? engine} />
+          {(session.provider ?? provider)
+            ? <ProviderLogo provider={session.provider ?? provider} />
+            : <EngineLogo engine={session.engine ?? engine} />}
           <span className="truncate font-mono font-semibold">
             {session.session}
           </span>
@@ -212,7 +245,9 @@ function SessionNode({
               <ChevronRight className={cn("size-3 transition-transform", expanded && "rotate-90")} />
             </span>
             <span className="flex flex-1 min-w-0 items-center gap-2 py-1.5 pr-3 pl-1 text-left">
-              <EngineLogo engine={engine} />
+              {provider
+                ? <ProviderLogo provider={provider} />
+                : <EngineLogo engine={engine} />}
               <span className="truncate font-mono font-semibold">
                 {session.session}
               </span>
@@ -289,9 +324,9 @@ function SessionNode({
           ))}
           <button
             onClick={onAddTab}
-            className="flex w-full items-center gap-1.5 py-1 pr-1 pl-7 text-xs text-muted-foreground hover:text-foreground"
+            className="flex w-full items-center gap-2 py-1 pr-1 pl-7 text-xs text-muted-foreground hover:text-foreground"
           >
-            <Plus className="size-3.5" />
+            <Plus className="size-4" />
             Add tab
           </button>
         </div>
@@ -315,10 +350,12 @@ export function SessionTree() {
   const dispatchSwitchTab = useSetAtom(switchTabAtom);
 
   const [expandedMap, setExpandedMap] = useState<Record<number, boolean>>({});
-  const [newSessionOpen, setNewSessionOpen] = useState(false);
+  const [newSessionOpen, setNewSessionOpen] = useAtom(newSessionDialogAtom);
   const [closeAllOpen, setCloseAllOpen] = useState(false);
   const [newSessionName, setNewSessionName] = useState("");
-  const [newSessionEngine, setNewSessionEngine] = useState("chrome");
+  const [newSessionBrowser, setNewSessionBrowser] = useState("chrome");
+  const [creating, setCreating] = useState(false);
+  const [createError, setCreateError] = useState("");
   const nameInputRef = useRef<HTMLInputElement>(null);
 
   const isExpanded = useCallback(
@@ -330,20 +367,41 @@ export function SessionTree() {
     setExpandedMap((prev) => ({ ...prev, [port]: !(prev[port] ?? true) }));
   }, []);
 
-  const handleCreateSubmit = useCallback(() => {
+  const handleCreateSubmit = useCallback(async () => {
     const name = newSessionName.trim();
-    if (name) {
-      dispatchCreateSession({ name, engine: newSessionEngine });
+    if (!name || creating) return;
+    setCreating(true);
+    setCreateError("");
+    const option = BROWSER_OPTIONS.find((o) => o.id === newSessionBrowser);
+    const error = await dispatchCreateSession({
+      name,
+      engine: option?.engine ?? "chrome",
+      provider: option?.provider,
+    });
+    setCreating(false);
+    if (error) {
+      setCreateError(error);
+    } else {
       setNewSessionName("");
       setNewSessionOpen(false);
     }
-  }, [newSessionName, newSessionEngine, dispatchCreateSession]);
+  }, [newSessionName, newSessionBrowser, creating, dispatchCreateSession]);
+
+  useEffect(() => {
+    if (newSessionOpen && !newSessionName) {
+      const existing = new Set(sessions.map((s) => s.session));
+      let n = sessions.length + 1;
+      while (existing.has(`session-${n}`)) n++;
+      setNewSessionName(`session-${n}`);
+    }
+  }, [newSessionOpen, newSessionName, sessions]);
 
   return (
     <div className="flex h-full flex-col">
       <div className="flex shrink-0 items-center px-3 py-2">
         <span className="text-xs text-muted-foreground">Sessions</span>
         <div className="ml-auto flex items-center gap-0.5">
+          <ThemeToggle />
           {sessions.some((s) => !s.pending) && (
             <button
               type="button"
@@ -356,7 +414,13 @@ export function SessionTree() {
           )}
           <button
             type="button"
-            onClick={() => setNewSessionOpen(true)}
+            onClick={() => {
+              const existing = new Set(sessions.map((s) => s.session));
+              let n = sessions.length + 1;
+              while (existing.has(`session-${n}`)) n++;
+              setNewSessionName(`session-${n}`);
+              setNewSessionOpen(true);
+            }}
             className="flex size-5 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
             title="New session"
           >
@@ -379,6 +443,7 @@ export function SessionTree() {
                 isActive={s.port === activePort}
                 tabs={getTabsForSession(s.port)}
                 engine={getEngineForSession(s.port)}
+                provider={s.provider ?? ""}
                 expanded={isExpanded(s.port)}
                 onSelect={() => setActivePort(s.port)}
                 onToggle={() => toggleExpanded(s.port)}
@@ -393,8 +458,11 @@ export function SessionTree() {
         </div>
       </ScrollArea>
 
-      <Dialog open={newSessionOpen} onOpenChange={setNewSessionOpen}>
-        <DialogContent className="sm:max-w-sm">
+      <Dialog open={newSessionOpen} onOpenChange={(open) => {
+        setNewSessionOpen(open);
+        if (open) setCreateError("");
+      }}>
+        <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle>New session</DialogTitle>
           </DialogHeader>
@@ -411,40 +479,52 @@ export function SessionTree() {
             }}
             placeholder="Session name"
             autoFocus
+            disabled={creating}
             className="w-full rounded-md border border-border bg-transparent px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring"
           />
-          <div className="flex gap-2">
-            {SUPPORTED_ENGINES.map((eng) => (
+          <div className="grid grid-cols-3 gap-2">
+            {BROWSER_OPTIONS.map((opt) => (
               <button
-                key={eng}
+                key={opt.id}
                 type="button"
-                onClick={() => setNewSessionEngine(eng)}
+                disabled={creating}
+                onClick={() => setNewSessionBrowser(opt.id)}
                 className={cn(
-                  "flex flex-1 items-center justify-center gap-2 rounded-md border px-3 py-2 text-sm transition-colors",
-                  newSessionEngine === eng
+                  "flex items-center justify-center gap-2 rounded-md border px-3 py-2 text-sm transition-colors",
+                  newSessionBrowser === opt.id
                     ? "border-ring bg-muted text-foreground"
                     : "border-border text-muted-foreground hover:text-foreground",
+                  creating && "opacity-50",
                 )}
               >
-                <EngineLogo engine={eng} />
-                {eng}
+                {opt.engine
+                  ? <EngineLogo engine={opt.engine} />
+                  : <ProviderLogo provider={opt.provider!} />}
+                {opt.label}
               </button>
             ))}
           </div>
+          {createError && (
+            <p className="rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">
+              {createError}
+            </p>
+          )}
           <DialogFooter>
             <Button
               variant="ghost"
               size="sm"
               onClick={() => setNewSessionOpen(false)}
+              disabled={creating}
             >
               Cancel
             </Button>
             <Button
               size="sm"
               onClick={handleCreateSubmit}
-              disabled={!newSessionName.trim()}
+              disabled={!newSessionName.trim() || creating}
             >
-              Create
+              {creating && <Loader2 className="size-3 animate-spin" />}
+              {creating ? "Creating..." : "Create"}
             </Button>
           </DialogFooter>
         </DialogContent>

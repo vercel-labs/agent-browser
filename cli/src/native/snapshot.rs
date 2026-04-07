@@ -80,6 +80,7 @@ pub struct SnapshotOptions {
     pub interactive: bool,
     pub compact: bool,
     pub depth: Option<usize>,
+    pub urls: bool,
 }
 
 struct TreeNode {
@@ -98,7 +99,8 @@ struct TreeNode {
     has_ref: bool,
     ref_id: Option<String>,
     depth: usize,
-    cursor_info: Option<CursorElementInfo>, // cursor-interactive information
+    cursor_info: Option<CursorElementInfo>,
+    url: Option<String>,
 }
 
 impl TreeNode {
@@ -121,10 +123,10 @@ impl TreeNode {
             ref_id: None,
             depth: 0,
             cursor_info: None,
+            url: None,
         }
     }
 
-    // Clear node content
     fn clear(&mut self) {
         self.role = String::new();
         self.name = String::new();
@@ -139,6 +141,7 @@ impl TreeNode {
         self.children.clear();
         self.parent_idx = None;
         self.has_ref = false;
+        self.url = None;
         self.ref_id = None;
         self.depth = 0;
         self.cursor_info = None;
@@ -382,6 +385,75 @@ pub async fn take_snapshot(
     }
 
     ref_map.set_next_ref_num(next_ref);
+
+    if options.urls {
+        let link_nodes: Vec<(usize, i64)> = tree_nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| n.role == "link" && n.has_ref && n.backend_node_id.is_some())
+            .filter_map(|(i, n)| n.backend_node_id.map(|bid| (i, bid)))
+            .collect();
+
+        if !link_nodes.is_empty() {
+            // CDP has no batch resolve API, so we parallelize individual calls.
+            // Phase 1: resolve all backend node IDs to JS object IDs in parallel.
+            let resolve_futs = link_nodes.iter().map(|&(idx, bid)| async move {
+                let resolved = client
+                    .send_command(
+                        "DOM.resolveNode",
+                        Some(serde_json::json!({ "backendNodeId": bid })),
+                        Some(session_id),
+                    )
+                    .await;
+                let obj_id = resolved.ok().and_then(|r| {
+                    r.get("object")
+                        .and_then(|o| o.get("objectId"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                });
+                (idx, obj_id)
+            });
+            let resolved: Vec<(usize, Option<String>)> =
+                futures_util::future::join_all(resolve_futs).await;
+
+            // Phase 2: fetch hrefs for all resolved objects in parallel.
+            let href_futs: Vec<_> = resolved
+                .iter()
+                .filter_map(|(idx, obj_id)| {
+                    let oid = obj_id.as_ref()?;
+                    Some(async move {
+                        let result = client
+                            .send_command(
+                                "Runtime.callFunctionOn",
+                                Some(serde_json::json!({
+                                    "objectId": oid,
+                                    "functionDeclaration": "function() { return this.href || ''; }",
+                                    "returnByValue": true,
+                                })),
+                                Some(session_id),
+                            )
+                            .await;
+                        let href = result.ok().and_then(|r| {
+                            r.get("result")
+                                .and_then(|r| r.get("value"))
+                                .and_then(|v| v.as_str())
+                                .filter(|s| !s.is_empty())
+                                .map(|s| s.to_string())
+                        });
+                        (*idx, href)
+                    })
+                })
+                .collect();
+            let hrefs: Vec<(usize, Option<String>)> =
+                futures_util::future::join_all(href_futs).await;
+
+            for (idx, href) in hrefs {
+                if let Some(url) = href {
+                    tree_nodes[idx].url = Some(url);
+                }
+            }
+        }
+    }
 
     let mut output = String::new();
     for &root_idx in &effective_roots {
@@ -797,6 +869,7 @@ fn build_tree(nodes: &[AXNode]) -> (Vec<TreeNode>, Vec<usize>) {
             ref_id: None,
             depth: 0,
             cursor_info: None,
+            url: None,
         });
         id_to_idx.insert(node.node_id.clone(), i);
     }
@@ -991,6 +1064,10 @@ fn render_tree(
 
     if let Some(ref ref_id) = node.ref_id {
         attrs.push(format!("ref={}", ref_id));
+    }
+
+    if let Some(ref url) = node.url {
+        attrs.push(format!("url={}", url));
     }
 
     if !attrs.is_empty() {

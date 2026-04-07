@@ -1544,6 +1544,7 @@ Designed for AI agents to understand page structure.
 
 Options:
   -i, --interactive    Only include interactive elements
+  -u, --urls           Include href URLs for link elements
   -c, --compact        Remove empty structural elements
   -d, --depth <n>      Limit tree depth
   -s, --selector <sel> Scope snapshot to CSS selector
@@ -1555,6 +1556,7 @@ Global Options:
 Examples:
   agent-browser snapshot
   agent-browser snapshot -i
+  agent-browser snapshot -i --urls
   agent-browser snapshot --compact --depth 5
   agent-browser snapshot -s "#main-content"
 "##
@@ -2397,15 +2399,15 @@ Examples:
             r##"
 agent-browser dashboard - Observability dashboard
 
-Usage: agent-browser dashboard [start|stop|install] [options]
+Usage: agent-browser dashboard [start|stop] [options]
 
 Manage the observability dashboard, a local web UI that shows live
 browser viewports and command activity feeds for all sessions.
+The dashboard is bundled into the binary and requires no separate install.
 
 Subcommands:
   start [--port <n>]   Start the dashboard server (default port: 4848)
   stop                 Stop the dashboard server
-  install              Download and install the dashboard to ~/.agent-browser/dashboard/
 
 Running 'agent-browser dashboard' with no subcommand is equivalent to 'dashboard start'.
 
@@ -2419,7 +2421,6 @@ Global Options:
   --json               Output as JSON
 
 Examples:
-  agent-browser dashboard install
   agent-browser dashboard start
   agent-browser dashboard start --port 8080
   agent-browser dashboard stop
@@ -2622,20 +2623,24 @@ Examples:
 
         "batch" => {
             r##"
-agent-browser batch - Execute multiple commands from stdin
+agent-browser batch - Execute multiple commands sequentially
 
-Usage: echo '<json>' | agent-browser batch [options]
+Usage: agent-browser batch [options] "<cmd1>" "<cmd2>" ...
+       echo '<json>' | agent-browser batch [options]
 
-Reads a JSON array of commands from stdin and executes them sequentially.
-Each command is an array of strings matching normal CLI arguments.
-Results are printed in order, separated by blank lines (or as a JSON array
-with --json).
+Runs multiple commands in sequence. Commands can be passed as quoted
+arguments or piped as JSON via stdin. Results are printed in order,
+separated by blank lines (or as a JSON array with --json).
 
 Options:
   --bail               Stop on first error (default: continue all commands)
   --json               Output results as a JSON array
 
-Input Format:
+Argument Mode:
+  Each quoted argument is a full command string:
+  agent-browser batch "open https://example.com" "snapshot -i" "screenshot"
+
+Stdin Mode (JSON):
   A JSON array of string arrays. Each inner array is one command:
   [
     ["open", "https://example.com"],
@@ -2646,9 +2651,64 @@ Input Format:
   ]
 
 Examples:
+  agent-browser batch "open https://example.com" "screenshot"
+  agent-browser batch --bail "open https://example.com" "click @e1" "screenshot"
   echo '[["open", "https://example.com"], ["snapshot"]]' | agent-browser batch
-  echo '[["open", "https://example.com"], ["get", "title"]]' | agent-browser batch --json
   agent-browser batch --bail < commands.json
+"##
+        }
+
+        "profiles" => {
+            r##"
+agent-browser profiles - List available Chrome profiles
+
+Usage: agent-browser profiles
+
+Lists all Chrome profiles found in your Chrome user data directory, showing
+the directory name and display name for each profile. Use the directory name
+with --profile to launch Chrome with that profile's login state.
+
+Global Options:
+  --json               Output as JSON
+
+Examples:
+  agent-browser profiles
+  agent-browser profiles --json
+  agent-browser --profile Default open https://gmail.com
+"##
+        }
+
+        "chat" => {
+            r##"
+agent-browser chat - Natural language browser control via AI
+
+Usage:
+  agent-browser chat <message>         Single-shot: execute instruction and exit
+  agent-browser chat                   Interactive REPL (when stdin is a TTY)
+  echo "instruction" | agent-browser chat   Piped input
+
+Sends natural language instructions to an AI model that translates them
+into agent-browser commands and executes them against the active session.
+Requires AI_GATEWAY_API_KEY to be set.
+
+In interactive mode, type "quit", "exit", or "q" to leave the REPL.
+
+Chat Options:
+  --model <name>         AI model (or AI_GATEWAY_MODEL env, default: anthropic/claude-sonnet-4.6)
+  -v, --verbose          Show tool commands and their raw output
+  -q, --quiet            Show only the AI text response (hide tool calls)
+
+Global Options:
+  --json                 Structured JSON output per turn
+  --session <name>       Target session for commands
+
+Examples:
+  agent-browser chat "open google.com and search for cats"
+  agent-browser chat "take a screenshot of the current page"
+  agent-browser -q chat "summarize this page"
+  agent-browser -v chat "fill in the login form with test@example.com"
+  agent-browser --model openai/gpt-4o chat "navigate to hacker news"
+  agent-browser chat
 "##
         }
 
@@ -2749,8 +2809,8 @@ Streaming:
   stream status              Show streaming status and active port
 
 Batch:
-  batch [--bail]             Execute commands from stdin (JSON array of string arrays)
-                             --bail stops on first error (default: continue all)
+  batch [--bail] ["cmd" ...]  Execute multiple commands sequentially (args or stdin)
+                              --bail stops on first error (default: continue all)
 
 Auth Vault:
   auth save <name> [opts]    Save auth profile (--url, --username, --password/--password-stdin)
@@ -2767,6 +2827,11 @@ Sessions:
   session                    Show current session name
   session list               List active sessions
 
+Chat (AI):
+  chat <message>             Send a natural language instruction (single-shot)
+  chat                       Start interactive chat (REPL mode when stdin is a TTY)
+  Options: --model <name>, -v/--verbose, -q/--quiet
+
 Dashboard:
   dashboard [start]          Start the dashboard server (default port: 4848)
   dashboard start --port <n> Start on a specific port
@@ -2776,7 +2841,8 @@ Setup:
   install                    Install browser binaries
   install --with-deps        Also install system dependencies (Linux)
   upgrade                    Upgrade to the latest version
-  dashboard install          Install the observability dashboard
+  dashboard start            Start the observability dashboard
+  profiles                   List available Chrome profiles
 
 Snapshot Options:
   -i, --interactive          Only interactive elements
@@ -2785,7 +2851,8 @@ Snapshot Options:
   -s, --selector <sel>       Scope to CSS selector
 
 Authentication:
-  --profile <path>           Persist login sessions across restarts (cookies, IndexedDB, cache)
+  --profile <name|path>      Chrome profile name (e.g., Default) to reuse login state,
+                             or a directory path for a persistent custom profile
                              (or AGENT_BROWSER_PROFILE env)
   --session-name <name>      Auto-save/restore cookies and localStorage by name
                              (or AGENT_BROWSER_SESSION_NAME env)
@@ -2808,7 +2875,7 @@ Options:
                              e.g., --proxy-bypass "localhost,*.internal.com"
   --ignore-https-errors      Ignore HTTPS certificate errors
   --allow-file-access        Allow file:// URLs to access local files (Chromium only)
-  -p, --provider <name>      Browser provider: ios, browserbase, kernel, browseruse, browserless
+  -p, --provider <name>      Browser provider: ios, browserbase, kernel, browseruse, browserless, agentcore
   --device <name>            iOS device name (e.g., "iPhone 15 Pro")
   --json                     JSON output
   --annotate                 Annotated screenshot with numbered labels and legend
@@ -2827,6 +2894,9 @@ Options:
   --confirm-interactive      Interactive confirmation prompts; auto-denies if stdin is not a TTY (or AGENT_BROWSER_CONFIRM_INTERACTIVE)
   --engine <name>            Browser engine: chrome (default), lightpanda (or AGENT_BROWSER_ENGINE)
   --no-auto-dialog           Disable automatic dismissal of alert/beforeunload dialogs (or AGENT_BROWSER_NO_AUTO_DIALOG)
+  --model <name>             AI model for chat (or AI_GATEWAY_MODEL env)
+  -v, --verbose              Show tool commands and their raw output
+  -q, --quiet                Show only AI text responses (hide tool calls)
   --config <path>            Use a custom config file (or AGENT_BROWSER_CONFIG env)
   --debug                    Debug output
   --version, -V              Show version
@@ -2863,7 +2933,7 @@ Environment:
   AGENT_BROWSER_ANNOTATE         Annotated screenshot with numbered labels and legend
   AGENT_BROWSER_DEBUG            Debug output
   AGENT_BROWSER_IGNORE_HTTPS_ERRORS Ignore HTTPS certificate errors
-  AGENT_BROWSER_PROVIDER         Browser provider (ios, browserbase, kernel, browseruse, browserless)
+  AGENT_BROWSER_PROVIDER         Browser provider (ios, browserbase, kernel, browseruse, browserless, agentcore)
   AGENT_BROWSER_AUTO_CONNECT     Auto-discover and connect to running Chrome
   AGENT_BROWSER_ALLOW_FILE_ACCESS Allow file:// URLs to access local files
   AGENT_BROWSER_COLOR_SCHEME     Color scheme preference (dark, light, no-preference)
@@ -2890,6 +2960,9 @@ Environment:
   AGENT_BROWSER_SCREENSHOT_DIR   Default screenshot output directory
   AGENT_BROWSER_SCREENSHOT_QUALITY JPEG quality 0-100
   AGENT_BROWSER_SCREENSHOT_FORMAT Screenshot format: png, jpeg
+  AI_GATEWAY_URL                 Vercel AI Gateway base URL (default: https://ai-gateway.vercel.sh)
+  AI_GATEWAY_API_KEY             API key for the AI Gateway (enables chat command and dashboard AI chat)
+  AI_GATEWAY_MODEL               Default AI model (default: anthropic/claude-sonnet-4.6, or --model flag)
 
 Install:
   npm install -g agent-browser           # npm
@@ -2906,21 +2979,26 @@ Examples:
   agent-browser get text @e1
   agent-browser screenshot --full
   agent-browser screenshot --annotate    # Labeled screenshot for vision models
-  agent-browser wait --load networkidle  # Wait for slow pages to load
+  agent-browser wait 2000               # Wait for slow pages to settle
   agent-browser --cdp 9222 snapshot      # Connect via CDP port
   agent-browser --auto-connect snapshot  # Auto-discover running Chrome
   agent-browser stream enable            # Start runtime streaming on an auto-selected port
   agent-browser stream status            # Inspect runtime streaming state
   agent-browser --color-scheme dark open example.com  # Dark mode
-  agent-browser --profile ~/.myapp open example.com    # Persistent profile
+  agent-browser --profile Default open gmail.com        # Reuse Chrome login state
+  agent-browser --profile ~/.myapp open example.com    # Persistent custom profile
+  agent-browser profiles                               # List available Chrome profiles
   agent-browser --session-name myapp open example.com  # Auto-save/restore state
+  agent-browser chat "open google.com and search for cats"  # AI chat (single-shot)
+  agent-browser chat                                        # AI chat (interactive REPL)
+  agent-browser -q chat "summarize this page"               # Quiet mode (text only)
 
 Command Chaining:
   Chain commands with && in a single shell call (browser persists via daemon):
 
-  agent-browser open example.com && agent-browser wait --load networkidle && agent-browser snapshot -i
+  agent-browser open example.com && agent-browser snapshot -i
   agent-browser fill @e1 "user@example.com" && agent-browser fill @e2 "pass" && agent-browser click @e3
-  agent-browser open example.com && agent-browser wait --load networkidle && agent-browser screenshot page.png
+  agent-browser open example.com && agent-browser screenshot
 
 iOS Simulator (requires Xcode and Appium):
   agent-browser -p ios open example.com                    # Use default iPhone

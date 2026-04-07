@@ -6,6 +6,7 @@ use std::sync::Arc;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 use tokio::sync::{broadcast, oneshot, Mutex};
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -46,9 +47,29 @@ pub struct CdpClient {
 
 impl CdpClient {
     pub async fn connect(url: &str) -> Result<Self, String> {
-        // Use unlimited message/frame sizes to handle large CDP responses
-        // (e.g. Accessibility.getFullAXTree) over remote WSS connections where
-        // proxies may produce frames exceeding the default 16 MiB limit.
+        Self::connect_with_headers(url, None).await
+    }
+
+    pub async fn connect_with_headers(
+        url: &str,
+        headers: Option<Vec<(String, String)>>,
+    ) -> Result<Self, String> {
+        let mut request = url
+            .into_client_request()
+            .map_err(|e| format!("Invalid WebSocket URL: {}", e))?;
+
+        if let Some(hdrs) = headers {
+            let req_headers = request.headers_mut();
+            for (key, value) in hdrs {
+                if let (Ok(name), Ok(val)) = (
+                    key.parse::<tokio_tungstenite::tungstenite::http::header::HeaderName>(),
+                    value.parse::<tokio_tungstenite::tungstenite::http::header::HeaderValue>(),
+                ) {
+                    req_headers.insert(name, val);
+                }
+            }
+        }
+
         let ws_config = WebSocketConfig {
             max_message_size: None,
             max_frame_size: None,
@@ -56,23 +77,18 @@ impl CdpClient {
         };
 
         let (ws_stream, _) =
-            tokio_tungstenite::connect_async_with_config(url, Some(ws_config), false)
+            tokio_tungstenite::connect_async_with_config(request, Some(ws_config), false)
                 .await
                 .map_err(|e| format!("CDP WebSocket connect failed: {}", e))?;
 
-        // Enable TCP SO_KEEPALIVE on the underlying socket. This matches the
-        // behavior of Playwright's WebSocket transport (pre-v0.20.0) which used
-        // Node.js HTTP agents with keepAlive: true. TCP-level keepalive probes
-        // maintain the connection at the transport layer, complementing the
-        // WebSocket-level Ping frames sent by the keepalive task below.
         enable_tcp_keepalive(ws_stream.get_ref());
 
         let (ws_tx, mut ws_rx) = ws_stream.split();
         let ws_tx = Arc::new(Mutex::new(ws_tx));
 
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
-        let (event_tx, _) = broadcast::channel(256);
-        let (raw_tx, _) = broadcast::channel(512);
+        let (event_tx, _) = broadcast::channel(4096);
+        let (raw_tx, _) = broadcast::channel(4096);
 
         let pending_clone = pending.clone();
         let event_tx_clone = event_tx.clone();
@@ -199,7 +215,7 @@ impl CdpClient {
             id,
             method: method.to_string(),
             params,
-            session_id: session_id.map(|s| s.to_string()),
+            session_id: session_id.filter(|s| !s.is_empty()).map(|s| s.to_string()),
         };
 
         let json = serde_json::to_string(&cmd)

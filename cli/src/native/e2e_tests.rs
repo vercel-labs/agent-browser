@@ -34,6 +34,7 @@ fn native_test_fixture_html(name: &str) -> &'static str {
         "drag_probe" => include_str!("test_fixtures/drag_probe.html"),
         "html5_drag_probe" => include_str!("test_fixtures/html5_drag_probe.html"),
         "pointer_capture_probe" => include_str!("test_fixtures/pointer_capture_probe.html"),
+        "upload_probe" => include_str!("test_fixtures/upload_probe.html"),
         _ => panic!("Unknown native test fixture: {}", name),
     }
 }
@@ -1615,6 +1616,73 @@ async fn e2e_mouse_drag_reaches_pointer_capture_target() {
     assert_success(&resp);
 }
 
+#[tokio::test]
+#[ignore]
+async fn e2e_drag_action_sends_buttons_during_move() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "2",
+            "action": "navigate",
+            "url": native_test_fixture_url("html5_drag_probe")
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "3",
+            "action": "drag",
+            "source": "#source",
+            "target": "#dest"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["dragged"].as_bool(), Some(true));
+
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "evaluate", "script": "window.__html5DragProbe" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let probe = &get_data(&resp)["result"];
+    let events = probe["events"]
+        .as_array()
+        .expect("html5 drag probe should expose events");
+
+    // The mousemove events emitted while the button is held should carry
+    // buttons == 1 so the browser recognises the gesture as a drag.
+    assert!(
+        events
+            .iter()
+            .any(|event| { event["type"] == "mousemove" && event["buttons"].as_i64() == Some(1) }),
+        "Expected at least one mousemove with buttons == 1 during drag"
+    );
+
+    // dragstart must fire on the source element.
+    assert!(
+        events.iter().any(|event| event["type"] == "dragstart"),
+        "Expected dragstart to fire on the source element"
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 // ---------------------------------------------------------------------------
 // State save/load, state management
 // ---------------------------------------------------------------------------
@@ -2995,12 +3063,17 @@ async fn start_delayed_login_server(
       setTimeout(() => {{
         const root = document.getElementById('root');
         root.innerHTML = `
-          <form id="login-form" onsubmit="event.preventDefault(); window.__submitted = true;">
+          <form id="login-form">
             <input type="email" name="email" />
             <input type="password" name="password" />
             <button type="submit">Sign in</button>
           </form>
         `;
+        document.getElementById('login-form').addEventListener('submit', function(e) {{
+          e.preventDefault();
+          e.stopPropagation();
+          window.__submitted = true;
+        }});
       }}, {render_delay_ms});
     </script>
   </body>
@@ -3028,7 +3101,7 @@ async fn start_delayed_login_server(
 #[tokio::test]
 #[ignore]
 async fn e2e_auth_login_waits_for_delayed_spa_form_render() {
-    let (base_url, _server) = start_delayed_login_server(1200, 100).await;
+    let (base_url, _server) = start_delayed_login_server(800, 100).await;
     let mut state = DaemonState::new();
 
     let profile_name = format!(
@@ -3757,6 +3830,70 @@ async fn e2e_externally_opened_tab_detected() {
 }
 
 // ---------------------------------------------------------------------------
+// Regression: issue #993 — launch options change must trigger relaunch
+// ---------------------------------------------------------------------------
+
+/// When the browser is already running and a second launch command arrives with
+/// different options (e.g., extensions added), the daemon must relaunch the
+/// browser instead of silently reusing the old one.
+///
+/// Before the fix, `handle_launch` only checked connection type and liveness,
+/// so changed options like extensions were ignored and the old browser was reused.
+#[tokio::test]
+#[ignore]
+async fn e2e_relaunch_on_options_change() {
+    let mut state = DaemonState::new();
+
+    // First launch — headless, no extensions.
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["launched"], true);
+    assert!(
+        get_data(&resp).get("reused").is_none(),
+        "first launch must not be a reuse"
+    );
+
+    // Second launch — same options → should reuse.
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["reused"],
+        true,
+        "identical options must reuse the browser"
+    );
+
+    // Third launch — different options (userAgent changed) → must relaunch, not reuse.
+    // We use userAgent instead of extensions because extensions force headed mode,
+    // which requires a display server and fails in headless CI environments.
+    let resp = execute_command(
+        &json!({
+            "id": "3",
+            "action": "launch",
+            "headless": true,
+            "userAgent": "agent-browser-test/1.0"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert!(
+        get_data(&resp).get("reused").is_none(),
+        "changed options must trigger a relaunch, not reuse (issue #993)"
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+// ---------------------------------------------------------------------------
 // Stream: custom viewport is reflected in screencast frame metadata
 // ---------------------------------------------------------------------------
 
@@ -3896,4 +4033,97 @@ fn jpeg_dimensions(data: &[u8]) -> Option<(u32, u32)> {
         }
     }
     None
+}
+
+// ---------------------------------------------------------------------------
+// Upload: ref-based selector support (issue #1107)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore]
+async fn e2e_upload_with_ref_selector() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": native_test_fixture_url("upload_probe") }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(&json!({ "id": "3", "action": "snapshot" }), &mut state).await;
+    assert_success(&resp);
+    let snapshot = get_data(&resp)["snapshot"].as_str().unwrap();
+
+    // Match by label text, not by role which may vary across Chrome versions
+    let file_input_ref = snapshot
+        .lines()
+        .filter_map(|line| {
+            if line.contains("Choose file") && line.contains("ref=") {
+                let start = line.find("ref=")? + 4;
+                let end = line[start..].find(']')? + start;
+                Some(line[start..end].to_string())
+            } else {
+                None
+            }
+        })
+        .next()
+        .expect("Snapshot should contain the file input with a ref");
+
+    let tmp = std::env::temp_dir().join(format!("ab-upload-ref-{}.txt", std::process::id()));
+    std::fs::write(&tmp, "test").unwrap();
+
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "upload", "selector": file_input_ref, "files": [tmp.to_string_lossy()] }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["uploaded"], 1);
+
+    let _ = std::fs::remove_file(&tmp);
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_upload_with_css_selector() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": native_test_fixture_url("upload_probe") }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let tmp = std::env::temp_dir().join(format!("ab-upload-css-{}.txt", std::process::id()));
+    std::fs::write(&tmp, "test").unwrap();
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "upload", "selector": "#fileInput", "files": [tmp.to_string_lossy()] }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["uploaded"], 1);
+
+    let _ = std::fs::remove_file(&tmp);
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
 }
