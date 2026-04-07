@@ -1975,7 +1975,10 @@ mod tests {
         };
         let result = build_chrome_args(&opts).unwrap();
         assert!(
-            !result.args.iter().any(|a| a == "--disable-component-update"),
+            !result
+                .args
+                .iter()
+                .any(|a| a == "--disable-component-update"),
             "exact-matched flag should be removed"
         );
         assert!(
@@ -2015,7 +2018,10 @@ mod tests {
         let opts = LaunchOptions::default();
         let result = build_chrome_args(&opts).unwrap();
         assert!(
-            result.args.iter().any(|a| a == "--disable-component-update"),
+            result
+                .args
+                .iter()
+                .any(|a| a == "--disable-component-update"),
             "default flags should remain when ignore list is empty"
         );
         if let Some(ref dir) = result.temp_user_data_dir {

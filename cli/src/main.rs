@@ -816,7 +816,9 @@ fn main() {
             flags.cli_allow_file_access.then_some("--allow-file-access"),
             flags.cli_download_path.then_some("--download-path"),
             flags.cli_headed.then_some("--headed"),
-            flags.cli_ignore_default_args.then_some("--ignore-default-args"),
+            flags
+                .cli_ignore_default_args
+                .then_some("--ignore-default-args"),
         ]
         .into_iter()
         .flatten()
