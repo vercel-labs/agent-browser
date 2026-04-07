@@ -633,10 +633,31 @@ fn is_transient_error(error: &str) -> bool {
         || error.contains("os error 10054") // Connection reset by peer (Windows)
 }
 
+/// Socket read timeout for responses from the daemon.
+///
+/// Must be strictly larger than the daemon-side CDP command timeout
+/// (see `native/cdp/client.rs::CDP_COMMAND_TIMEOUT_SECS`) so that the daemon
+/// always has time to materialise and return an error/success response before
+/// this client-side socket read gives up. Otherwise commands like
+/// `Page.captureScreenshot`, which can take close to the full CDP timeout on
+/// headless Chrome 147+, regularly trigger `EAGAIN (os error 35)` on macOS
+/// (and `os error 11` on Linux) even though the daemon is still healthy.
+///
+/// Can be overridden via the `AGENT_BROWSER_READ_TIMEOUT_SECS` env var.
+fn socket_read_timeout_secs() -> u64 {
+    std::env::var("AGENT_BROWSER_READ_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(75)
+}
+
 fn send_command_once(cmd: &Value, session: &str) -> Result<Response, String> {
     let mut stream = connect(session)?;
 
-    stream.set_read_timeout(Some(Duration::from_secs(30))).ok();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(socket_read_timeout_secs())))
+        .ok();
     stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
 
     let mut json_str = serde_json::to_string(cmd).map_err(|e| e.to_string())?;

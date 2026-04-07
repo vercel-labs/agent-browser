@@ -18,6 +18,27 @@ type PendingMap = Arc<Mutex<HashMap<u64, oneshot::Sender<CdpMessage>>>>;
 /// through intermediate proxies (reverse proxies, load balancers, service meshes).
 const WS_KEEPALIVE_INTERVAL_SECS: u64 = 30;
 
+/// Default timeout for a single CDP command in seconds.
+///
+/// Chrome 147+ headless can take up to ~40 s to return a large
+/// `Page.captureScreenshot` response on slower machines. 60 s gives enough
+/// headroom for real-world workloads while still failing fast on truly stuck
+/// commands. Override with the `AGENT_BROWSER_CDP_TIMEOUT_SECS` env var.
+///
+/// The client-side socket read timeout (see `connection.rs`) must stay
+/// strictly larger than this value so that the client doesn't give up on the
+/// daemon before the daemon can materialise an error response.
+const DEFAULT_CDP_COMMAND_TIMEOUT_SECS: u64 = 60;
+
+fn cdp_command_timeout() -> std::time::Duration {
+    let secs = std::env::var("AGENT_BROWSER_CDP_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(DEFAULT_CDP_COMMAND_TIMEOUT_SECS);
+    std::time::Duration::from_secs(secs)
+}
+
 /// Raw incoming CDP message (text) broadcast to all subscribers.
 /// Used by the inspect proxy to forward responses and events to DevTools.
 #[derive(Debug, Clone)]
@@ -236,7 +257,7 @@ impl CdpClient {
                 .map_err(|e| format!("Failed to send CDP command: {}", e))?;
         }
 
-        let response = match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
+        let response = match tokio::time::timeout(cdp_command_timeout(), rx).await {
             Ok(Ok(resp)) => resp,
             Ok(Err(_)) => return Err("CDP response channel closed".to_string()),
             Err(_) => {
