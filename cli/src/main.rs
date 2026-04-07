@@ -1,3 +1,4 @@
+mod chat;
 mod color;
 mod commands;
 mod connection;
@@ -653,10 +654,6 @@ fn main() {
     // Handle dashboard subcommand
     if clean.first().map(|s| s.as_str()) == Some("dashboard") {
         match clean.get(1).map(|s| s.as_str()) {
-            Some("install") => {
-                install::run_dashboard_install();
-                return;
-            }
             Some("start") | None => {
                 let port = clean
                     .iter()
@@ -701,6 +698,17 @@ fn main() {
     ) && clean.iter().any(|a| a == "--all")
     {
         run_close_all(&flags);
+        return;
+    }
+
+    // Handle chat command
+    if clean.first().map(|s| s.as_str()) == Some("chat") {
+        let message = if clean.len() > 1 {
+            Some(clean[1..].join(" "))
+        } else {
+            None
+        };
+        chat::run_chat(&flags, message);
         return;
     }
 
@@ -826,6 +834,7 @@ fn main() {
         engine: flags.engine.as_deref(),
         auto_connect: flags.auto_connect,
         idle_timeout: flags.idle_timeout.as_deref(),
+        default_timeout: flags.default_timeout,
         cdp: flags.cdp.as_deref(),
         no_auto_dialog: flags.no_auto_dialog,
     };
@@ -1256,10 +1265,16 @@ fn main() {
         }
     }
 
-    // Handle batch command: read commands from stdin, execute sequentially
+    // Handle batch command: from args or stdin
     if cmd.get("action").and_then(|v| v.as_str()) == Some("batch") {
         let bail = cmd.get("bail").and_then(|v| v.as_bool()).unwrap_or(false);
-        run_batch(&flags, bail);
+        let arg_commands = cmd.get("commands").and_then(|v| v.as_array()).map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .map(commands::shell_words_split)
+                .collect::<Vec<Vec<String>>>()
+        });
+        run_batch(&flags, bail, arg_commands);
         return;
     }
 
@@ -1339,35 +1354,39 @@ fn main() {
     }
 }
 
-fn run_batch(flags: &Flags, bail: bool) {
-    use std::io::Read as _;
+fn run_batch(flags: &Flags, bail: bool, arg_commands: Option<Vec<Vec<String>>>) {
+    let commands: Vec<Vec<String>> = if let Some(cmds) = arg_commands {
+        cmds
+    } else {
+        use std::io::Read as _;
 
-    let mut input = String::new();
-    if let Err(e) = std::io::stdin().read_to_string(&mut input) {
-        if flags.json {
-            print_json_error(format!("Failed to read stdin: {}", e));
-        } else {
-            eprintln!("{} Failed to read stdin: {}", color::error_indicator(), e);
-        }
-        exit(1);
-    }
-
-    let commands: Vec<Vec<String>> = match serde_json::from_str(&input) {
-        Ok(c) => c,
-        Err(e) => {
+        let mut input = String::new();
+        if let Err(e) = std::io::stdin().read_to_string(&mut input) {
             if flags.json {
-                print_json_error(format!(
-                    "Invalid JSON input: {}. Expected an array of string arrays, e.g. [[\"open\", \"https://example.com\"], [\"snapshot\"]]",
-                    e
-                ));
+                print_json_error(format!("Failed to read stdin: {}", e));
             } else {
-                eprintln!(
-                    "{} Invalid JSON input: {}. Expected an array of string arrays.",
-                    color::error_indicator(),
-                    e
-                );
+                eprintln!("{} Failed to read stdin: {}", color::error_indicator(), e);
             }
             exit(1);
+        }
+
+        match serde_json::from_str(&input) {
+            Ok(c) => c,
+            Err(e) => {
+                if flags.json {
+                    print_json_error(format!(
+                        "Invalid JSON input: {}. Expected an array of string arrays, e.g. [[\"open\", \"https://example.com\"], [\"snapshot\"]]",
+                        e
+                    ));
+                } else {
+                    eprintln!(
+                        "{} Invalid JSON input: {}. Expected an array of string arrays.",
+                        color::error_indicator(),
+                        e
+                    );
+                }
+                exit(1);
+            }
         }
     };
 

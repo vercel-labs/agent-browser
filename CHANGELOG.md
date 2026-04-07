@@ -1,8 +1,71 @@
 # agent-browser
 
-## 0.24.1
+## 0.25.3
 
 <!-- release:start -->
+### Bug Fixes
+
+- Fixed **hidden radio/checkbox inputs missing from snapshot refs** when a `<label>` wraps a `display:none` `<input type="radio">` or `<input type="checkbox">`. Chrome excludes these inputs from the accessibility tree entirely, making it impossible for AI agents to identify radio buttons and checkboxes via refs. Hidden inputs inside elements are now detected during cursor-interactive scanning and their parent nodes are promoted to the correct role with proper name and checked state (#1085)
+
+### Documentation
+
+- Added **clickable heading anchors** to the docs site, making it easy to link directly to any section (#1175)
+
+### Contributors
+
+- @ctate
+- @jin-2-kakaoent
+- @hyunjinee
+<!-- release:end -->
+
+## 0.25.2
+
+### Bug Fixes
+
+- Fixed **Chrome being killed after ~10s idle on Linux** caused by `PR_SET_PDEATHSIG` tracking the blocking thread that spawned Chrome rather than the daemon process. When Tokio reaped the idle thread, the kernel sent SIGKILL to Chrome even though the daemon was still alive. Orphan cleanup is handled by the existing process-group kill in `ChromeProcess::kill()` (#1157, #1173)
+
+### Contributors
+
+- @ctate
+
+## 0.25.1
+
+### Improvements
+
+- **Embedded dashboard** - The observability dashboard is now bundled directly into the CLI binary using `rust-embed`, eliminating the need for `dashboard install`. The dashboard is available immediately after installing agent-browser (#1169)
+
+### Contributors
+
+- @ctate
+
+## 0.25.0
+
+### New Features
+
+- **AI chat command** - Added `chat` command for AI-powered browser automation. Supports single-shot mode (`chat "open google.com"`) and an interactive REPL. The AI agent can execute any agent-browser command via tool calls. Requires `AI_GATEWAY_API_KEY`. Configure the model with `--model` or `AI_GATEWAY_MODEL` (#1160, #1163)
+- **Dashboard AI chat** - The observability dashboard now includes a built-in AI chat interface for conversational browser control alongside live session views (#1160, #1163)
+- **`snapshot --urls`** - New `-u`/`--urls` flag to include href URLs for link elements in snapshot output, giving agents direct access to link targets without additional queries (#1160)
+- **Batch argument mode** - The `batch` command now accepts commands as inline arguments in addition to reading from stdin, simplifying single-invocation multi-command workflows (#1160)
+
+### Bug Fixes
+
+- Fixed **`getByRole`** matching wrong elements (e.g. `<link>` stylesheet elements instead of `<a>` anchors) by rewriting the implementation to use the CDP accessibility tree with ref-based element resolution instead of CSS selectors (#1145)
+- Fixed **`upload` command** not supporting accessibility tree refs (`@eN`) for file upload element selection (#1156)
+- Fixed **`AGENT_BROWSER_DEFAULT_TIMEOUT`** not being applied to `wait` commands. The environment variable now propagates to all wait variants (`wait`, `wait --url`, `wait --text`, `wait --load`, `wait --fn`, `wait --download`) (#1153)
+- Fixed **dashboard download** error handling with improved retry logic for more reliable dashboard installation (#1154)
+
+### Tests
+
+- Fixed CI test failures on Windows and E2E (#1165)
+
+### Contributors
+
+- @ctate
+- @jin-2-kakaoent
+- @hyunjinee
+
+## 0.24.1
+
 ### New Features
 
 - **Chrome profile login state reuse** - `--profile <name>` now resolves Chrome profile names (e.g. `Default`, `Profile 1`) and copies the profile to a temp directory to reuse login state, cookies, and extensions without modifying the original. Added `profiles` command to list available Chrome profiles with `--json` support (#1131)
@@ -30,11 +93,9 @@
 - @desenmeng
 - @jin-2-kakaoent
 - @snese
-<!-- release:end -->
 
 ## 0.24.0
 
-<!-- release:start -->
 ### New Features
 
 - **AWS Bedrock AgentCore provider** - Added AWS Bedrock AgentCore as a cloud browser provider. Connect with `--provider agentcore` or `AGENT_BROWSER_PROVIDER=agentcore`. Uses lightweight manual SigV4 signing for authentication with support for the full AWS credential provider chain (environment variables, AWS CLI, SSO, IAM roles). Configure with `AGENTCORE_REGION`, `AGENTCORE_PROFILE_ID`, and `AGENTCORE_BROWSER_ID` environment variables. Returns session ID and Live View URL in the launch response (#397)
@@ -47,7 +108,6 @@
 
 - @ctate
 - @pahud
-<!-- release:end -->
 
 ## 0.23.4
 

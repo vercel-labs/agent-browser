@@ -34,6 +34,7 @@ fn native_test_fixture_html(name: &str) -> &'static str {
         "drag_probe" => include_str!("test_fixtures/drag_probe.html"),
         "html5_drag_probe" => include_str!("test_fixtures/html5_drag_probe.html"),
         "pointer_capture_probe" => include_str!("test_fixtures/pointer_capture_probe.html"),
+        "upload_probe" => include_str!("test_fixtures/upload_probe.html"),
         _ => panic!("Unknown native test fixture: {}", name),
     }
 }
@@ -3062,12 +3063,17 @@ async fn start_delayed_login_server(
       setTimeout(() => {{
         const root = document.getElementById('root');
         root.innerHTML = `
-          <form id="login-form" onsubmit="event.preventDefault(); window.__submitted = true;">
+          <form id="login-form">
             <input type="email" name="email" />
             <input type="password" name="password" />
             <button type="submit">Sign in</button>
           </form>
         `;
+        document.getElementById('login-form').addEventListener('submit', function(e) {{
+          e.preventDefault();
+          e.stopPropagation();
+          window.__submitted = true;
+        }});
       }}, {render_delay_ms});
     </script>
   </body>
@@ -3864,13 +3870,15 @@ async fn e2e_relaunch_on_options_change() {
         "identical options must reuse the browser"
     );
 
-    // Third launch — different options (extensions added) → must relaunch, not reuse.
+    // Third launch — different options (userAgent changed) → must relaunch, not reuse.
+    // We use userAgent instead of extensions because extensions force headed mode,
+    // which requires a display server and fails in headless CI environments.
     let resp = execute_command(
         &json!({
             "id": "3",
             "action": "launch",
             "headless": true,
-            "extensions": ["/tmp/fake-extension"]
+            "userAgent": "agent-browser-test/1.0"
         }),
         &mut state,
     )
@@ -3881,6 +3889,99 @@ async fn e2e_relaunch_on_options_change() {
         "changed options must trigger a relaunch, not reuse (issue #993)"
     );
 
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+// ---------------------------------------------------------------------------
+// Upload: ref-based selector support (issue #1107)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore]
+async fn e2e_upload_with_ref_selector() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": native_test_fixture_url("upload_probe") }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(&json!({ "id": "3", "action": "snapshot" }), &mut state).await;
+    assert_success(&resp);
+    let snapshot = get_data(&resp)["snapshot"].as_str().unwrap();
+
+    // Match by label text, not by role which may vary across Chrome versions
+    let file_input_ref = snapshot
+        .lines()
+        .filter_map(|line| {
+            if line.contains("Choose file") && line.contains("ref=") {
+                let start = line.find("ref=")? + 4;
+                let end = line[start..].find(']')? + start;
+                Some(line[start..end].to_string())
+            } else {
+                None
+            }
+        })
+        .next()
+        .expect("Snapshot should contain the file input with a ref");
+
+    let tmp = std::env::temp_dir().join(format!("ab-upload-ref-{}.txt", std::process::id()));
+    std::fs::write(&tmp, "test").unwrap();
+
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "upload", "selector": file_input_ref, "files": [tmp.to_string_lossy()] }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["uploaded"], 1);
+
+    let _ = std::fs::remove_file(&tmp);
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_upload_with_css_selector() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": native_test_fixture_url("upload_probe") }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let tmp = std::env::temp_dir().join(format!("ab-upload-css-{}.txt", std::process::id()));
+    std::fs::write(&tmp, "test").unwrap();
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "upload", "selector": "#fileInput", "files": [tmp.to_string_lossy()] }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["uploaded"], 1);
+
+    let _ = std::fs::remove_file(&tmp);
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     assert_success(&resp);
 }

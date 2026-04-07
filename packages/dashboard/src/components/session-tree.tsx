@@ -1,6 +1,7 @@
 "use client";
 
-import { useCallback, useRef, useState, type SyntheticEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type SyntheticEvent } from "react";
+import { useAtom } from "jotai/react";
 import { useAtomValue, useSetAtom } from "jotai/react";
 import type { SessionInfo, TabInfo } from "@/types";
 import {
@@ -13,9 +14,11 @@ import {
   closeTabAtom,
   addTabAtom,
   switchTabAtom,
+  newSessionDialogAtom,
 } from "@/store/sessions";
 import { tabsForPortAtom, engineForPortAtom } from "@/store/tabs";
 import { ChevronRight, Loader2, Plus, Trash2 } from "lucide-react";
+import { ThemeToggle } from "@/components/theme-toggle";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -116,7 +119,7 @@ function getFaviconUrl(url: string): string | null {
 function TabFavicon({ url }: { url: string }) {
   const src = getFaviconUrl(url);
   if (!src) {
-    return <span className="flex size-3.5 shrink-0 items-center justify-center rounded-sm bg-muted text-[8px] text-muted-foreground">&#9679;</span>;
+    return <span className="flex size-4 shrink-0 items-center justify-center rounded-sm bg-muted text-[8px] text-muted-foreground">&#9679;</span>;
   }
   const handleError = (e: SyntheticEvent<HTMLImageElement>) => {
     (e.target as HTMLImageElement).style.display = "none";
@@ -125,9 +128,9 @@ function TabFavicon({ url }: { url: string }) {
     <img
       src={src}
       alt=""
-      width={14}
-      height={14}
-      className="size-3.5 shrink-0 rounded-sm"
+      width={16}
+      height={16}
+      className="size-4 shrink-0 rounded-sm"
       onError={handleError}
     />
   );
@@ -149,7 +152,7 @@ function TabNode({ tab, isViewed, isSessionActive, onClose, onSwitch, onSelectSe
         <button
           onClick={isClickable ? handleClick : undefined}
           className={cn(
-            "flex w-full min-w-0 items-center gap-1.5 py-1 pr-1 pl-7 text-left text-xs",
+            "flex w-full min-w-0 items-center gap-2 py-1 pr-1 pl-7 text-left text-xs",
             isViewed
               ? "bg-card text-foreground"
               : "text-muted-foreground cursor-pointer hover:text-foreground",
@@ -321,9 +324,9 @@ function SessionNode({
           ))}
           <button
             onClick={onAddTab}
-            className="flex w-full items-center gap-1.5 py-1 pr-1 pl-7 text-xs text-muted-foreground hover:text-foreground"
+            className="flex w-full items-center gap-2 py-1 pr-1 pl-7 text-xs text-muted-foreground hover:text-foreground"
           >
-            <Plus className="size-3.5" />
+            <Plus className="size-4" />
             Add tab
           </button>
         </div>
@@ -347,7 +350,7 @@ export function SessionTree() {
   const dispatchSwitchTab = useSetAtom(switchTabAtom);
 
   const [expandedMap, setExpandedMap] = useState<Record<number, boolean>>({});
-  const [newSessionOpen, setNewSessionOpen] = useState(false);
+  const [newSessionOpen, setNewSessionOpen] = useAtom(newSessionDialogAtom);
   const [closeAllOpen, setCloseAllOpen] = useState(false);
   const [newSessionName, setNewSessionName] = useState("");
   const [newSessionBrowser, setNewSessionBrowser] = useState("chrome");
@@ -384,11 +387,21 @@ export function SessionTree() {
     }
   }, [newSessionName, newSessionBrowser, creating, dispatchCreateSession]);
 
+  useEffect(() => {
+    if (newSessionOpen && !newSessionName) {
+      const existing = new Set(sessions.map((s) => s.session));
+      let n = sessions.length + 1;
+      while (existing.has(`session-${n}`)) n++;
+      setNewSessionName(`session-${n}`);
+    }
+  }, [newSessionOpen, newSessionName, sessions]);
+
   return (
     <div className="flex h-full flex-col">
       <div className="flex shrink-0 items-center px-3 py-2">
         <span className="text-xs text-muted-foreground">Sessions</span>
         <div className="ml-auto flex items-center gap-0.5">
+          <ThemeToggle />
           {sessions.some((s) => !s.pending) && (
             <button
               type="button"
@@ -401,7 +414,13 @@ export function SessionTree() {
           )}
           <button
             type="button"
-            onClick={() => setNewSessionOpen(true)}
+            onClick={() => {
+              const existing = new Set(sessions.map((s) => s.session));
+              let n = sessions.length + 1;
+              while (existing.has(`session-${n}`)) n++;
+              setNewSessionName(`session-${n}`);
+              setNewSessionOpen(true);
+            }}
             className="flex size-5 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
             title="New session"
           >

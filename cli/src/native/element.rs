@@ -103,6 +103,10 @@ impl RefMap {
         entries
     }
 
+    pub fn remove(&mut self, ref_id: &str) {
+        self.map.remove(ref_id);
+    }
+
     pub fn clear(&mut self) {
         self.map.clear();
         self.next_ref = 1;
@@ -380,7 +384,7 @@ async fn find_node_id_by_role_name(
     ))
 }
 
-fn extract_ax_string(value: &Option<AXValue>) -> String {
+pub(super) fn extract_ax_string(value: &Option<AXValue>) -> String {
     match value {
         Some(v) => match &v.value {
             Some(Value::String(s)) => s.clone(),

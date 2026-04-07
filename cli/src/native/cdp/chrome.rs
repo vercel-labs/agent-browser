@@ -351,23 +351,18 @@ fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<Chro
     // Place Chrome in its own process group so we can kill the entire tree
     // (main process + GPU/renderer/utility/crashpad helpers) with a single
     // killpg(), preventing orphaned processes (issue #1113).
+    //
+    // NOTE: Do NOT use PR_SET_PDEATHSIG here. Chrome is spawned via
+    // tokio::task::spawn_blocking, and PR_SET_PDEATHSIG fires when the
+    // *thread* that forked the child exits, not the process. Tokio reaps
+    // idle blocking threads after ~10s, which kills Chrome (issue #1157).
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
         // SAFETY: pre_exec runs between fork() and exec() in the child.
-        // Both prctl and setpgid are async-signal-safe.
+        // setpgid is async-signal-safe.
         unsafe {
             cmd.pre_exec(|| {
-                // On Linux, ask the kernel to send SIGKILL to this process
-                // when the parent (daemon) dies for any reason, including
-                // SIGKILL. This is the most robust orphan prevention
-                // available and has no macOS equivalent.
-                #[cfg(target_os = "linux")]
-                {
-                    libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
-                }
-                // Create a new process group (PGID = own PID) so the
-                // daemon can kill the entire Chrome tree in one call.
                 libc::setpgid(0, 0);
                 Ok(())
             });
