@@ -152,7 +152,17 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
         "--disable-prompt-on-repost".to_string(),
         "--disable-sync".to_string(),
         "--disable-features=Translate".to_string(),
-        "--enable-features=NetworkService,NetworkServiceInProcess".to_string(),
+        // `CDPScreenshotNewSurface` is required for `Page.captureScreenshot`
+        // to return successfully on Chrome 147+ headless (including the
+        // "Chrome for Testing" 147.0.7727.50 build that `agent-browser
+        // install` downloads by default). Without it the CDP command waits
+        // forever on the new compositor path, surfacing to the CLI as
+        // `CDP command timed out: Page.captureScreenshot` and — via the
+        // socket read-timeout race — `Failed to read: Resource temporarily
+        // unavailable (os error 35)`. Playwright sets the same flag; see
+        // their `chromiumSwitches` list.
+        "--enable-features=NetworkService,NetworkServiceInProcess,CDPScreenshotNewSurface"
+            .to_string(),
         "--metrics-recording-only".to_string(),
     ];
 
@@ -243,20 +253,45 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
 }
 
 pub fn launch_chrome(options: &LaunchOptions) -> Result<ChromeProcess, String> {
+    let has_extensions = options
+        .extensions
+        .as_ref()
+        .is_some_and(|exts| !exts.is_empty());
+
+    // For headless runs (no user-supplied executable, no extensions) we
+    // prefer `chrome-headless-shell` over full Chrome when it is
+    // available. `chrome-headless-shell` is the slim headless-only
+    // Chromium build that Playwright uses; it reliably handles
+    // `Page.captureScreenshot` on Chrome 147+, whereas full Chrome for
+    // Testing 147.x has shipped intermittent `Page.captureScreenshot`
+    // hangs in headless mode. Falling back to full Chrome keeps older
+    // installs (that only have `chrome`) working.
     let chrome_path = match &options.executable_path {
         Some(p) => PathBuf::from(p),
-        None => find_chrome().ok_or_else(|| {
-            let cache_dir = crate::install::get_browsers_dir();
-            format!(
-                "Chrome not found. Checked:\n  \
-                 - agent-browser cache: {}\n  \
-                 - System Chrome installations\n  \
-                 - Puppeteer browser cache\n  \
-                 - Playwright browser cache\n\
-                 Run `agent-browser install` to download Chrome, or use --executable-path.",
-                cache_dir.display()
-            )
-        })?,
+        None => {
+            let prefer_shell = options.headless && !has_extensions;
+            let maybe_shell = if prefer_shell {
+                crate::install::find_installed_headless_shell()
+            } else {
+                None
+            };
+
+            match maybe_shell {
+                Some(p) => p,
+                None => find_chrome().ok_or_else(|| {
+                    let cache_dir = crate::install::get_browsers_dir();
+                    format!(
+                        "Chrome not found. Checked:\n  \
+                         - agent-browser cache: {}\n  \
+                         - System Chrome installations\n  \
+                         - Puppeteer browser cache\n  \
+                         - Playwright browser cache\n\
+                         Run `agent-browser install` to download Chrome, or use --executable-path.",
+                        cache_dir.display()
+                    )
+                })?,
+            }
+        }
     };
 
     // Profile name preprocessing: if --profile is a Chrome profile name (not a
