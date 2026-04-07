@@ -531,11 +531,68 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
             Ok(cmd)
         }
         "pdf" => {
-            let path = rest.first().ok_or_else(|| ParseError::MissingArguments {
+            // pdf <path> [--css-page-size] [--landscape] [--no-background]
+            //            [--width <inches>] [--height <inches>]
+            let mut path: Option<&str> = None;
+            let mut prefer_css_page_size: Option<bool> = None;
+            let mut landscape: Option<bool> = None;
+            let mut print_background: Option<bool> = None;
+            let mut paper_width: Option<f64> = None;
+            let mut paper_height: Option<f64> = None;
+            let mut i = 0;
+            while i < rest.len() {
+                match rest[i].as_ref() {
+                    "--css-page-size" => prefer_css_page_size = Some(true),
+                    "--landscape" => landscape = Some(true),
+                    "--no-background" => print_background = Some(false),
+                    "--width" => {
+                        i += 1;
+                        let v = rest.get(i).ok_or_else(|| ParseError::InvalidValue {
+                            message: "--width requires a value in inches".to_string(),
+                            usage: "pdf <path> [--width <inches>]",
+                        })?;
+                        paper_width = Some(v.parse::<f64>().map_err(|_| ParseError::InvalidValue {
+                            message: format!("invalid --width value: {}", v),
+                            usage: "pdf <path> [--width <inches>]",
+                        })?);
+                    }
+                    "--height" => {
+                        i += 1;
+                        let v = rest.get(i).ok_or_else(|| ParseError::InvalidValue {
+                            message: "--height requires a value in inches".to_string(),
+                            usage: "pdf <path> [--height <inches>]",
+                        })?;
+                        paper_height = Some(v.parse::<f64>().map_err(|_| ParseError::InvalidValue {
+                            message: format!("invalid --height value: {}", v),
+                            usage: "pdf <path> [--height <inches>]",
+                        })?);
+                    }
+                    _ if path.is_none() => path = Some(&rest[i]),
+                    _ => {}
+                }
+                i += 1;
+            }
+            let path = path.ok_or_else(|| ParseError::MissingArguments {
                 context: "pdf".to_string(),
-                usage: "pdf <path>",
+                usage: "pdf <path> [--css-page-size] [--landscape] [--no-background] [--width <in>] [--height <in>]",
             })?;
-            Ok(json!({ "id": id, "action": "pdf", "path": path }))
+            let mut cmd = json!({ "id": id, "action": "pdf", "path": path });
+            if let Some(v) = prefer_css_page_size {
+                cmd["preferCSSPageSize"] = json!(v);
+            }
+            if let Some(v) = landscape {
+                cmd["landscape"] = json!(v);
+            }
+            if let Some(v) = print_background {
+                cmd["printBackground"] = json!(v);
+            }
+            if let Some(w) = paper_width {
+                cmd["paperWidth"] = json!(w);
+            }
+            if let Some(h) = paper_height {
+                cmd["paperHeight"] = json!(h);
+            }
+            Ok(cmd)
         }
 
         // === Snapshot ===
@@ -3001,6 +3058,78 @@ mod tests {
         assert_eq!(cmd["action"], "screenshot");
         assert_eq!(cmd["selector"], ".btn");
         assert_eq!(cmd["path"], "./button.png");
+    }
+
+    // === PDF ===
+
+    #[test]
+    fn test_pdf_basic() {
+        let cmd = parse_command(&args("pdf ./out.pdf"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "pdf");
+        assert_eq!(cmd["path"], "./out.pdf");
+        assert!(cmd.get("preferCSSPageSize").is_none());
+        assert!(cmd.get("landscape").is_none());
+    }
+
+    #[test]
+    fn test_pdf_css_page_size() {
+        let cmd = parse_command(&args("pdf ./out.pdf --css-page-size"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "pdf");
+        assert_eq!(cmd["preferCSSPageSize"], true);
+    }
+
+    #[test]
+    fn test_pdf_landscape() {
+        let cmd = parse_command(&args("pdf ./out.pdf --landscape"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "pdf");
+        assert_eq!(cmd["landscape"], true);
+    }
+
+    #[test]
+    fn test_pdf_no_background() {
+        let cmd = parse_command(&args("pdf ./out.pdf --no-background"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "pdf");
+        assert_eq!(cmd["printBackground"], false);
+    }
+
+    #[test]
+    fn test_pdf_custom_size() {
+        let cmd = parse_command(&args("pdf ./out.pdf --width 8.27 --height 11.69"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "pdf");
+        assert_eq!(cmd["paperWidth"], 8.27);
+        assert_eq!(cmd["paperHeight"], 11.69);
+    }
+
+    #[test]
+    fn test_pdf_all_flags() {
+        let cmd = parse_command(
+            &args("pdf ./out.pdf --css-page-size --landscape --no-background --width 5.0 --height 7.0"),
+            &default_flags(),
+        ).unwrap();
+        assert_eq!(cmd["action"], "pdf");
+        assert_eq!(cmd["preferCSSPageSize"], true);
+        assert_eq!(cmd["landscape"], true);
+        assert_eq!(cmd["printBackground"], false);
+        assert_eq!(cmd["paperWidth"], 5.0);
+        assert_eq!(cmd["paperHeight"], 7.0);
+    }
+
+    #[test]
+    fn test_pdf_invalid_width() {
+        let result = parse_command(&args("pdf ./out.pdf --width abc"), &default_flags());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_pdf_missing_width_value() {
+        let result = parse_command(&args("pdf ./out.pdf --width"), &default_flags());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_pdf_missing_path() {
+        let result = parse_command(&args("pdf"), &default_flags());
+        assert!(result.is_err());
     }
 
     // === Snapshot ===

@@ -1517,9 +1517,16 @@ Examples:
             r##"
 agent-browser pdf - Save page as PDF
 
-Usage: agent-browser pdf <path>
+Usage: agent-browser pdf <path> [options]
 
-Saves the current page as a PDF file.
+Saves the current page as a PDF file. Backgrounds are printed by default.
+
+Options:
+  --css-page-size      Honor CSS @page size instead of default Letter
+  --landscape          Landscape orientation
+  --no-background      Omit background graphics
+  --width <inches>     Paper width in inches (default: 8.5)
+  --height <inches>    Paper height in inches (default: 11)
 
 Global Options:
   --json               Output as JSON
@@ -1528,6 +1535,8 @@ Global Options:
 Examples:
   agent-browser pdf ./page.pdf
   agent-browser pdf ~/Documents/report.pdf
+  agent-browser pdf ./a4.pdf --width 8.27 --height 11.69
+  agent-browser pdf ./slide.pdf --landscape --css-page-size
 "##
         }
 
