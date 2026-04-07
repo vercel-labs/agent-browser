@@ -168,6 +168,65 @@ pub async fn take_screenshot(
     })
 }
 
+/// Prepare the target for a screenshot.
+///
+/// On headless Chrome 147+, calling `Page.captureScreenshot` with
+/// `from_surface: true` against an occluded/background target can wait
+/// indefinitely for a compositor frame that never arrives, because the
+/// compositor is frozen for non-visible targets. This surfaces to the CLI
+/// as `CDP command timed out: Page.captureScreenshot` and (via the socket
+/// read-timeout race) `Failed to read: Resource temporarily unavailable
+/// (os error 35)`.
+///
+/// Playwright avoids this by enabling focus emulation on the target so that
+/// Chromium always treats it as focused, and by explicitly bringing it to
+/// the front before capture. We do the same here. All CDP calls are
+/// best-effort: if any of them fail we still attempt the screenshot so we
+/// don't regress existing callers whose browsers don't support the
+/// Emulation domain (older Chrome, certain cloud providers, etc.).
+async fn prepare_target_for_capture(client: &CdpClient, session_id: &str) {
+    // 1. Force Chromium to treat this target as focused. Without this,
+    //    occluded targets stop producing compositor frames on headless
+    //    Chrome 147+, which deadlocks a subsequent `Page.captureScreenshot`
+    //    call that uses `fromSurface: true`.
+    let _ = client
+        .send_command(
+            "Emulation.setFocusEmulationEnabled",
+            Some(serde_json::json!({ "enabled": true })),
+            Some(session_id),
+        )
+        .await;
+
+    // 2. Activate the target so it becomes the foreground tab. This is the
+    //    same call Playwright's `crPage.bringToFront()` makes. On headless
+    //    this also nudges the compositor out of its idle state.
+    let _ = client
+        .send_command_no_params("Page.bringToFront", Some(session_id))
+        .await;
+
+    // 3. Cheap layout/paint trigger. Reading `offsetHeight` forces a
+    //    synchronous layout, and the `readyState` check avoids taking a
+    //    screenshot before the document has started parsing.
+    let expr = "(() => { \
+        try { \
+            const rs = document.readyState; \
+            if (rs === 'loading') return false; \
+            void document.documentElement.offsetHeight; \
+            return true; \
+        } catch (_) { return true; } \
+    })()";
+
+    let params = serde_json::json!({
+        "expression": expr,
+        "returnByValue": true,
+        "awaitPromise": false,
+    });
+
+    let _ = client
+        .send_command("Runtime.evaluate", Some(params), Some(session_id))
+        .await;
+}
+
 async fn capture_screenshot_base64(
     client: &CdpClient,
     session_id: &str,
@@ -175,6 +234,19 @@ async fn capture_screenshot_base64(
     options: &ScreenshotOptions,
     iframe_sessions: &HashMap<String, String>,
 ) -> Result<String, String> {
+    // Best-effort render sync — see prepare_target_for_capture for rationale.
+    prepare_target_for_capture(client, session_id).await;
+
+    // `from_surface: true` is the preferred path on modern Chrome because
+    // it uses the compositor output directly. Combined with
+    // `prepare_target_for_capture` (focus emulation + bringToFront) this
+    // works reliably on Chrome 147+ headless as well. Users who hit
+    // environments where the compositor path is broken can force the
+    // DOM-capture path via `AGENT_BROWSER_SCREENSHOT_FROM_SURFACE=0`.
+    let prefer_surface = std::env::var("AGENT_BROWSER_SCREENSHOT_FROM_SURFACE")
+        .map(|v| !(v == "0" || v.eq_ignore_ascii_case("false")))
+        .unwrap_or(true);
+
     let mut params = CaptureScreenshotParams {
         format: Some(options.format.clone()),
         quality: if options.format == "jpeg" {
@@ -183,7 +255,7 @@ async fn capture_screenshot_base64(
             None
         },
         clip: None,
-        from_surface: Some(true),
+        from_surface: Some(prefer_surface),
         capture_beyond_viewport: if options.full_page { Some(true) } else { None },
     };
 
@@ -221,11 +293,34 @@ async fn capture_screenshot_base64(
         }
     }
 
-    let result: CaptureScreenshotResult = client
-        .send_command_typed("Page.captureScreenshot", &params, Some(session_id))
-        .await?;
-
-    Ok(result.data)
+    match client
+        .send_command_typed::<_, CaptureScreenshotResult>(
+            "Page.captureScreenshot",
+            &params,
+            Some(session_id),
+        )
+        .await
+    {
+        Ok(result) => Ok(result.data),
+        Err(e) if e.contains("CDP command timed out") => {
+            // Fallback: retry once with the opposite from_surface value.
+            // See above for the Chrome 147+ headless rationale. This keeps
+            // the change safe for older Chrome builds where the default
+            // (true) used to work.
+            params.from_surface = Some(!prefer_surface);
+            let result: CaptureScreenshotResult = client
+                .send_command_typed("Page.captureScreenshot", &params, Some(session_id))
+                .await
+                .map_err(|fallback_err| {
+                    format!(
+                        "Page.captureScreenshot failed (fromSurface={}: {}; fromSurface={}: {})",
+                        prefer_surface, e, !prefer_surface, fallback_err
+                    )
+                })?;
+            Ok(result.data)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 async fn collect_annotations(
