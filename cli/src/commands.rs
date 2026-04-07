@@ -773,9 +773,39 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
 
         // === Connect (CDP) ===
         "connect" => {
-            let endpoint = rest.first().ok_or_else(|| ParseError::MissingArguments {
+            let mut direct = false;
+            let mut endpoint: Option<&str> = None;
+
+            for arg in rest {
+                match arg.as_ref() {
+                    // Page-level CDP sockets do not support browser-level Target.*
+                    // discovery, so `connect --direct <ws-url>` opts into the
+                    // existing direct page-session path.
+                    "--direct" => direct = true,
+                    value if value.starts_with('-') => {
+                        return Err(ParseError::InvalidValue {
+                            message: format!("Unknown option for connect: {}", value),
+                            usage: "connect [--direct] <port|url>",
+                        });
+                    }
+                    value => {
+                        if endpoint.is_some() {
+                            return Err(ParseError::InvalidValue {
+                                message: format!(
+                                    "Unexpected argument: '{}'. connect accepts a single <port|url>",
+                                    value
+                                ),
+                                usage: "connect [--direct] <port|url>",
+                            });
+                        }
+                        endpoint = Some(value);
+                    }
+                }
+            }
+
+            let endpoint = endpoint.ok_or_else(|| ParseError::MissingArguments {
                 context: "connect".to_string(),
-                usage: "connect <port|url>",
+                usage: "connect [--direct] <port|url>",
             })?;
             // Check if it's a URL (ws://, wss://, http://, https://)
             if endpoint.starts_with("ws://")
@@ -783,14 +813,19 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 || endpoint.starts_with("http://")
                 || endpoint.starts_with("https://")
             {
-                Ok(json!({ "id": id, "action": "launch", "cdpUrl": endpoint }))
+                Ok(json!({
+                    "id": id,
+                    "action": "launch",
+                    "cdpUrl": endpoint,
+                    "direct": direct
+                }))
             } else {
                 // It's a port number - validate and use cdpPort field
                 let port: u16 = match endpoint.parse::<u32>() {
                     Ok(0) => {
                         return Err(ParseError::InvalidValue {
                             message: "Invalid port: port must be greater than 0".to_string(),
-                            usage: "connect <port|url>",
+                            usage: "connect [--direct] <port|url>",
                         });
                     }
                     Ok(p) if p > 65535 => {
@@ -799,7 +834,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                                 "Invalid port: {} is out of range (valid range: 1-65535)",
                                 p
                             ),
-                            usage: "connect <port|url>",
+                            usage: "connect [--direct] <port|url>",
                         });
                     }
                     Ok(p) => p as u16,
@@ -809,11 +844,16 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                                 "Invalid value: '{}' is not a valid port number or URL",
                                 endpoint
                             ),
-                            usage: "connect <port|url>",
+                            usage: "connect [--direct] <port|url>",
                         });
                     }
                 };
-                Ok(json!({ "id": id, "action": "launch", "cdpPort": port }))
+                Ok(json!({
+                    "id": id,
+                    "action": "launch",
+                    "cdpPort": port,
+                    "direct": direct
+                }))
             }
         }
 
@@ -3732,6 +3772,7 @@ mod tests {
         assert_eq!(cmd["action"], "launch");
         assert_eq!(cmd["cdpPort"], 9222);
         assert!(cmd.get("cdpUrl").is_none());
+        assert_eq!(cmd["direct"], false);
     }
 
     #[test]
@@ -3744,6 +3785,7 @@ mod tests {
         assert_eq!(cmd["action"], "launch");
         assert_eq!(cmd["cdpUrl"], "ws://localhost:9222/devtools/browser/abc123");
         assert!(cmd.get("cdpPort").is_none());
+        assert_eq!(cmd["direct"], false);
     }
 
     #[test]
@@ -3759,6 +3801,7 @@ mod tests {
             "wss://remote-browser.example.com/cdp?token=xyz"
         );
         assert!(cmd.get("cdpPort").is_none());
+        assert_eq!(cmd["direct"], false);
     }
 
     #[test]
@@ -3768,6 +3811,41 @@ mod tests {
         assert_eq!(cmd["action"], "launch");
         assert_eq!(cmd["cdpUrl"], "http://localhost:9222");
         assert!(cmd.get("cdpPort").is_none());
+        assert_eq!(cmd["direct"], false);
+    }
+
+    #[test]
+    fn test_connect_with_direct_ws_url() {
+        let input: Vec<String> = vec![
+            "connect".to_string(),
+            "--direct".to_string(),
+            "ws://localhost:19222/devtools/page/ABC123".to_string(),
+        ];
+        let cmd = parse_command(&input, &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "launch");
+        assert_eq!(cmd["cdpUrl"], "ws://localhost:19222/devtools/page/ABC123");
+        assert_eq!(cmd["direct"], true);
+        assert!(cmd.get("cdpPort").is_none());
+    }
+
+    #[test]
+    fn test_connect_with_direct_before_port() {
+        let cmd = parse_command(&args("connect --direct 9222"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "launch");
+        assert_eq!(cmd["cdpPort"], 9222);
+        assert_eq!(cmd["direct"], true);
+    }
+
+    #[test]
+    fn test_connect_with_direct_after_url() {
+        let input: Vec<String> = vec![
+            "connect".to_string(),
+            "ws://localhost:19222/devtools/page/ABC123".to_string(),
+            "--direct".to_string(),
+        ];
+        let cmd = parse_command(&input, &default_flags()).unwrap();
+        assert_eq!(cmd["cdpUrl"], "ws://localhost:19222/devtools/page/ABC123");
+        assert_eq!(cmd["direct"], true);
     }
 
     #[test]

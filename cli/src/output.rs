@@ -2432,7 +2432,7 @@ Examples:
             r##"
 agent-browser connect - Connect to browser via CDP
 
-Usage: agent-browser connect <port|url>
+Usage: agent-browser connect [--direct] <port|url>
 
 Connects to a running browser instance via Chrome DevTools Protocol (CDP).
 This allows controlling browsers, Electron apps, or remote browser services.
@@ -2441,9 +2441,14 @@ Arguments:
   <port>               Local port number (e.g., 9222)
   <url>                Full WebSocket URL (ws://, wss://, http://, https://)
 
+Options:
+  --direct             Connect directly to a page-level WebSocket URL without
+                       Target.* discovery
+
 Supported URL formats:
   - Port number: 9222 (connects to http://localhost:9222)
   - WebSocket URL: ws://localhost:9222/devtools/browser/...
+  - Page WebSocket URL: ws://localhost:19222/devtools/page/ABC123 (use --direct)
   - Remote service: wss://remote-browser.example.com/cdp?token=...
 
 Global Options:
@@ -2457,6 +2462,9 @@ Examples:
 
   # Connect using WebSocket URL from /json/version endpoint
   agent-browser connect "ws://localhost:9222/devtools/browser/abc123"
+
+  # Connect directly to a page-level WebSocket URL
+  agent-browser connect --direct "ws://localhost:19222/devtools/page/ABC123"
 
   # Connect to remote browser service
   agent-browser connect "wss://browser-service.example.com/cdp?token=xyz"
@@ -2749,7 +2757,7 @@ Core Commands:
   pdf <path>                 Save as PDF
   snapshot                   Accessibility tree with refs (for AI)
   eval <js>                  Run JavaScript
-  connect <port|url>         Connect to browser via CDP
+  connect [--direct] <port|url>  Connect to browser via CDP
   close [--all]              Close browser (--all closes every session)
 
 Navigation:
