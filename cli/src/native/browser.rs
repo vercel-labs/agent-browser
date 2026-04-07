@@ -202,6 +202,8 @@ pub struct BrowserManager {
     default_timeout_ms: u64,
     /// Stored download path from launch options, re-applied to new contexts (e.g., recording)
     pub download_path: Option<String>,
+    /// Whether to ignore HTTPS certificate errors, re-applied to new contexts (e.g., recording)
+    pub ignore_https_errors: bool,
     /// Origins visited during this session, used by save_state to collect cross-origin localStorage.
     visited_origins: HashSet<String>,
 }
@@ -273,6 +275,7 @@ impl BrowserManager {
                 active_page_index: 0,
                 default_timeout_ms: 25_000,
                 download_path: download_path.clone(),
+                ignore_https_errors,
                 visited_origins: HashSet::new(),
             };
             manager.discover_and_attach_targets().await?;
@@ -360,6 +363,7 @@ impl BrowserManager {
             active_page_index: 0,
             default_timeout_ms: 25_000,
             download_path: None,
+            ignore_https_errors: false,
             visited_origins: HashSet::new(),
         };
 
@@ -1331,6 +1335,7 @@ async fn initialize_lightpanda_manager(
             active_page_index: 0,
             default_timeout_ms: 25_000,
             download_path: None,
+            ignore_https_errors: false,
             visited_origins: HashSet::new(),
         };
 

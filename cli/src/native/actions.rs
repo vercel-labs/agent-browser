@@ -3939,6 +3939,19 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
                 .await;
         }
 
+        // Re-apply HTTPS error ignore to the recording context.
+        // Security.setIgnoreCertificateErrors at launch only applies to the session it was sent on.
+        if mgr.ignore_https_errors {
+            let _ = mgr
+                .client
+                .send_command(
+                    "Security.setIgnoreCertificateErrors",
+                    Some(json!({ "ignore": true })),
+                    Some(&new_session_id),
+                )
+                .await;
+        }
+
         // Transfer cookies to new context
         if let Some(ref cr) = cookies_result {
             if let Some(cookie_arr) = cr.get("cookies").and_then(|v| v.as_array()) {
