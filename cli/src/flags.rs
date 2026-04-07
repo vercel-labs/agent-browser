@@ -323,6 +323,7 @@ pub struct Flags {
     pub cli_user_agent: bool,
     pub cli_proxy: bool,
     pub cli_proxy_bypass: bool,
+    pub cli_ca_cert: bool,
     pub cli_allow_file_access: bool,
     pub cli_annotate: bool,
     pub cli_download_path: bool,
@@ -460,6 +461,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
         cli_user_agent: false,
         cli_proxy: false,
         cli_proxy_bypass: false,
+        cli_ca_cert: false,
         cli_allow_file_access: false,
         cli_annotate: false,
         cli_download_path: false,
@@ -594,6 +596,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
             "--ca-cert" => {
                 if let Some(s) = args.get(i + 1) {
                     flags.ca_cert = Some(s.clone());
+                    flags.cli_ca_cert = true;
                     i += 1;
                 }
             }

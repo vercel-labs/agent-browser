@@ -876,58 +876,48 @@ fn main() {
     // Only warn about flags that were passed on the command line, not those set via environment
     // variables (since the daemon already uses the env vars when it starts).
     if daemon_result.already_running {
-        let ignored_flags: Vec<String> = [
+        let ignored_flags: Vec<&str> = [
             if flags.cli_executable_path {
-                Some("--executable-path".to_string())
+                Some("--executable-path")
             } else {
                 None
             },
             if flags.cli_extensions {
-                Some("--extension".to_string())
+                Some("--extension")
             } else {
                 None
             },
             if flags.cli_profile {
-                Some("--profile".to_string())
+                Some("--profile")
             } else {
                 None
             },
             if flags.cli_state {
-                Some("--state".to_string())
+                Some("--state")
             } else {
                 None
             },
-            if flags.cli_args {
-                Some("--args".to_string())
-            } else {
-                None
-            },
+            if flags.cli_args { Some("--args") } else { None },
             if flags.cli_user_agent {
-                Some("--user-agent".to_string())
+                Some("--user-agent")
             } else {
                 None
             },
             if flags.cli_proxy {
-                Some("--proxy".to_string())
+                Some("--proxy")
             } else {
                 None
             },
             if flags.cli_proxy_bypass {
-                Some("--proxy-bypass".to_string())
+                Some("--proxy-bypass")
             } else {
                 None
             },
-            flags
-                .ignore_https_errors
-                .then(|| "--ignore-https-errors".to_string()),
-            flags.ca_cert.as_ref().map(|p| format!("--ca-cert {}", p)),
-            flags
-                .cli_allow_file_access
-                .then(|| "--allow-file-access".to_string()),
-            flags
-                .cli_download_path
-                .then(|| "--download-path".to_string()),
-            flags.cli_headed.then(|| "--headed".to_string()),
+            flags.ignore_https_errors.then_some("--ignore-https-errors"),
+            flags.cli_ca_cert.then_some("--ca-cert"),
+            flags.cli_allow_file_access.then_some("--allow-file-access"),
+            flags.cli_download_path.then_some("--download-path"),
+            flags.cli_headed.then_some("--headed"),
         ]
         .into_iter()
         .flatten()

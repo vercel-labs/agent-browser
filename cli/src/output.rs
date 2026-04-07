@@ -465,12 +465,11 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
             }
             return;
         }
-        // Cleared (cookies, console, or request log)
+        // Cleared (cookies or request log)
         if let Some(cleared) = data.get("cleared").and_then(|v| v.as_bool()) {
             if cleared {
                 let label = match action {
                     Some("cookies_clear") => "Cookies cleared",
-                    Some("console") => "Console log cleared",
                     _ => "Request log cleared",
                 };
                 println!("{} {}", color::success_indicator(), label);
