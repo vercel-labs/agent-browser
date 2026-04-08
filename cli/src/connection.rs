@@ -635,21 +635,44 @@ fn is_transient_error(error: &str) -> bool {
 
 /// Socket read timeout for responses from the daemon.
 ///
-/// Must be strictly larger than the daemon-side CDP command timeout
-/// (see `native/cdp/client.rs::CDP_COMMAND_TIMEOUT_SECS`) so that the daemon
-/// always has time to materialise and return an error/success response before
-/// this client-side socket read gives up. Otherwise commands like
-/// `Page.captureScreenshot`, which can take close to the full CDP timeout on
-/// headless Chrome 147+, regularly trigger `EAGAIN (os error 35)` on macOS
-/// (and `os error 11` on Linux) even though the daemon is still healthy.
+/// Must be strictly larger than the worst-case time the daemon can spend
+/// on a single command so that the client doesn't give up before the
+/// daemon can materialise an error/success response. Otherwise commands
+/// like `Page.captureScreenshot`, which can take close to the full CDP
+/// timeout on headless Chrome 147+, regularly trigger `EAGAIN (os error
+/// 35)` on macOS (and `os error 11` on Linux) even though the daemon is
+/// still healthy.
+///
+/// The worst case today is `capture_screenshot_base64` in
+/// `native/screenshot.rs`, which on timeout retries once with the
+/// opposite `fromSurface` value. That gives a worst-case daemon wall
+/// time of `2 × cdp_command_timeout`. We add a safety margin on top
+/// (JSON serialisation of a large base64 payload, socket write-back,
+/// scheduler jitter) to avoid races at the exact boundary.
 ///
 /// Can be overridden via the `AGENT_BROWSER_READ_TIMEOUT_SECS` env var.
 fn socket_read_timeout_secs() -> u64 {
-    std::env::var("AGENT_BROWSER_READ_TIMEOUT_SECS")
+    if let Some(override_secs) = std::env::var("AGENT_BROWSER_READ_TIMEOUT_SECS")
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
         .filter(|&n| n > 0)
-        .unwrap_or(75)
+    {
+        return override_secs;
+    }
+
+    // Keep this in sync with the CDP command timeout so the two knobs
+    // don't silently drift. We can't import the constant from
+    // `native::cdp::client` here because the binary is cfg-gated on
+    // per-command features; read the same env var instead.
+    let cdp_secs = std::env::var("AGENT_BROWSER_CDP_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(60);
+
+    // `2 × cdp` covers the screenshot fallback retry, `+ 15 s` covers
+    // serialisation / write-back overhead.
+    cdp_secs.saturating_mul(2).saturating_add(15)
 }
 
 fn send_command_once(cmd: &Value, session: &str) -> Result<Response, String> {
