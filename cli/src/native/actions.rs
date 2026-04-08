@@ -2225,7 +2225,63 @@ async fn handle_evaluate(cmd: &Value, state: &DaemonState) -> Result<Value, Stri
         .and_then(|v| v.as_str())
         .ok_or("Missing 'script' parameter")?;
 
-    let result = mgr.evaluate(script, None).await?;
+    // If we're inside an iframe context, evaluate in that frame's session.
+    // Cross-origin iframes have a dedicated CDP session; same-origin iframes
+    // use Page.createIsolatedWorld to get an execution context in that frame.
+    let main_session_id = mgr.active_session_id()?.to_string();
+    let (eval_session, context_id) =
+        if let Some(ref frame_id) = state.active_frame_id {
+            if let Some(iframe_sid) = state.iframe_sessions.get(frame_id) {
+                // Cross-origin: dedicated session, no contextId needed
+                (iframe_sid.clone(), None)
+            } else {
+                // Same-origin: create an isolated world in that frame
+                let ctx_id = mgr
+                    .client
+                    .send_command(
+                        "Page.createIsolatedWorld",
+                        Some(json!({ "frameId": frame_id, "worldName": "__ab_eval" })),
+                        Some(&main_session_id),
+                    )
+                    .await
+                    .ok()
+                    .and_then(|r| r.get("executionContextId").and_then(|v| v.as_i64()));
+                (main_session_id, ctx_id)
+            }
+        } else {
+            (main_session_id, None)
+        };
+
+    let mut params = json!({
+        "expression": script,
+        "returnByValue": true,
+        "awaitPromise": true
+    });
+    if let Some(ctx) = context_id {
+        params["contextId"] = json!(ctx);
+    }
+
+    let raw: serde_json::Value = mgr
+        .client
+        .send_command("Runtime.evaluate", Some(params), Some(&eval_session))
+        .await?;
+
+    if let Some(details) = raw.get("exceptionDetails") {
+        let msg = details
+            .get("exception")
+            .and_then(|e| e.get("description"))
+            .and_then(|v| v.as_str())
+            .or_else(|| details.get("text").and_then(|v| v.as_str()))
+            .unwrap_or("Unknown evaluation error");
+        return Err(format!("Evaluation error: {}", msg));
+    }
+
+    let result = raw
+        .get("result")
+        .and_then(|r| r.get("value"))
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+
     let url = mgr.get_url().await.unwrap_or_default();
     Ok(json!({ "result": result, "origin": url }))
 }
