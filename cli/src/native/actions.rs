@@ -1292,6 +1292,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         "wait" => handle_wait(cmd, state).await,
         "gettext" => handle_gettext(cmd, state).await,
         "getattribute" => handle_getattribute(cmd, state).await,
+        "getattributes" => handle_getattributes(cmd, state).await,
         "isvisible" => handle_isvisible(cmd, state).await,
         "isenabled" => handle_isenabled(cmd, state).await,
         "ischecked" => handle_ischecked(cmd, state).await,
@@ -2870,6 +2871,26 @@ async fn handle_getattribute(cmd: &Value, state: &mut DaemonState) -> Result<Val
     .await?;
     let url = mgr.get_url().await.unwrap_or_default();
     Ok(json!({ "value": value, "origin": url }))
+}
+
+async fn handle_getattributes(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?.to_string();
+    let selector = cmd
+        .get("selector")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'selector' parameter")?;
+
+    let attributes = super::element::get_element_attributes(
+        &mgr.client,
+        &session_id,
+        &state.ref_map,
+        selector,
+        &state.iframe_sessions,
+    )
+    .await?;
+    let url = mgr.get_url().await.unwrap_or_default();
+    Ok(json!({ "attributes": attributes, "origin": url }))
 }
 
 async fn handle_isvisible(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {

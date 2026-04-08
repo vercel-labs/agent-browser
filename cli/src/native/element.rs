@@ -553,6 +553,46 @@ pub async fn get_element_attribute(
     Ok(result.result.value.unwrap_or(Value::Null))
 }
 
+pub async fn get_element_attributes(
+    client: &CdpClient,
+    session_id: &str,
+    ref_map: &RefMap,
+    selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
+) -> Result<Value, String> {
+    let (object_id, effective_session_id) = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
+
+    let result: EvaluateResult = client
+        .send_command_typed(
+            "Runtime.callFunctionOn",
+            &CallFunctionOnParams {
+                function_declaration: r#"function() {
+                    const attrs = {};
+                    for (const attr of this.attributes) {
+                        attrs[attr.name] = attr.value;
+                    }
+                    return attrs;
+                }"#
+                .to_string(),
+                object_id: Some(object_id),
+                arguments: None,
+                return_by_value: Some(true),
+                await_promise: Some(false),
+            },
+            Some(&effective_session_id),
+        )
+        .await?;
+
+    Ok(result.result.value.unwrap_or(Value::Null))
+}
+
 pub async fn is_element_visible(
     client: &CdpClient,
     session_id: &str,
