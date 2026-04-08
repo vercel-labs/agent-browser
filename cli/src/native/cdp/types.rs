@@ -192,6 +192,7 @@ pub struct PageNavigateResult {
     pub frame_id: String,
     pub loader_id: Option<String>,
     pub error_text: Option<String>,
+    pub is_download: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

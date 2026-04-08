@@ -106,6 +106,7 @@ fn update_page_target_info_in_pages(pages: &mut [PageInfo], target: &TargetInfo)
         page.url = target.url.clone();
         page.title = target.title.clone();
         page.target_type = target.target_type.clone();
+        page.browser_context_id = target.browser_context_id.clone();
         return true;
     }
     false
@@ -143,6 +144,7 @@ pub struct PageInfo {
     pub url: String,
     pub title: String,
     pub target_type: String, // "page" or "webview"
+    pub browser_context_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,6 +153,11 @@ pub enum WaitUntil {
     DomContentLoaded,
     NetworkIdle,
     None,
+}
+
+pub enum NavigationOutcome {
+    Page(Value),
+    Download(Value),
 }
 
 impl WaitUntil {
@@ -202,6 +209,12 @@ pub struct BrowserManager {
     default_timeout_ms: u64,
     /// Stored download path from launch options, re-applied to new contexts (e.g., recording)
     pub download_path: Option<String>,
+    /// Whether the agent owns the default browser context and may safely mutate
+    /// its browser-wide download behavior.
+    manages_default_download_context: bool,
+    /// Browser contexts created and owned by the agent. These are safe to
+    /// update with browser-wide download behavior.
+    managed_browser_context_ids: HashSet<String>,
     /// Whether to ignore HTTPS certificate errors, re-applied to new contexts (e.g., recording)
     pub ignore_https_errors: bool,
     /// Origins visited during this session, used by save_state to collect cross-origin localStorage.
@@ -211,6 +224,20 @@ pub struct BrowserManager {
 const LIGHTPANDA_CDP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const LIGHTPANDA_CDP_CONNECT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const LIGHTPANDA_TARGET_INIT_TIMEOUT: Duration = Duration::from_secs(10);
+
+#[derive(Debug, Default)]
+struct DownloadState {
+    guid: Option<String>,
+    suggested_filename: Option<String>,
+    /// The configured download directory; used to construct the file path for
+    /// Page-domain download events which do not include `filePath`.
+    download_path: Option<String>,
+}
+
+enum BufferedDownload {
+    InProgress(DownloadState),
+    Completed(Value),
+}
 
 impl BrowserManager {
     pub async fn launch(options: LaunchOptions, engine: Option<&str>) -> Result<Self, String> {
@@ -264,7 +291,7 @@ impl BrowserManager {
         };
 
         let manager = if engine == "lightpanda" {
-            initialize_lightpanda_manager(ws_url, process).await?
+            initialize_lightpanda_manager(ws_url, process, download_path.clone()).await?
         } else {
             let client = Arc::new(CdpClient::connect(&ws_url).await?);
             let mut manager = Self {
@@ -275,6 +302,8 @@ impl BrowserManager {
                 active_page_index: 0,
                 default_timeout_ms: 25_000,
                 download_path: download_path.clone(),
+                manages_default_download_context: true,
+                managed_browser_context_ids: HashSet::new(),
                 ignore_https_errors,
                 visited_origins: HashSet::new(),
             };
@@ -317,41 +346,35 @@ impl BrowserManager {
                 .await;
         }
 
-        if let Some(ref path) = download_path {
-            let _ = manager
-                .client
-                .send_command(
-                    "Browser.setDownloadBehavior",
-                    Some(json!({ "behavior": "allow", "downloadPath": path })),
-                    None,
-                )
-                .await;
-        }
-
         Ok(manager)
     }
 
-    pub async fn connect_cdp(url: &str) -> Result<Self, String> {
-        Self::connect_cdp_inner(url, false, None).await
+    pub async fn connect_cdp(url: &str, download_path: Option<String>) -> Result<Self, String> {
+        Self::connect_cdp_inner(url, false, None, download_path).await
     }
 
     /// Connect to a provider CDP proxy where the WebSocket IS the page session.
     /// Skips browser-level Target.* commands that most proxies don't support.
-    pub async fn connect_cdp_direct(url: &str) -> Result<Self, String> {
-        Self::connect_cdp_inner(url, true, None).await
+    pub async fn connect_cdp_direct(
+        url: &str,
+        download_path: Option<String>,
+    ) -> Result<Self, String> {
+        Self::connect_cdp_inner(url, true, None, download_path).await
     }
 
     pub async fn connect_cdp_with_headers(
         url: &str,
         headers: Option<Vec<(String, String)>>,
+        download_path: Option<String>,
     ) -> Result<Self, String> {
-        Self::connect_cdp_inner(url, false, headers).await
+        Self::connect_cdp_inner(url, false, headers, download_path).await
     }
 
     async fn connect_cdp_inner(
         url: &str,
         direct_page: bool,
         headers: Option<Vec<(String, String)>>,
+        download_path: Option<String>,
     ) -> Result<Self, String> {
         let ws_url = resolve_cdp_url(url).await?;
         let client = Arc::new(CdpClient::connect_with_headers(&ws_url, headers).await?);
@@ -362,7 +385,9 @@ impl BrowserManager {
             pages: Vec::new(),
             active_page_index: 0,
             default_timeout_ms: 25_000,
-            download_path: None,
+            download_path: download_path.clone(),
+            manages_default_download_context: false,
+            managed_browser_context_ids: HashSet::new(),
             ignore_https_errors: false,
             visited_origins: HashSet::new(),
         };
@@ -374,18 +399,20 @@ impl BrowserManager {
                 url: String::new(),
                 title: String::new(),
                 target_type: "page".to_string(),
+                browser_context_id: None,
             });
             manager.active_page_index = 0;
             manager.enable_domains_direct().await?;
         } else {
             manager.discover_and_attach_targets().await?;
         }
+
         Ok(manager)
     }
 
-    pub async fn connect_auto() -> Result<Self, String> {
+    pub async fn connect_auto(download_path: Option<String>) -> Result<Self, String> {
         let ws_url = auto_connect_cdp().await?;
-        Self::connect_cdp(&ws_url).await
+        Self::connect_cdp(&ws_url, download_path).await
     }
 
     async fn discover_and_attach_targets(&mut self) -> Result<(), String> {
@@ -439,6 +466,7 @@ impl BrowserManager {
                 url: "about:blank".to_string(),
                 title: String::new(),
                 target_type: "page".to_string(),
+                browser_context_id: None,
             });
             self.active_page_index = 0;
             self.enable_domains(&attach_result.session_id).await?;
@@ -462,6 +490,7 @@ impl BrowserManager {
                     url: target.url.clone(),
                     title: target.title.clone(),
                     target_type: target.target_type.clone(),
+                    browser_context_id: target.browser_context_id.clone(),
                 });
             }
 
@@ -473,11 +502,26 @@ impl BrowserManager {
         Ok(())
     }
 
-    pub async fn enable_domains_pub(&self, session_id: &str) -> Result<(), String> {
-        self.enable_domains(session_id).await
+    pub async fn enable_domains_pub(
+        &self,
+        session_id: &str,
+        browser_context_id: Option<&str>,
+    ) -> Result<(), String> {
+        self.enable_domains_with_context(session_id, browser_context_id)
+            .await
     }
 
     async fn enable_domains(&self, session_id: &str) -> Result<(), String> {
+        let browser_context_id = self.browser_context_id_for_session(session_id);
+        self.enable_domains_with_context(session_id, browser_context_id)
+            .await
+    }
+
+    async fn enable_domains_with_context(
+        &self,
+        session_id: &str,
+        browser_context_id: Option<&str>,
+    ) -> Result<(), String> {
         self.client
             .send_command_no_params("Page.enable", Some(session_id))
             .await?;
@@ -509,6 +553,13 @@ impl BrowserManager {
                 Some(session_id),
             )
             .await;
+        if self.download_path.is_some() {
+            self.apply_page_download_behavior(Some(session_id)).await;
+            if self.should_apply_browser_download_behavior(browser_context_id) {
+                self.apply_browser_download_behavior(browser_context_id)
+                    .await;
+            }
+        }
         Ok(())
     }
 
@@ -527,6 +578,12 @@ impl BrowserManager {
         self.client
             .send_command_no_params("Network.enable", None)
             .await?;
+        if self.download_path.is_some() {
+            self.apply_page_download_behavior(None).await;
+            if self.should_apply_browser_download_behavior(None) {
+                self.apply_browser_download_behavior(None).await;
+            }
+        }
         Ok(())
     }
 
@@ -537,7 +594,11 @@ impl BrowserManager {
             .ok_or_else(|| "No active page".to_string())
     }
 
-    pub async fn navigate(&mut self, url: &str, wait_until: WaitUntil) -> Result<Value, String> {
+    pub async fn navigate(
+        &mut self,
+        url: &str,
+        wait_until: WaitUntil,
+    ) -> Result<NavigationOutcome, String> {
         let session_id = self.active_session_id()?.to_string();
         let mut lifecycle_rx = self.client.subscribe();
 
@@ -552,6 +613,47 @@ impl BrowserManager {
                 Some(&session_id),
             )
             .await?;
+
+        if navigation_has_explicit_download(&nav_result) {
+            if let Some(ref dl_path) = self.download_path {
+                let download_result = self
+                    .wait_for_download(&session_id, &nav_result.frame_id, &mut lifecycle_rx)
+                    .await;
+                return match download_result {
+                    Ok(info) => Ok(NavigationOutcome::Download(info)),
+                    Err(e) => Err(format!(
+                        "Navigation failed: {} (download_path={}, download_error={})",
+                        nav_result.error_text.as_deref().unwrap_or("download"),
+                        dl_path,
+                        e
+                    )),
+                };
+            }
+            return Err("Navigation aborted: the URL triggered a file download. \
+                 Use --download-path <dir> to save the file."
+                .to_string());
+        }
+
+        if nav_result.error_text.as_deref() == Some("net::ERR_ABORTED") {
+            if let Some(ref dl_path) = self.download_path {
+                return match self
+                    .buffered_download_after_abort(
+                        &session_id,
+                        &nav_result.frame_id,
+                        &mut lifecycle_rx,
+                    )
+                    .await
+                {
+                    Ok(Some(info)) => Ok(NavigationOutcome::Download(info)),
+                    Ok(None) => Err("Navigation failed: net::ERR_ABORTED".to_string()),
+                    Err(e) => Err(format!(
+                        "Navigation failed: {} (download_path={}, download_error={})",
+                        "net::ERR_ABORTED", dl_path, e
+                    )),
+                };
+            }
+            return Err("Navigation failed: net::ERR_ABORTED".to_string());
+        }
 
         if let Some(ref error_text) = nav_result.error_text {
             return Err(format!("Navigation failed: {}", error_text));
@@ -581,7 +683,31 @@ impl BrowserManager {
             page.title = title.clone();
         }
 
-        Ok(json!({ "url": page_url, "title": title }))
+        Ok(NavigationOutcome::Page(
+            json!({ "url": page_url, "title": title }),
+        ))
+    }
+
+    /// Wait for a CDP download to complete after a navigation triggered a file
+    /// download (net::ERR_ABORTED).  Returns a JSON value with the download
+    /// path and suggested filename on success.
+    async fn wait_for_download(
+        &self,
+        session_id: &str,
+        frame_id: &str,
+        rx: &mut broadcast::Receiver<CdpEvent>,
+    ) -> Result<Value, String> {
+        wait_for_download_completion(
+            session_id,
+            frame_id,
+            rx,
+            tokio::time::Duration::from_millis(self.default_timeout_ms),
+            DownloadState {
+                download_path: self.download_path.clone(),
+                ..Default::default()
+            },
+        )
+        .await
     }
 
     async fn wait_for_lifecycle(
@@ -807,6 +933,7 @@ impl BrowserManager {
             url: "about:blank".to_string(),
             title: String::new(),
             target_type: "page".to_string(),
+            browser_context_id: None,
         });
         self.active_page_index = 0;
         self.enable_domains(&attach_result.session_id).await?;
@@ -881,6 +1008,7 @@ impl BrowserManager {
             url: target_url.to_string(),
             title: String::new(),
             target_type: "page".to_string(),
+            browser_context_id: None,
         });
         self.active_page_index = index;
 
@@ -1221,20 +1349,353 @@ impl BrowserManager {
         &self.visited_origins
     }
 
+    pub fn register_managed_browser_context(&mut self, browser_context_id: impl Into<String>) {
+        self.managed_browser_context_ids
+            .insert(browser_context_id.into());
+    }
+
+    pub async fn update_download_path(
+        &mut self,
+        download_path: Option<String>,
+    ) -> Result<(), String> {
+        self.download_path = download_path;
+
+        let (has_direct_page, session_ids) = collect_page_download_behavior_targets(&self.pages);
+
+        if has_direct_page {
+            self.apply_page_download_behavior(None).await;
+        }
+        for session_id in session_ids {
+            self.apply_page_download_behavior(Some(&session_id)).await;
+        }
+
+        if self.manages_default_download_context {
+            self.apply_browser_download_behavior(None).await;
+        }
+        let mut browser_context_ids: Vec<_> =
+            self.managed_browser_context_ids.iter().cloned().collect();
+        browser_context_ids.sort();
+        for browser_context_id in browser_context_ids {
+            self.apply_browser_download_behavior(Some(&browser_context_id))
+                .await;
+        }
+        Ok(())
+    }
+
+    fn browser_context_id_for_session(&self, session_id: &str) -> Option<&str> {
+        self.pages
+            .iter()
+            .find(|page| page.session_id == session_id)
+            .and_then(|page| page.browser_context_id.as_deref())
+    }
+
     pub async fn set_download_behavior(&self, download_path: &str) -> Result<(), String> {
         let session_id = self.active_session_id()?;
+        let browser_context_id = self.browser_context_id_for_session(session_id);
         self.client
             .send_command(
                 "Browser.setDownloadBehavior",
-                Some(json!({
-                    "behavior": "allowAndName",
-                    "downloadPath": download_path,
-                    "eventsEnabled": true,
-                })),
-                Some(session_id),
+                Some(browser_download_behavior_params(
+                    Some(download_path),
+                    browser_context_id,
+                    "allowAndName",
+                )),
+                None,
             )
             .await?;
         Ok(())
+    }
+
+    fn should_apply_browser_download_behavior(&self, browser_context_id: Option<&str>) -> bool {
+        should_apply_browser_download_behavior(
+            browser_context_id,
+            self.manages_default_download_context,
+            &self.managed_browser_context_ids,
+        )
+    }
+
+    async fn apply_page_download_behavior(&self, session_id: Option<&str>) {
+        let _ = self
+            .client
+            .send_command(
+                "Page.setDownloadBehavior",
+                Some(page_download_behavior_params(self.download_path.as_deref())),
+                session_id,
+            )
+            .await;
+    }
+
+    async fn apply_browser_download_behavior(&self, browser_context_id: Option<&str>) {
+        let _ = self
+            .client
+            .send_command(
+                "Browser.setDownloadBehavior",
+                Some(browser_download_behavior_params(
+                    self.download_path.as_deref(),
+                    browser_context_id,
+                    "allow",
+                )),
+                None,
+            )
+            .await;
+    }
+
+    async fn buffered_download_after_abort(
+        &self,
+        session_id: &str,
+        frame_id: &str,
+        rx: &mut broadcast::Receiver<CdpEvent>,
+    ) -> Result<Option<Value>, String> {
+        match drain_buffered_download_events(session_id, frame_id, rx, &self.download_path)? {
+            Some(BufferedDownload::Completed(info)) => Ok(Some(info)),
+            Some(BufferedDownload::InProgress(state)) => self
+                .wait_for_download_from_state(session_id, frame_id, rx, state)
+                .await
+                .map(Some),
+            None => Ok(None),
+        }
+    }
+
+    async fn wait_for_download_from_state(
+        &self,
+        session_id: &str,
+        frame_id: &str,
+        rx: &mut broadcast::Receiver<CdpEvent>,
+        state: DownloadState,
+    ) -> Result<Value, String> {
+        wait_for_download_completion(
+            session_id,
+            frame_id,
+            rx,
+            tokio::time::Duration::from_millis(self.default_timeout_ms),
+            state,
+        )
+        .await
+    }
+}
+
+fn navigation_has_explicit_download(result: &PageNavigateResult) -> bool {
+    result.is_download == Some(true)
+}
+
+fn page_download_behavior_params(download_path: Option<&str>) -> Value {
+    match download_path {
+        Some(download_path) => json!({
+            "behavior": "allow",
+            "downloadPath": download_path,
+        }),
+        None => json!({
+            "behavior": "default",
+        }),
+    }
+}
+
+fn browser_download_behavior_params(
+    download_path: Option<&str>,
+    browser_context_id: Option<&str>,
+    allow_behavior: &str,
+) -> Value {
+    let mut params = match download_path {
+        Some(download_path) => json!({
+            "behavior": allow_behavior,
+            "downloadPath": download_path,
+            "eventsEnabled": true,
+        }),
+        None => json!({
+            "behavior": "default",
+            "eventsEnabled": false,
+        }),
+    };
+    if let Some(browser_context_id) = browser_context_id {
+        params["browserContextId"] = json!(browser_context_id);
+    }
+    params
+}
+
+fn should_apply_browser_download_behavior(
+    browser_context_id: Option<&str>,
+    manages_default_download_context: bool,
+    managed_browser_context_ids: &HashSet<String>,
+) -> bool {
+    match browser_context_id {
+        Some(browser_context_id) => managed_browser_context_ids.contains(browser_context_id),
+        None => manages_default_download_context,
+    }
+}
+
+fn collect_page_download_behavior_targets(pages: &[PageInfo]) -> (bool, Vec<String>) {
+    let mut session_ids = HashSet::new();
+    let mut has_direct_page = false;
+
+    for page in pages {
+        if page.session_id.is_empty() {
+            has_direct_page = true;
+        } else {
+            session_ids.insert(page.session_id.clone());
+        }
+    }
+
+    let mut session_ids: Vec<_> = session_ids.into_iter().collect();
+    session_ids.sort();
+
+    (has_direct_page, session_ids)
+}
+
+async fn wait_for_download_completion(
+    session_id: &str,
+    frame_id: &str,
+    rx: &mut broadcast::Receiver<CdpEvent>,
+    timeout: tokio::time::Duration,
+    mut state: DownloadState,
+) -> Result<Value, String> {
+    let deadline = tokio::time::Instant::now() + timeout;
+
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Err("Timeout waiting for download to complete".to_string());
+        }
+
+        match tokio::time::timeout(remaining, rx.recv()).await {
+            Ok(Ok(event)) => {
+                if let Some(info) =
+                    process_download_event(session_id, frame_id, &event, &mut state)?
+                {
+                    return Ok(info);
+                }
+            }
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
+            Ok(Err(_)) => return Err("Event stream closed".to_string()),
+            Err(_) => return Err("Timeout waiting for download to complete".to_string()),
+        }
+    }
+}
+
+fn drain_buffered_download_events(
+    session_id: &str,
+    frame_id: &str,
+    rx: &mut broadcast::Receiver<CdpEvent>,
+    download_path: &Option<String>,
+) -> Result<Option<BufferedDownload>, String> {
+    let mut state = DownloadState {
+        download_path: download_path.clone(),
+        ..Default::default()
+    };
+
+    loop {
+        match rx.try_recv() {
+            Ok(event) => {
+                if let Some(info) =
+                    process_download_event(session_id, frame_id, &event, &mut state)?
+                {
+                    return Ok(Some(BufferedDownload::Completed(info)));
+                }
+            }
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
+            Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => continue,
+            Err(tokio::sync::broadcast::error::TryRecvError::Closed) => {
+                return Err("Event stream closed".to_string());
+            }
+        }
+    }
+
+    if state.guid.is_some() {
+        Ok(Some(BufferedDownload::InProgress(state)))
+    } else {
+        Ok(None)
+    }
+}
+
+fn process_download_event(
+    session_id: &str,
+    frame_id: &str,
+    event: &CdpEvent,
+    state: &mut DownloadState,
+) -> Result<Option<Value>, String> {
+    let is_page_session = event.session_id.as_deref() == Some(session_id);
+
+    match event.method.as_str() {
+        "Browser.downloadWillBegin" => {
+            if event.params.get("frameId").and_then(|v| v.as_str()) != Some(frame_id) {
+                return Ok(None);
+            }
+            if let Some(guid) = event.params.get("guid").and_then(|v| v.as_str()) {
+                state.guid = Some(guid.to_string());
+            }
+            if let Some(filename) = event
+                .params
+                .get("suggestedFilename")
+                .and_then(|v| v.as_str())
+            {
+                state.suggested_filename = Some(filename.to_string());
+            }
+        }
+        "Page.downloadWillBegin" if is_page_session => {
+            if let Some(event_frame_id) = event.params.get("frameId").and_then(|v| v.as_str()) {
+                if event_frame_id != frame_id {
+                    return Ok(None);
+                }
+            }
+            if let Some(guid) = event.params.get("guid").and_then(|v| v.as_str()) {
+                state.guid = Some(guid.to_string());
+            }
+            if let Some(filename) = event
+                .params
+                .get("suggestedFilename")
+                .and_then(|v| v.as_str())
+            {
+                state.suggested_filename = Some(filename.to_string());
+            }
+        }
+        "Browser.downloadProgress" => {
+            return process_download_progress_event(event, state);
+        }
+        "Page.downloadProgress" if is_page_session => {
+            return process_download_progress_event(event, state);
+        }
+        _ => {}
+    }
+
+    Ok(None)
+}
+
+fn process_download_progress_event(
+    event: &CdpEvent,
+    state: &DownloadState,
+) -> Result<Option<Value>, String> {
+    let Some(expected_guid) = state.guid.as_deref() else {
+        return Ok(None);
+    };
+    if event.params.get("guid").and_then(|v| v.as_str()) != Some(expected_guid) {
+        return Ok(None);
+    }
+
+    match event.params.get("state").and_then(|v| v.as_str()) {
+        Some("completed") => {
+            let file_path = event
+                .params
+                .get("filePath")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .or_else(|| {
+                    // Page.downloadProgress does not include filePath;
+                    // reconstruct it from the configured download directory
+                    // and the suggested filename from downloadWillBegin.
+                    let dir = state.download_path.as_deref()?;
+                    let name = state.suggested_filename.as_deref()?;
+                    Some(format!("{}/{}", dir.trim_end_matches('/'), name))
+                })
+                .unwrap_or_default();
+            Ok(Some(json!({
+                "download": true,
+                "path": file_path,
+                "filePath": file_path,
+                "suggestedFilename": state.suggested_filename.as_deref().unwrap_or(""),
+            })))
+        }
+        Some("canceled") => Err("Download was canceled".to_string()),
+        _ => Ok(None),
     }
 }
 
@@ -1338,6 +1799,7 @@ async fn connect_cdp_with_retry(
 async fn initialize_lightpanda_manager(
     ws_url: String,
     process: BrowserProcess,
+    download_path: Option<String>,
 ) -> Result<BrowserManager, String> {
     let deadline = Instant::now() + LIGHTPANDA_TARGET_INIT_TIMEOUT;
     let mut process = Some(process);
@@ -1367,7 +1829,9 @@ async fn initialize_lightpanda_manager(
             pages: Vec::new(),
             active_page_index: 0,
             default_timeout_ms: 25_000,
-            download_path: None,
+            download_path: download_path.clone(),
+            manages_default_download_context: true,
+            managed_browser_context_ids: HashSet::new(),
             ignore_https_errors: false,
             visited_origins: HashSet::new(),
         };
@@ -1511,6 +1975,7 @@ mod tests {
             url: String::new(),
             title: String::new(),
             target_type: "page".to_string(),
+            browser_context_id: None,
         }];
         let target = TargetInfo {
             target_id: "popup-1".to_string(),
@@ -1518,12 +1983,147 @@ mod tests {
             title: "Popup".to_string(),
             url: "https://example.com/popup".to_string(),
             attached: None,
-            browser_context_id: None,
+            browser_context_id: Some("context-1".to_string()),
         };
 
         assert!(update_page_target_info_in_pages(&mut pages, &target));
         assert_eq!(pages[0].url, "https://example.com/popup");
         assert_eq!(pages[0].title, "Popup");
+        assert_eq!(pages[0].browser_context_id.as_deref(), Some("context-1"));
+    }
+
+    #[test]
+    fn test_navigation_has_explicit_download_for_is_download() {
+        let result = PageNavigateResult {
+            frame_id: "frame-1".to_string(),
+            loader_id: None,
+            error_text: None,
+            is_download: Some(true),
+        };
+
+        assert!(navigation_has_explicit_download(&result));
+    }
+
+    #[test]
+    fn test_navigation_has_explicit_download_ignores_err_aborted() {
+        let result = PageNavigateResult {
+            frame_id: "frame-1".to_string(),
+            loader_id: None,
+            error_text: Some("net::ERR_ABORTED".to_string()),
+            is_download: None,
+        };
+
+        assert!(!navigation_has_explicit_download(&result));
+    }
+
+    #[test]
+    fn test_navigation_has_explicit_download_ignores_other_errors() {
+        let result = PageNavigateResult {
+            frame_id: "frame-1".to_string(),
+            loader_id: None,
+            error_text: Some("net::ERR_CONNECTION_RESET".to_string()),
+            is_download: None,
+        };
+
+        assert!(!navigation_has_explicit_download(&result));
+    }
+
+    #[test]
+    fn test_page_download_behavior_params_reset_to_default() {
+        assert_eq!(
+            page_download_behavior_params(None),
+            json!({
+                "behavior": "default",
+            })
+        );
+    }
+
+    #[test]
+    fn test_browser_download_behavior_params_reset_to_default_for_context() {
+        assert_eq!(
+            browser_download_behavior_params(None, Some("context-1"), "allow"),
+            json!({
+                "behavior": "default",
+                "eventsEnabled": false,
+                "browserContextId": "context-1",
+            })
+        );
+    }
+
+    #[test]
+    fn test_collect_page_download_behavior_targets_covers_direct_and_sessions() {
+        let pages = vec![
+            PageInfo {
+                target_id: "page-1".to_string(),
+                session_id: "session-1".to_string(),
+                url: String::new(),
+                title: String::new(),
+                target_type: "page".to_string(),
+                browser_context_id: None,
+            },
+            PageInfo {
+                target_id: "page-2".to_string(),
+                session_id: "session-2".to_string(),
+                url: String::new(),
+                title: String::new(),
+                target_type: "page".to_string(),
+                browser_context_id: Some("context-1".to_string()),
+            },
+            PageInfo {
+                target_id: "page-3".to_string(),
+                session_id: "session-3".to_string(),
+                url: String::new(),
+                title: String::new(),
+                target_type: "page".to_string(),
+                browser_context_id: Some("context-2".to_string()),
+            },
+            PageInfo {
+                target_id: "direct-page".to_string(),
+                session_id: String::new(),
+                url: String::new(),
+                title: String::new(),
+                target_type: "page".to_string(),
+                browser_context_id: None,
+            },
+        ];
+
+        assert_eq!(
+            collect_page_download_behavior_targets(&pages),
+            (
+                true,
+                vec![
+                    "session-1".to_string(),
+                    "session-2".to_string(),
+                    "session-3".to_string()
+                ],
+            )
+        );
+    }
+
+    #[test]
+    fn test_should_apply_browser_download_behavior_only_for_managed_contexts() {
+        let managed_contexts = HashSet::from(["context-1".to_string()]);
+
+        assert!(should_apply_browser_download_behavior(
+            None,
+            true,
+            &managed_contexts
+        ));
+        assert!(!should_apply_browser_download_behavior(
+            None,
+            false,
+            &managed_contexts
+        ));
+        assert!(should_apply_browser_download_behavior(
+            Some("context-1"),
+            false,
+            &managed_contexts
+        ));
+        assert!(!should_apply_browser_download_behavior(
+            Some("context-2"),
+            true,
+            &managed_contexts
+        ));
     }
 
     #[test]
@@ -1714,6 +2314,146 @@ mod tests {
             params,
             session_id: Some(session_id.to_string()),
         }
+    }
+
+    fn cdp_browser_event(method: &str, params: Value) -> CdpEvent {
+        CdpEvent {
+            method: method.to_string(),
+            params,
+            session_id: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_download_completion_ignores_other_browser_frames() {
+        let (tx, mut rx) = broadcast::channel::<CdpEvent>(16);
+
+        tokio::spawn(async move {
+            let _ = tx.send(cdp_browser_event(
+                "Browser.downloadWillBegin",
+                json!({
+                    "frameId": "other-frame",
+                    "guid": "other-guid",
+                    "suggestedFilename": "other.csv",
+                }),
+            ));
+            let _ = tx.send(cdp_browser_event(
+                "Browser.downloadProgress",
+                json!({
+                    "guid": "other-guid",
+                    "state": "completed",
+                    "filePath": "/tmp/other.csv",
+                }),
+            ));
+            sleep(Duration::from_millis(25)).await;
+            let _ = tx.send(cdp_browser_event(
+                "Browser.downloadWillBegin",
+                json!({
+                    "frameId": "frame-1",
+                    "guid": "expected-guid",
+                    "suggestedFilename": "report.csv",
+                }),
+            ));
+            let _ = tx.send(cdp_browser_event(
+                "Browser.downloadProgress",
+                json!({
+                    "guid": "expected-guid",
+                    "state": "completed",
+                    "filePath": "/tmp/report.csv",
+                }),
+            ));
+        });
+
+        let result = wait_for_download_completion(
+            "session-1",
+            "frame-1",
+            &mut rx,
+            Duration::from_secs(1),
+            DownloadState::default(),
+        )
+        .await
+        .expect("download should complete for the matching frame");
+
+        assert_eq!(
+            result.get("path").and_then(|v| v.as_str()),
+            Some("/tmp/report.csv")
+        );
+        assert_eq!(
+            result.get("filePath").and_then(|v| v.as_str()),
+            Some("/tmp/report.csv")
+        );
+        assert_eq!(
+            result.get("suggestedFilename").and_then(|v| v.as_str()),
+            Some("report.csv")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_download_completion_requires_matching_guid() {
+        let (tx, mut rx) = broadcast::channel::<CdpEvent>(16);
+
+        tokio::spawn(async move {
+            let _ = tx.send(cdp_event(
+                "Page.downloadWillBegin",
+                "session-1",
+                json!({
+                    "frameId": "frame-1",
+                    "guid": "expected-guid",
+                    "suggestedFilename": "report.csv",
+                }),
+            ));
+            let _ = tx.send(cdp_browser_event(
+                "Browser.downloadProgress",
+                json!({
+                    "guid": "other-guid",
+                    "state": "completed",
+                    "filePath": "/tmp/other.csv",
+                }),
+            ));
+            sleep(Duration::from_millis(25)).await;
+            let _ = tx.send(cdp_event(
+                "Page.downloadProgress",
+                "session-1",
+                json!({
+                    "guid": "expected-guid",
+                    "state": "completed",
+                    "filePath": "/tmp/report.csv",
+                }),
+            ));
+        });
+
+        let result = wait_for_download_completion(
+            "session-1",
+            "frame-1",
+            &mut rx,
+            Duration::from_secs(1),
+            DownloadState::default(),
+        )
+        .await
+        .expect("download should complete for the matching guid");
+
+        assert_eq!(
+            result.get("path").and_then(|v| v.as_str()),
+            Some("/tmp/report.csv")
+        );
+        assert_eq!(
+            result.get("filePath").and_then(|v| v.as_str()),
+            Some("/tmp/report.csv")
+        );
+        assert_eq!(
+            result.get("suggestedFilename").and_then(|v| v.as_str()),
+            Some("report.csv")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_drain_buffered_download_events_returns_none_without_signal() {
+        let (_tx, mut rx) = broadcast::channel::<CdpEvent>(16);
+
+        let result = drain_buffered_download_events("session-1", "frame-1", &mut rx, &None)
+            .expect("buffered drain should not error without events");
+
+        assert!(result.is_none());
     }
 
     /// Regression test for #846: when no network events arrive at all (e.g.

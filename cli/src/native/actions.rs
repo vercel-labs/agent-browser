@@ -12,7 +12,7 @@ use tokio::sync::{broadcast, oneshot, RwLock};
 use crate::connection::get_socket_dir;
 
 use super::auth;
-use super::browser::{should_track_target, BrowserManager, WaitUntil};
+use super::browser::{should_track_target, BrowserManager, NavigationOutcome, WaitUntil};
 use super::cdp::chrome::LaunchOptions;
 use super::cdp::client::CdpClient;
 use super::cdp::types::{
@@ -56,6 +56,34 @@ const AUTH_LOGIN_SELECTOR_POLL_INTERVAL_MS: u64 = 100;
 /// Time spent trying targeted username selectors before broad text-input
 /// fallback selectors are allowed.
 const AUTH_LOGIN_PREFERRED_SELECTOR_WINDOW_MS: u64 = 5_000;
+
+fn require_loaded_page(outcome: NavigationOutcome) -> Result<Value, String> {
+    match outcome {
+        NavigationOutcome::Page(value) => Ok(value),
+        NavigationOutcome::Download(info) => {
+            let mut message =
+                "Navigation triggered a file download instead of loading a page".to_string();
+
+            if let Some(path) = info.get("path").and_then(|v| v.as_str()) {
+                if !path.is_empty() {
+                    message.push_str(&format!(": {}", path));
+                }
+            } else if let Some(filename) = info.get("suggestedFilename").and_then(|v| v.as_str()) {
+                if !filename.is_empty() {
+                    message.push_str(&format!(": {}", filename));
+                }
+            }
+
+            Err(message)
+        }
+    }
+}
+
+fn navigation_outcome_value(outcome: NavigationOutcome) -> Value {
+    match outcome {
+        NavigationOutcome::Page(value) | NavigationOutcome::Download(value) => value,
+    }
+}
 
 pub struct PendingConfirmation {
     pub action: String,
@@ -639,7 +667,12 @@ impl DaemonState {
                     )
                     .await;
                 if let Ok(attach) = attach_result {
-                    let _ = mgr.enable_domains_pub(&attach.session_id).await;
+                    let _ = mgr
+                        .enable_domains_pub(
+                            &attach.session_id,
+                            te.target_info.browser_context_id.as_deref(),
+                        )
+                        .await;
 
                     // Install domain filter on new pages
                     let df = self.domain_filter.read().await;
@@ -660,6 +693,7 @@ impl DaemonState {
                         url: te.target_info.url.clone(),
                         title: te.target_info.title.clone(),
                         target_type: te.target_info.target_type.clone(),
+                        browser_context_id: te.target_info.browser_context_id.clone(),
                     });
                 }
             }
@@ -1479,8 +1513,10 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
 
 /// Connect to a running Chrome via auto-discovery and open a fresh tab so
 /// subsequent navigations don't hijack the user's existing tabs.
-async fn connect_auto_with_fresh_tab() -> Result<BrowserManager, String> {
-    let mut mgr = BrowserManager::connect_auto().await?;
+async fn connect_auto_with_fresh_tab(
+    download_path: Option<String>,
+) -> Result<BrowserManager, String> {
+    let mut mgr = BrowserManager::connect_auto(download_path).await?;
     mgr.tab_new(None).await?;
     let session_id = mgr.active_session_id()?.to_string();
     let _ = mgr
@@ -1515,7 +1551,7 @@ async fn auto_launch(state: &mut DaemonState) -> Result<(), String> {
     write_extensions_file(&state.session_id);
 
     if let Ok(cdp) = env::var("AGENT_BROWSER_CDP") {
-        let mgr = BrowserManager::connect_cdp(&cdp).await?;
+        let mgr = BrowserManager::connect_cdp(&cdp, options.download_path.clone()).await?;
         state.reset_input_state();
         state.browser = Some(mgr);
         state.subscribe_to_browser_events();
@@ -1528,7 +1564,7 @@ async fn auto_launch(state: &mut DaemonState) -> Result<(), String> {
 
     if env::var("AGENT_BROWSER_AUTO_CONNECT").is_ok() {
         state.reset_input_state();
-        state.browser = Some(connect_auto_with_fresh_tab().await?);
+        state.browser = Some(connect_auto_with_fresh_tab(options.download_path.clone()).await?);
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
         state.start_dialog_handler();
@@ -1552,11 +1588,17 @@ async fn auto_launch(state: &mut DaemonState) -> Result<(), String> {
                 None
             };
             let connect_result = if conn.direct_page {
-                BrowserManager::connect_cdp_direct(&conn.ws_url).await
+                BrowserManager::connect_cdp_direct(&conn.ws_url, options.download_path.clone())
+                    .await
             } else if ws_headers.is_some() {
-                BrowserManager::connect_cdp_with_headers(&conn.ws_url, ws_headers).await
+                BrowserManager::connect_cdp_with_headers(
+                    &conn.ws_url,
+                    ws_headers,
+                    options.download_path.clone(),
+                )
+                .await
             } else {
-                BrowserManager::connect_cdp(&conn.ws_url).await
+                BrowserManager::connect_cdp(&conn.ws_url, options.download_path.clone()).await
             };
             match connect_result {
                 Ok(mgr) => {
@@ -1754,6 +1796,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         viewport_size: None,
         use_real_keychain: false,
     };
+    let download_path_provided = cmd.get("downloadPath").is_some();
 
     let new_hash = launch_hash(&launch_options);
 
@@ -1782,6 +1825,12 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
             state.update_stream_client().await;
         }
     } else {
+        if download_path_provided {
+            if let Some(ref mut mgr) = state.browser {
+                mgr.update_download_path(launch_options.download_path.clone())
+                    .await?;
+            }
+        }
         return Ok(json!({ "launched": true, "reused": true }));
     }
     state.ref_map.clear();
@@ -1798,7 +1847,8 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
 
     if let Some(url) = cdp_url {
         state.reset_input_state();
-        state.browser = Some(BrowserManager::connect_cdp(url).await?);
+        state.browser =
+            Some(BrowserManager::connect_cdp(url, launch_options.download_path.clone()).await?);
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
         state.start_dialog_handler();
@@ -1808,7 +1858,10 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
 
     if let Some(port) = cdp_port {
         state.reset_input_state();
-        state.browser = Some(BrowserManager::connect_cdp(&port.to_string()).await?);
+        state.browser = Some(
+            BrowserManager::connect_cdp(&port.to_string(), launch_options.download_path.clone())
+                .await?,
+        );
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
         state.start_dialog_handler();
@@ -1818,7 +1871,8 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
 
     if auto_connect {
         state.reset_input_state();
-        state.browser = Some(connect_auto_with_fresh_tab().await?);
+        state.browser =
+            Some(connect_auto_with_fresh_tab(launch_options.download_path.clone()).await?);
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
         state.start_dialog_handler();
@@ -1844,11 +1898,21 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
                 };
 
                 let connect_result = if conn.direct_page {
-                    BrowserManager::connect_cdp_direct(&conn.ws_url).await
+                    BrowserManager::connect_cdp_direct(
+                        &conn.ws_url,
+                        launch_options.download_path.clone(),
+                    )
+                    .await
                 } else if ws_headers.is_some() {
-                    BrowserManager::connect_cdp_with_headers(&conn.ws_url, ws_headers).await
+                    BrowserManager::connect_cdp_with_headers(
+                        &conn.ws_url,
+                        ws_headers,
+                        launch_options.download_path.clone(),
+                    )
+                    .await
                 } else {
-                    BrowserManager::connect_cdp(&conn.ws_url).await
+                    BrowserManager::connect_cdp(&conn.ws_url, launch_options.download_path.clone())
+                        .await
                 };
                 match connect_result {
                     Ok(mgr) => {
@@ -2122,7 +2186,9 @@ async fn handle_navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     state.ref_map.clear();
     state.iframe_sessions.clear();
     state.active_frame_id = None;
-    mgr.navigate(url, wait_until).await
+    mgr.navigate(url, wait_until)
+        .await
+        .map(navigation_outcome_value)
 }
 
 async fn handle_url(state: &DaemonState) -> Result<Value, String> {
@@ -3374,7 +3440,7 @@ async fn handle_diff_url(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         .unwrap_or(WaitUntil::Load);
 
     // Navigate to URL1 and snapshot
-    mgr.navigate(url1, wait_until).await?;
+    require_loaded_page(mgr.navigate(url1, wait_until).await?)?;
     let session_id = mgr.active_session_id()?.to_string();
     let options = SnapshotOptions::default();
     let snap1 = snapshot::take_snapshot(
@@ -3388,7 +3454,7 @@ async fn handle_diff_url(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     .await?;
 
     // Navigate to URL2 and snapshot
-    mgr.navigate(url2, wait_until).await?;
+    require_loaded_page(mgr.navigate(url2, wait_until).await?)?;
     state.ref_map.clear();
     let snap2 = snapshot::take_snapshot(
         &mgr.client,
@@ -3926,26 +3992,9 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
             .await?;
 
         let new_session_id = attach_result.session_id.clone();
-        mgr.enable_domains_pub(&new_session_id).await?;
-
-        // Re-apply download behavior to the recording context.
-        // Without this, downloads in the recording context are silently dropped
-        // because Browser.setDownloadBehavior at launch only applies to the default context.
-        if let Some(ref dl_path) = mgr.download_path {
-            let _ = mgr
-                .client
-                .send_command(
-                    "Browser.setDownloadBehavior",
-                    Some(json!({
-                        "behavior": "allow",
-                        "downloadPath": dl_path,
-                        "browserContextId": context_id,
-                        "eventsEnabled": true
-                    })),
-                    None,
-                )
-                .await;
-        }
+        mgr.register_managed_browser_context(context_id.clone());
+        mgr.enable_domains_pub(&new_session_id, Some(&context_id))
+            .await?;
 
         // Re-apply HTTPS error ignore to the recording context.
         // Security.setIgnoreCertificateErrors at launch only applies to the session it was sent on.
@@ -3983,6 +4032,7 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
             url: nav_url.clone(),
             title: String::new(),
             target_type: "page".to_string(),
+            browser_context_id: Some(context_id.clone()),
         });
 
         // Navigate to URL
@@ -5882,12 +5932,14 @@ async fn handle_window_new(cmd: &Value, state: &mut DaemonState) -> Result<Value
         )
         .await?;
 
+    mgr.register_managed_browser_context(context_id.clone());
     mgr.add_page(super::browser::PageInfo {
         target_id: create_result.target_id,
         session_id: attach.session_id,
         url: "about:blank".to_string(),
         title: String::new(),
         target_type: "page".to_string(),
+        browser_context_id: Some(context_id),
     });
 
     if let Some(viewport) = cmd.get("viewport") {
@@ -6954,7 +7006,7 @@ async fn handle_auth_login(cmd: &Value, state: &mut DaemonState) -> Result<Value
     let password = cred.password;
 
     let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
-    mgr.navigate(&url, AUTH_LOGIN_WAIT_UNTIL).await?;
+    require_loaded_page(mgr.navigate(&url, AUTH_LOGIN_WAIT_UNTIL).await?)?;
 
     let session_id = mgr.active_session_id()?.to_string();
     let auth_timeout_ms = mgr.default_timeout_ms();
@@ -8474,6 +8526,28 @@ mod tests {
         let (key, mods) = parse_key_chord("+");
         assert_eq!(key, "+");
         assert_eq!(mods, None);
+    }
+
+    #[test]
+    fn test_require_loaded_page_accepts_page_navigation() {
+        let value = json!({ "url": "https://example.com", "title": "Example" });
+
+        let result = require_loaded_page(NavigationOutcome::Page(value.clone()))
+            .expect("page navigation should be accepted");
+
+        assert_eq!(result, value);
+    }
+
+    #[test]
+    fn test_require_loaded_page_rejects_download_navigation() {
+        let err = require_loaded_page(NavigationOutcome::Download(json!({
+            "path": "/tmp/report.csv",
+            "suggestedFilename": "report.csv",
+        })))
+        .expect_err("download navigation should be rejected for page-only flows");
+
+        assert!(err.contains("file download"));
+        assert!(err.contains("/tmp/report.csv"));
     }
 
     #[tokio::test]
