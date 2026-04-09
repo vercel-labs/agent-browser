@@ -1640,6 +1640,7 @@ fn launch_options_from_env() -> LaunchOptions {
         ignore_https_errors: env::var("AGENT_BROWSER_IGNORE_HTTPS_ERRORS")
             .map(|v| v == "1" || v == "true")
             .unwrap_or(false),
+        ca_cert: env::var("AGENT_BROWSER_CA_CERT").ok(),
         color_scheme: env::var("AGENT_BROWSER_COLOR_SCHEME").ok(),
         download_path: env::var("AGENT_BROWSER_DOWNLOAD_PATH").ok(),
         viewport_size: None,
@@ -1743,6 +1744,11 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
             .get("ignoreHTTPSErrors")
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
+        ca_cert: cmd
+            .get("caCert")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .or_else(|| env::var("AGENT_BROWSER_CA_CERT").ok()),
         color_scheme: cmd
             .get("colorScheme")
             .and_then(|v| v.as_str())

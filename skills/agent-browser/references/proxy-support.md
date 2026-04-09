@@ -171,7 +171,18 @@ export HTTP_PROXY="http://user:pass@proxy.example.com:8080"
 
 ### SSL/TLS Errors Through Proxy
 
-Some proxies perform SSL inspection. If you encounter certificate errors:
+Some proxies perform SSL inspection using a custom CA certificate. Use `--ca-cert` to trust only that CA:
+
+```bash
+# Recommended: trust the proxy's CA certificate
+agent-browser --ca-cert /etc/ssl/certs/proxy-ca.crt open https://example.com
+
+# Via environment variable
+export AGENT_BROWSER_CA_CERT=/etc/ssl/certs/proxy-ca.crt
+agent-browser open https://example.com
+```
+
+If you don't have the CA certificate, you can fall back to ignoring all errors (less secure):
 
 ```bash
 # For testing only - not recommended for production

@@ -3,6 +3,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
+use base64::Engine;
+use sha2::{Digest, Sha256};
+
 use super::discovery::discover_cdp_url;
 
 pub struct ChromeProcess {
@@ -101,6 +104,7 @@ pub struct LaunchOptions {
     pub storage_state: Option<String>,
     pub user_agent: Option<String>,
     pub ignore_https_errors: bool,
+    pub ca_cert: Option<String>,
     pub color_scheme: Option<String>,
     pub download_path: Option<String>,
     /// Initial viewport dimensions used for `--window-size` so the content
@@ -128,6 +132,7 @@ impl Default for LaunchOptions {
             storage_state: None,
             user_agent: None,
             ignore_https_errors: false,
+            ca_cert: None,
             color_scheme: None,
             download_path: None,
             viewport_size: None,
@@ -140,6 +145,168 @@ struct ChromeArgs {
     args: Vec<String>,
     user_data_dir: PathBuf,
     temp_user_data_dir: Option<PathBuf>,
+}
+
+/// Compute base64-encoded SHA-256 hashes of the SubjectPublicKeyInfo (SPKI)
+/// from a PEM or DER certificate file. Returns a comma-separated list of
+/// hashes when the PEM contains multiple certificates (e.g., a CA bundle).
+/// This is the format Chromium expects for `--ignore-certificate-errors-spki-list`.
+fn compute_spki_hash(cert_path: &str) -> Result<String, String> {
+    let data = std::fs::read(cert_path)
+        .map_err(|e| format!("Failed to read CA certificate '{}': {}", cert_path, e))?;
+
+    let certs: Vec<Vec<u8>> = if data.starts_with(b"-----BEGIN") {
+        let pem_str = std::str::from_utf8(&data)
+            .map_err(|e| format!("CA certificate is not valid UTF-8: {}", e))?;
+        decode_pem_certificates(pem_str)?
+    } else {
+        vec![data]
+    };
+
+    let hashes: Vec<String> = certs
+        .iter()
+        .map(|der| {
+            let spki = extract_spki_from_der(der)?;
+            let hash = Sha256::digest(spki);
+            Ok(base64::engine::general_purpose::STANDARD.encode(hash))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+
+    Ok(hashes.join(","))
+}
+
+/// Decode all certificates from a PEM file to DER bytes.
+fn decode_pem_certificates(pem: &str) -> Result<Vec<Vec<u8>>, String> {
+    let mut certs = Vec::new();
+    let mut in_cert = false;
+    let mut b64 = String::new();
+
+    for line in pem.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("-----BEGIN CERTIFICATE") {
+            in_cert = true;
+            b64.clear();
+            continue;
+        }
+        if trimmed.starts_with("-----END CERTIFICATE") {
+            if !b64.is_empty() {
+                let der = base64::engine::general_purpose::STANDARD
+                    .decode(&b64)
+                    .map_err(|e| format!("Failed to decode PEM base64: {}", e))?;
+                certs.push(der);
+            }
+            in_cert = false;
+            continue;
+        }
+        if in_cert {
+            b64.push_str(trimmed);
+        }
+    }
+
+    if certs.is_empty() {
+        return Err("No certificate found in PEM file".to_string());
+    }
+
+    Ok(certs)
+}
+
+/// Decode the first certificate from a PEM file to DER bytes.
+#[cfg(test)]
+fn decode_pem_certificate(pem: &str) -> Result<Vec<u8>, String> {
+    decode_pem_certificates(pem)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| "No certificate found in PEM file".to_string())
+}
+
+/// Extract the SubjectPublicKeyInfo (SPKI) field from a DER-encoded X.509
+/// certificate.  Uses minimal ASN.1 parsing — just enough to walk the
+/// top-level SEQUENCE → TBSCertificate → skip version/serial/sigAlg/issuer/
+/// validity → subject → subjectPublicKeyInfo.
+fn extract_spki_from_der(der: &[u8]) -> Result<&[u8], String> {
+    // Top-level SEQUENCE (Certificate)
+    let (cert_content, _) = read_asn1_sequence(der)?;
+    // First element: TBSCertificate SEQUENCE
+    let (tbs, _) = read_asn1_sequence(cert_content)?;
+
+    let mut pos = 0;
+
+    // Field 0: version [0] EXPLICIT (optional — present if v2 or v3)
+    if pos < tbs.len() && tbs[pos] == 0xA0 {
+        let (_, consumed) = read_asn1_element(&tbs[pos..])?;
+        pos += consumed;
+    }
+
+    // Field 1: serialNumber INTEGER
+    let (_, consumed) = read_asn1_element(&tbs[pos..])?;
+    pos += consumed;
+
+    // Field 2: signature AlgorithmIdentifier SEQUENCE
+    let (_, consumed) = read_asn1_element(&tbs[pos..])?;
+    pos += consumed;
+
+    // Field 3: issuer Name SEQUENCE
+    let (_, consumed) = read_asn1_element(&tbs[pos..])?;
+    pos += consumed;
+
+    // Field 4: validity SEQUENCE
+    let (_, consumed) = read_asn1_element(&tbs[pos..])?;
+    pos += consumed;
+
+    // Field 5: subject Name SEQUENCE
+    let (_, consumed) = read_asn1_element(&tbs[pos..])?;
+    pos += consumed;
+
+    // Field 6: subjectPublicKeyInfo SEQUENCE — this is the SPKI
+    let (_, consumed) = read_asn1_element(&tbs[pos..])?;
+    Ok(&tbs[pos..pos + consumed])
+}
+
+/// Read the length from an ASN.1 TLV and return (total_element_bytes, header_size).
+fn read_asn1_length(data: &[u8], offset: usize) -> Result<(usize, usize), String> {
+    if offset >= data.len() {
+        return Err("ASN.1 parse error: unexpected end of data".to_string());
+    }
+    let first = data[offset] as usize;
+    if first < 0x80 {
+        Ok((first, 1))
+    } else {
+        let num_bytes = first & 0x7F;
+        if num_bytes == 0 || num_bytes > 4 {
+            return Err("ASN.1 parse error: unsupported length encoding".to_string());
+        }
+        let mut length = 0usize;
+        for i in 0..num_bytes {
+            if offset + 1 + i >= data.len() {
+                return Err("ASN.1 parse error: length bytes truncated".to_string());
+            }
+            length = (length << 8) | (data[offset + 1 + i] as usize);
+        }
+        Ok((length, 1 + num_bytes))
+    }
+}
+
+/// Read a complete ASN.1 element (tag + length + value) and return
+/// (content_slice, total_consumed_bytes).
+fn read_asn1_element(data: &[u8]) -> Result<(&[u8], usize), String> {
+    if data.is_empty() {
+        return Err("ASN.1 parse error: empty data".to_string());
+    }
+    let (length, len_size) = read_asn1_length(data, 1)?;
+    let header_size = 1 + len_size;
+    let total = header_size + length;
+    if total > data.len() {
+        return Err("ASN.1 parse error: element extends past end of data".to_string());
+    }
+    Ok((&data[header_size..total], total))
+}
+
+/// Read an ASN.1 SEQUENCE and return (content_slice, total_consumed_bytes).
+fn read_asn1_sequence(data: &[u8]) -> Result<(&[u8], usize), String> {
+    if data.is_empty() || data[0] != 0x30 {
+        return Err("ASN.1 parse error: expected SEQUENCE tag (0x30)".to_string());
+    }
+    read_asn1_element(data)
 }
 
 fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
@@ -187,6 +354,14 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
 
     if let Some(ref bypass) = options.proxy_bypass {
         args.push(format!("--proxy-bypass-list={}", bypass));
+    }
+
+    if let Some(ref ca_cert) = options.ca_cert {
+        let spki_hash = compute_spki_hash(ca_cert)?;
+        args.push(format!(
+            "--ignore-certificate-errors-spki-list={}",
+            spki_hash
+        ));
     }
 
     let (user_data_dir, temp_user_data_dir) = if let Some(ref profile) = options.profile {
@@ -1523,6 +1698,229 @@ mod tests {
         }
 
         assert!(!dir.exists(), "Temp dir should be cleaned up on drop");
+    }
+
+    // Self-signed RSA-2048 test certificate (CN=test-ca).
+    // Generated with: openssl req -x509 -newkey rsa:2048 -nodes -subj "/CN=test-ca"
+    const TEST_PEM: &str = "-----BEGIN CERTIFICATE-----\n\
+MIIDBTCCAe2gAwIBAgIUFhZ9tlfduuEvOIOcGuOA7E0SSL4wDQYJKoZIhvcNAQEL\n\
+BQAwEjEQMA4GA1UEAwwHdGVzdC1jYTAeFw0yNjAzMjUxNDE5MDVaFw0yNzAzMjUx\n\
+NDE5MDVaMBIxEDAOBgNVBAMMB3Rlc3QtY2EwggEiMA0GCSqGSIb3DQEBAQUAA4IB\n\
+DwAwggEKAoIBAQDcgmzozr7Ia72OCsxk2uKUFhM6wR0H69cv4qO5OViu+0qFoYr6\n\
+Bny2o+Q/ooqCCYveamPukYlZMFilnk9b4M2VwxK72pOVTkvyWUWpIJrV6OQKqsaf\n\
+DNgDdl4U4i2U/HKKNXTNtaVPzc3d40rcwy8dHVzFaTs8o7UG73foHQ2/7KQ6sY5d\n\
+gjOchbLDlhN2Nkyc4WxXEipesonUogLzZxx9gSMZN6VmXaIyijncAFxO9vSenTQd\n\
+FstTlTI/FCPQU2cg5K3rtToPli3j7z9oeeMrrt3pp1xmU5/cliz5kQ3CXxbH1UR3\n\
+uFAaW09wTsK+fSo8rBgGWO5JU706M1aL5wvXAgMBAAGjUzBRMB0GA1UdDgQWBBR3\n\
+yFGDemoQUIFA/YW1BJYhT6hlhzAfBgNVHSMEGDAWgBR3yFGDemoQUIFA/YW1BJYh\n\
+T6hlhzAPBgNVHRMBAf8EBTADAQH/MA0GCSqGSIb3DQEBCwUAA4IBAQCq5bl2J+JO\n\
+LpOZG4n4xbQUi456bV40a9lxFwXyR4toiOnLc9QTiFLtrRRMjiAYBlpnp7Aq7rPK\n\
+0dxGhFsNhTHYv5bKF3Wt6EKnfmjC5J2PQ4j4fZbqnBJVNhtP3/QdTg/Alx2DgVlP\n\
+vUaYBYvyM8aeAGCvlTr9XbciLgDHrO6xE0mppF87jG3DbVIqhGAa8z7KR286Hmw3\n\
+JtnWOCSAT+dNsAXmz4ebm7kp9OnpLLKjvrNEUNPA20J5S+BXTtPv7x/koRwSX35M\n\
+9yOorGsG0RB4CaEy4fpiKTewGNMdHNoZNevXB1s7jm3YdW5BDxvG4Su5RGqAjS+Y\n\
+49s7jC+okfzl\n\
+-----END CERTIFICATE-----\n";
+
+    // Expected SPKI hash for TEST_PEM, computed with:
+    // openssl x509 -pubkey -noout | openssl pkey -pubin -outform der | openssl dgst -sha256 -binary | base64
+    const TEST_PEM_SPKI_HASH: &str = "bGmEVcmCy5Btl3rFpi8tv60akkmtflu5gzLmS9JlnD0=";
+
+    #[test]
+    fn test_compute_spki_hash_pem() {
+        let dir = std::env::temp_dir().join(format!("spki-test-{}", uuid::Uuid::new_v4()));
+        let _ = std::fs::create_dir_all(&dir);
+        let cert_path = dir.join("test-ca.crt");
+        std::fs::write(&cert_path, TEST_PEM).unwrap();
+
+        let hash = compute_spki_hash(cert_path.to_str().unwrap()).unwrap();
+        assert_eq!(
+            hash, TEST_PEM_SPKI_HASH,
+            "SPKI hash should match openssl-computed value"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_compute_spki_hash_nonexistent_file() {
+        let result = compute_spki_hash("/nonexistent/path/to/cert.pem");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Failed to read"));
+    }
+
+    #[test]
+    fn test_compute_spki_hash_invalid_pem() {
+        let dir = std::env::temp_dir().join(format!("spki-test-invalid-{}", uuid::Uuid::new_v4()));
+        let _ = std::fs::create_dir_all(&dir);
+        let cert_path = dir.join("invalid.crt");
+        std::fs::write(
+            &cert_path,
+            "-----BEGIN CERTIFICATE-----\nnot-valid-base64!\n-----END CERTIFICATE-----\n",
+        )
+        .unwrap();
+
+        let result = compute_spki_hash(cert_path.to_str().unwrap());
+        assert!(result.is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_compute_spki_hash_empty_pem() {
+        let dir = std::env::temp_dir().join(format!("spki-test-empty-{}", uuid::Uuid::new_v4()));
+        let _ = std::fs::create_dir_all(&dir);
+        let cert_path = dir.join("empty.crt");
+        std::fs::write(
+            &cert_path,
+            "-----BEGIN PRIVATE KEY-----\ndata\n-----END PRIVATE KEY-----\n",
+        )
+        .unwrap();
+
+        let result = compute_spki_hash(cert_path.to_str().unwrap());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("No certificate found"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_build_args_ca_cert_adds_spki_list() {
+        let dir = std::env::temp_dir().join(format!("spki-args-test-{}", uuid::Uuid::new_v4()));
+        let _ = std::fs::create_dir_all(&dir);
+        let cert_path = dir.join("test-ca.crt");
+        std::fs::write(&cert_path, TEST_PEM).unwrap();
+
+        let opts = LaunchOptions {
+            ca_cert: Some(cert_path.to_str().unwrap().to_string()),
+            ..Default::default()
+        };
+        let result = build_chrome_args(&opts).unwrap();
+        assert!(
+            result
+                .args
+                .iter()
+                .any(|a| a.starts_with("--ignore-certificate-errors-spki-list=")),
+            "Should add --ignore-certificate-errors-spki-list when ca_cert is set"
+        );
+
+        if let Some(ref d) = result.temp_user_data_dir {
+            let _ = std::fs::remove_dir_all(d);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_decode_pem_certificates_extracts_all_certs() {
+        let pem = "-----BEGIN CERTIFICATE-----\nYWJj\n-----END CERTIFICATE-----\n\
+-----BEGIN CERTIFICATE-----\nZGVm\n-----END CERTIFICATE-----\n";
+        let certs = decode_pem_certificates(pem).unwrap();
+        assert_eq!(certs.len(), 2);
+        assert_eq!(certs[0], b"abc"); // "YWJj" decodes to "abc"
+        assert_eq!(certs[1], b"def"); // "ZGVm" decodes to "def"
+    }
+
+    #[test]
+    fn test_decode_pem_certificate_extracts_first_cert() {
+        let pem = "-----BEGIN CERTIFICATE-----\nYWJj\n-----END CERTIFICATE-----\n\
+-----BEGIN CERTIFICATE-----\nZGVm\n-----END CERTIFICATE-----\n";
+        let decoded = decode_pem_certificate(pem).unwrap();
+        assert_eq!(decoded, b"abc");
+    }
+
+    #[test]
+    fn test_asn1_length_short_form() {
+        let data = [0x05]; // length = 5
+        let (len, size) = read_asn1_length(&data, 0).unwrap();
+        assert_eq!(len, 5);
+        assert_eq!(size, 1);
+    }
+
+    #[test]
+    fn test_asn1_length_long_form() {
+        let data = [0x82, 0x01, 0x00]; // 2 bytes of length = 256
+        let (len, size) = read_asn1_length(&data, 0).unwrap();
+        assert_eq!(len, 256);
+        assert_eq!(size, 3);
+    }
+
+    /// EC P-256 certificate -- different SPKI structure from RSA.
+    /// Verified against: openssl x509 -pubkey -noout | openssl pkey -pubin -outform der |
+    ///                   openssl dgst -sha256 -binary | base64
+    #[test]
+    fn test_compute_spki_hash_ec_cert() {
+        let ec_pem = "-----BEGIN CERTIFICATE-----\n\
+MIIBeTCCAR+gAwIBAgIUC77fmNcp/aMfqP4lKAzS5d6jIkswCgYIKoZIzj0EAwIw\n\
+EjEQMA4GA1UEAwwHZWMtdGVzdDAeFw0yNjAzMjUxNDQwMDhaFw0yNzAzMjUxNDQw\n\
+MDhaMBIxEDAOBgNVBAMMB2VjLXRlc3QwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNC\n\
+AAQBnhhpB1hXMU9ApP03C+h8cCNXmFnt1ceEXG2HF435Wr/Ky+OQZzpjMT/F5p6b\n\
+d9NZybE1SEwHjFDGSih77kR3o1MwUTAdBgNVHQ4EFgQUHhS1zOh00+tnCdSonx+B\n\
+9J9k3GowHwYDVR0jBBgwFoAUHhS1zOh00+tnCdSonx+B9J9k3GowDwYDVR0TAQH/\n\
+BAUwAwEB/zAKBggqhkjOPQQDAgNIADBFAiEAj1qMNlpw9ydvcHHmyDTEl1a57fH2\n\
+VXKy7lhMb3nDiq8CIBmql5q02Sl8+aztTKjtEtOfCtcqGghI+rLkQG7jI51x\n\
+-----END CERTIFICATE-----\n";
+
+        let dir = std::env::temp_dir().join(format!("spki-ec-{}", uuid::Uuid::new_v4()));
+        let _ = std::fs::create_dir_all(&dir);
+        let cert_path = dir.join("ec-ca.crt");
+        std::fs::write(&cert_path, ec_pem).unwrap();
+
+        let hash = compute_spki_hash(cert_path.to_str().unwrap()).unwrap();
+        assert_eq!(hash, "j4u7vkJhMUO1e0mrG0BsLqT56MELt1SAYDhN0iHyvD4=");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// DER-encoded certificate (binary, not PEM).
+    #[test]
+    fn test_compute_spki_hash_der_cert() {
+        // Convert TEST_PEM to DER and verify we get the same hash
+        let der = decode_pem_certificate(TEST_PEM).unwrap();
+        let dir = std::env::temp_dir().join(format!("spki-der-{}", uuid::Uuid::new_v4()));
+        let _ = std::fs::create_dir_all(&dir);
+        let cert_path = dir.join("test-ca.der");
+        std::fs::write(&cert_path, &der).unwrap();
+
+        let hash = compute_spki_hash(cert_path.to_str().unwrap()).unwrap();
+        assert_eq!(
+            hash, TEST_PEM_SPKI_HASH,
+            "DER cert should produce same hash as PEM"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Multi-cert PEM bundle produces comma-separated SPKI hashes.
+    #[test]
+    fn test_compute_spki_hash_multi_cert_pem() {
+        let ec_pem = "-----BEGIN CERTIFICATE-----\n\
+MIIBeTCCAR+gAwIBAgIUC77fmNcp/aMfqP4lKAzS5d6jIkswCgYIKoZIzj0EAwIw\n\
+EjEQMA4GA1UEAwwHZWMtdGVzdDAeFw0yNjAzMjUxNDQwMDhaFw0yNzAzMjUxNDQw\n\
+MDhaMBIxEDAOBgNVBAMMB2VjLXRlc3QwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNC\n\
+AAQBnhhpB1hXMU9ApP03C+h8cCNXmFnt1ceEXG2HF435Wr/Ky+OQZzpjMT/F5p6b\n\
+d9NZybE1SEwHjFDGSih77kR3o1MwUTAdBgNVHQ4EFgQUHhS1zOh00+tnCdSonx+B\n\
+9J9k3GowHwYDVR0jBBgwFoAUHhS1zOh00+tnCdSonx+B9J9k3GowDwYDVR0TAQH/\n\
+BAUwAwEB/zAKBggqhkjOPQQDAgNIADBFAiEAj1qMNlpw9ydvcHHmyDTEl1a57fH2\n\
+VXKy7lhMb3nDiq8CIBmql5q02Sl8+aztTKjtEtOfCtcqGghI+rLkQG7jI51x\n\
+-----END CERTIFICATE-----\n";
+
+        let bundle = format!("{}{}", TEST_PEM, ec_pem);
+        let dir = std::env::temp_dir().join(format!("spki-multi-{}", uuid::Uuid::new_v4()));
+        let _ = std::fs::create_dir_all(&dir);
+        let cert_path = dir.join("bundle.crt");
+        std::fs::write(&cert_path, &bundle).unwrap();
+
+        let hash = compute_spki_hash(cert_path.to_str().unwrap()).unwrap();
+        let expected = format!(
+            "{},{}",
+            TEST_PEM_SPKI_HASH, "j4u7vkJhMUO1e0mrG0BsLqT56MELt1SAYDhN0iHyvD4="
+        );
+        assert_eq!(
+            hash, expected,
+            "Multi-cert PEM should produce comma-separated hashes"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

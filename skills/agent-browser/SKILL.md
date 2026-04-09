@@ -725,11 +725,27 @@ Create `agent-browser.json` in the project root for persistent settings:
 {
   "headed": true,
   "proxy": "http://localhost:8080",
-  "profile": "./browser-data"
+  "profile": "./browser-data",
+  "caCert": "/etc/ssl/certs/proxy-ca.crt"
 }
 ```
 
 Priority (lowest to highest): `~/.agent-browser/config.json` < `./agent-browser.json` < env vars < CLI flags. Use `--config <path>` or `AGENT_BROWSER_CONFIG` env var for a custom config file (exits with error if missing/invalid). All CLI options map to camelCase keys (e.g., `--executable-path` -> `"executablePath"`). Boolean flags accept `true`/`false` values (e.g., `--headed false` overrides config). Extensions from user and project configs are merged, not replaced.
+
+### HTTPS Interception Proxies
+
+Behind corporate proxies that perform SSL inspection (Zscaler, Netskope, mitmproxy), use `--ca-cert` to trust the proxy's CA certificate instead of disabling all certificate validation:
+
+```bash
+agent-browser --ca-cert /etc/ssl/certs/proxy-ca.crt open https://example.com
+
+# Or via environment variable
+export AGENT_BROWSER_CA_CERT=/etc/ssl/certs/proxy-ca.crt
+
+# Or in agent-browser.json: "caCert": "/path/to/proxy-ca.crt"
+```
+
+This computes the SPKI hash and passes it to Chromium, trusting only the specified CA. If you don't have the CA certificate, fall back to `--ignore-https-errors` (less secure).
 
 ## Deep-Dive Documentation
 
@@ -741,7 +757,7 @@ Priority (lowest to highest): `~/.agent-browser/config.json` < `./agent-browser.
 | [references/authentication.md](references/authentication.md)         | Login flows, OAuth, 2FA handling, state reuse             |
 | [references/video-recording.md](references/video-recording.md)       | Recording workflows for debugging and documentation       |
 | [references/profiling.md](references/profiling.md)                   | Chrome DevTools profiling for performance analysis        |
-| [references/proxy-support.md](references/proxy-support.md)           | Proxy configuration, geo-testing, rotating proxies        |
+| [references/proxy-support.md](references/proxy-support.md)           | Proxy configuration, CA certificates, geo-testing, rotating proxies |
 
 ## Cloud Providers
 

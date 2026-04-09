@@ -260,6 +260,7 @@ agent-browser --headers <json> ...    # HTTP headers scoped to URL's origin
 agent-browser --executable-path <p>   # Custom browser executable
 agent-browser --extension <path> ...  # Load browser extension (repeatable)
 agent-browser --ignore-https-errors   # Ignore SSL certificate errors
+agent-browser --ca-cert <path> ...   # Trust a specific CA certificate (HTTPS interception proxies)
 agent-browser --help                  # Show help (-h)
 agent-browser --version               # Show version (-V)
 agent-browser <command> --help        # Show detailed help for a command

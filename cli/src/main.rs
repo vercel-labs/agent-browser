@@ -802,6 +802,26 @@ fn main() {
         return;
     }
 
+    // Validate --ca-cert file exists early, before spawning the daemon.
+    if let Some(ref ca_path) = flags.ca_cert {
+        if !std::path::Path::new(ca_path).exists() {
+            let msg = format!("CA certificate file not found: {}", ca_path);
+            if flags.json {
+                print_json_error(&msg);
+            } else {
+                eprintln!("{} {}", color::warning_indicator(), msg);
+            }
+            exit(1);
+        }
+    }
+
+    if flags.ca_cert.is_some() && flags.ignore_https_errors && !flags.json {
+        eprintln!(
+            "{} --ca-cert has no effect when --ignore-https-errors is set (all certificate errors are already ignored)",
+            color::warning_indicator()
+        );
+    }
+
     // Parse proxy URL to separate server from credentials for the daemon.
     let (proxy_server, proxy_username, proxy_password) = if let Some(ref proxy_str) = flags.proxy {
         let parsed = parse_proxy(proxy_str);
@@ -821,6 +841,7 @@ fn main() {
         proxy_username: proxy_username.as_deref(),
         proxy_password: proxy_password.as_deref(),
         ignore_https_errors: flags.ignore_https_errors,
+        ca_cert: flags.ca_cert.as_deref(),
         allow_file_access: flags.allow_file_access,
         profile: flags.profile.as_deref(),
         state: flags.state.as_deref(),
@@ -893,6 +914,7 @@ fn main() {
                 None
             },
             flags.ignore_https_errors.then_some("--ignore-https-errors"),
+            flags.cli_ca_cert.then_some("--ca-cert"),
             flags.cli_allow_file_access.then_some("--allow-file-access"),
             flags.cli_download_path.then_some("--download-path"),
             flags.cli_headed.then_some("--headed"),
@@ -974,6 +996,10 @@ fn main() {
 
         if flags.ignore_https_errors {
             launch_cmd["ignoreHTTPSErrors"] = json!(true);
+        }
+
+        if let Some(ref ca) = flags.ca_cert {
+            launch_cmd["caCert"] = json!(ca);
         }
 
         if let Some(ref cs) = flags.color_scheme {
@@ -1070,6 +1096,10 @@ fn main() {
 
             if flags.ignore_https_errors {
                 launch_cmd["ignoreHTTPSErrors"] = json!(true);
+            }
+
+            if let Some(ref ca) = flags.ca_cert {
+                launch_cmd["caCert"] = json!(ca);
             }
 
             if let Some(ref cs) = flags.color_scheme {
@@ -1212,6 +1242,10 @@ fn main() {
 
         if flags.ignore_https_errors {
             launch_cmd["ignoreHTTPSErrors"] = json!(true);
+        }
+
+        if let Some(ref ca) = flags.ca_cert {
+            launch_cmd["caCert"] = json!(ca);
         }
 
         if flags.allow_file_access {

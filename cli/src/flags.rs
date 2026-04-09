@@ -69,6 +69,7 @@ pub struct Config {
     pub provider: Option<String>,
     pub device: Option<String>,
     pub ignore_https_errors: Option<bool>,
+    pub ca_cert: Option<String>,
     pub allow_file_access: Option<bool>,
     pub cdp: Option<String>,
     pub auto_connect: Option<bool>,
@@ -116,6 +117,7 @@ impl Config {
             provider: other.provider.or(self.provider),
             device: other.device.or(self.device),
             ignore_https_errors: other.ignore_https_errors.or(self.ignore_https_errors),
+            ca_cert: other.ca_cert.or(self.ca_cert),
             allow_file_access: other.allow_file_access.or(self.allow_file_access),
             cdp: other.cdp.or(self.cdp),
             auto_connect: other.auto_connect.or(self.auto_connect),
@@ -221,6 +223,7 @@ fn extract_config_path(args: &[String]) -> Option<Option<String>> {
         "--screenshot-quality",
         "--screenshot-format",
         "--idle-timeout",
+        "--ca-cert",
         "--model",
     ];
     let mut i = 0;
@@ -285,6 +288,7 @@ pub struct Flags {
     pub user_agent: Option<String>,
     pub provider: Option<String>,
     pub ignore_https_errors: bool,
+    pub ca_cert: Option<String>,
     pub allow_file_access: bool,
     pub device: Option<String>,
     pub auto_connect: bool,
@@ -319,6 +323,7 @@ pub struct Flags {
     pub cli_user_agent: bool,
     pub cli_proxy: bool,
     pub cli_proxy_bypass: bool,
+    pub cli_ca_cert: bool,
     pub cli_allow_file_access: bool,
     pub cli_annotate: bool,
     pub cli_download_path: bool,
@@ -384,6 +389,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
         provider: env::var("AGENT_BROWSER_PROVIDER").ok().or(config.provider),
         ignore_https_errors: env_var_is_truthy("AGENT_BROWSER_IGNORE_HTTPS_ERRORS")
             || config.ignore_https_errors.unwrap_or(false),
+        ca_cert: env::var("AGENT_BROWSER_CA_CERT").ok().or(config.ca_cert),
         allow_file_access: env_var_is_truthy("AGENT_BROWSER_ALLOW_FILE_ACCESS")
             || config.allow_file_access.unwrap_or(false),
         device: env::var("AGENT_BROWSER_IOS_DEVICE").ok().or(config.device),
@@ -455,6 +461,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
         cli_user_agent: false,
         cli_proxy: false,
         cli_proxy_bypass: false,
+        cli_ca_cert: false,
         cli_allow_file_access: false,
         cli_annotate: false,
         cli_download_path: false,
@@ -583,6 +590,13 @@ pub fn parse_flags(args: &[String]) -> Flags {
                 let (val, consumed) = parse_bool_arg(args, i);
                 flags.ignore_https_errors = val;
                 if consumed {
+                    i += 1;
+                }
+            }
+            "--ca-cert" => {
+                if let Some(s) = args.get(i + 1) {
+                    flags.ca_cert = Some(s.clone());
+                    flags.cli_ca_cert = true;
                     i += 1;
                 }
             }
@@ -801,6 +815,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--screenshot-quality",
         "--screenshot-format",
         "--idle-timeout",
+        "--ca-cert",
         "--model",
     ];
 
@@ -1417,6 +1432,47 @@ mod tests {
         };
         let merged = user.merge(project);
         assert_eq!(merged.extensions, Some(vec!["/ext2".to_string()]));
+    }
+
+    #[test]
+    fn test_parse_ca_cert_flag() {
+        let flags = parse_flags(&args("--ca-cert /path/to/ca.crt open example.com"));
+        assert_eq!(flags.ca_cert, Some("/path/to/ca.crt".to_string()));
+    }
+
+    #[test]
+    fn test_parse_ca_cert_flag_no_value() {
+        let flags = parse_flags(&args("--ca-cert"));
+        assert_eq!(flags.ca_cert, None);
+    }
+
+    #[test]
+    fn test_clean_args_removes_ca_cert() {
+        let cleaned = clean_args(&args("--ca-cert /path/to/ca.crt open example.com"));
+        assert_eq!(cleaned, vec!["open", "example.com"]);
+    }
+
+    #[test]
+    fn test_config_merge_ca_cert() {
+        let user = Config {
+            ca_cert: Some("/user/ca.crt".to_string()),
+            ..Config::default()
+        };
+        let project = Config::default();
+        let merged = user.merge(project);
+        assert_eq!(merged.ca_cert, Some("/user/ca.crt".to_string()));
+
+        // Project overrides user
+        let user = Config {
+            ca_cert: Some("/user/ca.crt".to_string()),
+            ..Config::default()
+        };
+        let project = Config {
+            ca_cert: Some("/project/ca.crt".to_string()),
+            ..Config::default()
+        };
+        let merged = user.merge(project);
+        assert_eq!(merged.ca_cert, Some("/project/ca.crt".to_string()));
     }
 
     #[test]

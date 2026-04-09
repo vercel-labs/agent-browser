@@ -65,6 +65,7 @@ Every CLI flag can be set in the config file using its camelCase equivalent:
     <tr><td><code>provider</code></td><td><code>-p, --provider</code></td><td>string</td></tr>
     <tr><td><code>device</code></td><td><code>--device</code></td><td>string</td></tr>
     <tr><td><code>ignoreHttpsErrors</code></td><td><code>--ignore-https-errors</code></td><td>boolean</td></tr>
+    <tr><td><code>caCert</code></td><td><code>--ca-cert</code></td><td>string</td></tr>
     <tr><td><code>allowFileAccess</code></td><td><code>--allow-file-access</code></td><td>boolean</td></tr>
     <tr><td><code>cdp</code></td><td><code>--cdp</code></td><td>string</td></tr>
     <tr><td><code>autoConnect</code></td><td><code>--auto-connect</code></td><td>boolean</td></tr>
@@ -94,6 +95,16 @@ Every CLI flag can be set in the config file using its camelCase equivalent:
 ```
 
 ### Behind a Proxy
+
+```json
+{
+  "proxy": "http://proxy.corp.example.com:8080",
+  "proxyBypass": "localhost,*.internal.com",
+  "caCert": "/etc/ssl/certs/proxy-ca.crt"
+}
+```
+
+If you don't have the proxy's CA certificate, you can fall back to ignoring all certificate errors (less secure):
 
 ```json
 {

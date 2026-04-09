@@ -607,6 +607,7 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 | `--proxy <url>` | Proxy server URL with optional auth (or `AGENT_BROWSER_PROXY` env) |
 | `--proxy-bypass <hosts>` | Hosts to bypass proxy (or `AGENT_BROWSER_PROXY_BYPASS` env) |
 | `--ignore-https-errors` | Ignore HTTPS certificate errors (useful for self-signed certs) |
+| `--ca-cert <path>` | Trust a specific CA certificate for HTTPS interception proxies (or `AGENT_BROWSER_CA_CERT` env) |
 | `--allow-file-access` | Allow file:// URLs to access local files (Chromium only) |
 | `-p, --provider <name>` | Cloud browser provider (or `AGENT_BROWSER_PROVIDER` env) |
 | `--device <name>` | iOS device name, e.g. "iPhone 15 Pro" (or `AGENT_BROWSER_IOS_DEVICE` env) |
@@ -704,7 +705,8 @@ Create an `agent-browser.json` file to set persistent defaults instead of repeat
   "proxy": "http://localhost:8080",
   "profile": "./browser-data",
   "userAgent": "my-agent/1.0",
-  "ignoreHttpsErrors": true
+  "ignoreHttpsErrors": true,
+  "caCert": "/etc/ssl/certs/proxy-ca.crt"
 }
 ```
 

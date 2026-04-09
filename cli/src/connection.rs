@@ -211,6 +211,7 @@ pub struct DaemonOptions<'a> {
     pub proxy_username: Option<&'a str>,
     pub proxy_password: Option<&'a str>,
     pub ignore_https_errors: bool,
+    pub ca_cert: Option<&'a str>,
     pub allow_file_access: bool,
     pub profile: Option<&'a str>,
     pub state: Option<&'a str>,
@@ -265,6 +266,9 @@ fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
     }
     if opts.ignore_https_errors {
         cmd.env("AGENT_BROWSER_IGNORE_HTTPS_ERRORS", "1");
+    }
+    if let Some(ca) = opts.ca_cert {
+        cmd.env("AGENT_BROWSER_CA_CERT", ca);
     }
     if opts.allow_file_access {
         cmd.env("AGENT_BROWSER_ALLOW_FILE_ACCESS", "1");

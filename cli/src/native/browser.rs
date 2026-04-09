@@ -80,6 +80,9 @@ fn validate_lightpanda_options(options: &LaunchOptions) -> Result<(), String> {
     if !options.headless {
         return Err("Headed mode is not supported with Lightpanda (headless only)".to_string());
     }
+    if options.ca_cert.is_some() {
+        return Err("--ca-cert is not supported with Lightpanda (Chromium only)".to_string());
+    }
     if !options.args.is_empty() {
         return Err(
             "Custom Chrome arguments (--args) are not supported with Lightpanda".to_string(),
