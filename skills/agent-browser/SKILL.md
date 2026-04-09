@@ -612,6 +612,30 @@ agent-browser dialog dismiss
 
 When a dialog is pending, all command responses include a `warning` field indicating the dialog type and message. In `--json` mode this appears as a `"warning"` key in the response object.
 
+### Apps with Persistent Connections (SSE, WebSockets)
+
+**`wait --load networkidle` will always time out** on apps that maintain persistent server connections — this includes any app using Server-Sent Events (SSE), WebSockets, or long-polling. Playwright's `networkidle` waits for zero network activity for 500ms, which never happens when a connection is held open.
+
+This affects many modern web apps: chat interfaces, real-time dashboards, notification systems, collaborative editors, and any app with live updates.
+
+Use these alternatives instead:
+
+```bash
+# Wait for the DOM to be ready (ignores ongoing network connections)
+agent-browser wait --load domcontentloaded
+
+# Wait for specific content to appear
+agent-browser wait --text "Welcome back"
+
+# Wait for a specific element
+agent-browser wait "#main-content"
+
+# Wait for app-specific readiness
+agent-browser wait --fn "window.appReady === true"
+```
+
+**Rule of thumb:** If the app updates in real time, avoid `networkidle` entirely. Prefer `domcontentloaded`, element waits, or text waits.
+
 ## Session Management and Cleanup
 
 When running multiple agents or automations concurrently, always use named sessions to avoid conflicts:
