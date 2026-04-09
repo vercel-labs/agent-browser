@@ -297,6 +297,33 @@ agent-browser tab close [n]           # Close tab
 agent-browser window new              # New window
 ```
 
+### SPA Detail Pages
+
+On SPAs with dynamic result lists, refs from `snapshot` often become stale if
+you click into a detail page and then navigate back. A more reliable pattern is
+to keep the source tab on the list page and open detail pages in a temporary
+tab:
+
+```bash
+# 1. Snapshot the result list
+agent-browser snapshot -i -c
+
+# 2. Open one result in a new tab instead of leaving the list page
+agent-browser click @e12 --new-tab
+agent-browser tab 1
+
+# 3. Inspect the detail page, then close it
+agent-browser snapshot -i -c
+agent-browser tab close
+
+# 4. Return to the source tab and re-snapshot before the next item
+agent-browser tab 0
+agent-browser snapshot -i -c
+```
+
+This avoids invalidating refs on the source page and is especially useful for
+search results, infinite-scroll feeds, and modal-heavy applications.
+
 ### Frames
 
 ```bash
