@@ -604,7 +604,7 @@ impl BrowserManager {
                 match rx.recv().await {
                     Ok(event) => {
                         if event.method == event_name
-                            && event.session_id.as_deref() == Some(session_id)
+                            && event_matches_session(event.session_id.as_deref(), session_id)
                         {
                             return Ok(());
                         }
@@ -1258,7 +1258,7 @@ async fn poll_network_idle(
                 tokio::time::timeout(tokio::time::Duration::from_millis(600), rx.recv()).await;
 
             match recv_result {
-                Ok(Ok(event)) if event.session_id.as_deref() == Some(session_id) => {
+                Ok(Ok(event)) if event_matches_session(event.session_id.as_deref(), session_id) => {
                     let mut p = pending.lock().await;
                     match event.method.as_str() {
                         "Network.requestWillBeSent" => {
@@ -1312,6 +1312,14 @@ async fn poll_network_idle(
     })
     .await
     .map_err(|_| "Timeout waiting for networkidle".to_string())?
+}
+
+fn event_matches_session(event_session_id: Option<&str>, expected_session_id: &str) -> bool {
+    if expected_session_id.is_empty() {
+        event_session_id.is_none() || event_session_id == Some("")
+    } else {
+        event_session_id == Some(expected_session_id)
+    }
 }
 
 async fn connect_cdp_with_retry(
@@ -1716,6 +1724,28 @@ mod tests {
         }
     }
 
+    fn cdp_event_direct(method: &str, params: Value) -> CdpEvent {
+        CdpEvent {
+            method: method.to_string(),
+            params,
+            session_id: None,
+        }
+    }
+
+    #[test]
+    fn test_event_matches_session_standard_session() {
+        assert!(event_matches_session(Some("s1"), "s1"));
+        assert!(!event_matches_session(None, "s1"));
+        assert!(!event_matches_session(Some("s2"), "s1"));
+    }
+
+    #[test]
+    fn test_event_matches_session_direct_page() {
+        assert!(event_matches_session(None, ""));
+        assert!(event_matches_session(Some(""), ""));
+        assert!(!event_matches_session(Some("s1"), ""));
+    }
+
     /// Regression test for #846: when no network events arrive at all (e.g.
     /// page fully served from cache), poll_network_idle must NOT return
     /// instantly.  It should observe at least 500 ms of idle before resolving.
@@ -1860,5 +1890,33 @@ mod tests {
         assert!(result
             .unwrap_err()
             .contains("Timeout waiting for networkidle"));
+    }
+
+    #[tokio::test]
+    async fn test_network_idle_direct_page_without_session_id() {
+        let (tx, mut rx) = broadcast::channel::<CdpEvent>(16);
+
+        let _keep_alive = tx.clone();
+        tokio::spawn(async move {
+            sleep(Duration::from_millis(50)).await;
+            let _ = tx.send(cdp_event_direct(
+                "Network.requestWillBeSent",
+                json!({ "requestId": "r1" }),
+            ));
+            sleep(Duration::from_millis(100)).await;
+            let _ = tx.send(cdp_event_direct(
+                "Network.loadingFinished",
+                json!({ "requestId": "r1" }),
+            ));
+        });
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            poll_network_idle("", &mut rx, Duration::from_secs(5)),
+        )
+        .await
+        .expect("outer timeout should not fire");
+
+        assert!(result.is_ok());
     }
 }

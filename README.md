@@ -124,7 +124,7 @@ agent-browser screenshot --screenshot-format jpeg --screenshot-quality 80
 agent-browser pdf <path>              # Save as PDF
 agent-browser snapshot                # Accessibility tree with refs (best for AI)
 agent-browser eval <js>               # Run JavaScript (-b for base64, --stdin for piped input)
-agent-browser connect <port>          # Connect to browser via CDP
+agent-browser connect [--direct] <port|url>  # Connect to browser via CDP
 agent-browser stream enable [--port <port>]  # Start runtime WebSocket streaming
 agent-browser stream status           # Show runtime streaming state and bound port
 agent-browser stream disable          # Stop runtime WebSocket streaming
@@ -972,12 +972,17 @@ agent-browser --cdp 9222 snapshot
 
 # Connect to remote browser via WebSocket URL
 agent-browser --cdp "wss://your-browser-service.com/cdp?token=..." snapshot
+
+# Connect directly to a page-level WebSocket URL
+agent-browser connect --direct "ws://localhost:19222/devtools/page/ABC123"
 ```
 
 The `--cdp` flag accepts either:
 
 - A port number (e.g., `9222`) for local connections via `http://localhost:{port}`
 - A full WebSocket URL (e.g., `wss://...` or `ws://...`) for remote browser services
+
+Use `agent-browser connect --direct <ws-url>` when you already have a page-level CDP WebSocket URL such as `ws://localhost:19222/devtools/page/ABC123`. This skips browser-level `Target.*` discovery and talks to the page session directly.
 
 This enables control of:
 

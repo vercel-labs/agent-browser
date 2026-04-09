@@ -46,6 +46,8 @@ agent-browser open https://example.com && agent-browser screenshot
 
 **When to chain:** Use `&&` when you don't need to read the output of an intermediate command before proceeding (e.g., open + wait + screenshot). Run commands separately when you need to parse the output first (e.g., snapshot to discover refs, then interact using those refs).
 
+Use `agent-browser connect --direct <ws-url>` when you already have a page-level CDP WebSocket URL such as `ws://localhost:19222/devtools/page/ABC123`. This skips `Target.*` discovery, which is required for page sessions exposed by some embedded browsers and framework integrations.
+
 ## Handling Authentication
 
 When automating a site that requires login, choose the approach that fits:

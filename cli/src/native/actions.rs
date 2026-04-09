@@ -1672,6 +1672,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         .unwrap_or(true);
     let cdp_url = cmd.get("cdpUrl").and_then(|v| v.as_str());
     let cdp_port = cmd.get("cdpPort").and_then(|v| v.as_u64());
+    let direct = cmd.get("direct").and_then(|v| v.as_bool()).unwrap_or(false);
     let auto_connect = cmd
         .get("autoConnect")
         .and_then(|v| v.as_bool())
@@ -1798,7 +1799,15 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
 
     if let Some(url) = cdp_url {
         state.reset_input_state();
-        state.browser = Some(BrowserManager::connect_cdp(url).await?);
+        state.browser = Some(
+            // `connect --direct` is only meaningful for WebSocket URLs that
+            // already point at a specific page session.
+            if direct && (url.starts_with("ws://") || url.starts_with("wss://")) {
+                BrowserManager::connect_cdp_direct(url).await?
+            } else {
+                BrowserManager::connect_cdp(url).await?
+            },
+        );
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
         state.start_dialog_handler();

@@ -25,12 +25,17 @@ agent-browser --cdp "wss://browser-service.com/cdp?token=..." snapshot
 
 # Works with any CDP-compatible service
 agent-browser --cdp "ws://localhost:9222/devtools/browser/abc123" open example.com
+
+# Connect directly to a page-level WebSocket session
+agent-browser connect --direct "ws://localhost:19222/devtools/page/ABC123"
 ```
 
 The `--cdp` flag accepts either:
 
 - A port number (e.g., `9222`) for local connections via `http://localhost:{port}`
 - A full WebSocket URL (e.g., `wss://...` or `ws://...`) for remote browser services
+
+Use `agent-browser connect --direct <ws-url>` when you already have a page-level CDP WebSocket URL such as `ws://localhost:19222/devtools/page/ABC123`. This skips browser-level `Target.*` discovery and connects straight to the page session.
 
 ## Auto-Connect
 
