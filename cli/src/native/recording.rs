@@ -212,12 +212,14 @@ pub fn spawn_recording_task(
                 event = event_rx.recv() => {
                     match event {
                         Ok(evt) if evt.method == "Page.screencastFrame" => {
-                            // Ack so Chrome sends the next frame
+                            // Ack so Chrome sends the next frame.
+                            // Use evt.session_id (not the closed-over session_id) — matches
+                            // the cdp_loop.rs pattern and handles session reattach/target swaps.
                             if let Some(sid) = evt.params.get("sessionId").and_then(|v| v.as_i64()) {
                                 let _ = client.send_command(
                                     "Page.screencastFrameAck",
                                     Some(json!({ "sessionId": sid })),
-                                    Some(&session_id),
+                                    evt.session_id.as_deref(),
                                 ).await;
                             }
 
