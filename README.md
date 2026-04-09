@@ -407,6 +407,8 @@ agent-browser --session-name myapp state load ./my-auth.json
 # From now on, --session-name myapp auto-saves/restores this state
 ```
 
+If Chrome is already running and `--auto-connect` still reports that no Chrome instance was found, open `chrome://inspect/#remote-debugging` in Chrome and enable `Allow remote debugging for this browser instance`.
+
 > **Security notes:**
 > - `--remote-debugging-port` exposes full browser control on localhost. Any local process can connect. Only use on trusted machines and close Chrome when done.
 > - State files contain session tokens in plaintext. Add them to `.gitignore` and delete when no longer needed. For encryption at rest, set `AGENT_BROWSER_ENCRYPTION_KEY` (see [State Encryption](#state-encryption)).
@@ -1008,6 +1010,7 @@ Auto-connect discovers Chrome by:
 This is useful when:
 
 - Chrome 144+ has remote debugging enabled via `chrome://inspect/#remote-debugging` (which uses a dynamic port)
+- If Chrome is already running but `--auto-connect` still fails, enable `Allow remote debugging for this browser instance` in that page
 - You want a zero-configuration connection to your existing browser
 - You don't want to track which port Chrome is using
 

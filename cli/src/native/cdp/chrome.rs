@@ -679,7 +679,12 @@ pub async fn auto_connect_cdp() -> Result<String, String> {
         }
     }
 
-    Err("No running Chrome instance found. Launch Chrome with --remote-debugging-port or use --cdp.".to_string())
+    Err(auto_connect_unavailable_error())
+}
+
+/// User-facing guidance when auto-connect cannot find a usable Chrome CDP endpoint.
+fn auto_connect_unavailable_error() -> String {
+    "No running Chrome instance found. Launch Chrome with --remote-debugging-port, or if Chrome is already running open chrome://inspect/#remote-debugging and enable \"Allow remote debugging for this browser instance\". You can also connect explicitly with --cdp.".to_string()
 }
 
 fn is_port_reachable(port: u16) -> bool {
@@ -1256,6 +1261,13 @@ mod tests {
     fn test_read_devtools_active_port_missing() {
         let result = read_devtools_active_port(Path::new("/nonexistent"));
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_auto_connect_unavailable_error_mentions_remote_debugging_checkbox() {
+        let msg = auto_connect_unavailable_error();
+        assert!(msg.contains("chrome://inspect/#remote-debugging"));
+        assert!(msg.contains("Allow remote debugging for this browser instance"));
     }
 
     #[test]
