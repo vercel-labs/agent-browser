@@ -2860,6 +2860,8 @@ Authentication:
                              (or AGENT_BROWSER_STATE env)
   --auto-connect             Connect to a running Chrome to reuse its auth state
                              Tip: agent-browser --auto-connect state save ./auth.json
+                             If Chrome is already running but not found, check
+                             chrome://inspect/#remote-debugging in Chrome
   --headers <json>           HTTP headers scoped to URL's origin (e.g., Authorization bearer token)
 
 Options:
@@ -2982,6 +2984,8 @@ Examples:
   agent-browser wait 2000               # Wait for slow pages to settle
   agent-browser --cdp 9222 snapshot      # Connect via CDP port
   agent-browser --auto-connect snapshot  # Auto-discover running Chrome
+  # If auto-connect still fails, enable "Allow remote debugging for this
+  # browser instance" in chrome://inspect/#remote-debugging
   agent-browser stream enable            # Start runtime streaming on an auto-selected port
   agent-browser stream status            # Inspect runtime streaming state
   agent-browser --color-scheme dark open example.com  # Dark mode

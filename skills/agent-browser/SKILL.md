@@ -406,6 +406,8 @@ agent-browser --cdp 9222 snapshot
 
 Auto-connect discovers Chrome via `DevToolsActivePort`, common debugging ports (9222, 9229), and falls back to a direct WebSocket connection if HTTP-based CDP discovery fails.
 
+If Chrome is already running but `--auto-connect` still fails, open `chrome://inspect/#remote-debugging` and enable `Allow remote debugging for this browser instance`.
+
 ### Color Scheme (Dark Mode)
 
 ```bash

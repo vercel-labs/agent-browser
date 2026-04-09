@@ -98,6 +98,8 @@ If you are already logged in to a site in Chrome, you can grab that auth state a
 google-chrome --remote-debugging-port=9222
 ```
 
+If Chrome is already running and `--auto-connect` still reports that no Chrome instance was found, open `chrome://inspect/#remote-debugging` in Chrome and enable `Allow remote debugging for this browser instance`.
+
 Log in to your target site(s) in this Chrome window.
 
 `--remote-debugging-port` exposes full browser control on localhost. Any local process can connect. Only use on trusted machines and close Chrome when done.
