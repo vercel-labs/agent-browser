@@ -220,6 +220,7 @@ pub struct DaemonOptions<'a> {
     pub idle_timeout: Option<&'a str>,
     pub cdp: Option<&'a str>,
     pub no_auto_dialog: bool,
+    pub viewport: Option<&'a str>,
 }
 
 fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
@@ -291,6 +292,9 @@ fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
     }
     if let Some(engine) = opts.engine {
         cmd.env("AGENT_BROWSER_ENGINE", engine);
+    }
+    if let Some(viewport) = opts.viewport {
+        cmd.env("AGENT_BROWSER_VIEWPORT", viewport);
     }
     if opts.auto_connect {
         cmd.env("AGENT_BROWSER_AUTO_CONNECT", "1");

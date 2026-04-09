@@ -88,6 +88,7 @@ pub struct Config {
     pub screenshot_format: Option<String>,
     pub idle_timeout: Option<String>,
     pub no_auto_dialog: Option<bool>,
+    pub viewport: Option<String>,
 }
 
 impl Config {
@@ -134,6 +135,7 @@ impl Config {
             screenshot_format: other.screenshot_format.or(self.screenshot_format),
             idle_timeout: other.idle_timeout.or(self.idle_timeout),
             no_auto_dialog: other.no_auto_dialog.or(self.no_auto_dialog),
+            viewport: other.viewport.or(self.viewport),
         }
     }
 }
@@ -301,6 +303,7 @@ pub struct Flags {
     pub screenshot_format: Option<String>,
     pub idle_timeout: Option<String>, // Canonical milliseconds string for AGENT_BROWSER_IDLE_TIMEOUT_MS
     pub no_auto_dialog: bool,
+    pub viewport: Option<String>,
 
     // Track which launch-time options were explicitly passed via CLI
     // (as opposed to being set only via environment variables)
@@ -434,6 +437,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
         .or(config.idle_timeout),
         no_auto_dialog: env_var_is_truthy("AGENT_BROWSER_NO_AUTO_DIALOG")
             || config.no_auto_dialog.unwrap_or(false),
+        viewport: env::var("AGENT_BROWSER_VIEWPORT").ok().or(config.viewport),
         cli_executable_path: false,
         cli_extensions: false,
         cli_profile: false,

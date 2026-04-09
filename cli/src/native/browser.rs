@@ -11,6 +11,23 @@ use super::cdp::discovery::discover_cdp_url;
 use super::cdp::lightpanda::{launch_lightpanda, LightpandaLaunchOptions, LightpandaProcess};
 use super::cdp::types::*;
 
+
+/// Parse viewport string like "1920x1080" or "1920,1080" into (width, height)
+fn parse_viewport(s: &str) -> Option<(u32, u32)> {
+    let parts: Vec<&str> = if s.contains(',') {
+        s.split(',').collect()
+    } else {
+        s.split('x').collect()
+    };
+    if parts.len() == 2 {
+        let width = parts[0].trim().parse::<u32>().ok()?;
+        let height = parts[1].trim().parse::<u32>().ok()?;
+        Some((width, height))
+    } else {
+        None
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Launch validation
 // ---------------------------------------------------------------------------
@@ -239,6 +256,7 @@ impl BrowserManager {
         let user_agent = options.user_agent.clone();
         let color_scheme = options.color_scheme.clone();
         let download_path = options.download_path.clone();
+        let viewport = options.viewport.clone();
 
         let (ws_url, process) = match engine {
             "lightpanda" => {
@@ -322,6 +340,24 @@ impl BrowserManager {
                     None,
                 )
                 .await;
+        }
+
+        if let Some(ref viewport_str) = viewport {
+            if let Some((width, height)) = parse_viewport(viewport_str) {
+                let _ = manager
+                    .client
+                    .send_command(
+                        "Emulation.setDeviceMetricsOverride",
+                        Some(json!({
+                            "width": width,
+                            "height": height,
+                            "deviceScaleFactor": 1,
+                            "mobile": false
+                        })),
+                        Some(&session_id),
+                    )
+                    .await;
+            }
         }
 
         Ok(manager)

@@ -1495,6 +1495,7 @@ fn launch_options_from_env() -> LaunchOptions {
             .unwrap_or(false),
         color_scheme: env::var("AGENT_BROWSER_COLOR_SCHEME").ok(),
         download_path: env::var("AGENT_BROWSER_DOWNLOAD_PATH").ok(),
+        viewport: env::var("AGENT_BROWSER_VIEWPORT").ok(),
     }
 }
 
@@ -1718,6 +1719,19 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
             .get("downloadPath")
             .and_then(|v| v.as_str())
             .map(String::from),
+        viewport: cmd
+            .get("viewport")
+            .and_then(|v| {
+                // Support both string "1920x1080" and object {"width": 1920, "height": 1080}
+                if let Some(s) = v.as_str() {
+                    Some(s.to_string())
+                } else {
+                    let width = v.get("width")?.as_u64()?;
+                    let height = v.get("height")?.as_u64()?;
+                    Some(format!("{}x{}", width, height))
+                }
+            })
+            .or_else(|| env::var("AGENT_BROWSER_VIEWPORT").ok()),
     };
 
     // Store proxy credentials for Fetch.authRequired handling

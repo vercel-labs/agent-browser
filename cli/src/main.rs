@@ -722,6 +722,7 @@ fn main() {
         idle_timeout: flags.idle_timeout.as_deref(),
         cdp: flags.cdp.as_deref(),
         no_auto_dialog: flags.no_auto_dialog,
+        viewport: flags.viewport.as_deref(),
     };
 
     let daemon_result = match ensure_daemon(&flags.session, &daemon_opts) {
