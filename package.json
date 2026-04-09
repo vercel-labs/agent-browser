@@ -6,7 +6,7 @@
   "files": [
     "bin",
     "scripts",
-    "skills"
+    "skills/agent-browser"
   ],
   "bin": {
     "agent-browser": "./bin/agent-browser.js"
