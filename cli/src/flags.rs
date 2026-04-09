@@ -72,6 +72,7 @@ pub struct Config {
     pub allow_file_access: Option<bool>,
     pub cdp: Option<String>,
     pub auto_connect: Option<bool>,
+    pub context: Option<String>,
     pub headers: Option<String>,
     pub annotate: Option<bool>,
     pub color_scheme: Option<String>,
@@ -119,6 +120,7 @@ impl Config {
             allow_file_access: other.allow_file_access.or(self.allow_file_access),
             cdp: other.cdp.or(self.cdp),
             auto_connect: other.auto_connect.or(self.auto_connect),
+            context: other.context.or(self.context),
             headers: other.headers.or(self.headers),
             annotate: other.annotate.or(self.annotate),
             color_scheme: other.color_scheme.or(self.color_scheme),
@@ -210,6 +212,7 @@ fn extract_config_path(args: &[String]) -> Option<Option<String>> {
         "--provider",
         "--device",
         "--session-name",
+        "--context",
         "--color-scheme",
         "--download-path",
         "--max-output",
@@ -288,6 +291,7 @@ pub struct Flags {
     pub allow_file_access: bool,
     pub device: Option<String>,
     pub auto_connect: bool,
+    pub context: Option<String>,
     pub session_name: Option<String>,
     pub annotate: bool,
     pub color_scheme: Option<String>,
@@ -389,6 +393,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
         device: env::var("AGENT_BROWSER_IOS_DEVICE").ok().or(config.device),
         auto_connect: env_var_is_truthy("AGENT_BROWSER_AUTO_CONNECT")
             || config.auto_connect.unwrap_or(false),
+        context: env::var("AGENT_BROWSER_CONTEXT").ok().or(config.context),
         session_name: env::var("AGENT_BROWSER_SESSION_NAME")
             .ok()
             .or(config.session_name),
@@ -489,6 +494,12 @@ pub fn parse_flags(args: &[String]) -> Flags {
             "--session" => {
                 if let Some(s) = args.get(i + 1) {
                     flags.session = s.clone();
+                    i += 1;
+                }
+            }
+            "--context" => {
+                if let Some(c) = args.get(i + 1) {
+                    flags.context = c.clone().into();
                     i += 1;
                 }
             }
@@ -789,6 +800,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--provider",
         "--device",
         "--session-name",
+        "--context",
         "--color-scheme",
         "--download-path",
         "--max-output",

@@ -1490,6 +1490,29 @@ async fn connect_auto_with_fresh_tab() -> Result<BrowserManager, String> {
     Ok(mgr)
 }
 
+async fn maybe_create_browser_context(cmd: &Value, state: &mut DaemonState) -> Result<(), String> {
+    if let Some(context_name) = cmd.get("contextName").and_then(|v| v.as_str()) {
+        if let Some(mgr) = state.browser.as_mut() {
+            match mgr.create_browser_context().await {
+                Ok(ctx_id) => {
+                    eprintln!(
+                        "Created BrowserContext: {} (name: {})",
+                        ctx_id, context_name
+                    );
+                    // Create a fresh tab inside the isolated context and switch to it.
+                    // The pages discovered by connect_cdp() belong to the default context,
+                    // so we must replace them with a page in the new context for real isolation.
+                    mgr.replace_pages_with_context_tab().await?;
+                }
+                Err(e) => {
+                    return Err(format!("Failed to create BrowserContext: {}", e));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn auto_launch(state: &mut DaemonState) -> Result<(), String> {
     let mut options = launch_options_from_env();
 
@@ -1799,6 +1822,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     if let Some(url) = cdp_url {
         state.reset_input_state();
         state.browser = Some(BrowserManager::connect_cdp(url).await?);
+        maybe_create_browser_context(cmd, state).await?;
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
         state.start_dialog_handler();
@@ -1809,6 +1833,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     if let Some(port) = cdp_port {
         state.reset_input_state();
         state.browser = Some(BrowserManager::connect_cdp(&port.to_string()).await?);
+        maybe_create_browser_context(cmd, state).await?;
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
         state.start_dialog_handler();
@@ -1819,6 +1844,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     if auto_connect {
         state.reset_input_state();
         state.browser = Some(connect_auto_with_fresh_tab().await?);
+        maybe_create_browser_context(cmd, state).await?;
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
         state.start_dialog_handler();
@@ -1854,6 +1880,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
                     Ok(mgr) => {
                         state.reset_input_state();
                         state.browser = Some(mgr);
+                        maybe_create_browser_context(cmd, state).await?;
                         state.subscribe_to_browser_events();
                         state.start_fetch_handler();
                         state.start_dialog_handler();
@@ -1905,6 +1932,14 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     {
         let mut df = state.domain_filter.write().await;
         *df = Some(DomainFilter::new(domains));
+    }
+
+    if cmd.get("contextName").and_then(|v| v.as_str()).is_some() {
+        eprintln!(
+            "Warning: --context is ignored when launching Chrome directly. \
+             Use --cdp-url or --auto-connect to share a Chrome instance with \
+             context isolation."
+        );
     }
 
     state.engine = engine.as_deref().unwrap_or("chrome").to_string();

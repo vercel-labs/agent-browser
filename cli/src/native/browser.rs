@@ -195,6 +195,7 @@ impl BrowserProcess {
 
 pub struct BrowserManager {
     pub client: Arc<CdpClient>,
+    pub browser_context_id: Option<String>,
     browser_process: Option<BrowserProcess>,
     ws_url: String,
     pages: Vec<PageInfo>,
@@ -269,6 +270,7 @@ impl BrowserManager {
             let client = Arc::new(CdpClient::connect(&ws_url).await?);
             let mut manager = Self {
                 client,
+                browser_context_id: None,
                 browser_process: Some(process),
                 ws_url,
                 pages: Vec::new(),
@@ -357,6 +359,7 @@ impl BrowserManager {
         let client = Arc::new(CdpClient::connect_with_headers(&ws_url, headers).await?);
         let mut manager = Self {
             client,
+            browser_context_id: None,
             browser_process: None,
             ws_url,
             pages: Vec::new(),
@@ -416,6 +419,7 @@ impl BrowserManager {
                     "Target.createTarget",
                     &CreateTargetParams {
                         url: "about:blank".to_string(),
+                        browser_context_id: self.browser_context_id.clone(),
                     },
                     None,
                 )
@@ -688,6 +692,18 @@ impl BrowserManager {
     }
 
     pub async fn close(&mut self) -> Result<(), String> {
+        // Dispose BrowserContext if one was created.
+        if let Some(ref ctx_id) = self.browser_context_id {
+            let _ = self
+                .client
+                .send_command_typed::<_, Value>(
+                    "Target.disposeBrowserContext",
+                    &json!({ "browserContextId": ctx_id }),
+                    None,
+                )
+                .await;
+        }
+
         if self.browser_process.is_some() {
             // Only send Browser.close when we launched the browser ourselves.
             // For external connections (--auto-connect, --cdp) we just disconnect
@@ -771,6 +787,80 @@ impl BrowserManager {
         self.browser_process.is_none()
     }
 
+    /// After creating an isolated BrowserContext, replace the current page list
+    /// with a fresh tab inside that context. This is needed because connect_cdp()
+    /// discovers pages from the default context, and navigating on those pages
+    /// would bypass the isolation.
+    pub async fn replace_pages_with_context_tab(&mut self) -> Result<(), String> {
+        // Detach from existing default-context pages (best-effort).
+        for page in &self.pages {
+            let _ = self
+                .client
+                .send_command_typed::<_, Value>(
+                    "Target.detachFromTarget",
+                    &json!({ "sessionId": page.session_id }),
+                    None,
+                )
+                .await;
+        }
+        self.pages.clear();
+
+        // Create a new tab inside the isolated context.
+        let result: CreateTargetResult = self
+            .client
+            .send_command_typed(
+                "Target.createTarget",
+                &CreateTargetParams {
+                    url: "about:blank".to_string(),
+                    browser_context_id: self.browser_context_id.clone(),
+                },
+                None,
+            )
+            .await?;
+
+        let attach_result: AttachToTargetResult = self
+            .client
+            .send_command_typed(
+                "Target.attachToTarget",
+                &AttachToTargetParams {
+                    target_id: result.target_id.clone(),
+                    flatten: true,
+                },
+                None,
+            )
+            .await?;
+
+        self.pages.push(PageInfo {
+            target_id: result.target_id,
+            session_id: attach_result.session_id.clone(),
+            url: "about:blank".to_string(),
+            title: String::new(),
+            target_type: "page".to_string(),
+        });
+        self.active_page_index = 0;
+        self.enable_domains(&attach_result.session_id).await?;
+
+        Ok(())
+    }
+
+    pub async fn create_browser_context(&mut self) -> Result<String, String> {
+        let result = self
+            .client
+            .send_command_typed::<_, Value>(
+                "Target.createBrowserContext",
+                &json!({ "disposeOnDetach": true }),
+                None,
+            )
+            .await?;
+        let ctx_id = result
+            .get("browserContextId")
+            .and_then(|v| v.as_str())
+            .ok_or("Failed to get browserContextId")?
+            .to_string();
+        self.browser_context_id = Some(ctx_id.clone());
+        Ok(ctx_id)
+    }
+
     /// Ensures the browser has at least one page. If `pages` is empty, creates a new
     /// about:blank page and attaches to it.
     pub async fn ensure_page(&mut self) -> Result<(), String> {
@@ -784,6 +874,7 @@ impl BrowserManager {
                 "Target.createTarget",
                 &CreateTargetParams {
                     url: "about:blank".to_string(),
+                    browser_context_id: self.browser_context_id.clone(),
                 },
                 None,
             )
@@ -855,6 +946,7 @@ impl BrowserManager {
                 "Target.createTarget",
                 &CreateTargetParams {
                     url: target_url.to_string(),
+                    browser_context_id: self.browser_context_id.clone(),
                 },
                 None,
             )
@@ -1362,6 +1454,7 @@ async fn initialize_lightpanda_manager(
 
         let mut manager = BrowserManager {
             client: Arc::new(client),
+            browser_context_id: None,
             browser_process: None,
             ws_url: ws_url.clone(),
             pages: Vec::new(),

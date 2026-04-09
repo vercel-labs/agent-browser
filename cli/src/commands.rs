@@ -783,7 +783,11 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 || endpoint.starts_with("http://")
                 || endpoint.starts_with("https://")
             {
-                Ok(json!({ "id": id, "action": "launch", "cdpUrl": endpoint }))
+                let mut cmd = json!({ "id": id, "action": "launch", "cdpUrl": endpoint });
+                if let Some(ref ctx) = flags.context {
+                    cmd["contextName"] = json!(ctx);
+                }
+                Ok(cmd)
             } else {
                 // It's a port number - validate and use cdpPort field
                 let port: u16 = match endpoint.parse::<u32>() {
@@ -813,7 +817,11 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                         });
                     }
                 };
-                Ok(json!({ "id": id, "action": "launch", "cdpPort": port }))
+                let mut cmd = json!({ "id": id, "action": "launch", "cdpPort": port });
+                if let Some(ref ctx) = flags.context {
+                    cmd["contextName"] = json!(ctx);
+                }
+                Ok(cmd)
             }
         }
 
@@ -2353,6 +2361,7 @@ mod tests {
             allow_file_access: false,
             device: None,
             auto_connect: false,
+            context: None,
             session_name: None,
             cli_executable_path: false,
             cli_extensions: false,
