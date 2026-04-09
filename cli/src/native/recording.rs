@@ -3,14 +3,17 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::oneshot;
 
 use super::cdp::client::CdpClient;
-use super::cdp::types::{CaptureScreenshotParams, CaptureScreenshotResult};
 
-const CAPTURE_INTERVAL_MS: u64 = 100;
 const CAPTURE_FPS: u32 = 10;
+// Keep only the tail of ffmpeg stderr so diagnostics remain available without
+// allowing the pipe to block the encoder.
+const FFMPEG_STDERR_TAIL_BYTES: usize = 8 * 1024;
+// Bound stop latency so a wedged task does not hang the CLI forever.
+const RECORDING_STOP_TIMEOUT_MS: u64 = 5_000;
 
 pub struct RecordingState {
     pub active: bool,
@@ -120,8 +123,15 @@ fn build_ffmpeg_command(output_path: &str) -> tokio::process::Command {
     cmd
 }
 
-/// Spawn a background task that captures screenshots at a fixed interval
-/// and pipes them to ffmpeg in real-time.
+/// Spawn a background task that records browser frames via `Page.startScreencast`.
+///
+/// Chrome pushes frames automatically as CDP events — no polling, no
+/// `Page.captureScreenshot` commands competing with user commands for the
+/// compositor. The only CDP write is `Page.screencastFrameAck`.
+///
+/// The previous `Page.captureScreenshot` approach sent 10 CDP commands/second
+/// that contended with user commands (`eval`, `navigate`, `snapshot`) for
+/// Chrome's compositor, causing intermittent timeouts on JS-heavy pages.
 pub fn spawn_recording_task(
     client: Arc<CdpClient>,
     session_id: String,
@@ -143,65 +153,119 @@ pub fn spawn_recording_task(
             .stdin
             .take()
             .ok_or_else(|| "Failed to open ffmpeg stdin".to_string())?;
+        let stderr = ffmpeg
+            .stderr
+            .take()
+            .ok_or_else(|| "Failed to open ffmpeg stderr".to_string())?;
 
-        let mut interval = tokio::time::interval(Duration::from_millis(CAPTURE_INTERVAL_MS));
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // Drain ffmpeg stderr in background to prevent pipe backpressure
+        // from blocking the encoder (see PR #1197 for the original diagnosis).
+        let stderr_task = tokio::spawn(async move {
+            let mut stderr = stderr;
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 2048];
 
-        let params = CaptureScreenshotParams {
-            format: Some("jpeg".to_string()),
-            quality: Some(80),
-            clip: None,
-            from_surface: Some(true),
-            capture_beyond_viewport: None,
-        };
+            loop {
+                match stderr.read(&mut chunk).await {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        buf.extend_from_slice(&chunk[..n]);
+                        if buf.len() > FFMPEG_STDERR_TAIL_BYTES {
+                            let overflow = buf.len() - FFMPEG_STDERR_TAIL_BYTES;
+                            buf.drain(..overflow);
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+
+            buf
+        });
+
+        // Subscribe to CDP events BEFORE starting screencast
+        let mut event_rx = client.subscribe();
+
+        // Start screencast — Chrome pushes JPEG frames as events
+        let start_result = client
+            .send_command(
+                "Page.startScreencast",
+                Some(json!({
+                    "format": "jpeg",
+                    "quality": 80,
+                    "maxWidth": 1920,
+                    "maxHeight": 1080,
+                    "everyNthFrame": 1,
+                })),
+                Some(&session_id),
+            )
+            .await;
+
+        if let Err(e) = start_result {
+            drop(stdin);
+            let _ = ffmpeg.kill().await;
+            return Err(format!("Page.startScreencast failed: {}", e));
+        }
 
         loop {
             tokio::select! {
                 _ = &mut cancel_rx => break,
-                _ = interval.tick() => {}
-            }
+                event = event_rx.recv() => {
+                    match event {
+                        Ok(evt) if evt.method == "Page.screencastFrame" => {
+                            // Ack so Chrome sends the next frame
+                            if let Some(sid) = evt.params.get("sessionId").and_then(|v| v.as_i64()) {
+                                let _ = client.send_command(
+                                    "Page.screencastFrameAck",
+                                    Some(json!({ "sessionId": sid })),
+                                    Some(&session_id),
+                                ).await;
+                            }
 
-            let result: Result<CaptureScreenshotResult, _> = client
-                .send_command_typed("Page.captureScreenshot", &params, Some(&session_id))
-                .await;
+                            if let Some(data) = evt.params.get("data").and_then(|v| v.as_str()) {
+                                let bytes = match base64::Engine::decode(
+                                    &base64::engine::general_purpose::STANDARD,
+                                    data,
+                                ) {
+                                    Ok(b) => b,
+                                    Err(_) => continue,
+                                };
 
-            let screenshot = match result {
-                Ok(s) => s,
-                Err(e) => {
-                    if e.contains("Target closed") || e.contains("not found") {
-                        break;
+                                if stdin.write_all(&bytes).await.is_err() {
+                                    break;
+                                }
+                                shared_count.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                        Ok(_) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(_) => break,
                     }
-                    continue;
                 }
-            };
-
-            let bytes = match base64::Engine::decode(
-                &base64::engine::general_purpose::STANDARD,
-                &screenshot.data,
-            ) {
-                Ok(b) => b,
-                Err(_) => continue,
-            };
-
-            if stdin.write_all(&bytes).await.is_err() {
-                break;
             }
-            shared_count.fetch_add(1, Ordering::Relaxed);
         }
+
+        // Stop screencast
+        let _ = client
+            .send_command_no_params("Page.stopScreencast", Some(&session_id))
+            .await;
 
         drop(stdin);
 
-        let output = ffmpeg
-            .wait_with_output()
+        let status = ffmpeg
+            .wait()
             .await
             .map_err(|e| format!("ffmpeg wait failed: {}", e))?;
+        let stderr = stderr_task
+            .await
+            .map_err(|e| format!("ffmpeg stderr task failed: {}", e))?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!(
-                "ffmpeg failed: {}",
-                stderr.chars().take(300).collect::<String>()
-            ));
+        if !status.success() {
+            let stderr = String::from_utf8_lossy(&stderr);
+            let stderr = stderr.trim();
+            if stderr.is_empty() {
+                return Err(format!("ffmpeg exited with status {}", status));
+            }
+            return Err(format!("ffmpeg exited with status {}: {}", status, stderr));
         }
 
         Ok(())
@@ -216,11 +280,16 @@ pub async fn stop_recording_task(state: &mut RecordingState) -> Result<(), Strin
     let counter = state.shared_frame_count.take();
     let handle = state.capture_task.take();
 
-    let result = if let Some(h) = handle {
-        match h.await {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(e)) => Err(e),
-            Err(e) => Err(format!("Recording task panicked: {}", e)),
+    let result = if let Some(mut h) = handle {
+        match tokio::time::timeout(Duration::from_millis(RECORDING_STOP_TIMEOUT_MS), &mut h).await {
+            Ok(Ok(Ok(()))) => Ok(()),
+            Ok(Ok(Err(e))) => Err(e),
+            Ok(Err(e)) => Err(format!("Recording task panicked: {}", e)),
+            Err(_) => {
+                h.abort();
+                let _ = h.await;
+                Err("Timed out stopping recording task".to_string())
+            }
         }
     } else {
         Ok(())
@@ -236,6 +305,7 @@ pub async fn stop_recording_task(state: &mut RecordingState) -> Result<(), Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::future::pending;
 
     #[test]
     fn test_recording_state_new() {
@@ -319,5 +389,25 @@ mod tests {
         let args_str: Vec<&str> = args.iter().filter_map(|a| a.to_str()).collect();
         assert!(args_str.contains(&"libx264"));
         assert!(args_str.contains(&"/tmp/out.mp4"));
+    }
+
+    #[tokio::test]
+    async fn test_stop_recording_task_times_out_and_aborts_hung_task() {
+        let mut state = RecordingState::new();
+        let (cancel_tx, _cancel_rx) = oneshot::channel();
+        let shared_count = Arc::new(AtomicU64::new(7));
+
+        state.cancel_tx = Some(cancel_tx);
+        state.shared_frame_count = Some(shared_count);
+        state.capture_task = Some(tokio::spawn(async move {
+            pending::<Result<(), String>>().await
+        }));
+
+        let result = stop_recording_task(&mut state).await;
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Timed out"));
+        assert_eq!(state.frame_count, 7);
+        assert!(state.capture_task.is_none());
     }
 }
