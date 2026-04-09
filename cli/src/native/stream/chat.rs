@@ -132,6 +132,12 @@ pub(crate) fn get_system_prompt() -> &'static str {
             sections.push_str(&format!("\n\n<skill name=\"{}\">\n{}\n</skill>", name, body.trim()));
         }
 
+        let exa_section = if std::env::var("EXA_API_KEY").is_ok() {
+            "\n\nWEB SEARCH:\n- You have access to the exa_web_search tool for fast web search.\n- Use exa_web_search when the user wants to find information, look something up, or discover pages. It returns clean results with titles and text snippets.\n- After searching, you can use agent_browser to open any of the result URLs for deeper exploration.\n- Do NOT navigate to google.com or other search engines — use exa_web_search instead."
+        } else {
+            ""
+        };
+
         format!(
             r#"You are an AI assistant that controls a browser through agent-browser. You have an active browser session, but you can also create new sessions.
 
@@ -148,12 +154,22 @@ RULES:
 - To use a different browser engine: add `--engine <engine>` (e.g. `agent-browser --session lp-session --engine lightpanda open https://example.com`). Supported engines: chrome (default), lightpanda.
 
 The following skill references describe agent-browser capabilities in detail. Use them when deciding which commands to run and how to approach tasks.
-{sections}"#,
+{exa_section}{sections}"#,
         )
     })
 }
 
-pub(crate) const CHAT_TOOLS: &str = r#"[{"type":"function","function":{"name":"agent_browser","description":"Execute an agent-browser command. Runs against the active session by default. Add --session <name> to target or create a different session, and --engine <engine> to choose a browser engine.","parameters":{"type":"object","properties":{"command":{"type":"string","description":"The command to execute, e.g. 'agent-browser open https://google.com' or 'agent-browser --session new-session open https://example.com' or 'agent-browser snapshot -i' or 'agent-browser click @e3'"}},"required":["command"]}}}]"#;
+const AGENT_BROWSER_TOOL: &str = r#"{"type":"function","function":{"name":"agent_browser","description":"Execute an agent-browser command. Runs against the active session by default. Add --session <name> to target or create a different session, and --engine <engine> to choose a browser engine.","parameters":{"type":"object","properties":{"command":{"type":"string","description":"The command to execute, e.g. 'agent-browser open https://google.com' or 'agent-browser --session new-session open https://example.com' or 'agent-browser snapshot -i' or 'agent-browser click @e3'"}},"required":["command"]}}}"#;
+
+const EXA_SEARCH_TOOL: &str = r#"{"type":"function","function":{"name":"exa_web_search","description":"Search the web using Exa AI. Returns relevant URLs with titles and text snippets. Use this instead of navigating to a search engine when the user needs to find information, look something up, or discover relevant pages.","parameters":{"type":"object","properties":{"query":{"type":"string","description":"The search query"},"numResults":{"type":"integer","description":"Number of results to return (default 5, max 20)"}},"required":["query"]}}}"#;
+
+pub(crate) fn chat_tools_json() -> String {
+    if std::env::var("EXA_API_KEY").is_ok() {
+        format!("[{},{}]", AGENT_BROWSER_TOOL, EXA_SEARCH_TOOL)
+    } else {
+        format!("[{}]", AGENT_BROWSER_TOOL)
+    }
+}
 
 pub(crate) const COMPACT_THRESHOLD_CHARS: usize = 200_000;
 pub(crate) const KEEP_RECENT_MESSAGES: usize = 6;
@@ -451,6 +467,92 @@ const ALLOWED_COMMANDS: &[&str] = &[
     "clipboard",
     "session",
 ];
+
+const EXA_API_URL: &str = "https://api.exa.ai/search";
+
+/// Execute an Exa web search and return formatted results.
+pub(crate) async fn execute_exa_search(query: &str, num_results: Option<u64>) -> String {
+    let api_key = match std::env::var("EXA_API_KEY") {
+        Ok(k) => k,
+        Err(_) => return "EXA_API_KEY not set. Set the EXA_API_KEY environment variable to enable web search.".to_string(),
+    };
+
+    let num = num_results.unwrap_or(5).min(20).max(1);
+    let body = json!({
+        "query": query,
+        "numResults": num,
+        "type": "auto",
+        "contents": {
+            "highlights": true
+        }
+    });
+
+    let client = http_client();
+    let result = client
+        .post(EXA_API_URL)
+        .header("x-api-key", &api_key)
+        .header("Content-Type", "application/json")
+        .header("x-exa-integration", "vercel-agent-browser")
+        .body(body.to_string())
+        .send()
+        .await;
+
+    let response = match result {
+        Ok(r) => r,
+        Err(e) => return format!("Exa search request failed: {}", e),
+    };
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body_text = response.text().await.unwrap_or_default();
+        return format!("Exa search failed ({}): {}", status, body_text);
+    }
+
+    let resp_json: Value = match response.json().await {
+        Ok(v) => v,
+        Err(e) => return format!("Failed to parse Exa response: {}", e),
+    };
+
+    let results = resp_json.get("results").and_then(|r| r.as_array());
+    let Some(results) = results else {
+        return "No results found.".to_string();
+    };
+
+    if results.is_empty() {
+        return "No results found.".to_string();
+    }
+
+    let mut output = String::new();
+    for (i, result) in results.iter().enumerate() {
+        let title = result
+            .get("title")
+            .and_then(|t| t.as_str())
+            .unwrap_or("(no title)");
+        let url = result.get("url").and_then(|u| u.as_str()).unwrap_or("");
+        output.push_str(&format!("{}. {} - {}\n", i + 1, title, url));
+
+        if let Some(highlights) = result.get("highlights").and_then(|h| h.as_array()) {
+            for highlight in highlights {
+                if let Some(text) = highlight.as_str() {
+                    let trimmed = if text.len() > 300 {
+                        let mut end = 300;
+                        while !text.is_char_boundary(end) {
+                            end -= 1;
+                        }
+                        format!("{}...", &text[..end])
+                    } else {
+                        text.to_string()
+                    };
+                    output.push_str(&format!("   {}", trimmed));
+                    output.push('\n');
+                }
+            }
+        }
+        output.push('\n');
+    }
+
+    output.trim_end().to_string()
+}
 
 const ALLOWED_GLOBAL_FLAGS: &[&str] = &["--session", "--engine"];
 
@@ -771,7 +873,7 @@ pub(super) async fn handle_chat_request(
         }
     }
 
-    let tools: Value = serde_json::from_str(CHAT_TOOLS).unwrap();
+    let tools: Value = serde_json::from_str(&chat_tools_json()).unwrap();
     let url = format!("{}/v1/chat/completions", gateway_url);
     let client = http_client();
 
@@ -918,7 +1020,6 @@ pub(super) async fn handle_chat_request(
 
         for (tc_id, tc_name, tc_args) in &tool_calls {
             let input: Value = serde_json::from_str(tc_args).unwrap_or(json!({}));
-            let command = input.get("command").and_then(|c| c.as_str()).unwrap_or("");
 
             let ev = format!(
                 "data: {}\n\n",
@@ -931,14 +1032,20 @@ pub(super) async fn handle_chat_request(
             );
             let _ = stream.write_all(ev.as_bytes()).await;
 
-            let result = match tokio::time::timeout(
-                TOOL_TIMEOUT,
-                execute_chat_tool(&session, command),
-            )
-            .await
-            {
-                Ok(r) => r,
-                Err(_) => "Tool execution timed out after 60 seconds.".to_string(),
+            let result = if tc_name == "exa_web_search" {
+                let query = input.get("query").and_then(|q| q.as_str()).unwrap_or("");
+                let num = input.get("numResults").and_then(|n| n.as_u64());
+                match tokio::time::timeout(TOOL_TIMEOUT, execute_exa_search(query, num)).await {
+                    Ok(r) => r,
+                    Err(_) => "Exa search timed out after 60 seconds.".to_string(),
+                }
+            } else {
+                let command = input.get("command").and_then(|c| c.as_str()).unwrap_or("");
+                match tokio::time::timeout(TOOL_TIMEOUT, execute_chat_tool(&session, command)).await
+                {
+                    Ok(r) => r,
+                    Err(_) => "Tool execution timed out after 60 seconds.".to_string(),
+                }
             };
 
             let frontend_output = enrich_tool_output(&result);
