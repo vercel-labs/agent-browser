@@ -130,6 +130,8 @@ agent-browser stream status           # Show runtime streaming state and bound p
 agent-browser stream disable          # Stop runtime WebSocket streaming
 agent-browser close                   # Close browser (aliases: quit, exit)
 agent-browser close --all             # Close all active sessions
+agent-browser chat "<instruction>"    # AI chat: natural language browser control (single-shot)
+agent-browser chat                    # AI chat: interactive REPL mode
 ```
 
 ### Get Info
@@ -203,21 +205,24 @@ agent-browser wait "#spinner" --state hidden
 
 ### Batch Execution
 
-Execute multiple commands in a single invocation by piping a JSON array of
-string arrays to `batch`. This avoids per-command process startup overhead
-when running multi-step workflows.
+Execute multiple commands in a single invocation. Commands can be passed as
+quoted arguments or piped as JSON via stdin. This avoids per-command process
+startup overhead when running multi-step workflows.
 
 ```bash
-# Pipe commands as JSON
+# Argument mode: each quoted argument is a full command
+agent-browser batch "open https://example.com" "snapshot -i" "screenshot"
+
+# With --bail to stop on first error
+agent-browser batch --bail "open https://example.com" "click @e1" "screenshot"
+
+# Stdin mode: pipe commands as JSON
 echo '[
   ["open", "https://example.com"],
   ["snapshot", "-i"],
   ["click", "@e1"],
   ["screenshot", "result.png"]
 ]' | agent-browser batch --json
-
-# Stop on first error
-agent-browser batch --bail < commands.json
 ```
 
 ### Clipboard
@@ -374,6 +379,7 @@ agent-browser provides multiple ways to persist login sessions so you don't re-a
 
 | Approach | Best for | Flag / Env |
 |----------|----------|------------|
+| **Chrome profile reuse** | Reuse your existing Chrome login state (cookies, sessions) with zero setup | `--profile <name>` / `AGENT_BROWSER_PROFILE` |
 | **Persistent profile** | Full browser state (cookies, IndexedDB, service workers, cache) across restarts | `--profile <path>` / `AGENT_BROWSER_PROFILE` |
 | **Session persistence** | Auto-save/restore cookies + localStorage by name | `--session-name <name>` / `AGENT_BROWSER_SESSION_NAME` |
 | **Import from your browser** | Grab auth from a Chrome session you already logged into | `--auto-connect` + `state save` |
@@ -437,9 +443,31 @@ Each session has its own:
 - Navigation history
 - Authentication state
 
+## Chrome Profile Reuse
+
+The fastest way to use your existing login state: pass a Chrome profile name to `--profile`:
+
+```bash
+# List available Chrome profiles
+agent-browser profiles
+
+# Reuse your default Chrome profile's login state
+agent-browser --profile Default open https://gmail.com
+
+# Use a named profile (by display name or directory name)
+agent-browser --profile "Work" open https://app.example.com
+
+# Or via environment variable
+AGENT_BROWSER_PROFILE=Default agent-browser open https://gmail.com
+```
+
+This copies your Chrome profile to a temp directory (read-only snapshot, no changes to your original profile), so the browser launches with your existing cookies and sessions.
+
+> **Note:** On Windows, close Chrome before using `--profile <name>` if Chrome is running, as some profile files may be locked.
+
 ## Persistent Profiles
 
-By default, browser state (cookies, localStorage, login sessions) is ephemeral and lost when the browser closes. Use `--profile` to persist state across browser restarts:
+For a persistent custom profile directory that stores state across browser restarts, pass a path to `--profile`:
 
 ```bash
 # Use a persistent profile directory
@@ -525,6 +553,7 @@ The `snapshot` command supports filtering to reduce output size:
 ```bash
 agent-browser snapshot                    # Full accessibility tree
 agent-browser snapshot -i                 # Interactive elements only (buttons, inputs, links)
+agent-browser snapshot -i --urls          # Interactive elements with link URLs
 agent-browser snapshot -c                 # Compact (remove empty structural elements)
 agent-browser snapshot -d 3               # Limit depth to 3 levels
 agent-browser snapshot -s "#main"         # Scope to CSS selector
@@ -534,6 +563,7 @@ agent-browser snapshot -i -c -d 5         # Combine options
 | Option                 | Description                                                             |
 | ---------------------- | ----------------------------------------------------------------------- |
 | `-i, --interactive`    | Only show interactive elements (buttons, links, inputs)                 |
+| `-u, --urls`           | Include href URLs for link elements                                     |
 | `-c, --compact`        | Remove empty structural elements                                        |
 | `-d, --depth <n>`      | Limit tree depth                                                        |
 | `-s, --selector <sel>` | Scope to CSS selector                                                   |
@@ -567,7 +597,7 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 |--------|-------------|
 | `--session <name>` | Use isolated session (or `AGENT_BROWSER_SESSION` env) |
 | `--session-name <name>` | Auto-save/restore session state (or `AGENT_BROWSER_SESSION_NAME` env) |
-| `--profile <path>` | Persistent browser profile directory (or `AGENT_BROWSER_PROFILE` env) |
+| `--profile <name\|path>` | Chrome profile name or persistent directory path (or `AGENT_BROWSER_PROFILE` env) |
 | `--state <path>` | Load storage state from JSON file (or `AGENT_BROWSER_STATE` env) |
 | `--headers <json>` | Set HTTP headers scoped to the URL's origin |
 | `--executable-path <path>` | Custom browser executable (or `AGENT_BROWSER_EXECUTABLE_PATH` env) |
@@ -598,6 +628,9 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 | `--confirm-interactive` | Interactive confirmation prompts; auto-denies if stdin is not a TTY (or `AGENT_BROWSER_CONFIRM_INTERACTIVE` env) |
 | `--engine <name>` | Browser engine: `chrome` (default), `lightpanda` (or `AGENT_BROWSER_ENGINE` env) |
 | `--no-auto-dialog` | Disable automatic dismissal of `alert`/`beforeunload` dialogs (or `AGENT_BROWSER_NO_AUTO_DIALOG` env) |
+| `--model <name>` | AI model for chat command (or `AI_GATEWAY_MODEL` env) |
+| `-v`, `--verbose` | Show tool commands and their raw output (chat) |
+| `-q`, `--quiet` | Show only AI text responses, hide tool calls (chat) |
 | `--config <path>` | Use a custom config file (or `AGENT_BROWSER_CONFIG` env) |
 | `--debug` | Debug output |
 
@@ -606,9 +639,6 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 Monitor agent-browser sessions in real time with a local web dashboard showing a live viewport and command activity feed.
 
 ```bash
-# Install the dashboard (one time)
-agent-browser dashboard install
-
 # Start the dashboard server (runs in background on port 4848)
 agent-browser dashboard start
 agent-browser dashboard start --port 8080   # Custom port
@@ -626,7 +656,34 @@ The dashboard displays:
 - **Live viewport** -- real-time JPEG frames from the browser
 - **Activity feed** -- chronological command/result stream with timing and expandable details
 - **Console output** -- browser console messages (log, warn, error)
-- **Session creation** -- create new sessions from the UI with local engines (Chrome, Lightpanda) or cloud providers (Browserbase, Browserless, Browser Use, Kernel)
+- **Session creation** -- create new sessions from the UI with local engines (Chrome, Lightpanda) or cloud providers (AgentCore, Browserbase, Browserless, Browser Use, Kernel)
+- **AI Chat** -- chat with an AI assistant directly in the dashboard (requires Vercel AI Gateway configuration)
+
+### AI Chat
+
+The dashboard includes an optional AI chat panel powered by the Vercel AI Gateway. The same functionality is available directly from the CLI via the `chat` command. Set these environment variables to enable AI chat:
+
+```bash
+export AI_GATEWAY_API_KEY=gw_your_key_here
+export AI_GATEWAY_MODEL=anthropic/claude-sonnet-4.6           # optional, this is the default
+export AI_GATEWAY_URL=https://ai-gateway.vercel.sh           # optional, this is the default
+```
+
+**CLI usage:**
+
+```bash
+agent-browser chat "open google.com and search for cats"     # Single-shot
+agent-browser chat                                           # Interactive REPL
+agent-browser -q chat "summarize this page"                  # Quiet mode (text only)
+agent-browser -v chat "fill in the login form"               # Verbose (show command output)
+agent-browser --model openai/gpt-4o chat "take a screenshot" # Override model
+```
+
+The `chat` command translates natural language instructions into agent-browser commands, executes them, and streams the AI response. In interactive mode, type `quit` to exit. Use `--json` for structured output suitable for agent consumption.
+
+**Dashboard usage:**
+
+The Chat tab is always visible in the dashboard. When `AI_GATEWAY_API_KEY` is set, the Rust server proxies requests to the gateway and streams responses back using the Vercel AI SDK's UI Message Stream protocol. Without the key, sending a message shows an error inline.
 
 ## Configuration
 
@@ -1316,6 +1373,39 @@ When enabled, agent-browser connects to a Kernel cloud session instead of launch
 **Profile Persistence:** When `KERNEL_PROFILE_NAME` is set, the profile will be created if it doesn't already exist. Cookies, logins, and session data are automatically saved back to the profile when the browser session ends, making them available for future sessions.
 
 Get your API key from the [Kernel Dashboard](https://dashboard.onkernel.com).
+
+### AgentCore
+
+[AWS Bedrock AgentCore](https://aws.amazon.com/bedrock/agentcore/) provides cloud browser sessions with SigV4 authentication.
+
+To enable AgentCore, use the `-p` flag:
+
+```bash
+agent-browser -p agentcore open https://example.com
+```
+
+Or use environment variables for CI/scripts:
+
+```bash
+export AGENT_BROWSER_PROVIDER=agentcore
+agent-browser open https://example.com
+```
+
+Credentials are automatically resolved from environment variables (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`) or the AWS CLI (`aws configure export-credentials`), which supports SSO, profiles, and IAM roles.
+
+Optional configuration via environment variables:
+
+| Variable                   | Description                                                          | Default          |
+| -------------------------- | -------------------------------------------------------------------- | ---------------- |
+| `AGENTCORE_REGION`         | AWS region for the AgentCore endpoint                                | `us-east-1`      |
+| `AGENTCORE_BROWSER_ID`     | Browser identifier                                                   | `aws.browser.v1` |
+| `AGENTCORE_PROFILE_ID`     | Browser profile for persistent state (cookies, localStorage)         | (none)           |
+| `AGENTCORE_SESSION_TIMEOUT`| Session timeout in seconds                                           | `3600`           |
+| `AWS_PROFILE`              | AWS CLI profile for credential resolution                            | `default`        |
+
+**Browser profiles:** When `AGENTCORE_PROFILE_ID` is set, browser state (cookies, localStorage) is persisted across sessions automatically.
+
+When enabled, agent-browser connects to an AgentCore cloud browser session instead of launching a local browser. All commands work identically.
 
 ## License
 

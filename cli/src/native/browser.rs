@@ -1,5 +1,5 @@
 use serde_json::{json, Value};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -10,6 +10,7 @@ use super::cdp::client::CdpClient;
 use super::cdp::discovery::discover_cdp_url;
 use super::cdp::lightpanda::{launch_lightpanda, LightpandaLaunchOptions, LightpandaProcess};
 use super::cdp::types::*;
+use super::element::{resolve_element_object_id, RefMap};
 
 // ---------------------------------------------------------------------------
 // Launch validation
@@ -201,6 +202,8 @@ pub struct BrowserManager {
     default_timeout_ms: u64,
     /// Stored download path from launch options, re-applied to new contexts (e.g., recording)
     pub download_path: Option<String>,
+    /// Whether to ignore HTTPS certificate errors, re-applied to new contexts (e.g., recording)
+    pub ignore_https_errors: bool,
     /// Origins visited during this session, used by save_state to collect cross-origin localStorage.
     visited_origins: HashSet<String>,
 }
@@ -272,6 +275,7 @@ impl BrowserManager {
                 active_page_index: 0,
                 default_timeout_ms: 25_000,
                 download_path: download_path.clone(),
+                ignore_https_errors,
                 visited_origins: HashSet::new(),
             };
             manager.discover_and_attach_targets().await?;
@@ -328,18 +332,29 @@ impl BrowserManager {
     }
 
     pub async fn connect_cdp(url: &str) -> Result<Self, String> {
-        Self::connect_cdp_inner(url, false).await
+        Self::connect_cdp_inner(url, false, None).await
     }
 
     /// Connect to a provider CDP proxy where the WebSocket IS the page session.
     /// Skips browser-level Target.* commands that most proxies don't support.
     pub async fn connect_cdp_direct(url: &str) -> Result<Self, String> {
-        Self::connect_cdp_inner(url, true).await
+        Self::connect_cdp_inner(url, true, None).await
     }
 
-    async fn connect_cdp_inner(url: &str, direct_page: bool) -> Result<Self, String> {
+    pub async fn connect_cdp_with_headers(
+        url: &str,
+        headers: Option<Vec<(String, String)>>,
+    ) -> Result<Self, String> {
+        Self::connect_cdp_inner(url, false, headers).await
+    }
+
+    async fn connect_cdp_inner(
+        url: &str,
+        direct_page: bool,
+        headers: Option<Vec<(String, String)>>,
+    ) -> Result<Self, String> {
         let ws_url = resolve_cdp_url(url).await?;
-        let client = Arc::new(CdpClient::connect(&ws_url).await?);
+        let client = Arc::new(CdpClient::connect_with_headers(&ws_url, headers).await?);
         let mut manager = Self {
             client,
             browser_process: None,
@@ -348,6 +363,7 @@ impl BrowserManager {
             active_page_index: 0,
             default_timeout_ms: 25_000,
             download_path: None,
+            ignore_https_errors: false,
             visited_origins: HashSet::new(),
         };
 
@@ -468,6 +484,13 @@ impl BrowserManager {
         self.client
             .send_command_no_params("Runtime.enable", Some(session_id))
             .await?;
+        // Resume the target if it is paused waiting for the debugger.
+        // This is needed for real browser sessions (Chrome 144+) where targets
+        // are paused after attach until explicitly resumed. No-op otherwise.
+        let _ = self
+            .client
+            .send_command_no_params("Runtime.runIfWaitingForDebugger", Some(session_id))
+            .await;
         self.client
             .send_command_no_params("Network.enable", Some(session_id))
             .await?;
@@ -497,6 +520,10 @@ impl BrowserManager {
         self.client
             .send_command_no_params("Runtime.enable", None)
             .await?;
+        let _ = self
+            .client
+            .send_command_no_params("Runtime.runIfWaitingForDebugger", None)
+            .await;
         self.client
             .send_command_no_params("Network.enable", None)
             .await?;
@@ -947,6 +974,39 @@ impl BrowserManager {
                 Some(session_id),
             )
             .await?;
+
+        // Screencast captures the actual content area, not the emulated CSS
+        // viewport, so resize the content area to match.
+        if let Ok(target_id) = self.active_target_id() {
+            if let Ok(window_info) = self
+                .client
+                .send_command(
+                    "Browser.getWindowForTarget",
+                    Some(json!({ "targetId": target_id })),
+                    None,
+                )
+                .await
+            {
+                if let Some(window_id) = window_info.get("windowId").and_then(|v| v.as_i64()) {
+                    if let Err(e) = self
+                        .client
+                        .send_command(
+                            "Browser.setContentsSize",
+                            Some(json!({
+                                "windowId": window_id,
+                                "width": width,
+                                "height": height,
+                            })),
+                            None,
+                        )
+                        .await
+                    {
+                        eprintln!("Browser.setContentsSize failed (experimental CDP): {e}");
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -1069,50 +1129,25 @@ impl BrowserManager {
         Ok(())
     }
 
-    pub async fn upload_files(&self, selector: &str, files: &[String]) -> Result<(), String> {
+    pub async fn upload_files(
+        &self,
+        selector: &str,
+        files: &[String],
+        ref_map: &RefMap,
+        iframe_sessions: &HashMap<String, String>,
+    ) -> Result<(), String> {
         let session_id = self.active_session_id()?;
 
-        let node_result = self
-            .client
-            .send_command(
-                "DOM.querySelector",
-                Some(json!({
-                    "nodeId": 1,
-                    "selector": selector,
-                })),
-                Some(session_id),
-            )
-            .await;
+        let (object_id, effective_session_id) =
+            resolve_element_object_id(&self.client, session_id, ref_map, selector, iframe_sessions)
+                .await?;
 
-        // Alternative: resolve via JS
-        let result: EvaluateResult = self
-            .client
-            .send_command_typed(
-                "Runtime.evaluate",
-                &EvaluateParams {
-                    expression: format!(
-                        "document.querySelector({})",
-                        serde_json::to_string(selector).unwrap_or_default()
-                    ),
-                    return_by_value: Some(false),
-                    await_promise: Some(false),
-                },
-                Some(session_id),
-            )
-            .await?;
-
-        let object_id = result
-            .result
-            .object_id
-            .ok_or("File input element not found")?;
-
-        // Get the DOM node from the remote object
         let describe: Value = self
             .client
             .send_command(
                 "DOM.describeNode",
                 Some(json!({ "objectId": object_id })),
-                Some(session_id),
+                Some(&effective_session_id),
             )
             .await?;
 
@@ -1122,9 +1157,6 @@ impl BrowserManager {
             .and_then(|v| v.as_i64())
             .ok_or("Could not get backendNodeId for file input")?;
 
-        // Suppress unused variable warning
-        let _ = node_result;
-
         self.client
             .send_command(
                 "DOM.setFileInputFiles",
@@ -1132,7 +1164,7 @@ impl BrowserManager {
                     "files": files,
                     "backendNodeId": backend_node_id,
                 })),
-                Some(session_id),
+                Some(&effective_session_id),
             )
             .await?;
 
@@ -1336,6 +1368,7 @@ async fn initialize_lightpanda_manager(
             active_page_index: 0,
             default_timeout_ms: 25_000,
             download_path: None,
+            ignore_https_errors: false,
             visited_origins: HashSet::new(),
         };
 

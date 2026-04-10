@@ -329,13 +329,42 @@ agent-browser session                 # Show current session name
 agent-browser session list            # List active sessions
 ```
 
+## Chrome profiles
+
+```bash
+agent-browser profiles               # List available Chrome profiles
+agent-browser profiles --json        # List profiles as JSON
+agent-browser --profile Default open https://gmail.com  # Reuse a profile's login state
+```
+
 ## Dashboard
 
 ```bash
 agent-browser dashboard [start]       # Start the dashboard server (default port: 4848)
 agent-browser dashboard start --port <n>  # Start on a specific port
 agent-browser dashboard stop          # Stop the dashboard server
-agent-browser dashboard install       # Install the dashboard files
+```
+
+## Chat
+
+Use natural language to control the browser via AI. The `chat` command translates instructions into agent-browser commands, executes them, and streams the AI response. Requires `AI_GATEWAY_API_KEY` to be set.
+
+```bash
+agent-browser chat "open google.com and search for cats"     # Single-shot instruction
+agent-browser chat                                           # Interactive REPL (type quit to exit)
+echo "summarize this page" | agent-browser chat              # Piped input
+agent-browser -q chat "summarize this page"                  # Quiet: text only, no tool calls shown
+agent-browser -v chat "fill in the login form"               # Verbose: show commands and their output
+agent-browser --model openai/gpt-4o chat "take a screenshot" # Override the default AI model
+agent-browser --json chat "open example.com"                 # Structured JSON output
+```
+
+Chat-specific options:
+
+```bash
+--model <name>           # AI model (or AI_GATEWAY_MODEL env, default: anthropic/claude-sonnet-4.6)
+-v, --verbose            # Show tool commands and their raw output
+-q, --quiet              # Show only the AI text response (hide tool calls)
 ```
 
 ## Navigation
@@ -380,24 +409,31 @@ agent-browser reload                  # Reload page
 --action-policy <path>   # Path to action policy JSON file
 --confirm-actions <list> # Action categories requiring confirmation
 --confirm-interactive    # Interactive confirmation prompts (auto-denies if stdin is not a TTY)
+--model <name>           # AI model for chat (or AI_GATEWAY_MODEL env)
+-v, --verbose            # Show tool commands and their raw output (chat)
+-q, --quiet              # Show only AI text responses (chat)
 --config <path>          # Use a custom config file
 --debug                  # Debug output
 ```
 
 ## Batch execution
 
-Execute multiple commands in a single invocation by piping a JSON array of string arrays to `batch`:
+Execute multiple commands in a single invocation. Commands can be passed as quoted arguments or piped as JSON via stdin.
 
 ```bash
+# Argument mode: each quoted argument is a full command
+agent-browser batch "open https://example.com" "snapshot -i" "screenshot"
+
+# With --bail to stop on first error
+agent-browser batch --bail "open https://example.com" "click @e1" "screenshot"
+
+# Stdin mode: pipe commands as JSON
 echo '[
   ["open", "https://example.com"],
   ["snapshot", "-i"],
   ["click", "@e1"],
   ["screenshot", "result.png"]
 ]' | agent-browser batch --json
-
-# Stop on first error
-agent-browser batch --bail < commands.json
 ```
 
 <table>

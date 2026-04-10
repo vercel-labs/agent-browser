@@ -187,6 +187,9 @@ These environment variables configure additional daemon and runtime behavior:
     <tr><td><code>AGENT_BROWSER_CONFIRM_INTERACTIVE</code></td><td>Enable interactive confirmation prompts (auto-denies if stdin is not a TTY).</td><td>(disabled)</td></tr>
     <tr><td><code>AGENT_BROWSER_ENGINE</code></td><td>Browser engine to use: <code>chrome</code> (default), <code>lightpanda</code>.</td><td><code>chrome</code></td></tr>
     <tr><td><code>AGENT_BROWSER_NO_AUTO_DIALOG</code></td><td>Disable automatic dismissal of <code>alert</code>/<code>beforeunload</code> dialogs.</td><td>(disabled)</td></tr>
+    <tr><td><code>AI_GATEWAY_URL</code></td><td>Vercel AI Gateway base URL.</td><td><code>https://ai-gateway.vercel.sh</code></td></tr>
+    <tr><td><code>AI_GATEWAY_API_KEY</code></td><td>API key for the Vercel AI Gateway. Required to enable AI chat.</td><td>(none)</td></tr>
+    <tr><td><code>AI_GATEWAY_MODEL</code></td><td>Default AI model for dashboard chat.</td><td><code>anthropic/claude-sonnet-4.6</code></td></tr>
   </tbody>
 </table>
 

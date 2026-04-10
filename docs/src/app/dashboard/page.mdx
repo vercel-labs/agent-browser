@@ -2,19 +2,9 @@
 
 Monitor agent-browser sessions in real time with a local web dashboard showing a live browser viewport and command activity feed.
 
-## Install
-
-Download the dashboard once:
-
-```bash
-agent-browser dashboard install
-```
-
-This downloads the dashboard to `~/.agent-browser/dashboard/` and is served directly by the daemon when streaming is enabled.
-
 ## Usage
 
-Start the dashboard server and open any session -- it appears automatically:
+The dashboard is bundled into the binary and requires no separate install. Start the server and open any session:
 
 ```bash
 agent-browser dashboard start
@@ -63,7 +53,7 @@ The dashboard is a single-page web app with three areas:
     </tr>
     <tr>
       <td><strong>Session creation</strong></td>
-      <td>Create new sessions from the dashboard with local engines (Chrome, Lightpanda) or cloud providers (Browserbase, Browserless, Browser Use, Kernel)</td>
+      <td>Create new sessions from the dashboard with local engines (Chrome, Lightpanda) or cloud providers (AgentCore, Browserbase, Browserless, Browser Use, Kernel)</td>
     </tr>
     <tr>
       <td><strong>Status bar</strong></td>
@@ -132,6 +122,39 @@ The dashboard is a Next.js static export (`output: 'export'`) that produces plai
 pnpm build:dashboard
 ```
 
-The built files are served by the daemon's stream server on the same port used for WebSocket connections. Plain HTTP requests serve the dashboard, while WebSocket upgrade requests are handled as before.
+The dashboard is embedded into the CLI binary at compile time using `rust-embed`. Plain HTTP requests serve the embedded dashboard assets, while WebSocket upgrade requests are handled as before.
 
-When the dashboard is not installed, visiting the HTTP endpoint shows instructions to run `agent-browser dashboard install`.
+## AI Chat
+
+The dashboard includes an optional AI chat panel powered by the [Vercel AI Gateway](https://vercel.com/docs/ai-gateway). When enabled, a **Chat** tab appears in the right pane alongside Activity, Console, Network, Storage, and Extensions.
+
+### Setup
+
+The Chat tab is always visible. Set the API key to enable responses:
+
+```bash
+export AI_GATEWAY_API_KEY=gw_your_key_here
+agent-browser dashboard start
+```
+
+Optionally override the gateway URL or model:
+
+```bash
+export AI_GATEWAY_URL=https://ai-gateway.vercel.sh   # this is the default
+export AI_GATEWAY_MODEL=openai/gpt-4o-mini           # default: anthropic/claude-sonnet-4.6
+```
+
+### How it works
+
+The Rust server proxies chat requests from the dashboard to the Vercel AI Gateway and streams responses back using the Vercel AI SDK's UI Message Stream protocol. The dashboard frontend uses `useChat` from `@ai-sdk/react` with `DefaultChatTransport`.
+
+<table>
+  <thead>
+    <tr><th>Variable</th><th>Description</th><th>Default</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>AI_GATEWAY_URL</code></td><td>Vercel AI Gateway base URL.</td><td><code>https://ai-gateway.vercel.sh</code></td></tr>
+    <tr><td><code>AI_GATEWAY_API_KEY</code></td><td>API key for the AI Gateway. Required to enable AI chat responses.</td><td>(none)</td></tr>
+    <tr><td><code>AI_GATEWAY_MODEL</code></td><td>Default AI model for chat requests.</td><td><code>anthropic/claude-sonnet-4.6</code></td></tr>
+  </tbody>
+</table>
