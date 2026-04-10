@@ -4127,3 +4127,95 @@ async fn e2e_upload_with_css_selector() {
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     assert_success(&resp);
 }
+
+// ---------------------------------------------------------------------------
+// Recording: viewport inheritance
+// ---------------------------------------------------------------------------
+
+/// Verify that `recording_start` inherits the current viewport dimensions
+/// into the newly created recording context. Without this, the recording
+/// context falls back to the default 1280×720 regardless of what the user set.
+#[tokio::test]
+#[ignore]
+async fn e2e_recording_inherits_viewport() {
+    let mut state = DaemonState::new();
+
+    // Launch browser
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Navigate to a simple page
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": "data:text/html,<h1>Viewport</h1>" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Set a custom viewport (non-default)
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "viewport", "width": 800, "height": 600 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Start recording — this creates a new browser context and switches to it
+    let tmp_dir = std::env::temp_dir();
+    let rec_path = tmp_dir.join(format!(
+        "ab-e2e-rec-viewport-{}.webm",
+        std::process::id()
+    ));
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "recording_start", "path": rec_path.to_string_lossy() }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Give the recording context a moment to finish navigation
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+    // The active page is now in the recording context.
+    // Verify it inherited the custom viewport dimensions.
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "evaluate", "script": "window.innerWidth" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let rec_width = get_data(&resp)["result"].as_i64().unwrap();
+
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "evaluate", "script": "window.innerHeight" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let rec_height = get_data(&resp)["result"].as_i64().unwrap();
+
+    assert_eq!(
+        rec_width, 800,
+        "Recording context width should be 800 (inherited from viewport), got {rec_width}"
+    );
+    assert_eq!(
+        rec_height, 600,
+        "Recording context height should be 600 (inherited from viewport), got {rec_height}"
+    );
+
+    // Stop recording and cleanup
+    let resp = execute_command(
+        &json!({ "id": "7", "action": "recording_stop" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let _ = std::fs::remove_file(&rec_path);
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}

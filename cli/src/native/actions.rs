@@ -248,6 +248,9 @@ pub struct DaemonState {
     pub engine: String,
     /// Default timeout for wait operations, from AGENT_BROWSER_DEFAULT_TIMEOUT env var.
     pub default_timeout_ms: u64,
+    /// Last viewport settings (width, height, deviceScaleFactor, mobile),
+    /// re-applied to new contexts (e.g., recording).
+    pub viewport: Option<(i32, i32, f64, bool)>,
 }
 
 impl DaemonState {
@@ -301,6 +304,7 @@ impl DaemonState {
                 .ok()
                 .and_then(|s| s.parse::<u64>().ok())
                 .unwrap_or(30_000),
+            viewport: None,
         }
     }
 
@@ -3605,7 +3609,7 @@ async fn handle_tab_close(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     mgr.tab_close(index).await
 }
 
-async fn handle_viewport(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+async fn handle_viewport(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let width = cmd.get("width").and_then(|v| v.as_i64()).unwrap_or(1280) as i32;
     let height = cmd.get("height").and_then(|v| v.as_i64()).unwrap_or(720) as i32;
@@ -3616,6 +3620,9 @@ async fn handle_viewport(cmd: &Value, state: &DaemonState) -> Result<Value, Stri
     let mobile = cmd.get("mobile").and_then(|v| v.as_bool()).unwrap_or(false);
 
     mgr.set_viewport(width, height, scale, mobile).await?;
+
+    // Remember viewport for re-application to new contexts (e.g., recording)
+    state.viewport = Some((width, height, scale, mobile));
 
     // Update stream server viewport so status messages and screencast use the new dimensions
     if let Some(ref server) = state.stream_server {
@@ -3872,6 +3879,8 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty());
 
+    let viewport = state.viewport;
+
     let (client, new_session_id) = {
         let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
         let old_session_id = mgr.active_session_id()?.to_string();
@@ -3984,6 +3993,12 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
             title: String::new(),
             target_type: "page".to_string(),
         });
+
+        // Re-apply viewport to the recording context so it inherits the
+        // user's custom resolution instead of falling back to the default.
+        if let Some((w, h, scale, mobile)) = viewport {
+            let _ = mgr.set_viewport(w, h, scale, mobile).await;
+        }
 
         // Navigate to URL
         if nav_url != "about:blank" {
@@ -4661,7 +4676,7 @@ async fn handle_wheel(cmd: &Value, state: &DaemonState) -> Result<Value, String>
     Ok(json!({ "scrolled": true, "deltaX": delta_x, "deltaY": delta_y }))
 }
 
-async fn handle_device(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+async fn handle_device(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let name = cmd
         .get("name")
@@ -4689,6 +4704,8 @@ async fn handle_device(cmd: &Value, state: &DaemonState) -> Result<Value, String
 
     mgr.set_viewport(width, height, scale, mobile).await?;
     mgr.set_user_agent(ua).await?;
+
+    state.viewport = Some((width, height, scale, mobile));
 
     // Update stream server viewport so status messages and screencast use the new dimensions
     if let Some(ref server) = state.stream_server {
