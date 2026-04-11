@@ -85,6 +85,19 @@ agent-browser screenshot page.png
 agent-browser close
 ```
 
+## Audit Log (Action Registry)
+
+Log agent actions to a portable JSONL audit trail.
+
+```bash
+pip install action-registry
+areg init
+areg log --user-id demo --action-type browser_open --tool agent-browser \
+  --target example.com --decision allow --status done --tags audit
+```
+
+Spec: `https://pypi.org/project/action-registry/`
+
 ### Traditional Selectors (also supported)
 
 ```bash
