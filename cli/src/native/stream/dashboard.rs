@@ -9,9 +9,8 @@ use super::chat::{chat_status_json, handle_chat_request, handle_models_request};
 use super::discovery::discover_sessions;
 use super::http::{serve_embedded_file, CORS_HEADERS};
 
-pub async fn run_dashboard_server(port: u16) {
-    let addr = format!("127.0.0.1:{}", port);
-    let listener = match TcpListener::bind(&addr).await {
+pub async fn run_dashboard_server(addr: &str) {
+    let listener = match TcpListener::bind(addr).await {
         Ok(l) => l,
         Err(e) => {
             eprintln!("Failed to bind dashboard server on {}: {}", addr, e);

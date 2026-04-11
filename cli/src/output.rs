@@ -2406,8 +2406,8 @@ browser viewports and command activity feeds for all sessions.
 The dashboard is bundled into the binary and requires no separate install.
 
 Subcommands:
-  start [--port <n>]   Start the dashboard server (default port: 4848)
-  stop                 Stop the dashboard server
+  start [--port <n>] [--addr <addr>]  Start the dashboard server (default: 127.0.0.1:4848)
+  stop                                Stop the dashboard server
 
 Running 'agent-browser dashboard' with no subcommand is equivalent to 'dashboard start'.
 
@@ -2415,7 +2415,8 @@ The dashboard runs as a standalone background process, independent of
 browser sessions. All sessions automatically stream to the dashboard.
 
 Options:
-  --port <n>           Port for the dashboard server (default: 4848)
+  --addr <addr>      Bind address for the dashboard server (default: 127.0.0.1)
+  --port <n>         Port for the dashboard server (default: 4848)
 
 Global Options:
   --json               Output as JSON
@@ -2423,6 +2424,8 @@ Global Options:
 Examples:
   agent-browser dashboard start
   agent-browser dashboard start --port 8080
+  agent-browser dashboard start --addr 0.0.0.0
+  agent-browser dashboard start --addr 0.0.0.0 --port 8080
   agent-browser dashboard stop
 "##
         }

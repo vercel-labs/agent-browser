@@ -280,7 +280,7 @@ fn is_pid_alive(pid: u32) -> bool {
     }
 }
 
-fn run_dashboard_start(port: u16, json_mode: bool) {
+fn run_dashboard_start(addr: &str, port: u16, json_mode: bool) {
     let pid_path = get_dashboard_pid_path();
 
     // Check if already running
@@ -293,7 +293,7 @@ fn run_dashboard_start(port: u16, json_mode: bool) {
                         "data": { "port": port, "pid": pid, "already_running": true },
                     }));
                 } else {
-                    println!("Dashboard already running at http://localhost:{}", port);
+                    println!("Dashboard already running at http://{}:{}", addr, port);
                 }
                 return;
             }
@@ -324,6 +324,7 @@ fn run_dashboard_start(port: u16, json_mode: bool) {
 
     let mut cmd = std::process::Command::new(&exe_path);
     cmd.env("AGENT_BROWSER_DASHBOARD", "1")
+        .env("AGENT_BROWSER_DASHBOARD_ADDR", addr)
         .env("AGENT_BROWSER_DASHBOARD_PORT", port.to_string());
 
     #[cfg(unix)]
@@ -602,12 +603,16 @@ fn main() {
 
     // Standalone dashboard server mode
     if env::var("AGENT_BROWSER_DASHBOARD").is_ok() {
+        let addr = env::var("AGENT_BROWSER_DASHBOARD_ADDR")
+            .ok()
+            .unwrap_or_else(|| "127.0.0.1".to_string());
         let port: u16 = env::var("AGENT_BROWSER_DASHBOARD_PORT")
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(4848);
+        let addr = format!("{}:{}", addr, port);
         let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
-        rt.block_on(native::stream::run_dashboard_server(port));
+        rt.block_on(native::stream::run_dashboard_server(&addr));
         return;
     }
 
@@ -655,13 +660,19 @@ fn main() {
     if clean.first().map(|s| s.as_str()) == Some("dashboard") {
         match clean.get(1).map(|s| s.as_str()) {
             Some("start") | None => {
+                let addr = clean
+                    .iter()
+                    .position(|a| a == "--addr")
+                    .and_then(|i| clean.get(i + 1))
+                    .map(|s| s.as_str())
+                    .unwrap_or("127.0.0.1");
                 let port = clean
                     .iter()
                     .position(|a| a == "--port")
                     .and_then(|i| clean.get(i + 1))
                     .and_then(|s| s.parse::<u16>().ok())
                     .unwrap_or(4848);
-                run_dashboard_start(port, flags.json);
+                run_dashboard_start(addr, port, flags.json);
                 return;
             }
             Some("stop") => {
