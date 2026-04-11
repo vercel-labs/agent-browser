@@ -1288,6 +1288,10 @@ fn main() {
 
     let output_opts = OutputOptions::from_flags(&flags);
 
+    if flags.background {
+        cmd["background"] = json!(true);
+    }
+
     match send_command(cmd.clone(), &flags.session) {
         Ok(resp) => {
             let success = resp.success;

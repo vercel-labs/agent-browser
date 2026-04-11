@@ -2129,7 +2129,18 @@ async fn handle_navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     state.ref_map.clear();
     state.iframe_sessions.clear();
     state.active_frame_id = None;
-    mgr.navigate(url, wait_until).await
+    let result = mgr.navigate(url, wait_until).await?;
+
+    let bg = cmd.get("background").and_then(|v| v.as_bool()).unwrap_or(state.background);
+    if !bg {
+        let session_id = mgr.active_session_id()?.to_string();
+        let _ = mgr
+            .client
+            .send_command("Page.bringToFront", None, Some(&session_id))
+            .await;
+    }
+
+    Ok(result)
 }
 
 async fn handle_url(state: &DaemonState) -> Result<Value, String> {
@@ -2513,7 +2524,8 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
 
         let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
         state.ref_map.clear();
-        mgr.tab_new(Some(&href), state.background).await?;
+        let bg = cmd.get("background").and_then(|v| v.as_bool()).unwrap_or(state.background);
+        mgr.tab_new(Some(&href), bg).await?;
 
         return Ok(json!({ "clicked": selector, "newTab": true, "url": href }));
     }
@@ -3562,10 +3574,11 @@ async fn handle_tab_list(state: &DaemonState) -> Result<Value, String> {
 async fn handle_tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
     let url = cmd.get("url").and_then(|v| v.as_str());
+    let background = cmd.get("background").and_then(|v| v.as_bool()).unwrap_or(state.background);
     state.ref_map.clear();
     state.iframe_sessions.clear();
     state.active_frame_id = None;
-    mgr.tab_new(url, state.background).await
+    mgr.tab_new(url, background).await
 }
 
 async fn handle_tab_switch(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -3574,10 +3587,11 @@ async fn handle_tab_switch(cmd: &Value, state: &mut DaemonState) -> Result<Value
         .get("index")
         .and_then(|v| v.as_u64())
         .ok_or("Missing 'index' parameter")? as usize;
+    let background = cmd.get("background").and_then(|v| v.as_bool()).unwrap_or(state.background);
     state.ref_map.clear();
     state.iframe_sessions.clear();
     state.active_frame_id = None;
-    let result = mgr.tab_switch(index, state.background).await?;
+    let result = mgr.tab_switch(index, background).await?;
 
     if let Some(ref server) = state.stream_server {
         if let Ok(dims) = mgr
