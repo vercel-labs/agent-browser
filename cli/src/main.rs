@@ -362,7 +362,7 @@ fn run_dashboard_start(addr: &str, port: u16, json_mode: bool) {
                     "data": { "port": port, "pid": pid },
                 }));
             } else {
-                println!("Dashboard started at http://localhost:{}", port);
+                println!("Dashboard started at http://{}:{}", addr, port);
             }
         }
         Err(e) => {
