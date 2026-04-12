@@ -303,43 +303,85 @@ impl ScreencastRecording {
         let client_arc = client.clone();
         let session_owned = session_id.to_string();
 
-        // Subscribe to CDP events and collect screencast frames in background
+        // Background task: collect screencast frames from CDP events,
+        // with periodic screenshot polling as fallback for static pages.
         let mut event_rx = client.subscribe();
         let task = tokio::spawn(async move {
-            loop {
-                match event_rx.recv().await {
-                    Ok(evt) => {
-                        if evt.method == "Page.screencastFrame" {
-                            // ACK the frame so Chrome keeps sending
-                            if let Some(sid) =
-                                evt.params.get("sessionId").and_then(|v| v.as_i64())
-                            {
-                                let _ = client_arc
-                                    .send_command(
-                                        "Page.screencastFrameAck",
-                                        Some(serde_json::json!({ "sessionId": sid })),
-                                        Some(&session_owned),
-                                    )
-                                    .await;
-                            }
+            let mut poll_interval =
+                tokio::time::interval(Duration::from_millis(250));
+            poll_interval.set_missed_tick_behavior(
+                tokio::time::MissedTickBehavior::Skip,
+            );
 
-                            if let Some(data) =
-                                evt.params.get("data").and_then(|v| v.as_str())
-                            {
-                                if let Ok(bytes) = base64::Engine::decode(
-                                    &base64::engine::general_purpose::STANDARD,
-                                    data,
-                                ) {
-                                    let time_ms =
-                                        start_time.elapsed().as_millis() as u64;
-                                    let mut guard = frames_clone.lock().await;
-                                    guard.push(CapturedFrame { bytes, time_ms });
+            let poll_params = CaptureScreenshotParams {
+                format: Some("jpeg".to_string()),
+                quality: Some(80),
+                clip: None,
+                from_surface: Some(true),
+                capture_beyond_viewport: None,
+            };
+
+            loop {
+                tokio::select! {
+                    event = event_rx.recv() => {
+                        match event {
+                            Ok(evt) => {
+                                if evt.method == "Page.screencastFrame" {
+                                    // ACK the frame so Chrome keeps sending
+                                    if let Some(sid) =
+                                        evt.params.get("sessionId").and_then(|v| v.as_i64())
+                                    {
+                                        let _ = client_arc
+                                            .send_command(
+                                                "Page.screencastFrameAck",
+                                                Some(serde_json::json!({ "sessionId": sid })),
+                                                Some(&session_owned),
+                                            )
+                                            .await;
+                                    }
+
+                                    if let Some(data) =
+                                        evt.params.get("data").and_then(|v| v.as_str())
+                                    {
+                                        if let Ok(bytes) = base64::Engine::decode(
+                                            &base64::engine::general_purpose::STANDARD,
+                                            data,
+                                        ) {
+                                            let time_ms =
+                                                start_time.elapsed().as_millis() as u64;
+                                            let mut guard = frames_clone.lock().await;
+                                            guard.push(CapturedFrame { bytes, time_ms });
+                                            // Reset poll interval after receiving a screencast frame
+                                            poll_interval.reset();
+                                        }
+                                    }
                                 }
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        }
+                    }
+                    _ = poll_interval.tick() => {
+                        // Fallback polling: capture a screenshot when no screencast
+                        // frames are arriving (static page or idle periods)
+                        if let Ok(result) = client_arc
+                            .send_command_typed::<_, CaptureScreenshotResult>(
+                                "Page.captureScreenshot",
+                                &poll_params,
+                                Some(&session_owned),
+                            )
+                            .await
+                        {
+                            if let Ok(bytes) = base64::Engine::decode(
+                                &base64::engine::general_purpose::STANDARD,
+                                &result.data,
+                            ) {
+                                let time_ms = start_time.elapsed().as_millis() as u64;
+                                let mut guard = frames_clone.lock().await;
+                                guard.push(CapturedFrame { bytes, time_ms });
                             }
                         }
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 }
             }
         });
