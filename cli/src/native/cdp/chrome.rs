@@ -5,6 +5,14 @@ use std::time::Duration;
 
 use super::discovery::discover_cdp_url;
 
+fn set_private_dir_permissions(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
+    }
+}
+
 pub struct ChromeProcess {
     child: Child,
     pub ws_url: String,
@@ -199,6 +207,7 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
             std::env::temp_dir().join(format!("agent-browser-chrome-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir)
             .map_err(|e| format!("Failed to create temp profile dir: {}", e))?;
+        set_private_dir_permissions(&dir);
         args.push(format!("--user-data-dir={}", dir.display()));
         (dir.clone(), Some(dir))
     };
@@ -897,6 +906,7 @@ pub fn copy_chrome_profile(
         std::env::temp_dir().join(format!("agent-browser-profile-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&temp_dir)
         .map_err(|e| format!("Failed to create temp profile dir: {}", e))?;
+    set_private_dir_permissions(&temp_dir);
 
     // Copy Local State (non-fatal if missing or unreadable)
     let local_state_src = user_data_dir.join("Local State");

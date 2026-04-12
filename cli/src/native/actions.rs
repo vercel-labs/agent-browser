@@ -3872,137 +3872,135 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty());
 
-    let (client, new_session_id) = {
+    let (client, recording_session_id) = {
         let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
-        let old_session_id = mgr.active_session_id()?.to_string();
-
-        // Capture current URL if no URL specified
-        let nav_url = if let Some(u) = recording_url {
-            u.to_string()
-        } else {
-            mgr.get_url()
-                .await
-                .unwrap_or_else(|_| "about:blank".to_string())
-        };
-
-        // Capture current cookies
-        let cookies_result = mgr
-            .client
-            .send_command_no_params("Network.getAllCookies", Some(&old_session_id))
+        let active_session_id = mgr.active_session_id()?.to_string();
+        let current_url = mgr
+            .get_url()
             .await
-            .ok();
+            .unwrap_or_else(|_| "about:blank".to_string());
 
-        // Create new browser context
-        let ctx_result = mgr
-            .client
-            .send_command_no_params("Target.createBrowserContext", None)
-            .await?;
-        let context_id = ctx_result
-            .get("browserContextId")
-            .and_then(|v| v.as_str())
-            .ok_or("Failed to get browserContextId")?
-            .to_string();
+        // Record the current active page in-place unless the caller explicitly
+        // asked to record a different URL. Creating a fresh context here
+        // invalidates the active target and any refs the agent just resolved.
+        if recording_url.is_none_or(|u| u == current_url) {
+            (mgr.client.clone(), active_session_id)
+        } else {
+            let nav_url = recording_url.unwrap_or("about:blank").to_string();
 
-        // Create page in new context
-        let create_result: CreateTargetResult = mgr
-            .client
-            .send_command_typed(
-                "Target.createTarget",
-                &json!({ "url": "about:blank", "browserContextId": context_id }),
-                None,
-            )
-            .await?;
-
-        let attach_result: AttachToTargetResult = mgr
-            .client
-            .send_command_typed(
-                "Target.attachToTarget",
-                &AttachToTargetParams {
-                    target_id: create_result.target_id.clone(),
-                    flatten: true,
-                },
-                None,
-            )
-            .await?;
-
-        let new_session_id = attach_result.session_id.clone();
-        mgr.enable_domains_pub(&new_session_id).await?;
-
-        // Re-apply download behavior to the recording context.
-        // Without this, downloads in the recording context are silently dropped
-        // because Browser.setDownloadBehavior at launch only applies to the default context.
-        if let Some(ref dl_path) = mgr.download_path {
-            let _ = mgr
+            // Capture current cookies
+            let cookies_result = mgr
                 .client
-                .send_command(
-                    "Browser.setDownloadBehavior",
-                    Some(json!({
-                        "behavior": "allow",
-                        "downloadPath": dl_path,
-                        "browserContextId": context_id,
-                        "eventsEnabled": true
-                    })),
+                .send_command_no_params("Network.getAllCookies", Some(&active_session_id))
+                .await
+                .ok();
+
+            // Create new browser context only when the caller explicitly wants
+            // to record a different URL than the active page.
+            let ctx_result = mgr
+                .client
+                .send_command_no_params("Target.createBrowserContext", None)
+                .await?;
+            let context_id = ctx_result
+                .get("browserContextId")
+                .and_then(|v| v.as_str())
+                .ok_or("Failed to get browserContextId")?
+                .to_string();
+
+            let create_result: CreateTargetResult = mgr
+                .client
+                .send_command_typed(
+                    "Target.createTarget",
+                    &json!({ "url": "about:blank", "browserContextId": context_id }),
                     None,
                 )
-                .await;
-        }
+                .await?;
 
-        // Re-apply HTTPS error ignore to the recording context.
-        // Security.setIgnoreCertificateErrors at launch only applies to the session it was sent on.
-        if mgr.ignore_https_errors {
-            let _ = mgr
+            let attach_result: AttachToTargetResult = mgr
                 .client
-                .send_command(
-                    "Security.setIgnoreCertificateErrors",
-                    Some(json!({ "ignore": true })),
-                    Some(&new_session_id),
+                .send_command_typed(
+                    "Target.attachToTarget",
+                    &AttachToTargetParams {
+                        target_id: create_result.target_id.clone(),
+                        flatten: true,
+                    },
+                    None,
                 )
-                .await;
-        }
+                .await?;
 
-        // Transfer cookies to new context
-        if let Some(ref cr) = cookies_result {
-            if let Some(cookie_arr) = cr.get("cookies").and_then(|v| v.as_array()) {
-                if !cookie_arr.is_empty() {
-                    let _ = mgr
-                        .client
-                        .send_command(
-                            "Network.setCookies",
-                            Some(json!({ "cookies": cookie_arr })),
-                            Some(&new_session_id),
-                        )
-                        .await;
+            let new_session_id = attach_result.session_id.clone();
+            mgr.enable_domains_pub(&new_session_id).await?;
+
+            if let Some(ref dl_path) = mgr.download_path {
+                let _ = mgr
+                    .client
+                    .send_command(
+                        "Browser.setDownloadBehavior",
+                        Some(json!({
+                            "behavior": "allow",
+                            "downloadPath": dl_path,
+                            "browserContextId": context_id,
+                            "eventsEnabled": true
+                        })),
+                        None,
+                    )
+                    .await;
+            }
+
+            if mgr.ignore_https_errors {
+                let _ = mgr
+                    .client
+                    .send_command(
+                        "Security.setIgnoreCertificateErrors",
+                        Some(json!({ "ignore": true })),
+                        Some(&new_session_id),
+                    )
+                    .await;
+            }
+
+            if let Some(ref cr) = cookies_result {
+                if let Some(cookie_arr) = cr.get("cookies").and_then(|v| v.as_array()) {
+                    if !cookie_arr.is_empty() {
+                        let _ = mgr
+                            .client
+                            .send_command(
+                                "Network.setCookies",
+                                Some(json!({ "cookies": cookie_arr })),
+                                Some(&new_session_id),
+                            )
+                            .await;
+                    }
                 }
             }
+
+            mgr.add_page(super::browser::PageInfo {
+                target_id: create_result.target_id,
+                session_id: new_session_id.clone(),
+                url: nav_url.clone(),
+                title: String::new(),
+                target_type: "page".to_string(),
+            });
+
+            if nav_url != "about:blank" {
+                let _ = mgr
+                    .client
+                    .send_command(
+                        "Page.navigate",
+                        Some(json!({ "url": nav_url })),
+                        Some(&new_session_id),
+                    )
+                    .await;
+                tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+            }
+
+            (mgr.client.clone(), new_session_id)
         }
-
-        // Add page and switch to it
-        mgr.add_page(super::browser::PageInfo {
-            target_id: create_result.target_id,
-            session_id: new_session_id.clone(),
-            url: nav_url.clone(),
-            title: String::new(),
-            target_type: "page".to_string(),
-        });
-
-        // Navigate to URL
-        if nav_url != "about:blank" {
-            let _ = mgr
-                .client
-                .send_command(
-                    "Page.navigate",
-                    Some(json!({ "url": nav_url })),
-                    Some(&new_session_id),
-                )
-                .await;
-            tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
-        }
-
-        (mgr.client.clone(), new_session_id)
     };
 
     let result = recording::recording_start(&mut state.recording_state, path)?;
-    state.start_recording_task(client, new_session_id).await?;
+    state
+        .start_recording_task(client, recording_session_id)
+        .await?;
 
     if let Some(ref server) = state.stream_server {
         server.set_recording(true, &state.engine).await;
@@ -4494,7 +4492,25 @@ async fn handle_upload(cmd: &Value, state: &DaemonState) -> Result<Value, String
         })
         .unwrap_or_default();
 
-    mgr.upload_files(selector, &files, &state.ref_map, &state.iframe_sessions)
+    let session_id = mgr.active_session_id()?.to_string();
+    let (object_id, effective_session_id) = super::element::resolve_element_object_id(
+        &mgr.client,
+        &session_id,
+        &state.ref_map,
+        selector,
+        &state.iframe_sessions,
+    )
+    .await?;
+
+    mgr.client
+        .send_command(
+            "DOM.setFileInputFiles",
+            Some(json!({
+                "files": files,
+                "objectId": object_id,
+            })),
+            Some(&effective_session_id),
+        )
         .await?;
     Ok(json!({ "uploaded": files.len(), "selector": selector }))
 }
@@ -5812,6 +5828,17 @@ async fn handle_waitfordownload(cmd: &Value, state: &DaemonState) -> Result<Valu
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
     let timeout_ms = state.timeout_ms(cmd);
+    let expected_path = cmd.get("path").and_then(|v| v.as_str()).map(String::from);
+    let initial_file_state = expected_path.as_ref().and_then(|path| {
+        std::fs::metadata(path).ok().map(|meta| {
+            let modified = meta
+                .modified()
+                .ok()
+                .and_then(|ts| ts.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|dur| dur.as_nanos());
+            (meta.len(), modified)
+        })
+    });
 
     let mut rx = mgr.client.subscribe();
     let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
@@ -5833,16 +5860,27 @@ async fn handle_waitfordownload(cmd: &Value, state: &DaemonState) -> Result<Valu
                 if is_progress
                     && event.params.get("state").and_then(|v| v.as_str()) == Some("completed")
                 {
-                    let path = cmd
-                        .get("path")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("download");
+                    let path = expected_path.as_deref().unwrap_or("download");
                     return Ok(json!({ "path": path }));
                 }
             }
             Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
             Ok(Err(_)) => return Err("Event stream closed".to_string()),
             Err(_) => return Err("Timeout waiting for download".to_string()),
+        }
+
+        if let Some(ref path) = expected_path {
+            if let Ok(meta) = std::fs::metadata(path) {
+                let modified = meta
+                    .modified()
+                    .ok()
+                    .and_then(|ts| ts.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|dur| dur.as_nanos());
+                let current_state = (meta.len(), modified);
+                if initial_file_state.as_ref() != Some(&current_state) {
+                    return Ok(json!({ "path": path }));
+                }
+            }
         }
     }
 }
