@@ -1,8 +1,32 @@
 # agent-browser
 
-## 0.25.3
+## 0.25.4
 
 <!-- release:start -->
+### New Features
+
+- **`skills` command** - Added `agent-browser skills` command for discovering and installing agent skills, with built-in evaluation support for testing skills against live browser sessions (#1225, #1227)
+
+### Bug Fixes
+
+- Fixed **custom viewport dimensions** not being used in streaming frame metadata and image resolution (#1033)
+- Fixed **`--ignore-https-errors`** not being re-applied to recording contexts, causing TLS errors during screen recordings (#1178)
+- Fixed **duplicate option numbering** in the auth skill documentation (#1161)
+
+### Documentation
+
+- The docs site header now **dynamically fetches** the GitHub star count (#1202)
+
+### Contributors
+
+- @ctate
+- @jin-2-kakaoent
+- @juniper929
+- @Marshall-Sun
+<!-- release:end -->
+
+## 0.25.3
+
 ### Bug Fixes
 
 - Fixed **hidden radio/checkbox inputs missing from snapshot refs** when a `<label>` wraps a `display:none` `<input type="radio">` or `<input type="checkbox">`. Chrome excludes these inputs from the accessibility tree entirely, making it impossible for AI agents to identify radio buttons and checkboxes via refs. Hidden inputs inside elements are now detected during cursor-interactive scanning and their parent nodes are promoted to the correct role with proper name and checked state (#1085)
@@ -16,7 +40,6 @@
 - @ctate
 - @jin-2-kakaoent
 - @hyunjinee
-<!-- release:end -->
 
 ## 0.25.2
 
