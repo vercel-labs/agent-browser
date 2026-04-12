@@ -28,7 +28,9 @@ use super::interaction;
 use super::network::{self, DomainFilter, EventTracker};
 use super::policy::{ActionPolicy, ConfirmActions, PolicyResult};
 use super::providers;
+use super::animation;
 use super::recording::{self, RecordingState};
+use super::screencast;
 use super::screenshot::{self, ScreenshotOptions};
 use super::snapshot::{self, SnapshotOptions};
 use super::state;
@@ -1322,6 +1324,13 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         "recording_start" => handle_recording_start(cmd, state).await,
         "recording_stop" => handle_recording_stop(state).await,
         "recording_restart" => handle_recording_restart(cmd, state).await,
+        "burst_capture" => handle_burst_capture(cmd, state).await,
+        "screencast" => handle_screencast(cmd, state).await,
+        "animation_list" => handle_animation_list(state).await,
+        "animation_pause" => handle_animation_pause(cmd, state).await,
+        "animation_resume" => handle_animation_resume(cmd, state).await,
+        "animation_scrub" => handle_animation_scrub(cmd, state).await,
+        "animation_audit" => handle_animation_audit(state).await,
         "pdf" => handle_pdf(cmd, state).await,
         "tab_list" => handle_tab_list(state).await,
         "tab_new" => handle_tab_new(cmd, state).await,
@@ -4039,6 +4048,163 @@ async fn handle_recording_restart(cmd: &Value, state: &mut DaemonState) -> Resul
     }
 
     Ok(result)
+}
+
+async fn handle_burst_capture(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?.to_string();
+
+    let count = cmd
+        .get("count")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(10) as u32;
+    let interval = cmd
+        .get("interval")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(200);
+    let format = cmd
+        .get("format")
+        .and_then(|v| v.as_str())
+        .unwrap_or("png");
+    let quality = cmd.get("quality").and_then(|v| v.as_i64()).map(|q| q as i32);
+    let output_dir = cmd
+        .get("outputDir")
+        .and_then(|v| v.as_str())
+        .unwrap_or_else(|| {
+            // Default to ~/.agent-browser/tmp/burst/
+            ""
+        });
+    let output_dir = if output_dir.is_empty() {
+        let dir = dirs::home_dir()
+            .unwrap_or_else(std::env::temp_dir)
+            .join(".agent-browser")
+            .join("tmp")
+            .join("burst");
+        dir.to_string_lossy().to_string()
+    } else {
+        output_dir.to_string()
+    };
+    let gif_path = cmd.get("gifPath").and_then(|v| v.as_str());
+
+    let result = screencast::burst_capture(
+        &mgr.client,
+        &session_id,
+        count,
+        interval,
+        format,
+        quality,
+        &output_dir,
+        gif_path,
+    )
+    .await?;
+
+    let mut response = json!({
+        "frames": result.frames,
+        "count": result.frames.len(),
+        "outputDir": output_dir,
+    });
+    if let Some(gif) = result.gif {
+        response["gif"] = json!(gif);
+    }
+    Ok(response)
+}
+
+async fn handle_screencast(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?.to_string();
+
+    let duration = cmd
+        .get("duration")
+        .and_then(|v| v.as_u64())
+        .ok_or("Missing 'duration' parameter")?;
+    let format = cmd
+        .get("format")
+        .and_then(|v| v.as_str())
+        .unwrap_or("jpeg");
+    let quality = cmd.get("quality").and_then(|v| v.as_i64()).map(|q| q as i32);
+    let max_width = cmd.get("maxWidth").and_then(|v| v.as_u64()).map(|w| w as u32);
+    let max_height = cmd
+        .get("maxHeight")
+        .and_then(|v| v.as_u64())
+        .map(|h| h as u32);
+    let every_nth = cmd
+        .get("everyNthFrame")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as u32);
+    let output_dir = cmd
+        .get("outputDir")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .unwrap_or_else(|| {
+            let dir = dirs::home_dir()
+                .unwrap_or_else(std::env::temp_dir)
+                .join(".agent-browser")
+                .join("tmp")
+                .join("screencast");
+            dir.to_string_lossy().to_string()
+        });
+    let gif_path = cmd.get("gifPath").and_then(|v| v.as_str());
+
+    let result = screencast::screencast_capture(
+        &mgr.client,
+        &session_id,
+        duration,
+        format,
+        quality,
+        max_width,
+        max_height,
+        every_nth,
+        &output_dir,
+        gif_path,
+    )
+    .await?;
+
+    let mut response = json!({
+        "frames": result.frames,
+        "count": result.frames.len(),
+        "outputDir": output_dir,
+    });
+    if let Some(gif) = result.gif {
+        response["gif"] = json!(gif);
+    }
+    Ok(response)
+}
+
+async fn handle_animation_list(state: &DaemonState) -> Result<Value, String> {
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?.to_string();
+    animation::list_animations(&mgr.client, &session_id).await
+}
+
+async fn handle_animation_pause(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?.to_string();
+    let index = cmd.get("index").and_then(|v| v.as_u64()).map(|i| i as u32);
+    animation::pause_animations(&mgr.client, &session_id, index).await
+}
+
+async fn handle_animation_resume(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?.to_string();
+    let index = cmd.get("index").and_then(|v| v.as_u64()).map(|i| i as u32);
+    animation::resume_animations(&mgr.client, &session_id, index).await
+}
+
+async fn handle_animation_scrub(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?.to_string();
+    let progress = cmd
+        .get("progress")
+        .and_then(|v| v.as_f64())
+        .ok_or("Missing 'progress' parameter")?;
+    let index = cmd.get("index").and_then(|v| v.as_u64()).map(|i| i as u32);
+    animation::scrub_animations(&mgr.client, &session_id, progress, index).await
+}
+
+async fn handle_animation_audit(state: &DaemonState) -> Result<Value, String> {
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?.to_string();
+    animation::audit_animations(&mgr.client, &session_id).await
 }
 
 async fn handle_pdf(cmd: &Value, state: &DaemonState) -> Result<Value, String> {

@@ -468,20 +468,52 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
 
         // === Screenshot/PDF ===
         "screenshot" => {
-            // screenshot [selector] [path] [--full/-f]
+            // screenshot [selector] [path] [--full/-f] [--burst N] [--interval Ms] [--gif path]
             // selector: @ref or CSS selector
             // path: file path (contains / or . or ends with known extension)
             let mut full_page = false;
+            let mut burst_count: Option<u32> = None;
+            let mut burst_interval: Option<u64> = None;
+            let mut gif_path: Option<String> = None;
+            let mut skip_next = false;
             let positional: Vec<&str> = rest
                 .iter()
-                .filter(|arg| match **arg {
-                    "--full" | "-f" => {
-                        full_page = true;
-                        false
+                .enumerate()
+                .filter(|(i, arg)| {
+                    if skip_next {
+                        skip_next = false;
+                        return false;
                     }
-                    _ => true,
+                    match **arg {
+                        "--full" | "-f" => {
+                            full_page = true;
+                            false
+                        }
+                        "--burst" => {
+                            if let Some(next) = rest.get(i + 1) {
+                                burst_count = next.parse().ok();
+                            }
+                            skip_next = true;
+                            false
+                        }
+                        "--interval" => {
+                            if let Some(next) = rest.get(i + 1) {
+                                burst_interval = next.parse().ok();
+                            }
+                            skip_next = true;
+                            false
+                        }
+                        "--gif" => {
+                            if let Some(next) = rest.get(i + 1) {
+                                gif_path = Some(next.to_string());
+                            }
+                            skip_next = true;
+                            false
+                        }
+                        _ => true,
+                    }
                 })
-                .copied()
+                .map(|(_, arg)| *arg)
                 .collect();
             let (selector, path) = match (positional.first(), positional.get(1)) {
                 (Some(first), Some(second)) => {
@@ -508,6 +540,30 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 }
                 _ => (None, None),
             };
+
+            // If --burst is specified, route to burst_capture action
+            if let Some(count) = burst_count {
+                let mut cmd = json!({
+                    "id": id,
+                    "action": "burst_capture",
+                    "count": count,
+                    "interval": burst_interval.unwrap_or(200),
+                });
+                if let Some(ref fmt) = flags.screenshot_format {
+                    cmd["format"] = json!(fmt);
+                }
+                if let Some(q) = flags.screenshot_quality {
+                    cmd["quality"] = json!(q);
+                }
+                if let Some(ref dir) = flags.screenshot_dir {
+                    cmd["outputDir"] = json!(dir);
+                }
+                if let Some(ref gp) = gif_path {
+                    cmd["gifPath"] = json!(gp);
+                }
+                return Ok(cmd);
+            }
+
             let mut cmd = json!({
                 "id": id, "action": "screenshot",
                 "path": path, "selector": selector,
@@ -536,6 +592,136 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 usage: "pdf <path>",
             })?;
             Ok(json!({ "id": id, "action": "pdf", "path": path }))
+        }
+
+        // === Screencast ===
+        // screencast <duration_ms> [output_dir] [--gif path] [--format jpeg|png]
+        //   [--quality N] [--max-width N] [--max-height N] [--every-nth N]
+        "screencast" => {
+            let duration_str = rest.first().ok_or_else(|| ParseError::MissingArguments {
+                context: "screencast".to_string(),
+                usage: "screencast <duration_ms> [output_dir] [--gif path] [--format fmt] [--quality N] [--max-width N] [--max-height N] [--every-nth N]",
+            })?;
+            let duration: u64 = duration_str
+                .parse()
+                .map_err(|_| ParseError::InvalidValue {
+                    message: format!("'{}' is not a valid duration", duration_str),
+                    usage: "screencast <duration_ms>",
+                })?;
+
+            let mut output_dir: Option<String> = None;
+            let mut gif_path: Option<String> = None;
+            let mut format: Option<String> = None;
+            let mut quality: Option<i32> = None;
+            let mut max_width: Option<u32> = None;
+            let mut max_height: Option<u32> = None;
+            let mut every_nth: Option<u32> = None;
+
+            let mut i = 1;
+            while i < rest.len() {
+                match rest[i] {
+                    "--gif" => {
+                        i += 1;
+                        gif_path = rest.get(i).map(|s| s.to_string());
+                    }
+                    "--format" => {
+                        i += 1;
+                        format = rest.get(i).map(|s| s.to_string());
+                    }
+                    "--quality" => {
+                        i += 1;
+                        quality = rest.get(i).and_then(|s| s.parse().ok());
+                    }
+                    "--max-width" => {
+                        i += 1;
+                        max_width = rest.get(i).and_then(|s| s.parse().ok());
+                    }
+                    "--max-height" => {
+                        i += 1;
+                        max_height = rest.get(i).and_then(|s| s.parse().ok());
+                    }
+                    "--every-nth" => {
+                        i += 1;
+                        every_nth = rest.get(i).and_then(|s| s.parse().ok());
+                    }
+                    other if !other.starts_with('-') && output_dir.is_none() => {
+                        output_dir = Some(other.to_string());
+                    }
+                    _ => {}
+                }
+                i += 1;
+            }
+
+            let mut cmd = json!({
+                "id": id,
+                "action": "screencast",
+                "duration": duration,
+            });
+            if let Some(dir) = output_dir {
+                cmd["outputDir"] = json!(dir);
+            }
+            if let Some(gp) = gif_path {
+                cmd["gifPath"] = json!(gp);
+            }
+            if let Some(f) = format {
+                cmd["format"] = json!(f);
+            }
+            if let Some(q) = quality {
+                cmd["quality"] = json!(q);
+            }
+            if let Some(w) = max_width {
+                cmd["maxWidth"] = json!(w);
+            }
+            if let Some(h) = max_height {
+                cmd["maxHeight"] = json!(h);
+            }
+            if let Some(n) = every_nth {
+                cmd["everyNthFrame"] = json!(n);
+            }
+            Ok(cmd)
+        }
+
+        // === Animation Inspection ===
+        // animation list                 — list all running animations
+        // animation pause [index]        — pause all or one animation
+        // animation resume [index]       — resume all or one animation
+        // animation scrub <progress> [index] — scrub to 0.0–1.0
+        // animation audit                — performance/a11y audit
+        "animation" => {
+            let subcmd = rest.first().ok_or_else(|| ParseError::MissingArguments {
+                context: "animation".to_string(),
+                usage: "animation <list|pause|resume|scrub|audit> [args]",
+            })?;
+            match *subcmd {
+                "list" => Ok(json!({ "id": id, "action": "animation_list" })),
+                "pause" => {
+                    let index: Option<u32> = rest.get(1).and_then(|s| s.parse().ok());
+                    Ok(json!({ "id": id, "action": "animation_pause", "index": index }))
+                }
+                "resume" | "play" => {
+                    let index: Option<u32> = rest.get(1).and_then(|s| s.parse().ok());
+                    Ok(json!({ "id": id, "action": "animation_resume", "index": index }))
+                }
+                "scrub" => {
+                    let progress_str = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
+                        context: "animation scrub".to_string(),
+                        usage: "animation scrub <progress 0.0-1.0> [index]",
+                    })?;
+                    let progress: f64 = progress_str.parse().map_err(|_| {
+                        ParseError::InvalidValue {
+                            message: format!("'{}' is not a valid progress value", progress_str),
+                            usage: "animation scrub <0.0-1.0> [index]",
+                        }
+                    })?;
+                    let index: Option<u32> = rest.get(2).and_then(|s| s.parse().ok());
+                    Ok(json!({ "id": id, "action": "animation_scrub", "progress": progress, "index": index }))
+                }
+                "audit" => Ok(json!({ "id": id, "action": "animation_audit" })),
+                _ => Err(ParseError::InvalidValue {
+                    message: format!("'{}' is not a valid animation subcommand", subcmd),
+                    usage: "animation <list|pause|resume|scrub|audit>",
+                }),
+            }
         }
 
         // === Snapshot ===

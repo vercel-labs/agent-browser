@@ -1,6 +1,8 @@
 #[allow(dead_code)]
 pub mod actions;
 #[allow(dead_code)]
+pub mod animation;
+#[allow(dead_code)]
 pub mod auth;
 #[allow(dead_code)]
 pub mod browser;
@@ -26,6 +28,8 @@ pub mod policy;
 pub mod providers;
 #[allow(dead_code)]
 pub mod recording;
+#[allow(dead_code)]
+pub mod screencast;
 #[allow(dead_code)]
 pub mod screenshot;
 #[allow(dead_code)]
