@@ -206,3 +206,30 @@ npx opensrc <owner>/<repo>      # GitHub repo (e.g., npx opensrc vercel/ai)
 ```
 
 <!-- opensrc:end -->
+
+## Policy Entry
+
+This repo keeps its durable repo-local policy under `docs/dev/policies/`.
+
+Installed policy bundle:
+- `repo-policy-selector` `v0.1.8`
+- selected profile: `standalone-library`
+
+Read and follow:
+- `docs/dev/policies/0001-policy-management.md`
+- `docs/dev/policies/0002-policy-upgrade-management.md`
+- `docs/dev/policies/0003-policy-adoption-feedback-loop.md`
+- `docs/dev/policies/0004-git-worktree-hygiene.md`
+- `docs/dev/policies/0005-commit-history-discipline.md`
+- `docs/dev/policies/0006-branch-and-integration-strategy.md`
+- `docs/dev/policies/0007-commit-and-push-cadence.md`
+- `docs/dev/policies/0008-versioning-and-release.md`
+- `docs/dev/policies/0009-turn-closeout.md`
+- `docs/dev/policies/0010-validation-and-handoff.md`
+
+## Scope
+
+- `AGENTS.md` includes repo-local guidance plus the policy entry section.
+- The durable policy body lives under `docs/dev/policies/`.
+- Record policy adoption and upgrade notes under `docs/dev/notes/`.
+- Keep repo-specific commands, environment details, and operational caveats in this file or adjacent local docs.
