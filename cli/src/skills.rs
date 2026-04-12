@@ -180,8 +180,7 @@ fn run_list(skills_dir: &Path, json_mode: bool) {
         if json_mode {
             println!(
                 "{}",
-                serde_json::to_string(&json!({ "success": true, "data": [] }))
-                    .unwrap_or_default()
+                serde_json::to_string(&json!({ "success": true, "data": [] })).unwrap_or_default()
             );
         } else {
             println!("No skills found");
@@ -201,8 +200,7 @@ fn run_list(skills_dir: &Path, json_mode: bool) {
             .collect();
         println!(
             "{}",
-            serde_json::to_string(&json!({ "success": true, "data": items }))
-                .unwrap_or_default()
+            serde_json::to_string(&json!({ "success": true, "data": items })).unwrap_or_default()
         );
     } else {
         let max_name = skills.iter().map(|s| s.name.len()).max().unwrap_or(0);
@@ -246,11 +244,7 @@ fn run_get(skills_dir: &Path, names: &[String], get_all: bool, full: bool, json_
                             .unwrap_or_default()
                         );
                     } else {
-                        eprintln!(
-                            "{} Skill not found: {}",
-                            color::error_indicator(),
-                            name
-                        );
+                        eprintln!("{} Skill not found: {}", color::error_indicator(), name);
                     }
                     exit(1);
                 }
@@ -293,9 +287,7 @@ fn run_get(skills_dir: &Path, names: &[String], get_all: bool, full: bool, json_
                     if !supplementary.is_empty() {
                         let files: Vec<serde_json::Value> = supplementary
                             .iter()
-                            .map(|(path, content)| {
-                                json!({ "path": path, "content": content })
-                            })
+                            .map(|(path, content)| json!({ "path": path, "content": content }))
                             .collect();
                         obj["files"] = json!(files);
                     }
@@ -305,8 +297,7 @@ fn run_get(skills_dir: &Path, names: &[String], get_all: bool, full: bool, json_
             .collect();
         println!(
             "{}",
-            serde_json::to_string(&json!({ "success": true, "data": items }))
-                .unwrap_or_default()
+            serde_json::to_string(&json!({ "success": true, "data": items })).unwrap_or_default()
         );
     } else {
         for (i, s) in targets.iter().enumerate() {
@@ -365,11 +356,7 @@ fn run_path(skills_dir: &Path, name: Option<&str>, json_mode: bool) {
                             .unwrap_or_default()
                         );
                     } else {
-                        eprintln!(
-                            "{} Skill not found: {}",
-                            color::error_indicator(),
-                            name
-                        );
+                        eprintln!("{} Skill not found: {}", color::error_indicator(), name);
                     }
                     exit(1);
                 }
