@@ -251,6 +251,10 @@ pub struct DaemonState {
 }
 
 impl DaemonState {
+    pub fn is_isolated(&self) -> bool {
+        self.session_id != "default"
+    }
+
     pub fn new() -> Self {
         Self {
             browser: None,
@@ -674,6 +678,7 @@ impl DaemonState {
     }
 
     fn drain_cdp_events(&mut self) -> DrainedEvents {
+        let is_isolated = self.is_isolated();
         let rx = match self.event_rx.as_mut() {
             Some(rx) => rx,
             None => return DrainedEvents::default(),
@@ -701,7 +706,8 @@ impl DaemonState {
                                         .browser
                                         .as_ref()
                                         .is_none_or(|b| b.has_target(&te.target_info.target_id));
-                                    if !already_tracked {
+                                    let allowed = !is_isolated || self.browser.as_ref().is_some_and(|b| te.target_info.opener_id.as_ref().is_some_and(|op| b.has_target(op)));
+                                    if !already_tracked && allowed {
                                         new_target_ids.insert(te.target_info.target_id.clone());
                                         new_targets.push(te);
                                     }
@@ -722,11 +728,12 @@ impl DaemonState {
                                         .browser
                                         .as_ref()
                                         .is_some_and(|b| b.has_target(&te.target_info.target_id));
+                                    let allowed = !is_isolated || self.browser.as_ref().is_some_and(|b| te.target_info.opener_id.as_ref().is_some_and(|op| b.has_target(op)));
                                     if already_tracked
                                         || new_target_ids.contains(&te.target_info.target_id)
                                     {
                                         changed_targets.push(te);
-                                    } else {
+                                    } else if allowed {
                                         new_target_ids.insert(te.target_info.target_id.clone());
                                         new_targets.push(TargetCreatedEvent {
                                             target_info: te.target_info,
@@ -1479,8 +1486,8 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
 
 /// Connect to a running Chrome via auto-discovery and open a fresh tab so
 /// subsequent navigations don't hijack the user's existing tabs.
-async fn connect_auto_with_fresh_tab() -> Result<BrowserManager, String> {
-    let mut mgr = BrowserManager::connect_auto().await?;
+async fn connect_auto_with_fresh_tab(isolate: bool) -> Result<BrowserManager, String> {
+    let mut mgr = BrowserManager::connect_auto(isolate).await?;
     mgr.tab_new(None).await?;
     let session_id = mgr.active_session_id()?.to_string();
     let _ = mgr
@@ -1515,7 +1522,7 @@ async fn auto_launch(state: &mut DaemonState) -> Result<(), String> {
     write_extensions_file(&state.session_id);
 
     if let Ok(cdp) = env::var("AGENT_BROWSER_CDP") {
-        let mgr = BrowserManager::connect_cdp(&cdp).await?;
+        let mgr = BrowserManager::connect_cdp(&cdp, state.is_isolated()).await?;
         state.reset_input_state();
         state.browser = Some(mgr);
         state.subscribe_to_browser_events();
@@ -1528,7 +1535,7 @@ async fn auto_launch(state: &mut DaemonState) -> Result<(), String> {
 
     if env::var("AGENT_BROWSER_AUTO_CONNECT").is_ok() {
         state.reset_input_state();
-        state.browser = Some(connect_auto_with_fresh_tab().await?);
+        state.browser = Some(connect_auto_with_fresh_tab(state.is_isolated()).await?);
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
         state.start_dialog_handler();
@@ -1552,11 +1559,11 @@ async fn auto_launch(state: &mut DaemonState) -> Result<(), String> {
                 None
             };
             let connect_result = if conn.direct_page {
-                BrowserManager::connect_cdp_direct(&conn.ws_url).await
+                BrowserManager::connect_cdp_direct(&conn.ws_url, state.is_isolated()).await
             } else if ws_headers.is_some() {
-                BrowserManager::connect_cdp_with_headers(&conn.ws_url, ws_headers).await
+                BrowserManager::connect_cdp_with_headers(&conn.ws_url, ws_headers, state.is_isolated()).await
             } else {
-                BrowserManager::connect_cdp(&conn.ws_url).await
+                BrowserManager::connect_cdp(&conn.ws_url, state.is_isolated()).await
             };
             match connect_result {
                 Ok(mgr) => {
@@ -1798,7 +1805,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
 
     if let Some(url) = cdp_url {
         state.reset_input_state();
-        state.browser = Some(BrowserManager::connect_cdp(url).await?);
+        state.browser = Some(BrowserManager::connect_cdp(url, state.is_isolated()).await?);
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
         state.start_dialog_handler();
@@ -1808,7 +1815,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
 
     if let Some(port) = cdp_port {
         state.reset_input_state();
-        state.browser = Some(BrowserManager::connect_cdp(&port.to_string()).await?);
+        state.browser = Some(BrowserManager::connect_cdp(&port.to_string(), state.is_isolated()).await?);
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
         state.start_dialog_handler();
@@ -1818,7 +1825,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
 
     if auto_connect {
         state.reset_input_state();
-        state.browser = Some(connect_auto_with_fresh_tab().await?);
+        state.browser = Some(connect_auto_with_fresh_tab(state.is_isolated()).await?);
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
         state.start_dialog_handler();
@@ -1844,11 +1851,11 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
                 };
 
                 let connect_result = if conn.direct_page {
-                    BrowserManager::connect_cdp_direct(&conn.ws_url).await
+                    BrowserManager::connect_cdp_direct(&conn.ws_url, state.is_isolated()).await
                 } else if ws_headers.is_some() {
-                    BrowserManager::connect_cdp_with_headers(&conn.ws_url, ws_headers).await
+                    BrowserManager::connect_cdp_with_headers(&conn.ws_url, ws_headers, state.is_isolated()).await
                 } else {
-                    BrowserManager::connect_cdp(&conn.ws_url).await
+                    BrowserManager::connect_cdp(&conn.ws_url, state.is_isolated()).await
                 };
                 match connect_result {
                     Ok(mgr) => {

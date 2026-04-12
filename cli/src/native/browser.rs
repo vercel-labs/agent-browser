@@ -278,7 +278,7 @@ impl BrowserManager {
                 ignore_https_errors,
                 visited_origins: HashSet::new(),
             };
-            manager.discover_and_attach_targets().await?;
+            manager.discover_and_attach_targets(false).await?;
             manager
         };
 
@@ -331,27 +331,29 @@ impl BrowserManager {
         Ok(manager)
     }
 
-    pub async fn connect_cdp(url: &str) -> Result<Self, String> {
-        Self::connect_cdp_inner(url, false, None).await
+    pub async fn connect_cdp(url: &str, isolate_session: bool) -> Result<Self, String> {
+        Self::connect_cdp_inner(url, false, None, isolate_session).await
     }
 
     /// Connect to a provider CDP proxy where the WebSocket IS the page session.
     /// Skips browser-level Target.* commands that most proxies don't support.
-    pub async fn connect_cdp_direct(url: &str) -> Result<Self, String> {
-        Self::connect_cdp_inner(url, true, None).await
+    pub async fn connect_cdp_direct(url: &str, isolate_session: bool) -> Result<Self, String> {
+        Self::connect_cdp_inner(url, true, None, isolate_session).await
     }
 
     pub async fn connect_cdp_with_headers(
         url: &str,
         headers: Option<Vec<(String, String)>>,
+        isolate_session: bool,
     ) -> Result<Self, String> {
-        Self::connect_cdp_inner(url, false, headers).await
+        Self::connect_cdp_inner(url, false, headers, isolate_session).await
     }
 
     async fn connect_cdp_inner(
         url: &str,
         direct_page: bool,
         headers: Option<Vec<(String, String)>>,
+        isolate_session: bool,
     ) -> Result<Self, String> {
         let ws_url = resolve_cdp_url(url).await?;
         let client = Arc::new(CdpClient::connect_with_headers(&ws_url, headers).await?);
@@ -378,17 +380,17 @@ impl BrowserManager {
             manager.active_page_index = 0;
             manager.enable_domains_direct().await?;
         } else {
-            manager.discover_and_attach_targets().await?;
+            manager.discover_and_attach_targets(isolate_session).await?;
         }
         Ok(manager)
     }
 
-    pub async fn connect_auto() -> Result<Self, String> {
+    pub async fn connect_auto(isolate_session: bool) -> Result<Self, String> {
         let ws_url = auto_connect_cdp().await?;
-        Self::connect_cdp(&ws_url).await
+        Self::connect_cdp(&ws_url, isolate_session).await
     }
 
-    async fn discover_and_attach_targets(&mut self) -> Result<(), String> {
+    async fn discover_and_attach_targets(&mut self, isolate_session: bool) -> Result<(), String> {
         self.client
             .send_command_typed::<_, Value>(
                 "Target.setDiscoverTargets",
@@ -402,11 +404,15 @@ impl BrowserManager {
             .send_command_typed("Target.getTargets", &json!({}), None)
             .await?;
 
-        let page_targets: Vec<TargetInfo> = result
-            .target_infos
-            .into_iter()
-            .filter(should_track_target)
-            .collect();
+        let page_targets: Vec<TargetInfo> = if isolate_session {
+            Vec::new()
+        } else {
+            result
+                .target_infos
+                .into_iter()
+                .filter(should_track_target)
+                .collect()
+        };
 
         if page_targets.is_empty() {
             // Create a new tab
@@ -1393,7 +1399,7 @@ async fn discover_and_attach_lightpanda_targets(
 ) -> Result<(), String> {
     run_with_lightpanda_deadline(
         deadline,
-        manager.discover_and_attach_targets(),
+        manager.discover_and_attach_targets(false),
         "Target domain initialization attempt exceeded the remaining startup deadline",
     )
     .await

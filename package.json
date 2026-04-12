@@ -42,5 +42,7 @@
     "url": "https://github.com/vercel-labs/agent-browser/issues"
   },
   "homepage": "https://agent-browser.dev",
-  "devDependencies": {}
+  "dependencies": {
+    "ws": "^8.20.0"
+  }
 }
