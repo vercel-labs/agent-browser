@@ -2834,9 +2834,10 @@ async fn handle_wait(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
     }
 
     if let Some(load_state) = cmd.get("loadState").and_then(|v| v.as_str()) {
-        let mgr = state.browser.as_ref().ok_or(
-            "loadState wait requires a CDP browser (not supported on WebDriver backends)",
-        )?;
+        let mgr = state
+            .browser
+            .as_ref()
+            .ok_or("loadState wait requires a CDP browser (not supported on WebDriver backends)")?;
         let session_id = mgr.active_session_id()?.to_string();
         let wait_until = WaitUntil::from_str(load_state);
         mgr.wait_for_lifecycle_external(wait_until, &session_id)
@@ -3099,7 +3100,13 @@ async fn wait_for_selector(
     state: &str,
     timeout_ms: u64,
 ) -> Result<(), String> {
-    cdp_poll_until_true(client, session_id, &selector_check_js(selector, state), timeout_ms).await
+    cdp_poll_until_true(
+        client,
+        session_id,
+        &selector_check_js(selector, state),
+        timeout_ms,
+    )
+    .await
 }
 
 async fn wait_for_url(
@@ -8656,8 +8663,10 @@ mod tests {
         // When only WebDriver backend is active (no CDP browser),
         // `wait` with a plain timeout should still work (sleep N ms).
         let mut state = DaemonState::new();
-        let wd_client =
-            super::super::webdriver::client::WebDriverClient::new_with_session(19999, "fake-sid".to_string());
+        let wd_client = super::super::webdriver::client::WebDriverClient::new_with_session(
+            19999,
+            "fake-sid".to_string(),
+        );
         state.webdriver_backend = Some(WebDriverBackend::new(wd_client));
         state.backend_type = BackendType::WebDriver;
 
@@ -8676,8 +8685,10 @@ mod tests {
         // `wait` with a selector should attempt WebDriver-based polling,
         // not fail with "Browser not launched".
         let mut state = DaemonState::new();
-        let wd_client =
-            super::super::webdriver::client::WebDriverClient::new_with_session(19999, "fake-sid".to_string());
+        let wd_client = super::super::webdriver::client::WebDriverClient::new_with_session(
+            19999,
+            "fake-sid".to_string(),
+        );
         state.webdriver_backend = Some(WebDriverBackend::new(wd_client));
         state.backend_type = BackendType::WebDriver;
 
@@ -8705,8 +8716,10 @@ mod tests {
         let mut state = DaemonState::new();
 
         // Set up a fake WebDriver backend (no real server, but state is set)
-        let wd_client =
-            super::super::webdriver::client::WebDriverClient::new_with_session(19999, "fake-sid".to_string());
+        let wd_client = super::super::webdriver::client::WebDriverClient::new_with_session(
+            19999,
+            "fake-sid".to_string(),
+        );
         state.webdriver_backend = Some(WebDriverBackend::new(wd_client));
         state.backend_type = BackendType::WebDriver;
 
