@@ -1863,7 +1863,7 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
-    // auto_connect_cdp discovery-order tests (#1210, #1206, #1003, #1086)
+    // auto_connect_cdp discovery-order tests (#1210, #1206)
     // -------------------------------------------------------------------
 
     /// When DevToolsActivePort provides a ws_path and the port is reachable,
