@@ -30,7 +30,7 @@ use super::policy::{ActionPolicy, ConfirmActions, PolicyResult};
 use super::providers;
 use super::animation;
 use super::recording::{self, RecordingState};
-use super::screencast;
+use super::screencast::{self, ScreencastRecording};
 use super::screenshot::{self, ScreenshotOptions};
 use super::snapshot::{self, SnapshotOptions};
 use super::state;
@@ -205,6 +205,7 @@ pub struct DaemonState {
     pub session_id: String,
     pub tracing_state: TracingState,
     pub recording_state: RecordingState,
+    pub screencast_recording: Option<ScreencastRecording>,
     event_rx: Option<broadcast::Receiver<CdpEvent>>,
     pub screencasting: bool,
     pub policy: Option<ActionPolicy>,
@@ -272,6 +273,7 @@ impl DaemonState {
             session_id: env::var("AGENT_BROWSER_SESSION").unwrap_or_else(|_| "default".to_string()),
             tracing_state: TracingState::new(),
             recording_state: RecordingState::new(),
+            screencast_recording: None,
             event_rx: None,
             screencasting: false,
             policy: ActionPolicy::load_if_exists(),
@@ -1069,6 +1071,9 @@ impl DaemonState {
                                     pending_acks.push(sid);
                                 }
                             }
+
+                            // Frame collection for interactive recording is handled
+                            // by a background task in ScreencastRecording.
                         }
                         "Page.javascriptDialogOpening" => {
                             if let Ok(dialog_event) =
@@ -1326,6 +1331,8 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         "recording_restart" => handle_recording_restart(cmd, state).await,
         "burst_capture" => handle_burst_capture(cmd, state).await,
         "screencast" => handle_screencast(cmd, state).await,
+        "screencast_rec_start" => handle_screencast_rec_start(cmd, state).await,
+        "screencast_rec_stop" => handle_screencast_rec_stop(cmd, state).await,
         "animation_list" => handle_animation_list(state).await,
         "animation_pause" => handle_animation_pause(cmd, state).await,
         "animation_resume" => handle_animation_resume(cmd, state).await,
@@ -1433,6 +1440,16 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         "mouseup" => handle_mouseup(cmd, state).await,
         _ => Err(format!("Not yet implemented: {}", action)),
     };
+
+    // Log action to interactive screencast recording if active
+    if let Some(ref mut rec) = state.screencast_recording {
+        if !matches!(
+            action,
+            "screencast_rec_start" | "screencast_rec_stop" | "screencast" | ""
+        ) {
+            rec.log_action(action, cmd);
+        }
+    }
 
     let mut resp = match result {
         Ok(data) => success_response(&id, data),
@@ -4162,6 +4179,102 @@ async fn handle_screencast(cmd: &Value, state: &DaemonState) -> Result<Value, St
     let mut response = json!({
         "frames": result.frames,
         "count": result.frames.len(),
+        "outputDir": output_dir,
+    });
+    if let Some(gif) = result.gif {
+        response["gif"] = json!(gif);
+    }
+    Ok(response)
+}
+
+async fn handle_screencast_rec_start(
+    cmd: &Value,
+    state: &mut DaemonState,
+) -> Result<Value, String> {
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?.to_string();
+
+    if state.screencast_recording.is_some() {
+        return Err("Screencast recording already active".to_string());
+    }
+
+    let format = cmd
+        .get("format")
+        .and_then(|v| v.as_str())
+        .unwrap_or("jpeg");
+    let quality = cmd.get("quality").and_then(|v| v.as_i64()).map(|q| q as i32);
+
+    // Use stored viewport as default for screencast dimensions
+    let (default_w, default_h) = if let Some(ref server) = state.stream_server {
+        server.viewport().await
+    } else {
+        (1280, 720)
+    };
+
+    stream::start_screencast(
+        &mgr.client,
+        &session_id,
+        format,
+        quality.unwrap_or(80),
+        default_w as i32,
+        default_h as i32,
+    )
+    .await?;
+
+    state.screencasting = true;
+    state.screencast_recording = Some(ScreencastRecording::new(
+        format,
+        quality,
+        mgr.client.clone(),
+        &session_id,
+    ));
+
+    if let Some(ref server) = state.stream_server {
+        server.set_screencasting(true).await;
+    }
+
+    Ok(json!({ "started": true, "format": format }))
+}
+
+async fn handle_screencast_rec_stop(
+    cmd: &Value,
+    state: &mut DaemonState,
+) -> Result<Value, String> {
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?;
+
+    let recording = state
+        .screencast_recording
+        .take()
+        .ok_or("No screencast recording active")?;
+
+    stream::stop_screencast(&mgr.client, session_id).await?;
+    state.screencasting = false;
+
+    if let Some(ref server) = state.stream_server {
+        server.set_screencasting(false).await;
+    }
+
+    let output_dir = cmd
+        .get("outputDir")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .unwrap_or_else(|| {
+            let dir = dirs::home_dir()
+                .unwrap_or_else(std::env::temp_dir)
+                .join(".agent-browser")
+                .join("tmp")
+                .join("screencast");
+            dir.to_string_lossy().to_string()
+        });
+    let gif_path = cmd.get("gifPath").and_then(|v| v.as_str());
+
+    let result = recording.finish(&output_dir, gif_path).await?;
+
+    let mut response = json!({
+        "frames": result.frames,
+        "count": result.frames.len(),
+        "timeline": result.timeline,
         "outputDir": output_dir,
     });
     if let Some(gif) = result.gif {

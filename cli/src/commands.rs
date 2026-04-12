@@ -595,18 +595,78 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
         }
 
         // === Screencast ===
+        // screencast start [--format jpeg|png] [--quality N]
+        // screencast stop [output_dir] [--gif path]
         // screencast <duration_ms> [output_dir] [--gif path] [--format jpeg|png]
         //   [--quality N] [--max-width N] [--max-height N] [--every-nth N]
         "screencast" => {
-            let duration_str = rest.first().ok_or_else(|| ParseError::MissingArguments {
+            let first = rest.first().ok_or_else(|| ParseError::MissingArguments {
                 context: "screencast".to_string(),
-                usage: "screencast <duration_ms> [output_dir] [--gif path] [--format fmt] [--quality N] [--max-width N] [--max-height N] [--every-nth N]",
+                usage: "screencast <start|stop|duration_ms> [options]",
             })?;
-            let duration: u64 = duration_str
+
+            // Interactive start/stop mode
+            if *first == "start" {
+                let mut format: Option<String> = None;
+                let mut quality: Option<i32> = None;
+                let mut i = 1;
+                while i < rest.len() {
+                    match rest[i] {
+                        "--format" => {
+                            i += 1;
+                            format = rest.get(i).map(|s| s.to_string());
+                        }
+                        "--quality" => {
+                            i += 1;
+                            quality = rest.get(i).and_then(|s| s.parse().ok());
+                        }
+                        _ => {}
+                    }
+                    i += 1;
+                }
+                let mut cmd = json!({ "id": id, "action": "screencast_rec_start" });
+                if let Some(f) = format {
+                    cmd["format"] = json!(f);
+                }
+                if let Some(q) = quality {
+                    cmd["quality"] = json!(q);
+                }
+                return Ok(cmd);
+            }
+
+            if *first == "stop" {
+                let mut output_dir: Option<String> = None;
+                let mut gif_path: Option<String> = None;
+                let mut i = 1;
+                while i < rest.len() {
+                    match rest[i] {
+                        "--gif" => {
+                            i += 1;
+                            gif_path = rest.get(i).map(|s| s.to_string());
+                        }
+                        other if !other.starts_with('-') && output_dir.is_none() => {
+                            output_dir = Some(other.to_string());
+                        }
+                        _ => {}
+                    }
+                    i += 1;
+                }
+                let mut cmd = json!({ "id": id, "action": "screencast_rec_stop" });
+                if let Some(dir) = output_dir {
+                    cmd["outputDir"] = json!(dir);
+                }
+                if let Some(gp) = gif_path {
+                    cmd["gifPath"] = json!(gp);
+                }
+                return Ok(cmd);
+            }
+
+            // Fixed-duration mode: screencast <duration_ms> [options]
+            let duration: u64 = first
                 .parse()
                 .map_err(|_| ParseError::InvalidValue {
-                    message: format!("'{}' is not a valid duration", duration_str),
-                    usage: "screencast <duration_ms>",
+                    message: format!("'{}' is not a valid duration or subcommand", first),
+                    usage: "screencast <start|stop|duration_ms>",
                 })?;
 
             let mut output_dir: Option<String> = None;
