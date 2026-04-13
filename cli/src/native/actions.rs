@@ -2272,6 +2272,28 @@ async fn handle_close(state: &mut DaemonState) -> Result<Value, String> {
             }
         }
     }
+    // Auto-save interactive screencast recording before closing
+    if let Some(recording) = state.screencast_recording.take() {
+        let fallback_dir = dirs::home_dir()
+            .unwrap_or_else(std::env::temp_dir)
+            .join(".agent-browser")
+            .join("tmp")
+            .join("screencast");
+        let dir = fallback_dir.to_string_lossy().to_string();
+        match recording.finish(&dir, None).await {
+            Ok(result) => {
+                eprintln!(
+                    "Screencast recording auto-saved: {} frames to {}",
+                    result.frames.len(),
+                    dir
+                );
+            }
+            Err(e) => {
+                eprintln!("Warning: failed to auto-save screencast recording: {}", e);
+            }
+        }
+    }
+
     if let Some(ref mut mgr) = state.browser {
         mgr.close().await?;
     }
@@ -4240,15 +4262,17 @@ async fn handle_screencast_rec_stop(
     cmd: &Value,
     state: &mut DaemonState,
 ) -> Result<Value, String> {
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let session_id = mgr.active_session_id()?;
-
     let recording = state
         .screencast_recording
         .take()
         .ok_or("No screencast recording active")?;
 
-    stream::stop_screencast(&mgr.client, session_id).await?;
+    // Stop CDP screencast if browser is still alive
+    if let Some(ref mgr) = state.browser {
+        if let Ok(session_id) = mgr.active_session_id() {
+            let _ = stream::stop_screencast(&mgr.client, session_id).await;
+        }
+    }
     state.screencasting = false;
 
     if let Some(ref server) = state.stream_server {

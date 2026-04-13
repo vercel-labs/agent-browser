@@ -290,6 +290,14 @@ pub struct TimelineEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub direction: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub event: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub frame: Option<usize>,
@@ -428,6 +436,10 @@ impl ScreencastRecording {
             action: None,
             selector: None,
             value: None,
+            url: None,
+            key: None,
+            direction: None,
+            duration: None,
             event: Some("screencast_start".to_string()),
             frame: Some(0),
         });
@@ -436,6 +448,7 @@ impl ScreencastRecording {
 
     pub fn log_action(&mut self, action: &str, cmd: &Value) {
         let time_ms = self.start_time.elapsed().as_millis() as u64;
+
         let selector = cmd
             .get("selector")
             .and_then(|v| v.as_str())
@@ -445,12 +458,26 @@ impl ScreencastRecording {
             .or_else(|| cmd.get("text"))
             .and_then(|v| v.as_str())
             .map(String::from);
+        let url = cmd.get("url").and_then(|v| v.as_str()).map(String::from);
+        let key = cmd.get("key").and_then(|v| v.as_str()).map(String::from);
+        let direction = cmd
+            .get("direction")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let duration = cmd
+            .get("duration")
+            .or_else(|| cmd.get("timeout"))
+            .and_then(|v| v.as_u64());
 
         self.timeline.push(TimelineEntry {
             time_ms,
             action: Some(action.to_string()),
             selector,
             value,
+            url,
+            key,
+            direction,
+            duration,
             event: None,
             frame: None,
         });
@@ -528,6 +555,10 @@ fn save_recording_output(
         action: None,
         selector: None,
         value: None,
+        url: None,
+        key: None,
+        direction: None,
+        duration: None,
         event: Some("screencast_stop".to_string()),
         frame: Some(frames.len().saturating_sub(1)),
     });
