@@ -206,6 +206,10 @@ pub struct BrowserManager {
     pub ignore_https_errors: bool,
     /// Origins visited during this session, used by save_state to collect cross-origin localStorage.
     visited_origins: HashSet<String>,
+    /// Stable tab IDs: maps target_id -> stable tab id (1-based, never reused)
+    tab_ids: HashMap<String, usize>,
+    /// Next tab id to assign
+    next_tab_id: usize,
 }
 
 const LIGHTPANDA_CDP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -277,6 +281,8 @@ impl BrowserManager {
                 download_path: download_path.clone(),
                 ignore_https_errors,
                 visited_origins: HashSet::new(),
+                tab_ids: HashMap::new(),
+                next_tab_id: 1,
             };
             manager.discover_and_attach_targets().await?;
             manager
@@ -365,11 +371,17 @@ impl BrowserManager {
             download_path: None,
             ignore_https_errors: false,
             visited_origins: HashSet::new(),
+            tab_ids: HashMap::new(),
+            next_tab_id: 1,
         };
 
         if direct_page {
+            let tab_id = manager.next_tab_id;
+            manager.next_tab_id += 1;
+            let target_id = "provider-page".to_string();
+            manager.tab_ids.insert(target_id.clone(), tab_id);
             manager.pages.push(PageInfo {
-                target_id: "provider-page".to_string(),
+                target_id,
                 session_id: String::new(),
                 url: String::new(),
                 title: String::new(),
@@ -433,8 +445,12 @@ impl BrowserManager {
                 )
                 .await?;
 
+            let tab_id = self.next_tab_id;
+            self.next_tab_id += 1;
+            let target_id = result.target_id.clone();
+            self.tab_ids.insert(target_id.clone(), tab_id);
             self.pages.push(PageInfo {
-                target_id: result.target_id,
+                target_id,
                 session_id: attach_result.session_id.clone(),
                 url: "about:blank".to_string(),
                 title: String::new(),
@@ -456,6 +472,9 @@ impl BrowserManager {
                     )
                     .await?;
 
+                let tab_id = self.next_tab_id;
+                self.next_tab_id += 1;
+                self.tab_ids.insert(target.target_id.clone(), tab_id);
                 self.pages.push(PageInfo {
                     target_id: target.target_id.clone(),
                     session_id: attach_result.session_id.clone(),
@@ -484,9 +503,6 @@ impl BrowserManager {
         self.client
             .send_command_no_params("Runtime.enable", Some(session_id))
             .await?;
-        // Resume the target if it is paused waiting for the debugger.
-        // This is needed for real browser sessions (Chrome 144+) where targets
-        // are paused after attach until explicitly resumed. No-op otherwise.
         let _ = self
             .client
             .send_command_no_params("Runtime.runIfWaitingForDebugger", Some(session_id))
@@ -835,8 +851,9 @@ impl BrowserManager {
             .iter()
             .enumerate()
             .map(|(i, p)| {
+                let tab_id = self.tab_ids.get(&p.target_id).copied().unwrap_or(0);
                 json!({
-                    "index": i,
+                    "index": tab_id,
                     "title": p.title,
                     "url": p.url,
                     "type": p.target_type,
@@ -874,9 +891,13 @@ impl BrowserManager {
 
         self.enable_domains(&attach.session_id).await?;
 
+        let tab_id = self.next_tab_id;
+        self.next_tab_id += 1;
         let index = self.pages.len();
+        let target_id = result.target_id.clone();
+        self.tab_ids.insert(target_id.clone(), tab_id);
         self.pages.push(PageInfo {
-            target_id: result.target_id,
+            target_id,
             session_id: attach.session_id,
             url: target_url.to_string(),
             title: String::new(),
@@ -884,23 +905,30 @@ impl BrowserManager {
         });
         self.active_page_index = index;
 
-        Ok(json!({ "index": index, "url": target_url }))
+        Ok(json!({ "index": tab_id, "url": target_url }))
     }
 
-    pub async fn tab_switch(&mut self, index: usize) -> Result<Value, String> {
-        if index >= self.pages.len() {
-            return Err(format!(
-                "Tab index {} out of range (0-{})",
-                index,
-                self.pages.len().saturating_sub(1)
-            ));
-        }
+    fn resolve_tab_index(&self, tab_id: usize) -> Option<usize> {
+        let target_id = self.tab_ids.iter().find(|(_, &id)| id == tab_id)?.0;
+        self.pages.iter().position(|p| p.target_id == *target_id)
+    }
+
+    pub fn active_tab_id(&self) -> usize {
+        self.pages
+            .get(self.active_page_index)
+            .and_then(|p| self.tab_ids.get(&p.target_id).copied())
+            .unwrap_or(0)
+    }
+
+    pub async fn tab_switch(&mut self, tab_id: usize) -> Result<Value, String> {
+        let index = self.resolve_tab_index(tab_id).ok_or_else(|| {
+            format!("Tab id {} not found", tab_id)
+        })?;
 
         self.active_page_index = index;
         let session_id = self.pages[index].session_id.clone();
         self.enable_domains(&session_id).await?;
 
-        // Bring tab to front
         let _ = self
             .client
             .send_command("Page.bringToFront", None, Some(&session_id))
@@ -914,27 +942,27 @@ impl BrowserManager {
             page.title = title.clone();
         }
 
-        Ok(json!({ "index": index, "url": url, "title": title }))
+        Ok(json!({ "index": tab_id, "url": url, "title": title }))
     }
 
-    pub async fn tab_close(&mut self, index: Option<usize>) -> Result<Value, String> {
-        let target_index = index.unwrap_or(self.active_page_index);
-
-        if target_index >= self.pages.len() {
-            return Err(format!("Tab index {} out of range", target_index));
-        }
+    pub async fn tab_close(&mut self, tab_id: Option<usize>) -> Result<Value, String> {
+        let target_tab_id = tab_id.unwrap_or(self.active_tab_id());
+        let index = self.resolve_tab_index(target_tab_id).ok_or_else(|| {
+            format!("Tab id {} not found", target_tab_id)
+        })?;
 
         if self.pages.len() <= 1 {
             return Err("Cannot close the last tab".to_string());
         }
 
-        let page = self.pages.remove(target_index);
+        let page = self.pages.remove(index);
+        self.tab_ids.remove(&page.target_id);
         let _ = self
             .client
             .send_command_typed::<_, Value>(
                 "Target.closeTarget",
                 &CloseTargetParams {
-                    target_id: page.target_id,
+                    target_id: page.target_id.clone(),
                 },
                 None,
             )
@@ -947,7 +975,8 @@ impl BrowserManager {
         let session_id = self.pages[self.active_page_index].session_id.clone();
         self.enable_domains(&session_id).await?;
 
-        Ok(json!({ "closed": target_index, "activeIndex": self.active_page_index }))
+        let active_tab_id = self.active_tab_id();
+        Ok(json!({ "closed": target_tab_id, "activeIndex": active_tab_id }))
     }
 
     // -----------------------------------------------------------------------
@@ -1189,6 +1218,9 @@ impl BrowserManager {
     }
 
     pub fn add_page(&mut self, page: PageInfo) {
+        let tab_id = self.next_tab_id;
+        self.next_tab_id += 1;
+        self.tab_ids.insert(page.target_id.clone(), tab_id);
         let index = self.pages.len();
         self.pages.push(page);
         self.active_page_index = index;
@@ -1201,6 +1233,7 @@ impl BrowserManager {
     pub fn remove_page_by_target_id(&mut self, target_id: &str) {
         if let Some(pos) = self.pages.iter().position(|p| p.target_id == target_id) {
             self.pages.remove(pos);
+            self.tab_ids.remove(target_id);
             self.update_active_page_if_needed();
         }
     }
@@ -1370,6 +1403,8 @@ async fn initialize_lightpanda_manager(
             download_path: None,
             ignore_https_errors: false,
             visited_origins: HashSet::new(),
+            tab_ids: HashMap::new(),
+            next_tab_id: 1,
         };
 
         match discover_and_attach_lightpanda_targets(&mut manager, deadline).await {

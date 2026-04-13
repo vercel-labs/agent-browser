@@ -381,19 +381,20 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
         }
         // Tabs
         if let Some(tabs) = data.get("tabs").and_then(|v| v.as_array()) {
-            for (i, tab) in tabs.iter().enumerate() {
+            for tab in tabs.iter() {
                 let title = tab
                     .get("title")
                     .and_then(|v| v.as_str())
                     .unwrap_or("Untitled");
                 let url = tab.get("url").and_then(|v| v.as_str()).unwrap_or("");
                 let active = tab.get("active").and_then(|v| v.as_bool()).unwrap_or(false);
+                let idx = tab.get("index").and_then(|v| v.as_u64()).unwrap_or(0);
                 let marker = if active {
                     color::cyan("→")
                 } else {
                     " ".to_string()
                 };
-                println!("{} [{}] {} - {}", marker, i, title, url);
+                println!("{} [{}] {} - {}", marker, idx, title, url);
             }
             return;
         }
