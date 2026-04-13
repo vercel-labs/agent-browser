@@ -14,7 +14,8 @@ pub async fn list_animations(client: &CdpClient, session_id: &str) -> Result<Val
             const timing = effect && effect.getTiming ? effect.getTiming() : null;
             const computed = effect && effect.getComputedTiming ? effect.getComputedTiming() : null;
             let keyframes = null;
-            try { keyframes = effect && effect.getKeyframes ? effect.getKeyframes() : null; } catch(e) {}
+            let keyframeError = null;
+            try { keyframes = effect && effect.getKeyframes ? effect.getKeyframes() : null; } catch(e) { keyframeError = e.message || String(e); }
 
             let targetDesc = null;
             if (target) {
@@ -46,6 +47,7 @@ pub async fn list_animations(client: &CdpClient, session_id: &str) -> Result<Val
                 activeDuration: computed ? computed.activeDuration : null,
                 localTime: computed ? computed.localTime : null,
                 keyframes: keyframes,
+                keyframeError: keyframeError,
                 type: a.constructor.name
             };
         });
@@ -208,7 +210,7 @@ pub async fn audit_animations(client: &CdpClient, session_id: &str) -> Result<Va
                 } catch(e) { /* cross-origin */ }
                 if (reducedMotionStylesheet) break;
             }
-        } catch(e) {}
+        } catch(e) { /* stylesheet access may fail in restricted contexts */ }
 
         for (const anim of animations) {
             const issues = [];
@@ -217,7 +219,7 @@ pub async fn audit_animations(client: &CdpClient, session_id: &str) -> Result<Va
 
             // Check animated properties for layout triggers
             let keyframes = [];
-            try { keyframes = effect && effect.getKeyframes ? effect.getKeyframes() : []; } catch(e) {}
+            try { keyframes = effect && effect.getKeyframes ? effect.getKeyframes() : []; } catch(e) { /* cross-origin or unsupported */ }
 
             const animatedProps = new Set();
             for (const kf of keyframes) {
@@ -327,7 +329,13 @@ async fn eval_and_return(
     }
 
     match result.result.value {
-        Some(v) => Ok(v),
+        Some(v) => {
+            // Detect JS-returned error objects like { error: "..." }
+            if let Some(err_msg) = v.get("error").and_then(|e| e.as_str()) {
+                return Err(err_msg.to_string());
+            }
+            Ok(v)
+        }
         None => Ok(serde_json::json!(null)),
     }
 }

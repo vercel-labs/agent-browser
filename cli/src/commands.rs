@@ -476,6 +476,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
             let mut burst_interval: Option<u64> = None;
             let mut gif_path: Option<String> = None;
             let mut skip_next = false;
+            let mut burst_requested = false;
             let positional: Vec<&str> = rest
                 .iter()
                 .enumerate()
@@ -490,6 +491,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                             false
                         }
                         "--burst" => {
+                            burst_requested = true;
                             if let Some(next) = rest.get(i + 1) {
                                 burst_count = next.parse().ok();
                             }
@@ -540,6 +542,14 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 }
                 _ => (None, None),
             };
+
+            // Validate --burst was given a valid count
+            if burst_requested && burst_count.is_none() {
+                return Err(ParseError::InvalidValue {
+                    message: "--burst requires a positive integer".to_string(),
+                    usage: "screenshot --burst <count> [--interval <ms>] [--gif <path>]",
+                });
+            }
 
             // If --burst is specified, route to burst_capture action
             if let Some(count) = burst_count {

@@ -3,7 +3,7 @@ use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::Mutex;
+use tokio::sync::{oneshot, Mutex};
 
 use super::cdp::client::CdpClient;
 use super::cdp::types::{CaptureScreenshotParams, CaptureScreenshotResult};
@@ -178,24 +178,29 @@ pub async fn screencast_capture(
                                         .to_string_lossy()
                                         .to_string();
 
-                                    if std::fs::write(&frame_path, &bytes).is_ok() {
-                                        paths.push(frame_path);
-                                    }
+                                    std::fs::write(&frame_path, &bytes).map_err(|e| {
+                                        format!("Failed to write frame {}: {}", idx, e)
+                                    })?;
+                                    paths.push(frame_path);
                                     frames.push(bytes);
                                 }
                             }
                         }
                     }
-                    Err(_) => break,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 }
             }
         }
     }
 
-    // Stop screencast
-    let _ = client
+    // Stop screencast — log but don't fail on cleanup error
+    if let Err(e) = client
         .send_command_no_params("Page.stopScreencast", Some(session_id))
-        .await;
+        .await
+    {
+        eprintln!("Warning: failed to stop screencast: {}", e);
+    }
 
     if frames.is_empty() {
         return Err("No screencast frames captured".to_string());
@@ -222,6 +227,15 @@ pub async fn screencast_capture(
 
 /// Encode a sequence of image bytes (PNG or JPEG) into an animated GIF.
 fn encode_gif(frames: &[Vec<u8>], output_path: &str, delay_centisecs: u16) -> Result<(), String> {
+    let refs: Vec<&[u8]> = frames.iter().map(|f| f.as_slice()).collect();
+    encode_gif_refs(&refs, output_path, delay_centisecs)
+}
+
+fn encode_gif_refs(
+    frames: &[&[u8]],
+    output_path: &str,
+    delay_centisecs: u16,
+) -> Result<(), String> {
     use image::codecs::gif::{GifEncoder, Repeat};
     use image::{Frame, RgbaImage};
     use std::fs::File;
@@ -269,7 +283,8 @@ struct CapturedFrame {
 pub struct TimelineEntry {
     #[serde(rename = "timeMs")]
     pub time_ms: u64,
-    pub action: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selector: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -285,6 +300,7 @@ pub struct ScreencastRecording {
     frames: Arc<Mutex<Vec<CapturedFrame>>>,
     timeline: Vec<TimelineEntry>,
     format: String,
+    cancel_tx: Option<oneshot::Sender<()>>,
     collector_task: Option<tokio::task::JoinHandle<()>>,
 }
 
@@ -293,7 +309,7 @@ impl ScreencastRecording {
     /// from the CDP event broadcast channel.
     pub fn new(
         format: &str,
-        _quality: Option<i32>,
+        quality: Option<i32>,
         client: Arc<CdpClient>,
         session_id: &str,
     ) -> Self {
@@ -302,20 +318,26 @@ impl ScreencastRecording {
         let start_time = Instant::now();
         let client_arc = client.clone();
         let session_owned = session_id.to_string();
+        let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
+        let task_format = format.to_string();
+        let task_quality = quality;
 
-        // Background task: collect screencast frames from CDP events,
-        // with periodic screenshot polling as fallback for static pages.
         let mut event_rx = client.subscribe();
         let task = tokio::spawn(async move {
-            let mut poll_interval =
-                tokio::time::interval(Duration::from_millis(250));
-            poll_interval.set_missed_tick_behavior(
-                tokio::time::MissedTickBehavior::Skip,
-            );
+            let mut cancel_rx = std::pin::pin!(cancel_rx);
 
+            let mut poll_interval = tokio::time::interval(Duration::from_millis(250));
+            poll_interval
+                .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+            let is_jpeg = task_format == "jpeg";
             let poll_params = CaptureScreenshotParams {
-                format: Some("jpeg".to_string()),
-                quality: Some(80),
+                format: Some(task_format),
+                quality: if is_jpeg {
+                    task_quality.or(Some(80))
+                } else {
+                    None
+                },
                 clip: None,
                 from_surface: Some(true),
                 capture_beyond_viewport: None,
@@ -323,47 +345,54 @@ impl ScreencastRecording {
 
             loop {
                 tokio::select! {
+                    _ = &mut cancel_rx => break,
                     event = event_rx.recv() => {
                         match event {
-                            Ok(evt) => {
-                                if evt.method == "Page.screencastFrame" {
-                                    // ACK the frame so Chrome keeps sending
-                                    if let Some(sid) =
-                                        evt.params.get("sessionId").and_then(|v| v.as_i64())
+                            Ok(evt) if evt.method == "Page.screencastFrame" => {
+                                if let Some(sid) =
+                                    evt.params.get("sessionId").and_then(|v| v.as_i64())
+                                {
+                                    if let Err(e) = client_arc
+                                        .send_command(
+                                            "Page.screencastFrameAck",
+                                            Some(serde_json::json!({ "sessionId": sid })),
+                                            Some(&session_owned),
+                                        )
+                                        .await
                                     {
-                                        let _ = client_arc
-                                            .send_command(
-                                                "Page.screencastFrameAck",
-                                                Some(serde_json::json!({ "sessionId": sid })),
-                                                Some(&session_owned),
-                                            )
-                                            .await;
+                                        eprintln!("Warning: screencast ACK failed: {}", e);
                                     }
+                                }
 
-                                    if let Some(data) =
-                                        evt.params.get("data").and_then(|v| v.as_str())
-                                    {
-                                        if let Ok(bytes) = base64::Engine::decode(
-                                            &base64::engine::general_purpose::STANDARD,
-                                            data,
-                                        ) {
+                                if let Some(data) =
+                                    evt.params.get("data").and_then(|v| v.as_str())
+                                {
+                                    match base64::Engine::decode(
+                                        &base64::engine::general_purpose::STANDARD,
+                                        data,
+                                    ) {
+                                        Ok(bytes) => {
                                             let time_ms =
                                                 start_time.elapsed().as_millis() as u64;
                                             let mut guard = frames_clone.lock().await;
                                             guard.push(CapturedFrame { bytes, time_ms });
-                                            // Reset poll interval after receiving a screencast frame
                                             poll_interval.reset();
+                                        }
+                                        Err(e) => {
+                                            eprintln!("Warning: screencast frame decode failed: {}", e);
                                         }
                                     }
                                 }
                             }
+                            Ok(_) => {} // other CDP events
                             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                                eprintln!("Warning: screencast collector lagged, skipped {} events", n);
+                                continue;
+                            }
                         }
                     }
                     _ = poll_interval.tick() => {
-                        // Fallback polling: capture a screenshot when no screencast
-                        // frames are arriving (static page or idle periods)
                         if let Ok(result) = client_arc
                             .send_command_typed::<_, CaptureScreenshotResult>(
                                 "Page.captureScreenshot",
@@ -391,11 +420,12 @@ impl ScreencastRecording {
             frames,
             timeline: Vec::new(),
             format: format.to_string(),
+            cancel_tx: Some(cancel_tx),
             collector_task: Some(task),
         };
         rec.timeline.push(TimelineEntry {
             time_ms: 0,
-            action: String::new(),
+            action: None,
             selector: None,
             value: None,
             event: Some("screencast_start".to_string()),
@@ -418,11 +448,11 @@ impl ScreencastRecording {
 
         self.timeline.push(TimelineEntry {
             time_ms,
-            action: action.to_string(),
+            action: Some(action.to_string()),
             selector,
             value,
             event: None,
-            frame: None, // filled in during finish()
+            frame: None,
         });
     }
 
@@ -433,13 +463,19 @@ impl ScreencastRecording {
     ) -> Result<ScreencastStopResult, String> {
         let stop_time = self.start_time.elapsed().as_millis() as u64;
 
-        // Stop the background collector
-        if let Some(task) = self.collector_task.take() {
-            task.abort();
+        // Signal the collector to stop gracefully
+        if let Some(tx) = self.cancel_tx.take() {
+            let _ = tx.send(());
         }
 
-        // Give the collector task a moment to process any remaining frames
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        // Wait for the collector task to finish (with timeout)
+        if let Some(task) = self.collector_task.take() {
+            match tokio::time::timeout(Duration::from_millis(500), task).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => eprintln!("Warning: collector task panicked: {}", e),
+                Err(_) => eprintln!("Warning: collector task timed out, aborting"),
+            }
+        }
 
         let frames = match Arc::try_unwrap(self.frames) {
             Ok(mutex) => mutex.into_inner(),
@@ -449,66 +485,76 @@ impl ScreencastRecording {
             }
         };
 
-        let dir = PathBuf::from(output_dir);
-        std::fs::create_dir_all(&dir)
-            .map_err(|e| format!("Failed to create output dir: {}", e))?;
-
-        let ext = if self.format == "jpeg" { "jpg" } else { "png" };
-        let mut paths = Vec::with_capacity(frames.len());
-
-        for (i, frame) in frames.iter().enumerate() {
-            let frame_path = dir
-                .join(format!("frame-{:04}.{}", i, ext))
-                .to_string_lossy()
-                .to_string();
-            std::fs::write(&frame_path, &frame.bytes)
-                .map_err(|e| format!("Failed to write frame {}: {}", i, e))?;
-            paths.push(frame_path);
-        }
-
-        // Correlate timeline entries with nearest frame by timestamp
-        for entry in &mut self.timeline {
-            if entry.frame.is_some() {
-                continue; // already set (e.g. screencast_start)
-            }
-            entry.frame = Some(nearest_frame_index(&frames, entry.time_ms));
-        }
-
-        // Add stop event
-        self.timeline.push(TimelineEntry {
-            time_ms: stop_time,
-            action: String::new(),
-            selector: None,
-            value: None,
-            event: Some("screencast_stop".to_string()),
-            frame: Some(frames.len().saturating_sub(1)),
-        });
-
-        let gif_output = if let Some(gif_dest) = gif_path {
-            if frames.is_empty() {
-                None
-            } else {
-                let frame_bytes: Vec<Vec<u8>> =
-                    frames.iter().map(|f| f.bytes.clone()).collect();
-                let delay = if frames.len() > 1 {
-                    let total_ms = frames.last().map(|f| f.time_ms).unwrap_or(stop_time);
-                    ((total_ms as f64 / frames.len() as f64) / 10.0).max(1.0) as u16
-                } else {
-                    10
-                };
-                encode_gif(&frame_bytes, gif_dest, delay)?;
-                Some(gif_dest.to_string())
-            }
-        } else {
-            None
-        };
-
-        Ok(ScreencastStopResult {
-            frames: paths,
-            timeline: self.timeline,
-            gif: gif_output,
-        })
+        save_recording_output(&frames, &self.format, &mut self.timeline, stop_time, output_dir, gif_path)
     }
+}
+
+fn save_recording_output(
+    frames: &[CapturedFrame],
+    format: &str,
+    timeline: &mut Vec<TimelineEntry>,
+    stop_time: u64,
+    output_dir: &str,
+    gif_path: Option<&str>,
+) -> Result<ScreencastStopResult, String> {
+    let dir = PathBuf::from(output_dir);
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("Failed to create output dir: {}", e))?;
+
+    let ext = if format == "jpeg" { "jpg" } else { "png" };
+    let mut paths = Vec::with_capacity(frames.len());
+
+    for (i, frame) in frames.iter().enumerate() {
+        let frame_path = dir
+            .join(format!("frame-{:04}.{}", i, ext))
+            .to_string_lossy()
+            .to_string();
+        std::fs::write(&frame_path, &frame.bytes)
+            .map_err(|e| format!("Failed to write frame {}: {}", i, e))?;
+        paths.push(frame_path);
+    }
+
+    // Correlate timeline entries with nearest frame by timestamp
+    for entry in timeline.iter_mut() {
+        if entry.frame.is_some() {
+            continue;
+        }
+        entry.frame = Some(nearest_frame_index(frames, entry.time_ms));
+    }
+
+    // Add stop event
+    timeline.push(TimelineEntry {
+        time_ms: stop_time,
+        action: None,
+        selector: None,
+        value: None,
+        event: Some("screencast_stop".to_string()),
+        frame: Some(frames.len().saturating_sub(1)),
+    });
+
+    let gif_output = if let Some(gif_dest) = gif_path {
+        if frames.is_empty() {
+            None
+        } else {
+            let frame_bytes: Vec<&[u8]> = frames.iter().map(|f| f.bytes.as_slice()).collect();
+            let delay = if frames.len() > 1 {
+                let total_ms = frames.last().map(|f| f.time_ms).unwrap_or(stop_time);
+                ((total_ms as f64 / frames.len() as f64) / 10.0).max(1.0) as u16
+            } else {
+                10
+            };
+            encode_gif_refs(&frame_bytes, gif_dest, delay)?;
+            Some(gif_dest.to_string())
+        }
+    } else {
+        None
+    };
+
+    Ok(ScreencastStopResult {
+        frames: paths,
+        timeline: timeline.clone(),
+        gif: gif_output,
+    })
 }
 
 fn nearest_frame_index(frames: &[CapturedFrame], target_ms: u64) -> usize {
