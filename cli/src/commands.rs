@@ -619,6 +619,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
             if *first == "start" {
                 let mut format: Option<String> = None;
                 let mut quality: Option<i32> = None;
+                let mut fps: Option<u32> = None;
                 let mut i = 1;
                 while i < rest.len() {
                     match rest[i] {
@@ -630,6 +631,10 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                             i += 1;
                             quality = rest.get(i).and_then(|s| s.parse().ok());
                         }
+                        "--fps" => {
+                            i += 1;
+                            fps = rest.get(i).and_then(|s| s.parse().ok());
+                        }
                         _ => {}
                     }
                     i += 1;
@@ -640,6 +645,9 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 }
                 if let Some(q) = quality {
                     cmd["quality"] = json!(q);
+                }
+                if let Some(f) = fps {
+                    cmd["fps"] = json!(f);
                 }
                 return Ok(cmd);
             }

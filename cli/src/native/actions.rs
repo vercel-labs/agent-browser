@@ -4225,6 +4225,7 @@ async fn handle_screencast_rec_start(
         .and_then(|v| v.as_str())
         .unwrap_or("jpeg");
     let quality = cmd.get("quality").and_then(|v| v.as_i64()).map(|q| q as i32);
+    let fps = cmd.get("fps").and_then(|v| v.as_u64()).map(|f| f as u32);
 
     // Use stored viewport as default for screencast dimensions
     let (default_w, default_h) = if let Some(ref server) = state.stream_server {
@@ -4247,6 +4248,7 @@ async fn handle_screencast_rec_start(
     state.screencast_recording = Some(ScreencastRecording::new(
         format,
         quality,
+        fps,
         mgr.client.clone(),
         &session_id,
     ));

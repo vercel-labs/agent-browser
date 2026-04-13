@@ -315,9 +315,12 @@ pub struct ScreencastRecording {
 impl ScreencastRecording {
     /// Start a new recording with a background task that collects frames
     /// from the CDP event broadcast channel.
+    /// `fps`: frames per second for polling fallback (default 2).
+    /// `quality`: JPEG quality 1-100 (default 60 for small GIFs).
     pub fn new(
         format: &str,
         quality: Option<i32>,
+        fps: Option<u32>,
         client: Arc<CdpClient>,
         session_id: &str,
     ) -> Self {
@@ -330,11 +333,13 @@ impl ScreencastRecording {
         let task_format = format.to_string();
         let task_quality = quality;
 
+        let poll_ms = 1000 / (fps.unwrap_or(2).max(1)) as u64;
+
         let mut event_rx = client.subscribe();
         let task = tokio::spawn(async move {
             let mut cancel_rx = std::pin::pin!(cancel_rx);
 
-            let mut poll_interval = tokio::time::interval(Duration::from_millis(250));
+            let mut poll_interval = tokio::time::interval(Duration::from_millis(poll_ms));
             poll_interval
                 .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -342,7 +347,7 @@ impl ScreencastRecording {
             let poll_params = CaptureScreenshotParams {
                 format: Some(task_format),
                 quality: if is_jpeg {
-                    task_quality.or(Some(80))
+                    task_quality.or(Some(60))
                 } else {
                     None
                 },
