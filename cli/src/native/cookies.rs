@@ -29,10 +29,13 @@ pub async fn get_all_cookies(client: &CdpClient, session_id: &str) -> Result<Vec
         .send_command_no_params("Network.getAllCookies", Some(session_id))
         .await?;
 
-    let cookies: Vec<Cookie> = result
+    let mut cookies: Vec<Cookie> = result
         .get("cookies")
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_default();
+
+    // Chrome may return empty sameSite; default to "Lax" to match Playwright behavior
+    fill_default_same_site(&mut cookies);
 
     Ok(cookies)
 }
@@ -51,12 +54,27 @@ pub async fn get_cookies(
         .send_command("Network.getCookies", Some(params), Some(session_id))
         .await?;
 
-    let cookies: Vec<Cookie> = result
+    let mut cookies: Vec<Cookie> = result
         .get("cookies")
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_default();
 
+    // Chrome may return empty sameSite; default to "Lax" to match Playwright behavior
+    fill_default_same_site(&mut cookies);
+
     Ok(cookies)
+}
+
+/// When Chrome CDP returns cookies with an empty `sameSite` field, default it
+/// to `"Lax"` so that saved state files always include the attribute. This
+/// matches Playwright's serialization behavior and prevents session cookies
+/// from being dropped during cross-origin redirects when the state is restored.
+fn fill_default_same_site(cookies: &mut [Cookie]) {
+    for cookie in cookies.iter_mut() {
+        if cookie.same_site.is_none() {
+            cookie.same_site = Some("Lax".to_string());
+        }
+    }
 }
 
 pub async fn set_cookies(
