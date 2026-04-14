@@ -1028,33 +1028,15 @@ fn should_disable_sandbox(existing_args: &[String]) -> bool {
 }
 
 /// Returns true if Chrome should use disk instead of /dev/shm for shared memory.
-/// On CI runners and containers, /dev/shm is often too small (64MB default),
-/// which causes Chrome to crash mid-session.
+///
+/// We enable this by default because many container runtimes mount `/dev/shm`
+/// with small limits (often 64MB), which can cause Chromium to crash.
 fn should_disable_dev_shm(existing_args: &[String]) -> bool {
     if existing_args.iter().any(|a| a == "--disable-dev-shm-usage") {
-        return false;
+        return false; // already set by user
     }
 
-    if std::env::var("CI").is_ok() {
-        return true;
-    }
-
-    #[cfg(unix)]
-    {
-        if unsafe { libc::geteuid() } == 0 {
-            return true;
-        }
-        if Path::new("/.dockerenv").exists() || Path::new("/run/.containerenv").exists() {
-            return true;
-        }
-        if let Ok(cgroup) = std::fs::read_to_string("/proc/1/cgroup") {
-            if cgroup.contains("docker") || cgroup.contains("kubepods") || cgroup.contains("lxc") {
-                return true;
-            }
-        }
-    }
-
-    false
+    true
 }
 
 /// Search Puppeteer's browser cache for a Chrome binary.
