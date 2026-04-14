@@ -218,6 +218,8 @@ fn extract_config_path(args: &[String]) -> Option<Option<String>> {
         "--download-path",
         "--max-output",
         "--allowed-domains",
+        "--navigation-domains",
+        "--resource-domains",
         "--action-policy",
         "--confirm-actions",
         "--engine",
@@ -420,8 +422,24 @@ pub fn parse_flags(args: &[String]) -> Flags {
                     .collect()
             })
             .or(config.allowed_domains),
-        navigation_domains: config.navigation_domains,
-        resource_domains: config.resource_domains,
+        navigation_domains: env::var("AGENT_BROWSER_NAVIGATION_DOMAINS")
+            .ok()
+            .map(|s| {
+                s.split(',')
+                    .map(|d| d.trim().to_lowercase())
+                    .filter(|d| !d.is_empty())
+                    .collect()
+            })
+            .or(config.navigation_domains),
+        resource_domains: env::var("AGENT_BROWSER_RESOURCE_DOMAINS")
+            .ok()
+            .map(|s| {
+                s.split(',')
+                    .map(|d| d.trim().to_lowercase())
+                    .filter(|d| !d.is_empty())
+                    .collect()
+            })
+            .or(config.resource_domains),
         action_policy: env::var("AGENT_BROWSER_ACTION_POLICY")
             .ok()
             .or(config.action_policy),
@@ -668,6 +686,28 @@ pub fn parse_flags(args: &[String]) -> Flags {
                     i += 1;
                 }
             }
+            "--navigation-domains" => {
+                if let Some(s) = args.get(i + 1) {
+                    flags.navigation_domains = Some(
+                        s.split(',')
+                            .map(|d| d.trim().to_lowercase())
+                            .filter(|d| !d.is_empty())
+                            .collect(),
+                    );
+                    i += 1;
+                }
+            }
+            "--resource-domains" => {
+                if let Some(s) = args.get(i + 1) {
+                    flags.resource_domains = Some(
+                        s.split(',')
+                            .map(|d| d.trim().to_lowercase())
+                            .filter(|d| !d.is_empty())
+                            .collect(),
+                    );
+                    i += 1;
+                }
+            }
             "--action-policy" => {
                 if let Some(s) = args.get(i + 1) {
                     flags.action_policy = Some(s.clone());
@@ -801,6 +841,8 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--download-path",
         "--max-output",
         "--allowed-domains",
+        "--navigation-domains",
+        "--resource-domains",
         "--action-policy",
         "--confirm-actions",
         "--config",
