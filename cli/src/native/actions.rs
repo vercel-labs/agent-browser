@@ -262,7 +262,27 @@ impl DaemonState {
             webdriver_backend: None,
             backend_type: BackendType::Cdp,
             ref_map: RefMap::new(),
-            domain_filter: Arc::new(RwLock::new(None)),
+            domain_filter: Arc::new(RwLock::new({
+                let allowed = env::var("AGENT_BROWSER_ALLOWED_DOMAINS")
+                    .ok()
+                    .filter(|s| !s.is_empty());
+                let navigation = env::var("AGENT_BROWSER_NAVIGATION_DOMAINS")
+                    .ok()
+                    .filter(|s| !s.is_empty());
+                let resource = env::var("AGENT_BROWSER_RESOURCE_DOMAINS")
+                    .ok()
+                    .filter(|s| !s.is_empty());
+                if allowed.is_some() || navigation.is_some() || resource.is_some() {
+                    let filter = DomainFilter::with_split(
+                        allowed.as_deref().unwrap_or(""),
+                        navigation.as_deref(),
+                        resource.as_deref(),
+                    );
+                    Some(filter)
+                } else {
+                    None
+                }
+            })),
             event_tracker: EventTracker::new(),
             session_name: env::var("AGENT_BROWSER_SESSION_NAME").ok(),
             session_id: env::var("AGENT_BROWSER_SESSION").unwrap_or_else(|_| "default".to_string()),
@@ -7852,9 +7872,15 @@ mod tests {
     #[tokio::test]
     async fn test_daemon_state_new() {
         let guard = EnvGuard::new(&[
+            "AGENT_BROWSER_ALLOWED_DOMAINS",
+            "AGENT_BROWSER_NAVIGATION_DOMAINS",
+            "AGENT_BROWSER_RESOURCE_DOMAINS",
             "AGENT_BROWSER_SESSION_NAME",
             "AGENT_BROWSER_SESSION",
         ]);
+        guard.remove("AGENT_BROWSER_ALLOWED_DOMAINS");
+        guard.remove("AGENT_BROWSER_NAVIGATION_DOMAINS");
+        guard.remove("AGENT_BROWSER_RESOURCE_DOMAINS");
         guard.remove("AGENT_BROWSER_SESSION_NAME");
         guard.remove("AGENT_BROWSER_SESSION");
 
