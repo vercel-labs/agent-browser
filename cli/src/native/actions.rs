@@ -640,6 +640,7 @@ impl DaemonState {
                     .await;
                 if let Ok(attach) = attach_result {
                     let _ = mgr.enable_domains_pub(&attach.session_id).await;
+                    mgr.apply_session_settings(&attach.session_id, None).await;
 
                     // Install domain filter on new pages
                     let df = self.domain_filter.read().await;
@@ -3928,37 +3929,9 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
         let new_session_id = attach_result.session_id.clone();
         mgr.enable_domains_pub(&new_session_id).await?;
 
-        // Re-apply download behavior to the recording context.
-        // Without this, downloads in the recording context are silently dropped
-        // because Browser.setDownloadBehavior at launch only applies to the default context.
-        if let Some(ref dl_path) = mgr.download_path {
-            let _ = mgr
-                .client
-                .send_command(
-                    "Browser.setDownloadBehavior",
-                    Some(json!({
-                        "behavior": "allow",
-                        "downloadPath": dl_path,
-                        "browserContextId": context_id,
-                        "eventsEnabled": true
-                    })),
-                    None,
-                )
-                .await;
-        }
-
-        // Re-apply HTTPS error ignore to the recording context.
-        // Security.setIgnoreCertificateErrors at launch only applies to the session it was sent on.
-        if mgr.ignore_https_errors {
-            let _ = mgr
-                .client
-                .send_command(
-                    "Security.setIgnoreCertificateErrors",
-                    Some(json!({ "ignore": true })),
-                    Some(&new_session_id),
-                )
-                .await;
-        }
+        // Re-apply all session-scoped settings to the recording context.
+        mgr.apply_session_settings(&new_session_id, Some(&context_id))
+            .await;
 
         // Transfer cookies to new context
         if let Some(ref cr) = cookies_result {
@@ -5881,6 +5854,9 @@ async fn handle_window_new(cmd: &Value, state: &mut DaemonState) -> Result<Value
             None,
         )
         .await?;
+
+    mgr.apply_session_settings(&attach.session_id, Some(&context_id))
+        .await;
 
     mgr.add_page(super::browser::PageInfo {
         target_id: create_result.target_id,

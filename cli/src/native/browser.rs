@@ -224,6 +224,10 @@ pub struct BrowserManager {
     pub download_path: Option<String>,
     /// Whether to ignore HTTPS certificate errors, re-applied to new contexts (e.g., recording)
     pub ignore_https_errors: bool,
+    /// Stored user-agent override from launch options, re-applied to new contexts (e.g., recording)
+    pub user_agent: Option<String>,
+    /// Stored color-scheme override from launch options, re-applied to new contexts (e.g., recording)
+    pub color_scheme: Option<String>,
     /// Origins visited during this session, used by save_state to collect cross-origin localStorage.
     visited_origins: HashSet<String>,
 }
@@ -296,6 +300,8 @@ impl BrowserManager {
                 default_timeout_ms: 25_000,
                 download_path: download_path.clone(),
                 ignore_https_errors,
+                user_agent: user_agent.clone(),
+                color_scheme: color_scheme.clone(),
                 visited_origins: HashSet::new(),
             };
             manager.discover_and_attach_targets().await?;
@@ -303,52 +309,66 @@ impl BrowserManager {
         };
 
         let session_id = manager.active_session_id()?.to_string();
+        manager.apply_session_settings(&session_id, None).await;
 
-        if ignore_https_errors {
-            let _ = manager
+        Ok(manager)
+    }
+
+    /// Apply all session-scoped CDP settings to the given session.
+    ///
+    /// Called after initial target discovery in `launch()` and after attaching to
+    /// new sessions (e.g., recording contexts in `handle_recording_start`).
+    ///
+    /// Any new session-scoped CDP setting should be added here so it is
+    /// automatically applied to every new session/context.
+    ///
+    /// `browser_context_id` is required for settings like `Browser.setDownloadBehavior`
+    /// that are scoped to a browser context rather than a session.
+    pub async fn apply_session_settings(&self, session_id: &str, browser_context_id: Option<&str>) {
+        if self.ignore_https_errors {
+            let _ = self
                 .client
                 .send_command(
                     "Security.setIgnoreCertificateErrors",
                     Some(json!({ "ignore": true })),
-                    Some(&session_id),
+                    Some(session_id),
                 )
                 .await;
         }
 
-        if let Some(ref ua) = user_agent {
-            let _ = manager
+        if let Some(ref ua) = self.user_agent {
+            let _ = self
                 .client
                 .send_command(
                     "Emulation.setUserAgentOverride",
                     Some(json!({ "userAgent": ua })),
-                    Some(&session_id),
+                    Some(session_id),
                 )
                 .await;
         }
 
-        if let Some(ref scheme) = color_scheme {
-            let _ = manager
+        if let Some(ref scheme) = self.color_scheme {
+            let _ = self
                 .client
                 .send_command(
                     "Emulation.setEmulatedMedia",
                     Some(json!({ "features": [{ "name": "prefers-color-scheme", "value": scheme }] })),
-                    Some(&session_id),
+                    Some(session_id),
                 )
                 .await;
         }
 
-        if let Some(ref path) = download_path {
-            let _ = manager
+        if let Some(ref path) = self.download_path {
+            let mut params = json!({ "behavior": "allow", "downloadPath": path });
+            if let Some(ctx_id) = browser_context_id {
+                params["browserContextId"] = json!(ctx_id);
+                params["eventsEnabled"] = json!(true);
+            }
+            let _ = self
                 .client
-                .send_command(
-                    "Browser.setDownloadBehavior",
-                    Some(json!({ "behavior": "allow", "downloadPath": path })),
-                    None,
-                )
+                .send_command("Browser.setDownloadBehavior", Some(params), None)
                 .await;
         }
-
-        Ok(manager)
     }
 
     pub async fn connect_cdp(url: &str) -> Result<Self, String> {
@@ -384,6 +404,8 @@ impl BrowserManager {
             default_timeout_ms: 25_000,
             download_path: None,
             ignore_https_errors: false,
+            user_agent: None,
+            color_scheme: None,
             visited_origins: HashSet::new(),
         };
 
@@ -830,6 +852,8 @@ impl BrowserManager {
         });
         self.active_page_index = 0;
         self.enable_domains(&attach_result.session_id).await?;
+        self.apply_session_settings(&attach_result.session_id, None)
+            .await;
 
         Ok(())
     }
@@ -901,6 +925,7 @@ impl BrowserManager {
             .await?;
 
         self.enable_domains(&attach.session_id).await?;
+        self.apply_session_settings(&attach.session_id, None).await;
 
         let index = self.pages.len();
         self.pages.push(PageInfo {
@@ -1394,6 +1419,8 @@ async fn initialize_lightpanda_manager(
             default_timeout_ms: 25_000,
             download_path: None,
             ignore_https_errors: false,
+            user_agent: None,
+            color_scheme: None,
             visited_origins: HashSet::new(),
         };
 
