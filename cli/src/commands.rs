@@ -234,6 +234,13 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
         }
     }
 
+    // Inject --tabname into the command so the daemon can route to the named tab.
+    if let Some(ref name) = flags.tab_name {
+        if result.get("tab_name").is_none() {
+            result["tab_name"] = json!(name);
+        }
+    }
+
     Ok(result)
 }
 
