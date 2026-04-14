@@ -835,7 +835,6 @@ fn main() {
         device: flags.device.as_deref(),
         session_name: flags.session_name.as_deref(),
         download_path: flags.download_path.as_deref(),
-        allowed_domains: flags.allowed_domains.as_deref(),
         action_policy: flags.action_policy.as_deref(),
         confirm_actions: flags.confirm_actions.as_deref(),
         engine: flags.engine.as_deref(),
@@ -1234,7 +1233,13 @@ fn main() {
         }
 
         if let Some(ref domains) = flags.allowed_domains {
-            launch_cmd["allowedDomains"] = json!(domains);
+            launch_cmd["allowedDomains"] = json!(domains.join(","));
+        }
+        if let Some(ref domains) = flags.navigation_domains {
+            launch_cmd["navigationDomains"] = json!(domains.join(","));
+        }
+        if let Some(ref domains) = flags.resource_domains {
+            launch_cmd["resourceDomains"] = json!(domains.join(","));
         }
 
         if let Some(ref engine) = flags.engine {

@@ -2372,6 +2372,8 @@ mod tests {
             content_boundaries: false,
             max_output: None,
             allowed_domains: None,
+            navigation_domains: None,
+            resource_domains: None,
             action_policy: None,
             confirm_actions: None,
             confirm_interactive: false,

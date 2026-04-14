@@ -79,6 +79,8 @@ pub struct Config {
     pub content_boundaries: Option<bool>,
     pub max_output: Option<usize>,
     pub allowed_domains: Option<Vec<String>>,
+    pub navigation_domains: Option<Vec<String>>,
+    pub resource_domains: Option<Vec<String>>,
     pub action_policy: Option<String>,
     pub confirm_actions: Option<String>,
     pub confirm_interactive: Option<bool>,
@@ -126,6 +128,8 @@ impl Config {
             content_boundaries: other.content_boundaries.or(self.content_boundaries),
             max_output: other.max_output.or(self.max_output),
             allowed_domains: other.allowed_domains.or(self.allowed_domains),
+            navigation_domains: other.navigation_domains.or(self.navigation_domains),
+            resource_domains: other.resource_domains.or(self.resource_domains),
             action_policy: other.action_policy.or(self.action_policy),
             confirm_actions: other.confirm_actions.or(self.confirm_actions),
             confirm_interactive: other.confirm_interactive.or(self.confirm_interactive),
@@ -295,6 +299,8 @@ pub struct Flags {
     pub content_boundaries: bool,
     pub max_output: Option<usize>,
     pub allowed_domains: Option<Vec<String>>,
+    pub navigation_domains: Option<Vec<String>>,
+    pub resource_domains: Option<Vec<String>>,
     pub action_policy: Option<String>,
     pub confirm_actions: Option<String>,
     pub confirm_interactive: bool,
@@ -414,6 +420,8 @@ pub fn parse_flags(args: &[String]) -> Flags {
                     .collect()
             })
             .or(config.allowed_domains),
+        navigation_domains: config.navigation_domains,
+        resource_domains: config.resource_domains,
         action_policy: env::var("AGENT_BROWSER_ACTION_POLICY")
             .ok()
             .or(config.action_policy),
