@@ -218,7 +218,8 @@ pub struct DaemonOptions<'a> {
     pub device: Option<&'a str>,
     pub session_name: Option<&'a str>,
     pub download_path: Option<&'a str>,
-    pub allowed_domains: Option<&'a [String]>,
+    // Domain filtering is config-file-only (not passed via env vars for security).
+    // The config values flow through the launch command JSON instead.
     pub action_policy: Option<&'a str>,
     pub confirm_actions: Option<&'a str>,
     pub engine: Option<&'a str>,
@@ -286,9 +287,6 @@ fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
     }
     if let Some(dp) = opts.download_path {
         cmd.env("AGENT_BROWSER_DOWNLOAD_PATH", dp);
-    }
-    if let Some(ad) = opts.allowed_domains {
-        cmd.env("AGENT_BROWSER_ALLOWED_DOMAINS", ad.join(","));
     }
     if let Some(ap) = opts.action_policy {
         cmd.env("AGENT_BROWSER_ACTION_POLICY", ap);
