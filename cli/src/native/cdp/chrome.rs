@@ -200,16 +200,24 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
     let (user_data_dir, temp_user_data_dir) = if let Some(ref profile) = options.profile {
         let expanded = expand_tilde(profile);
         let dir = PathBuf::from(&expanded);
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| format!("Failed to create profile dir {}: {}", dir.display(), e))?;
+        set_private_dir_permissions(&dir);
         args.push(format!("--user-data-dir={}", expanded));
         (dir, None)
     } else {
-        let dir =
-            std::env::temp_dir().join(format!("agent-browser-chrome-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir)
-            .map_err(|e| format!("Failed to create temp profile dir: {}", e))?;
+        let dir = default_managed_profile_dir()
+            .map_err(|e| format!("Failed to resolve default profile dir: {}", e))?;
+        std::fs::create_dir_all(&dir).map_err(|e| {
+            format!(
+                "Failed to create default profile dir {}: {}",
+                dir.display(),
+                e
+            )
+        })?;
         set_private_dir_permissions(&dir);
         args.push(format!("--user-data-dir={}", dir.display()));
-        (dir.clone(), Some(dir))
+        (dir, None)
     };
 
     if options.ignore_https_errors {
@@ -304,6 +312,8 @@ pub fn launch_chrome(options: &LaunchOptions) -> Result<ChromeProcess, String> {
     let mut last_err = String::new();
 
     for attempt in 1..=max_attempts {
+        cleanup_stale_profile_lock(&build_chrome_args(effective_options)?.user_data_dir);
+        ensure_profile_not_in_use(&build_chrome_args(effective_options)?.user_data_dir)?;
         match try_launch_chrome(&chrome_path, effective_options) {
             Ok(mut process) => {
                 // Transfer profile temp dir ownership to ChromeProcess for cleanup on Drop.
@@ -339,6 +349,55 @@ pub fn launch_chrome(options: &LaunchOptions) -> Result<ChromeProcess, String> {
     Err(last_err)
 }
 
+fn ensure_profile_not_in_use(user_data_dir: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        if let Some(pid) = singleton_lock_pid(user_data_dir) {
+            if pid != std::process::id() && pid_is_running(pid) {
+                return Err(format!(
+                    "Chrome profile {} is already in use by PID {}. Close the existing browser or use --profile <path> for an isolated profile.",
+                    user_data_dir.display(),
+                    pid
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn cleanup_stale_profile_lock(user_data_dir: &Path) {
+    #[cfg(unix)]
+    {
+        if let Some(pid) = singleton_lock_pid(user_data_dir) {
+            if !pid_is_running(pid) {
+                for name in [
+                    "SingletonLock",
+                    "SingletonSocket",
+                    "SingletonCookie",
+                    "DevToolsActivePort",
+                ] {
+                    let _ = std::fs::remove_file(user_data_dir.join(name));
+                }
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+fn singleton_lock_pid(user_data_dir: &Path) -> Option<u32> {
+    let lock_path = user_data_dir.join("SingletonLock");
+    let target = std::fs::read_link(lock_path).ok()?;
+    let value = target.to_string_lossy();
+    value.rsplit('-').next()?.parse().ok()
+}
+
+#[cfg(unix)]
+fn pid_is_running(pid: u32) -> bool {
+    let rc = unsafe { libc::kill(pid as i32, 0) };
+    rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
 fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<ChromeProcess, String> {
     let ChromeArgs {
         args,
@@ -361,6 +420,14 @@ fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<Chro
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
+
+    // In headed mode on Unix, default DISPLAY to :0.0 when it is unset so WSL
+    // and similar environments can attach to the user's primary X server
+    // without requiring explicit DISPLAY configuration.
+    #[cfg(unix)]
+    if let Some(display) = headed_display_fallback(options) {
+        cmd.env("DISPLAY", display);
+    }
 
     // Place Chrome in its own process group so we can kill the entire tree
     // (main process + GPU/renderer/utility/crashpad helpers) with a single
@@ -1211,6 +1278,23 @@ fn expand_tilde(path: &str) -> String {
     path.to_string()
 }
 
+/// Returns the managed default Chrome user-data-dir used when the caller does
+/// not explicitly select a profile. This keeps manual sign-in state in a
+/// stable location under ~/.agent-browser across runs.
+fn default_managed_profile_dir() -> Result<PathBuf, String> {
+    dirs::home_dir()
+        .map(|home| home.join(".agent-browser").join("profile"))
+        .ok_or_else(|| "home directory not found".to_string())
+}
+
+fn headed_display_fallback(options: &LaunchOptions) -> Option<&'static str> {
+    if !options.headless && std::env::var_os("DISPLAY").is_none() {
+        Some(":0.0")
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1220,6 +1304,17 @@ mod tests {
     fn spawn_noop_child() -> Child {
         Command::new("/bin/sh")
             .args(["-c", "exit 0"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap()
+    }
+
+    #[cfg(unix)]
+    fn spawn_sleep_child() -> Child {
+        Command::new("/bin/sh")
+            .args(["-c", "sleep 30"])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -1336,11 +1431,13 @@ mod tests {
             .iter()
             .any(|a| a == "--enable-unsafe-swiftshader"));
         assert!(result.args.iter().any(|a| a == "--window-size=1280,720"));
-        // Temp dir created when no profile
-        assert!(result.temp_user_data_dir.is_some());
-        let dir = result.temp_user_data_dir.unwrap();
-        assert!(dir.exists());
-        let _ = std::fs::remove_dir_all(&dir);
+        assert!(result.temp_user_data_dir.is_none());
+        let default_dir = default_managed_profile_dir().unwrap();
+        assert!(result
+            .args
+            .iter()
+            .any(|a| a == &format!("--user-data-dir={}", default_dir.display())));
+        assert!(default_dir.exists());
     }
 
     #[test]
@@ -1356,24 +1453,26 @@ mod tests {
             .iter()
             .any(|a| a == "--enable-unsafe-swiftshader"));
         assert!(!result.args.iter().any(|a| a.starts_with("--window-size=")));
-        // Temp dir created when no profile
-        assert!(result.temp_user_data_dir.is_some());
-        let dir = result.temp_user_data_dir.unwrap();
-        assert!(dir.exists());
-        let _ = std::fs::remove_dir_all(&dir);
+        assert!(result.temp_user_data_dir.is_none());
+        let default_dir = default_managed_profile_dir().unwrap();
+        assert!(result
+            .args
+            .iter()
+            .any(|a| a == &format!("--user-data-dir={}", default_dir.display())));
+        assert!(default_dir.exists());
     }
 
     #[test]
-    fn test_build_args_temp_user_data_dir_created() {
+    fn test_build_args_default_profile_dir_created() {
         let opts = LaunchOptions::default();
         let result = build_chrome_args(&opts).unwrap();
-        let dir = result.temp_user_data_dir.as_ref().unwrap();
+        let dir = default_managed_profile_dir().unwrap();
+        assert!(result.temp_user_data_dir.is_none());
         assert!(dir.exists());
         assert!(result
             .args
             .iter()
-            .any(|a| a.starts_with("--user-data-dir=")));
-        let _ = std::fs::remove_dir_all(dir);
+            .any(|a| a == &format!("--user-data-dir={}", dir.display())));
     }
 
     #[test]
@@ -1388,6 +1487,102 @@ mod tests {
             .args
             .iter()
             .any(|a| a == "--user-data-dir=/tmp/my-profile"));
+    }
+
+    #[test]
+    fn test_default_managed_profile_dir_under_agent_browser_home() {
+        let dir = default_managed_profile_dir().unwrap();
+        assert!(dir.ends_with(".agent-browser/profile"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_singleton_lock_pid_parses_pid() {
+        let dir = TempDir::new("singleton-lock");
+        std::fs::create_dir_all(&*dir).unwrap();
+        std::os::unix::fs::symlink(
+            format!("host-{}", std::process::id()),
+            dir.join("SingletonLock"),
+        )
+        .unwrap();
+
+        assert_eq!(singleton_lock_pid(&dir), Some(std::process::id()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_cleanup_stale_profile_lock_removes_stale_files() {
+        let dir = TempDir::new("stale-lock");
+        std::fs::create_dir_all(&*dir).unwrap();
+        std::os::unix::fs::symlink("host-999999", dir.join("SingletonLock")).unwrap();
+        std::os::unix::fs::symlink("cookie", dir.join("SingletonCookie")).unwrap();
+        std::os::unix::fs::symlink("socket", dir.join("SingletonSocket")).unwrap();
+        std::fs::write(
+            dir.join("DevToolsActivePort"),
+            "1234\n/devtools/browser/test",
+        )
+        .unwrap();
+
+        cleanup_stale_profile_lock(&dir);
+
+        assert!(!dir.join("SingletonLock").exists());
+        assert!(!dir.join("SingletonCookie").exists());
+        assert!(!dir.join("SingletonSocket").exists());
+        assert!(!dir.join("DevToolsActivePort").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_ensure_profile_not_in_use_rejects_live_lock() {
+        let dir = TempDir::new("live-lock");
+        std::fs::create_dir_all(&*dir).unwrap();
+        let mut child = spawn_sleep_child();
+        std::os::unix::fs::symlink(format!("host-{}", child.id()), dir.join("SingletonLock"))
+            .unwrap();
+
+        let err = ensure_profile_not_in_use(&dir).unwrap_err();
+        assert!(err.contains("already in use"));
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn test_headed_display_fallback_when_display_missing() {
+        let guard = EnvGuard::new(&["DISPLAY"]);
+        guard.remove("DISPLAY");
+
+        let opts = LaunchOptions {
+            headless: false,
+            ..Default::default()
+        };
+
+        assert_eq!(headed_display_fallback(&opts), Some(":0.0"));
+    }
+
+    #[test]
+    fn test_headed_display_fallback_not_used_when_display_set() {
+        let guard = EnvGuard::new(&["DISPLAY"]);
+        guard.set("DISPLAY", ":9");
+
+        let opts = LaunchOptions {
+            headless: false,
+            ..Default::default()
+        };
+
+        assert_eq!(headed_display_fallback(&opts), None);
+    }
+
+    #[test]
+    fn test_headed_display_fallback_not_used_in_headless_mode() {
+        let guard = EnvGuard::new(&["DISPLAY"]);
+        guard.remove("DISPLAY");
+
+        let opts = LaunchOptions {
+            headless: true,
+            ..Default::default()
+        };
+
+        assert_eq!(headed_display_fallback(&opts), None);
     }
 
     #[test]

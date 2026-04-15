@@ -30,6 +30,28 @@ Each session has its own:
 - Navigation history
 - Authentication state
 
+## Default managed profile
+
+If you do not pass <code>--profile</code>, agent-browser uses a stable Chrome user-data-dir at <code>~/.agent-browser/profile</code>. This keeps manual sign-in state across runs without any extra setup.
+
+```bash
+# First run: sign in once
+agent-browser --headed open https://google.com
+
+# Later runs reuse the same browser state
+agent-browser open https://gmail.com
+```
+
+It stores:
+
+- Cookies and localStorage
+- IndexedDB data
+- Service workers
+- Browser cache
+- Login sessions
+
+If you need a different persistent profile or multiple isolated Chrome instances at the same time, pass <code>--profile &lt;path&gt;</code> explicitly.
+
 ## Chrome profile reuse
 
 The simplest way to reuse your existing login state: pass a Chrome profile name to `--profile`. agent-browser copies the profile to a temp directory (read-only snapshot) and launches Chrome with your existing cookies and sessions.
@@ -39,14 +61,18 @@ The simplest way to reuse your existing login state: pass a Chrome profile name 
 agent-browser profiles
 
 # Reuse your default Chrome profile's login state
-agent-browser --profile Default open https://gmail.com
+agent-browser --profile Default open https://app.example.com
 
 # Use a named profile (by display name or directory name)
 agent-browser --profile "Work" open https://app.example.com
 
 # Or via environment variable
-AGENT_BROWSER_PROFILE=Default agent-browser open https://gmail.com
+AGENT_BROWSER_PROFILE=Default agent-browser open https://app.example.com
 ```
+
+Use this for ordinary authenticated sites that just need cookies and local storage.
+
+> <strong>Important:</strong> Do not treat <code>--profile &lt;name&gt;</code> as the preferred path for Google, Gmail, or other security-sensitive consumer properties. Because agent-browser launches from a copied temp snapshot of the named Chrome profile, those sites may detect an inconsistent browser state and reject sign-in. For those sites, prefer the default managed profile at <code>~/.agent-browser/profile</code> or <code>--auto-connect</code> to a real running Chrome.
 
 <table>
   <thead>
@@ -63,7 +89,7 @@ AGENT_BROWSER_PROFILE=Default agent-browser open https://gmail.com
 
 ## Persistent profiles
 
-For a custom profile directory that persists state across browser restarts, pass a path to `--profile`:
+For a custom profile directory that persists state across browser restarts, pass a path to <code>--profile</code>:
 
 ```bash
 # Use a persistent profile directory

@@ -1018,7 +1018,11 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 }
                 Ok(cmd)
             }
-            Some("list") => Ok(json!({ "id": id, "action": "tab_list" })),
+            Some("list") => Ok(json!({
+                "id": id,
+                "action": "tab_list",
+                "verbose": rest.contains(&"--verbose")
+            })),
             Some("close") => {
                 let mut cmd = json!({ "id": id, "action": "tab_close" });
                 if let Some(index) = rest.get(1).and_then(|s| s.parse::<i32>().ok()) {
@@ -1700,7 +1704,17 @@ fn parse_diff(rest: &[&str], id: &str) -> Result<Value, ParseError> {
 
 fn parse_get(rest: &[&str], id: &str) -> Result<Value, ParseError> {
     const VALID: &[&str] = &[
-        "text", "html", "value", "attr", "url", "title", "count", "box", "styles", "cdp-url",
+        "text",
+        "html",
+        "value",
+        "attr",
+        "url",
+        "title",
+        "count",
+        "box",
+        "styles",
+        "cdp-url",
+        "browser-pid",
     ];
 
     match rest.first().copied() {
@@ -1738,6 +1752,7 @@ fn parse_get(rest: &[&str], id: &str) -> Result<Value, ParseError> {
         }
         Some("url") => Ok(json!({ "id": id, "action": "url" })),
         Some("cdp-url") => Ok(json!({ "id": id, "action": "cdp_url" })),
+        Some("browser-pid") => Ok(json!({ "id": id, "action": "browser_pid" })),
         Some("title") => Ok(json!({ "id": id, "action": "title" })),
         Some("count") => {
             let sel = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
@@ -1766,7 +1781,7 @@ fn parse_get(rest: &[&str], id: &str) -> Result<Value, ParseError> {
         }),
         None => Err(ParseError::MissingArguments {
             context: "get".to_string(),
-            usage: "get <text|html|value|attr|url|title|count|box|styles|cdp-url> [args...]",
+            usage: "get <text|html|value|attr|url|title|count|box|styles|cdp-url|browser-pid> [args...]",
         }),
     }
 }
@@ -2841,6 +2856,14 @@ mod tests {
     fn test_tab_list() {
         let cmd = parse_command(&args("tab list"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "tab_list");
+        assert_eq!(cmd["verbose"], false);
+    }
+
+    #[test]
+    fn test_tab_list_verbose() {
+        let cmd = parse_command(&args("tab list --verbose"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "tab_list");
+        assert_eq!(cmd["verbose"], true);
     }
 
     #[test]
@@ -3466,6 +3489,12 @@ mod tests {
         let err = result.unwrap_err();
         assert!(matches!(err, ParseError::MissingArguments { .. }));
         assert!(err.format().contains("get text"));
+    }
+
+    #[test]
+    fn test_get_browser_pid() {
+        let cmd = parse_command(&args("get browser-pid"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "browser_pid");
     }
 
     // === Protocol alignment tests ===

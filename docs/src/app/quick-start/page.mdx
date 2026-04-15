@@ -52,6 +52,8 @@ Show browser window for debugging:
 agent-browser open example.com --headed
 ```
 
+On Unix, if <code>DISPLAY</code> is unset, agent-browser falls back to <code>DISPLAY=:0.0</code> for headed Chrome launches.
+
 ## Wait for content
 
 ```bash

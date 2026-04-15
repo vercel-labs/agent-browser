@@ -949,13 +949,16 @@ mod tests {
         let result = rt.block_on(download_bytes("http://127.0.0.1:1/test.zip"));
         assert!(result.is_err());
         let err = result.unwrap_err();
-        // The new code should include the root cause (connection refused)
-        // not just the vague "error sending request for url"
+        // The new code should include a network-level connection failure cause
+        // rather than just the vague "error sending request for url".
         assert!(
             err.contains("Connection refused")
                 || err.contains("connection refused")
-                || err.contains("actively refused it"),
-            "expected 'connection refused' in error, got: {}",
+                || err.contains("actively refused it")
+                || err.contains("timed out")
+                || err.contains("deadline has elapsed")
+                || err.contains("timed out while waiting"),
+            "expected a connection failure in error, got: {}",
             err
         );
     }

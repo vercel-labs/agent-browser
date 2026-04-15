@@ -240,6 +240,10 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
             println!("{}", cdp_url);
             return;
         }
+        if let Some(pid) = data.get("pid").and_then(|v| v.as_u64()) {
+            println!("{}", pid);
+            return;
+        }
         // Diff responses -- route by action to avoid fragile shape probing
         if let Some(obj) = data.as_object() {
             match action {
@@ -394,6 +398,16 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
                     " ".to_string()
                 };
                 println!("{} [{}] {} - {}", marker, i, title, url);
+                if let Some(target_id) = tab.get("targetId").and_then(|v| v.as_str()) {
+                    let session_id = tab.get("sessionId").and_then(|v| v.as_str()).unwrap_or("");
+                    println!(
+                        "    {} {}  {} {}",
+                        color::dim("targetId:"),
+                        color::dim(target_id),
+                        color::dim("sessionId:"),
+                        color::dim(session_id)
+                    );
+                }
             }
             return;
         }
@@ -1653,6 +1667,7 @@ Subcommands:
   attr <selector> <name>     Get attribute value
   title                      Get page title
   url                        Get current URL
+  browser-pid                Get local browser process PID
   count <selector>           Count matching elements
   box <selector>             Get bounding box (x, y, width, height)
   styles <selector>          Get computed styles of elements
@@ -1666,6 +1681,7 @@ Examples:
   agent-browser get text @e1
   agent-browser get html "#content"
   agent-browser get value "#email-input"
+  agent-browser get browser-pid
   agent-browser get attr "#link" href
   agent-browser get title
   agent-browser get url
@@ -1951,6 +1967,9 @@ Operations:
   close [index]        Close tab (current if no index)
   <index>              Switch to tab by index
 
+Options:
+  --verbose            Include targetId and sessionId
+
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
@@ -1958,6 +1977,7 @@ Global Options:
 Examples:
   agent-browser tab
   agent-browser tab list
+  agent-browser tab list --verbose
   agent-browser tab new
   agent-browser tab new https://example.com
   agent-browser tab 2
@@ -2758,7 +2778,7 @@ Navigation:
   reload                     Reload page
 
 Get Info:  agent-browser get <what> [selector]
-  text, html, value, attr <name>, title, url, count, box, styles, cdp-url
+  text, html, value, attr <name>, title, url, browser-pid, count, box, styles, cdp-url
 
 Check State:  agent-browser is <what> <selector>
   visible, enabled, checked
@@ -2853,7 +2873,8 @@ Snapshot Options:
 Authentication:
   --profile <name|path>      Chrome profile name (e.g., Default) to reuse login state,
                              or a directory path for a persistent custom profile
-                             (or AGENT_BROWSER_PROFILE env)
+                             (or AGENT_BROWSER_PROFILE env). If omitted, Chrome
+                             uses ~/.agent-browser/profile by default
   --session-name <name>      Auto-save/restore cookies and localStorage by name
                              (or AGENT_BROWSER_SESSION_NAME env)
   --state <path>             Load saved auth state (cookies + storage) from JSON file
@@ -2882,7 +2903,9 @@ Options:
   --screenshot-dir <path>    Default screenshot output directory (or AGENT_BROWSER_SCREENSHOT_DIR)
   --screenshot-quality <n>   JPEG quality 0-100; ignored for PNG (or AGENT_BROWSER_SCREENSHOT_QUALITY)
   --screenshot-format <fmt>  Screenshot format: png, jpeg (or AGENT_BROWSER_SCREENSHOT_FORMAT)
-  --headed                   Show browser window (not headless) (or AGENT_BROWSER_HEADED env)
+  --headed                   Show browser window (not headless). On Unix,
+                             defaults DISPLAY to :0.0 if DISPLAY is unset
+                             (or AGENT_BROWSER_HEADED env)
   --cdp <port>               Connect via CDP (Chrome DevTools Protocol)
   --color-scheme <scheme>    Color scheme: dark, light, no-preference (or AGENT_BROWSER_COLOR_SCHEME)
   --download-path <path>     Default download directory (or AGENT_BROWSER_DOWNLOAD_PATH)

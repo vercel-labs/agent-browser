@@ -533,7 +533,7 @@ impl DaemonState {
                 .broadcast_status(connected, sc, vw, vh, &self.engine)
                 .await;
             if let Some(ref mgr) = self.browser {
-                server.broadcast_tabs(&mgr.tab_list()).await;
+                server.broadcast_tabs(&mgr.tab_list(false)).await;
             } else {
                 server.broadcast_tabs(&[]).await;
             }
@@ -1271,6 +1271,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         "launch" => handle_launch(cmd, state).await,
         "navigate" => handle_navigate(cmd, state).await,
         "url" => handle_url(state).await,
+        "browser_pid" => handle_browser_pid(state),
         "cdp_url" => handle_cdp_url(state),
         "inspect" => handle_inspect(state).await,
         "title" => handle_title(state).await,
@@ -1323,7 +1324,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         "recording_stop" => handle_recording_stop(state).await,
         "recording_restart" => handle_recording_restart(cmd, state).await,
         "pdf" => handle_pdf(cmd, state).await,
-        "tab_list" => handle_tab_list(state).await,
+        "tab_list" => handle_tab_list(cmd, state).await,
         "tab_new" => handle_tab_new(cmd, state).await,
         "tab_switch" => handle_tab_switch(cmd, state).await,
         "tab_close" => handle_tab_close(cmd, state).await,
@@ -1455,7 +1456,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         server.broadcast_result(&id, action, success, &data, duration_ms);
 
         if let Some(ref mgr) = state.browser {
-            server.broadcast_tabs(&mgr.tab_list()).await;
+            server.broadcast_tabs(&mgr.tab_list(false)).await;
 
             // Keep the stream server's CDP session in sync with the active tab
             // so screencasting always targets the correct page.
@@ -3546,10 +3547,19 @@ async fn handle_keyboard(cmd: &Value, state: &DaemonState) -> Result<Value, Stri
 // Phase 5 handlers
 // ---------------------------------------------------------------------------
 
-async fn handle_tab_list(state: &DaemonState) -> Result<Value, String> {
+async fn handle_tab_list(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let tabs = mgr.tab_list();
+    let verbose = cmd
+        .get("verbose")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let tabs = mgr.tab_list(verbose);
     Ok(json!({ "tabs": tabs }))
+}
+
+fn handle_browser_pid(state: &DaemonState) -> Result<Value, String> {
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    Ok(json!({ "pid": mgr.browser_pid() }))
 }
 
 async fn handle_tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {

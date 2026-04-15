@@ -48,6 +48,8 @@ agent-browser open https://example.com && agent-browser screenshot
 
 ## Handling Authentication
 
+By default, agent-browser uses a stable Chrome user-data-dir at `~/.agent-browser/profile`. If a user signs in manually once in headed mode, later runs reuse that state automatically. Only reach for `--profile` when you need a different persistent profile or to reuse an existing Chrome profile by name.
+
 When automating a site that requires login, choose the approach that fits:
 
 **Option 1: Import auth from the user's browser (fastest for one-off tasks)**
@@ -61,17 +63,31 @@ agent-browser --state ./auth.json open https://app.example.com/dashboard
 
 State files contain session tokens in plaintext -- add to `.gitignore` and delete when no longer needed. Set `AGENT_BROWSER_ENCRYPTION_KEY` for encryption at rest.
 
-**Option 2: Chrome profile reuse (zero setup)**
+**Option 2: Default managed profile (best default for recurring manual sign-in)**
+
+```bash
+# First run: sign in manually
+agent-browser --headed open https://accounts.google.com
+
+# Later runs reuse ~/.agent-browser/profile automatically
+agent-browser open https://gmail.com
+```
+
+Use an explicit `--profile <path>` only when you need a separate persistent profile.
+
+**Option 3: Chrome profile reuse (zero setup from an existing browser)**
 
 ```bash
 # List available Chrome profiles
 agent-browser profiles
 
 # Reuse the user's existing Chrome login state
-agent-browser --profile Default open https://gmail.com
+agent-browser --profile Default open https://app.example.com
 ```
 
-**Option 3: Persistent profile (for recurring tasks)**
+Use this only for ordinary authenticated sites. Do not prefer it for Google, Gmail, or other security-sensitive consumer properties, because the named-profile flow launches from a copied temp snapshot and those sites may reject the browser state. For those sites, prefer the default managed profile at `~/.agent-browser/profile` or `--auto-connect` to a real running Chrome.
+
+**Option 4: Persistent profile (for a separate recurring task profile)**
 
 ```bash
 # First run: login manually or via automation
@@ -82,7 +98,7 @@ agent-browser --profile ~/.myapp open https://app.example.com/login
 agent-browser --profile ~/.myapp open https://app.example.com/dashboard
 ```
 
-**Option 4: Session name (auto-save/restore cookies + localStorage)**
+**Option 5: Session name (auto-save/restore cookies + localStorage)**
 
 ```bash
 agent-browser --session-name myapp open https://app.example.com/login
@@ -93,7 +109,7 @@ agent-browser close  # State auto-saved
 agent-browser --session-name myapp open https://app.example.com/dashboard
 ```
 
-**Option 5: Auth vault (credentials stored encrypted, login by name)**
+**Option 6: Auth vault (credentials stored encrypted, login by name)**
 
 ```bash
 echo "$PASSWORD" | agent-browser auth save myapp --url https://app.example.com/login --username user --password-stdin
@@ -102,7 +118,7 @@ agent-browser auth login myapp
 
 `auth login` navigates with `load` and then waits for login form selectors to appear before filling/clicking, which is more reliable on delayed SPA login screens.
 
-**Option 6: State file (manual save/load)**
+**Option 7: State file (manual save/load)**
 
 ```bash
 # After logging in:
@@ -454,6 +470,18 @@ agent-browser profiler stop trace.json # Stop and save profile (path optional)
 ```
 
 Use `AGENT_BROWSER_HEADED=1` to enable headed mode via environment variable. Browser extensions work in both headed and headless mode.
+
+On Unix, if `DISPLAY` is unset, agent-browser defaults headed Chrome launches to `DISPLAY=:0.0`. Assume that fallback unless the user explicitly wants a different display.
+
+For runtime debugging, use:
+
+```bash
+agent-browser get browser-pid
+agent-browser tab list
+agent-browser tab list --verbose
+```
+
+`tab list --verbose` exposes CDP `targetId` and `sessionId` for each tab.
 
 ### Local Files (PDFs, HTML)
 

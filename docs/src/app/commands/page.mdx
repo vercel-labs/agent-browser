@@ -398,7 +398,8 @@ agent-browser reload                  # Reload page
 --screenshot-dir <path>   # Default screenshot output directory (or AGENT_BROWSER_SCREENSHOT_DIR)
 --screenshot-quality <n>  # JPEG quality 0-100 (or AGENT_BROWSER_SCREENSHOT_QUALITY)
 --screenshot-format <fmt> # Format: png (default), jpeg (or AGENT_BROWSER_SCREENSHOT_FORMAT)
---headed                 # Show browser window (not headless)
+--headed                 # Show browser window (not headless); on Unix,
+                         # falls back to DISPLAY=:0.0 if DISPLAY is unset
 --cdp <port|url>         # Connect via Chrome DevTools Protocol (port or WebSocket URL)
 --auto-connect           # Auto-discover and connect to running Chrome
 --color-scheme <scheme>  # Color scheme: dark, light, no-preference
@@ -415,6 +416,18 @@ agent-browser reload                  # Reload page
 --config <path>          # Use a custom config file
 --debug                  # Debug output
 ```
+
+## Inspect runtime state
+
+Inspect the live browser process or tab-level CDP identifiers:
+
+```bash
+agent-browser get browser-pid
+agent-browser tab list
+agent-browser tab list --verbose
+```
+
+`tab list --verbose` includes each tab's <code>targetId</code> and <code>sessionId</code>.
 
 ## Batch execution
 

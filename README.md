@@ -379,8 +379,9 @@ agent-browser provides multiple ways to persist login sessions so you don't re-a
 
 | Approach | Best for | Flag / Env |
 |----------|----------|------------|
+| **Default managed profile** | Stable browser state in `~/.agent-browser/profile` across runs when you do not pass `--profile` | Automatic |
 | **Chrome profile reuse** | Reuse your existing Chrome login state (cookies, sessions) with zero setup | `--profile <name>` / `AGENT_BROWSER_PROFILE` |
-| **Persistent profile** | Full browser state (cookies, IndexedDB, service workers, cache) across restarts | `--profile <path>` / `AGENT_BROWSER_PROFILE` |
+| **Persistent profile** | Full browser state in a custom directory across restarts | `--profile <path>` / `AGENT_BROWSER_PROFILE` |
 | **Session persistence** | Auto-save/restore cookies + localStorage by name | `--session-name <name>` / `AGENT_BROWSER_SESSION_NAME` |
 | **Import from your browser** | Grab auth from a Chrome session you already logged into | `--auto-connect` + `state save` |
 | **State file** | Load a previously saved state JSON on launch | `--state <path>` / `AGENT_BROWSER_STATE` |
@@ -443,6 +444,30 @@ Each session has its own:
 - Navigation history
 - Authentication state
 
+## Default managed profile
+
+If you do not pass `--profile`, agent-browser launches Chrome with a stable
+user-data-dir at `~/.agent-browser/profile`:
+
+```bash
+# First run: sign in manually once
+agent-browser --headed open https://google.com
+
+# Later runs reuse the same browser state automatically
+agent-browser open https://gmail.com
+```
+
+This default profile keeps:
+
+- Cookies and localStorage
+- IndexedDB data
+- Service workers
+- Browser cache
+- Signed-in browser sessions
+
+If you need a different persistent profile or multiple isolated Chrome
+instances at the same time, pass `--profile <path>` explicitly.
+
 ## Chrome Profile Reuse
 
 The fastest way to use your existing login state: pass a Chrome profile name to `--profile`:
@@ -452,16 +477,20 @@ The fastest way to use your existing login state: pass a Chrome profile name to 
 agent-browser profiles
 
 # Reuse your default Chrome profile's login state
-agent-browser --profile Default open https://gmail.com
+agent-browser --profile Default open https://app.example.com
 
 # Use a named profile (by display name or directory name)
 agent-browser --profile "Work" open https://app.example.com
 
 # Or via environment variable
-AGENT_BROWSER_PROFILE=Default agent-browser open https://gmail.com
+AGENT_BROWSER_PROFILE=Default agent-browser open https://app.example.com
 ```
 
 This copies your Chrome profile to a temp directory (read-only snapshot, no changes to your original profile), so the browser launches with your existing cookies and sessions.
+
+Use this for ordinary authenticated sites that just need cookies and local storage.
+
+> **Important:** Do not treat `--profile <name>` as the preferred path for Google, Gmail, or other security-sensitive consumer properties. Because agent-browser launches from a copied temp snapshot of the named Chrome profile, those sites may detect an inconsistent browser state and reject sign-in. For those sites, prefer the default managed profile at `~/.agent-browser/profile` or `--auto-connect` to a real running Chrome.
 
 > **Note:** On Windows, close Chrome before using `--profile <name>` if Chrome is running, as some profile files may be locked.
 
@@ -505,6 +534,18 @@ agent-browser --session-name twitter open twitter.com
 export AGENT_BROWSER_SESSION_NAME=twitter
 agent-browser open twitter.com
 ```
+
+## Inspect Runtime State
+
+Inspect the live browser process or tab-level CDP identifiers:
+
+```bash
+agent-browser get browser-pid
+agent-browser tab list
+agent-browser tab list --verbose
+```
+
+`tab list --verbose` includes each tab's `targetId` and `sessionId`, which are useful when debugging daemon, CDP, or tab-tracking issues.
 
 ### State Encryption
 
@@ -615,7 +656,7 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 | `--screenshot-dir <path>` | Default screenshot output directory (or `AGENT_BROWSER_SCREENSHOT_DIR` env) |
 | `--screenshot-quality <n>` | JPEG quality 0-100 (or `AGENT_BROWSER_SCREENSHOT_QUALITY` env) |
 | `--screenshot-format <fmt>` | Screenshot format: `png`, `jpeg` (or `AGENT_BROWSER_SCREENSHOT_FORMAT` env) |
-| `--headed` | Show browser window (not headless) (or `AGENT_BROWSER_HEADED` env) |
+| `--headed` | Show browser window (not headless). On Unix, agent-browser defaults `DISPLAY` to `:0.0` if `DISPLAY` is unset (or `AGENT_BROWSER_HEADED` env) |
 | `--cdp <port\|url>` | Connect via Chrome DevTools Protocol (port or WebSocket URL) |
 | `--auto-connect` | Auto-discover and connect to running Chrome (or `AGENT_BROWSER_AUTO_CONNECT` env) |
 | `--color-scheme <scheme>` | Color scheme: `dark`, `light`, `no-preference` (or `AGENT_BROWSER_COLOR_SCHEME` env) |
@@ -844,6 +885,8 @@ agent-browser open example.com --headed
 ```
 
 This opens a visible browser window instead of running headless.
+
+On Unix, if `DISPLAY` is unset, agent-browser launches headed Chrome with `DISPLAY=:0.0` by default. This matches common WSL X server setups.
 
 > **Note:** Browser extensions work in both headed and headless mode (Chrome's `--headless=new`).
 

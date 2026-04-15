@@ -191,6 +191,13 @@ impl BrowserProcess {
             BrowserProcess::Lightpanda(_) => false,
         }
     }
+
+    pub fn pid(&self) -> Option<u32> {
+        match self {
+            BrowserProcess::Chrome(p) => Some(p.id()),
+            BrowserProcess::Lightpanda(_) => None,
+        }
+    }
 }
 
 pub struct BrowserManager {
@@ -830,18 +837,30 @@ impl BrowserManager {
         }
     }
 
-    pub fn tab_list(&self) -> Vec<Value> {
+    pub fn tab_list(&self, verbose: bool) -> Vec<Value> {
         self.pages
             .iter()
             .enumerate()
             .map(|(i, p)| {
-                json!({
-                    "index": i,
-                    "title": p.title,
-                    "url": p.url,
-                    "type": p.target_type,
-                    "active": i == self.active_page_index,
-                })
+                if verbose {
+                    json!({
+                        "index": i,
+                        "title": p.title,
+                        "url": p.url,
+                        "type": p.target_type,
+                        "active": i == self.active_page_index,
+                        "targetId": p.target_id,
+                        "sessionId": p.session_id,
+                    })
+                } else {
+                    json!({
+                        "index": i,
+                        "title": p.title,
+                        "url": p.url,
+                        "type": p.target_type,
+                        "active": i == self.active_page_index,
+                    })
+                }
             })
             .collect()
     }
@@ -1215,6 +1234,13 @@ impl BrowserManager {
 
     pub fn pages_list(&self) -> Vec<PageInfo> {
         self.pages.clone()
+    }
+
+    /// Returns the local browser child PID when agent-browser launched Chrome
+    /// itself. Remote CDP and provider-backed sessions do not expose a
+    /// meaningful local browser PID here.
+    pub fn browser_pid(&self) -> Option<u32> {
+        self.browser_process.as_ref().and_then(|p| p.pid())
     }
 
     pub fn visited_origins(&self) -> &HashSet<String> {
