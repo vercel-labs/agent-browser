@@ -112,6 +112,8 @@ Every CLI flag can be set in the config file using its camelCase equivalent:
 }
 ```
 
+agent-browser already auto-adds `--no-sandbox` when the sandbox looks unavailable, and auto-adds `--disable-dev-shm-usage` when `/dev/shm` is too small. Keeping these args in config can still be useful when you want an explicit, pinned setup for CI images.
+
 ### iOS Testing
 
 ```json

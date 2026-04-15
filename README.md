@@ -647,6 +647,16 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 | `--config <path>` | Use a custom config file (or `AGENT_BROWSER_CONFIG` env) |
 | `--debug` | Debug output |
 
+### Containers and CI
+
+In Docker, devcontainers, CI runners, or other sandboxed Linux environments, Chrome may need extra launch flags:
+
+```bash
+agent-browser --args "--no-sandbox,--disable-dev-shm-usage" open example.com
+```
+
+agent-browser automatically adds `--no-sandbox` when the runtime looks sandbox-constrained, and automatically adds `--disable-dev-shm-usage` when `/dev/shm` is smaller than 128 MiB. Manual `--args` still work if you want to pin the behavior explicitly.
+
 ## Observability Dashboard
 
 Monitor agent-browser sessions in real time with a local web dashboard showing a live viewport and command activity feed.

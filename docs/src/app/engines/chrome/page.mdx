@@ -95,10 +95,10 @@ These features are available only with Chrome:
 
 ## Containers and CI
 
-In Docker, CI runners, or other sandboxed environments, Chrome's user namespace sandbox may need to be disabled:
+In Docker, CI runners, devcontainers, or other sandboxed Linux environments, Chrome may need extra launch flags:
 
 ```bash
-agent-browser --args "--no-sandbox" open example.com
+agent-browser --args "--no-sandbox,--disable-dev-shm-usage" open example.com
 ```
 
-agent-browser automatically adds `--no-sandbox` when it detects a container environment (Docker, Podman, running as root).
+agent-browser automatically adds `--no-sandbox` when the runtime looks sandbox-constrained. It also automatically adds `--disable-dev-shm-usage` when `/dev/shm` is smaller than 128 MiB, which is common in containers with the default 64 MiB shared-memory mount.

@@ -1,3 +1,4 @@
+use std::env;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -989,37 +990,128 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
 /// Returns true if Chrome's sandbox should be disabled because the environment
 /// doesn't support it (containers, VMs, CI runners, running as root).
 fn should_disable_sandbox(existing_args: &[String]) -> bool {
+    let is_ci = env::var_os("CI").is_some();
+
+    #[cfg(unix)]
+    let is_root = unsafe { libc::geteuid() } == 0;
+    #[cfg(not(unix))]
+    let is_root = false;
+
+    should_disable_sandbox_for_environment(existing_args, is_ci, is_root, is_containerized())
+}
+
+fn should_disable_sandbox_for_environment(
+    existing_args: &[String],
+    is_ci: bool,
+    is_root: bool,
+    is_containerized: bool,
+) -> bool {
     if existing_args.iter().any(|a| a == "--no-sandbox") {
         return false; // already set by user
     }
 
     // CI environments (GitHub Actions, GitLab CI, etc.) often lack user namespace
     // support due to AppArmor or kernel restrictions.
-    if std::env::var("CI").is_ok() {
+    if is_ci {
+        return true;
+    }
+
+    // Root user often lacks the Chrome sandbox prerequisites even on bare metal.
+    if is_root {
+        return true;
+    }
+
+    is_containerized
+}
+
+/// Returns true if Chrome should use disk instead of /dev/shm for shared memory.
+/// On Linux containers and CI runners, `/dev/shm` is often too small
+/// (64 MiB is a common default), which causes Chrome to crash mid-session.
+fn should_disable_dev_shm(existing_args: &[String]) -> bool {
+    let is_ci = env::var_os("CI").is_some();
+    let is_containerized = is_containerized();
+
+    #[cfg(unix)]
+    let dev_shm_status = detect_dev_shm_status();
+    #[cfg(not(unix))]
+    let dev_shm_status = None;
+
+    should_disable_dev_shm_for_environment(existing_args, is_ci, is_containerized, dev_shm_status)
+}
+
+fn should_disable_dev_shm_for_environment(
+    existing_args: &[String],
+    is_ci: bool,
+    is_containerized: bool,
+    #[cfg(unix)] dev_shm_status: Option<DevShmStatus>,
+    #[cfg(not(unix))] _dev_shm_status: Option<()>,
+) -> bool {
+    if existing_args.iter().any(|a| a == "--disable-dev-shm-usage") {
+        return false;
+    }
+
+    if is_ci {
         return true;
     }
 
     #[cfg(unix)]
     {
-        // Root user -- standard container default, Chrome sandbox requires non-root
-        if unsafe { libc::geteuid() } == 0 {
+        match dev_shm_status {
+            Some(DevShmStatus::TooSmall) => return true,
+            Some(DevShmStatus::Healthy) => return false,
+            Some(DevShmStatus::Missing) | None => {}
+        }
+
+        if is_containerized {
+            return true;
+        }
+    }
+
+    false
+}
+
+const CONTAINER_CGROUP_MARKERS: &[&str] = &[
+    "docker",
+    "kubepods",
+    "containerd",
+    "cri-containerd",
+    "libpod",
+    "podman",
+    "lxc",
+];
+
+#[cfg(unix)]
+const MIN_DEV_SHM_BYTES: u64 = 128 * 1024 * 1024;
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DevShmStatus {
+    Missing,
+    TooSmall,
+    Healthy,
+}
+
+/// Best-effort detection for containerized runtimes across Docker, Podman,
+/// Kubernetes/containerd, and systemd-managed containers.
+fn is_containerized() -> bool {
+    #[cfg(unix)]
+    {
+        if env::var_os("container").is_some_and(|value| !value.is_empty()) {
             return true;
         }
 
-        // Docker container
-        if Path::new("/.dockerenv").exists() {
+        if Path::new("/.dockerenv").exists()
+            || Path::new("/run/.containerenv").exists()
+            || Path::new("/run/systemd/container").exists()
+        {
             return true;
         }
 
-        // Podman container
-        if Path::new("/run/.containerenv").exists() {
-            return true;
-        }
-
-        // Generic container detection: cgroup contains docker/kubepods/lxc
-        if let Ok(cgroup) = std::fs::read_to_string("/proc/1/cgroup") {
-            if cgroup.contains("docker") || cgroup.contains("kubepods") || cgroup.contains("lxc") {
-                return true;
+        for path in ["/proc/1/cgroup", "/proc/self/cgroup"] {
+            if let Ok(cgroup) = std::fs::read_to_string(path) {
+                if cgroup_indicates_container(&cgroup) {
+                    return true;
+                }
             }
         }
     }
@@ -1027,34 +1119,42 @@ fn should_disable_sandbox(existing_args: &[String]) -> bool {
     false
 }
 
-/// Returns true if Chrome should use disk instead of /dev/shm for shared memory.
-/// On CI runners and containers, /dev/shm is often too small (64MB default),
-/// which causes Chrome to crash mid-session.
-fn should_disable_dev_shm(existing_args: &[String]) -> bool {
-    if existing_args.iter().any(|a| a == "--disable-dev-shm-usage") {
-        return false;
+fn cgroup_indicates_container(cgroup: &str) -> bool {
+    CONTAINER_CGROUP_MARKERS
+        .iter()
+        .any(|marker| cgroup.contains(marker))
+}
+
+#[cfg(unix)]
+fn detect_dev_shm_status() -> Option<DevShmStatus> {
+    let dev_shm = Path::new("/dev/shm");
+    if !dev_shm.exists() {
+        return Some(DevShmStatus::Missing);
     }
 
-    if std::env::var("CI").is_ok() {
-        return true;
+    // `/dev/shm` capacity is the real signal we care about. If statvfs fails,
+    // fall back to container heuristics instead of guessing here.
+    let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    let rc = unsafe { libc::statvfs(b"/dev/shm\0".as_ptr().cast(), stats.as_mut_ptr()) };
+    if rc != 0 {
+        return None;
     }
 
-    #[cfg(unix)]
-    {
-        if unsafe { libc::geteuid() } == 0 {
-            return true;
-        }
-        if Path::new("/.dockerenv").exists() || Path::new("/run/.containerenv").exists() {
-            return true;
-        }
-        if let Ok(cgroup) = std::fs::read_to_string("/proc/1/cgroup") {
-            if cgroup.contains("docker") || cgroup.contains("kubepods") || cgroup.contains("lxc") {
-                return true;
-            }
-        }
-    }
+    let stats = unsafe { stats.assume_init() };
+    let block_size = u64::from(stats.f_frsize);
+    let total_bytes = u64::from(stats.f_blocks).saturating_mul(block_size);
+    let available_bytes = u64::from(stats.f_bavail).saturating_mul(block_size);
 
-    false
+    Some(dev_shm_status_from_capacity(total_bytes, available_bytes))
+}
+
+#[cfg(unix)]
+fn dev_shm_status_from_capacity(total_bytes: u64, available_bytes: u64) -> DevShmStatus {
+    if total_bytes < MIN_DEV_SHM_BYTES || available_bytes < MIN_DEV_SHM_BYTES {
+        DevShmStatus::TooSmall
+    } else {
+        DevShmStatus::Healthy
+    }
 }
 
 /// Search Puppeteer's browser cache for a Chrome binary.
@@ -1262,6 +1362,86 @@ mod tests {
     fn test_should_disable_sandbox_skips_if_already_set() {
         let args = vec!["--headless=new".to_string(), "--no-sandbox".to_string()];
         assert!(!should_disable_sandbox(&args));
+    }
+
+    #[test]
+    fn test_should_disable_sandbox_for_containerized_env() {
+        let args = vec!["--headless=new".to_string()];
+        assert!(should_disable_sandbox_for_environment(
+            &args, false, false, true
+        ));
+    }
+
+    #[test]
+    fn test_cgroup_indicates_container_matches_containerd() {
+        let cgroup = "0::/kubepods.slice/pod123/cri-containerd-abcdef.scope";
+        assert!(cgroup_indicates_container(cgroup));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_should_disable_dev_shm_skips_if_already_set() {
+        let args = vec![
+            "--headless=new".to_string(),
+            "--disable-dev-shm-usage".to_string(),
+        ];
+        assert!(!should_disable_dev_shm_for_environment(
+            &args,
+            false,
+            true,
+            Some(DevShmStatus::TooSmall),
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_dev_shm_status_marks_small_tmpfs_as_too_small() {
+        assert_eq!(
+            dev_shm_status_from_capacity(64 * 1024 * 1024, 64 * 1024 * 1024),
+            DevShmStatus::TooSmall
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_dev_shm_status_accepts_large_tmpfs() {
+        assert_eq!(
+            dev_shm_status_from_capacity(512 * 1024 * 1024, 256 * 1024 * 1024),
+            DevShmStatus::Healthy
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_should_disable_dev_shm_when_tmpfs_missing_falls_back_to_container_signal() {
+        let args = vec!["--headless=new".to_string()];
+        assert!(should_disable_dev_shm_for_environment(
+            &args,
+            false,
+            true,
+            Some(DevShmStatus::Missing),
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_should_disable_dev_shm_when_tmpfs_is_healthy() {
+        let args = vec!["--headless=new".to_string()];
+        assert!(!should_disable_dev_shm_for_environment(
+            &args,
+            false,
+            false,
+            Some(DevShmStatus::Healthy),
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_should_disable_dev_shm_falls_back_to_container_signal() {
+        let args = vec!["--headless=new".to_string()];
+        assert!(should_disable_dev_shm_for_environment(
+            &args, false, true, None
+        ));
     }
 
     #[test]
