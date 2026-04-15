@@ -4370,6 +4370,45 @@ async fn e2e_state_flag_restores_cookies() {
     let _ = std::fs::remove_file(&state_path);
 }
 
+/// Verify that explicit `launch` surfaces storageState load failures instead
+/// of reporting success with an empty browser state.
+#[tokio::test]
+#[ignore]
+async fn e2e_state_flag_missing_file_fails_launch() {
+    let guard = EnvGuard::new(&["CI"]);
+    guard.set("CI", "1");
+
+    let missing_path = std::env::temp_dir()
+        .join(format!(
+            "agent-browser-e2e-missing-state-{}.json",
+            uuid::Uuid::new_v4()
+        ))
+        .to_string_lossy()
+        .to_string();
+
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({
+            "id": "10",
+            "action": "launch",
+            "headless": true,
+            "args": ["--no-sandbox"],
+            "storageState": &missing_path
+        }),
+        &mut state,
+    )
+    .await;
+
+    assert_eq!(resp["success"], false);
+    let error = resp["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("Failed to read state from") || error.contains("storage state"),
+        "Unexpected error for missing storageState file: {}",
+        error
+    );
+}
+
 /// Repeated launch calls on the same live session should apply a new
 /// `storageState` file without forcing a close/relaunch.
 #[tokio::test]

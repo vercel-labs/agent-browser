@@ -1672,15 +1672,25 @@ async fn try_auto_restore_state(state: &mut DaemonState) {
     }
 }
 
-/// Load storage state from AGENT_BROWSER_STATE if set.
-async fn try_load_storage_state(state: &DaemonState, path: &Option<String>) {
+/// Load storage state if a path is configured.
+///
+/// Explicit launch should surface this error. Best-effort callers can ignore
+/// the returned `Result` and keep their previous behavior.
+async fn load_storage_state(state: &DaemonState, path: &Option<String>) -> Result<(), String> {
     if let Some(ref path) = path {
         if let Some(ref mgr) = state.browser {
             if let Ok(session_id) = mgr.active_session_id() {
-                let _ = state::load_state(&mgr.client, session_id, path).await;
+                state::load_state(&mgr.client, session_id, path).await?;
             }
         }
     }
+
+    Ok(())
+}
+
+/// Load storage state from AGENT_BROWSER_STATE if set.
+async fn try_load_storage_state(state: &DaemonState, path: &Option<String>) {
+    let _ = load_storage_state(state, path).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -1947,7 +1957,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     state.update_stream_client().await;
 
     // Load storage state (--state / storageState) if provided.
-    try_load_storage_state(state, &storage_state_owned).await;
+    load_storage_state(state, &storage_state_owned).await?;
 
     // Enable Fetch interception (domain filtering and/or proxy auth).
     // Only call Fetch.enable once to avoid overwriting handleAuthRequests.
