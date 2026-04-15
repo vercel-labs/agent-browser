@@ -39,6 +39,15 @@ AGENT_BROWSER_CONFIG=./ci-config.json agent-browser open example.com
 }
 ```
 
+A [JSON Schema](https://github.com/vercel-labs/agent-browser/blob/main/agent-browser.schema.json) is available for IDE autocomplete and validation. Add a `$schema` key to your config file to enable it:
+
+```json
+{
+  "$schema": "https://raw.githubusercontent.com/vercel-labs/agent-browser/main/agent-browser.schema.json",
+  "headed": true
+}
+```
+
 ## All Options
 
 Every CLI flag can be set in the config file using its camelCase equivalent:
