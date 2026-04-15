@@ -101,7 +101,8 @@
       "description": "Wrap page output in boundary markers for LLM safety."
     },
     "maxOutput": {
-      "type": "number",
+      "type": "integer",
+      "minimum": 0,
       "description": "Max characters for page output (truncates beyond limit)."
     },
     "allowedDomains": {
