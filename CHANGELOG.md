@@ -1,8 +1,24 @@
 # agent-browser
 
-## 0.25.4
+## 0.25.5
 
 <!-- release:start -->
+### Bug Fixes
+
+- Fixed **`--auto-connect` CDP discovery** preferring HTTP endpoint discovery over the DevToolsActivePort websocket path, which could fail on some setups. The CLI now reads the websocket path from DevToolsActivePort first and only falls back to HTTP discovery (#1218)
+- Fixed **recording context viewport** not inheriting the active viewport dimensions, causing recordings to use default resolution instead of the configured viewport (#1208)
+- Fixed **`get box` and `get styles`** printing no data in text mode (#1231, #1233)
+- Fixed **active page changing** when closing or removing earlier tabs. The previously focused page is now preserved correctly (#1220)
+
+### Contributors
+
+- @ctate
+- @jin-2-kakaoent
+- @officialasishkumar
+<!-- release:end -->
+
+## 0.25.4
+
 ### New Features
 
 - **`skills` command** - Added `agent-browser skills` command for discovering and installing agent skills, with built-in evaluation support for testing skills against live browser sessions (#1225, #1227)
@@ -23,7 +39,6 @@
 - @jin-2-kakaoent
 - @juniper929
 - @Marshall-Sun
-<!-- release:end -->
 
 ## 0.25.3
 
