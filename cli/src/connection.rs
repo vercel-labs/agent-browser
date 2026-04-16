@@ -206,6 +206,7 @@ pub struct DaemonOptions<'a> {
     pub extensions: &'a [String],
     pub args: Option<&'a str>,
     pub user_agent: Option<&'a str>,
+    pub runtime_profile: Option<&'a str>,
     pub proxy: Option<&'a str>,
     pub proxy_bypass: Option<&'a str>,
     pub proxy_username: Option<&'a str>,
@@ -222,6 +223,8 @@ pub struct DaemonOptions<'a> {
     pub action_policy: Option<&'a str>,
     pub confirm_actions: Option<&'a str>,
     pub engine: Option<&'a str>,
+    pub use_real_keychain: bool,
+    pub keychain_password: Option<&'a str>,
     pub auto_connect: bool,
     pub idle_timeout: Option<&'a str>,
     pub default_timeout: Option<u64>,
@@ -250,6 +253,9 @@ fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
     }
     if let Some(ua) = opts.user_agent {
         cmd.env("AGENT_BROWSER_USER_AGENT", ua);
+    }
+    if let Some(runtime_profile) = opts.runtime_profile {
+        cmd.env("AGENT_BROWSER_RUNTIME_PROFILE", runtime_profile);
     }
     if let Some(p) = opts.proxy {
         cmd.env("AGENT_BROWSER_PROXY", p);
@@ -298,6 +304,12 @@ fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
     }
     if let Some(engine) = opts.engine {
         cmd.env("AGENT_BROWSER_ENGINE", engine);
+    }
+    if opts.use_real_keychain {
+        cmd.env("AGENT_BROWSER_USE_REAL_KEYCHAIN", "1");
+    }
+    if let Some(password) = opts.keychain_password {
+        cmd.env("AGENT_BROWSER_KEYCHAIN_PASSWORD", password);
     }
     if opts.auto_connect {
         cmd.env("AGENT_BROWSER_AUTO_CONNECT", "1");
@@ -901,5 +913,60 @@ mod tests {
         assert!(!version_path.exists());
 
         let _ = fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn test_apply_daemon_env_forwards_keychain_settings() {
+        let mut cmd = Command::new("env");
+        let opts = DaemonOptions {
+            headed: false,
+            debug: false,
+            executable_path: None,
+            extensions: &[],
+            args: None,
+            user_agent: None,
+            runtime_profile: None,
+            proxy: None,
+            proxy_bypass: None,
+            proxy_username: None,
+            proxy_password: None,
+            ignore_https_errors: false,
+            allow_file_access: false,
+            profile: None,
+            state: None,
+            provider: None,
+            device: None,
+            session_name: None,
+            download_path: None,
+            allowed_domains: None,
+            action_policy: None,
+            confirm_actions: None,
+            engine: None,
+            use_real_keychain: true,
+            keychain_password: Some("secret"),
+            auto_connect: false,
+            idle_timeout: None,
+            default_timeout: None,
+            cdp: None,
+            no_auto_dialog: false,
+        };
+
+        apply_daemon_env(&mut cmd, "default", &opts);
+        let envs: Vec<(String, Option<String>)> = cmd
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|s| s.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+
+        assert!(envs
+            .iter()
+            .any(|(k, v)| { k == "AGENT_BROWSER_USE_REAL_KEYCHAIN" && v.as_deref() == Some("1") }));
+        assert!(envs.iter().any(|(k, v)| {
+            k == "AGENT_BROWSER_KEYCHAIN_PASSWORD" && v.as_deref() == Some("secret")
+        }));
     }
 }

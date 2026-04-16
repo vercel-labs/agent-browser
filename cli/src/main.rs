@@ -1,3 +1,4 @@
+mod agent_env;
 mod chat;
 mod color;
 mod commands;
@@ -6,6 +7,7 @@ mod flags;
 mod install;
 mod native;
 mod output;
+mod runtime_profile;
 #[cfg(test)]
 mod test_utils;
 mod upgrade;
@@ -23,10 +25,14 @@ use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_I
 
 use commands::{gen_id, parse_command, ParseError};
 use connection::{cleanup_stale_files, ensure_daemon, get_socket_dir, send_command, DaemonOptions};
-use flags::{clean_args, parse_flags, Flags};
+use flags::{clean_args, parse_flags, upsert_runtime_profile_in_user_config, Flags};
 use install::run_install;
+use native::cdp::chrome::{launch_chrome_detached, LaunchOptions};
 use output::{
     print_command_help, print_help, print_response_with_opts, print_version, OutputOptions,
+};
+use runtime_profile::{
+    list_runtime_profiles, runtime_status_with_user_data_dir, RuntimeProfileSummary, RuntimeStatus,
 };
 use upgrade::run_upgrade;
 
@@ -172,6 +178,505 @@ fn run_profiles(json_mode: bool) {
                 color::bold(&p.directory),
                 color::dim(&format!("({})", p.name))
             );
+        }
+    }
+}
+
+fn print_runtime_status(status: &RuntimeStatus, json_mode: bool) {
+    if json_mode {
+        print_json_value(serde_json::to_value(status).unwrap_or_default());
+        return;
+    }
+
+    println!("Runtime profile: {}", status.runtime_profile);
+    println!("User data dir: {}", status.user_data_dir);
+    println!("State file: {}", status.state_path);
+    println!(
+        "Browser PID: {}",
+        status
+            .browser_pid
+            .map(|pid| pid.to_string())
+            .unwrap_or_else(|| "none".to_string())
+    );
+    println!("Browser alive: {}", status.browser_alive);
+    if let Some(ref launch_mode) = status.launch_mode {
+        println!("Launch mode: {}", launch_mode);
+    }
+    if let Some(headed) = status.headed {
+        println!("Headed: {}", headed);
+    }
+    if let Some(port) = status.devtools_port {
+        println!("DevTools port: {}", port);
+    }
+    if let Some(ref ws_url) = status.ws_url {
+        println!("CDP URL: {}", ws_url);
+    }
+    if status.targets.is_empty() {
+        println!("Targets: none");
+    } else {
+        println!("Targets:");
+        for target in &status.targets {
+            println!(
+                "  - [{}] {} {}",
+                target.target_type,
+                if target.title.is_empty() {
+                    "<untitled>"
+                } else {
+                    &target.title
+                },
+                target.url
+            );
+        }
+    }
+}
+
+fn print_runtime_list(items: &[RuntimeProfileSummary], json_mode: bool) {
+    if json_mode {
+        print_json_value(serde_json::to_value(items).unwrap_or_default());
+        return;
+    }
+
+    if items.is_empty() {
+        println!("Runtime profiles: none");
+        return;
+    }
+
+    println!("Runtime profiles:");
+    for item in items {
+        let mut labels = Vec::new();
+        if item.default {
+            labels.push("default");
+        }
+        if item.configured {
+            labels.push("configured");
+        }
+        if item.browser_alive {
+            labels.push("running");
+        }
+
+        let label_suffix = if labels.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", labels.join(", "))
+        };
+
+        println!("  {}{}", item.runtime_profile, label_suffix);
+        println!("    User data dir: {}", item.user_data_dir);
+        println!("    State file: {}", item.state_path);
+        println!(
+            "    Browser PID: {}",
+            item.browser_pid
+                .map(|pid| pid.to_string())
+                .unwrap_or_else(|| "none".to_string())
+        );
+        if let Some(ref launch_mode) = item.launch_mode {
+            println!("    Launch mode: {}", launch_mode);
+        }
+        if let Some(headed) = item.headed {
+            println!("    Headed: {}", headed);
+        }
+        if let Some(port) = item.devtools_port {
+            println!("    DevTools port: {}", port);
+        }
+    }
+}
+
+fn first_runtime_positional(clean: &[String], start_index: usize) -> Option<String> {
+    clean
+        .iter()
+        .skip(start_index)
+        .find(|arg| !arg.starts_with("--"))
+        .cloned()
+}
+
+fn selected_runtime_name(clean: &[String], flags: &Flags, positional_index: usize) -> String {
+    first_runtime_positional(clean, positional_index)
+        .or_else(|| flags.runtime_profile.clone())
+        .or_else(|| {
+            flags.profile.as_ref().and_then(|profile| {
+                if runtime_profile::looks_like_path(profile) {
+                    None
+                } else {
+                    Some(profile.clone())
+                }
+            })
+        })
+        .or_else(|| flags.default_runtime_profile.clone())
+        .unwrap_or_else(runtime_profile::default_runtime_profile_name)
+}
+
+fn run_runtime_command(clean: &[String], flags: &Flags) {
+    match clean.get(1).map(|s| s.as_str()) {
+        Some("create") => {
+            let runtime_name = selected_runtime_name(clean, flags, 2);
+            if let Err(e) = runtime_profile::validate_runtime_profile_name(&runtime_name) {
+                if flags.json {
+                    print_json_error(e);
+                } else {
+                    eprintln!("{} {}", color::error_indicator(), e);
+                }
+                exit(1);
+            }
+
+            let user_data_dir = flags
+                .configured_runtime_profiles
+                .get(&runtime_name)
+                .and_then(|value| value.clone())
+                .unwrap_or_else(|| {
+                    runtime_profile::runtime_profile_user_data_dir(&runtime_name)
+                        .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                        .display()
+                        .to_string()
+                });
+            let profile_root = runtime_profile::runtime_profile_root(&runtime_name)
+                .unwrap_or_else(|_| std::path::PathBuf::from("."));
+            let set_default = clean.iter().any(|arg| arg == "--set-default");
+
+            if let Err(e) = fs::create_dir_all(&user_data_dir) {
+                let msg = format!(
+                    "Failed to create runtime profile user-data-dir {}: {}",
+                    user_data_dir, e
+                );
+                if flags.json {
+                    print_json_error(msg);
+                } else {
+                    eprintln!("{} {}", color::error_indicator(), msg);
+                }
+                exit(1);
+            }
+
+            if let Err(e) = fs::create_dir_all(&profile_root) {
+                let msg = format!(
+                    "Failed to create runtime profile root {}: {}",
+                    profile_root.display(),
+                    e
+                );
+                if flags.json {
+                    print_json_error(msg);
+                } else {
+                    eprintln!("{} {}", color::error_indicator(), msg);
+                }
+                exit(1);
+            }
+
+            match upsert_runtime_profile_in_user_config(
+                &runtime_name,
+                Some(&user_data_dir),
+                set_default,
+            ) {
+                Ok(config_path) => {
+                    if flags.json {
+                        print_json_value(json!({
+                            "created": true,
+                            "runtimeProfile": runtime_name,
+                            "userDataDir": user_data_dir,
+                            "configPath": config_path.display().to_string(),
+                            "default": set_default,
+                        }));
+                    } else {
+                        println!(
+                            "Runtime profile created\nName: {}\nUser data dir: {}\nConfig: {}{}",
+                            runtime_name,
+                            user_data_dir,
+                            config_path.display(),
+                            if set_default {
+                                "\nDefault runtime profile: true"
+                            } else {
+                                ""
+                            }
+                        );
+                    }
+                }
+                Err(e) => {
+                    if flags.json {
+                        print_json_error(e);
+                    } else {
+                        eprintln!("{} {}", color::error_indicator(), e);
+                    }
+                    exit(1);
+                }
+            }
+        }
+        Some("list") => {
+            let configured_profiles = flags
+                .configured_runtime_profiles
+                .iter()
+                .map(|(name, path)| (name.clone(), path.as_ref().map(std::path::PathBuf::from)))
+                .collect::<Vec<_>>();
+            let default_name = flags.default_runtime_profile.as_deref().or(Some("default"));
+            match list_runtime_profiles(&configured_profiles, default_name) {
+                Ok(items) => print_runtime_list(&items, flags.json),
+                Err(e) => {
+                    if flags.json {
+                        print_json_error(e);
+                    } else {
+                        eprintln!("{} {}", color::error_indicator(), e);
+                    }
+                    exit(1);
+                }
+            }
+        }
+        Some("status") => {
+            let runtime_name = selected_runtime_name(clean, flags, 2);
+            let configured_user_data_dir = flags
+                .configured_runtime_profiles
+                .get(&runtime_name)
+                .and_then(|path| path.as_deref())
+                .map(std::path::Path::new);
+            match runtime_status_with_user_data_dir(&runtime_name, configured_user_data_dir) {
+                Ok(status) => print_runtime_status(&status, flags.json),
+                Err(e) => {
+                    if flags.json {
+                        print_json_error(e);
+                    } else {
+                        eprintln!("{} {}", color::error_indicator(), e);
+                    }
+                    exit(1);
+                }
+            }
+        }
+        Some("login") => {
+            let attachable = clean.iter().any(|arg| arg == "--attachable");
+            let (proxy_server, proxy_username, proxy_password) =
+                if let Some(ref proxy_str) = flags.proxy {
+                    let parsed = parse_proxy(proxy_str);
+                    (Some(parsed.server), parsed.username, parsed.password)
+                } else {
+                    (None, None, None)
+                };
+            let mut options = LaunchOptions {
+                headless: false,
+                executable_path: flags.executable_path.clone(),
+                proxy: proxy_server,
+                proxy_bypass: flags.proxy_bypass.clone(),
+                proxy_username,
+                proxy_password,
+                profile: flags.profile.clone(),
+                runtime_profile: flags.runtime_profile.clone(),
+                args: Vec::new(),
+                allow_file_access: flags.allow_file_access,
+                extensions: if flags.extensions.is_empty() {
+                    None
+                } else {
+                    Some(flags.extensions.clone())
+                },
+                storage_state: flags.state.clone(),
+                user_agent: flags.user_agent.clone(),
+                ignore_https_errors: flags.ignore_https_errors,
+                color_scheme: flags.color_scheme.clone(),
+                download_path: flags.download_path.clone(),
+                viewport_size: None,
+                use_real_keychain: env::var("AGENT_BROWSER_USE_REAL_KEYCHAIN").is_ok_and(|v| {
+                    !matches!(v.to_ascii_lowercase().as_str(), "0" | "false" | "no" | "")
+                }) || env::var("AGENT_BROWSER_KEYCHAIN_PASSWORD").is_ok(),
+                keychain_password: env::var("AGENT_BROWSER_KEYCHAIN_PASSWORD").ok(),
+                attachable,
+            };
+
+            if let Some(url) = first_runtime_positional(clean, 2) {
+                let url = if url.contains("://") {
+                    url
+                } else {
+                    format!("https://{}", url)
+                };
+                options.args.push(url);
+            }
+
+            match launch_chrome_detached(&options) {
+                Ok(result) => {
+                    if flags.json {
+                        print_json_value(json!({
+                            "launched": true,
+                            "manual": true,
+                            "attachable": attachable,
+                            "pid": result.pid,
+                            "userDataDir": result.user_data_dir.display().to_string(),
+                            "runtimeProfile": result.runtime_profile,
+                            "devtoolsPort": result.devtools_port,
+                        }));
+                    } else {
+                        println!(
+                            "Manual browser launched\nPID: {}\nUser data dir: {}{}{}",
+                            result.pid,
+                            result.user_data_dir.display(),
+                            result
+                                .runtime_profile
+                                .as_ref()
+                                .map_or(String::new(), |name| {
+                                    format!("\nRuntime profile: {}", name)
+                                }),
+                            result.devtools_port.map_or(String::new(), |port| {
+                                format!("\nDevTools port: {}", port)
+                            }),
+                        );
+                    }
+                }
+                Err(e) => {
+                    if flags.json {
+                        print_json_error(e);
+                    } else {
+                        eprintln!("{} {}", color::error_indicator(), e);
+                    }
+                    exit(1);
+                }
+            }
+        }
+        Some("attach") => {
+            let runtime_name = selected_runtime_name(clean, flags, 2);
+            let configured_user_data_dir = flags
+                .configured_runtime_profiles
+                .get(&runtime_name)
+                .and_then(|path| path.as_deref())
+                .map(std::path::Path::new);
+            let status =
+                match runtime_status_with_user_data_dir(&runtime_name, configured_user_data_dir) {
+                    Ok(status) => status,
+                    Err(e) => {
+                        if flags.json {
+                            print_json_error(e);
+                        } else {
+                            eprintln!("{} {}", color::error_indicator(), e);
+                        }
+                        exit(1);
+                    }
+                };
+
+            let attach_to_existing = status.browser_alive && status.devtools_port.is_some();
+            if status.browser_alive && status.devtools_port.is_none() {
+                let msg = format!(
+                    "Runtime profile '{}' has a live browser without a DevTools port. Close that browser before attaching automation, or relaunch manual login with `agent-browser runtime login --attachable`.",
+                    runtime_name
+                );
+                if flags.json {
+                    print_json_error(msg);
+                } else {
+                    eprintln!("{} {}", color::error_indicator(), msg);
+                }
+                exit(1);
+            }
+
+            let cdp_port_str = status.devtools_port.map(|port| port.to_string());
+            let keychain_password = env::var("AGENT_BROWSER_KEYCHAIN_PASSWORD").ok();
+            let use_real_keychain = env::var("AGENT_BROWSER_USE_REAL_KEYCHAIN").is_ok_and(|v| {
+                !matches!(v.to_ascii_lowercase().as_str(), "0" | "false" | "no" | "")
+            }) || keychain_password.is_some();
+            let daemon_opts = DaemonOptions {
+                headed: flags.headed,
+                debug: flags.debug,
+                executable_path: flags.executable_path.as_deref(),
+                extensions: &flags.extensions,
+                args: flags.args.as_deref(),
+                user_agent: flags.user_agent.as_deref(),
+                runtime_profile: Some(&runtime_name),
+                proxy: None,
+                proxy_bypass: None,
+                proxy_username: None,
+                proxy_password: None,
+                ignore_https_errors: flags.ignore_https_errors,
+                allow_file_access: flags.allow_file_access,
+                profile: if attach_to_existing {
+                    None
+                } else {
+                    Some(status.user_data_dir.as_str())
+                },
+                state: flags.state.as_deref(),
+                provider: None,
+                device: None,
+                session_name: flags.session_name.as_deref(),
+                download_path: flags.download_path.as_deref(),
+                allowed_domains: flags.allowed_domains.as_deref(),
+                action_policy: flags.action_policy.as_deref(),
+                confirm_actions: flags.confirm_actions.as_deref(),
+                engine: flags.engine.as_deref(),
+                use_real_keychain,
+                keychain_password: keychain_password.as_deref(),
+                auto_connect: false,
+                idle_timeout: flags.idle_timeout.as_deref(),
+                default_timeout: flags.default_timeout,
+                cdp: cdp_port_str.as_deref(),
+                no_auto_dialog: flags.no_auto_dialog,
+            };
+
+            let daemon_result = match ensure_daemon(&flags.session, &daemon_opts) {
+                Ok(result) => result,
+                Err(e) => {
+                    if flags.json {
+                        print_json_error(e);
+                    } else {
+                        eprintln!("{} {}", color::error_indicator(), e);
+                    }
+                    exit(1);
+                }
+            };
+
+            let launch_cmd = if let Some(port) = status.devtools_port {
+                json!({
+                    "id": gen_id(),
+                    "action": "launch",
+                    "cdpPort": port,
+                })
+            } else {
+                json!({
+                    "id": gen_id(),
+                    "action": "launch",
+                    "headless": !flags.headed,
+                    "runtimeProfile": runtime_name,
+                })
+            };
+
+            match send_command(launch_cmd, &flags.session) {
+                Ok(resp) if resp.success => {
+                    if flags.json {
+                        print_json_value(json!({
+                            "attached": true,
+                            "runtimeProfile": runtime_name,
+                            "session": flags.session,
+                            "reusedDaemon": daemon_result.already_running,
+                            "attachedToExistingBrowser": attach_to_existing,
+                            "devtoolsPort": status.devtools_port,
+                        }));
+                    } else {
+                        println!(
+                            "Runtime profile attached\nName: {}\nSession: {}\nMode: {}",
+                            runtime_name,
+                            flags.session,
+                            if attach_to_existing {
+                                "existing browser"
+                            } else {
+                                "new automation browser"
+                            }
+                        );
+                    }
+                }
+                Ok(resp) => {
+                    let msg = resp
+                        .error
+                        .unwrap_or_else(|| "Failed to attach runtime profile".to_string());
+                    if flags.json {
+                        print_json_error(msg);
+                    } else {
+                        eprintln!("{} {}", color::error_indicator(), msg);
+                    }
+                    exit(1);
+                }
+                Err(e) => {
+                    if flags.json {
+                        print_json_error(e);
+                    } else {
+                        eprintln!("{} {}", color::error_indicator(), e);
+                    }
+                    exit(1);
+                }
+            }
+        }
+        _ => {
+            let msg = "Usage: agent-browser runtime <create|list|status|login|attach> [name|url]";
+            if flags.json {
+                print_json_error(msg);
+            } else {
+                eprintln!("{}", color::red(msg));
+            }
+            exit(1);
         }
     }
 }
@@ -586,6 +1091,12 @@ fn main() {
         env::set_var("MSYS2_ARG_CONV_EXCL", "*");
     }
 
+    if let Err(err) = agent_env::load_env_file() {
+        if !env::args().any(|arg| arg == "--help" || arg == "-h") {
+            eprintln!("{} {}", color::warning_indicator(), err);
+        }
+    }
+
     // Native daemon mode: when AGENT_BROWSER_DAEMON is set, run as the daemon process
     if env::var("AGENT_BROWSER_DAEMON").is_ok() {
         // Ignore SIGPIPE so the daemon isn't killed when the parent drops
@@ -682,6 +1193,11 @@ fn main() {
     // Handle profiles command (doesn't need daemon)
     if clean.first().map(|s| s.as_str()) == Some("profiles") {
         run_profiles(flags.json);
+        return;
+    }
+
+    if clean.first().map(|s| s.as_str()) == Some("runtime") {
+        run_runtime_command(&clean, &flags);
         return;
     }
 
@@ -809,6 +1325,10 @@ fn main() {
     } else {
         (None, None, None)
     };
+    let keychain_password = env::var("AGENT_BROWSER_KEYCHAIN_PASSWORD").ok();
+    let use_real_keychain = env::var("AGENT_BROWSER_USE_REAL_KEYCHAIN")
+        .is_ok_and(|v| !matches!(v.to_ascii_lowercase().as_str(), "0" | "false" | "no" | ""))
+        || keychain_password.is_some();
     let daemon_opts = DaemonOptions {
         headed: flags.headed,
         debug: flags.debug,
@@ -816,6 +1336,7 @@ fn main() {
         extensions: &flags.extensions,
         args: flags.args.as_deref(),
         user_agent: flags.user_agent.as_deref(),
+        runtime_profile: flags.runtime_profile.as_deref(),
         proxy: proxy_server.as_deref(),
         proxy_bypass: flags.proxy_bypass.as_deref(),
         proxy_username: proxy_username.as_deref(),
@@ -832,6 +1353,8 @@ fn main() {
         action_policy: flags.action_policy.as_deref(),
         confirm_actions: flags.confirm_actions.as_deref(),
         engine: flags.engine.as_deref(),
+        use_real_keychain,
+        keychain_password: keychain_password.as_deref(),
         auto_connect: flags.auto_connect,
         idle_timeout: flags.idle_timeout.as_deref(),
         default_timeout: flags.default_timeout,
@@ -868,6 +1391,11 @@ fn main() {
             },
             if flags.cli_profile {
                 Some("--profile")
+            } else {
+                None
+            },
+            if flags.cli_runtime_profile {
+                Some("--runtime-profile")
             } else {
                 None
             },
@@ -1138,6 +1666,7 @@ fn main() {
     if (flags.headed
         || flags.cli_headed  // User explicitly set --headed (even if false)
         || flags.executable_path.is_some()
+        || flags.runtime_profile.is_some()
         || flags.profile.is_some()
         || flags.state.is_some()
         || flags.proxy.is_some()
@@ -1170,6 +1699,9 @@ fn main() {
         // Add profile path if specified
         if let Some(ref profile_path) = flags.profile {
             cmd_obj.insert("profile".to_string(), json!(profile_path));
+        }
+        if let Some(ref runtime_profile) = flags.runtime_profile {
+            cmd_obj.insert("runtimeProfile".to_string(), json!(runtime_profile));
         }
 
         // Add state path if specified

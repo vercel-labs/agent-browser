@@ -10,6 +10,7 @@ use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use tokio::sync::{broadcast, oneshot, RwLock};
 
 use crate::connection::get_socket_dir;
+use crate::runtime_profile::clear_runtime_state;
 
 use super::auth;
 use super::browser::{should_track_target, BrowserManager, WaitUntil};
@@ -187,7 +188,27 @@ fn launch_hash(opts: &LaunchOptions) -> u64 {
     opts.proxy_password.hash(&mut h);
     opts.user_agent.hash(&mut h);
     opts.allow_file_access.hash(&mut h);
+    opts.runtime_profile.hash(&mut h);
+    opts.use_real_keychain.hash(&mut h);
+    opts.keychain_password.hash(&mut h);
     h.finish()
+}
+
+fn parse_env_bool(name: &str) -> bool {
+    env::var(name)
+        .is_ok_and(|v| !matches!(v.to_ascii_lowercase().as_str(), "0" | "false" | "no" | ""))
+}
+
+fn keychain_password_from_env() -> Option<String> {
+    env::var("AGENT_BROWSER_KEYCHAIN_PASSWORD").ok()
+}
+
+fn use_real_keychain_from_env() -> bool {
+    parse_env_bool("AGENT_BROWSER_USE_REAL_KEYCHAIN") || keychain_password_from_env().is_some()
+}
+
+fn runtime_profile_from_env() -> Option<String> {
+    env::var("AGENT_BROWSER_RUNTIME_PROFILE").ok()
 }
 
 pub struct DaemonState {
@@ -1427,7 +1448,16 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
     };
 
     let mut resp = match result {
-        Ok(data) => success_response(&id, data),
+        Ok(mut data) => {
+            let warning = take_response_warning(&mut data);
+            let mut resp = success_response(&id, data);
+            if let Some(warning) = warning {
+                if let Some(obj) = resp.as_object_mut() {
+                    obj.insert("warning".to_string(), json!(warning));
+                }
+            }
+            resp
+        }
         Err(e) => error_response(&id, &super::browser::to_ai_friendly_error(&e)),
     };
 
@@ -1624,6 +1654,7 @@ fn launch_options_from_env() -> LaunchOptions {
         proxy_username: env::var("AGENT_BROWSER_PROXY_USERNAME").ok(),
         proxy_password: env::var("AGENT_BROWSER_PROXY_PASSWORD").ok(),
         profile: env::var("AGENT_BROWSER_PROFILE").ok(),
+        runtime_profile: runtime_profile_from_env(),
         allow_file_access: env::var("AGENT_BROWSER_ALLOW_FILE_ACCESS")
             .map(|v| v == "1" || v == "true")
             .unwrap_or(false),
@@ -1644,7 +1675,9 @@ fn launch_options_from_env() -> LaunchOptions {
         color_scheme: env::var("AGENT_BROWSER_COLOR_SCHEME").ok(),
         download_path: env::var("AGENT_BROWSER_DOWNLOAD_PATH").ok(),
         viewport_size: None,
-        use_real_keychain: false,
+        use_real_keychain: use_real_keychain_from_env(),
+        keychain_password: keychain_password_from_env(),
+        attachable: false,
     }
 }
 
@@ -1721,6 +1754,11 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
             .get("profile")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string()),
+        runtime_profile: cmd
+            .get("runtimeProfile")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .or_else(runtime_profile_from_env),
         allow_file_access: cmd
             .get("allowFileAccess")
             .and_then(|v| v.as_bool())
@@ -1753,7 +1791,9 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
             .and_then(|v| v.as_str())
             .map(String::from),
         viewport_size: None,
-        use_real_keychain: false,
+        use_real_keychain: use_real_keychain_from_env(),
+        keychain_password: keychain_password_from_env(),
+        attachable: false,
     };
 
     let new_hash = launch_hash(&launch_options);
@@ -2066,7 +2106,9 @@ async fn handle_navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
             wb.navigate(url).await?;
             let new_url = wb.get_url().await.unwrap_or_else(|_| url.to_string());
             let title = wb.get_title().await.unwrap_or_default();
-            return Ok(json!({ "url": new_url, "title": title }));
+            let mut data = json!({ "url": new_url, "title": title });
+            add_manual_login_hint_warning(cmd, &mut data);
+            return Ok(data);
         }
     }
 
@@ -2123,7 +2165,34 @@ async fn handle_navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     state.ref_map.clear();
     state.iframe_sessions.clear();
     state.active_frame_id = None;
-    mgr.navigate(url, wait_until).await
+    let mut data = mgr.navigate(url, wait_until).await?;
+    add_manual_login_hint_warning(cmd, &mut data);
+    Ok(data)
+}
+
+fn add_manual_login_hint_warning(cmd: &Value, data: &mut Value) {
+    let Some(service) = cmd
+        .get("manualLoginPreferredService")
+        .and_then(|v| v.as_str())
+    else {
+        return;
+    };
+
+    if let Some(obj) = data.as_object_mut() {
+        obj.insert(
+            "_warning".to_string(),
+            json!(format!(
+                "Service hint: '{}' prefers manual login. If sign-in is blocked or required, use `agent-browser runtime login <url>` for detached sign-in, or `agent-browser runtime login <url> --attachable` followed by `agent-browser runtime attach` to bind automation to the live manual browser.",
+                service
+            )),
+        );
+    }
+}
+
+fn take_response_warning(data: &mut Value) -> Option<String> {
+    data.as_object_mut()
+        .and_then(|obj| obj.remove("_warning"))
+        .and_then(|v| v.as_str().map(str::to_string))
 }
 
 async fn handle_url(state: &DaemonState) -> Result<Value, String> {
@@ -2248,7 +2317,11 @@ async fn handle_close(state: &mut DaemonState) -> Result<Value, String> {
         }
     }
     if let Some(ref mut mgr) = state.browser {
+        let runtime_profile = mgr.runtime_profile_name().map(str::to_string);
         mgr.close().await?;
+        if let Some(runtime_profile) = runtime_profile {
+            let _ = clear_runtime_state(&runtime_profile);
+        }
     }
     state.browser = None;
     state.launch_hash = None;
@@ -7866,6 +7939,20 @@ mod tests {
     }
 
     #[test]
+    fn test_take_response_warning_removes_internal_warning_field() {
+        let mut data = json!({
+            "url": "https://accounts.google.com/",
+            "_warning": "manual login preferred"
+        });
+        assert_eq!(
+            take_response_warning(&mut data),
+            Some("manual login preferred".to_string())
+        );
+        assert!(data.get("_warning").is_none());
+        assert_eq!(data["url"], "https://accounts.google.com/");
+    }
+
+    #[test]
     fn test_error_response_structure() {
         let resp = error_response("cmd-2", "Something went wrong");
         assert_eq!(resp["id"], "cmd-2");
@@ -7984,22 +8071,56 @@ mod tests {
 
     #[test]
     fn test_launch_options_from_env_defaults() {
-        let _guard = EnvGuard::new(&["AGENT_BROWSER_HEADED"]);
+        let _guard = EnvGuard::new(&[
+            "AGENT_BROWSER_HEADED",
+            "AGENT_BROWSER_USE_REAL_KEYCHAIN",
+            "AGENT_BROWSER_KEYCHAIN_PASSWORD",
+        ]);
         let opts = launch_options_from_env();
         assert!(opts.headless);
         assert!(opts.args.is_empty());
         assert!(!opts.allow_file_access);
+        assert!(!opts.use_real_keychain);
+        assert!(opts.keychain_password.is_none());
     }
 
     #[test]
     fn test_launch_options_from_env_headed_flag() {
-        let _guard = EnvGuard::new(&["AGENT_BROWSER_HEADED"]);
+        let _guard = EnvGuard::new(&[
+            "AGENT_BROWSER_HEADED",
+            "AGENT_BROWSER_USE_REAL_KEYCHAIN",
+            "AGENT_BROWSER_KEYCHAIN_PASSWORD",
+        ]);
         _guard.set("AGENT_BROWSER_HEADED", "1");
         let opts = launch_options_from_env();
         assert!(
             !opts.headless,
             "AGENT_BROWSER_HEADED=1 should set headless=false"
         );
+    }
+
+    #[test]
+    fn test_launch_options_from_env_keychain_password_enables_real_keychain() {
+        let _guard = EnvGuard::new(&[
+            "AGENT_BROWSER_USE_REAL_KEYCHAIN",
+            "AGENT_BROWSER_KEYCHAIN_PASSWORD",
+        ]);
+        _guard.set("AGENT_BROWSER_KEYCHAIN_PASSWORD", "secret");
+        let opts = launch_options_from_env();
+        assert!(opts.use_real_keychain);
+        assert_eq!(opts.keychain_password.as_deref(), Some("secret"));
+    }
+
+    #[test]
+    fn test_launch_options_from_env_real_keychain_flag_without_password() {
+        let _guard = EnvGuard::new(&[
+            "AGENT_BROWSER_USE_REAL_KEYCHAIN",
+            "AGENT_BROWSER_KEYCHAIN_PASSWORD",
+        ]);
+        _guard.set("AGENT_BROWSER_USE_REAL_KEYCHAIN", "1");
+        let opts = launch_options_from_env();
+        assert!(opts.use_real_keychain);
+        assert!(opts.keychain_password.is_none());
     }
 
     #[test]
@@ -8154,6 +8275,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_har_stop_without_path_uses_default_location() {
+        let _guard = EnvGuard::new(&["HOME"]);
         let mut state = DaemonState::new();
         state.har_recording = true;
         state.har_entries.push(HarEntry {
@@ -8251,17 +8373,18 @@ mod tests {
 
     #[test]
     fn test_default_timeout_ms_from_env() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_DEFAULT_TIMEOUT"]);
         // When AGENT_BROWSER_DEFAULT_TIMEOUT is set, DaemonState should use it
-        env::set_var("AGENT_BROWSER_DEFAULT_TIMEOUT", "3000");
+        guard.set("AGENT_BROWSER_DEFAULT_TIMEOUT", "3000");
         let state = DaemonState::new();
         assert_eq!(state.default_timeout_ms, 3000);
-        env::remove_var("AGENT_BROWSER_DEFAULT_TIMEOUT");
     }
 
     #[test]
     fn test_default_timeout_ms_fallback() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_DEFAULT_TIMEOUT"]);
         // When AGENT_BROWSER_DEFAULT_TIMEOUT is unset, DaemonState uses 30000
-        env::remove_var("AGENT_BROWSER_DEFAULT_TIMEOUT");
+        guard.remove("AGENT_BROWSER_DEFAULT_TIMEOUT");
         let state = DaemonState::new();
         assert_eq!(state.default_timeout_ms, 30_000);
     }

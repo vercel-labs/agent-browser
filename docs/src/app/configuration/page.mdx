@@ -27,19 +27,53 @@ agent-browser --config ./ci-config.json open example.com
 AGENT_BROWSER_CONFIG=./ci-config.json agent-browser open example.com
 ```
 
-If you do not set <code>profile</code>, agent-browser uses the managed default profile at <code>~/.agent-browser/profile</code>. Set <code>profile</code> to another persistent directory for dedicated projects, or a Chrome profile name to reuse that name inside the managed <code>~/.agent-browser/profile</code> namespace.
+If you do not set <code>profile</code> or <code>runtimeProfile</code>, agent-browser uses the managed default runtime profile at <code>~/.agent-browser/runtime-profiles/default/user-data</code>. Set <code>runtimeProfile</code> for a named managed profile, or <code>profile</code> for a custom persistent user-data-dir path.
 
 ## Example Config
 
 ```json
 {
-  "headed": true,
-  "proxy": "http://localhost:8080",
-  "profile": "./browser-data",
+  "defaultRuntimeProfile": "work",
+  "runtimeProfiles": {
+    "work": {
+      "userDataDir": "~/.agent-browser/runtime-profiles/work/user-data",
+      "launch": {
+        "headed": true,
+        "proxy": "http://localhost:8080"
+      },
+      "auth": {
+        "sessionName": "work-session",
+        "manualLoginPreferred": true
+      },
+      "services": {
+        "google": {
+          "manualLoginPreferred": true
+        }
+      }
+    }
+  },
   "userAgent": "my-agent/1.0",
   "ignoreHttpsErrors": true
 }
 ```
+
+Runtime profiles are the preferred way to define durable managed browser lanes.
+Today agent-browser applies the selected runtime profile's `userDataDir`,
+launch defaults, auth session name, and service login hints. A service with
+`manualLoginPreferred` emits an advisory warning when navigation targets known
+login hosts for that service. Use this to tell agents to prefer
+<code>runtime login</code> or the attachable manual-login flow for services such
+as Google. The nested <code>preferences</code> section is accepted as
+forward-compatible config for future profile preferences.
+
+Use <code>agent-browser runtime list</code> to inspect the merged runtime-profile
+view from config plus on-disk managed profiles. If a profile sets
+<code>userDataDir</code>, <code>runtime status</code> reports that configured path
+even before Chrome has written a runtime state file.
+
+Use <code>agent-browser runtime create [name] [--set-default]</code> when you want
+to register a managed profile in <code>~/.agent-browser/config.json</code>
+without editing JSON by hand.
 
 ## All Options
 
@@ -54,7 +88,10 @@ Every CLI flag can be set in the config file using its camelCase equivalent:
     <tr><td><code>json</code></td><td><code>--json</code></td><td>boolean</td></tr>
     <tr><td><code>full</code></td><td><code>--full, -f</code></td><td>boolean</td></tr>
     <tr><td><code>debug</code></td><td><code>--debug</code></td><td>boolean</td></tr>
+    <tr><td><code>defaultRuntimeProfile</code></td><td><code>--runtime-profile</code> fallback</td><td>string</td></tr>
+    <tr><td><code>runtimeProfiles</code></td><td>managed runtime-profile map</td><td>object</td></tr>
     <tr><td><code>session</code></td><td><code>--session</code></td><td>string</td></tr>
+    <tr><td><code>runtimeProfile</code></td><td><code>--runtime-profile</code></td><td>string</td></tr>
     <tr><td><code>sessionName</code></td><td><code>--session-name</code></td><td>string</td></tr>
     <tr><td><code>executablePath</code></td><td><code>--executable-path</code></td><td>string</td></tr>
     <tr><td><code>extensions</code></td><td><code>--extension</code></td><td>string[]</td></tr>
@@ -91,7 +128,7 @@ Every CLI flag can be set in the config file using its camelCase equivalent:
 ```json
 {
   "headed": true,
-  "profile": "./browser-data"
+  "runtimeProfile": "work"
 }
 ```
 
@@ -157,6 +194,8 @@ Extensions from user-level and project-level configs are **concatenated**, not r
 
 The `AGENT_BROWSER_EXTENSIONS` environment variable and CLI `--extension` flags follow the standard priority rules (env replaces config, CLI appends).
 
+For local secret bootstrapping, agent-browser can also load `AGENT_BROWSER_ENV_FILE`, or `~/.agent-browser/.env` when that file exists. Environment variables from the real shell still win over the dotenv file.
+
 ## Environment Variables
 
 These environment variables configure additional daemon and runtime behavior:
@@ -176,10 +215,14 @@ These environment variables configure additional daemon and runtime behavior:
     <tr><td><code>AGENT_BROWSER_ENCRYPTION_KEY</code></td><td>64-char hex key for AES-256-GCM session encryption.</td><td>(none)</td></tr>
     <tr><td><code>AGENT_BROWSER_EXTENSIONS</code></td><td>Comma-separated browser extension paths. Extensions work in both headed and headless mode.</td><td>(none)</td></tr>
     <tr><td><code>AGENT_BROWSER_HEADED</code></td><td>Show browser window instead of running headless (<code>1</code> to enable).</td><td>(disabled)</td></tr>
+    <tr><td><code>AGENT_BROWSER_RUNTIME_PROFILE</code></td><td>Managed runtime profile name used for persistent browser state.</td><td><code>default</code></td></tr>
     <tr><td><code>AGENT_BROWSER_STREAM_PORT</code></td><td>Override the WebSocket streaming port. By default, an OS-assigned port is used. Set this to bind to a specific port (e.g., <code>9223</code>).</td><td>OS-assigned</td></tr>
     <tr><td><code>AGENT_BROWSER_IDLE_TIMEOUT_MS</code></td><td>Auto-shutdown the daemon after N ms of inactivity (no commands received). Useful for ephemeral environments.</td><td>(disabled)</td></tr>
     <tr><td><code>AGENT_BROWSER_IOS_DEVICE</code></td><td>Default iOS device name for the <code>ios</code> provider.</td><td>(none)</td></tr>
     <tr><td><code>AGENT_BROWSER_IOS_UDID</code></td><td>Default iOS device UDID for the <code>ios</code> provider.</td><td>(none)</td></tr>
+    <tr><td><code>AGENT_BROWSER_ENV_FILE</code></td><td>Optional dotenv file loaded before startup for agent-browser secrets.</td><td><code>~/.agent-browser/.env</code> if present</td></tr>
+    <tr><td><code>AGENT_BROWSER_USE_REAL_KEYCHAIN</code></td><td>Use the real OS keychain instead of mock/basic Chrome keychain flags.</td><td>(disabled)</td></tr>
+    <tr><td><code>AGENT_BROWSER_KEYCHAIN_PASSWORD</code></td><td>Password used to unlock the macOS login keychain or Linux GNOME Keyring before Chrome launch.</td><td>(none)</td></tr>
     <tr><td><code>AGENT_BROWSER_DEBUG</code></td><td>Enable debug output (<code>1</code> to enable).</td><td>(disabled)</td></tr>
     <tr><td><code>AGENT_BROWSER_CONTENT_BOUNDARIES</code></td><td>Wrap page output in boundary markers for LLM safety.</td><td>(disabled)</td></tr>
     <tr><td><code>AGENT_BROWSER_MAX_OUTPUT</code></td><td>Max characters for page output (truncates beyond limit).</td><td>(unlimited)</td></tr>

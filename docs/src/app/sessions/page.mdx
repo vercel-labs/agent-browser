@@ -30,13 +30,19 @@ Each session has its own:
 - Navigation history
 - Authentication state
 
-## Default managed profile
+## Default runtime profile
 
-If you do not pass <code>--profile</code>, agent-browser uses a stable Chrome user-data-dir at <code>~/.agent-browser/profile</code>. This keeps manual sign-in state across runs without any extra setup.
+If you do not pass <code>--profile</code> or <code>--runtime-profile</code>, agent-browser uses a stable Chrome user-data-dir at <code>~/.agent-browser/runtime-profiles/default/user-data</code>. This keeps manual sign-in state across runs without any extra setup.
 
 ```bash
-# First run: sign in once
-agent-browser --headed open https://google.com
+# Create and register a managed profile when needed
+agent-browser runtime create work --set-default
+
+# First run: open a detached manual-login browser
+agent-browser runtime login https://google.com
+
+# Inspect the runtime profile set
+agent-browser runtime list
 
 # Later runs reuse the same browser state
 agent-browser open https://gmail.com
@@ -50,40 +56,66 @@ It stores:
 - Browser cache
 - Login sessions
 
-If you need a different persistent profile or multiple isolated Chrome instances at the same time, pass <code>--profile &lt;path&gt;</code> explicitly.
+If you need a different persistent profile or multiple isolated Chrome instances at the same time, pass <code>--runtime-profile &lt;name&gt;</code> or <code>--profile &lt;path&gt;</code> explicitly.
 
-## Chrome profile reuse
-
-The simplest way to reuse your existing Chrome profile naming is to pass a profile name to `--profile`. agent-browser stores that profile in the managed root at `~/.agent-browser/profile` using `--profile-directory`, so cookies and sessions persist across launches.
+If you need automation to bind to the still-open manual browser, use an attachable manual launch:
 
 ```bash
-# List available Chrome profiles
-agent-browser profiles
-
-# Reuse your default Chrome profile's login state
-agent-browser --profile Default open https://app.example.com
-
-# Use a named profile (by display name or directory name)
-agent-browser --profile "Work" open https://app.example.com
-
-# Or via environment variable
-AGENT_BROWSER_PROFILE=Default agent-browser open https://app.example.com
+agent-browser runtime login https://example.com --attachable
+agent-browser runtime attach
 ```
 
-Use this for ordinary authenticated sites that just need cookies and local storage.
+## Named runtime profiles
 
-> <strong>Important:</strong> For Chrome password-manager features and some SSO flows, prefer <code>--auto-connect</code> to a real running browser. For regular session persistence, named profiles now persist in <code>~/.agent-browser/profile</code>.
+Use a named runtime profile when you want a dedicated persistent browser/account lane.
+
+```bash
+# Register the named runtime profile
+agent-browser runtime create work --set-default
+
+# Manual login for a dedicated runtime profile
+agent-browser --runtime-profile work runtime login https://app.example.com/login
+
+# Or keep DevTools enabled for later live attach
+agent-browser --runtime-profile work runtime login https://app.example.com/login --attachable
+
+# Inspect configured and discovered runtime profiles
+agent-browser runtime list
+
+# Bind automation to the named runtime profile explicitly
+agent-browser runtime attach work
+
+# Reuse the same runtime profile for automation
+agent-browser --runtime-profile work open https://app.example.com
+
+# Inspect the live runtime state
+agent-browser --runtime-profile work runtime status
+```
+
+Use this for ordinary authenticated sites, multi-account setups, and manual sign-in bootstrap flows.
+
+> <strong>Important:</strong> For Chrome password-manager features and Google sign-in, prefer <code>runtime login</code> first and then automate against the same runtime profile.
+
+Runtime-profile config can include service login hints. For example,
+<code>runtimeProfiles.work.services.google.manualLoginPreferred</code> tells
+agent-browser to warn when automation navigates to known Google login hosts, so
+agents can switch to <code>runtime login</code> or the attachable manual-login
+flow before continuing.
 
 <table>
   <thead>
     <tr><th>Detail</th><th>Description</th></tr>
   </thead>
   <tbody>
-    <tr><td>Supported browsers</td><td>Chrome, Chrome Canary, Chromium, Brave</td></tr>
-    <tr><td>What is used</td><td>Persistent managed profile under <code>~/.agent-browser/profile</code> with <code>--profile-directory</code></td></tr>
-    <tr><td>Persistence</td><td>State is saved across restarts in the managed profile namespace</td></tr>
-    <tr><td>Chrome password-store</td><td>Not required for cookie/session persistence; use <code>--auto-connect</code> for real-browser keychain flows</td></tr>
-    <tr><td>Windows note</td><td>Using <code>--profile</code> still requires Chrome not holding conflicting named profile locks</td></tr>
+    <tr><td>Managed path</td><td><code>~/.agent-browser/runtime-profiles/&lt;name&gt;/user-data</code></td></tr>
+    <tr><td>Status file</td><td><code>~/.agent-browser/runtime-profiles/&lt;name&gt;/runtime-state.json</code></td></tr>
+    <tr><td>Persistence</td><td>State is saved across restarts in the managed runtime-profile namespace</td></tr>
+    <tr><td>Registration</td><td><code>agent-browser runtime create [name] [--set-default]</code></td></tr>
+    <tr><td>Manual bootstrap</td><td><code>agent-browser runtime login [url]</code></td></tr>
+    <tr><td>Live manual bootstrap</td><td><code>agent-browser runtime login [url] --attachable</code></td></tr>
+    <tr><td>Explicit automation bind</td><td><code>agent-browser runtime attach [name]</code></td></tr>
+    <tr><td>Inventory</td><td><code>agent-browser runtime list</code></td></tr>
+    <tr><td>Inspection</td><td><code>agent-browser runtime status [name]</code></td></tr>
   </tbody>
 </table>
 

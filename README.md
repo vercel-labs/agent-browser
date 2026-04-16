@@ -379,8 +379,8 @@ agent-browser provides multiple ways to persist login sessions so you don't re-a
 
 | Approach | Best for | Flag / Env |
 |----------|----------|------------|
-| **Default managed profile** | Stable browser state in `~/.agent-browser/profile` across runs when you do not pass `--profile` | Automatic |
-| **Chrome profile reuse** | Reuse your existing Chrome login state (cookies, sessions) with zero setup | `--profile <name>` / `AGENT_BROWSER_PROFILE` |
+| **Default runtime profile** | Stable browser state in `~/.agent-browser/runtime-profiles/default/user-data` across runs | Automatic |
+| **Named runtime profile** | Isolated persistent browser state for a specific account or workflow | `--runtime-profile <name>` / `AGENT_BROWSER_RUNTIME_PROFILE` |
 | **Persistent profile** | Full browser state in a custom directory across restarts | `--profile <path>` / `AGENT_BROWSER_PROFILE` |
 | **Session persistence** | Auto-save/restore cookies + localStorage by name | `--session-name <name>` / `AGENT_BROWSER_SESSION_NAME` |
 | **Import from your browser** | Grab auth from a Chrome session you already logged into | `--auto-connect` + `state save` |
@@ -444,17 +444,73 @@ Each session has its own:
 - Navigation history
 - Authentication state
 
-## Default managed profile
+## Configured Runtime Profiles
 
-If you do not pass `--profile`, agent-browser launches Chrome with a stable
-user-data-dir at `~/.agent-browser/profile`:
+The config file can now define managed runtime profiles directly. This is the
+foundational model for agent-browser to become an agent-facing browser tool with
+stable per-profile defaults and service-specific login hints.
+
+```json
+{
+  "defaultRuntimeProfile": "work",
+  "runtimeProfiles": {
+    "work": {
+      "userDataDir": "~/.agent-browser/runtime-profiles/work/user-data",
+      "launch": {
+        "headed": true,
+        "proxy": "http://proxy.internal:8080"
+      },
+      "auth": {
+        "sessionName": "work-session",
+        "manualLoginPreferred": true
+      },
+      "services": {
+        "google": {
+          "manualLoginPreferred": true
+        }
+      }
+    }
+  }
+}
+```
+
+Today, agent-browser applies the selected runtime profile's `userDataDir`,
+launch settings, auth session name, and service login hints. A service with
+`manualLoginPreferred` emits an advisory warning when navigation targets known
+login hosts for that service, so agents can switch to `runtime login` or the
+attachable manual-login flow. The `preferences` subtree is reserved for future
+per-profile browsing preferences.
+
+You can register a runtime profile into user config explicitly:
 
 ```bash
-# First run: sign in manually once
-agent-browser --headed open https://google.com
+agent-browser runtime create work --set-default
+```
+
+## Default runtime profile
+
+If you do not pass `--profile` or `--runtime-profile`, agent-browser launches Chrome with a stable
+user-data-dir at `~/.agent-browser/runtime-profiles/default/user-data`.
+
+For Google and similar SSO flows, the preferred bootstrap is a detached manual login first:
+
+```bash
+# First run: open a detached manual-login browser
+agent-browser runtime login https://accounts.google.com
+
+# Inspect the runtime profile before automation touches it
+agent-browser runtime list
+agent-browser runtime status
 
 # Later runs reuse the same browser state automatically
 agent-browser open https://gmail.com
+```
+
+If you need to bind automation to the same live browser instead of closing it first, opt into an attachable manual browser:
+
+```bash
+agent-browser runtime login https://example.com --attachable
+agent-browser runtime attach
 ```
 
 This default profile keeps:
@@ -466,31 +522,37 @@ This default profile keeps:
 - Signed-in browser sessions
 
 If you need a different persistent profile or multiple isolated Chrome
-instances at the same time, pass `--profile <path>` explicitly.
+instances at the same time, pass `--runtime-profile <name>` or `--profile <path>` explicitly.
 
-## Chrome Profile Reuse
+## Named runtime profiles
 
-Use a Chrome profile name to create or reuse a managed profile namespace under `~/.agent-browser/profile`:
+Use a named runtime profile when you want one persistent browser/account lane per workflow:
 
 ```bash
-# List available Chrome profiles
-agent-browser profiles
+# Create and register a dedicated runtime profile
+agent-browser runtime create work --set-default
 
-# Reuse an existing Chrome profile name in a persistent managed namespace
-agent-browser --profile Default open https://app.example.com
+# Manual login for a dedicated runtime profile
+agent-browser --runtime-profile work runtime login https://app.example.com/login
 
-# Use a named profile (by display name or directory name)
-agent-browser --profile "Work" open https://app.example.com
+# Or keep DevTools available for a later live attach
+agent-browser --runtime-profile work runtime login https://app.example.com/login --attachable
 
-# Or via environment variable
-AGENT_BROWSER_PROFILE=Default agent-browser open https://app.example.com
+agent-browser runtime attach work
+
+# Later automation reuses the same profile
+agent-browser --runtime-profile work open https://app.example.com
+
+# Inspect the live runtime state
+agent-browser runtime list
+agent-browser --runtime-profile work runtime status
 ```
 
-This resolves to a persistent profile directory under `~/.agent-browser/profile`, so login state and cookies are saved between launches.
+This resolves to a persistent profile directory under `~/.agent-browser/runtime-profiles/<name>/user-data`, unless `runtimeProfiles.<name>.userDataDir` overrides it in config. Use `agent-browser runtime list` to inspect the merged view from config plus on-disk managed profiles.
 
-Use this for ordinary authenticated sites that just need cookies and local storage.
+Use this for ordinary authenticated sites, multi-account setups, and headed/manual bootstrap flows.
 
-> **Important:** If you want Chrome password-manager behavior, prefer `--auto-connect` to a real running browser. For general session persistence, `--profile <name>` and `~/.agent-browser/profile` keep cookies and local storage consistent across restarts.
+> **Important:** If you want Chrome password-manager behavior or Google sign-in without active automation attached, prefer `agent-browser runtime login ...` first, then reuse that runtime profile for automation.
 
 ## Persistent Profiles
 
@@ -574,6 +636,19 @@ agent-browser includes security features for safe AI agent deployments. All feat
 - **Action Confirmation** -- Require explicit approval for sensitive action categories: `--confirm-actions eval,download`
 - **Output Length Limits** -- Prevent context flooding: `--max-output 50000`
 
+For unattended headed or headless runs that need the real OS credential store, agent-browser can read keychain settings from a dotenv file. Environment variables take precedence, otherwise it loads `AGENT_BROWSER_ENV_FILE`, then `~/.agent-browser/.env` if present.
+
+```bash
+cat > ~/.agent-browser/.env <<'EOF'
+AGENT_BROWSER_USE_REAL_KEYCHAIN=1
+AGENT_BROWSER_KEYCHAIN_PASSWORD='your-login-keychain-password'
+EOF
+
+agent-browser open https://example.com
+```
+
+On macOS, `AGENT_BROWSER_KEYCHAIN_PASSWORD` unlocks the login keychain before Chrome launches. On Linux, agent-browser uses the password to call `gnome-keyring-daemon --unlock --components=secrets` and passes the exported secret-service environment into Chrome. This is aimed at Ubuntu and other GNOME-keyring setups. If you only need real keychain mode without an unlock step, set `AGENT_BROWSER_USE_REAL_KEYCHAIN=1`.
+
 | Variable                            | Description                              |
 | ----------------------------------- | ---------------------------------------- |
 | `AGENT_BROWSER_CONTENT_BOUNDARIES`  | Wrap page output in boundary markers     |
@@ -582,6 +657,9 @@ agent-browser includes security features for safe AI agent deployments. All feat
 | `AGENT_BROWSER_ACTION_POLICY`       | Path to action policy JSON file          |
 | `AGENT_BROWSER_CONFIRM_ACTIONS`     | Action categories requiring confirmation |
 | `AGENT_BROWSER_CONFIRM_INTERACTIVE` | Enable interactive confirmation prompts  |
+| `AGENT_BROWSER_ENV_FILE`            | Optional dotenv file for agent-browser secrets |
+| `AGENT_BROWSER_USE_REAL_KEYCHAIN`   | Use the real OS keychain for Chrome profile launches |
+| `AGENT_BROWSER_KEYCHAIN_PASSWORD`   | Password used to unlock the macOS login keychain or Linux GNOME Keyring |
 
 See [Security documentation](https://agent-browser.dev/security) for details.
 
@@ -636,7 +714,8 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 |--------|-------------|
 | `--session <name>` | Use isolated session (or `AGENT_BROWSER_SESSION` env) |
 | `--session-name <name>` | Auto-save/restore session state (or `AGENT_BROWSER_SESSION_NAME` env) |
-| `--profile <name\|path>` | Chrome profile name or persistent directory path (or `AGENT_BROWSER_PROFILE` env) |
+| `--runtime-profile <name>` | Managed runtime profile name (or `AGENT_BROWSER_RUNTIME_PROFILE` env) |
+| `--profile <path>` | Persistent custom user-data-dir path (or `AGENT_BROWSER_PROFILE` env) |
 | `--state <path>` | Load storage state from JSON file (or `AGENT_BROWSER_STATE` env) |
 | `--headers <json>` | Set HTTP headers scoped to the URL's origin |
 | `--executable-path <path>` | Custom browser executable (or `AGENT_BROWSER_EXECUTABLE_PATH` env) |

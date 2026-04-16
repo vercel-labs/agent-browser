@@ -334,8 +334,18 @@ agent-browser session list            # List active sessions
 ```bash
 agent-browser profiles               # List available Chrome profiles
 agent-browser profiles --json        # List profiles as JSON
-agent-browser --profile Default open https://gmail.com  # Reuse a profile's login state
+agent-browser runtime create work --set-default          # Register a named runtime profile
+agent-browser runtime login https://accounts.google.com  # Manual login on the default runtime profile
+agent-browser runtime login https://example.com --attachable # Manual login with DevTools left on for later attach
+agent-browser runtime attach work                        # Bind automation to a named runtime profile
+agent-browser runtime list                               # Show configured and discovered runtime profiles
+agent-browser --runtime-profile work runtime status      # Inspect a named runtime profile
 ```
+
+When runtime-profile config marks a service with <code>manualLoginPreferred</code>,
+navigation to known login hosts for that service returns an advisory warning.
+Use that warning as the signal to run <code>runtime login</code>, or
+<code>runtime login --attachable</code> followed by <code>runtime attach</code>.
 
 ## Dashboard
 

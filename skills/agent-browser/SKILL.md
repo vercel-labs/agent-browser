@@ -48,7 +48,22 @@ agent-browser open https://example.com && agent-browser screenshot
 
 ## Handling Authentication
 
-By default, agent-browser uses a stable Chrome user-data-dir at `~/.agent-browser/profile`. If a user signs in manually once in headed mode, later runs reuse that state automatically. Only reach for `--profile` when you need a different persistent profile or to reuse an existing Chrome profile by name.
+By default, agent-browser uses a stable runtime profile at `~/.agent-browser/runtime-profiles/default/user-data`. If a user signs in manually once, later runs reuse that state automatically. Use `--runtime-profile <name>` for a named managed profile, or `--profile <path>` for a custom user-data-dir path.
+
+Runtime profiles can also be declared in `agent-browser.json` via
+`defaultRuntimeProfile` and `runtimeProfiles.<name>`. Today that config can
+drive `userDataDir`, launch defaults, auth session naming, and service login
+hints. If navigation returns a warning for a service with
+`manualLoginPreferred`, switch to `runtime login` for detached manual sign-in,
+or use `runtime login <url> --attachable` followed by `runtime attach` to bind
+automation to the live manual browser. Treat `preferences` as a reserved future
+extension point unless the repo docs say otherwise.
+
+To create and track a managed profile explicitly, use:
+
+```bash
+agent-browser runtime create work --set-default
+```
 
 When automating a site that requires login, choose the approach that fits:
 
@@ -63,31 +78,58 @@ agent-browser --state ./auth.json open https://app.example.com/dashboard
 
 State files contain session tokens in plaintext -- add to `.gitignore` and delete when no longer needed. Set `AGENT_BROWSER_ENCRYPTION_KEY` for encryption at rest.
 
-**Option 2: Default managed profile (best default for recurring manual sign-in)**
+**Option 2: Runtime profile manual login (best default for recurring manual sign-in)**
 
 ```bash
-# First run: sign in manually
-agent-browser --headed open https://accounts.google.com
+# First run: launch a detached manual-login browser
+agent-browser runtime login https://accounts.google.com
 
-# Later runs reuse ~/.agent-browser/profile automatically
+# Inspect the runtime profile set before automation uses it
+agent-browser runtime list
+agent-browser runtime status
+
+# Later runs reuse the same runtime profile automatically
 agent-browser open https://gmail.com
 ```
 
-Use an explicit `--profile <path>` only when you need a separate persistent profile.
-
-**Option 3: Chrome profile reuse**
+If the workflow needs automation to bind to the still-open manual browser, use
+an attachable manual launch:
 
 ```bash
-# List available Chrome profiles
-agent-browser profiles
-
-# Reuse the user's existing Chrome login state
-agent-browser --profile Default open https://app.example.com
+agent-browser runtime login https://example.com --attachable
+agent-browser runtime attach
 ```
 
-This resolves the Chrome profile name and stores state in a managed namespace under `~/.agent-browser/profile`, so sessions persist across browser restarts without ephemeral profile copies.
+Use `--runtime-profile <name>` when you need a separate persistent managed profile:
 
-**Option 4: Persistent profile (for a separate recurring task profile)**
+```bash
+agent-browser runtime create work --set-default
+agent-browser --runtime-profile work runtime login https://app.example.com/login
+agent-browser --runtime-profile work runtime login https://app.example.com/login --attachable
+agent-browser runtime attach work
+agent-browser runtime list
+agent-browser --runtime-profile work open https://app.example.com
+```
+
+`runtime list` merges config-declared runtime profiles with on-disk managed
+profiles. If `runtimeProfiles.<name>.userDataDir` is set in config, both
+`runtime list` and `runtime status` report that configured path even before the
+browser has written runtime state.
+
+For unattended runs that still need a real OS credential-store-backed Chrome profile, prefer a dotenv-backed setup over putting secrets on the command line:
+
+```bash
+cat > ~/.agent-browser/.env <<'EOF'
+AGENT_BROWSER_USE_REAL_KEYCHAIN=1
+AGENT_BROWSER_KEYCHAIN_PASSWORD='your-login-keychain-password'
+EOF
+
+agent-browser open https://example.com
+```
+
+agent-browser loads `AGENT_BROWSER_ENV_FILE` first when set, otherwise `~/.agent-browser/.env` if it exists. Environment variables still override file values. On macOS, `AGENT_BROWSER_KEYCHAIN_PASSWORD` unlocks the login keychain before Chrome launches. On Linux, it is used with `gnome-keyring-daemon --unlock --components=secrets`, which is useful on Ubuntu and other GNOME-keyring setups.
+
+**Option 3: Persistent profile path (for a separate recurring task profile)**
 
 ```bash
 # First run: login manually or via automation
@@ -98,7 +140,7 @@ agent-browser --profile ~/.myapp open https://app.example.com/login
 agent-browser --profile ~/.myapp open https://app.example.com/dashboard
 ```
 
-**Option 5: Session name (auto-save/restore cookies + localStorage)**
+**Option 4: Session name (auto-save/restore cookies + localStorage)**
 
 ```bash
 agent-browser --session-name myapp open https://app.example.com/login
@@ -109,7 +151,7 @@ agent-browser close  # State auto-saved
 agent-browser --session-name myapp open https://app.example.com/dashboard
 ```
 
-**Option 6: Auth vault (credentials stored encrypted, login by name)**
+**Option 5: Auth vault (credentials stored encrypted, login by name)**
 
 ```bash
 echo "$PASSWORD" | agent-browser auth save myapp --url https://app.example.com/login --username user --password-stdin
@@ -118,7 +160,7 @@ agent-browser auth login myapp
 
 `auth login` navigates with `load` and then waits for login form selectors to appear before filling/clicking, which is more reliable on delayed SPA login screens.
 
-**Option 7: State file (manual save/load)**
+**Option 6: State file (manual save/load)**
 
 ```bash
 # After logging in:

@@ -231,9 +231,11 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
             if let Some(title) = data.get("title").and_then(|v| v.as_str()) {
                 println!("{} {}", color::success_indicator(), color::bold(title));
                 println!("  {}", color::dim(url));
+                print_warning(resp);
                 return;
             }
             println!("{}", url);
+            print_warning(resp);
             return;
         }
         if let Some(cdp_url) = data.get("cdpUrl").and_then(|v| v.as_str()) {
@@ -2685,8 +2687,9 @@ agent-browser profiles - List available Chrome profiles
 Usage: agent-browser profiles
 
 Lists all Chrome profiles found in your Chrome user data directory, showing
-the directory name and display name for each profile. Use the directory name
-with --profile to launch Chrome with that profile's login state.
+the directory name and display name for each profile. This is useful for
+inspection and migration planning, but agent-browser's persistent automation
+state now lives in runtime profiles under ~/.agent-browser/runtime-profiles.
 
 Global Options:
   --json               Output as JSON
@@ -2694,7 +2697,45 @@ Global Options:
 Examples:
   agent-browser profiles
   agent-browser profiles --json
-  agent-browser --profile Default open https://gmail.com
+"##
+        }
+
+        "runtime" => {
+            r##"
+agent-browser runtime - Manage persistent runtime profiles
+
+Usage:
+  agent-browser runtime create [name] [--set-default]
+  agent-browser runtime list
+  agent-browser runtime status [name]
+  agent-browser runtime login [url] [--attachable]
+  agent-browser runtime attach [name]
+
+Commands:
+  create [name]         Create a named runtime profile and persist it to user config
+  list                  Show configured and on-disk runtime profiles
+  status [name]         Show PID, profile path, DevTools details, and targets
+  login [url]           Launch a detached headed browser for manual sign-in
+  attach [name]         Bind the current automation session to a runtime profile
+
+Global Options:
+  --json                        Output as JSON
+  --runtime-profile <name>      Select runtime profile name
+  --profile <path>              Use a custom persistent user-data-dir path
+  --executable-path <path>      Custom browser executable
+  --headed                      Ignored for runtime login; manual login is always headed
+  --attachable                  Keep DevTools enabled for runtime login so a later runtime attach can bind to the live browser
+  --set-default                 Set a created runtime profile as default in user config
+
+Examples:
+  agent-browser runtime create work --set-default
+  agent-browser runtime list
+  agent-browser runtime status
+  agent-browser --runtime-profile work runtime status
+  agent-browser runtime login https://accounts.google.com
+  agent-browser runtime login https://example.com --attachable
+  agent-browser runtime attach work
+  agent-browser --runtime-profile work runtime login https://app.example.com
 "##
         }
 
@@ -2863,6 +2904,7 @@ Setup:
   upgrade                    Upgrade to the latest version
   dashboard start            Start the observability dashboard
   profiles                   List available Chrome profiles
+  runtime <op>               Runtime profile create/list/status/login/attach workflow
 
 Snapshot Options:
   -i, --interactive          Only interactive elements
@@ -2871,11 +2913,13 @@ Snapshot Options:
   -s, --selector <sel>       Scope to CSS selector
 
 Authentication:
-  --profile <name|path>      Chrome profile name (e.g., Default) resolved into the
-                             managed namespace at ~/.agent-browser/profile, or
-                             a directory path for a custom persistent profile
-                             (or AGENT_BROWSER_PROFILE env). If omitted, Chrome
-                             uses ~/.agent-browser/profile by default
+  --runtime-profile <name>   Managed runtime profile under
+                             ~/.agent-browser/runtime-profiles/<name>/user-data
+                             (or AGENT_BROWSER_RUNTIME_PROFILE env)
+  --profile <path>           Custom persistent Chrome user-data-dir path
+                             (or AGENT_BROWSER_PROFILE env). If omitted,
+                             agent-browser uses the selected runtime profile,
+                             defaulting to ~/.agent-browser/runtime-profiles/default/user-data
   --session-name <name>      Auto-save/restore cookies and localStorage by name
                              (or AGENT_BROWSER_SESSION_NAME env)
   --state <path>             Load saved auth state (cookies + storage) from JSON file
@@ -2941,6 +2985,30 @@ Configuration:
 
   Extensions from user and project configs are merged (not replaced).
 
+  Runtime profiles can also be declared in config:
+    {{
+      "defaultRuntimeProfile": "work",
+      "runtimeProfiles": {{
+        "work": {{
+          "userDataDir": "~/.agent-browser/runtime-profiles/work/user-data",
+          "launch": {{ "headed": true }},
+          "services": {{
+            "google": {{ "manualLoginPreferred": true }}
+          }}
+        }}
+      }}
+    }}
+
+  Service hints are advisory. When a configured service marks
+  manualLoginPreferred, navigation to known login hosts emits a warning that
+  points agents to `runtime login` or the attachable manual-login flow.
+
+  Use `agent-browser runtime create <name>` to register a managed profile in
+  ~/.agent-browser/config.json.
+
+  Use `agent-browser runtime list` to inspect the merged runtime-profile view
+  from config plus on-disk managed profiles.
+
   Example agent-browser.json:
     {{"headed": true, "proxy": "http://localhost:8080", "profile": "./browser-data"}}
 
@@ -2970,6 +3038,10 @@ Environment:
   AGENT_BROWSER_IDLE_TIMEOUT_MS  Auto-shutdown daemon after N ms of inactivity (disabled by default)
   AGENT_BROWSER_IOS_DEVICE       Default iOS device name
   AGENT_BROWSER_IOS_UDID         Default iOS device UDID
+  AGENT_BROWSER_RUNTIME_PROFILE  Managed runtime profile name
+  AGENT_BROWSER_ENV_FILE         Optional dotenv file for agent-browser runtime secrets
+  AGENT_BROWSER_USE_REAL_KEYCHAIN Use the real OS keychain instead of mock/basic storage
+  AGENT_BROWSER_KEYCHAIN_PASSWORD Password used to unlock the macOS login keychain or Linux GNOME Keyring before launch
   AGENT_BROWSER_CONTENT_BOUNDARIES Wrap page output in boundary markers
   AGENT_BROWSER_MAX_OUTPUT       Max characters for page output
   AGENT_BROWSER_ALLOWED_DOMAINS  Comma-separated allowed domain patterns
@@ -3009,8 +3081,13 @@ Examples:
   agent-browser stream enable            # Start runtime streaming on an auto-selected port
   agent-browser stream status            # Inspect runtime streaming state
   agent-browser --color-scheme dark open example.com  # Dark mode
-  agent-browser --profile Default open gmail.com        # Reuse Chrome login state
-  agent-browser --profile ~/.myapp open example.com    # Persistent custom profile
+  agent-browser runtime login https://accounts.google.com  # Manual login on the default runtime profile
+  agent-browser runtime login https://example.com --attachable # Manual login with DevTools enabled for later live attach
+  agent-browser runtime create work --set-default          # Register a named runtime profile in user config
+  agent-browser runtime attach work                        # Bind automation to a runtime profile
+  agent-browser runtime list                               # Show configured and discovered runtime profiles
+  agent-browser --runtime-profile work runtime status      # Inspect a named runtime profile
+  agent-browser --profile ~/.myapp open example.com        # Persistent custom profile path
   agent-browser profiles                               # List available Chrome profiles
   agent-browser --session-name myapp open example.com  # Auto-save/restore state
   agent-browser chat "open google.com and search for cats"  # AI chat (single-shot)

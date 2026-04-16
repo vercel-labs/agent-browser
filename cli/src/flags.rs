@@ -1,5 +1,7 @@
 use crate::color;
 use serde::Deserialize;
+use serde_json::{json, Map, Value};
+use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -52,11 +54,69 @@ fn parse_idle_timeout_value(value: Option<String>, source: &str) -> Option<Strin
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
+pub struct RuntimeProfileLaunchConfig {
+    pub headed: Option<bool>,
+    pub executable_path: Option<String>,
+    pub extensions: Option<Vec<String>>,
+    pub profile: Option<String>,
+    pub state: Option<String>,
+    pub proxy: Option<String>,
+    pub proxy_bypass: Option<String>,
+    pub args: Option<String>,
+    pub user_agent: Option<String>,
+    pub ignore_https_errors: Option<bool>,
+    pub allow_file_access: Option<bool>,
+    pub color_scheme: Option<String>,
+    pub download_path: Option<String>,
+    pub engine: Option<String>,
+    pub screenshot_dir: Option<String>,
+    pub screenshot_quality: Option<u32>,
+    pub screenshot_format: Option<String>,
+    pub no_auto_dialog: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct RuntimeProfileAuthConfig {
+    pub session_name: Option<String>,
+    pub manual_login_preferred: Option<bool>,
+}
+
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct RuntimeProfileServiceConfig {
+    pub manual_login_preferred: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct RuntimeProfilePreferencesConfig {
+    pub wait_for_network_idle: Option<bool>,
+    pub default_viewport: Option<String>,
+    pub annotation_style: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct RuntimeProfileConfig {
+    pub user_data_dir: Option<String>,
+    pub launch: Option<RuntimeProfileLaunchConfig>,
+    pub auth: Option<RuntimeProfileAuthConfig>,
+    pub services: Option<HashMap<String, RuntimeProfileServiceConfig>>,
+    pub preferences: Option<RuntimeProfilePreferencesConfig>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 pub struct Config {
+    pub default_runtime_profile: Option<String>,
+    pub runtime_profiles: Option<HashMap<String, RuntimeProfileConfig>>,
+    pub service_defaults: Option<HashMap<String, RuntimeProfileServiceConfig>>,
     pub headed: Option<bool>,
     pub json: Option<bool>,
     pub debug: Option<bool>,
     pub session: Option<String>,
+    pub runtime_profile: Option<String>,
     pub session_name: Option<String>,
     pub executable_path: Option<String>,
     pub extensions: Option<Vec<String>>,
@@ -94,10 +154,22 @@ pub struct Config {
 impl Config {
     fn merge(self, other: Config) -> Config {
         Config {
+            default_runtime_profile: other
+                .default_runtime_profile
+                .or(self.default_runtime_profile),
+            runtime_profiles: merge_runtime_profile_maps(
+                self.runtime_profiles,
+                other.runtime_profiles,
+            ),
+            service_defaults: merge_service_config_maps(
+                self.service_defaults,
+                other.service_defaults,
+            ),
             headed: other.headed.or(self.headed),
             json: other.json.or(self.json),
             debug: other.debug.or(self.debug),
             session: other.session.or(self.session),
+            runtime_profile: other.runtime_profile.or(self.runtime_profile),
             session_name: other.session_name.or(self.session_name),
             executable_path: other.executable_path.or(self.executable_path),
             extensions: match (self.extensions, other.extensions) {
@@ -140,6 +212,227 @@ impl Config {
     }
 }
 
+fn merge_runtime_profile_maps(
+    base: Option<HashMap<String, RuntimeProfileConfig>>,
+    overlay: Option<HashMap<String, RuntimeProfileConfig>>,
+) -> Option<HashMap<String, RuntimeProfileConfig>> {
+    match (base, overlay) {
+        (None, None) => None,
+        (Some(map), None) | (None, Some(map)) => Some(map),
+        (Some(mut base_map), Some(overlay_map)) => {
+            for (name, config) in overlay_map {
+                let merged = if let Some(existing) = base_map.remove(&name) {
+                    merge_runtime_profile_config(existing, config)
+                } else {
+                    config
+                };
+                base_map.insert(name, merged);
+            }
+            Some(base_map)
+        }
+    }
+}
+
+fn merge_service_config_maps(
+    base: Option<HashMap<String, RuntimeProfileServiceConfig>>,
+    overlay: Option<HashMap<String, RuntimeProfileServiceConfig>>,
+) -> Option<HashMap<String, RuntimeProfileServiceConfig>> {
+    match (base, overlay) {
+        (None, None) => None,
+        (Some(map), None) | (None, Some(map)) => Some(map),
+        (Some(mut base_map), Some(overlay_map)) => {
+            for (name, config) in overlay_map {
+                let merged = if let Some(existing) = base_map.remove(&name) {
+                    RuntimeProfileServiceConfig {
+                        manual_login_preferred: config
+                            .manual_login_preferred
+                            .or(existing.manual_login_preferred),
+                    }
+                } else {
+                    config
+                };
+                base_map.insert(name, merged);
+            }
+            Some(base_map)
+        }
+    }
+}
+
+fn merge_runtime_profile_config(
+    base: RuntimeProfileConfig,
+    overlay: RuntimeProfileConfig,
+) -> RuntimeProfileConfig {
+    RuntimeProfileConfig {
+        user_data_dir: overlay.user_data_dir.or(base.user_data_dir),
+        launch: match (base.launch, overlay.launch) {
+            (None, None) => None,
+            (Some(cfg), None) | (None, Some(cfg)) => Some(cfg),
+            (Some(base_launch), Some(overlay_launch)) => Some(RuntimeProfileLaunchConfig {
+                headed: overlay_launch.headed.or(base_launch.headed),
+                executable_path: overlay_launch
+                    .executable_path
+                    .or(base_launch.executable_path),
+                extensions: match (base_launch.extensions, overlay_launch.extensions) {
+                    (Some(mut a), Some(b)) => {
+                        a.extend(b);
+                        Some(a)
+                    }
+                    (a, b) => b.or(a),
+                },
+                profile: overlay_launch.profile.or(base_launch.profile),
+                state: overlay_launch.state.or(base_launch.state),
+                proxy: overlay_launch.proxy.or(base_launch.proxy),
+                proxy_bypass: overlay_launch.proxy_bypass.or(base_launch.proxy_bypass),
+                args: overlay_launch.args.or(base_launch.args),
+                user_agent: overlay_launch.user_agent.or(base_launch.user_agent),
+                ignore_https_errors: overlay_launch
+                    .ignore_https_errors
+                    .or(base_launch.ignore_https_errors),
+                allow_file_access: overlay_launch
+                    .allow_file_access
+                    .or(base_launch.allow_file_access),
+                color_scheme: overlay_launch.color_scheme.or(base_launch.color_scheme),
+                download_path: overlay_launch.download_path.or(base_launch.download_path),
+                engine: overlay_launch.engine.or(base_launch.engine),
+                screenshot_dir: overlay_launch.screenshot_dir.or(base_launch.screenshot_dir),
+                screenshot_quality: overlay_launch
+                    .screenshot_quality
+                    .or(base_launch.screenshot_quality),
+                screenshot_format: overlay_launch
+                    .screenshot_format
+                    .or(base_launch.screenshot_format),
+                no_auto_dialog: overlay_launch.no_auto_dialog.or(base_launch.no_auto_dialog),
+            }),
+        },
+        auth: match (base.auth, overlay.auth) {
+            (None, None) => None,
+            (Some(cfg), None) | (None, Some(cfg)) => Some(cfg),
+            (Some(base_auth), Some(overlay_auth)) => Some(RuntimeProfileAuthConfig {
+                session_name: overlay_auth.session_name.or(base_auth.session_name),
+                manual_login_preferred: overlay_auth
+                    .manual_login_preferred
+                    .or(base_auth.manual_login_preferred),
+            }),
+        },
+        services: merge_service_config_maps(base.services, overlay.services),
+        preferences: match (base.preferences, overlay.preferences) {
+            (None, None) => None,
+            (Some(cfg), None) | (None, Some(cfg)) => Some(cfg),
+            (Some(base_pref), Some(overlay_pref)) => Some(RuntimeProfilePreferencesConfig {
+                wait_for_network_idle: overlay_pref
+                    .wait_for_network_idle
+                    .or(base_pref.wait_for_network_idle),
+                default_viewport: overlay_pref.default_viewport.or(base_pref.default_viewport),
+                annotation_style: overlay_pref.annotation_style.or(base_pref.annotation_style),
+            }),
+        },
+    }
+}
+
+fn selected_runtime_profile_from_sources(args: &[String], config: &Config) -> Option<String> {
+    extract_named_value(args, "--runtime-profile")
+        .or_else(|| env::var("AGENT_BROWSER_RUNTIME_PROFILE").ok())
+        .or_else(|| config.runtime_profile.clone())
+        .or_else(|| config.default_runtime_profile.clone())
+}
+
+fn extract_named_value(args: &[String], flag: &str) -> Option<String> {
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == flag {
+            return args.get(i + 1).cloned();
+        }
+        i += 1;
+    }
+    None
+}
+
+fn apply_runtime_profile_overrides(config: &mut Config, runtime_profile_name: &str) {
+    let Some(runtime_profiles) = config.runtime_profiles.as_ref() else {
+        config.runtime_profile = Some(runtime_profile_name.to_string());
+        return;
+    };
+    let Some(runtime_profile) = runtime_profiles.get(runtime_profile_name) else {
+        config.runtime_profile = Some(runtime_profile_name.to_string());
+        return;
+    };
+
+    if config.profile.is_none() {
+        config.profile = runtime_profile.user_data_dir.clone();
+    }
+
+    if let Some(launch) = runtime_profile.launch.as_ref() {
+        config.headed = launch.headed.or(config.headed);
+        config.executable_path = launch
+            .executable_path
+            .clone()
+            .or(config.executable_path.take());
+        config.extensions = match (config.extensions.take(), launch.extensions.clone()) {
+            (Some(mut a), Some(b)) => {
+                a.extend(b);
+                Some(a)
+            }
+            (a, b) => b.or(a),
+        };
+        config.profile = launch.profile.clone().or(config.profile.take());
+        config.state = launch.state.clone().or(config.state.take());
+        config.proxy = launch.proxy.clone().or(config.proxy.take());
+        config.proxy_bypass = launch.proxy_bypass.clone().or(config.proxy_bypass.take());
+        config.args = launch.args.clone().or(config.args.take());
+        config.user_agent = launch.user_agent.clone().or(config.user_agent.take());
+        config.ignore_https_errors = launch.ignore_https_errors.or(config.ignore_https_errors);
+        config.allow_file_access = launch.allow_file_access.or(config.allow_file_access);
+        config.color_scheme = launch.color_scheme.clone().or(config.color_scheme.take());
+        config.download_path = launch.download_path.clone().or(config.download_path.take());
+        config.engine = launch.engine.clone().or(config.engine.take());
+        config.screenshot_dir = launch
+            .screenshot_dir
+            .clone()
+            .or(config.screenshot_dir.take());
+        config.screenshot_quality = launch.screenshot_quality.or(config.screenshot_quality);
+        config.screenshot_format = launch
+            .screenshot_format
+            .clone()
+            .or(config.screenshot_format.take());
+        config.no_auto_dialog = launch.no_auto_dialog.or(config.no_auto_dialog);
+    }
+
+    if let Some(auth) = runtime_profile.auth.as_ref() {
+        config.session_name = auth.session_name.clone().or(config.session_name.take());
+    }
+
+    config.runtime_profile = Some(runtime_profile_name.to_string());
+}
+
+fn manual_login_preferred_services(config: &Config) -> Vec<String> {
+    let mut services = config.service_defaults.clone().unwrap_or_default();
+
+    if let Some(runtime_profile_name) = config.runtime_profile.as_deref() {
+        if let Some(runtime_services) = config
+            .runtime_profiles
+            .as_ref()
+            .and_then(|profiles| profiles.get(runtime_profile_name))
+            .and_then(|profile| profile.services.clone())
+        {
+            services = merge_service_config_maps(Some(services), Some(runtime_services))
+                .unwrap_or_default();
+        }
+    }
+
+    let mut names = services
+        .into_iter()
+        .filter_map(|(name, service)| {
+            service
+                .manual_login_preferred
+                .unwrap_or(false)
+                .then(|| name.to_ascii_lowercase())
+        })
+        .collect::<Vec<_>>();
+    names.sort();
+    names.dedup();
+    names
+}
+
 fn read_config_file(path: &Path) -> Option<Config> {
     let content = fs::read_to_string(path).ok()?;
     match serde_json::from_str::<Config>(&content) {
@@ -160,6 +453,107 @@ fn read_config_file(path: &Path) -> Option<Config> {
             None
         }
     }
+}
+
+pub fn user_config_path() -> Result<PathBuf, String> {
+    dirs::home_dir()
+        .map(|d| d.join(CONFIG_DIR).join(CONFIG_FILENAME))
+        .ok_or_else(|| "Could not determine home directory for user config".to_string())
+}
+
+/// Create or update a runtime-profile entry in the user config without
+/// rewriting unrelated config keys.
+pub fn upsert_runtime_profile_in_user_config(
+    runtime_profile_name: &str,
+    user_data_dir: Option<&str>,
+    set_default: bool,
+) -> Result<PathBuf, String> {
+    let path = user_config_path()?;
+    let mut root = match fs::read_to_string(&path) {
+        Ok(raw) => serde_json::from_str::<Value>(&raw).map_err(|e| {
+            format!(
+                "Failed to parse existing user config {}: {}",
+                path.display(),
+                e
+            )
+        })?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => json!({}),
+        Err(e) => {
+            return Err(format!(
+                "Failed to read user config {}: {}",
+                path.display(),
+                e
+            ))
+        }
+    };
+
+    if !root.is_object() {
+        return Err(format!(
+            "User config {} must contain a JSON object",
+            path.display()
+        ));
+    }
+
+    let root_obj = root.as_object_mut().expect("checked above");
+    let runtime_profiles = root_obj
+        .entry("runtimeProfiles")
+        .or_insert_with(|| Value::Object(Map::new()));
+
+    if !runtime_profiles.is_object() {
+        return Err(format!(
+            "User config {} has a non-object runtimeProfiles field",
+            path.display()
+        ));
+    }
+
+    let runtime_profiles_obj = runtime_profiles
+        .as_object_mut()
+        .expect("runtimeProfiles must be object");
+    let profile_entry = runtime_profiles_obj
+        .entry(runtime_profile_name.to_string())
+        .or_insert_with(|| Value::Object(Map::new()));
+
+    if !profile_entry.is_object() {
+        return Err(format!(
+            "User config {} has a non-object runtimeProfiles.{} field",
+            path.display(),
+            runtime_profile_name
+        ));
+    }
+
+    if let Some(user_data_dir) = user_data_dir {
+        profile_entry
+            .as_object_mut()
+            .expect("profile entry must be object")
+            .insert(
+                "userDataDir".to_string(),
+                Value::String(user_data_dir.to_string()),
+            );
+    }
+
+    if set_default {
+        root_obj.insert(
+            "defaultRuntimeProfile".to_string(),
+            Value::String(runtime_profile_name.to_string()),
+        );
+    }
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| {
+            format!(
+                "Failed to create user config directory {}: {}",
+                parent.display(),
+                e
+            )
+        })?;
+    }
+
+    let serialized = serde_json::to_string_pretty(&root)
+        .map_err(|e| format!("Failed to serialize user config: {}", e))?;
+    fs::write(&path, format!("{}\n", serialized))
+        .map_err(|e| format!("Failed to write user config {}: {}", path.display(), e))?;
+
+    Ok(path)
 }
 
 /// Check if a boolean environment variable is set to a truthy value.
@@ -196,6 +590,7 @@ fn parse_bool_arg(args: &[String], i: usize) -> (bool, bool) {
 fn extract_config_path(args: &[String]) -> Option<Option<String>> {
     const FLAGS_WITH_VALUE: &[&str] = &[
         "--session",
+        "--runtime-profile",
         "--headers",
         "--executable-path",
         "--cdp",
@@ -262,10 +657,16 @@ pub fn load_config(args: &[String]) -> Result<Config, String> {
 
     let project_config = read_config_file(&PathBuf::from(PROJECT_CONFIG_FILENAME));
 
-    Ok(match project_config {
+    let mut merged = match project_config {
         Some(project) => user_config.merge(project),
         None => user_config,
-    })
+    };
+
+    if let Some(runtime_profile_name) = selected_runtime_profile_from_sources(args, &merged) {
+        apply_runtime_profile_overrides(&mut merged, &runtime_profile_name);
+    }
+
+    Ok(merged)
 }
 
 pub struct Flags {
@@ -273,6 +674,10 @@ pub struct Flags {
     pub headed: bool,
     pub debug: bool,
     pub session: String,
+    pub default_runtime_profile: Option<String>,
+    pub configured_runtime_profiles: HashMap<String, Option<String>>,
+    pub manual_login_preferred_services: Vec<String>,
+    pub runtime_profile: Option<String>,
     pub headers: Option<String>,
     pub executable_path: Option<String>,
     pub cdp: Option<String>,
@@ -323,6 +728,7 @@ pub struct Flags {
     pub cli_annotate: bool,
     pub cli_download_path: bool,
     pub cli_headed: bool,
+    pub cli_runtime_profile: bool,
 }
 
 pub fn parse_flags(args: &[String]) -> Flags {
@@ -330,6 +736,19 @@ pub fn parse_flags(args: &[String]) -> Flags {
         eprintln!("{} {}", color::warning_indicator(), e);
         std::process::exit(1);
     });
+
+    let default_runtime_profile = config.default_runtime_profile.clone();
+    let configured_runtime_profiles = config
+        .runtime_profiles
+        .as_ref()
+        .map(|profiles| {
+            profiles
+                .iter()
+                .map(|(name, profile)| (name.clone(), profile.user_data_dir.clone()))
+                .collect::<HashMap<_, _>>()
+        })
+        .unwrap_or_default();
+    let manual_login_preferred_services = manual_login_preferred_services(&config);
 
     let extensions_env = env::var("AGENT_BROWSER_EXTENSIONS")
         .ok()
@@ -355,6 +774,12 @@ pub fn parse_flags(args: &[String]) -> Flags {
             .ok()
             .or(config.session)
             .unwrap_or_else(|| "default".to_string()),
+        default_runtime_profile,
+        configured_runtime_profiles,
+        manual_login_preferred_services,
+        runtime_profile: env::var("AGENT_BROWSER_RUNTIME_PROFILE")
+            .ok()
+            .or(config.runtime_profile),
         headers: config.headers,
         executable_path: env::var("AGENT_BROWSER_EXECUTABLE_PATH")
             .ok()
@@ -459,6 +884,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
         cli_annotate: false,
         cli_download_path: false,
         cli_headed: false,
+        cli_runtime_profile: false,
     };
 
     let mut i = 0;
@@ -489,6 +915,13 @@ pub fn parse_flags(args: &[String]) -> Flags {
             "--session" => {
                 if let Some(s) = args.get(i + 1) {
                     flags.session = s.clone();
+                    i += 1;
+                }
+            }
+            "--runtime-profile" => {
+                if let Some(s) = args.get(i + 1) {
+                    flags.runtime_profile = Some(s.clone());
+                    flags.cli_runtime_profile = true;
                     i += 1;
                 }
             }
@@ -775,6 +1208,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
     // Global flags that always take a value (need to skip the next arg too)
     const GLOBAL_FLAGS_WITH_VALUE: &[&str] = &[
         "--session",
+        "--runtime-profile",
         "--headers",
         "--executable-path",
         "--cdp",
@@ -835,6 +1269,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::EnvGuard;
 
     fn args(s: &str) -> Vec<String> {
         s.split_whitespace().map(String::from).collect()
@@ -1063,6 +1498,19 @@ mod tests {
     #[test]
     fn test_config_deserialize_full() {
         let json = r#"{
+            "defaultRuntimeProfile": "work",
+            "runtimeProfiles": {
+                "work": {
+                    "userDataDir": "/tmp/work-profile",
+                    "launch": {
+                        "headed": true,
+                        "proxy": "http://runtime-proxy:8080"
+                    },
+                    "auth": {
+                        "sessionName": "runtime-session"
+                    }
+                }
+            },
             "headed": true,
             "json": true,
             "debug": true,
@@ -1085,6 +1533,11 @@ mod tests {
             "headers": "{\"Auth\":\"token\"}"
         }"#;
         let config: Config = serde_json::from_str(json).unwrap();
+        assert_eq!(config.default_runtime_profile.as_deref(), Some("work"));
+        assert!(config
+            .runtime_profiles
+            .as_ref()
+            .is_some_and(|m| m.contains_key("work")));
         assert_eq!(config.headed, Some(true));
         assert_eq!(config.json, Some(true));
         assert_eq!(config.debug, Some(true));
@@ -1139,12 +1592,30 @@ mod tests {
     #[test]
     fn test_config_merge_project_overrides_user() {
         let user = Config {
+            runtime_profiles: Some(HashMap::from([(
+                "default".to_string(),
+                RuntimeProfileConfig {
+                    user_data_dir: Some("/user/runtime".to_string()),
+                    ..RuntimeProfileConfig::default()
+                },
+            )])),
             headed: Some(true),
             proxy: Some("http://user-proxy:8080".to_string()),
             profile: Some("/user/profile".to_string()),
             ..Config::default()
         };
         let project = Config {
+            runtime_profiles: Some(HashMap::from([(
+                "default".to_string(),
+                RuntimeProfileConfig {
+                    launch: Some(RuntimeProfileLaunchConfig {
+                        headed: Some(false),
+                        proxy: Some("http://runtime-proxy:9090".to_string()),
+                        ..RuntimeProfileLaunchConfig::default()
+                    }),
+                    ..RuntimeProfileConfig::default()
+                },
+            )])),
             proxy: Some("http://project-proxy:9090".to_string()),
             debug: Some(true),
             ..Config::default()
@@ -1154,6 +1625,139 @@ mod tests {
         assert_eq!(merged.proxy.as_deref(), Some("http://project-proxy:9090")); // overridden by project
         assert_eq!(merged.profile.as_deref(), Some("/user/profile")); // kept from user
         assert_eq!(merged.debug, Some(true)); // added by project
+        let runtime = merged
+            .runtime_profiles
+            .as_ref()
+            .and_then(|m| m.get("default"))
+            .unwrap();
+        assert_eq!(runtime.user_data_dir.as_deref(), Some("/user/runtime"));
+        assert_eq!(
+            runtime.launch.as_ref().and_then(|l| l.proxy.as_deref()),
+            Some("http://runtime-proxy:9090")
+        );
+    }
+
+    #[test]
+    fn test_apply_runtime_profile_overrides_sets_launch_fields() {
+        let mut config = Config {
+            runtime_profiles: Some(HashMap::from([(
+                "work".to_string(),
+                RuntimeProfileConfig {
+                    user_data_dir: Some("/tmp/work-user-data".to_string()),
+                    launch: Some(RuntimeProfileLaunchConfig {
+                        headed: Some(true),
+                        proxy: Some("http://runtime-proxy:8080".to_string()),
+                        ..RuntimeProfileLaunchConfig::default()
+                    }),
+                    auth: Some(RuntimeProfileAuthConfig {
+                        session_name: Some("runtime-session".to_string()),
+                        manual_login_preferred: Some(true),
+                    }),
+                    ..RuntimeProfileConfig::default()
+                },
+            )])),
+            ..Config::default()
+        };
+
+        apply_runtime_profile_overrides(&mut config, "work");
+        assert_eq!(config.runtime_profile.as_deref(), Some("work"));
+        assert_eq!(config.profile.as_deref(), Some("/tmp/work-user-data"));
+        assert_eq!(config.proxy.as_deref(), Some("http://runtime-proxy:8080"));
+        assert_eq!(config.headed, Some(true));
+        assert_eq!(config.session_name.as_deref(), Some("runtime-session"));
+    }
+
+    #[test]
+    fn test_manual_login_preferred_services_uses_selected_runtime_profile_overlay() {
+        let mut config = Config {
+            default_runtime_profile: Some("work".to_string()),
+            service_defaults: Some(HashMap::from([
+                (
+                    "google".to_string(),
+                    RuntimeProfileServiceConfig {
+                        manual_login_preferred: Some(false),
+                    },
+                ),
+                (
+                    "github".to_string(),
+                    RuntimeProfileServiceConfig {
+                        manual_login_preferred: Some(true),
+                    },
+                ),
+            ])),
+            runtime_profiles: Some(HashMap::from([(
+                "work".to_string(),
+                RuntimeProfileConfig {
+                    services: Some(HashMap::from([(
+                        "google".to_string(),
+                        RuntimeProfileServiceConfig {
+                            manual_login_preferred: Some(true),
+                        },
+                    )])),
+                    ..RuntimeProfileConfig::default()
+                },
+            )])),
+            ..Config::default()
+        };
+
+        apply_runtime_profile_overrides(&mut config, "work");
+        assert_eq!(
+            manual_login_preferred_services(&config),
+            vec!["github".to_string(), "google".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_selected_runtime_profile_from_sources_prefers_arg_then_env_then_config() {
+        let config = Config {
+            runtime_profile: Some("legacy".to_string()),
+            default_runtime_profile: Some("default".to_string()),
+            ..Config::default()
+        };
+        assert_eq!(
+            selected_runtime_profile_from_sources(&args("--runtime-profile work open"), &config)
+                .as_deref(),
+            Some("work")
+        );
+
+        let guard = EnvGuard::new(&["AGENT_BROWSER_RUNTIME_PROFILE"]);
+        guard.set("AGENT_BROWSER_RUNTIME_PROFILE", "env-profile");
+        assert_eq!(
+            selected_runtime_profile_from_sources(&args("open"), &config).as_deref(),
+            Some("env-profile")
+        );
+        guard.remove("AGENT_BROWSER_RUNTIME_PROFILE");
+
+        assert_eq!(
+            selected_runtime_profile_from_sources(&args("open"), &config).as_deref(),
+            Some("legacy")
+        );
+    }
+
+    #[test]
+    fn test_upsert_runtime_profile_in_user_config_creates_profile_and_default() {
+        let temp_home = std::env::temp_dir().join(format!(
+            "agent-browser-config-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_micros()
+        ));
+        std::fs::create_dir_all(&temp_home).unwrap();
+
+        let guard = EnvGuard::new(&["HOME"]);
+        guard.set("HOME", temp_home.to_str().unwrap());
+
+        let path = upsert_runtime_profile_in_user_config("work", Some("/tmp/work-user-data"), true)
+            .unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+
+        assert_eq!(value["defaultRuntimeProfile"], "work");
+        assert_eq!(
+            value["runtimeProfiles"]["work"]["userDataDir"],
+            "/tmp/work-user-data"
+        );
     }
 
     #[test]

@@ -11,6 +11,7 @@ use super::cdp::discovery::discover_cdp_url;
 use super::cdp::lightpanda::{launch_lightpanda, LightpandaLaunchOptions, LightpandaProcess};
 use super::cdp::types::*;
 use super::element::{resolve_element_object_id, RefMap};
+use std::path::Path;
 
 // ---------------------------------------------------------------------------
 // Launch validation
@@ -195,6 +196,20 @@ impl BrowserProcess {
     pub fn pid(&self) -> Option<u32> {
         match self {
             BrowserProcess::Chrome(p) => Some(p.id()),
+            BrowserProcess::Lightpanda(_) => None,
+        }
+    }
+
+    pub fn runtime_profile(&self) -> Option<&str> {
+        match self {
+            BrowserProcess::Chrome(p) => p.runtime_profile(),
+            BrowserProcess::Lightpanda(_) => None,
+        }
+    }
+
+    pub fn user_data_dir(&self) -> Option<&Path> {
+        match self {
+            BrowserProcess::Chrome(p) => Some(p.user_data_dir()),
             BrowserProcess::Lightpanda(_) => None,
         }
     }
@@ -1241,6 +1256,18 @@ impl BrowserManager {
     /// meaningful local browser PID here.
     pub fn browser_pid(&self) -> Option<u32> {
         self.browser_process.as_ref().and_then(|p| p.pid())
+    }
+
+    pub fn runtime_profile_name(&self) -> Option<&str> {
+        self.browser_process
+            .as_ref()
+            .and_then(|p| p.runtime_profile())
+    }
+
+    pub fn browser_user_data_dir(&self) -> Option<&Path> {
+        self.browser_process
+            .as_ref()
+            .and_then(|p| p.user_data_dir())
     }
 
     pub fn visited_origins(&self) -> &HashSet<String> {

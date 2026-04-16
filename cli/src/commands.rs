@@ -129,6 +129,9 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 format!("https://{}", url)
             };
             let mut nav_cmd = json!({ "id": id, "action": "navigate", "url": url });
+            if let Some(service) = manual_login_preferred_service_for_url(&url, flags) {
+                nav_cmd["manualLoginPreferredService"] = json!(service);
+            }
             if flags.provider.is_some() {
                 nav_cmd["waitUntil"] = json!("none");
             }
@@ -1429,6 +1432,45 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
     }
 }
 
+fn manual_login_preferred_service_for_url(url: &str, flags: &Flags) -> Option<String> {
+    if flags.manual_login_preferred_services.is_empty() {
+        return None;
+    }
+
+    let parsed = url::Url::parse(url).ok()?;
+    let host = parsed.host_str()?.to_ascii_lowercase();
+    let path = parsed.path().to_ascii_lowercase();
+
+    flags
+        .manual_login_preferred_services
+        .iter()
+        .find(|service| service_matches_host(service, &host, &path))
+        .cloned()
+}
+
+fn service_matches_host(service: &str, host: &str, path: &str) -> bool {
+    match service {
+        "google" => {
+            host == "accounts.google.com"
+                || host.ends_with(".accounts.google.com")
+                || ((host == "google.com" || host.ends_with(".google.com"))
+                    && (path.contains("signin") || path.contains("login")))
+        }
+        "github" => {
+            host == "github.com"
+                && (path == "/login" || path.starts_with("/login/") || path.contains("sessions"))
+        }
+        "microsoft" | "office365" | "azure" => {
+            matches!(
+                host,
+                "login.microsoftonline.com" | "login.live.com" | "login.microsoft.com"
+            )
+        }
+        "slack" => host == "slack.com" && path.contains("signin"),
+        other => host == other || host.ends_with(&format!(".{}", other)),
+    }
+}
+
 fn parse_diff(rest: &[&str], id: &str) -> Result<Value, ParseError> {
     const VALID: &[&str] = &["snapshot", "screenshot", "url"];
 
@@ -2350,6 +2392,10 @@ mod tests {
     fn default_flags() -> Flags {
         Flags {
             session: "test".to_string(),
+            default_runtime_profile: None,
+            configured_runtime_profiles: std::collections::HashMap::new(),
+            manual_login_preferred_services: Vec::new(),
+            runtime_profile: None,
             json: false,
             headed: false,
             debug: false,
@@ -2381,6 +2427,7 @@ mod tests {
             cli_annotate: false,
             cli_download_path: false,
             cli_headed: false,
+            cli_runtime_profile: false,
             annotate: false,
             color_scheme: None,
             download_path: None,
@@ -2669,6 +2716,24 @@ mod tests {
         let cmd = parse_command(&args("open example.com"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "navigate");
         assert_eq!(cmd["url"], "https://example.com");
+    }
+
+    #[test]
+    fn test_navigate_adds_manual_login_preferred_service_hint_for_login_host() {
+        let mut flags = default_flags();
+        flags.manual_login_preferred_services = vec!["google".to_string()];
+        let cmd = parse_command(&args("open https://accounts.google.com/"), &flags).unwrap();
+        assert_eq!(cmd["action"], "navigate");
+        assert_eq!(cmd["manualLoginPreferredService"], "google");
+    }
+
+    #[test]
+    fn test_navigate_does_not_add_manual_login_preferred_hint_for_normal_service_host() {
+        let mut flags = default_flags();
+        flags.manual_login_preferred_services = vec!["google".to_string()];
+        let cmd = parse_command(&args("open https://gmail.com/"), &flags).unwrap();
+        assert_eq!(cmd["action"], "navigate");
+        assert!(cmd.get("manualLoginPreferredService").is_none());
     }
 
     #[test]
