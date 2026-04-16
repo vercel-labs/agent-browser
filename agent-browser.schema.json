@@ -27,7 +27,7 @@
     "tab": {
       "type": "integer",
       "minimum": 1,
-      "description": "Target a specific tab by stable tabId for this command only. The active tab is restored afterward."
+      "description": "Run this command on a specific tab by stable tabId (peek). The active tab and its element refs (@e1, etc.) are restored afterward. Use the `tab <id>` subcommand instead to switch tabs permanently."
     },
     "executablePath": {
       "type": "string",

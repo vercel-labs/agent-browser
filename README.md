@@ -300,12 +300,25 @@ agent-browser window new              # New window
 Tab IDs are stable and never reused within a session, so agents can keep
 referring to the same tab across commands even if other tabs are opened or
 closed in between. To run a single command against a specific tab without
-changing the active tab, use the global `--tab <id>` flag:
+changing the active tab, use the global `--tab <id>` flag. The active tab and
+its element refs (`@e1`, etc.) are preserved across the peek:
 
 ```bash
 agent-browser tab new https://docs.example.com   # opens and activates tab 2
-agent-browser --tab 1 snapshot                   # peek at tab 1 (tab 2 stays active)
-agent-browser click "#submit"                    # runs on tab 2 as expected
+agent-browser snapshot                           # refs @e1..@eN on tab 2
+agent-browser --tab 1 snapshot                   # peek at tab 1 (tab 2 still active)
+agent-browser click @e1                          # tab 2's refs still work
+```
+
+Use `--tab <id>` to peek (one-off read, then return) and `tab <id>` to switch
+(multiple commands on another tab). Element refs are scoped to the tab they
+were snapshotted on, so if you need to interact with another tab by ref,
+snapshot after switching:
+
+```bash
+agent-browser tab 1                              # switch permanently to tab 1
+agent-browser snapshot                           # refs for tab 1
+agent-browser click @e3                          # uses tab 1's refs
 ```
 
 ### Frames

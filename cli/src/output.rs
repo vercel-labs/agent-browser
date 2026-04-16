@@ -1057,7 +1057,7 @@ Aliases: goto, navigate
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
-  --tab <id>           Target specific tab ID
+  --tab <id>           Run on tab <id> (peek; active tab restored)
   --headers <json>     Set HTTP headers (scoped to this origin)
   --headed             Show browser window
 
@@ -1081,7 +1081,7 @@ the browser's back button.
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
-  --tab <id>           Target specific tab ID
+  --tab <id>           Run on tab <id> (peek; active tab restored)
 
 Examples:
   agent-browser back
@@ -1099,7 +1099,7 @@ the browser's forward button.
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
-  --tab <id>           Target specific tab ID
+  --tab <id>           Run on tab <id> (peek; active tab restored)
 
 Examples:
   agent-browser forward
@@ -1117,7 +1117,7 @@ the browser's reload button.
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
-  --tab <id>           Target specific tab ID
+  --tab <id>           Run on tab <id> (peek; active tab restored)
 
 Examples:
   agent-browser reload
@@ -1141,7 +1141,7 @@ Options:
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
-  --tab <id>           Target specific tab ID
+  --tab <id>           Run on tab <id> (peek; active tab restored)
 
 Examples:
   agent-browser click "#submit-button"
@@ -1163,7 +1163,7 @@ or triggering double-click handlers.
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
-  --tab <id>           Target specific tab ID
+  --tab <id>           Run on tab <id> (peek; active tab restored)
 
 Examples:
   agent-browser dblclick "#editable-text"
@@ -1182,7 +1182,7 @@ This replaces any existing content in the field.
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
-  --tab <id>           Target specific tab ID
+  --tab <id>           Run on tab <id> (peek; active tab restored)
 
 Examples:
   agent-browser fill "#email" "user@example.com"
@@ -1202,7 +1202,7 @@ Unlike fill, this does not clear existing content first.
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
-  --tab <id>           Target specific tab ID
+  --tab <id>           Run on tab <id> (peek; active tab restored)
 
 Examples:
   agent-browser type "#search" "hello"
@@ -1226,7 +1226,7 @@ triggering hover states or dropdown menus.
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
-  --tab <id>           Target specific tab ID
+  --tab <id>           Run on tab <id> (peek; active tab restored)
 
 Examples:
   agent-browser hover "#dropdown-trigger"
@@ -1244,7 +1244,7 @@ Sets keyboard focus to the specified element.
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
-  --tab <id>           Target specific tab ID
+  --tab <id>           Run on tab <id> (peek; active tab restored)
 
 Examples:
   agent-browser focus "#input-field"
@@ -1262,7 +1262,7 @@ Checks a checkbox element. If already checked, no action is taken.
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
-  --tab <id>           Target specific tab ID
+  --tab <id>           Run on tab <id> (peek; active tab restored)
 
 Examples:
   agent-browser check "#terms-checkbox"
@@ -1280,7 +1280,7 @@ Unchecks a checkbox element. If already unchecked, no action is taken.
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
-  --tab <id>           Target specific tab ID
+  --tab <id>           Run on tab <id> (peek; active tab restored)
 
 Examples:
   agent-browser uncheck "#newsletter-opt-in"
@@ -1298,7 +1298,7 @@ Selects one or more options in a <select> dropdown by value.
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
-  --tab <id>           Target specific tab ID
+  --tab <id>           Run on tab <id> (peek; active tab restored)
 
 Examples:
   agent-browser select "#country" "US"
@@ -1317,7 +1317,7 @@ Drags an element from source to target location.
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
-  --tab <id>           Target specific tab ID
+  --tab <id>           Run on tab <id> (peek; active tab restored)
 
 Examples:
   agent-browser drag "#draggable" "#drop-zone"
@@ -1335,7 +1335,7 @@ Uploads one or more files to a file input element.
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
-  --tab <id>           Target specific tab ID
+  --tab <id>           Run on tab <id> (peek; active tab restored)
 
 Examples:
   agent-browser upload "#file-input" ./document.pdf
@@ -1357,7 +1357,7 @@ Arguments:
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
-  --tab <id>           Target specific tab ID
+  --tab <id>           Run on tab <id> (peek; active tab restored)
 
 Examples:
   agent-browser download "#download-btn" ./file.pdf
@@ -1389,7 +1389,7 @@ Modifiers (combine with +):
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
-  --tab <id>           Target specific tab ID
+  --tab <id>           Run on tab <id> (peek; active tab restored)
 
 Examples:
   agent-browser press Enter
@@ -1411,7 +1411,7 @@ Useful for holding modifier keys.
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
-  --tab <id>           Target specific tab ID
+  --tab <id>           Run on tab <id> (peek; active tab restored)
 
 Examples:
   agent-browser keydown Shift
@@ -1429,7 +1429,7 @@ Releases a key that was pressed with keydown.
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
-  --tab <id>           Target specific tab ID
+  --tab <id>           Run on tab <id> (peek; active tab restored)
 
 Examples:
   agent-browser keyup Shift
@@ -1458,7 +1458,7 @@ directly — it already operates on the current focus.
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
-  --tab <id>           Target specific tab ID
+  --tab <id>           Run on tab <id> (peek; active tab restored)
 
 Examples:
   agent-browser keyboard type "Hello, World!"
@@ -1493,7 +1493,7 @@ Options:
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
-  --tab <id>           Target specific tab ID
+  --tab <id>           Run on tab <id> (peek; active tab restored)
 
 Examples:
   agent-browser scroll
@@ -1516,7 +1516,7 @@ Aliases: scrollinto
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
-  --tab <id>           Target specific tab ID
+  --tab <id>           Run on tab <id> (peek; active tab restored)
 
 Examples:
   agent-browser scrollintoview "#footer"
@@ -1554,7 +1554,7 @@ Wait for text to disappear:
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
-  --tab <id>           Target specific tab ID
+  --tab <id>           Run on tab <id> (peek; active tab restored)
 
 Examples:
   agent-browser wait "#loading-spinner"
@@ -1596,7 +1596,7 @@ Options:
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
-  --tab <id>           Target specific tab ID
+  --tab <id>           Run on tab <id> (peek; active tab restored)
 
 Examples:
   agent-browser screenshot
@@ -1620,7 +1620,7 @@ Saves the current page as a PDF file.
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
-  --tab <id>           Target specific tab ID
+  --tab <id>           Run on tab <id> (peek; active tab restored)
 
 Examples:
   agent-browser pdf ./page.pdf
@@ -1649,7 +1649,7 @@ Options:
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
-  --tab <id>           Target specific tab ID
+  --tab <id>           Run on tab <id> (peek; active tab restored)
 
 Examples:
   agent-browser snapshot
@@ -1676,7 +1676,7 @@ Options:
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
-  --tab <id>           Target specific tab ID
+  --tab <id>           Run on tab <id> (peek; active tab restored)
 
 Examples:
   agent-browser eval "document.title"
@@ -1709,7 +1709,7 @@ Options:
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
-  --tab <id>           Target specific tab ID
+  --tab <id>           Run on tab <id> (peek; active tab restored)
 
 Examples:
   agent-browser close
@@ -1761,7 +1761,7 @@ Subcommands:
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
-  --tab <id>           Target specific tab ID
+  --tab <id>           Run on tab <id> (peek; active tab restored)
 
 Examples:
   agent-browser get text @e1
@@ -1794,7 +1794,7 @@ Subcommands:
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
-  --tab <id>           Target specific tab ID
+  --tab <id>           Run on tab <id> (peek; active tab restored)
 
 Examples:
   agent-browser is visible "#modal"
@@ -1834,7 +1834,7 @@ Options:
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
-  --tab <id>           Target specific tab ID
+  --tab <id>           Run on tab <id> (peek; active tab restored)
 
 Examples:
   agent-browser find role button click --name Submit
@@ -1865,7 +1865,7 @@ Subcommands:
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
-  --tab <id>           Target specific tab ID
+  --tab <id>           Run on tab <id> (peek; active tab restored)
 
 Examples:
   agent-browser mouse move 100 200
@@ -1899,7 +1899,7 @@ Settings:
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
-  --tab <id>           Target specific tab ID
+  --tab <id>           Run on tab <id> (peek; active tab restored)
 
 Examples:
   agent-browser set viewport 1920 1080
@@ -1940,7 +1940,7 @@ Subcommands:
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
-  --tab <id>           Target specific tab ID
+  --tab <id>           Run on tab <id> (peek; active tab restored)
 
 Examples:
   agent-browser network route "**/api/*" --abort
@@ -1978,7 +1978,7 @@ Operations:
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
-  --tab <id>           Target specific tab ID
+  --tab <id>           Run on tab <id> (peek; active tab restored)
 
 Examples:
   agent-browser storage local
@@ -2018,7 +2018,7 @@ for the current page URL.
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
-  --tab <id>           Target specific tab ID
+  --tab <id>           Run on tab <id> (peek; active tab restored)
 
 Examples:
   # Simple cookie for current page
@@ -2062,7 +2062,7 @@ Operations:
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
-  --tab <id>           Target specific tab ID
+  --tab <id>           Run on tab <id> (peek; active tab restored)
 
 Examples:
   agent-browser tab
@@ -2090,7 +2090,7 @@ Operations:
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
-  --tab <id>           Target specific tab ID
+  --tab <id>           Run on tab <id> (peek; active tab restored)
 
 Examples:
   agent-browser window new
@@ -2113,7 +2113,7 @@ Arguments:
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
-  --tab <id>           Target specific tab ID
+  --tab <id>           Run on tab <id> (peek; active tab restored)
 
 Examples:
   agent-browser frame "#embed-iframe"
@@ -2201,7 +2201,7 @@ Operations:
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
-  --tab <id>           Target specific tab ID
+  --tab <id>           Run on tab <id> (peek; active tab restored)
 
 Examples:
   agent-browser dialog accept
@@ -2227,7 +2227,7 @@ Operations:
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
-  --tab <id>           Target specific tab ID
+  --tab <id>           Run on tab <id> (peek; active tab restored)
 
 Examples:
   agent-browser trace start
@@ -2259,7 +2259,7 @@ Start Options:
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
-  --tab <id>           Target specific tab ID
+  --tab <id>           Run on tab <id> (peek; active tab restored)
 
 Examples:
   # Basic profiling
@@ -2299,7 +2299,7 @@ Operations:
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
-  --tab <id>           Target specific tab ID
+  --tab <id>           Run on tab <id> (peek; active tab restored)
 
 Examples:
   # Record from current page (preserves login state)
@@ -2332,7 +2332,7 @@ Options:
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
-  --tab <id>           Target specific tab ID
+  --tab <id>           Run on tab <id> (peek; active tab restored)
 
 Examples:
   agent-browser console
@@ -2353,7 +2353,7 @@ Options:
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
-  --tab <id>           Target specific tab ID
+  --tab <id>           Run on tab <id> (peek; active tab restored)
 
 Examples:
   agent-browser errors
@@ -2373,7 +2373,7 @@ Visually highlights an element on the page for debugging.
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
-  --tab <id>           Target specific tab ID
+  --tab <id>           Run on tab <id> (peek; active tab restored)
 
 Examples:
   agent-browser highlight "#target-element"
@@ -2399,7 +2399,7 @@ Operations:
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
-  --tab <id>           Target specific tab ID
+  --tab <id>           Run on tab <id> (peek; active tab restored)
 
 Examples:
   agent-browser clipboard read
@@ -2439,7 +2439,7 @@ State Encryption:
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
-  --tab <id>           Target specific tab ID
+  --tab <id>           Run on tab <id> (peek; active tab restored)
 
 Examples:
   agent-browser state save ./auth-state.json
@@ -2472,7 +2472,7 @@ Environment:
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
-  --tab <id>           Target specific tab ID
+  --tab <id>           Run on tab <id> (peek; active tab restored)
 
 Examples:
   agent-browser session
@@ -2570,7 +2570,7 @@ Supported URL formats:
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
-  --tab <id>           Target specific tab ID
+  --tab <id>           Run on tab <id> (peek; active tab restored)
 
 Examples:
   # Connect to local Chrome with remote debugging
@@ -2732,7 +2732,7 @@ URL Diff:
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
-  --tab <id>           Target specific tab ID
+  --tab <id>           Run on tab <id> (peek; active tab restored)
 
 Examples:
   agent-browser diff snapshot
@@ -3027,7 +3027,7 @@ Authentication:
 
 Options:
   --session <name>           Isolated session (or AGENT_BROWSER_SESSION env)
-  --tab <id>                 Target specific tab ID for the command
+  --tab <id>                 Run on tab <id> for this command (peek; active tab restored)
   --executable-path <path>   Custom browser executable (or AGENT_BROWSER_EXECUTABLE_PATH)
   --extension <path>         Load browser extensions (repeatable)
   --args <args>              Browser launch args, comma or newline separated (or AGENT_BROWSER_ARGS)

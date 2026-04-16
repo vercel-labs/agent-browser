@@ -175,14 +175,36 @@ agent-browser window new          # New window
 ```
 
 Tab IDs are stable and never reused within a session, so the same `tabId` keeps
-referring to the same tab even when other tabs are opened or closed. For a
-non-intrusive peek at another tab, use the global `--tab <id>` flag; the
-active tab is restored after the command:
+referring to the same tab even when other tabs are opened or closed.
 
-```bash
-agent-browser --tab 1 snapshot    # snapshot tab 1 without switching
-agent-browser --tab 3 click @e1   # click @e1 on tab 3 and return
-```
+### When to use `--tab <id>` vs `tab <id>`
+
+- `--tab <id>` runs one command on the given tab and then restores the
+  previous active tab and its element refs (`@e1`, etc.). Use for read-only
+  peeks at another tab without disturbing the current context:
+
+  ```bash
+  agent-browser --tab 1 snapshot              # read tab 1, active tab preserved
+  agent-browser --tab 3 screenshot out.png    # screenshot tab 3
+  agent-browser --tab 2 cookies get session   # read a cookie from tab 2
+  agent-browser --tab 3 click "#submit"       # click by CSS selector on tab 3
+  ```
+
+- `tab <id>` switches the active tab permanently until the next switch. Use
+  when you need multiple commands on another tab, especially ref-based
+  interactions (`@e1`):
+
+  ```bash
+  agent-browser tab 3            # switch to tab 3
+  agent-browser snapshot         # populate refs for tab 3
+  agent-browser click @e1        # ref click works
+  ```
+
+Element refs (`@eN`) are scoped to the tab that was active when the snapshot
+ran, so `--tab N click @e1` only works if `@e1` was populated on tab N
+earlier and still points there. For most ref-based workflows on a non-active
+tab, prefer a permanent `tab <id>` switch. CSS selectors and role-based
+selectors work with `--tab` without this restriction.
 
 ## Frames
 
