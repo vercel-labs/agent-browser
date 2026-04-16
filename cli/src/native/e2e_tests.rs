@@ -3950,7 +3950,9 @@ async fn e2e_stream_frame_metadata_respects_custom_viewport() {
     .await;
     assert_success(&resp);
 
-    // Wait for a frame message and verify both metadata and actual image dimensions
+    // Wait for a frame whose JPEG dimensions match the custom viewport.
+    // Early frames may arrive before Chrome fully applies the viewport resize,
+    // so skip frames with stale dimensions rather than failing immediately.
     let mut found_frame = false;
     let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(15);
     while tokio::time::Instant::now() < deadline {
@@ -3977,28 +3979,18 @@ async fn e2e_stream_frame_metadata_respects_custom_viewport() {
                 meta
             );
 
-            // Verify the actual JPEG image dimensions match the custom viewport.
             let data_str = parsed
                 .get("data")
                 .and_then(|v| v.as_str())
                 .expect("frame message should include base64-encoded 'data' field");
-            {
-                use base64::Engine;
-                let bytes = base64::engine::general_purpose::STANDARD
-                    .decode(data_str)
-                    .expect("frame data should be valid base64");
-                let (img_w, img_h) = jpeg_dimensions(&bytes)
-                    .expect("frame data should be a valid JPEG with SOF marker");
-                assert_eq!(
-                    img_w, 800,
-                    "JPEG image width should match custom viewport, got: {}",
-                    img_w
-                );
-                assert_eq!(
-                    img_h, 600,
-                    "JPEG image height should match custom viewport, got: {}",
-                    img_h
-                );
+            use base64::Engine;
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(data_str)
+                .expect("frame data should be valid base64");
+            let (img_w, img_h) =
+                jpeg_dimensions(&bytes).expect("frame data should be a valid JPEG with SOF marker");
+            if img_w != 800 || img_h != 600 {
+                continue;
             }
 
             found_frame = true;
@@ -4007,7 +3999,7 @@ async fn e2e_stream_frame_metadata_respects_custom_viewport() {
     }
     assert!(
         found_frame,
-        "should have received at least one frame message with correct viewport metadata"
+        "should have received a frame with JPEG dimensions 800x600 within the deadline"
     );
 
     // Cleanup
