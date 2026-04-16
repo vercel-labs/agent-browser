@@ -296,6 +296,31 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
             println!("{}", count);
             return;
         }
+        // Bounding box (get box)
+        if action == Some("boundingbox") {
+            if let Some(obj) = data.as_object() {
+                let x = obj.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let y = obj.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let w = obj.get("width").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let h = obj.get("height").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                println!("x:      {}", x);
+                println!("y:      {}", y);
+                println!("width:  {}", w);
+                println!("height: {}", h);
+            }
+            return;
+        }
+        // Computed styles (get styles)
+        if let Some(styles) = data.get("styles").and_then(|v| v.as_object()) {
+            for (key, val) in styles {
+                let display = match val.as_str() {
+                    Some(s) => s.to_string(),
+                    None => val.to_string(),
+                };
+                println!("{}: {}", key, display);
+            }
+            return;
+        }
         // Boolean results
         if let Some(visible) = data.get("visible").and_then(|v| v.as_bool()) {
             println!("{}", visible);

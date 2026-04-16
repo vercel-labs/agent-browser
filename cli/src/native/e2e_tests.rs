@@ -3950,7 +3950,9 @@ async fn e2e_stream_frame_metadata_respects_custom_viewport() {
     .await;
     assert_success(&resp);
 
-    // Wait for a frame message and verify both metadata and actual image dimensions
+    // Wait for a frame whose JPEG dimensions match the custom viewport.
+    // Early frames may arrive before Chrome fully applies the viewport resize,
+    // so skip frames with stale dimensions rather than failing immediately.
     let mut found_frame = false;
     let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(15);
     while tokio::time::Instant::now() < deadline {
@@ -3977,28 +3979,18 @@ async fn e2e_stream_frame_metadata_respects_custom_viewport() {
                 meta
             );
 
-            // Verify the actual JPEG image dimensions match the custom viewport.
             let data_str = parsed
                 .get("data")
                 .and_then(|v| v.as_str())
                 .expect("frame message should include base64-encoded 'data' field");
-            {
-                use base64::Engine;
-                let bytes = base64::engine::general_purpose::STANDARD
-                    .decode(data_str)
-                    .expect("frame data should be valid base64");
-                let (img_w, img_h) = jpeg_dimensions(&bytes)
-                    .expect("frame data should be a valid JPEG with SOF marker");
-                assert_eq!(
-                    img_w, 800,
-                    "JPEG image width should match custom viewport, got: {}",
-                    img_w
-                );
-                assert_eq!(
-                    img_h, 600,
-                    "JPEG image height should match custom viewport, got: {}",
-                    img_h
-                );
+            use base64::Engine;
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(data_str)
+                .expect("frame data should be valid base64");
+            let (img_w, img_h) =
+                jpeg_dimensions(&bytes).expect("frame data should be a valid JPEG with SOF marker");
+            if img_w != 800 || img_h != 600 {
+                continue;
             }
 
             found_frame = true;
@@ -4007,7 +3999,7 @@ async fn e2e_stream_frame_metadata_respects_custom_viewport() {
     }
     assert!(
         found_frame,
-        "should have received at least one frame message with correct viewport metadata"
+        "should have received a frame with JPEG dimensions 800x600 within the deadline"
     );
 
     // Cleanup
@@ -4124,6 +4116,87 @@ async fn e2e_upload_with_css_selector() {
     assert_eq!(get_data(&resp)["uploaded"], 1);
 
     let _ = std::fs::remove_file(&tmp);
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+// ---------------------------------------------------------------------------
+// Recording: viewport inheritance
+// ---------------------------------------------------------------------------
+
+/// Verify that `recording_start` inherits the current viewport dimensions
+/// into the newly created recording context. Without this, the recording
+/// context falls back to the default 1280×720 regardless of what the user set.
+#[tokio::test]
+#[ignore]
+async fn e2e_recording_inherits_viewport() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": "data:text/html,<h1>Viewport</h1>" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "viewport", "width": 800, "height": 600 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let tmp_dir = std::env::temp_dir();
+    let rec_path = tmp_dir.join(format!("ab-e2e-rec-viewport-{}.webm", std::process::id()));
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "recording_start", "path": rec_path.to_string_lossy() }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "evaluate", "script": "window.innerWidth" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let rec_width = get_data(&resp)["result"].as_i64().unwrap();
+
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "evaluate", "script": "window.innerHeight" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let rec_height = get_data(&resp)["result"].as_i64().unwrap();
+
+    assert_eq!(
+        rec_width, 800,
+        "Recording context width should be 800 (inherited from viewport), got {rec_width}"
+    );
+    assert_eq!(
+        rec_height, 600,
+        "Recording context height should be 600 (inherited from viewport), got {rec_height}"
+    );
+
+    let resp = execute_command(
+        &json!({ "id": "7", "action": "recording_stop" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let _ = std::fs::remove_file(&rec_path);
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     assert_success(&resp);
 }
