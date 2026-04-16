@@ -57,7 +57,7 @@ pub struct Config {
     pub json: Option<bool>,
     pub debug: Option<bool>,
     pub session: Option<String>,
-    pub tab: Option<u32>,
+    pub tab: Option<String>,
     pub session_name: Option<String>,
     pub executable_path: Option<String>,
     pub extensions: Option<Vec<String>>,
@@ -276,7 +276,7 @@ pub struct Flags {
     pub headed: bool,
     pub debug: bool,
     pub session: String,
-    pub tab: Option<u32>,
+    pub tab: Option<String>,
     pub headers: Option<String>,
     pub executable_path: Option<String>,
     pub cdp: Option<String>,
@@ -499,7 +499,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
             }
             "--tab" => {
                 if let Some(s) = args.get(i + 1) {
-                    flags.tab = s.parse::<u32>().ok();
+                    flags.tab = Some(s.clone());
                     i += 1;
                 }
             }
@@ -1457,21 +1457,34 @@ mod tests {
     // === Tab flag tests ===
 
     #[test]
-    fn test_parse_tab_flag() {
-        let flags = parse_flags(&args("--tab 4 snapshot"));
-        assert_eq!(flags.tab, Some(4));
+    fn test_parse_tab_flag_id() {
+        let flags = parse_flags(&args("--tab t4 snapshot"));
+        assert_eq!(flags.tab.as_deref(), Some("t4"));
+    }
+
+    #[test]
+    fn test_parse_tab_flag_label() {
+        let flags = parse_flags(&args("--tab docs snapshot"));
+        assert_eq!(flags.tab.as_deref(), Some("docs"));
     }
 
     #[test]
     fn test_clean_args_removes_tab_flag() {
-        let cleaned = clean_args(&args("--tab 4 snapshot"));
+        let cleaned = clean_args(&args("--tab t4 snapshot"));
         assert_eq!(cleaned, vec!["snapshot"]);
     }
 
     #[test]
     fn test_parse_tab_config() {
-        let json = r#"{"tab": 4}"#;
+        let json = r#"{"tab": "t4"}"#;
         let config: Config = serde_json::from_str(json).unwrap();
-        assert_eq!(config.tab, Some(4));
+        assert_eq!(config.tab.as_deref(), Some("t4"));
+    }
+
+    #[test]
+    fn test_parse_tab_config_label() {
+        let json = r#"{"tab": "docs"}"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        assert_eq!(config.tab.as_deref(), Some("docs"));
     }
 }

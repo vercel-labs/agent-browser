@@ -188,32 +188,51 @@ agent-browser network har stop [output.har]    # Stop and save HAR (temp path if
 ## Tabs & frames
 
 ```bash
-agent-browser tab                     # List tabs (each row includes a stable tabId)
-agent-browser tab new [url]           # New tab
-agent-browser tab <id>                # Switch to tab by tabId
-agent-browser tab close [id]          # Close tab by tabId (defaults to active)
-agent-browser window new              # Open new browser window
-agent-browser frame <sel>             # Switch to iframe by CSS selector
-agent-browser frame @e3               # Switch to iframe by element ref
-agent-browser frame main              # Back to main frame
+agent-browser tab                              # List tabs (each row shows tabId and label)
+agent-browser tab new [url]                    # New tab
+agent-browser tab new --label docs [url]       # New tab with a user-assigned label
+agent-browser tab <t<N>|label>                 # Switch to a tab by id or label
+agent-browser tab close [t<N>|label]           # Close a tab (defaults to active)
+agent-browser window new                       # Open new browser window
+agent-browser frame <sel>                      # Switch to iframe by CSS selector
+agent-browser frame @e3                        # Switch to iframe by element ref
+agent-browser frame main                       # Back to main frame
 ```
 
-### Stable tab IDs and `--tab`
+### Stable tab ids and `--tab`
 
-Tab IDs are assigned on creation and never reused within a session, so a given
-`tabId` keeps pointing at the same tab even when other tabs are opened or
-closed. The global `--tab <id>` flag runs a single command against a specific
-tab without changing the active tab. The active tab and its element refs
-(`@e1`, etc.) are preserved across the peek:
+Tab ids are stable strings of the form `t1`, `t2`, `t3`. They're never reused
+within a session, so `t2` keeps pointing at the same tab even as other tabs
+are opened or closed. The `t` prefix mirrors the `@e1` element-ref convention
+and is not interchangeable with positional integers — `agent-browser tab 2`
+and `--tab 2` both error with a teaching message; use `t2` instead.
+
+You can also assign a memorable label (`docs`, `app`, `admin`) at tab-creation
+time and use it anywhere an id is accepted:
 
 ```bash
-agent-browser tab new https://docs.example.com   # opens and activates tab 2
-agent-browser snapshot                           # refs @e1..@eN on tab 2
-agent-browser --tab 1 snapshot                   # peek at tab 1; tab 2 still active
-agent-browser click @e1                          # tab 2's refs still work
+agent-browser tab new --label docs https://docs.example.com
+agent-browser tab docs                    # switch by label
+agent-browser --tab docs snapshot         # peek by label
 ```
 
-#### When to use `--tab` vs `tab <id>`
+Labels are never auto-generated and never rewritten on navigation — an agent
+that names a tab `docs` keeps that name until it explicitly closes the tab.
+Labels are unique within a session; creating a second tab with an existing
+label errors.
+
+The global `--tab <t<N>|label>` flag runs a single command against a tab
+without changing the active tab. The active tab and its element refs (`@e1`,
+etc.) are preserved across the peek:
+
+```bash
+agent-browser tab new --label docs https://docs.example.com   # activates t2
+agent-browser snapshot                                        # refs @e1..@eN on t2
+agent-browser --tab t1 snapshot                               # peek t1; t2 still active
+agent-browser click @e1                                       # t2's refs still work
+```
+
+#### When to use `--tab` vs `tab <id|label>`
 
 <table>
   <thead>
@@ -221,12 +240,12 @@ agent-browser click @e1                          # tab 2's refs still work
   </thead>
   <tbody>
     <tr>
-      <td><code>--tab &lt;id&gt;</code></td>
-      <td>Peek: runs one command on tab, then restores the original active tab and its refs.</td>
+      <td><code>--tab &lt;id|label&gt;</code></td>
+      <td>Peek: runs one command on the tab, then restores the original active tab and its refs.</td>
       <td>Reading state from another tab (snapshot, screenshot, url, title, cookies) without disturbing the agent's current context.</td>
     </tr>
     <tr>
-      <td><code>tab &lt;id&gt;</code></td>
+      <td><code>tab &lt;id|label&gt;</code></td>
       <td>Switch: changes the active tab permanently until the next switch.</td>
       <td>Running multiple commands on another tab, or interacting with its elements by ref (which requires snapshotting the active tab first).</td>
     </tr>
@@ -234,14 +253,13 @@ agent-browser click @e1                          # tab 2's refs still work
 </table>
 
 Element refs are scoped to the tab that was active when the snapshot ran, so
-`--tab 3 click @e1` only works if `@e1` was populated on tab 3 before the
-current active tab. For ref-based interaction with another tab, switch to it
-first:
+`--tab docs click @e1` only works if `@e1` was populated on the `docs` tab
+earlier. For ref-based interaction with another tab, switch to it first:
 
 ```bash
-agent-browser tab 1                              # switch permanently
-agent-browser snapshot                           # refs for tab 1
-agent-browser click @e3                          # uses tab 1's refs
+agent-browser tab docs                           # switch permanently
+agent-browser snapshot                           # refs for docs
+agent-browser click @e3                          # uses docs's refs
 ```
 
 ### Iframe support

@@ -738,9 +738,9 @@ fn main() {
         }
     };
 
-    if let Some(tab_id) = flags.tab {
+    if let Some(ref tab_ref) = flags.tab {
         if cmd.get("tabId").is_none() {
-            cmd["tabId"] = json!(tab_id);
+            cmd["tabId"] = json!(tab_ref);
         }
     }
 

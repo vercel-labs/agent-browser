@@ -911,7 +911,7 @@ async fn e2e_tabs() {
     let tabs = get_data(&resp)["tabs"].as_array().unwrap();
     assert_eq!(tabs.len(), 1);
     assert_eq!(tabs[0]["active"], true);
-    assert_eq!(tabs[0]["tabId"], 1, "First tab should have tabId 1");
+    assert_eq!(tabs[0]["tabId"], "t1", "First tab should have tabId t1");
 
     // Open new tab
     let resp = execute_command(
@@ -920,7 +920,11 @@ async fn e2e_tabs() {
     )
     .await;
     assert_success(&resp);
-    assert_eq!(get_data(&resp)["tabId"], 2, "New tab should have tabId 2");
+    assert_eq!(
+        get_data(&resp)["tabId"],
+        "t2",
+        "New tab should have tabId t2"
+    );
     assert_eq!(get_data(&resp)["total"], 2);
 
     // Tab list should show 2 tabs with distinct, incrementing tabIds
@@ -929,12 +933,12 @@ async fn e2e_tabs() {
     let tabs = get_data(&resp)["tabs"].as_array().unwrap();
     assert_eq!(tabs.len(), 2);
     assert_eq!(tabs[1]["active"], true);
-    assert_eq!(tabs[0]["tabId"], 1, "First tab should keep tabId 1");
-    assert_eq!(tabs[1]["tabId"], 2, "Second tab should have tabId 2");
+    assert_eq!(tabs[0]["tabId"], "t1", "First tab should keep tabId t1");
+    assert_eq!(tabs[1]["tabId"], "t2", "Second tab should have tabId t2");
 
     // Switch to first tab
     let resp = execute_command(
-        &json!({ "id": "6", "action": "tab_switch", "tabId": 1 }),
+        &json!({ "id": "6", "action": "tab_switch", "tabId": "t1" }),
         &mut state,
     )
     .await;
@@ -950,7 +954,7 @@ async fn e2e_tabs() {
 
     // Close second tab
     let resp = execute_command(
-        &json!({ "id": "8", "action": "tab_close", "tabId": 2 }),
+        &json!({ "id": "8", "action": "tab_close", "tabId": "t2" }),
         &mut state,
     )
     .await;
@@ -982,7 +986,7 @@ async fn e2e_tab_ids_not_reused() {
     let resp = execute_command(&json!({ "id": "2", "action": "tab_list" }), &mut state).await;
     assert_success(&resp);
     let tabs = get_data(&resp)["tabs"].as_array().unwrap();
-    assert_eq!(tabs[0]["tabId"], 1);
+    assert_eq!(tabs[0]["tabId"], "t1");
 
     // Open tab 2 and tab 3
     let resp = execute_command(
@@ -991,7 +995,7 @@ async fn e2e_tab_ids_not_reused() {
     )
     .await;
     assert_success(&resp);
-    assert_eq!(get_data(&resp)["tabId"], 2);
+    assert_eq!(get_data(&resp)["tabId"], "t2");
 
     let resp = execute_command(
         &json!({ "id": "4", "action": "tab_new", "url": "data:text/html,<h1>Tab 3</h1>" }),
@@ -999,11 +1003,11 @@ async fn e2e_tab_ids_not_reused() {
     )
     .await;
     assert_success(&resp);
-    assert_eq!(get_data(&resp)["tabId"], 3);
+    assert_eq!(get_data(&resp)["tabId"], "t3");
 
     // Close tab 2
     let resp = execute_command(
-        &json!({ "id": "5", "action": "tab_close", "tabId": 2 }),
+        &json!({ "id": "5", "action": "tab_close", "tabId": "t2" }),
         &mut state,
     )
     .await;
@@ -1018,17 +1022,20 @@ async fn e2e_tab_ids_not_reused() {
     assert_success(&resp);
     assert_eq!(
         get_data(&resp)["tabId"],
-        4,
+        "t4",
         "Tab IDs must not be reused after closing"
     );
 
-    // Verify final state: tabs 1, 3, 4
+    // Verify final state: tabs t1, t3, t4
     let resp = execute_command(&json!({ "id": "7", "action": "tab_list" }), &mut state).await;
     assert_success(&resp);
     let tabs = get_data(&resp)["tabs"].as_array().unwrap();
     assert_eq!(tabs.len(), 3);
-    let ids: Vec<i64> = tabs.iter().map(|t| t["tabId"].as_i64().unwrap()).collect();
-    assert_eq!(ids, vec![1, 3, 4]);
+    let ids: Vec<String> = tabs
+        .iter()
+        .map(|t| t["tabId"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(ids, vec!["t1", "t3", "t4"]);
 
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     assert_success(&resp);
@@ -1061,12 +1068,12 @@ async fn e2e_tab_global_targeting() {
     )
     .await;
     assert_success(&resp);
-    assert_eq!(get_data(&resp)["tabId"], 2);
+    assert_eq!(get_data(&resp)["tabId"], "t2");
 
     // Use tabId to evaluate on tab 1 while tab 2 is active
     // (simulates --tab 1 evaluate ...)
     let resp = execute_command(
-        &json!({ "id": "4", "action": "evaluate", "tabId": 1, "script": "document.querySelector('h1').textContent" }),
+        &json!({ "id": "4", "action": "evaluate", "tabId": "t1", "script": "document.querySelector('h1').textContent" }),
         &mut state,
     )
     .await;
@@ -1079,7 +1086,7 @@ async fn e2e_tab_global_targeting() {
 
     // Verify tab 2 content is still accessible
     let resp = execute_command(
-        &json!({ "id": "5", "action": "evaluate", "tabId": 2, "script": "document.querySelector('h1').textContent" }),
+        &json!({ "id": "5", "action": "evaluate", "tabId": "t2", "script": "document.querySelector('h1').textContent" }),
         &mut state,
     )
     .await;
@@ -1128,11 +1135,11 @@ async fn e2e_tab_global_targeting_snapshot() {
     )
     .await;
     assert_success(&resp);
-    assert_eq!(get_data(&resp)["tabId"], 2);
+    assert_eq!(get_data(&resp)["tabId"], "t2");
 
     // Snapshot tab 1 via tabId while tab 2 is active
     let resp = execute_command(
-        &json!({ "id": "4", "action": "snapshot", "tabId": 1 }),
+        &json!({ "id": "4", "action": "snapshot", "tabId": "t1" }),
         &mut state,
     )
     .await;
@@ -1151,7 +1158,7 @@ async fn e2e_tab_global_targeting_snapshot() {
 
     // Snapshot tab 2 via tabId
     let resp = execute_command(
-        &json!({ "id": "5", "action": "snapshot", "tabId": 2 }),
+        &json!({ "id": "5", "action": "snapshot", "tabId": "t2" }),
         &mut state,
     )
     .await;
@@ -1213,7 +1220,7 @@ async fn e2e_tab_global_targeting_snapshot_non_contiguous() {
     )
     .await;
     assert_success(&resp);
-    assert_eq!(get_data(&resp)["tabId"], 2);
+    assert_eq!(get_data(&resp)["tabId"], "t2");
 
     // Open tab 3
     let resp = execute_command(
@@ -1222,11 +1229,11 @@ async fn e2e_tab_global_targeting_snapshot_non_contiguous() {
     )
     .await;
     assert_success(&resp);
-    assert_eq!(get_data(&resp)["tabId"], 3);
+    assert_eq!(get_data(&resp)["tabId"], "t3");
 
     // Close tab 2 to create non-contiguous IDs: [1, 3]
     let resp = execute_command(
-        &json!({ "id": "5", "action": "tab_close", "tabId": 2 }),
+        &json!({ "id": "5", "action": "tab_close", "tabId": "t2" }),
         &mut state,
     )
     .await;
@@ -1237,12 +1244,12 @@ async fn e2e_tab_global_targeting_snapshot_non_contiguous() {
     assert_success(&resp);
     let tabs = get_data(&resp)["tabs"].as_array().unwrap();
     assert_eq!(tabs.len(), 2);
-    assert_eq!(tabs[0]["tabId"], 1);
-    assert_eq!(tabs[1]["tabId"], 3);
+    assert_eq!(tabs[0]["tabId"], "t1");
+    assert_eq!(tabs[1]["tabId"], "t3");
 
     // Switch active tab back to tab 1
     let resp = execute_command(
-        &json!({ "id": "7", "action": "tab_switch", "tabId": 1 }),
+        &json!({ "id": "7", "action": "tab_switch", "tabId": "t1" }),
         &mut state,
     )
     .await;
@@ -1251,7 +1258,7 @@ async fn e2e_tab_global_targeting_snapshot_non_contiguous() {
     // Snapshot tab 3 via tabId while tab 1 is active
     // (simulates: --tab 3 snapshot)
     let resp = execute_command(
-        &json!({ "id": "8", "action": "snapshot", "tabId": 3 }),
+        &json!({ "id": "8", "action": "snapshot", "tabId": "t3" }),
         &mut state,
     )
     .await;
@@ -1270,7 +1277,7 @@ async fn e2e_tab_global_targeting_snapshot_non_contiguous() {
 
     // Snapshot tab 1 via tabId
     let resp = execute_command(
-        &json!({ "id": "9", "action": "snapshot", "tabId": 1 }),
+        &json!({ "id": "9", "action": "snapshot", "tabId": "t1" }),
         &mut state,
     )
     .await;
@@ -1325,10 +1332,10 @@ async fn e2e_tab_scoped_command_preserves_outer_tab_state() {
     )
     .await;
     assert_success(&resp);
-    assert_eq!(get_data(&resp)["tabId"], 2);
+    assert_eq!(get_data(&resp)["tabId"], "t2");
 
     let resp = execute_command(
-        &json!({ "id": "4", "action": "tab_switch", "tabId": 1 }),
+        &json!({ "id": "4", "action": "tab_switch", "tabId": "t1" }),
         &mut state,
     )
     .await;
@@ -1345,7 +1352,7 @@ async fn e2e_tab_scoped_command_preserves_outer_tab_state() {
     // Run a tabId-scoped command. Outer state must be preserved across the
     // peek so subsequent ref-based commands on tab 1 keep working.
     let resp = execute_command(
-        &json!({ "id": "6", "action": "title", "tabId": 2 }),
+        &json!({ "id": "6", "action": "title", "tabId": "t2" }),
         &mut state,
     )
     .await;
@@ -1410,7 +1417,7 @@ async fn e2e_tab_scoped_command_isolates_refs_from_outer_tab() {
     // Snapshot tab 2 is unnecessary; we want to verify tab 1's refs don't
     // bleed through. Switch to tab 1 and populate refs there.
     let resp = execute_command(
-        &json!({ "id": "4", "action": "tab_switch", "tabId": 1 }),
+        &json!({ "id": "4", "action": "tab_switch", "tabId": "t1" }),
         &mut state,
     )
     .await;
@@ -1424,7 +1431,7 @@ async fn e2e_tab_scoped_command_isolates_refs_from_outer_tab() {
     // The scoped command sees an empty ref_map, so this fails cleanly with a
     // ref-resolution error rather than silently clicking something random.
     let resp = execute_command(
-        &json!({ "id": "6", "action": "click", "selector": "@e1", "tabId": 2 }),
+        &json!({ "id": "6", "action": "click", "selector": "@e1", "tabId": "t2" }),
         &mut state,
     )
     .await;
@@ -1473,11 +1480,11 @@ async fn e2e_tab_scoped_command_restores_active_tab() {
     )
     .await;
     assert_success(&resp);
-    assert_eq!(get_data(&resp)["tabId"], 2);
+    assert_eq!(get_data(&resp)["tabId"], "t2");
 
     // Active tab is 2. Peek at tab 1 with a scoped command.
     let resp = execute_command(
-        &json!({ "id": "4", "action": "title", "tabId": 1 }),
+        &json!({ "id": "4", "action": "title", "tabId": "t1" }),
         &mut state,
     )
     .await;
@@ -1556,7 +1563,7 @@ async fn e2e_tab_scoped_command_outer_tab_closed_mid_dispatch() {
             "id": "5",
             "action": "evaluate",
             "script": "window.open('about:blank', '_blank'); 'ok'",
-            "tabId": 2,
+            "tabId": "t2",
         }),
         &mut state,
     )
@@ -1576,7 +1583,7 @@ async fn e2e_tab_scoped_command_outer_tab_closed_mid_dispatch() {
     // Set active tab to tab 2 (the outer for our scoped peek). Previous
     // scoped eval restored to tab 1; bring us back to tab 2 explicitly.
     let resp = execute_command(
-        &json!({ "id": "7", "action": "tab_switch", "tabId": 2 }),
+        &json!({ "id": "7", "action": "tab_switch", "tabId": "t2" }),
         &mut state,
     )
     .await;
@@ -1591,7 +1598,7 @@ async fn e2e_tab_scoped_command_outer_tab_closed_mid_dispatch() {
             "id": "8",
             "action": "evaluate",
             "script": "window.opener && window.opener.close(); 'closed'",
-            "tabId": 3,
+            "tabId": "t3",
         }),
         &mut state,
     )
@@ -1605,10 +1612,13 @@ async fn e2e_tab_scoped_command_outer_tab_closed_mid_dispatch() {
     let resp = execute_command(&json!({ "id": "9", "action": "tab_list" }), &mut state).await;
     assert_success(&resp);
     let tabs = get_data(&resp)["tabs"].as_array().unwrap();
-    let ids: Vec<i64> = tabs.iter().map(|t| t["tabId"].as_i64().unwrap()).collect();
+    let ids: Vec<String> = tabs
+        .iter()
+        .map(|t| t["tabId"].as_str().unwrap().to_string())
+        .collect();
     assert!(
-        !ids.contains(&2),
-        "outer tab 2 should be closed by window.opener.close(): {:?}",
+        !ids.iter().any(|id| id == "t2"),
+        "outer tab t2 should be closed by window.opener.close(): {:?}",
         tabs,
     );
     assert_eq!(state.browser.as_ref().unwrap().active_tab_id(), Some(3));
@@ -1655,7 +1665,7 @@ async fn e2e_tab_close_with_tab_id_closes_active_tab() {
     assert_success(&resp);
 
     let resp = execute_command(
-        &json!({ "id": "4", "action": "tab_close", "tabId": 2 }),
+        &json!({ "id": "4", "action": "tab_close", "tabId": "t2" }),
         &mut state,
     )
     .await;
@@ -1667,6 +1677,178 @@ async fn e2e_tab_close_with_tab_id_closes_active_tab() {
     assert!(state.ref_map.get("e1").is_none());
     assert!(state.iframe_sessions.is_empty());
     assert!(state.active_frame_id.is_none());
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+/// Tabs can be opened with a user-assigned label and then addressed by that
+/// label anywhere a `t<N>` id is accepted. Labels are the agent-friendly way
+/// to write multi-tab workflows without memorizing ids.
+#[tokio::test]
+#[ignore]
+async fn e2e_tab_new_with_label_can_be_switched_and_peeked() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": "data:text/html,<title>Home</title>" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Open a labeled tab and verify the response echoes the label and a
+    // `t<N>` style tabId.
+    let resp = execute_command(
+        &json!({
+            "id": "3",
+            "action": "tab_new",
+            "url": "data:text/html,<title>Docs</title>",
+            "label": "docs",
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["tabId"], "t2");
+    assert_eq!(get_data(&resp)["label"], "docs");
+
+    // tab_list exposes the label alongside the id.
+    let resp = execute_command(&json!({ "id": "4", "action": "tab_list" }), &mut state).await;
+    assert_success(&resp);
+    let tabs = get_data(&resp)["tabs"].as_array().unwrap();
+    let docs = tabs
+        .iter()
+        .find(|t| t["tabId"] == "t2")
+        .expect("docs tab should be present");
+    assert_eq!(docs["label"], "docs");
+
+    // Peek by label via the scoped `tabId` path; active tab (t1) is restored.
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "tab_switch", "tabId": "t1" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "title", "tabId": "docs" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["title"], "Docs");
+
+    // Unscoped `title` reflects the restored active tab (t1).
+    let resp = execute_command(&json!({ "id": "7", "action": "title" }), &mut state).await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["title"], "Home");
+
+    // Permanent switch by label too.
+    let resp = execute_command(
+        &json!({ "id": "8", "action": "tab_switch", "tabId": "docs" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(state.browser.as_ref().unwrap().active_tab_id(), Some(2));
+
+    // Close by label.
+    let resp = execute_command(
+        &json!({ "id": "9", "action": "tab_close", "tabId": "docs" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["label"], "docs");
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+/// Duplicate labels must be rejected so agents can treat a label as a unique
+/// handle. The first tab keeps the label; the second tab's creation errors.
+#[tokio::test]
+#[ignore]
+async fn e2e_tab_new_with_duplicate_label_errors() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "tab_new", "url": "about:blank", "label": "docs" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "tab_new", "url": "about:blank", "label": "docs" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(
+        resp.get("success").and_then(|v| v.as_bool()),
+        Some(false),
+        "duplicate label should error: {}",
+        serde_json::to_string_pretty(&resp).unwrap_or_default()
+    );
+    let err = resp.get("error").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        err.contains("already used"),
+        "error should explain the collision: {}",
+        err
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+/// Positional integers must be rejected by CLI-layer parsing to prevent
+/// confusion with tab indices. The error should teach the user the correct
+/// form (`t<N>`).
+#[tokio::test]
+#[ignore]
+async fn e2e_tab_scoped_command_rejects_bare_integer() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Scoped command with a bare integer `tabId` must error with a teaching
+    // message rather than silently accept or reject quietly.
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "title", "tabId": "2" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(
+        resp.get("success").and_then(|v| v.as_bool()),
+        Some(false),
+        "bare integer tabId should error: {}",
+        serde_json::to_string_pretty(&resp).unwrap_or_default()
+    );
+    let err = resp.get("error").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        err.contains("t2") && err.contains("positional integers"),
+        "error should teach `t<N>` convention: {}",
+        err
+    );
 
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     assert_success(&resp);

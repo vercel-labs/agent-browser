@@ -166,45 +166,64 @@ agent-browser network requests --filter api    # Filter requests
 ## Tabs and Windows
 
 ```bash
-agent-browser tab                 # List tabs (each row includes a stable tabId)
-agent-browser tab new [url]       # New tab
-agent-browser tab 2               # Switch to tab by tabId
-agent-browser tab close           # Close current tab
-agent-browser tab close 2         # Close tab by tabId
-agent-browser window new          # New window
+agent-browser tab                              # List tabs with tabId and label
+agent-browser tab new [url]                    # New tab
+agent-browser tab new --label docs [url]       # New tab with a memorable label
+agent-browser tab t2                           # Switch to tab by id
+agent-browser tab docs                         # Switch to tab by label
+agent-browser tab close                        # Close current tab
+agent-browser tab close t2                     # Close tab by id
+agent-browser tab close docs                   # Close tab by label
+agent-browser window new                       # New window
 ```
 
-Tab IDs are stable and never reused within a session, so the same `tabId` keeps
-referring to the same tab even when other tabs are opened or closed.
+Tab ids are stable strings of the form `t1`, `t2`, `t3`. They're never reused
+within a session, so the same id keeps referring to the same tab across
+commands. Positional integers are **not** accepted — `tab 2` errors with a
+teaching message; use `t2`.
 
-### When to use `--tab <id>` vs `tab <id>`
+User-assigned labels (`docs`, `app`, `admin`) are interchangeable with ids
+everywhere a tab ref is accepted. Labels are the agent-friendly way to write
+multi-tab workflows:
 
-- `--tab <id>` runs one command on the given tab and then restores the
+```bash
+agent-browser tab new --label docs https://docs.example.com
+agent-browser tab new --label app  https://app.example.com
+agent-browser tab docs && agent-browser snapshot   # work on docs
+agent-browser --tab app url                        # peek at app's url
+```
+
+Labels are never auto-generated, never rewritten on navigation, and must be
+unique within a session.
+
+### When to use `--tab <id|label>` vs `tab <id|label>`
+
+- `--tab <id|label>` runs one command on the given tab and then restores the
   previous active tab and its element refs (`@e1`, etc.). Use for read-only
   peeks at another tab without disturbing the current context:
 
   ```bash
-  agent-browser --tab 1 snapshot              # read tab 1, active tab preserved
-  agent-browser --tab 3 screenshot out.png    # screenshot tab 3
-  agent-browser --tab 2 cookies get session   # read a cookie from tab 2
-  agent-browser --tab 3 click "#submit"       # click by CSS selector on tab 3
+  agent-browser --tab t1 snapshot             # read t1, active tab preserved
+  agent-browser --tab docs screenshot out.png # screenshot by label
+  agent-browser --tab app cookies get session # read a cookie from app
+  agent-browser --tab docs click "#submit"    # click by CSS selector on docs
   ```
 
-- `tab <id>` switches the active tab permanently until the next switch. Use
-  when you need multiple commands on another tab, especially ref-based
+- `tab <id|label>` switches the active tab permanently until the next switch.
+  Use when you need multiple commands on another tab, especially ref-based
   interactions (`@e1`):
 
   ```bash
-  agent-browser tab 3            # switch to tab 3
-  agent-browser snapshot         # populate refs for tab 3
+  agent-browser tab docs         # switch to docs
+  agent-browser snapshot         # populate refs for docs
   agent-browser click @e1        # ref click works
   ```
 
 Element refs (`@eN`) are scoped to the tab that was active when the snapshot
-ran, so `--tab N click @e1` only works if `@e1` was populated on tab N
+ran, so `--tab X click @e1` only works if `@e1` was populated on tab X
 earlier and still points there. For most ref-based workflows on a non-active
-tab, prefer a permanent `tab <id>` switch. CSS selectors and role-based
-selectors work with `--tab` without this restriction.
+tab, prefer a permanent `tab <id|label>` switch. CSS selectors and
+role-based selectors work with `--tab` without this restriction.
 
 ## Frames
 
