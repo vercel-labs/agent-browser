@@ -371,6 +371,19 @@ agent-browser install --with-deps     # Also install system deps (Linux)
 agent-browser upgrade                 # Upgrade agent-browser to the latest version
 ```
 
+### Skills
+
+```bash
+agent-browser skills                  # List available skills
+agent-browser skills list             # Same as above
+agent-browser skills get <name>       # Output a skill's full content
+agent-browser skills get <name> --full  # Include references and templates
+agent-browser skills get --all        # Output every skill
+agent-browser skills path [name]      # Print skill directory path
+```
+
+Serves bundled skill content that always matches the installed CLI version. AI agents use this to get current instructions rather than relying on cached copies. Set `AGENT_BROWSER_SKILLS_DIR` to override the skills directory path.
+
 ## Authentication
 
 agent-browser provides multiple ways to persist login sessions so you don't re-authenticate every run.

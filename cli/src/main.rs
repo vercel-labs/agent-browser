@@ -6,6 +6,7 @@ mod flags;
 mod install;
 mod native;
 mod output;
+mod skills;
 #[cfg(test)]
 mod test_utils;
 mod upgrade;
@@ -682,6 +683,12 @@ fn main() {
     // Handle profiles command (doesn't need daemon)
     if clean.first().map(|s| s.as_str()) == Some("profiles") {
         run_profiles(flags.json);
+        return;
+    }
+
+    // Handle skills command (doesn't need daemon)
+    if clean.first().map(|s| s.as_str()) == Some("skills") {
+        skills::run_skills(&clean, flags.json);
         return;
     }
 

@@ -248,6 +248,9 @@ pub struct DaemonState {
     pub engine: String,
     /// Default timeout for wait operations, from AGENT_BROWSER_DEFAULT_TIMEOUT env var.
     pub default_timeout_ms: u64,
+    /// Last viewport settings (width, height, deviceScaleFactor, mobile),
+    /// re-applied to new contexts (e.g., recording).
+    pub viewport: Option<(i32, i32, f64, bool)>,
 }
 
 impl DaemonState {
@@ -301,6 +304,7 @@ impl DaemonState {
                 .ok()
                 .and_then(|s| s.parse::<u64>().ok())
                 .unwrap_or(30_000),
+            viewport: None,
         }
     }
 
@@ -1491,7 +1495,13 @@ async fn connect_auto_with_fresh_tab() -> Result<BrowserManager, String> {
 }
 
 async fn auto_launch(state: &mut DaemonState) -> Result<(), String> {
-    let options = launch_options_from_env();
+    let mut options = launch_options_from_env();
+
+    // Use the stream server's viewport dimensions for --window-size so the
+    // content area matches the desired viewport from the start.
+    if let Some(ref server) = state.stream_server {
+        options.viewport_size = Some(server.viewport().await);
+    }
     let engine = env::var("AGENT_BROWSER_ENGINE").ok();
 
     // Store proxy credentials for Fetch.authRequired handling
@@ -1636,6 +1646,7 @@ fn launch_options_from_env() -> LaunchOptions {
             .unwrap_or(false),
         color_scheme: env::var("AGENT_BROWSER_COLOR_SCHEME").ok(),
         download_path: env::var("AGENT_BROWSER_DOWNLOAD_PATH").ok(),
+        viewport_size: None,
         use_real_keychain: false,
     }
 }
@@ -1744,6 +1755,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
             .get("downloadPath")
             .and_then(|v| v.as_str())
             .map(String::from),
+        viewport_size: None,
         use_real_keychain: false,
     };
 
@@ -3597,7 +3609,7 @@ async fn handle_tab_close(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     mgr.tab_close(index).await
 }
 
-async fn handle_viewport(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+async fn handle_viewport(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let width = cmd.get("width").and_then(|v| v.as_i64()).unwrap_or(1280) as i32;
     let height = cmd.get("height").and_then(|v| v.as_i64()).unwrap_or(720) as i32;
@@ -3608,6 +3620,8 @@ async fn handle_viewport(cmd: &Value, state: &DaemonState) -> Result<Value, Stri
     let mobile = cmd.get("mobile").and_then(|v| v.as_bool()).unwrap_or(false);
 
     mgr.set_viewport(width, height, scale, mobile).await?;
+
+    state.viewport = Some((width, height, scale, mobile));
 
     // Update stream server viewport so status messages and screencast use the new dimensions
     if let Some(ref server) = state.stream_server {
@@ -3864,6 +3878,8 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty());
 
+    let viewport = state.viewport;
+
     let (client, new_session_id) = {
         let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
         let old_session_id = mgr.active_session_id()?.to_string();
@@ -3939,6 +3955,19 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
                 .await;
         }
 
+        // Re-apply HTTPS error ignore to the recording context.
+        // Security.setIgnoreCertificateErrors at launch only applies to the session it was sent on.
+        if mgr.ignore_https_errors {
+            let _ = mgr
+                .client
+                .send_command(
+                    "Security.setIgnoreCertificateErrors",
+                    Some(json!({ "ignore": true })),
+                    Some(&new_session_id),
+                )
+                .await;
+        }
+
         // Transfer cookies to new context
         if let Some(ref cr) = cookies_result {
             if let Some(cookie_arr) = cr.get("cookies").and_then(|v| v.as_array()) {
@@ -3963,6 +3992,10 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
             title: String::new(),
             target_type: "page".to_string(),
         });
+
+        if let Some((w, h, scale, mobile)) = viewport {
+            let _ = mgr.set_viewport(w, h, scale, mobile).await;
+        }
 
         // Navigate to URL
         if nav_url != "about:blank" {
@@ -4640,7 +4673,7 @@ async fn handle_wheel(cmd: &Value, state: &DaemonState) -> Result<Value, String>
     Ok(json!({ "scrolled": true, "deltaX": delta_x, "deltaY": delta_y }))
 }
 
-async fn handle_device(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+async fn handle_device(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let name = cmd
         .get("name")
@@ -4668,6 +4701,8 @@ async fn handle_device(cmd: &Value, state: &DaemonState) -> Result<Value, String
 
     mgr.set_viewport(width, height, scale, mobile).await?;
     mgr.set_user_agent(ua).await?;
+
+    state.viewport = Some((width, height, scale, mobile));
 
     // Update stream server viewport so status messages and screencast use the new dimensions
     if let Some(ref server) = state.stream_server {

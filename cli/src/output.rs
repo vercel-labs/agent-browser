@@ -296,6 +296,31 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
             println!("{}", count);
             return;
         }
+        // Bounding box (get box)
+        if action == Some("boundingbox") {
+            if let Some(obj) = data.as_object() {
+                let x = obj.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let y = obj.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let w = obj.get("width").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let h = obj.get("height").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                println!("x:      {}", x);
+                println!("y:      {}", y);
+                println!("width:  {}", w);
+                println!("height: {}", h);
+            }
+            return;
+        }
+        // Computed styles (get styles)
+        if let Some(styles) = data.get("styles").and_then(|v| v.as_object()) {
+            for (key, val) in styles {
+                let display = match val.as_str() {
+                    Some(s) => s.to_string(),
+                    None => val.to_string(),
+                };
+                println!("{}: {}", key, display);
+            }
+            return;
+        }
         // Boolean results
         if let Some(visible) = data.get("visible").and_then(|v| v.as_bool()) {
             println!("{}", visible);
@@ -2712,6 +2737,40 @@ Examples:
 "##
         }
 
+        "skills" => {
+            r##"
+agent-browser skills - List and retrieve bundled skill content
+
+Usage: agent-browser skills [subcommand] [options]
+
+Subcommands:
+  list                       List all available skills (default)
+  get <name> [name...]       Output a skill's full content
+  get <name> --full          Include references and templates
+  get --all                  Output every skill
+  path [name]                Print filesystem path to skill directory
+
+Options:
+  --json                     Output as JSON
+
+The skills command serves bundled skill content that always matches the
+installed CLI version. Agents should use this to get current instructions
+rather than relying on cached copies.
+
+Examples:
+  agent-browser skills
+  agent-browser skills list
+  agent-browser skills get agent-browser
+  agent-browser skills get electron --full
+  agent-browser skills get --all
+  agent-browser skills path agent-browser
+  agent-browser skills list --json
+
+Environment:
+  AGENT_BROWSER_SKILLS_DIR   Override the skills directory path
+"##
+        }
+
         _ => return false,
     };
     println!("{}", help.trim());
@@ -2843,6 +2902,12 @@ Setup:
   upgrade                    Upgrade to the latest version
   dashboard start            Start the observability dashboard
   profiles                   List available Chrome profiles
+
+Skills:
+  skills [list]              List available skills
+  skills get <name> [--full] Get skill content (--full includes references)
+  skills get --all           Get all skill content
+  skills path [name]         Print skill directory path
 
 Snapshot Options:
   -i, --interactive          Only interactive elements

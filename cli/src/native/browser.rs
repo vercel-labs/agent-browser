@@ -111,6 +111,26 @@ fn update_page_target_info_in_pages(pages: &mut [PageInfo], target: &TargetInfo)
     false
 }
 
+fn active_page_index_after_removal(
+    active_page_index: usize,
+    removed_index: usize,
+    remaining_pages: usize,
+) -> usize {
+    if remaining_pages == 0 {
+        return 0;
+    }
+
+    if removed_index < active_page_index {
+        return active_page_index - 1;
+    }
+
+    if active_page_index >= remaining_pages {
+        return remaining_pages - 1;
+    }
+
+    active_page_index
+}
+
 /// Converts common error messages into AI-friendly, actionable descriptions.
 pub fn to_ai_friendly_error(error: &str) -> String {
     let lower = error.to_lowercase();
@@ -202,6 +222,8 @@ pub struct BrowserManager {
     default_timeout_ms: u64,
     /// Stored download path from launch options, re-applied to new contexts (e.g., recording)
     pub download_path: Option<String>,
+    /// Whether to ignore HTTPS certificate errors, re-applied to new contexts (e.g., recording)
+    pub ignore_https_errors: bool,
     /// Origins visited during this session, used by save_state to collect cross-origin localStorage.
     visited_origins: HashSet<String>,
 }
@@ -273,6 +295,7 @@ impl BrowserManager {
                 active_page_index: 0,
                 default_timeout_ms: 25_000,
                 download_path: download_path.clone(),
+                ignore_https_errors,
                 visited_origins: HashSet::new(),
             };
             manager.discover_and_attach_targets().await?;
@@ -360,6 +383,7 @@ impl BrowserManager {
             active_page_index: 0,
             default_timeout_ms: 25_000,
             download_path: None,
+            ignore_https_errors: false,
             visited_origins: HashSet::new(),
         };
 
@@ -826,6 +850,14 @@ impl BrowserManager {
         }
     }
 
+    fn update_active_page_after_removal(&mut self, removed_index: usize) {
+        self.active_page_index = active_page_index_after_removal(
+            self.active_page_index,
+            removed_index,
+            self.pages.len(),
+        );
+    }
+
     pub fn tab_list(&self) -> Vec<Value> {
         self.pages
             .iter()
@@ -925,6 +957,7 @@ impl BrowserManager {
         }
 
         let page = self.pages.remove(target_index);
+        self.update_active_page_after_removal(target_index);
         let _ = self
             .client
             .send_command_typed::<_, Value>(
@@ -935,10 +968,6 @@ impl BrowserManager {
                 None,
             )
             .await;
-
-        if self.active_page_index >= self.pages.len() {
-            self.active_page_index = self.pages.len() - 1;
-        }
 
         let session_id = self.pages[self.active_page_index].session_id.clone();
         self.enable_domains(&session_id).await?;
@@ -970,6 +999,39 @@ impl BrowserManager {
                 Some(session_id),
             )
             .await?;
+
+        // Screencast captures the actual content area, not the emulated CSS
+        // viewport, so resize the content area to match.
+        if let Ok(target_id) = self.active_target_id() {
+            if let Ok(window_info) = self
+                .client
+                .send_command(
+                    "Browser.getWindowForTarget",
+                    Some(json!({ "targetId": target_id })),
+                    None,
+                )
+                .await
+            {
+                if let Some(window_id) = window_info.get("windowId").and_then(|v| v.as_i64()) {
+                    if let Err(e) = self
+                        .client
+                        .send_command(
+                            "Browser.setContentsSize",
+                            Some(json!({
+                                "windowId": window_id,
+                                "width": width,
+                                "height": height,
+                            })),
+                            None,
+                        )
+                        .await
+                    {
+                        eprintln!("Browser.setContentsSize failed (experimental CDP): {e}");
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -1164,7 +1226,7 @@ impl BrowserManager {
     pub fn remove_page_by_target_id(&mut self, target_id: &str) {
         if let Some(pos) = self.pages.iter().position(|p| p.target_id == target_id) {
             self.pages.remove(pos);
-            self.update_active_page_if_needed();
+            self.update_active_page_after_removal(pos);
         }
     }
 
@@ -1331,6 +1393,7 @@ async fn initialize_lightpanda_manager(
             active_page_index: 0,
             default_timeout_ms: 25_000,
             download_path: None,
+            ignore_https_errors: false,
             visited_origins: HashSet::new(),
         };
 
@@ -1486,6 +1549,26 @@ mod tests {
         assert!(update_page_target_info_in_pages(&mut pages, &target));
         assert_eq!(pages[0].url, "https://example.com/popup");
         assert_eq!(pages[0].title, "Popup");
+    }
+
+    #[test]
+    fn test_active_page_index_after_removal_shifts_when_earlier_tab_is_removed() {
+        assert_eq!(active_page_index_after_removal(2, 0, 3), 1);
+    }
+
+    #[test]
+    fn test_active_page_index_after_removal_keeps_same_slot_when_later_tab_is_removed() {
+        assert_eq!(active_page_index_after_removal(1, 2, 3), 1);
+    }
+
+    #[test]
+    fn test_active_page_index_after_removal_clamps_when_active_last_tab_is_removed() {
+        assert_eq!(active_page_index_after_removal(3, 3, 3), 2);
+    }
+
+    #[test]
+    fn test_active_page_index_after_removal_resets_when_last_page_disappears() {
+        assert_eq!(active_page_index_after_removal(0, 0, 0), 0);
     }
 
     #[test]
