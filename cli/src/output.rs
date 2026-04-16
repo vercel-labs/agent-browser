@@ -2882,6 +2882,20 @@ agent-browser - fast browser automation CLI for AI agents
 
 Usage: agent-browser <command> [args] [options]
 
+Start here (for AI agents):
+  agent-browser skills get agent-browser --full
+
+  Skills ship with the CLI (always version-matched) and include workflow
+  patterns, ref/selector usage, and copy-paste examples. Prefer this over
+  guessing commands from flag docs alone. Specialized skills cover Electron
+  apps, Slack, exploratory testing, and cloud browser providers.
+
+  skills [list]                List available skills
+  skills get <name>            Get a skill's core content (overview + examples)
+  skills get <name> --full     Include references and templates
+  skills get --all             Get every skill
+  skills path [name]           Print skill directory path
+
 Core Commands:
   open <url>                 Navigate to URL
   click <sel>                Click element (or @ref)
@@ -3000,12 +3014,6 @@ Setup:
   upgrade                    Upgrade to the latest version
   dashboard start            Start the observability dashboard
   profiles                   List available Chrome profiles
-
-Skills:
-  skills [list]              List available skills
-  skills get <name> [--full] Get skill content (--full includes references)
-  skills get --all           Get all skill content
-  skills path [name]         Print skill directory path
 
 Snapshot Options:
   -i, --interactive          Only interactive elements
