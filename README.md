@@ -1185,7 +1185,7 @@ Install as a Claude Code skill:
 npx skills add vercel-labs/agent-browser
 ```
 
-This adds the skill to `.claude/skills/agent-browser/SKILL.md` in your project. The skill teaches Claude Code the full agent-browser workflow, including the snapshot-ref interaction pattern, session management, and timeout handling.
+This adds a thin discovery stub at `.claude/skills/agent-browser/SKILL.md`. The stub is intentionally minimal — it points Claude Code at `agent-browser skills get core` to load the actual workflow content at runtime. This way the instructions always match the installed CLI version instead of going stale between releases.
 
 ### AGENTS.md / CLAUDE.md
 

@@ -2829,10 +2829,11 @@ rather than relying on cached copies.
 Examples:
   agent-browser skills
   agent-browser skills list
-  agent-browser skills get agent-browser
+  agent-browser skills get core
+  agent-browser skills get core --full
   agent-browser skills get electron --full
   agent-browser skills get --all
-  agent-browser skills path agent-browser
+  agent-browser skills path core
   agent-browser skills list --json
 
 Environment:
@@ -2854,7 +2855,7 @@ agent-browser - fast browser automation CLI for AI agents
 Usage: agent-browser <command> [args] [options]
 
 Start here (for AI agents):
-  agent-browser skills get agent-browser --full
+  agent-browser skills get core --full
 
   Skills ship with the CLI (always version-matched) and include workflow
   patterns, ref/selector usage, and copy-paste examples. Prefer this over
@@ -2862,9 +2863,9 @@ Start here (for AI agents):
   apps, Slack, exploratory testing, and cloud browser providers.
 
   skills [list]                List available skills
-  skills get <name>            Get a skill's core content (overview + examples)
-  skills get <name> --full     Include references and templates
-  skills get --all             Get every skill
+  skills get core              Core usage guide (overview + common patterns)
+  skills get core --full       Include full command reference and templates
+  skills get <name>            Load a specialized skill (electron, slack, ...)
   skills path [name]           Print skill directory path
 
 Core Commands:
