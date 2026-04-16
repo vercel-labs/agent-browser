@@ -2488,6 +2488,39 @@ Examples:
 "##
         }
 
+        // === Doctor ===
+        "doctor" => {
+            r##"
+agent-browser doctor - Diagnose and repair your install
+
+Usage: agent-browser doctor [options]
+
+Runs a battery of checks across environment, Chrome install, daemon state,
+config files, encryption key, providers, network reachability, and a live
+headless browser launch test.
+
+Auto-cleans stale daemon socket/pid/version sidecar files. Destructive
+repairs (reinstalling Chrome, purging old state files, generating a missing
+encryption key) are gated behind --fix.
+
+Options:
+  --offline            Skip network probes
+  --quick              Skip the live headless launch test
+  --fix                Also run destructive repairs
+  --json               JSON output
+
+Exit codes:
+  0  All checks pass (warnings OK)
+  1  At least one check failed
+
+Examples:
+  agent-browser doctor
+  agent-browser doctor --offline --quick
+  agent-browser doctor --fix
+  agent-browser doctor --json
+"##
+        }
+
         // === Dashboard ===
         "dashboard" => {
             r##"
@@ -2984,6 +3017,7 @@ Setup:
   install                    Install browser binaries
   install --with-deps        Also install system dependencies (Linux)
   upgrade                    Upgrade to the latest version
+  doctor [--fix]             Diagnose install; auto-clean stale files
   dashboard start            Start the observability dashboard
   profiles                   List available Chrome profiles
 

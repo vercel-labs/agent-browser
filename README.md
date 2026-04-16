@@ -388,7 +388,15 @@ agent-browser reload                  # Reload page
 agent-browser install                 # Download Chrome from Chrome for Testing (Google's official automation channel)
 agent-browser install --with-deps     # Also install system deps (Linux)
 agent-browser upgrade                 # Upgrade agent-browser to the latest version
+agent-browser doctor                  # Diagnose the install and auto-clean stale daemon files
+agent-browser doctor --fix            # Also run destructive repairs (reinstall Chrome, purge old state, ...)
+agent-browser doctor --offline --quick  # Skip network probes and the live launch test
 ```
+
+`doctor` checks your environment, Chrome install, daemon state, config files,
+encryption key, providers, network reachability, and runs a live headless
+browser launch test. Stale socket/pid sidecar files are auto-cleaned. Output
+is also available as `--json` for agents.
 
 ### Skills
 

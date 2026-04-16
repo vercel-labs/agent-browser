@@ -379,6 +379,19 @@ agent-browser dashboard start --port <n>  # Start on a specific port
 agent-browser dashboard stop          # Stop the dashboard server
 ```
 
+## Doctor
+
+Diagnose your install, auto-clean stale daemon files, and optionally repair common problems.
+
+```bash
+agent-browser doctor                     # Full diagnosis (env, Chrome, daemons, config, providers, network, launch test)
+agent-browser doctor --offline --quick   # Local-only, fastest
+agent-browser doctor --fix               # Also run destructive repairs (reinstall Chrome, purge old state, ...)
+agent-browser doctor --json              # Structured JSON output for agents
+```
+
+Exit code is `0` if all checks pass (warnings are fine), `1` if any fail. See the [Installation page](/installation#doctor) for the full check catalog.
+
 ## Chat
 
 Use natural language to control the browser via AI. The `chat` command translates instructions into agent-browser commands, executes them, and streams the AI response. Requires `AI_GATEWAY_API_KEY` to be set.

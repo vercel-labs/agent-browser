@@ -331,6 +331,23 @@ agent-browser dialog accept "text"    # accept with prompt input
 agent-browser dialog dismiss          # cancel
 ```
 
+## Diagnosing install issues
+
+If a command fails unexpectedly (`Unknown command`, `Failed to connect`,
+stale daemons, version mismatches after `upgrade`, missing Chrome, etc.)
+run `doctor` before anything else:
+
+```bash
+agent-browser doctor                     # full diagnosis (env, Chrome, daemons, config, providers, network, launch test)
+agent-browser doctor --offline --quick   # fast, local-only
+agent-browser doctor --fix               # also run destructive repairs (reinstall Chrome, purge old state, ...)
+agent-browser doctor --json              # structured output for programmatic consumption
+```
+
+`doctor` auto-cleans stale socket/pid/version sidecar files on every run.
+Destructive actions require `--fix`. Exit code is `0` if all checks pass
+(warnings OK), `1` if any fail.
+
 ## Troubleshooting
 
 **"Ref not found" / "Element not found: @eN"**

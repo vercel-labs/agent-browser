@@ -2,6 +2,7 @@ mod chat;
 mod color;
 mod commands;
 mod connection;
+mod doctor;
 mod flags;
 mod install;
 mod native;
@@ -650,6 +651,18 @@ fn main() {
     if clean.first().map(|s| s.as_str()) == Some("upgrade") {
         run_upgrade();
         return;
+    }
+
+    // Handle doctor separately (doesn't need daemon; spawns its own scratch
+    // session for the live launch test).
+    if clean.first().map(|s| s.as_str()) == Some("doctor") {
+        let opts = doctor::DoctorOptions {
+            offline: args.iter().any(|a| a == "--offline"),
+            quick: args.iter().any(|a| a == "--quick"),
+            fix: args.iter().any(|a| a == "--fix"),
+            json: flags.json,
+        };
+        exit(doctor::run_doctor(opts));
     }
 
     // Handle dashboard subcommand
