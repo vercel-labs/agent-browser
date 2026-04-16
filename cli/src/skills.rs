@@ -10,11 +10,21 @@ struct SkillInfo {
     name: String,
     description: String,
     dir: PathBuf,
+    /// When true, the skill is omitted from `skills list` and `skills get --all`
+    /// but can still be fetched by name via `skills get <name>`. Used for
+    /// bootstrap stubs that exist for external tooling (e.g. `npx skills add`)
+    /// but aren't the intended entry point for agents already inside the CLI.
+    hidden: bool,
 }
 
 /// Skill content is split across two directories:
-/// - `skills/`     — the bootstrap skill (discoverable by npx skills add)
-/// - `skill-data/` — specialized skills (only served by the CLI)
+///
+/// - `skills/` — discovery stubs (picked up by `npx skills add`). Carry
+///   `hidden: true` so they don't show up in `skills list` or `skills get
+///   --all` inside the CLI, since they exist only to redirect external
+///   agents to `skills get core`.
+/// - `skill-data/` — runtime skill content served by the CLI (`core`,
+///   `electron`, `slack`, `dogfood`, etc.).
 ///
 /// Both are shipped in the npm package and searched by `discover_skills`.
 const SKILL_DIRS: &[&str] = &["skills", "skill-data"];
@@ -74,8 +84,8 @@ fn find_skills_dirs() -> Vec<PathBuf> {
         .collect()
 }
 
-/// Parse YAML frontmatter from a SKILL.md file. Returns (name, description).
-fn parse_frontmatter(content: &str) -> Option<(String, String)> {
+/// Parse YAML frontmatter from a SKILL.md file. Returns (name, description, hidden).
+fn parse_frontmatter(content: &str) -> Option<(String, String, bool)> {
     let content = content.trim_start();
     if !content.starts_with("---") {
         return None;
@@ -86,6 +96,7 @@ fn parse_frontmatter(content: &str) -> Option<(String, String)> {
 
     let mut name = None;
     let mut description = None;
+    let mut hidden = false;
 
     let lines: Vec<&str> = frontmatter.lines().collect();
     let mut i = 0;
@@ -104,11 +115,13 @@ fn parse_frontmatter(content: &str) -> Option<(String, String)> {
                 desc.push_str(lines[i].trim());
             }
             description = Some(desc);
+        } else if let Some(val) = line.strip_prefix("hidden:") {
+            hidden = matches!(val.trim(), "true" | "yes");
         }
         i += 1;
     }
 
-    Some((name?, description.unwrap_or_default()))
+    Some((name?, description.unwrap_or_default(), hidden))
 }
 
 /// Discover all skills across the given directories.
@@ -134,11 +147,12 @@ fn discover_skills(dirs: &[PathBuf]) -> Vec<SkillInfo> {
                 Ok(c) => c,
                 Err(_) => continue,
             };
-            if let Some((name, description)) = parse_frontmatter(&content) {
+            if let Some((name, description, hidden)) = parse_frontmatter(&content) {
                 skills.push(SkillInfo {
                     name,
                     description,
                     dir: path,
+                    hidden,
                 });
             }
         }
@@ -198,7 +212,10 @@ fn collect_supplementary_files(skill_dir: &Path) -> Vec<(String, String)> {
 }
 
 fn run_list(skills_dirs: &[PathBuf], json_mode: bool) {
-    let skills = discover_skills(skills_dirs);
+    let skills: Vec<SkillInfo> = discover_skills(skills_dirs)
+        .into_iter()
+        .filter(|s| !s.hidden)
+        .collect();
     if skills.is_empty() {
         if json_mode {
             println!(
@@ -242,7 +259,7 @@ fn run_get(skills_dirs: &[PathBuf], names: &[String], get_all: bool, full: bool,
     let all_skills = discover_skills(skills_dirs);
 
     let targets: Vec<&SkillInfo> = if get_all {
-        all_skills.iter().collect()
+        all_skills.iter().filter(|s| !s.hidden).collect()
     } else {
         let mut targets = Vec::new();
         for name in names {
@@ -490,18 +507,36 @@ mod tests {
     #[test]
     fn test_parse_frontmatter_basic() {
         let content = "---\nname: test-skill\ndescription: A test skill.\n---\n\n# Test\n";
-        let (name, desc) = parse_frontmatter(content).unwrap();
+        let (name, desc, hidden) = parse_frontmatter(content).unwrap();
         assert_eq!(name, "test-skill");
         assert_eq!(desc, "A test skill.");
+        assert!(!hidden);
     }
 
     #[test]
     fn test_parse_frontmatter_multiline_description() {
         let content =
             "---\nname: test\ndescription: First line\n  continued here\n  and here\n---\n";
-        let (name, desc) = parse_frontmatter(content).unwrap();
+        let (name, desc, hidden) = parse_frontmatter(content).unwrap();
         assert_eq!(name, "test");
         assert_eq!(desc, "First line continued here and here");
+        assert!(!hidden);
+    }
+
+    #[test]
+    fn test_parse_frontmatter_hidden_true() {
+        let content = "---\nname: stub\ndescription: A bootstrap stub.\nhidden: true\n---\n";
+        let (name, desc, hidden) = parse_frontmatter(content).unwrap();
+        assert_eq!(name, "stub");
+        assert_eq!(desc, "A bootstrap stub.");
+        assert!(hidden);
+    }
+
+    #[test]
+    fn test_parse_frontmatter_hidden_false() {
+        let content = "---\nname: visible\ndescription: Visible.\nhidden: false\n---\n";
+        let (_, _, hidden) = parse_frontmatter(content).unwrap();
+        assert!(!hidden);
     }
 
     #[test]
