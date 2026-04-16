@@ -1064,16 +1064,14 @@ impl DaemonState {
                                 }
                             }
                         }
-                        "Page.screencastFrame" => {
-                            // Frame broadcasting and acks are handled in real-time by the
-                            // stream server's background CDP event loop. Here we just
-                            // collect acks as a fallback for non-streaming mode.
-                            if self.stream_server.is_none() {
-                                if let Some(sid) =
-                                    event.params.get("sessionId").and_then(|v| v.as_i64())
-                                {
-                                    pending_acks.push(sid);
-                                }
+                        // Frame broadcasting and acks are handled in real-time by the
+                        // stream server's background CDP event loop. Here we just
+                        // collect acks as a fallback for non-streaming mode.
+                        "Page.screencastFrame" if self.stream_server.is_none() => {
+                            if let Some(sid) =
+                                event.params.get("sessionId").and_then(|v| v.as_i64())
+                            {
+                                pending_acks.push(sid);
                             }
                         }
                         "Page.javascriptDialogOpening" => {

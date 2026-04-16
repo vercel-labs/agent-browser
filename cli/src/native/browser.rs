@@ -1302,10 +1302,8 @@ async fn poll_network_idle(
                                 }
                             }
                         }
-                        "Page.loadEventFired" => {
-                            if p.is_empty() {
-                                idle_start = Some(tokio::time::Instant::now());
-                            }
+                        "Page.loadEventFired" if p.is_empty() => {
+                            idle_start = Some(tokio::time::Instant::now());
                         }
                         _ => {}
                     }

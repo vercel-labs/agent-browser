@@ -734,7 +734,7 @@ A [JSON Schema](agent-browser.schema.json) is available for IDE autocomplete and
 
 ```json
 {
-  "$schema": "https://raw.githubusercontent.com/vercel-labs/agent-browser/main/agent-browser.schema.json",
+  "$schema": "https://agent-browser.dev/schema.json",
   "headed": true
 }
 ```
