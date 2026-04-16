@@ -1145,19 +1145,6 @@ impl Drop for DaemonState {
     }
 }
 
-/// Outer-tab state saved across a `--tab N` scoped command so we can restore
-/// the agent's active tab and its refs/iframe context after the peek.
-///
-/// `tab_id` is `None` when the browser didn't have an active tab at the time
-/// of the switch (e.g. all tabs were closed); in that case we still save and
-/// restore the state fields but skip the `tab_switch_by_id` call.
-struct ScopedRestore {
-    tab_id: Option<u32>,
-    ref_map: RefMap,
-    iframe_sessions: HashMap<String, String>,
-    active_frame_id: Option<String>,
-}
-
 pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
     let action = cmd.get("action").and_then(|v| v.as_str()).unwrap_or("");
     let id = cmd
@@ -1288,70 +1275,6 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
             ),
         );
     }
-
-    // Pre-dispatch: if `tabId` is set on a non-tab command, temporarily switch
-    // to that tab for the duration of the command and restore the original
-    // active tab after. This lets `--tab N <cmd>` target a specific tab
-    // without stealing the user's active-tab context.
-    //
-    // We save the outer tab's stable `tab_id` (not its array index) so a tab
-    // close during the scoped command doesn't leave us restoring to a shifted
-    // position. We also save the outer tab's per-tab daemon state
-    // (`ref_map`/`iframe_sessions`/`active_frame_id`) and restore it after so
-    // agents that populated refs on the outer tab can keep using them across a
-    // `--tab N` peek. If the outer tab was closed, we discard both the saved
-    // tab id and the saved state.
-    let scoped_restore: Option<ScopedRestore> = if !matches!(
-        action,
-        "tab_list" | "tab_new" | "tab_switch" | "tab_close" | "launch" | "close"
-    ) {
-        if let Some(tab_ref_str) = cmd.get("tabId").and_then(|v| v.as_str()) {
-            let target_tab_id = match super::browser::TabRef::parse(tab_ref_str) {
-                Ok(tab_ref) => match state
-                    .browser
-                    .as_ref()
-                    .ok_or_else(|| "Browser not launched".to_string())
-                    .and_then(|mgr| mgr.resolve_tab_ref(&tab_ref))
-                {
-                    Ok(id) => id,
-                    Err(e) => return error_response(&id, &e),
-                },
-                Err(e) => return error_response(&id, &e),
-            };
-            let current_tab_id = state.browser.as_ref().and_then(|mgr| mgr.active_tab_id());
-            if current_tab_id == Some(target_tab_id) {
-                // Already on the target tab; no switch, no save/restore.
-                None
-            } else {
-                // Take the outer tab's per-tab state so the scoped command sees
-                // a clean slate and can't resolve outer-tab refs against the
-                // target tab's DOM. `mem::take` replaces with Default, which
-                // is equivalent to clearing.
-                let saved = ScopedRestore {
-                    tab_id: current_tab_id,
-                    ref_map: std::mem::take(&mut state.ref_map),
-                    iframe_sessions: std::mem::take(&mut state.iframe_sessions),
-                    active_frame_id: state.active_frame_id.take(),
-                };
-                if let Some(ref mut mgr) = state.browser {
-                    if let Err(e) = mgr.tab_switch_by_id(target_tab_id).await {
-                        // Restore outer state on switch failure so the caller's
-                        // refs aren't silently dropped on a user error like
-                        // "Tab ID N not found".
-                        state.ref_map = saved.ref_map;
-                        state.iframe_sessions = saved.iframe_sessions;
-                        state.active_frame_id = saved.active_frame_id;
-                        return error_response(&id, &e);
-                    }
-                }
-                Some(saved)
-            }
-        } else {
-            None
-        }
-    } else {
-        None
-    };
 
     let result = match action {
         "launch" => handle_launch(cmd, state).await,
@@ -1510,36 +1433,6 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         "mouseup" => handle_mouseup(cmd, state).await,
         _ => Err(format!("Not yet implemented: {}", action)),
     };
-
-    // Post-dispatch: if we temporarily switched tabs for this command, restore
-    // the outer tab and its per-tab state. If the outer tab was closed during
-    // the scoped command, leave the scoped tab active and clear state.
-    if let Some(saved) = scoped_restore {
-        let restore_tab_id = saved.tab_id;
-        let still_exists = restore_tab_id.is_some_and(|tid| {
-            state
-                .browser
-                .as_ref()
-                .is_some_and(|mgr| mgr.has_tab_id(tid))
-        });
-        if still_exists {
-            // Discard whatever the scoped command populated (it belongs to the
-            // scoped tab) and restore the outer tab's state before switching
-            // back.
-            state.ref_map = saved.ref_map;
-            state.iframe_sessions = saved.iframe_sessions;
-            state.active_frame_id = saved.active_frame_id;
-            if let (Some(ref mut mgr), Some(tid)) = (state.browser.as_mut(), restore_tab_id) {
-                let _ = mgr.tab_switch_by_id(tid).await;
-            }
-        } else {
-            // Outer tab is gone — agents on the scoped tab shouldn't see stale
-            // refs from a tab that no longer exists.
-            state.ref_map.clear();
-            state.iframe_sessions.clear();
-            state.active_frame_id = None;
-        }
-    }
 
     let mut resp = match result {
         Ok(data) => success_response(&id, data),

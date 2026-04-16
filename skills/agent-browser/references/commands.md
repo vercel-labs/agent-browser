@@ -189,41 +189,17 @@ multi-tab workflows:
 ```bash
 agent-browser tab new --label docs https://docs.example.com
 agent-browser tab new --label app  https://app.example.com
-agent-browser tab docs && agent-browser snapshot   # work on docs
-agent-browser --tab app url                        # peek at app's url
+agent-browser tab docs                   # switch to docs
+agent-browser snapshot                   # populate refs for docs
+agent-browser click @e1                  # ref click on docs
+agent-browser tab app                    # switch to app
+agent-browser tab close docs             # close by label
 ```
 
 Labels are never auto-generated, never rewritten on navigation, and must be
-unique within a session.
-
-### When to use `--tab <id|label>` vs `tab <id|label>`
-
-- `--tab <id|label>` runs one command on the given tab and then restores the
-  previous active tab and its element refs (`@e1`, etc.). Use for read-only
-  peeks at another tab without disturbing the current context:
-
-  ```bash
-  agent-browser --tab t1 snapshot             # read t1, active tab preserved
-  agent-browser --tab docs screenshot out.png # screenshot by label
-  agent-browser --tab app cookies get session # read a cookie from app
-  agent-browser --tab docs click "#submit"    # click by CSS selector on docs
-  ```
-
-- `tab <id|label>` switches the active tab permanently until the next switch.
-  Use when you need multiple commands on another tab, especially ref-based
-  interactions (`@e1`):
-
-  ```bash
-  agent-browser tab docs         # switch to docs
-  agent-browser snapshot         # populate refs for docs
-  agent-browser click @e1        # ref click works
-  ```
-
-Element refs (`@eN`) are scoped to the tab that was active when the snapshot
-ran, so `--tab X click @e1` only works if `@e1` was populated on tab X
-earlier and still points there. For most ref-based workflows on a non-active
-tab, prefer a permanent `tab <id|label>` switch. CSS selectors and
-role-based selectors work with `--tab` without this restriction.
+unique within a session. To interact with another tab, switch to it first:
+the daemon maintains a single active tab, so refs (`@eN`) belong to the tab
+that was active when the snapshot ran.
 
 ## Frames
 

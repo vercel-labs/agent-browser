@@ -310,29 +310,10 @@ rewritten on navigation — they're yours to name and keep:
 
 ```bash
 agent-browser tab new --label docs https://docs.example.com
-agent-browser tab docs                   # switch by label
-agent-browser --tab docs snapshot        # peek by label
-```
-
-The global `--tab <t<N>|label>` flag runs one command against a specific
-tab and then restores the active tab and its element refs (`@e1`, etc.):
-
-```bash
-agent-browser tab new --label docs https://docs.example.com    # activates t2
-agent-browser snapshot                                         # refs @e1..@eN on t2
-agent-browser --tab t1 snapshot                                # peek t1; t2 still active
-agent-browser click @e1                                        # t2's refs still work
-```
-
-Use `--tab` to peek (one-off read, then return) and `tab <id|label>` to
-switch (multiple commands on another tab). Element refs are scoped to the
-tab that was active when the snapshot ran, so if you need ref-based
-interaction with another tab, switch permanently first:
-
-```bash
-agent-browser tab docs                           # switch permanently
-agent-browser snapshot                           # refs for docs
-agent-browser click @e3                          # uses docs's refs
+agent-browser tab docs               # switch to the docs tab
+agent-browser snapshot               # populate refs for docs
+agent-browser click @e3              # click uses docs's refs
+agent-browser tab close docs         # close by label
 ```
 
 ### Frames
@@ -648,7 +629,6 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 |--------|-------------|
 | `--session <name>` | Use isolated session (or `AGENT_BROWSER_SESSION` env) |
 | `--session-name <name>` | Auto-save/restore session state (or `AGENT_BROWSER_SESSION_NAME` env) |
-| `--tab <t<N>\|label>` | Target a specific tab by id (`t2`) or label (`docs`) for this command only; the active tab is restored afterward |
 | `--profile <name\|path>` | Chrome profile name or persistent directory path (or `AGENT_BROWSER_PROFILE` env) |
 | `--state <path>` | Load storage state from JSON file (or `AGENT_BROWSER_STATE` env) |
 | `--headers <json>` | Set HTTP headers scoped to the URL's origin |

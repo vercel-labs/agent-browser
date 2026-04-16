@@ -20,12 +20,6 @@ pub struct RefMap {
     next_ref: usize,
 }
 
-impl Default for RefMap {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl RefMap {
     pub fn new() -> Self {
         Self {

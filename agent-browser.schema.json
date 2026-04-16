@@ -24,11 +24,6 @@
       "type": "string",
       "description": "Auto-save/load state persistence name."
     },
-    "tab": {
-      "type": "string",
-      "pattern": "^(t[0-9]+|[a-zA-Z][a-zA-Z0-9_-]*)$",
-      "description": "Run this command on a specific tab (peek). Accepts either a stable tab id (e.g. `t2`) or a user-assigned label (e.g. `docs`). The active tab and its element refs (@e1, etc.) are restored afterward. Use the `tab <id>` subcommand instead to switch tabs permanently. Positional integers are not accepted to avoid confusion with tab indices."
-    },
     "executablePath": {
       "type": "string",
       "description": "Path to a custom browser executable."

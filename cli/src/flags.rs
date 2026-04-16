@@ -57,7 +57,6 @@ pub struct Config {
     pub json: Option<bool>,
     pub debug: Option<bool>,
     pub session: Option<String>,
-    pub tab: Option<String>,
     pub session_name: Option<String>,
     pub executable_path: Option<String>,
     pub extensions: Option<Vec<String>>,
@@ -99,7 +98,6 @@ impl Config {
             json: other.json.or(self.json),
             debug: other.debug.or(self.debug),
             session: other.session.or(self.session),
-            tab: other.tab.or(self.tab),
             session_name: other.session_name.or(self.session_name),
             executable_path: other.executable_path.or(self.executable_path),
             extensions: match (self.extensions, other.extensions) {
@@ -198,7 +196,6 @@ fn parse_bool_arg(args: &[String], i: usize) -> (bool, bool) {
 fn extract_config_path(args: &[String]) -> Option<Option<String>> {
     const FLAGS_WITH_VALUE: &[&str] = &[
         "--session",
-        "--tab",
         "--headers",
         "--executable-path",
         "--cdp",
@@ -276,7 +273,6 @@ pub struct Flags {
     pub headed: bool,
     pub debug: bool,
     pub session: String,
-    pub tab: Option<String>,
     pub headers: Option<String>,
     pub executable_path: Option<String>,
     pub cdp: Option<String>,
@@ -359,7 +355,6 @@ pub fn parse_flags(args: &[String]) -> Flags {
             .ok()
             .or(config.session)
             .unwrap_or_else(|| "default".to_string()),
-        tab: config.tab,
         headers: config.headers,
         executable_path: env::var("AGENT_BROWSER_EXECUTABLE_PATH")
             .ok()
@@ -494,12 +489,6 @@ pub fn parse_flags(args: &[String]) -> Flags {
             "--session" => {
                 if let Some(s) = args.get(i + 1) {
                     flags.session = s.clone();
-                    i += 1;
-                }
-            }
-            "--tab" => {
-                if let Some(s) = args.get(i + 1) {
-                    flags.tab = Some(s.clone());
                     i += 1;
                 }
             }
@@ -786,7 +775,6 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
     // Global flags that always take a value (need to skip the next arg too)
     const GLOBAL_FLAGS_WITH_VALUE: &[&str] = &[
         "--session",
-        "--tab",
         "--headers",
         "--executable-path",
         "--cdp",
@@ -1452,39 +1440,5 @@ mod tests {
         ];
         let clean = clean_args(&input);
         assert_eq!(clean, vec!["open", "example.com"]);
-    }
-
-    // === Tab flag tests ===
-
-    #[test]
-    fn test_parse_tab_flag_id() {
-        let flags = parse_flags(&args("--tab t4 snapshot"));
-        assert_eq!(flags.tab.as_deref(), Some("t4"));
-    }
-
-    #[test]
-    fn test_parse_tab_flag_label() {
-        let flags = parse_flags(&args("--tab docs snapshot"));
-        assert_eq!(flags.tab.as_deref(), Some("docs"));
-    }
-
-    #[test]
-    fn test_clean_args_removes_tab_flag() {
-        let cleaned = clean_args(&args("--tab t4 snapshot"));
-        assert_eq!(cleaned, vec!["snapshot"]);
-    }
-
-    #[test]
-    fn test_parse_tab_config() {
-        let json = r#"{"tab": "t4"}"#;
-        let config: Config = serde_json::from_str(json).unwrap();
-        assert_eq!(config.tab.as_deref(), Some("t4"));
-    }
-
-    #[test]
-    fn test_parse_tab_config_label() {
-        let json = r#"{"tab": "docs"}"#;
-        let config: Config = serde_json::from_str(json).unwrap();
-        assert_eq!(config.tab.as_deref(), Some("docs"));
     }
 }
