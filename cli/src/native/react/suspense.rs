@@ -1,12 +1,11 @@
 //! React Suspense boundary introspection: walker data types, classifier, and
-//! human-readable report. Ported from next-browser `src/suspense.ts`.
+//! human-readable report.
 //!
 //! The classifier labels and recommendations are React-Suspense-general —
 //! they describe what kind of thing is making a boundary suspend (`client-hook`,
 //! `request-api`, `server-fetch`, `cache`, `stream`, `framework`, `unknown`)
-//! and a high-level direction for fixing it. Next.js-specific reasoning about
-//! PPR push vs goto semantics lives in the `nextjs` skill that composes this
-//! primitive.
+//! and a high-level direction for fixing it. Framework-specific reasoning
+//! (e.g. Next.js PPR push vs goto semantics) is left to the caller.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -187,9 +186,9 @@ pub struct StaticBoundarySummary {
     pub rendered_by: Vec<Owner>,
 }
 
-pub fn format_suspense_report(boundaries: &[Boundary]) -> String {
+pub fn format_suspense_report(boundaries: &[Boundary], only_dynamic: bool) -> String {
     let report = analyze_boundaries(boundaries);
-    format_report(&report)
+    format_report(&report, only_dynamic)
 }
 
 fn analyze_boundaries(boundaries: &[Boundary]) -> AnalysisReport {
@@ -519,13 +518,20 @@ fn escape_cell(s: &str) -> String {
     s.replace('|', "\\|")
 }
 
-fn format_report(report: &AnalysisReport) -> String {
+fn format_report(report: &AnalysisReport, only_dynamic: bool) -> String {
     let mut lines: Vec<String> = Vec::new();
     lines.push("# Suspense Boundary Analysis".to_string());
-    lines.push(format!(
-        "# {} boundaries: {} dynamic holes, {} static",
-        report.total_boundaries, report.dynamic_hole_count, report.static_count
-    ));
+    if only_dynamic {
+        lines.push(format!(
+            "# {} dynamic holes (static boundaries hidden; pass without --only-dynamic to see them)",
+            report.dynamic_hole_count
+        ));
+    } else {
+        lines.push(format!(
+            "# {} boundaries: {} dynamic holes, {} static",
+            report.total_boundaries, report.dynamic_hole_count, report.static_count
+        ));
+    }
     lines.push(String::new());
 
     if !report.holes.is_empty() {
@@ -611,7 +617,7 @@ fn format_report(report: &AnalysisReport) -> String {
         }
     }
 
-    if !report.statics.is_empty() {
+    if !only_dynamic && !report.statics.is_empty() {
         lines.push("## Static (not suspended)".to_string());
         for b in &report.statics {
             let name = b.name.clone().unwrap_or_else(|| "(unnamed)".into());

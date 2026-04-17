@@ -1,6 +1,6 @@
 //! React fiber render profiler report formatter.
 //!
-//! Ported from next-browser `rendersStop` CLI output. Default output is the
+//! Default output is the
 //! full agent-readable report (summary, FPS, component table, per-component
 //! "change details (prev -> next)"). `--json` emits the raw structured data
 //! instead.

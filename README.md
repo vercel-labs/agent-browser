@@ -98,7 +98,8 @@ agent-browser find role button click --name "Submit"
 ### Core Commands
 
 ```bash
-agent-browser open <url>              # Navigate to URL (aliases: goto, navigate)
+agent-browser open                    # Launch browser (no navigation); stays on about:blank
+agent-browser open <url>              # Launch + navigate to URL (aliases: goto, navigate)
 agent-browser click <sel>             # Click element (--new-tab to open in new tab)
 agent-browser dblclick <sel>          # Double-click element
 agent-browser focus <sel>             # Focus element
@@ -383,8 +384,27 @@ agent-browser state clean --older-than <days>  # Delete old states
 agent-browser back                    # Go back
 agent-browser forward                 # Go forward
 agent-browser reload                  # Reload page
-agent-browser pushstate <url>         # SPA client-side navigation (history.pushState + popstate)
+agent-browser pushstate <url>         # SPA client-side nav; auto-detects window.next.router.push,
+                                      # falls back to history.pushState + popstate
 ```
+
+### Pre-navigation setup
+
+Some flows (SSR debug, auth cookies for protected origins, init scripts)
+need state set up *before* the first navigation. Use `open` with no URL
+to launch the browser, then stage cookies / routes / init scripts, then
+navigate. `batch` sends it all in one CLI call:
+
+```bash
+agent-browser batch \
+  '["open"]' \
+  '["network","route","*","--abort","--resource-type","script"]' \
+  '["cookies","set","--curl","cookies.curl","--domain","localhost"]' \
+  '["navigate","http://localhost:3000/target"]'
+```
+
+Without `batch` the same sequence is three commands that all reuse the
+same daemon (fast, but not one turn).
 
 ### React / Web Vitals
 
@@ -398,7 +418,8 @@ agent-browser react tree                           # Full component tree
 agent-browser react inspect <fiberId>              # props, hooks, state, source
 agent-browser react renders start                  # Begin fiber render recording
 agent-browser react renders stop [--json]          # Stop and print profile (--json for raw data)
-agent-browser react suspense [--json]              # Suspense boundaries + classifier report
+agent-browser react suspense [--only-dynamic] [--json]  # Suspense boundaries + classifier
+                                                         # --only-dynamic hides the "static" list
 agent-browser vitals [url] [--json]                # LCP/CLS/TTFB/FCP/INP + React hydration phases
 ```
 
@@ -407,12 +428,8 @@ passed at launch (the React DevTools `installHook.js` is embedded in the
 binary). Without it the commands error with `React DevTools hook not installed
 - relaunch with --enable react-devtools`.
 
-For Next.js-specific workflows (PPR shell analysis, runtime prefetching,
-`/_next/mcp` bridge, dev server restart), install the `nextjs` skill:
-
-```bash
-agent-browser skills get nextjs
-```
+Works on any React app — Next.js, Remix, Vite+React, CRA, TanStack Start,
+React Native Web, etc. `vitals` and `pushstate` are framework-agnostic.
 
 ### Init scripts
 

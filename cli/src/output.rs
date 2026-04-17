@@ -1059,27 +1059,41 @@ pub fn print_command_help(command: &str) -> bool {
         // === Navigation ===
         "open" | "goto" | "navigate" => {
             r##"
-agent-browser open - Navigate to a URL
+agent-browser open - Launch the browser, optionally navigate
 
-Usage: agent-browser open <url>
+Usage: agent-browser open [url]
 
-Navigates the browser to the specified URL. If no protocol is provided,
-https:// is automatically prepended.
+Without a URL, launches the browser but stays on about:blank. This lets
+you stage state (network routes, cookies, init scripts) before the first
+real navigation — useful for SSR debug, auth setup, and capturing fresh
+`react suspense` / `vitals` state without noise from a prior page.
 
-Aliases: goto, navigate
+With a URL, launches and navigates. If no protocol is provided, https://
+is automatically prepended.
+
+The `goto` and `navigate` aliases still require a URL.
 
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
   --headers <json>     Set HTTP headers (scoped to this origin)
   --headed             Show browser window
+  --enable react-devtools   Inject the React DevTools hook before any page JS
+  --init-script <path>      Register a page init script (repeatable)
 
 Examples:
+  agent-browser open                     # Launch, no nav
   agent-browser open example.com
   agent-browser open https://github.com
   agent-browser open localhost:3000
   agent-browser open api.example.com --headers '{"Authorization": "Bearer token"}'
     # ^ Headers only sent to api.example.com, not other domains
+
+  # Pre-navigation setup in one turn:
+  agent-browser batch \
+    '["open"]' \
+    '["network","route","*","--abort","--resource-type","script"]' \
+    '["navigate","http://localhost:3000/target"]'
 "##
         }
         "back" => {
@@ -2990,14 +3004,18 @@ React (requires `open --enable react-devtools`):
   react inspect <id>         Inspect one fiber (props, hooks, state, source)
   react renders start        Start recording re-renders via onCommitFiberRoot
   react renders stop [--json] Stop and print render profile
-  react suspense [--json]    Walk Suspense boundaries + classifier report
+  react suspense [--only-dynamic] [--json]
+                             Walk Suspense boundaries + classifier report
+                             --only-dynamic hides the "static" list
 
 Performance:
   vitals [url] [--json]      Core Web Vitals (LCP/CLS/TTFB/FCP/INP) +
                              React hydration timing when profiling build detected
 
 SPA:
-  pushstate <url>            history.pushState + popstate dispatch (framework-agnostic)
+  pushstate <url>            SPA client-side nav. Auto-detects window.next.router.push
+                             (triggers RSC fetch on Next.js); falls back to
+                             history.pushState + popstate/navigate events for other frameworks
 
 Init scripts:
   removeinitscript <id>      Remove a script registered via --init-script or addinitscript

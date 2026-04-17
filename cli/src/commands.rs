@@ -260,10 +260,24 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
         // === Navigation ===
         // Maps to "navigate" action in protocol; reflected in ACTION_CATEGORIES in action-policy.ts
         "open" | "goto" | "navigate" => {
-            let url = rest.first().ok_or_else(|| ParseError::MissingArguments {
-                context: cmd.to_string(),
-                usage: "open <url>",
-            })?;
+            // `open` without a URL launches the browser but stays on
+            // about:blank. Lets agents set up routes, cookies, or init
+            // scripts before the first real navigation (see `batch`).
+            // `goto` and `navigate` still require a URL since those verbs
+            // imply the navigation itself.
+            let first_url = rest.iter().find(|a| !a.starts_with("--"));
+            let url = match first_url {
+                Some(u) => *u,
+                None if cmd == "open" => {
+                    return Ok(json!({ "id": id, "action": "launch", "headless": !flags.headed }));
+                }
+                None => {
+                    return Err(ParseError::MissingArguments {
+                        context: cmd.to_string(),
+                        usage: "goto <url>",
+                    });
+                }
+            };
             let url_lower = url.to_lowercase();
             let url = if url_lower.starts_with("http://")
                 || url_lower.starts_with("https://")
@@ -1729,7 +1743,17 @@ fn parse_react(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                 }),
             }
         }
-        "suspense" => Ok(flag("react_suspense")),
+        "suspense" => {
+            let only_dynamic = rest.contains(&"--only-dynamic");
+            let mut cmd = json!({ "id": id, "action": "react_suspense" });
+            if json_out {
+                cmd["json"] = json!(true);
+            }
+            if only_dynamic {
+                cmd["onlyDynamic"] = json!(true);
+            }
+            Ok(cmd)
+        }
         other => Err(ParseError::UnknownSubcommand {
             subcommand: other.to_string(),
             valid_options: VALID,
@@ -2876,6 +2900,27 @@ mod tests {
     fn test_react_suspense() {
         let cmd = parse_command(&args("react suspense"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "react_suspense");
+        // onlyDynamic defaults to unset; absence means the full report
+        assert!(cmd.get("onlyDynamic").is_none());
+    }
+
+    #[test]
+    fn test_react_suspense_only_dynamic() {
+        let cmd = parse_command(&args("react suspense --only-dynamic"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "react_suspense");
+        assert_eq!(cmd["onlyDynamic"], true);
+    }
+
+    #[test]
+    fn test_react_suspense_only_dynamic_with_json() {
+        let cmd = parse_command(
+            &args("react suspense --only-dynamic --json"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "react_suspense");
+        assert_eq!(cmd["onlyDynamic"], true);
+        assert_eq!(cmd["json"], true);
     }
 
     #[test]
@@ -3131,6 +3176,28 @@ mod tests {
     }
 
     // === Navigation Tests ===
+
+    #[test]
+    fn test_open_without_url_launches() {
+        let cmd = parse_command(&args("open"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "launch");
+        assert_eq!(cmd["headless"], true);
+    }
+
+    #[test]
+    fn test_open_without_url_headed() {
+        let mut flags = default_flags();
+        flags.headed = true;
+        let cmd = parse_command(&args("open"), &flags).unwrap();
+        assert_eq!(cmd["action"], "launch");
+        assert_eq!(cmd["headless"], false);
+    }
+
+    #[test]
+    fn test_goto_still_requires_url() {
+        assert!(parse_command(&args("goto"), &default_flags()).is_err());
+        assert!(parse_command(&args("navigate"), &default_flags()).is_err());
+    }
 
     #[test]
     fn test_navigate_with_https() {

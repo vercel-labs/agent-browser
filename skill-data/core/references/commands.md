@@ -5,16 +5,37 @@ Complete reference for all agent-browser commands. For quick start and common pa
 ## Navigation
 
 ```bash
-agent-browser open <url>      # Navigate to URL (aliases: goto, navigate)
+agent-browser open            # Launch browser (no navigation); stays on about:blank.
+                              # Pair with `network route`, `cookies set --curl`, or
+                              # `addinitscript` to stage state before the first navigation.
+agent-browser open <url>      # Launch + navigate (aliases: goto, navigate)
                               # Supports: https://, http://, file://, about:, data://
                               # Auto-prepends https:// if no protocol given
 agent-browser back            # Go back
 agent-browser forward         # Go forward
 agent-browser reload          # Reload page
-agent-browser pushstate <url> # SPA client-side navigation (history.pushState)
+agent-browser pushstate <url> # SPA client-side navigation. Auto-detects
+                              # window.next.router.push (triggers RSC fetch on Next.js);
+                              # falls back to history.pushState + popstate/navigate events.
 agent-browser close           # Close browser (aliases: quit, exit)
 agent-browser connect 9222    # Connect to browser via CDP port
 ```
+
+### Pre-navigation setup (one-turn batch)
+
+```bash
+agent-browser batch \
+  '["open"]' \
+  '["network","route","*","--abort","--resource-type","script"]' \
+  '["cookies","set","--curl","cookies.curl","--domain","localhost"]' \
+  '["navigate","http://localhost:3000/target"]'
+```
+
+`open` with no URL gives you a clean launch so any interception, cookies,
+or init scripts you register take effect on the *first* real navigation.
+Use for SSR-only debug (`--resource-type script`), protected-origin auth,
+or capturing fresh `react suspense`/`vitals` state without noise from a
+prior page.
 
 ## Snapshot (page analysis)
 
@@ -322,9 +343,10 @@ agent-browser react tree                            # Full component tree
 agent-browser react inspect <fiberId>               # Props, hooks, state, source
 agent-browser react renders start                   # Begin re-render recording
 agent-browser react renders stop [--json]           # Stop and print render profile
-agent-browser react suspense [--json]               # Suspense boundaries + classifier
+agent-browser react suspense [--only-dynamic] [--json]  # Suspense boundaries + classifier
+                                                         # --only-dynamic hides the "static" list
 agent-browser vitals [url] [--json]                 # LCP/CLS/TTFB/FCP/INP + hydration
-agent-browser pushstate <url>                       # SPA client-side navigation
+agent-browser pushstate <url>                       # SPA client-side nav (auto-detects Next router)
 ```
 
 ## Init scripts

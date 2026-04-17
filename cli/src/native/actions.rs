@@ -4826,10 +4826,29 @@ async fn handle_react_suspense(cmd: &Value, state: &DaemonState) -> Result<Value
         .map_err(|e| format!("Failed to parse suspense boundaries: {}", e))?;
 
     let return_json = cmd.get("json").and_then(|v| v.as_bool()).unwrap_or(false);
+    let only_dynamic = cmd
+        .get("onlyDynamic")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     if return_json {
-        Ok(json!({ "boundaries": boundaries_json }))
+        // When only-dynamic is set, filter the JSON payload too so callers
+        // get consistent output regardless of format choice.
+        if only_dynamic {
+            let filtered: Vec<&react::Boundary> = boundaries
+                .iter()
+                .filter(|b| {
+                    b.parent_id != 0
+                        && (b.is_suspended
+                            || !b.suspended_by.is_empty()
+                            || b.unknown_suspenders.is_some())
+                })
+                .collect();
+            Ok(json!({ "boundaries": filtered }))
+        } else {
+            Ok(json!({ "boundaries": boundaries_json }))
+        }
     } else {
-        Ok(json!({ "report": react::format_suspense_report(&boundaries) }))
+        Ok(json!({ "report": react::format_suspense_report(&boundaries, only_dynamic) }))
     }
 }
 

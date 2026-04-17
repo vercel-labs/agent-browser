@@ -9,7 +9,7 @@
 //! Rust binary with no filesystem vendor step at runtime.
 
 /// Build a no-argument async IIFE page-eval that returns the component tree as
-/// JSON. Ported from next-browser `src/tree.ts` `inPageSnapshot`.
+/// JSON.
 pub const TREE_SNAPSHOT: &str = r#"
 (async () => {
   const hook = window.__REACT_DEVTOOLS_GLOBAL_HOOK__;
@@ -95,8 +95,7 @@ pub const TREE_SNAPSHOT: &str = r#"
 })()
 "#;
 
-/// Template for `inspect` — replace {{ID}} with the numeric fiber id. Ported
-/// from next-browser `src/tree.ts` `inPageInspect`.
+/// Template for `inspect` — replace {{ID}} with the numeric fiber id.
 pub const TREE_INSPECT: &str = r#"
 (() => {
   const id = {{ID}};
@@ -158,7 +157,7 @@ pub const TREE_INSPECT: &str = r#"
 
 /// Fiber profiler init script. Registered via `addScriptToEvaluateOnNewDocument`
 /// so it survives navigations; also evaluated immediately on the current page
-/// by `react renders start`. Ported from next-browser `rendersHookScript`.
+/// by `react renders start`.
 pub const RENDERS_INIT: &str = r#"
 (() => {
   const hook = window.__REACT_DEVTOOLS_GLOBAL_HOOK__;
@@ -345,7 +344,7 @@ pub const RENDERS_INIT: &str = r#"
 })()
 "#;
 
-/// Stop script for fiber profiler. Ported from next-browser `rendersStop`.
+/// Stop script for fiber profiler. Returns the collected profile as JSON.
 pub const RENDERS_STOP: &str = r#"
 (() => {
   const active = window.__AB_RENDERS_ACTIVE__;
@@ -427,7 +426,7 @@ pub const RENDERS_STOP: &str = r#"
 })()
 "#;
 
-/// Suspense boundary walker. Ported from next-browser `inPageSuspense`.
+/// Suspense boundary walker. Returns boundaries with suspendedBy metadata as JSON.
 pub const SUSPENSE_WALK: &str = r#"
 (async () => {
   const hook = window.__REACT_DEVTOOLS_GLOBAL_HOOK__;
@@ -719,14 +718,25 @@ pub const VITALS_READ: &str = r#"
 })()
 "#;
 
-/// Generic SPA client-side navigation: history.pushState + popstate dispatch.
-/// Framework-agnostic; works with React Router, TanStack Router, Vue Router,
-/// Solid Router, or any listener wired up to browser history events.
+/// SPA client-side navigation. Tries the framework router first so Next.js
+/// app/pages router triggers an RSC fetch (pure `history.pushState` would
+/// be shallow routing and bypass data loading). Falls back to
+/// `history.pushState` + popstate/navigate events for vanilla pages and
+/// routers that listen to history events (React Router, TanStack Router,
+/// Solid Router, Vue Router).
 pub const PUSHSTATE: &str = r#"
 ((url) => {
   const before = location.href;
   const absolute = new URL(url, before).href;
   if (absolute === before) return before;
+
+  // Next.js pages + app router expose window.next.router with a `push`
+  // method that triggers the RSC fetch and re-render pipeline.
+  const r = typeof window.next === "object" && window.next && window.next.router;
+  if (r && typeof r.push === "function") {
+    try { r.push(url); return location.href; } catch {}
+  }
+
   history.pushState(null, "", absolute);
   try { dispatchEvent(new PopStateEvent("popstate", { state: null })); } catch {}
   try { dispatchEvent(new Event("navigate")); } catch {}
