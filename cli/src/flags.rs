@@ -60,6 +60,8 @@ pub struct Config {
     pub session_name: Option<String>,
     pub executable_path: Option<String>,
     pub extensions: Option<Vec<String>>,
+    pub init_scripts: Option<Vec<String>>,
+    pub enable: Option<Vec<String>>,
     pub profile: Option<String>,
     pub state: Option<String>,
     pub proxy: Option<String>,
@@ -101,6 +103,20 @@ impl Config {
             session_name: other.session_name.or(self.session_name),
             executable_path: other.executable_path.or(self.executable_path),
             extensions: match (self.extensions, other.extensions) {
+                (Some(mut a), Some(b)) => {
+                    a.extend(b);
+                    Some(a)
+                }
+                (a, b) => b.or(a),
+            },
+            init_scripts: match (self.init_scripts, other.init_scripts) {
+                (Some(mut a), Some(b)) => {
+                    a.extend(b);
+                    Some(a)
+                }
+                (a, b) => b.or(a),
+            },
+            enable: match (self.enable, other.enable) {
                 (Some(mut a), Some(b)) => {
                     a.extend(b);
                     Some(a)
@@ -200,6 +216,8 @@ fn extract_config_path(args: &[String]) -> Option<Option<String>> {
         "--executable-path",
         "--cdp",
         "--extension",
+        "--init-script",
+        "--enable",
         "--profile",
         "--state",
         "--proxy",
@@ -277,6 +295,8 @@ pub struct Flags {
     pub executable_path: Option<String>,
     pub cdp: Option<String>,
     pub extensions: Vec<String>,
+    pub init_scripts: Vec<String>,
+    pub enable: Vec<String>,
     pub profile: Option<String>,
     pub state: Option<String>,
     pub proxy: Option<String>,
@@ -313,6 +333,8 @@ pub struct Flags {
     // (as opposed to being set only via environment variables)
     pub cli_executable_path: bool,
     pub cli_extensions: bool,
+    pub cli_init_scripts: bool,
+    pub cli_enable: bool,
     pub cli_profile: bool,
     pub cli_state: bool,
     pub cli_args: bool,
@@ -347,6 +369,38 @@ pub fn parse_flags(args: &[String]) -> Flags {
         config.extensions.unwrap_or_default()
     };
 
+    let init_scripts_env = env::var("AGENT_BROWSER_INIT_SCRIPTS")
+        .ok()
+        .map(|s| {
+            s.split(',')
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let init_scripts = if !init_scripts_env.is_empty() {
+        init_scripts_env
+    } else {
+        config.init_scripts.unwrap_or_default()
+    };
+
+    let enable_env = env::var("AGENT_BROWSER_ENABLE")
+        .ok()
+        .map(|s| {
+            s.split(',')
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let enable = if !enable_env.is_empty() {
+        enable_env
+    } else {
+        config.enable.unwrap_or_default()
+    };
+
     let mut flags = Flags {
         json: env_var_is_truthy("AGENT_BROWSER_JSON") || config.json.unwrap_or(false),
         headed: env_var_is_truthy("AGENT_BROWSER_HEADED") || config.headed.unwrap_or(false),
@@ -361,6 +415,8 @@ pub fn parse_flags(args: &[String]) -> Flags {
             .or(config.executable_path),
         cdp: config.cdp,
         extensions,
+        init_scripts,
+        enable,
         profile: env::var("AGENT_BROWSER_PROFILE").ok().or(config.profile),
         state: env::var("AGENT_BROWSER_STATE").ok().or(config.state),
         proxy: env::var("AGENT_BROWSER_PROXY")
@@ -449,6 +505,8 @@ pub fn parse_flags(args: &[String]) -> Flags {
         quiet: false,
         cli_executable_path: false,
         cli_extensions: false,
+        cli_init_scripts: false,
+        cli_enable: false,
         cli_profile: false,
         cli_state: false,
         cli_args: false,
@@ -522,6 +580,27 @@ pub fn parse_flags(args: &[String]) -> Flags {
                 if let Some(s) = args.get(i + 1) {
                     flags.extensions.push(s.clone());
                     flags.cli_extensions = true;
+                    i += 1;
+                }
+            }
+            "--init-script" => {
+                if let Some(s) = args.get(i + 1) {
+                    flags.init_scripts.push(s.clone());
+                    flags.cli_init_scripts = true;
+                    i += 1;
+                }
+            }
+            "--enable" => {
+                if let Some(s) = args.get(i + 1) {
+                    // Allow either repeated --enable foo --enable bar, or
+                    // a single --enable foo,bar comma-list for convenience.
+                    for item in s.split(',') {
+                        let trimmed = item.trim();
+                        if !trimmed.is_empty() {
+                            flags.enable.push(trimmed.to_string());
+                        }
+                    }
+                    flags.cli_enable = true;
                     i += 1;
                 }
             }
@@ -783,6 +862,8 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--executable-path",
         "--cdp",
         "--extension",
+        "--init-script",
+        "--enable",
         "--profile",
         "--state",
         "--proxy",

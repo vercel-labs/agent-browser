@@ -418,12 +418,37 @@ and [references/authentication.md](references/authentication.md).
 
 ## When to load another skill
 
+- **Next.js dev workflows** (PPR shell analysis, hydration + re-render
+  profiling, `/_next/mcp` dev-server bridge): `agent-browser skills get nextjs`
 - **Electron desktop app** (VS Code, Slack desktop, Discord, Figma, etc.):
   `agent-browser skills get electron`
 - **Slack workspace automation**: `agent-browser skills get slack`
 - **Exploratory testing / QA / bug hunts**: `agent-browser skills get dogfood`
 - **Vercel Sandbox microVMs**: `agent-browser skills get vercel-sandbox`
 - **AWS Bedrock AgentCore cloud browser**: `agent-browser skills get agentcore`
+
+## React / Web Vitals (built-in, any React app)
+
+agent-browser ships with first-class React introspection. Works on any
+React app (Next, Remix, Vite+React, CRA, etc.) - not Next-specific. The
+React commands require the React DevTools hook to be installed at launch
+via `--enable react-devtools`:
+
+```bash
+agent-browser open --enable react-devtools http://localhost:3000
+agent-browser react tree                         # component tree
+agent-browser react inspect <fiberId>            # props, hooks, state, source
+agent-browser react renders start                # begin re-render recording
+agent-browser react renders stop                 # print render profile
+agent-browser react suspense                     # Suspense boundaries + classifier
+agent-browser vitals [url]                       # LCP/CLS/TTFB/FCP/INP + hydration
+```
+
+Without `--enable react-devtools`, the `react …` commands error. `vitals`
+and `pushstate` work on any site regardless of framework.
+
+Load the `nextjs` skill for PPR-specific workflows that compose these
+primitives with Next dev-server features.
 
 ## Full reference
 

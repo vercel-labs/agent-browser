@@ -55,6 +55,8 @@ pub(super) fn check(checks: &mut Vec<Check>) {
         debug: false,
         executable_path: None,
         extensions: &[],
+        init_scripts: &[],
+        enable: &[],
         args: None,
         user_agent: None,
         proxy: None,

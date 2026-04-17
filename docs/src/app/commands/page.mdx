@@ -173,6 +173,7 @@ agent-browser storage session         # Same for sessionStorage
 agent-browser network route <url>              # Intercept requests
 agent-browser network route <url> --abort      # Block requests
 agent-browser network route <url> --body <json>  # Mock response
+agent-browser network route '*' --abort --resource-type script  # Block scripts only
 agent-browser network unroute [url]            # Remove routes
 agent-browser network requests                 # View tracked requests
 agent-browser network requests --clear         # Clear request log
@@ -420,6 +421,38 @@ Chat-specific options:
 agent-browser back                    # Go back
 agent-browser forward                 # Go forward
 agent-browser reload                  # Reload page
+agent-browser pushstate <url>         # SPA client-side navigation (history.pushState + popstate)
+```
+
+## React / Web Vitals
+
+React commands require `--enable react-devtools` at launch (installs the
+React DevTools hook before any page JS runs). `vitals` and `pushstate`
+work on any site.
+
+```bash
+agent-browser open --enable react-devtools <url>   # Launch with React hook installed
+agent-browser react tree                           # Full component tree
+agent-browser react inspect <fiberId>              # Inspect one component
+agent-browser react renders start                  # Begin fiber render recording
+agent-browser react renders stop [--json]          # Stop + print profile
+agent-browser react suspense [--json]              # Suspense boundaries + classifier
+agent-browser vitals [url] [--json]                # LCP/CLS/TTFB/FCP/INP + hydration
+```
+
+For Next.js-specific workflows (PPR shell analysis, runtime prefetching,
+dev-server MCP, source maps), install the `nextjs` skill:
+
+```bash
+agent-browser skills get nextjs
+```
+
+## Init scripts
+
+```bash
+agent-browser open --init-script <path>           # Register before first navigation (repeatable)
+agent-browser addinitscript <js>                  # Register at runtime (returns identifier)
+agent-browser removeinitscript <identifier>       # Remove a previously registered init script
 ```
 
 ## Global options
@@ -432,6 +465,8 @@ agent-browser reload                  # Reload page
 --headers <json>         # HTTP headers scoped to URL's origin
 --executable-path <path> # Custom browser executable
 --extension <path>       # Load browser extension (repeatable)
+--init-script <path>     # Register a page init script before first navigation (repeatable)
+--enable <feature>       # Built-in init scripts: react-devtools (repeatable or comma-list)
 --args <args>            # Browser launch args (comma separated)
 --user-agent <ua>        # Custom User-Agent string
 --proxy <url>            # Proxy server URL

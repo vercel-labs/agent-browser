@@ -389,6 +389,8 @@ pub struct DaemonOptions<'a> {
     pub debug: bool,
     pub executable_path: Option<&'a str>,
     pub extensions: &'a [String],
+    pub init_scripts: &'a [String],
+    pub enable: &'a [String],
     pub args: Option<&'a str>,
     pub user_agent: Option<&'a str>,
     pub proxy: Option<&'a str>,
@@ -429,6 +431,12 @@ fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
     }
     if !opts.extensions.is_empty() {
         cmd.env("AGENT_BROWSER_EXTENSIONS", opts.extensions.join(","));
+    }
+    if !opts.init_scripts.is_empty() {
+        cmd.env("AGENT_BROWSER_INIT_SCRIPTS", opts.init_scripts.join(","));
+    }
+    if !opts.enable.is_empty() {
+        cmd.env("AGENT_BROWSER_ENABLE", opts.enable.join(","));
     }
     if let Some(a) = opts.args {
         cmd.env("AGENT_BROWSER_ARGS", a);

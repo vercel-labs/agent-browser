@@ -1386,6 +1386,18 @@ impl BrowserManager {
             .to_string())
     }
 
+    pub async fn remove_script_to_evaluate(&self, identifier: &str) -> Result<(), String> {
+        let session_id = self.active_session_id()?;
+        self.client
+            .send_command(
+                "Page.removeScriptToEvaluateOnNewDocument",
+                Some(json!({ "identifier": identifier })),
+                Some(session_id),
+            )
+            .await?;
+        Ok(())
+    }
+
     pub async fn tab_switch_by_id(&mut self, tab_id: u32) -> Result<Value, String> {
         let index = self
             .pages

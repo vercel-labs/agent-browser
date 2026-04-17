@@ -5109,3 +5109,238 @@ async fn e2e_explicit_state_load_restores_cookies() {
 
     let _ = std::fs::remove_file(&state_path);
 }
+
+// === React / Web Vitals primitives ===
+
+const REACT_FIXTURE_HTML: &str = r#"<!doctype html>
+<html>
+  <head><title>React fixture</title></head>
+  <body>
+    <div id="root"></div>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script>
+      const { useState, createElement: h } = React;
+      function Counter({ label }) {
+        const [n, setN] = useState(0);
+        return h("button", { onClick: () => setN(n + 1) }, label + ": " + n);
+      }
+      function App() {
+        return h("div", {}, [
+          h("h1", { key: "t" }, "Hello"),
+          h(Counter, { key: "c1", label: "A" }),
+          h(Counter, { key: "c2", label: "B" }),
+        ]);
+      }
+      ReactDOM.createRoot(document.getElementById("root")).render(h(App));
+    </script>
+  </body>
+</html>
+"#;
+
+fn react_fixture_url() -> String {
+    format!(
+        "data:text/html;base64,{}",
+        STANDARD.encode(REACT_FIXTURE_HTML)
+    )
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_react_tree_errors_without_hook() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": "https://example.com" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Without --enable react-devtools, the hook isn't installed and the
+    // command should error.
+    let resp = execute_command(&json!({ "id": "3", "action": "react_tree" }), &mut state).await;
+    let err = resp
+        .get("error")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    assert!(
+        err.contains("React DevTools") || err.contains("renderer"),
+        "Expected hook-missing error, got: {:?}",
+        resp
+    );
+
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_react_tree_with_enable_hook() {
+    let guard = EnvGuard::new(&["AGENT_BROWSER_ENABLE"]);
+    guard.set("AGENT_BROWSER_ENABLE", "react-devtools");
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": &react_fixture_url() }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Give React a moment to boot and register with the hook.
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+
+    let resp = execute_command(&json!({ "id": "3", "action": "react_tree" }), &mut state).await;
+    assert_success(&resp);
+    let tree = get_data(&resp)
+        .get("tree")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        tree.contains("App"),
+        "Expected tree to contain 'App': {}",
+        tree
+    );
+    assert!(
+        tree.contains("Counter"),
+        "Expected tree to contain 'Counter': {}",
+        tree
+    );
+
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_vitals_reports_metrics() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": &react_fixture_url() }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(&json!({ "id": "3", "action": "vitals" }), &mut state).await;
+    assert_success(&resp);
+    let report = get_data(&resp)
+        .get("report")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    assert!(
+        report.contains("Core Web Vitals"),
+        "Expected vitals report, got: {}",
+        report
+    );
+    assert!(report.contains("TTFB"));
+    assert!(report.contains("CLS"));
+
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_pushstate_changes_url() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": "https://example.com/" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "pushstate", "url": "/newpath" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let url = get_data(&resp)
+        .get("url")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    assert!(
+        url.ends_with("/newpath"),
+        "Expected pushstate URL to end with /newpath, got: {}",
+        url
+    );
+
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_removeinitscript_roundtrip() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": "https://example.com" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "3",
+            "action": "addinitscript",
+            "script": "window.__AB_ROUNDTRIP__ = 1;"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let identifier = get_data(&resp)["identifier"]
+        .as_str()
+        .expect("addinitscript should return an identifier")
+        .to_string();
+    assert!(!identifier.is_empty());
+
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "removeinitscript", "identifier": identifier }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["removed"], true);
+
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
