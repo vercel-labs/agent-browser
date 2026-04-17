@@ -111,6 +111,20 @@ fn update_page_target_info_in_pages(pages: &mut [PageInfo], target: &TargetInfo)
     false
 }
 
+fn add_page_and_activate(pages: &mut Vec<PageInfo>, active_page_index: &mut usize, page: PageInfo) {
+    let index = pages.len();
+    pages.push(page);
+    *active_page_index = index;
+}
+
+fn add_page_preserving_active(
+    pages: &mut Vec<PageInfo>,
+    _active_page_index: &mut usize,
+    page: PageInfo,
+) {
+    pages.push(page);
+}
+
 fn active_page_index_after_removal(
     active_page_index: usize,
     removed_index: usize,
@@ -1415,9 +1429,13 @@ impl BrowserManager {
     }
 
     pub fn add_page(&mut self, page: PageInfo) {
-        let index = self.pages.len();
-        self.pages.push(page);
-        self.active_page_index = index;
+        add_page_and_activate(&mut self.pages, &mut self.active_page_index, page);
+    }
+
+    /// Register a page discovered in the background (e.g. `Target.targetCreated`)
+    /// without changing the active tab.
+    pub fn add_page_background(&mut self, page: PageInfo) {
+        add_page_preserving_active(&mut self.pages, &mut self.active_page_index, page);
     }
 
     pub fn update_page_target_info(&mut self, target: &TargetInfo) -> bool {
@@ -1830,6 +1848,71 @@ mod tests {
         assert!(update_page_target_info_in_pages(&mut pages, &target));
         assert_eq!(pages[0].url, "https://example.com/popup");
         assert_eq!(pages[0].title, "Popup");
+    }
+
+    #[test]
+    fn test_add_page_and_activate_switches_active_page() {
+        let mut pages = vec![PageInfo {
+            tab_id: 1,
+            label: None,
+            target_id: "existing".to_string(),
+            session_id: "session-existing".to_string(),
+            url: "https://example.com/".to_string(),
+            title: "Example".to_string(),
+            target_type: "page".to_string(),
+        }];
+        let mut active_page_index = 0;
+
+        add_page_and_activate(
+            &mut pages,
+            &mut active_page_index,
+            PageInfo {
+                tab_id: 2,
+                label: None,
+                target_id: "explicit-new-tab".to_string(),
+                session_id: "session-new".to_string(),
+                url: "https://vercel.com/".to_string(),
+                title: "Vercel".to_string(),
+                target_type: "page".to_string(),
+            },
+        );
+
+        assert_eq!(pages.len(), 2);
+        assert_eq!(active_page_index, 1);
+        assert_eq!(pages[active_page_index].target_id, "explicit-new-tab");
+    }
+
+    #[test]
+    fn test_add_page_preserving_active_keeps_existing_active_page() {
+        let mut pages = vec![PageInfo {
+            tab_id: 1,
+            label: None,
+            target_id: "navigated-page".to_string(),
+            session_id: "session-navigated".to_string(),
+            url: "https://example.com/".to_string(),
+            title: "Example".to_string(),
+            target_type: "page".to_string(),
+        }];
+        let mut active_page_index = 0;
+
+        add_page_preserving_active(
+            &mut pages,
+            &mut active_page_index,
+            PageInfo {
+                tab_id: 2,
+                label: None,
+                target_id: "late-about-blank".to_string(),
+                session_id: "session-about-blank".to_string(),
+                url: "about:blank".to_string(),
+                title: String::new(),
+                target_type: "page".to_string(),
+            },
+        );
+
+        assert_eq!(pages.len(), 2);
+        assert_eq!(active_page_index, 0);
+        assert_eq!(pages[active_page_index].target_id, "navigated-page");
+        assert_eq!(pages[active_page_index].url, "https://example.com/");
     }
 
     #[test]

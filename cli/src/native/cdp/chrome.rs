@@ -155,6 +155,8 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
         "--disable-popup-blocking".to_string(),
         "--disable-prompt-on-repost".to_string(),
         "--disable-sync".to_string(),
+        "--disable-session-crashed-bubble".to_string(),
+        "--hide-crash-restore-bubble".to_string(),
         "--disable-features=Translate".to_string(),
         "--enable-features=NetworkService,NetworkServiceInProcess".to_string(),
         "--metrics-recording-only".to_string(),
@@ -232,6 +234,10 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
 
     args.extend(options.args.iter().cloned());
 
+    if !has_startup_target_arg(&options.args) {
+        args.push("about:blank".to_string());
+    }
+
     if should_disable_sandbox(&args) {
         args.push("--no-sandbox".to_string());
     }
@@ -244,6 +250,16 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
         args,
         user_data_dir,
         temp_user_data_dir,
+    })
+}
+
+fn has_startup_target_arg(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        let lower = arg.to_ascii_lowercase();
+        lower == "--app"
+            || lower.starts_with("--app=")
+            || lower == "--no-startup-window"
+            || !arg.starts_with('-')
     })
 }
 
@@ -1369,6 +1385,47 @@ mod tests {
     }
 
     #[test]
+    fn test_build_args_adds_default_startup_target() {
+        let opts = LaunchOptions::default();
+        let result = build_chrome_args(&opts).unwrap();
+        assert!(result.args.iter().any(|a| a == "about:blank"));
+        let dir = result.temp_user_data_dir.unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_build_args_preserves_custom_startup_target() {
+        let opts = LaunchOptions {
+            args: vec!["https://example.com".to_string()],
+            ..Default::default()
+        };
+        let result = build_chrome_args(&opts).unwrap();
+        assert_eq!(
+            result.args.iter().filter(|a| *a == "about:blank").count(),
+            0
+        );
+        assert!(result.args.iter().any(|a| a == "https://example.com"));
+        let dir = result.temp_user_data_dir.unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_build_args_skips_default_startup_target_for_app_mode() {
+        let opts = LaunchOptions {
+            args: vec!["--app=https://example.com".to_string()],
+            ..Default::default()
+        };
+        let result = build_chrome_args(&opts).unwrap();
+        assert_eq!(
+            result.args.iter().filter(|a| *a == "about:blank").count(),
+            0
+        );
+        assert!(result.args.iter().any(|a| a == "--app=https://example.com"));
+        let dir = result.temp_user_data_dir.unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn test_build_args_headed_no_headless_flag() {
         let opts = LaunchOptions {
             headless: false,
@@ -1453,6 +1510,23 @@ mod tests {
             .args
             .iter()
             .any(|a| a.contains("--disable-features") && a.contains("Translate")));
+        if let Some(ref dir) = result.temp_user_data_dir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn test_build_args_hides_crash_restore_ui() {
+        let opts = LaunchOptions::default();
+        let result = build_chrome_args(&opts).unwrap();
+        assert!(result
+            .args
+            .iter()
+            .any(|a| a == "--disable-session-crashed-bubble"));
+        assert!(result
+            .args
+            .iter()
+            .any(|a| a == "--hide-crash-restore-bubble"));
         if let Some(ref dir) = result.temp_user_data_dir {
             let _ = std::fs::remove_dir_all(dir);
         }
