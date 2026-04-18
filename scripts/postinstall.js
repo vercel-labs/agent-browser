@@ -33,7 +33,10 @@ function isMusl() {
 
 // Platform detection
 const osKey = platform() === 'linux' && isMusl() ? 'linux-musl' : platform();
-const platformKey = `${osKey}-${arch()}`;
+// Windows ARM64 falls back to x64 binary (no native ARM64 build available).
+// x64 binaries run via Windows' built-in emulation on ARM64.
+const effectiveArch = platform() === 'win32' && arch() === 'arm64' ? 'x64' : arch();
+const platformKey = `${osKey}-${effectiveArch}`;
 const ext = platform() === 'win32' ? '.exe' : '';
 const binaryName = `agent-browser-${platformKey}${ext}`;
 const binaryPath = join(binDir, binaryName);
@@ -129,6 +132,9 @@ async function main() {
   }
 
   console.log(`Downloading native binary for ${platformKey}...`);
+  if (platform() === 'win32' && arch() === 'arm64') {
+    console.log(`  Note: Using x64 binary on ARM64 Windows (runs via emulation)`);
+  }
   console.log(`URL: ${DOWNLOAD_URL}`);
 
   try {
@@ -288,7 +294,8 @@ async function fixWindowsShims() {
   }
 
   // Detect architecture so ARM64 Windows is handled correctly
-  const cpuArch = arch() === 'arm64' ? 'arm64' : 'x64';
+  // (falls back to x64 binary — see platform detection above)
+  const cpuArch = effectiveArch;
   const relativeBinaryPath = `node_modules\\agent-browser\\bin\\agent-browser-win32-${cpuArch}.exe`;
   const absoluteBinaryPath = join(npmBinDir, relativeBinaryPath);
 
