@@ -188,14 +188,48 @@ agent-browser network har stop [output.har]    # Stop and save HAR (temp path if
 ## Tabs & frames
 
 ```bash
-agent-browser tab                     # List tabs
-agent-browser tab new [url]           # New tab
-agent-browser tab <n>                 # Switch to tab
-agent-browser tab close [n]           # Close tab
-agent-browser window new              # Open new browser window
-agent-browser frame <sel>             # Switch to iframe by CSS selector
-agent-browser frame @e3               # Switch to iframe by element ref
-agent-browser frame main              # Back to main frame
+agent-browser tab                              # List tabs (each row shows tabId and label)
+agent-browser tab new [url]                    # New tab
+agent-browser tab new --label docs [url]       # New tab with a user-assigned label
+agent-browser tab <t<N>|label>                 # Switch to a tab by id or label
+agent-browser tab close [t<N>|label]           # Close a tab (defaults to active)
+agent-browser window new                       # Open new browser window
+agent-browser frame <sel>                      # Switch to iframe by CSS selector
+agent-browser frame @e3                        # Switch to iframe by element ref
+agent-browser frame main                       # Back to main frame
+```
+
+### Stable tab ids and labels
+
+Tab ids are stable strings of the form `t1`, `t2`, `t3`. They're never reused
+within a session, so `t2` keeps pointing at the same tab even as other tabs
+are opened or closed. The `t` prefix mirrors the `@e1` element-ref convention
+and is not interchangeable with positional integers — `agent-browser tab 2`
+errors with a teaching message; use `t2`.
+
+You can also assign a memorable label (`docs`, `app`, `admin`) at tab-creation
+time and use it anywhere an id is accepted:
+
+```bash
+agent-browser tab new --label docs https://docs.example.com
+agent-browser tab docs          # switch to the docs tab
+agent-browser snapshot          # populate refs for docs
+agent-browser click @e3         # click uses docs's refs
+agent-browser tab close docs    # close by label
+```
+
+Labels are never auto-generated and never rewritten on navigation — an agent
+that names a tab `docs` keeps that name until the tab is closed. Labels are
+unique within a session; creating a second tab with an existing label
+errors.
+
+Refs (`@e1`, etc.) are scoped to the tab that was active when the snapshot
+ran, so switch tabs first, then snapshot and interact:
+
+```bash
+agent-browser tab docs          # switch first
+agent-browser snapshot          # refs for docs
+agent-browser click @e3         # uses docs's refs
 ```
 
 ### Iframe support
@@ -344,6 +378,19 @@ agent-browser dashboard [start]       # Start the dashboard server (default port
 agent-browser dashboard start --port <n>  # Start on a specific port
 agent-browser dashboard stop          # Stop the dashboard server
 ```
+
+## Doctor
+
+Diagnose your install, auto-clean stale daemon files, and optionally repair common problems.
+
+```bash
+agent-browser doctor                     # Full diagnosis (env, Chrome, daemons, config, providers, network, launch test)
+agent-browser doctor --offline --quick   # Local-only, fastest
+agent-browser doctor --fix               # Also run destructive repairs (reinstall Chrome, purge old state, ...)
+agent-browser doctor --json              # Structured JSON output for agents
+```
+
+Exit code is `0` if all checks pass (warnings are fine), `1` if any fail. See the [Installation page](/installation#doctor) for the full check catalog.
 
 ## Chat
 

@@ -169,8 +169,12 @@ struct DrainedEvents {
 /// Compute a hash of the [`LaunchOptions`] fields that require a browser
 /// relaunch when changed (baked into the Chrome process at startup).
 ///
-/// Fields NOT hashed (adjustable at runtime via CDP without relaunch):
-/// ignore_https_errors, color_scheme, download_path, storage_state
+/// Fields NOT hashed:
+/// ignore_https_errors, color_scheme, download_path
+///
+/// `storage_state` is handled separately in `handle_launch()`: explicit
+/// `storageState` launches always require a clean local browser so the loaded
+/// state replaces the prior session instead of merging into it.
 fn launch_hash(opts: &LaunchOptions) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
@@ -252,6 +256,9 @@ pub struct DaemonState {
     pub engine: String,
     /// Default timeout for wait operations, from AGENT_BROWSER_DEFAULT_TIMEOUT env var.
     pub default_timeout_ms: u64,
+    /// Last viewport settings (width, height, deviceScaleFactor, mobile),
+    /// re-applied to new contexts (e.g., recording).
+    pub viewport: Option<(i32, i32, f64, bool)>,
 }
 
 impl DaemonState {
@@ -306,6 +313,7 @@ impl DaemonState {
                 .ok()
                 .and_then(|s| s.parse::<u64>().ok())
                 .unwrap_or(30_000),
+            viewport: None,
         }
     }
 
@@ -659,7 +667,10 @@ impl DaemonState {
                         .await;
                     }
 
+                    let tab_id = mgr.assign_tab_id();
                     mgr.add_page(super::browser::PageInfo {
+                        tab_id,
+                        label: None,
                         target_id: te.target_info.target_id.clone(),
                         session_id: attach.session_id,
                         url: te.target_info.url.clone(),
@@ -1061,16 +1072,14 @@ impl DaemonState {
                                 }
                             }
                         }
-                        "Page.screencastFrame" => {
-                            // Frame broadcasting and acks are handled in real-time by the
-                            // stream server's background CDP event loop. Here we just
-                            // collect acks as a fallback for non-streaming mode.
-                            if self.stream_server.is_none() {
-                                if let Some(sid) =
-                                    event.params.get("sessionId").and_then(|v| v.as_i64())
-                                {
-                                    pending_acks.push(sid);
-                                }
+                        // Frame broadcasting and acks are handled in real-time by the
+                        // stream server's background CDP event loop. Here we just
+                        // collect acks as a fallback for non-streaming mode.
+                        "Page.screencastFrame" if self.stream_server.is_none() => {
+                            if let Some(sid) =
+                                event.params.get("sessionId").and_then(|v| v.as_i64())
+                            {
+                                pending_acks.push(sid);
                             }
                         }
                         "Page.javascriptDialogOpening" => {
@@ -1497,7 +1506,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
 /// subsequent navigations don't hijack the user's existing tabs.
 async fn connect_auto_with_fresh_tab() -> Result<BrowserManager, String> {
     let mut mgr = BrowserManager::connect_auto().await?;
-    mgr.tab_new(None).await?;
+    mgr.tab_new(None, None).await?;
     let session_id = mgr.active_session_id()?.to_string();
     let _ = mgr
         .client
@@ -1507,8 +1516,17 @@ async fn connect_auto_with_fresh_tab() -> Result<BrowserManager, String> {
 }
 
 async fn auto_launch(state: &mut DaemonState) -> Result<(), String> {
-    let options = launch_options_from_env();
+    let mut options = launch_options_from_env();
+
+    // Use the stream server's viewport dimensions for --window-size so the
+    // content area matches the desired viewport from the start.
+    if let Some(ref server) = state.stream_server {
+        options.viewport_size = Some(server.viewport().await);
+    }
     let engine = env::var("AGENT_BROWSER_ENGINE").ok();
+
+    // Extract storage_state before options is moved into BrowserManager::launch.
+    let storage_state_path = options.storage_state.clone();
 
     // Store proxy credentials for Fetch.authRequired handling
     let has_proxy_auth = options.proxy_username.is_some();
@@ -1533,6 +1551,7 @@ async fn auto_launch(state: &mut DaemonState) -> Result<(), String> {
         state.start_dialog_handler();
         state.update_stream_client().await;
         try_auto_restore_state(state).await;
+        try_load_storage_state(state, &storage_state_path).await;
         return Ok(());
     }
 
@@ -1544,6 +1563,7 @@ async fn auto_launch(state: &mut DaemonState) -> Result<(), String> {
         state.start_dialog_handler();
         state.update_stream_client().await;
         try_auto_restore_state(state).await;
+        try_load_storage_state(state, &storage_state_path).await;
         return Ok(());
     }
 
@@ -1578,6 +1598,7 @@ async fn auto_launch(state: &mut DaemonState) -> Result<(), String> {
                     state.update_stream_client().await;
                     write_provider_file(&state.session_id, &p);
                     try_auto_restore_state(state).await;
+                    try_load_storage_state(state, &storage_state_path).await;
                     return Ok(());
                 }
                 Err(e) => {
@@ -1610,6 +1631,7 @@ async fn auto_launch(state: &mut DaemonState) -> Result<(), String> {
     }
 
     try_auto_restore_state(state).await;
+    try_load_storage_state(state, &storage_state_path).await;
     Ok(())
 }
 
@@ -1652,6 +1674,7 @@ fn launch_options_from_env() -> LaunchOptions {
             .unwrap_or(false),
         color_scheme: env::var("AGENT_BROWSER_COLOR_SCHEME").ok(),
         download_path: env::var("AGENT_BROWSER_DOWNLOAD_PATH").ok(),
+        viewport_size: None,
         use_real_keychain: false,
     }
 }
@@ -1668,6 +1691,64 @@ async fn try_auto_restore_state(state: &mut DaemonState) {
             }
         }
     }
+}
+
+/// Load storage state if a path is configured.
+///
+/// Explicit launch should surface this error. Best-effort callers can ignore
+/// the returned `Result` and keep their previous behavior.
+async fn load_storage_state(state: &DaemonState, path: &Option<String>) -> Result<(), String> {
+    if let Some(ref path) = path {
+        if let Some(ref mgr) = state.browser {
+            if let Ok(session_id) = mgr.active_session_id() {
+                state::load_state(&mgr.client, session_id, path).await?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn rollback_failed_launch(state: &mut DaemonState) -> Result<(), String> {
+    let close_error = if let Some(mut mgr) = state.browser.take() {
+        mgr.close().await.err()
+    } else {
+        None
+    };
+
+    state.launch_hash = None;
+    state.screencasting = false;
+    state.reset_input_state();
+    state.ref_map.clear();
+    state.update_stream_client().await;
+
+    if let Some(err) = close_error {
+        return Err(err);
+    }
+
+    Ok(())
+}
+
+async fn load_storage_state_or_rollback(
+    state: &mut DaemonState,
+    path: &Option<String>,
+) -> Result<(), String> {
+    if let Err(err) = load_storage_state(state, path).await {
+        if let Err(close_err) = rollback_failed_launch(state).await {
+            return Err(format!(
+                "{} (also failed to roll back browser after launch: {})",
+                err, close_err
+            ));
+        }
+        return Err(err);
+    }
+
+    Ok(())
+}
+
+/// Load storage state from AGENT_BROWSER_STATE if set.
+async fn try_load_storage_state(state: &DaemonState, path: &Option<String>) {
+    let _ = load_storage_state(state, path).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -1693,6 +1774,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
                 .collect()
         });
     let storage_state = cmd.get("storageState").and_then(|v| v.as_str());
+    let storage_state_owned = storage_state.map(|s| s.to_string());
 
     let launch_options = LaunchOptions {
         headless,
@@ -1760,6 +1842,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
             .get("downloadPath")
             .and_then(|v| v.as_str())
             .map(String::from),
+        viewport_size: None,
         use_real_keychain: false,
     };
 
@@ -1772,8 +1855,10 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         let is_external = cdp_url.is_some() || cdp_port.is_some() || auto_connect;
         let was_external = mgr.is_cdp_connection();
         let hash_changed = !is_external && state.launch_hash != Some(new_hash);
+        let storage_state_requires_clean_launch = storage_state_owned.is_some() && !is_external;
         is_external != was_external
             || hash_changed
+            || storage_state_requires_clean_launch
             || mgr.has_process_exited()
             || !mgr.is_connection_alive().await
     } else {
@@ -1790,6 +1875,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
             state.update_stream_client().await;
         }
     } else {
+        load_storage_state(state, &storage_state_owned).await?;
         return Ok(json!({ "launched": true, "reused": true }));
     }
     state.ref_map.clear();
@@ -1811,6 +1897,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         state.start_fetch_handler();
         state.start_dialog_handler();
         state.update_stream_client().await;
+        load_storage_state_or_rollback(state, &storage_state_owned).await?;
         return Ok(json!({ "launched": true }));
     }
 
@@ -1821,6 +1908,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         state.start_fetch_handler();
         state.start_dialog_handler();
         state.update_stream_client().await;
+        load_storage_state_or_rollback(state, &storage_state_owned).await?;
         return Ok(json!({ "launched": true }));
     }
 
@@ -1831,6 +1919,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         state.start_fetch_handler();
         state.start_dialog_handler();
         state.update_stream_client().await;
+        load_storage_state_or_rollback(state, &storage_state_owned).await?;
         return Ok(json!({ "launched": true }));
     }
 
@@ -1867,6 +1956,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
                         state.start_dialog_handler();
                         state.update_stream_client().await;
                         write_provider_file(&state.session_id, provider);
+                        load_storage_state_or_rollback(state, &storage_state_owned).await?;
 
                         if let Some(info) = providers::get_agentcore_info() {
                             return Ok(json!({
@@ -1958,6 +2048,11 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
             }
         }
     }
+
+    // Load storage state only after Fetch interception is active so replayed
+    // origin navigations go through the same domain and proxy handling as
+    // normal browser traffic.
+    load_storage_state_or_rollback(state, &storage_state_owned).await?;
 
     Ok(json!({ "launched": true }))
 }
@@ -2518,7 +2613,7 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
         state.ref_map.clear();
         state.pending_file_chooser = None;
-        mgr.tab_new(Some(&href)).await?;
+        mgr.tab_new(Some(&href), None).await?;
 
         return Ok(json!({ "clicked": selector, "newTab": true, "url": href }));
     }
@@ -3573,24 +3668,27 @@ async fn handle_tab_list(state: &DaemonState) -> Result<Value, String> {
 async fn handle_tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
     let url = cmd.get("url").and_then(|v| v.as_str());
+    let label = cmd.get("label").and_then(|v| v.as_str());
     state.ref_map.clear();
     state.iframe_sessions.clear();
     state.active_frame_id = None;
     state.pending_file_chooser = None;
-    mgr.tab_new(url).await
+    mgr.tab_new(url, label).await
 }
 
 async fn handle_tab_switch(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
-    let index = cmd
-        .get("index")
-        .and_then(|v| v.as_u64())
-        .ok_or("Missing 'index' parameter")? as usize;
+    let tab_ref_str = cmd
+        .get("tabId")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'tabId' parameter (expected `t<N>` or a label)")?;
+    let tab_ref = super::browser::TabRef::parse(tab_ref_str)?;
+    let tab_id = mgr.resolve_tab_ref(&tab_ref)?;
     state.ref_map.clear();
     state.iframe_sessions.clear();
     state.active_frame_id = None;
     state.pending_file_chooser = None;
-    let result = mgr.tab_switch(index).await?;
+    let result = mgr.tab_switch_by_id(tab_id).await?;
 
     if let Some(ref server) = state.stream_server {
         if let Ok(dims) = mgr
@@ -3615,18 +3713,21 @@ async fn handle_tab_switch(cmd: &Value, state: &mut DaemonState) -> Result<Value
 
 async fn handle_tab_close(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
-    let index = cmd
-        .get("index")
-        .and_then(|v| v.as_u64())
-        .map(|i| i as usize);
+    let tab_id = match cmd.get("tabId").and_then(|v| v.as_str()) {
+        Some(s) => {
+            let tab_ref = super::browser::TabRef::parse(s)?;
+            Some(mgr.resolve_tab_ref(&tab_ref)?)
+        }
+        None => None,
+    };
     state.ref_map.clear();
     state.iframe_sessions.clear();
     state.active_frame_id = None;
     state.pending_file_chooser = None;
-    mgr.tab_close(index).await
+    mgr.tab_close_by_id(tab_id).await
 }
 
-async fn handle_viewport(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+async fn handle_viewport(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let width = cmd.get("width").and_then(|v| v.as_i64()).unwrap_or(1280) as i32;
     let height = cmd.get("height").and_then(|v| v.as_i64()).unwrap_or(720) as i32;
@@ -3637,6 +3738,8 @@ async fn handle_viewport(cmd: &Value, state: &DaemonState) -> Result<Value, Stri
     let mobile = cmd.get("mobile").and_then(|v| v.as_bool()).unwrap_or(false);
 
     mgr.set_viewport(width, height, scale, mobile).await?;
+
+    state.viewport = Some((width, height, scale, mobile));
 
     // Update stream server viewport so status messages and screencast use the new dimensions
     if let Some(ref server) = state.stream_server {
@@ -3893,6 +3996,8 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty());
 
+    let viewport = state.viewport;
+
     let (client, new_session_id) = {
         let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
         let old_session_id = mgr.active_session_id()?.to_string();
@@ -3968,6 +4073,19 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
                 .await;
         }
 
+        // Re-apply HTTPS error ignore to the recording context.
+        // Security.setIgnoreCertificateErrors at launch only applies to the session it was sent on.
+        if mgr.ignore_https_errors {
+            let _ = mgr
+                .client
+                .send_command(
+                    "Security.setIgnoreCertificateErrors",
+                    Some(json!({ "ignore": true })),
+                    Some(&new_session_id),
+                )
+                .await;
+        }
+
         // Transfer cookies to new context
         if let Some(ref cr) = cookies_result {
             if let Some(cookie_arr) = cr.get("cookies").and_then(|v| v.as_array()) {
@@ -3985,13 +4103,20 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
         }
 
         // Add page and switch to it
+        let tab_id = mgr.assign_tab_id();
         mgr.add_page(super::browser::PageInfo {
+            tab_id,
+            label: None,
             target_id: create_result.target_id,
             session_id: new_session_id.clone(),
             url: nav_url.clone(),
             title: String::new(),
             target_type: "page".to_string(),
         });
+
+        if let Some((w, h, scale, mobile)) = viewport {
+            let _ = mgr.set_viewport(w, h, scale, mobile).await;
+        }
 
         // Navigate to URL
         if nav_url != "about:blank" {
@@ -4675,7 +4800,7 @@ async fn handle_wheel(cmd: &Value, state: &DaemonState) -> Result<Value, String>
     Ok(json!({ "scrolled": true, "deltaX": delta_x, "deltaY": delta_y }))
 }
 
-async fn handle_device(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+async fn handle_device(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let name = cmd
         .get("name")
@@ -4703,6 +4828,8 @@ async fn handle_device(cmd: &Value, state: &DaemonState) -> Result<Value, String
 
     mgr.set_viewport(width, height, scale, mobile).await?;
     mgr.set_user_agent(ua).await?;
+
+    state.viewport = Some((width, height, scale, mobile));
 
     // Update stream server viewport so status messages and screencast use the new dimensions
     if let Some(ref server) = state.stream_server {
@@ -5896,7 +6023,10 @@ async fn handle_window_new(cmd: &Value, state: &mut DaemonState) -> Result<Value
         )
         .await?;
 
+    let tab_id = mgr.assign_tab_id();
     mgr.add_page(super::browser::PageInfo {
+        tab_id,
+        label: None,
         target_id: create_result.target_id,
         session_id: attach.session_id,
         url: "about:blank".to_string(),
@@ -5925,7 +6055,10 @@ async fn handle_window_new(cmd: &Value, state: &mut DaemonState) -> Result<Value
     state.ref_map.clear();
     state.pending_file_chooser = None;
 
-    Ok(json!({ "index": total - 1, "total": total }))
+    Ok(json!({
+        "tabId": super::browser::format_tab_id(tab_id),
+        "total": total,
+    }))
 }
 
 async fn handle_diff_screenshot(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
