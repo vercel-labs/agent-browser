@@ -1353,10 +1353,10 @@ fn run_batch(flags: &Flags, bail: bool, arg_commands: Option<Vec<Vec<String>>>) 
         };
 
         let per_cmd_opts = match cmd_output_opts {
-            Some(ov) => OutputOptions {
+            Some(cmd_opts) => OutputOptions {
                 json: output_opts.json,
-                content_boundaries: output_opts.content_boundaries || ov.content_boundaries,
-                max_output: ov.max_output.or(output_opts.max_output),
+                content_boundaries: output_opts.content_boundaries || cmd_opts.content_boundaries,
+                max_output: cmd_opts.max_output.or(output_opts.max_output),
             },
             None => output_opts,
         };
