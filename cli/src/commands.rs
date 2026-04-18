@@ -3504,6 +3504,35 @@ mod tests {
     }
 
     #[test]
+    fn test_batch_issue_1261_scenario() {
+        // The exact 3-command sequence from issue #1261.
+        // run_batch parses each sub-command independently; verify each token
+        // sequence produces the correct parsed value and no parse error.
+        let flags = default_flags();
+
+        let (open_cmd, open_opts) =
+            parse_command(&args("open https://example.com/"), &flags).unwrap();
+        assert_eq!(open_cmd["action"], "navigate");
+        assert!(open_opts.is_none());
+
+        let (wait_cmd, wait_opts) =
+            parse_command(&args("wait --load networkidle"), &flags).unwrap();
+        assert_eq!(wait_cmd["action"], "waitforloadstate");
+        assert!(wait_opts.is_none());
+
+        let (screenshot_cmd, screenshot_opts) =
+            parse_command(&args("screenshot --annotate"), &flags).unwrap();
+        assert_eq!(screenshot_cmd["action"], "screenshot");
+        assert_eq!(screenshot_cmd["annotate"], true);
+        assert_eq!(
+            screenshot_cmd["selector"],
+            serde_json::Value::Null,
+            "--annotate must not fall through to selector"
+        );
+        assert!(screenshot_opts.is_none());
+    }
+
+    #[test]
     fn test_screenshot_annotate_with_full() {
         let (cmd, _) =
             parse_command(&args("screenshot --full --annotate"), &default_flags()).unwrap();
