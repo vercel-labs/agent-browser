@@ -101,12 +101,11 @@ pub fn parse_command(
 
 fn take_next_arg<'a>(
     rest: &[&'a str],
-    i: &mut usize,
+    i: usize,
     flag: &'static str,
     usage: &'static str,
 ) -> Result<&'a str, ParseError> {
-    *i += 1;
-    rest.get(*i)
+    rest.get(i + 1)
         .copied()
         .ok_or_else(|| ParseError::MissingArguments {
             context: flag.to_string(),
@@ -148,10 +147,11 @@ fn parse_command_inner(
                     "--headers" => {
                         headers_json = Some(take_next_arg(
                             &rest,
-                            &mut i,
+                            i,
                             "--headers",
                             "open <url> --headers '<json>'",
                         )?);
+                        i += 1;
                     }
                     arg if arg.starts_with('-') => {
                         return Err(ParseError::InvalidValue {
@@ -357,10 +357,11 @@ fn parse_command_inner(
                     "--download-path" => {
                         path_flag = Some(take_next_arg(
                             &rest,
-                            &mut i,
+                            i,
                             "--download-path",
                             "download <selector> <path>",
                         )?);
+                        i += 1;
                     }
                     arg if arg.starts_with('-') => {
                         return Err(ParseError::InvalidValue {
@@ -633,10 +634,11 @@ fn parse_command_inner(
                     "--screenshot-format" => {
                         let fmt = take_next_arg(
                             &rest,
-                            &mut i,
+                            i,
                             "--screenshot-format",
                             "screenshot [--screenshot-format <png|jpeg|webp>]",
                         )?;
+                        i += 1;
                         match fmt {
                             "png" | "jpeg" | "webp" => screenshot_format = Some(fmt),
                             _ => {
@@ -653,10 +655,11 @@ fn parse_command_inner(
                     "--screenshot-quality" => {
                         let val = take_next_arg(
                             &rest,
-                            &mut i,
+                            i,
                             "--screenshot-quality",
                             "screenshot [--screenshot-quality <0-100>]",
                         )?;
+                        i += 1;
                         match val.parse::<u32>() {
                             Ok(q) if q <= 100 => screenshot_quality = Some(q),
                             Ok(_) => {
@@ -682,10 +685,11 @@ fn parse_command_inner(
                     "--screenshot-dir" => {
                         screenshot_dir = Some(take_next_arg(
                             &rest,
-                            &mut i,
+                            i,
                             "--screenshot-dir",
                             "screenshot [--screenshot-dir <path>]",
                         )?);
+                        i += 1;
                     }
                     arg if arg.starts_with('-') => {
                         return Err(ParseError::InvalidValue {
@@ -793,12 +797,9 @@ fn parse_command_inner(
                         inline_content_boundaries = true;
                     }
                     "--max-output" => {
-                        let val = take_next_arg(
-                            &rest,
-                            &mut i,
-                            "--max-output",
-                            "snapshot [--max-output <n>]",
-                        )?;
+                        let val =
+                            take_next_arg(&rest, i, "--max-output", "snapshot [--max-output <n>]")?;
+                        i += 1;
                         match val.parse::<usize>() {
                             Ok(n) => inline_max_output = Some(n),
                             Err(_) => {
@@ -3487,6 +3488,19 @@ mod tests {
         assert_eq!(cmd["action"], "screenshot");
         assert_eq!(cmd["annotate"], true);
         assert_eq!(cmd["selector"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn test_screenshot_annotate_not_treated_as_selector() {
+        // Regression for issue #1261: in batch mode, `screenshot --annotate` must treat
+        // --annotate as a flag, not fall through to positional/selector logic.
+        let (cmd, _) = parse_command(&args("screenshot --annotate"), &default_flags()).unwrap();
+        assert_eq!(cmd["annotate"], true);
+        assert_eq!(
+            cmd["selector"],
+            serde_json::Value::Null,
+            "--annotate was treated as a CSS selector"
+        );
     }
 
     #[test]
