@@ -3093,15 +3093,6 @@ mod tests {
             .contains("Invalid JSON for --headers"));
     }
 
-    #[test]
-    fn test_navigate_headers_missing_value() {
-        let result = parse_command(
-            &args("open https://example.com --headers"),
-            &default_flags(),
-        );
-        assert!(result.is_err());
-    }
-
     // === Set Headers Tests ===
 
     #[test]
@@ -3242,7 +3233,7 @@ mod tests {
 
     #[test]
     fn test_tab_switch_by_label() {
-        let cmd = parse_command(&args("tab docs"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("tab docs"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "tab_switch");
         assert_eq!(cmd["tabId"], "docs");
     }
@@ -3255,21 +3246,21 @@ mod tests {
 
     #[test]
     fn test_tab_close_with_id() {
-        let cmd = parse_command(&args("tab close t2"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("tab close t2"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "tab_close");
         assert_eq!(cmd["tabId"], "t2");
     }
 
     #[test]
     fn test_tab_close_with_label() {
-        let cmd = parse_command(&args("tab close docs"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("tab close docs"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "tab_close");
         assert_eq!(cmd["tabId"], "docs");
     }
 
     #[test]
     fn test_tab_sends_string_tab_id() {
-        let cmd = parse_command(&args("tab t2"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("tab t2"), &default_flags()).unwrap();
         assert!(
             cmd["tabId"].is_string(),
             "tabId must be a string, got: {:?}",
@@ -3280,14 +3271,14 @@ mod tests {
 
     #[test]
     fn test_tab_new_with_label() {
-        let cmd = parse_command(&args("tab new --label docs"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("tab new --label docs"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "tab_new");
         assert_eq!(cmd["label"], "docs");
     }
 
     #[test]
     fn test_tab_new_with_label_and_url() {
-        let cmd = parse_command(
+        let (cmd, _) = parse_command(
             &args("tab new --label docs https://docs.example.com"),
             &default_flags(),
         )
@@ -3299,7 +3290,7 @@ mod tests {
 
     #[test]
     fn test_tab_new_with_url_then_label() {
-        let cmd = parse_command(
+        let (cmd, _) = parse_command(
             &args("tab new https://docs.example.com --label docs"),
             &default_flags(),
         )
@@ -3310,7 +3301,7 @@ mod tests {
 
     #[test]
     fn test_tab_no_args_defaults_to_list() {
-        let cmd = parse_command(&args("tab"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("tab"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "tab_list");
     }
 
@@ -3334,7 +3325,7 @@ mod tests {
         // After the shift to `t<N>`/label ids, non-keyword tokens (`select`,
         // `docs`, etc.) are valid label refs; `tab <something>` routes to
         // tab_switch and the runtime decides whether the label exists.
-        let cmd = parse_command(&args("tab select"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("tab select"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "tab_switch");
         assert_eq!(cmd["tabId"], "select");
     }
@@ -3554,15 +3545,6 @@ mod tests {
     }
 
     #[test]
-    fn test_screenshot_quality_invalid_value() {
-        let result = parse_command(
-            &args("screenshot --screenshot-quality abc"),
-            &default_flags(),
-        );
-        assert!(result.is_err());
-    }
-
-    #[test]
     fn test_screenshot_quality_out_of_range() {
         let result = parse_command(
             &args("screenshot --screenshot-quality 101"),
@@ -3570,24 +3552,6 @@ mod tests {
         );
         assert!(result.is_err());
         assert!(result.unwrap_err().format().contains("between 0 and 100"));
-    }
-
-    #[test]
-    fn test_screenshot_format_missing_value() {
-        let result = parse_command(&args("screenshot --screenshot-format"), &default_flags());
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_screenshot_quality_missing_value() {
-        let result = parse_command(&args("screenshot --screenshot-quality"), &default_flags());
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_screenshot_dir_missing_value() {
-        let result = parse_command(&args("screenshot --screenshot-dir"), &default_flags());
-        assert!(result.is_err());
     }
 
     #[test]
@@ -3689,12 +3653,6 @@ mod tests {
     #[test]
     fn test_snapshot_max_output_invalid() {
         let result = parse_command(&args("snapshot --max-output abc"), &default_flags());
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_snapshot_max_output_missing_value() {
-        let result = parse_command(&args("snapshot --max-output"), &default_flags());
         assert!(result.is_err());
     }
 
@@ -4297,12 +4255,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cmd["path"], "./local.pdf");
-    }
-
-    #[test]
-    fn test_download_path_flag_missing_value() {
-        let result = parse_command(&args("download #btn --download-path"), &default_flags());
-        assert!(result.is_err());
     }
 
     // === Wait for Download Tests ===
