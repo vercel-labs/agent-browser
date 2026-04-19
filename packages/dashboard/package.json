@@ -1,6 +1,6 @@
 {
   "name": "dashboard",
-  "version": "0.26.0",
+  "version": "0.26.0-celeria-stealth.1",
   "private": true,
   "scripts": {
     "dev": "next dev",
