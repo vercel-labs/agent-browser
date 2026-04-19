@@ -1,8 +1,16 @@
 # agent-browser
 
-## 0.26.0
+## 0.26.0-celeria-stealth.1
 
 <!-- release:start -->
+### New Features
+
+- **`--stealth` flag and `AGENT_BROWSER_STEALTH` env var** - Opt-in stealth mode that masks the most common bot-detection signals: hides `navigator.webdriver`, restores a fake `chrome.runtime`, spoofs `navigator.plugins`, fixes `navigator.languages`, patches the WebGL vendor/renderer tuple, and prepends `--disable-blink-features=AutomationControlled` to the Chromium launch args. The init script is injected per-page via `Page.addScriptToEvaluateOnNewDocument` from `enable_domains`, so it runs before any document JS on every navigation. Spirit of the closed upstream PR #471, ported to the current Rust codebase. (Celeria fork)
+<!-- release:end -->
+
+## 0.26.0
+
+<!-- old-release:start -->
 ### New Features
 
 - **`doctor` command** - Added `agent-browser doctor` for one-shot diagnosis of an install. Checks environment, Chrome, running daemons, config files, security, providers, and network connectivity; auto-cleans stale daemon sidecar files on every run; and performs a live headless launch test. Supports `--offline` to skip network probes, `--quick` to skip the launch test, `--fix` for opt-in repairs (install missing Chrome, close version-mismatched daemons, prune expired state files), and `--json` for structured output (#1254)
@@ -24,7 +32,7 @@
 - @DJRHails
 - @michael-farah
 - @tomdale
-<!-- release:end -->
+<!-- old-release:end -->
 
 ## 0.25.5
 
