@@ -186,7 +186,9 @@ jobs:
   publish:
     name: Publish to npm
     needs: [check-release, build-binaries]
-    if: needs.check-release.outputs.should_release == 'true'
+    # Skip on forks — only the upstream Vercel-owned repo holds the npm token
+    # for the `agent-browser` package.
+    if: needs.check-release.outputs.should_release == 'true' && github.repository_owner == 'vercel-labs'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository

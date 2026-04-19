@@ -89,6 +89,7 @@ pub struct Config {
     pub idle_timeout: Option<String>,
     pub no_auto_dialog: Option<bool>,
     pub model: Option<String>,
+    pub stealth: Option<bool>,
 }
 
 impl Config {
@@ -136,6 +137,7 @@ impl Config {
             idle_timeout: other.idle_timeout.or(self.idle_timeout),
             no_auto_dialog: other.no_auto_dialog.or(self.no_auto_dialog),
             model: other.model.or(self.model),
+            stealth: other.stealth.or(self.stealth),
         }
     }
 }
@@ -306,6 +308,7 @@ pub struct Flags {
     pub default_timeout: Option<u64>, // AGENT_BROWSER_DEFAULT_TIMEOUT in ms
     pub no_auto_dialog: bool,
     pub model: Option<String>,
+    pub stealth: bool,
     pub verbose: bool,
     pub quiet: bool,
 
@@ -445,6 +448,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
         no_auto_dialog: env_var_is_truthy("AGENT_BROWSER_NO_AUTO_DIALOG")
             || config.no_auto_dialog.unwrap_or(false),
         model: env::var("AI_GATEWAY_MODEL").ok().or(config.model),
+        stealth: env_var_is_truthy("AGENT_BROWSER_STEALTH") || config.stealth.unwrap_or(false),
         verbose: false,
         quiet: false,
         cli_executable_path: false,
@@ -728,6 +732,13 @@ pub fn parse_flags(args: &[String]) -> Flags {
                     i += 1;
                 }
             }
+            "--stealth" => {
+                let (val, consumed) = parse_bool_arg(args, i);
+                flags.stealth = val;
+                if consumed {
+                    i += 1;
+                }
+            }
             "--model" => {
                 if let Some(s) = args.get(i + 1) {
                     flags.model = Some(s.clone());
@@ -767,6 +778,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--content-boundaries",
         "--confirm-interactive",
         "--no-auto-dialog",
+        "--stealth",
         "-v",
         "--verbose",
         "-q",

@@ -2410,6 +2410,7 @@ mod tests {
             default_timeout: None,
             no_auto_dialog: false,
             model: None,
+            stealth: false,
             verbose: false,
             quiet: false,
         }

@@ -191,6 +191,7 @@ fn launch_hash(opts: &LaunchOptions) -> u64 {
     opts.proxy_password.hash(&mut h);
     opts.user_agent.hash(&mut h);
     opts.allow_file_access.hash(&mut h);
+    opts.stealth.hash(&mut h);
     h.finish()
 }
 
@@ -1660,6 +1661,9 @@ fn launch_options_from_env() -> LaunchOptions {
         download_path: env::var("AGENT_BROWSER_DOWNLOAD_PATH").ok(),
         viewport_size: None,
         use_real_keychain: false,
+        stealth: env::var("AGENT_BROWSER_STEALTH")
+            .map(|v| v == "1" || v == "true")
+            .unwrap_or(false),
     }
 }
 
@@ -1828,6 +1832,14 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
             .map(String::from),
         viewport_size: None,
         use_real_keychain: false,
+        stealth: cmd
+            .get("stealth")
+            .and_then(|v| v.as_bool())
+            .unwrap_or_else(|| {
+                env::var("AGENT_BROWSER_STEALTH")
+                    .map(|v| v == "1" || v == "true")
+                    .unwrap_or(false)
+            }),
     };
 
     let new_hash = launch_hash(&launch_options);
