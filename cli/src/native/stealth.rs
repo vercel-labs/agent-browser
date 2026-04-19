@@ -3,9 +3,12 @@
 //! `AGENT_BROWSER_STEALTH=1` is enabled.
 //!
 //! The script masks the most common bot-detection signals shipped by stock
-//! Chromium: `navigator.webdriver`, missing `chrome.runtime`, empty plugins,
-//! identical `navigator.languages`, the WebGL vendor/renderer tuple, and the
-//! permissions `Notification` mismatch. It is paired with the
+//! Chromium: `navigator.webdriver`, missing `chrome.runtime`, empty /
+//! plain-array `navigator.plugins` (bot.sannysoft checks
+//! `navigator.plugins.constructor.name === 'PluginArray'`), missing
+//! `deviceMemory`/`hardwareConcurrency`, identical `navigator.languages`,
+//! the WebGL vendor/renderer tuple, and the permissions `Notification`
+//! mismatch. It is paired with the
 //! `--disable-blink-features=AutomationControlled` launch arg in `chrome.rs`
 //! to also drop the corresponding header/feature signals.
 //!
@@ -51,22 +54,73 @@ pub const STEALTH_INIT_SCRIPT: &str = r#"
   } catch (_) {}
 
   try {
-    const fakePlugins = [
-      { name: 'PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
-      { name: 'Chrome PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
-      { name: 'Chromium PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
-      { name: 'Microsoft Edge PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
-      { name: 'WebKit built-in PDF', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+    const makeMimeType = (type, description, suffixes, enabledPlugin) => {
+      const mt = Object.create(MimeType.prototype);
+      Object.defineProperties(mt, {
+        type:          { value: type,          enumerable: true },
+        description:   { value: description,   enumerable: true },
+        suffixes:      { value: suffixes,      enumerable: true },
+        enabledPlugin: { value: enabledPlugin, enumerable: true },
+      });
+      return mt;
+    };
+
+    const makePlugin = (name, filename, description, mimeSpecs) => {
+      const plugin = Object.create(Plugin.prototype);
+      Object.defineProperties(plugin, {
+        name:        { value: name,        enumerable: true },
+        filename:    { value: filename,    enumerable: true },
+        description: { value: description, enumerable: true },
+      });
+      const mimes = mimeSpecs.map((s) => makeMimeType(s.type, s.description, s.suffixes, plugin));
+      mimes.forEach((m, i) => Object.defineProperty(plugin, i, { value: m, enumerable: true }));
+      mimes.forEach((m) => { if (!(m.type in plugin)) Object.defineProperty(plugin, m.type, { value: m }); });
+      Object.defineProperty(plugin, 'length', { value: mimes.length });
+      Object.defineProperty(plugin, 'item', { value: function (i) { return this[i] != null ? this[i] : null; } });
+      Object.defineProperty(plugin, 'namedItem', { value: function (n) { return this[n] != null ? this[n] : null; } });
+      return { plugin, mimes };
+    };
+
+    const pdfSpecs = [
+      { type: 'application/pdf',       description: 'Portable Document Format', suffixes: 'pdf' },
+      { type: 'text/pdf',              description: 'Portable Document Format', suffixes: 'pdf' },
     ];
+
+    const built = [
+      makePlugin('PDF Viewer',                 'internal-pdf-viewer', 'Portable Document Format', pdfSpecs),
+      makePlugin('Chrome PDF Viewer',          'internal-pdf-viewer', 'Portable Document Format', pdfSpecs),
+      makePlugin('Chromium PDF Viewer',        'internal-pdf-viewer', 'Portable Document Format', pdfSpecs),
+      makePlugin('Microsoft Edge PDF Viewer',  'internal-pdf-viewer', 'Portable Document Format', pdfSpecs),
+      makePlugin('WebKit built-in PDF',        'internal-pdf-viewer', 'Portable Document Format', pdfSpecs),
+    ];
+    const plugins = built.map((b) => b.plugin);
+    const allMimes = [];
+    built.forEach((b) => b.mimes.forEach((m) => { if (!allMimes.some((x) => x.type === m.type)) allMimes.push(m); }));
+
+    const pluginArray = Object.create(PluginArray.prototype);
+    plugins.forEach((p, i) => Object.defineProperty(pluginArray, i, { value: p, enumerable: true }));
+    plugins.forEach((p) => { if (!(p.name in pluginArray)) Object.defineProperty(pluginArray, p.name, { value: p }); });
+    Object.defineProperty(pluginArray, 'length',    { value: plugins.length, enumerable: true });
+    Object.defineProperty(pluginArray, 'item',      { value: function (i) { return this[i] != null ? this[i] : null; } });
+    Object.defineProperty(pluginArray, 'namedItem', { value: function (n) { return this[n] != null ? this[n] : null; } });
+    Object.defineProperty(pluginArray, 'refresh',   { value: function () {} });
+
+    const mimeTypeArray = Object.create(MimeTypeArray.prototype);
+    allMimes.forEach((m, i) => Object.defineProperty(mimeTypeArray, i, { value: m, enumerable: true }));
+    allMimes.forEach((m) => { if (!(m.type in mimeTypeArray)) Object.defineProperty(mimeTypeArray, m.type, { value: m }); });
+    Object.defineProperty(mimeTypeArray, 'length',    { value: allMimes.length, enumerable: true });
+    Object.defineProperty(mimeTypeArray, 'item',      { value: function (i) { return this[i] != null ? this[i] : null; } });
+    Object.defineProperty(mimeTypeArray, 'namedItem', { value: function (n) { return this[n] != null ? this[n] : null; } });
+
     Object.defineProperty(Navigator.prototype, 'plugins', {
       configurable: true,
       enumerable: true,
-      get: () => fakePlugins,
+      get: () => pluginArray,
     });
     Object.defineProperty(Navigator.prototype, 'mimeTypes', {
       configurable: true,
       enumerable: true,
-      get: () => [{ type: 'application/pdf', suffixes: 'pdf', description: '' }],
+      get: () => mimeTypeArray,
     });
   } catch (_) {}
 
@@ -75,6 +129,22 @@ pub const STEALTH_INIT_SCRIPT: &str = r#"
       configurable: true,
       enumerable: true,
       get: () => ['en-US', 'en'],
+    });
+  } catch (_) {}
+
+  try {
+    Object.defineProperty(Navigator.prototype, 'deviceMemory', {
+      configurable: true,
+      enumerable: true,
+      get: () => 8,
+    });
+  } catch (_) {}
+
+  try {
+    Object.defineProperty(Navigator.prototype, 'hardwareConcurrency', {
+      configurable: true,
+      enumerable: true,
+      get: () => 8,
     });
   } catch (_) {}
 
