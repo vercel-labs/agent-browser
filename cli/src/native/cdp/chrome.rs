@@ -110,6 +110,10 @@ pub struct LaunchOptions {
     /// Chrome uses the real system keychain. Set automatically when launching
     /// with a copied Chrome profile.
     pub use_real_keychain: bool,
+    /// When true, prepend stealth-mode launch args (e.g.
+    /// `--disable-blink-features=AutomationControlled`). Pairs with the JS
+    /// init script applied per-session in `BrowserManager::enable_domains`.
+    pub stealth: bool,
 }
 
 impl Default for LaunchOptions {
@@ -132,6 +136,7 @@ impl Default for LaunchOptions {
             download_path: None,
             viewport_size: None,
             use_real_keychain: false,
+            stealth: false,
         }
     }
 }
@@ -228,6 +233,13 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
     if !has_window_size && options.headless && !has_extensions {
         let (w, h) = options.viewport_size.unwrap_or((1280, 720));
         args.push(format!("--window-size={},{}", w, h));
+    }
+
+    if options.stealth {
+        // Drop the AutomationControlled blink feature so window.navigator
+        // stops advertising webdriver. The fingerprint surface is patched
+        // in JS by the per-page init script.
+        args.push("--disable-blink-features=AutomationControlled".to_string());
     }
 
     args.extend(options.args.iter().cloned());

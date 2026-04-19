@@ -3071,6 +3071,8 @@ Options:
   --confirm-interactive      Interactive confirmation prompts; auto-denies if stdin is not a TTY (or AGENT_BROWSER_CONFIRM_INTERACTIVE)
   --engine <name>            Browser engine: chrome (default), lightpanda (or AGENT_BROWSER_ENGINE)
   --no-auto-dialog           Disable automatic dismissal of alert/beforeunload dialogs (or AGENT_BROWSER_NO_AUTO_DIALOG)
+  --stealth                  Mask common bot-detection signals (webdriver, chrome.runtime,
+                             plugins, languages, WebGL) (or AGENT_BROWSER_STEALTH)
   --model <name>             AI model for chat (or AI_GATEWAY_MODEL env)
   -v, --verbose              Show tool commands and their raw output
   -q, --quiet                Show only AI text responses (hide tool calls)
@@ -3117,6 +3119,7 @@ Environment:
   AGENT_BROWSER_DOWNLOAD_PATH    Default download directory for browser downloads
   AGENT_BROWSER_DEFAULT_TIMEOUT  Default action timeout in ms (default: 25000)
   AGENT_BROWSER_SESSION_NAME     Auto-save/load state persistence name
+  AGENT_BROWSER_STEALTH          Enable stealth mode (mask bot-detection signals)
   AGENT_BROWSER_STATE_EXPIRE_DAYS Auto-delete saved states older than N days (default: 30)
   AGENT_BROWSER_ENCRYPTION_KEY   64-char hex key for AES-256-GCM session encryption
   AGENT_BROWSER_STREAM_PORT      Override WebSocket streaming port (default: OS-assigned)

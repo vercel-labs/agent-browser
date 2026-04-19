@@ -754,6 +754,7 @@ fn main() {
         default_timeout: flags.default_timeout,
         cdp: flags.cdp.as_deref(),
         no_auto_dialog: flags.no_auto_dialog,
+        stealth: flags.stealth,
     };
 
     let daemon_result = match ensure_daemon(&flags.session, &daemon_opts) {
@@ -1064,6 +1065,7 @@ fn main() {
         || flags.color_scheme.is_some()
         || flags.download_path.is_some()
         || flags.engine.is_some()
+        || flags.stealth
         || !flags.extensions.is_empty())
         && flags.cdp.is_none()
         && flags.provider.is_none()
@@ -1149,6 +1151,10 @@ fn main() {
 
         if let Some(ref engine) = flags.engine {
             launch_cmd["engine"] = json!(engine);
+        }
+
+        if flags.stealth {
+            launch_cmd["stealth"] = json!(true);
         }
 
         match send_command(launch_cmd, &flags.session) {

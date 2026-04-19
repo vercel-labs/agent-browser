@@ -305,6 +305,9 @@ pub struct BrowserManager {
     /// Origins visited during this session, used by save_state to collect cross-origin localStorage.
     visited_origins: HashSet<String>,
     next_tab_id: u32,
+    /// When true, inject the stealth init script into every page session via
+    /// `Page.addScriptToEvaluateOnNewDocument` from `enable_domains`.
+    pub stealth: bool,
 }
 
 const LIGHTPANDA_CDP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -341,6 +344,7 @@ impl BrowserManager {
         let user_agent = options.user_agent.clone();
         let color_scheme = options.color_scheme.clone();
         let download_path = options.download_path.clone();
+        let stealth = options.stealth;
 
         let (ws_url, process) = match engine {
             "lightpanda" => {
@@ -377,6 +381,7 @@ impl BrowserManager {
                 ignore_https_errors,
                 visited_origins: HashSet::new(),
                 next_tab_id: 1,
+                stealth,
             };
             manager.discover_and_attach_targets().await?;
             manager
@@ -455,6 +460,9 @@ impl BrowserManager {
     ) -> Result<Self, String> {
         let ws_url = resolve_cdp_url(url).await?;
         let client = Arc::new(CdpClient::connect_with_headers(&ws_url, headers).await?);
+        let stealth = std::env::var("AGENT_BROWSER_STEALTH")
+            .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "True"))
+            .unwrap_or(false);
         let mut manager = Self {
             client,
             browser_process: None,
@@ -466,6 +474,7 @@ impl BrowserManager {
             ignore_https_errors: false,
             visited_origins: HashSet::new(),
             next_tab_id: 1,
+            stealth,
         };
 
         if direct_page {
@@ -593,6 +602,16 @@ impl BrowserManager {
         self.client
             .send_command_no_params("Page.enable", Some(session_id))
             .await?;
+        if self.stealth {
+            let _ = self
+                .client
+                .send_command(
+                    "Page.addScriptToEvaluateOnNewDocument",
+                    Some(json!({ "source": super::stealth::STEALTH_INIT_SCRIPT })),
+                    Some(session_id),
+                )
+                .await;
+        }
         self.client
             .send_command_no_params("Runtime.enable", Some(session_id))
             .await?;
@@ -629,6 +648,16 @@ impl BrowserManager {
         self.client
             .send_command_no_params("Page.enable", None)
             .await?;
+        if self.stealth {
+            let _ = self
+                .client
+                .send_command(
+                    "Page.addScriptToEvaluateOnNewDocument",
+                    Some(json!({ "source": super::stealth::STEALTH_INIT_SCRIPT })),
+                    None,
+                )
+                .await;
+        }
         self.client
             .send_command_no_params("Runtime.enable", None)
             .await?;
@@ -1605,6 +1634,7 @@ async fn initialize_lightpanda_manager(
             ignore_https_errors: false,
             visited_origins: HashSet::new(),
             next_tab_id: 1,
+            stealth: false,
         };
 
         match discover_and_attach_lightpanda_targets(&mut manager, deadline).await {
