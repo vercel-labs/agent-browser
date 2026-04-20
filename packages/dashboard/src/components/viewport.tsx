@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useAtomValue, useSetAtom } from "jotai/react";
-import { ArrowLeft, ArrowRight, Camera, Circle, FileCode, Maximize, Moon, RotateCw, Smartphone, Square, Sun, Wifi, WifiOff } from "lucide-react";
+import { ArrowLeft, ArrowRight, Camera, Bot, Circle, FileCode, Maximize, Moon, RotateCw, Smartphone, Square, Sun, Wifi, WifiOff } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { execCommand, sessionArgs } from "@/lib/exec";
 import { Badge } from "@/components/ui/badge";
@@ -29,6 +29,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { AgentView } from "@/components/agent-view";
 import {
   currentFrameAtom,
   viewportWidthAtom,
@@ -43,6 +44,7 @@ import {
 import { activeSessionNameAtom, activePortAtom } from "@/store/sessions";
 
 const SCREENCAST_ENGINES = new Set(["chrome"]);
+const AGENT_VIEW_SNAPSHOT_DEPTH = "9999";
 
 function cdpModifiers(e: React.MouseEvent | React.WheelEvent): number {
   let m = 0;
@@ -146,6 +148,8 @@ export function Viewport() {
   const [recordDialogOpen, setRecordDialogOpen] = useState(false);
   const [recordPath, setRecordPath] = useState("recording.webm");
   const recordInputRef = useRef<HTMLInputElement>(null);
+  const [agentViewMode, setAgentViewMode] = useState(false);
+  const [agentViewSnapshot, setAgentViewSnapshot] = useState("");
   const [activeDevice, setActiveDevice] = useState<string | null>(null);
   const [colorScheme, setColorScheme] = useState<ColorScheme>("no-preference");
   const [offline, setOffline] = useState(false);
@@ -227,10 +231,42 @@ export function Viewport() {
   }, []);
 
   useEffect(() => {
-    if (frame) {
+    if (!agentViewMode && frame) {
       drawFrame(frame);
     }
-  }, [frame, drawFrame]);
+  }, [frame, drawFrame, agentViewMode]);
+
+  useEffect(() => {
+    if (!agentViewMode || !browserConnected || !sessionName) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    const pollSnapshot = async () => {
+      const result = await runCmd("snapshot", "--depth", AGENT_VIEW_SNAPSHOT_DEPTH);
+      if (cancelled) return;
+      if (result.success && result.stdout) {
+        try {
+          const parsed = JSON.parse(result.stdout) as { data?: { snapshot?: string }; error?: string };
+          setAgentViewSnapshot(parsed.data?.snapshot ?? parsed.error ?? result.stdout);
+        } catch {
+          setAgentViewSnapshot(result.stdout);
+        }
+      } else {
+        setAgentViewSnapshot(result.stderr || "Failed to fetch Agent view snapshot");
+      }
+      if (!cancelled) {
+        timer = setTimeout(() => {
+          void pollSnapshot();
+        }, 1000);
+      }
+    };
+
+    void pollSnapshot();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [agentViewMode, browserConnected, runCmd, sessionName]);
 
   const isFit =
     canvasArea.width > 0 &&
@@ -464,6 +500,21 @@ export function Viewport() {
                 <TooltipTrigger asChild>
                   <button
                     type="button"
+                    onClick={() => setAgentViewMode((prev) => !prev)}
+                    className={cn(
+                      "shrink-0 rounded p-1 transition-colors",
+                      agentViewMode ? "text-foreground" : "text-muted-foreground hover:text-foreground",
+                    )}
+                  >
+                    <Bot className="size-4" />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent side="bottom"><p>{agentViewMode ? "Human view" : "Agent view"}</p></TooltipContent>
+              </Tooltip>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    type="button"
                     onClick={() => runCmd("snapshot")}
                     className="shrink-0 rounded p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
                   >
@@ -508,7 +559,9 @@ export function Viewport() {
       )}
 
       <div ref={canvasAreaRef} className="flex min-h-0 flex-1 items-center justify-center">
-        {frame ? (
+        {agentViewMode ? (
+          <AgentView snapshot={agentViewSnapshot} connected={browserConnected} />
+        ) : frame ? (
           <canvas
             ref={canvasRef}
             tabIndex={0}
