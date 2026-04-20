@@ -629,7 +629,7 @@ fn main() {
         return;
     }
 
-    let mut cmd = match parse_command(&clean, &flags) {
+    let (mut cmd, _) = match parse_command(&clean, &flags) {
         Ok(c) => c,
         Err(e) => {
             if flags.json {
@@ -1324,7 +1324,7 @@ fn run_batch(flags: &Flags, bail: bool, arg_commands: Option<Vec<Vec<String>>>) 
             continue;
         }
 
-        let parsed = match parse_command(cmd_args, flags) {
+        let (parsed, cmd_output_opts) = match parse_command(cmd_args, flags) {
             Ok(c) => c,
             Err(e) => {
                 had_error = true;
@@ -1352,6 +1352,15 @@ fn run_batch(flags: &Flags, bail: bool, arg_commands: Option<Vec<Vec<String>>>) 
             }
         };
 
+        let per_cmd_opts = match cmd_output_opts {
+            Some(cmd_opts) => OutputOptions {
+                json: output_opts.json,
+                content_boundaries: output_opts.content_boundaries || cmd_opts.content_boundaries,
+                max_output: cmd_opts.max_output.or(output_opts.max_output),
+            },
+            None => output_opts,
+        };
+
         let action = parsed
             .get("action")
             .and_then(|v| v.as_str())
@@ -1370,7 +1379,7 @@ fn run_batch(flags: &Flags, bail: bool, arg_commands: Option<Vec<Vec<String>>>) 
                     if i > 0 {
                         println!();
                     }
-                    print_response_with_opts(&resp, action.as_deref(), &output_opts);
+                    print_response_with_opts(&resp, action.as_deref(), &per_cmd_opts);
                 }
                 if !resp.success {
                     had_error = true;

@@ -16,7 +16,7 @@ fn get_boundary_nonce() -> &'static str {
     })
 }
 
-#[derive(Default)]
+#[derive(Default, Clone, Copy)]
 pub struct OutputOptions {
     pub json: bool,
     pub content_boundaries: bool,

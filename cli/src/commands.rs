@@ -6,6 +6,14 @@ use crate::color;
 use crate::flags::Flags;
 use crate::validation::{is_valid_session_name, session_name_error};
 
+/// Per-command output formatting overrides for CLI-layer flags
+/// that are not forwarded to the daemon.
+#[derive(Debug, Default)]
+pub struct CommandOutputOpts {
+    pub content_boundaries: bool,
+    pub max_output: Option<usize>,
+}
+
 /// Error type for command parsing with contextual information
 #[derive(Debug)]
 pub enum ParseError {
@@ -71,8 +79,11 @@ pub fn gen_id() -> String {
     )
 }
 
-pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError> {
-    let mut result = parse_command_inner(args, flags)?;
+pub fn parse_command(
+    args: &[String],
+    flags: &Flags,
+) -> Result<(Value, Option<CommandOutputOpts>), ParseError> {
+    let (mut result, output_opts) = parse_command_inner(args, flags)?;
 
     // Inject AGENT_BROWSER_DEFAULT_TIMEOUT into any wait-family command that
     // doesn't already carry an explicit timeout. Centralised here so that new
@@ -85,10 +96,27 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
         }
     }
 
-    Ok(result)
+    Ok((result, output_opts))
 }
 
-fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseError> {
+fn take_next_arg<'a>(
+    rest: &[&'a str],
+    i: usize,
+    flag: &'static str,
+    usage: &'static str,
+) -> Result<&'a str, ParseError> {
+    rest.get(i + 1)
+        .copied()
+        .ok_or_else(|| ParseError::MissingArguments {
+            context: flag.to_string(),
+            usage,
+        })
+}
+
+fn parse_command_inner(
+    args: &[String],
+    flags: &Flags,
+) -> Result<(Value, Option<CommandOutputOpts>), ParseError> {
     if args.is_empty() {
         return Err(ParseError::MissingArguments {
             context: "".to_string(),
@@ -111,7 +139,35 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
         // === Navigation ===
         // Maps to "navigate" action in protocol; reflected in ACTION_CATEGORIES in action-policy.ts
         "open" | "goto" | "navigate" => {
-            let url = rest.first().ok_or_else(|| ParseError::MissingArguments {
+            let mut headers_json: Option<&str> = flags.headers.as_deref();
+            let mut url_positional: Option<&str> = None;
+            let mut i = 0;
+            while i < rest.len() {
+                match rest[i] {
+                    "--headers" => {
+                        headers_json = Some(take_next_arg(
+                            &rest,
+                            i,
+                            "--headers",
+                            "open <url> --headers '<json>'",
+                        )?);
+                        i += 1;
+                    }
+                    arg if arg.starts_with('-') => {
+                        return Err(ParseError::InvalidValue {
+                            message: format!("Unknown flag for open: {}", arg),
+                            usage: "open <url> [--headers '<json>']",
+                        });
+                    }
+                    _ => {
+                        if url_positional.is_none() {
+                            url_positional = Some(rest[i]);
+                        }
+                    }
+                }
+                i += 1;
+            }
+            let url = url_positional.ok_or_else(|| ParseError::MissingArguments {
                 context: cmd.to_string(),
                 usage: "open <url>",
             })?;
@@ -132,11 +188,11 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
             if flags.provider.is_some() {
                 nav_cmd["waitUntil"] = json!("none");
             }
-            if let Some(ref headers_json) = flags.headers {
+            if let Some(headers_str) = headers_json {
                 let headers =
-                    serde_json::from_str::<serde_json::Value>(headers_json).map_err(|_| {
+                    serde_json::from_str::<serde_json::Value>(headers_str).map_err(|_| {
                         ParseError::InvalidValue {
-                            message: format!("Invalid JSON for --headers: {}", headers_json),
+                            message: format!("Invalid JSON for --headers: {}", headers_str),
                             usage: "open <url> --headers '{\"Key\": \"Value\"}'",
                         }
                     })?;
@@ -148,11 +204,11 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                     nav_cmd["iosDevice"] = json!(device);
                 }
             }
-            Ok(nav_cmd)
+            Ok((nav_cmd, None))
         }
-        "back" => Ok(json!({ "id": id, "action": "back" })),
-        "forward" => Ok(json!({ "id": id, "action": "forward" })),
-        "reload" => Ok(json!({ "id": id, "action": "reload" })),
+        "back" => Ok((json!({ "id": id, "action": "back" }), None)),
+        "forward" => Ok((json!({ "id": id, "action": "forward" }), None)),
+        "reload" => Ok((json!({ "id": id, "action": "reload" }), None)),
 
         // === Core Actions ===
         "click" => {
@@ -165,9 +221,15 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                     usage: "click <selector> [--new-tab]",
                 })?;
             if new_tab {
-                Ok(json!({ "id": id, "action": "click", "selector": sel, "newTab": true }))
+                Ok((
+                    json!({ "id": id, "action": "click", "selector": sel, "newTab": true }),
+                    None,
+                ))
             } else {
-                Ok(json!({ "id": id, "action": "click", "selector": sel }))
+                Ok((
+                    json!({ "id": id, "action": "click", "selector": sel }),
+                    None,
+                ))
             }
         }
         "dblclick" => {
@@ -175,49 +237,70 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 context: "dblclick".to_string(),
                 usage: "dblclick <selector>",
             })?;
-            Ok(json!({ "id": id, "action": "dblclick", "selector": sel }))
+            Ok((
+                json!({ "id": id, "action": "dblclick", "selector": sel }),
+                None,
+            ))
         }
         "fill" => {
             let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
                 context: "fill".to_string(),
                 usage: "fill <selector> <text>",
             })?;
-            Ok(json!({ "id": id, "action": "fill", "selector": sel, "value": rest[1..].join(" ") }))
+            Ok((
+                json!({ "id": id, "action": "fill", "selector": sel, "value": rest[1..].join(" ") }),
+                None,
+            ))
         }
         "type" => {
             let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
                 context: "type".to_string(),
                 usage: "type <selector> <text>",
             })?;
-            Ok(json!({ "id": id, "action": "type", "selector": sel, "text": rest[1..].join(" ") }))
+            Ok((
+                json!({ "id": id, "action": "type", "selector": sel, "text": rest[1..].join(" ") }),
+                None,
+            ))
         }
         "hover" => {
             let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
                 context: "hover".to_string(),
                 usage: "hover <selector>",
             })?;
-            Ok(json!({ "id": id, "action": "hover", "selector": sel }))
+            Ok((
+                json!({ "id": id, "action": "hover", "selector": sel }),
+                None,
+            ))
         }
         "focus" => {
             let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
                 context: "focus".to_string(),
                 usage: "focus <selector>",
             })?;
-            Ok(json!({ "id": id, "action": "focus", "selector": sel }))
+            Ok((
+                json!({ "id": id, "action": "focus", "selector": sel }),
+                None,
+            ))
         }
         "check" => {
             let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
                 context: "check".to_string(),
                 usage: "check <selector>",
             })?;
-            Ok(json!({ "id": id, "action": "check", "selector": sel }))
+            Ok((
+                json!({ "id": id, "action": "check", "selector": sel }),
+                None,
+            ))
         }
         "uncheck" => {
             let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
                 context: "uncheck".to_string(),
                 usage: "uncheck <selector>",
             })?;
-            Ok(json!({ "id": id, "action": "uncheck", "selector": sel }))
+            Ok((
+                json!({ "id": id, "action": "uncheck", "selector": sel }),
+                None,
+            ))
         }
         "select" => {
             let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
@@ -230,9 +313,15 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
             })?;
             let values = &rest[1..];
             if values.len() == 1 {
-                Ok(json!({ "id": id, "action": "select", "selector": sel, "values": values[0] }))
+                Ok((
+                    json!({ "id": id, "action": "select", "selector": sel, "values": values[0] }),
+                    None,
+                ))
             } else {
-                Ok(json!({ "id": id, "action": "select", "selector": sel, "values": values }))
+                Ok((
+                    json!({ "id": id, "action": "select", "selector": sel, "values": values }),
+                    None,
+                ))
             }
         }
         "drag" => {
@@ -244,25 +333,65 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 context: "drag".to_string(),
                 usage: "drag <source> <target>",
             })?;
-            Ok(json!({ "id": id, "action": "drag", "source": src, "target": tgt }))
+            Ok((
+                json!({ "id": id, "action": "drag", "source": src, "target": tgt }),
+                None,
+            ))
         }
         "upload" => {
             let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
                 context: "upload".to_string(),
                 usage: "upload <selector> <files...>",
             })?;
-            Ok(json!({ "id": id, "action": "upload", "selector": sel, "files": &rest[1..] }))
+            Ok((
+                json!({ "id": id, "action": "upload", "selector": sel, "files": &rest[1..] }),
+                None,
+            ))
         }
         "download" => {
-            let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
-                context: "download".to_string(),
-                usage: "download <selector> <path>",
+            let mut path_flag: Option<&str> = None;
+            let mut positional: Vec<&str> = Vec::with_capacity(2);
+            let mut i = 0;
+            while i < rest.len() {
+                match rest[i] {
+                    "--download-path" => {
+                        path_flag = Some(take_next_arg(
+                            &rest,
+                            i,
+                            "--download-path",
+                            "download <selector> <path>",
+                        )?);
+                        i += 1;
+                    }
+                    arg if arg.starts_with('-') => {
+                        return Err(ParseError::InvalidValue {
+                            message: format!("Unknown flag for download: {}", arg),
+                            usage: "download <selector> (--download-path <path> | <path>)",
+                        });
+                    }
+                    _ => {
+                        positional.push(rest[i]);
+                    }
+                }
+                i += 1;
+            }
+            let sel = positional
+                .first()
+                .copied()
+                .ok_or_else(|| ParseError::MissingArguments {
+                    context: "download".to_string(),
+                    usage: "download <selector> <path>",
+                })?;
+            let path = positional.get(1).copied().or(path_flag).ok_or_else(|| {
+                ParseError::MissingArguments {
+                    context: "download".to_string(),
+                    usage: "download <selector> <path>",
+                }
             })?;
-            let path = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
-                context: "download".to_string(),
-                usage: "download <selector> <path>",
-            })?;
-            Ok(json!({ "id": id, "action": "download", "selector": sel, "path": path }))
+            Ok((
+                json!({ "id": id, "action": "download", "selector": sel, "path": path }),
+                None,
+            ))
         }
 
         // === Keyboard ===
@@ -271,21 +400,21 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 context: "press".to_string(),
                 usage: "press <key>",
             })?;
-            Ok(json!({ "id": id, "action": "press", "key": key }))
+            Ok((json!({ "id": id, "action": "press", "key": key }), None))
         }
         "keydown" => {
             let key = rest.first().ok_or_else(|| ParseError::MissingArguments {
                 context: "keydown".to_string(),
                 usage: "keydown <key>",
             })?;
-            Ok(json!({ "id": id, "action": "keydown", "key": key }))
+            Ok((json!({ "id": id, "action": "keydown", "key": key }), None))
         }
         "keyup" => {
             let key = rest.first().ok_or_else(|| ParseError::MissingArguments {
                 context: "keyup".to_string(),
                 usage: "keyup <key>",
             })?;
-            Ok(json!({ "id": id, "action": "keyup", "key": key }))
+            Ok((json!({ "id": id, "action": "keyup", "key": key }), None))
         }
         "keyboard" => {
             let sub = rest.first().ok_or_else(|| ParseError::MissingArguments {
@@ -301,7 +430,10 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                             usage: "keyboard type <text>",
                         });
                     }
-                    Ok(json!({ "id": id, "action": "keyboard", "subaction": "type", "text": text }))
+                    Ok((
+                        json!({ "id": id, "action": "keyboard", "subaction": "type", "text": text }),
+                        None,
+                    ))
                 }
                 "inserttext" | "insertText" => {
                     let text: String = rest[1..].join(" ");
@@ -311,9 +443,10 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                             usage: "keyboard inserttext <text>",
                         });
                     }
-                    Ok(
+                    Ok((
                         json!({ "id": id, "action": "keyboard", "subaction": "insertText", "text": text }),
-                    )
+                        None,
+                    ))
                 }
                 _ => Err(ParseError::UnknownSubcommand {
                     subcommand: sub.to_string(),
@@ -365,14 +498,17 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
             if !obj.contains_key("amount") {
                 obj.insert("amount".to_string(), json!(300));
             }
-            Ok(cmd)
+            Ok((cmd, None))
         }
         "scrollintoview" | "scrollinto" => {
             let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
                 context: "scrollintoview".to_string(),
                 usage: "scrollintoview <selector>",
             })?;
-            Ok(json!({ "id": id, "action": "scrollintoview", "selector": sel }))
+            Ok((
+                json!({ "id": id, "action": "scrollintoview", "selector": sel }),
+                None,
+            ))
         }
 
         // === Wait ===
@@ -385,7 +521,10 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                         context: "wait --url".to_string(),
                         usage: "wait --url <pattern>",
                     })?;
-                return Ok(json!({ "id": id, "action": "waitforurl", "url": url }));
+                return Ok((
+                    json!({ "id": id, "action": "waitforurl", "url": url }),
+                    None,
+                ));
             }
 
             // Check for --load flag: wait --load networkidle
@@ -396,7 +535,10 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                         context: "wait --load".to_string(),
                         usage: "wait --load <state>",
                     })?;
-                return Ok(json!({ "id": id, "action": "waitforloadstate", "state": state }));
+                return Ok((
+                    json!({ "id": id, "action": "waitforloadstate", "state": state }),
+                    None,
+                ));
             }
 
             // Check for --fn flag: wait --fn "window.ready === true"
@@ -407,7 +549,10 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                         context: "wait --fn".to_string(),
                         usage: "wait --fn <expression>",
                     })?;
-                return Ok(json!({ "id": id, "action": "waitforfunction", "expression": expr }));
+                return Ok((
+                    json!({ "id": id, "action": "waitforfunction", "expression": expr }),
+                    None,
+                ));
             }
 
             // Check for --text flag: wait --text "Welcome" [--timeout ms]
@@ -424,7 +569,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                         cmd["timeout"] = json!(ms);
                     }
                 }
-                return Ok(cmd);
+                return Ok((cmd, None));
             }
 
             // Check for --download flag: wait --download [path] [--timeout ms]
@@ -448,15 +593,18 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                         }
                     }
                 }
-                return Ok(cmd);
+                return Ok((cmd, None));
             }
 
             // Default: selector or timeout
             if let Some(arg) = rest.first() {
                 if let Ok(timeout) = arg.parse::<u64>() {
-                    Ok(json!({ "id": id, "action": "wait", "timeout": timeout }))
+                    Ok((
+                        json!({ "id": id, "action": "wait", "timeout": timeout }),
+                        None,
+                    ))
                 } else {
-                    Ok(json!({ "id": id, "action": "wait", "selector": arg }))
+                    Ok((json!({ "id": id, "action": "wait", "selector": arg }), None))
                 }
             } else {
                 Err(ParseError::MissingArguments {
@@ -468,21 +616,93 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
 
         // === Screenshot/PDF ===
         "screenshot" => {
-            // screenshot [selector] [path] [--full/-f]
-            // selector: @ref or CSS selector
-            // path: file path (contains / or . or ends with known extension)
             let mut full_page = false;
-            let positional: Vec<&str> = rest
-                .iter()
-                .filter(|arg| match **arg {
+            let mut annotate = flags.annotate;
+            let mut screenshot_format: Option<&str> = flags.screenshot_format.as_deref();
+            let mut screenshot_quality: Option<u32> = flags.screenshot_quality;
+            let mut screenshot_dir: Option<&str> = flags.screenshot_dir.as_deref();
+            let mut positional: Vec<&str> = Vec::with_capacity(2);
+            let mut i = 0;
+            while i < rest.len() {
+                match rest[i] {
                     "--full" | "-f" => {
                         full_page = true;
-                        false
                     }
-                    _ => true,
-                })
-                .copied()
-                .collect();
+                    "--annotate" => {
+                        annotate = true;
+                    }
+                    "--screenshot-format" => {
+                        let fmt = take_next_arg(
+                            &rest,
+                            i,
+                            "--screenshot-format",
+                            "screenshot [--screenshot-format <png|jpeg|webp>]",
+                        )?;
+                        i += 1;
+                        match fmt {
+                            "png" | "jpeg" | "webp" => screenshot_format = Some(fmt),
+                            _ => {
+                                return Err(ParseError::InvalidValue {
+                                    message: format!(
+                                        "--screenshot-format must be png, jpeg, or webp, got: {}",
+                                        fmt
+                                    ),
+                                    usage: "screenshot [--screenshot-format <png|jpeg|webp>]",
+                                })
+                            }
+                        }
+                    }
+                    "--screenshot-quality" => {
+                        let val = take_next_arg(
+                            &rest,
+                            i,
+                            "--screenshot-quality",
+                            "screenshot [--screenshot-quality <0-100>]",
+                        )?;
+                        i += 1;
+                        match val.parse::<u32>() {
+                            Ok(q) if q <= 100 => screenshot_quality = Some(q),
+                            Ok(_) => {
+                                return Err(ParseError::InvalidValue {
+                                    message: format!(
+                                        "--screenshot-quality must be between 0 and 100, got: {}",
+                                        val
+                                    ),
+                                    usage: "screenshot [--screenshot-quality <0-100>]",
+                                })
+                            }
+                            Err(_) => {
+                                return Err(ParseError::InvalidValue {
+                                    message: format!(
+                                        "--screenshot-quality must be a number, got: {}",
+                                        val
+                                    ),
+                                    usage: "screenshot [--screenshot-quality <0-100>]",
+                                })
+                            }
+                        }
+                    }
+                    "--screenshot-dir" => {
+                        screenshot_dir = Some(take_next_arg(
+                            &rest,
+                            i,
+                            "--screenshot-dir",
+                            "screenshot [--screenshot-dir <path>]",
+                        )?);
+                        i += 1;
+                    }
+                    arg if arg.starts_with('-') => {
+                        return Err(ParseError::InvalidValue {
+                            message: format!("Unknown flag for screenshot: {}", arg),
+                            usage: "screenshot [selector] [path] [--full/-f] [--annotate] [--screenshot-format <fmt>] [--screenshot-quality <0-100>] [--screenshot-dir <path>]",
+                        });
+                    }
+                    _ => {
+                        positional.push(rest[i]);
+                    }
+                }
+                i += 1;
+            }
             let (selector, path) = match (positional.first(), positional.get(1)) {
                 (Some(first), Some(second)) => {
                     // Two args: first is selector, second is path
@@ -511,37 +731,39 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
             let mut cmd = json!({
                 "id": id, "action": "screenshot",
                 "path": path, "selector": selector,
-                "fullPage": full_page, "annotate": flags.annotate
+                "fullPage": full_page, "annotate": annotate
             });
-            if let Some(ref fmt) = flags.screenshot_format {
+            if let Some(fmt) = screenshot_format {
                 cmd["format"] = json!(fmt);
             }
-            if let Some(q) = flags.screenshot_quality {
+            if let Some(q) = screenshot_quality {
                 cmd["quality"] = json!(q);
-                if flags.screenshot_format.as_deref() != Some("jpeg") {
+                if screenshot_format != Some("jpeg") {
                     eprintln!(
                         "{} --screenshot-quality is ignored for PNG; use --screenshot-format jpeg",
                         color::warning_indicator()
                     );
                 }
             }
-            if let Some(ref dir) = flags.screenshot_dir {
+            if let Some(dir) = screenshot_dir {
                 cmd["screenshotDir"] = json!(dir);
             }
-            Ok(cmd)
+            Ok((cmd, None))
         }
         "pdf" => {
             let path = rest.first().ok_or_else(|| ParseError::MissingArguments {
                 context: "pdf".to_string(),
                 usage: "pdf <path>",
             })?;
-            Ok(json!({ "id": id, "action": "pdf", "path": path }))
+            Ok((json!({ "id": id, "action": "pdf", "path": path }), None))
         }
 
         // === Snapshot ===
         "snapshot" => {
             let mut cmd = json!({ "id": id, "action": "snapshot" });
             let obj = cmd.as_object_mut().unwrap();
+            let mut inline_content_boundaries = false;
+            let mut inline_max_output: Option<usize> = None;
             let mut i = 0;
             while i < rest.len() {
                 match rest[i] {
@@ -571,11 +793,42 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                             i += 1;
                         }
                     }
+                    "--content-boundaries" => {
+                        inline_content_boundaries = true;
+                    }
+                    "--max-output" => {
+                        let val =
+                            take_next_arg(&rest, i, "--max-output", "snapshot [--max-output <n>]")?;
+                        i += 1;
+                        match val.parse::<usize>() {
+                            Ok(n) => inline_max_output = Some(n),
+                            Err(_) => {
+                                return Err(ParseError::InvalidValue {
+                                    message: format!("--max-output must be a number, got: {}", val),
+                                    usage: "snapshot [--max-output <n>]",
+                                })
+                            }
+                        }
+                    }
+                    arg if arg.starts_with('-') => {
+                        return Err(ParseError::InvalidValue {
+                            message: format!("Unknown flag for snapshot: {}", arg),
+                            usage: "snapshot [-i] [-c] [-C] [-u] [-d <depth>] [-s <selector>] [--content-boundaries] [--max-output <n>]",
+                        });
+                    }
                     _ => {}
                 }
                 i += 1;
             }
-            Ok(cmd)
+            let output_opts = if inline_content_boundaries || inline_max_output.is_some() {
+                Some(CommandOutputOpts {
+                    content_boundaries: flags.content_boundaries || inline_content_boundaries,
+                    max_output: inline_max_output.or(flags.max_output),
+                })
+            } else {
+                None
+            };
+            Ok((cmd, output_opts))
         }
 
         // === Eval ===
@@ -617,14 +870,17 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                     raw_script
                 }
             };
-            Ok(json!({ "id": id, "action": "evaluate", "script": script }))
+            Ok((
+                json!({ "id": id, "action": "evaluate", "script": script }),
+                None,
+            ))
         }
 
         // === Close ===
-        "close" | "quit" | "exit" => Ok(json!({ "id": id, "action": "close" })),
+        "close" | "quit" | "exit" => Ok((json!({ "id": id, "action": "close" }), None)),
 
         // === Inspect ===
-        "inspect" => Ok(json!({ "id": id, "action": "inspect" })),
+        "inspect" => Ok((json!({ "id": id, "action": "inspect" }), None)),
 
         // === Authentication Vault ===
         "auth" => {
@@ -724,29 +980,38 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                     if let Some(ss) = submit_selector {
                         cmd["submitSelector"] = json!(ss);
                     }
-                    Ok(cmd)
+                    Ok((cmd, None))
                 }
                 Some("login") => {
                     let name = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
                         context: "auth login".to_string(),
                         usage: "agent-browser auth login <name>",
                     })?;
-                    Ok(json!({ "id": id, "action": "auth_login", "name": name }))
+                    Ok((
+                        json!({ "id": id, "action": "auth_login", "name": name }),
+                        None,
+                    ))
                 }
-                Some("list") => Ok(json!({ "id": id, "action": "auth_list" })),
+                Some("list") => Ok((json!({ "id": id, "action": "auth_list" }), None)),
                 Some("delete") | Some("remove") => {
                     let name = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
                         context: "auth delete".to_string(),
                         usage: "agent-browser auth delete <name>",
                     })?;
-                    Ok(json!({ "id": id, "action": "auth_delete", "name": name }))
+                    Ok((
+                        json!({ "id": id, "action": "auth_delete", "name": name }),
+                        None,
+                    ))
                 }
                 Some("show") => {
                     let name = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
                         context: "auth show".to_string(),
                         usage: "agent-browser auth show <name>",
                     })?;
-                    Ok(json!({ "id": id, "action": "auth_show", "name": name }))
+                    Ok((
+                        json!({ "id": id, "action": "auth_show", "name": name }),
+                        None,
+                    ))
                 }
                 _ => Err(ParseError::UnknownSubcommand {
                     subcommand: sub.unwrap_or("(none)").to_string(),
@@ -761,14 +1026,20 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 context: "confirm".to_string(),
                 usage: "agent-browser confirm <confirmation-id>",
             })?;
-            Ok(json!({ "id": id, "action": "confirm", "confirmationId": cid }))
+            Ok((
+                json!({ "id": id, "action": "confirm", "confirmationId": cid }),
+                None,
+            ))
         }
         "deny" => {
             let cid = rest.first().ok_or_else(|| ParseError::MissingArguments {
                 context: "deny".to_string(),
                 usage: "agent-browser deny <confirmation-id>",
             })?;
-            Ok(json!({ "id": id, "action": "deny", "confirmationId": cid }))
+            Ok((
+                json!({ "id": id, "action": "deny", "confirmationId": cid }),
+                None,
+            ))
         }
 
         // === Connect (CDP) ===
@@ -783,7 +1054,10 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 || endpoint.starts_with("http://")
                 || endpoint.starts_with("https://")
             {
-                Ok(json!({ "id": id, "action": "launch", "cdpUrl": endpoint }))
+                Ok((
+                    json!({ "id": id, "action": "launch", "cdpUrl": endpoint }),
+                    None,
+                ))
             } else {
                 // It's a port number - validate and use cdpPort field
                 let port: u16 = match endpoint.parse::<u32>() {
@@ -813,7 +1087,10 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                         });
                     }
                 };
-                Ok(json!({ "id": id, "action": "launch", "cdpPort": port }))
+                Ok((
+                    json!({ "id": id, "action": "launch", "cdpPort": port }),
+                    None,
+                ))
             }
         }
 
@@ -859,10 +1136,10 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                         }
                     }
                 }
-                Ok(cmd)
+                Ok((cmd, None))
             }
-            Some("disable") => Ok(json!({ "id": id, "action": "stream_disable" })),
-            Some("status") => Ok(json!({ "id": id, "action": "stream_status" })),
+            Some("disable") => Ok((json!({ "id": id, "action": "stream_disable" }), None)),
+            Some("status") => Ok((json!({ "id": id, "action": "stream_status" }), None)),
             Some(sub) => Err(ParseError::UnknownSubcommand {
                 subcommand: sub.to_string(),
                 valid_options: &["enable", "disable", "status"],
@@ -874,25 +1151,25 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
         },
 
         // === Get ===
-        "get" => parse_get(&rest, &id),
+        "get" => parse_get(&rest, &id).map(|cmd| (cmd, None)),
 
         // === Is (state checks) ===
-        "is" => parse_is(&rest, &id),
+        "is" => parse_is(&rest, &id).map(|cmd| (cmd, None)),
 
         // === Find (locators) ===
-        "find" => parse_find(&rest, &id),
+        "find" => parse_find(&rest, &id).map(|cmd| (cmd, None)),
 
         // === Mouse ===
-        "mouse" => parse_mouse(&rest, &id),
+        "mouse" => parse_mouse(&rest, &id).map(|cmd| (cmd, None)),
 
         // === Set (browser settings) ===
-        "set" => parse_set(&rest, &id),
+        "set" => parse_set(&rest, &id).map(|cmd| (cmd, None)),
 
         // === Network ===
-        "network" => parse_network(&rest, &id),
+        "network" => parse_network(&rest, &id).map(|cmd| (cmd, None)),
 
         // === Storage ===
-        "storage" => parse_storage(&rest, &id),
+        "storage" => parse_storage(&rest, &id).map(|cmd| (cmd, None)),
 
         // === Cookies ===
         "cookies" => {
@@ -1002,10 +1279,13 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                         }
                     }
 
-                    Ok(json!({ "id": id, "action": "cookies_set", "cookies": [cookie] }))
+                    Ok((
+                        json!({ "id": id, "action": "cookies_set", "cookies": [cookie] }),
+                        None,
+                    ))
                 }
-                "clear" => Ok(json!({ "id": id, "action": "cookies_clear" })),
-                _ => Ok(json!({ "id": id, "action": "cookies_get" })),
+                "clear" => Ok((json!({ "id": id, "action": "cookies_clear" }), None)),
+                _ => Ok((json!({ "id": id, "action": "cookies_get" }), None)),
             }
         }
 
@@ -1041,22 +1321,21 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                             }
                         }
                     }
-                    Ok(cmd)
+                    Ok((cmd, None))
                 }
-                Some("list") => Ok(json!({ "id": id, "action": "tab_list" })),
+                Some("list") => Ok((json!({ "id": id, "action": "tab_list" }), None)),
                 Some("close") => {
                     let mut cmd = json!({ "id": id, "action": "tab_close" });
                     if let Some(tab_ref) = rest.get(1) {
                         cmd["tabId"] = json!(tab_ref);
                     }
-                    Ok(cmd)
+                    Ok((cmd, None))
                 }
-                Some(tab_ref) => Ok(json!({
-                    "id": id,
-                    "action": "tab_switch",
-                    "tabId": tab_ref,
-                })),
-                None => Ok(json!({ "id": id, "action": "tab_list" })),
+                Some(tab_ref) => Ok((
+                    json!({ "id": id, "action": "tab_switch", "tabId": tab_ref }),
+                    None,
+                )),
+                None => Ok((json!({ "id": id, "action": "tab_list" }), None)),
             }
         }
 
@@ -1064,7 +1343,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
         "window" => {
             const VALID: &[&str] = &["new"];
             match rest.first().copied() {
-                Some("new") => Ok(json!({ "id": id, "action": "window_new" })),
+                Some("new") => Ok((json!({ "id": id, "action": "window_new" }), None)),
                 Some(sub) => Err(ParseError::UnknownSubcommand {
                     subcommand: sub.to_string(),
                     valid_options: VALID,
@@ -1079,13 +1358,16 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
         // === Frame ===
         "frame" => {
             if rest.first().copied() == Some("main") {
-                Ok(json!({ "id": id, "action": "mainframe" }))
+                Ok((json!({ "id": id, "action": "mainframe" }), None))
             } else {
                 let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
                     context: "frame".to_string(),
                     usage: "frame <selector|main>",
                 })?;
-                Ok(json!({ "id": id, "action": "frame", "selector": sel }))
+                Ok((
+                    json!({ "id": id, "action": "frame", "selector": sel }),
+                    None,
+                ))
             }
         }
 
@@ -1098,16 +1380,19 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                     if let Some(prompt_text) = rest.get(1) {
                         cmd["promptText"] = json!(prompt_text);
                     }
-                    Ok(cmd)
+                    Ok((cmd, None))
                 }
                 Some("dismiss") => {
                     let mut cmd = json!({ "id": id, "action": "dialog", "response": "dismiss" });
                     if let Some(prompt_text) = rest.get(1) {
                         cmd["promptText"] = json!(prompt_text);
                     }
-                    Ok(cmd)
+                    Ok((cmd, None))
                 }
-                Some("status") => Ok(json!({ "id": id, "action": "dialog", "response": "status" })),
+                Some("status") => Ok((
+                    json!({ "id": id, "action": "dialog", "response": "status" }),
+                    None,
+                )),
                 Some(sub) => Err(ParseError::UnknownSubcommand {
                     subcommand: sub.to_string(),
                     valid_options: VALID,
@@ -1123,13 +1408,13 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
         "trace" => {
             const VALID: &[&str] = &["start", "stop"];
             match rest.first().copied() {
-                Some("start") => Ok(json!({ "id": id, "action": "trace_start" })),
+                Some("start") => Ok((json!({ "id": id, "action": "trace_start" }), None)),
                 Some("stop") => {
                     let mut cmd = json!({ "id": id, "action": "trace_stop" });
                     if let Some(path) = rest.get(1) {
                         cmd["path"] = json!(path);
                     }
-                    Ok(cmd)
+                    Ok((cmd, None))
                 }
                 Some(sub) => Err(ParseError::UnknownSubcommand {
                     subcommand: sub.to_string(),
@@ -1159,14 +1444,14 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                             });
                         }
                     }
-                    Ok(cmd)
+                    Ok((cmd, None))
                 }
                 Some("stop") => {
                     let mut cmd = json!({ "id": id, "action": "profiler_stop" });
                     if let Some(path) = rest.get(1) {
                         cmd["path"] = json!(path);
                     }
-                    Ok(cmd)
+                    Ok((cmd, None))
                 }
                 Some(sub) => Err(ParseError::UnknownSubcommand {
                     subcommand: sub.to_string(),
@@ -1200,9 +1485,9 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                         };
                         cmd["url"] = json!(url_str);
                     }
-                    Ok(cmd)
+                    Ok((cmd, None))
                 }
-                Some("stop") => Ok(json!({ "id": id, "action": "recording_stop" })),
+                Some("stop") => Ok((json!({ "id": id, "action": "recording_stop" }), None)),
                 Some("restart") => {
                     let path = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
                         context: "record restart".to_string(),
@@ -1220,7 +1505,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                         };
                         cmd["url"] = json!(url_str);
                     }
-                    Ok(cmd)
+                    Ok((cmd, None))
                 }
                 Some(sub) => Err(ParseError::UnknownSubcommand {
                     subcommand: sub.to_string(),
@@ -1234,35 +1519,54 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
         }
         "console" => {
             let clear = rest.contains(&"--clear");
-            Ok(json!({ "id": id, "action": "console", "clear": clear }))
+            Ok((
+                json!({ "id": id, "action": "console", "clear": clear }),
+                None,
+            ))
         }
         "errors" => {
             let clear = rest.contains(&"--clear");
-            Ok(json!({ "id": id, "action": "errors", "clear": clear }))
+            Ok((
+                json!({ "id": id, "action": "errors", "clear": clear }),
+                None,
+            ))
         }
         "highlight" => {
             let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
                 context: "highlight".to_string(),
                 usage: "highlight <selector>",
             })?;
-            Ok(json!({ "id": id, "action": "highlight", "selector": sel }))
+            Ok((
+                json!({ "id": id, "action": "highlight", "selector": sel }),
+                None,
+            ))
         }
 
         // === Clipboard ===
         "clipboard" => match rest.first().copied() {
-            Some("read") | None => {
-                Ok(json!({ "id": id, "action": "clipboard", "operation": "read" }))
-            }
+            Some("read") | None => Ok((
+                json!({ "id": id, "action": "clipboard", "operation": "read" }),
+                None,
+            )),
             Some("write") => {
                 rest.get(1).ok_or_else(|| ParseError::MissingArguments {
                     context: "clipboard write".to_string(),
                     usage: "clipboard write <text>",
                 })?;
                 let text = rest[1..].join(" ");
-                Ok(json!({ "id": id, "action": "clipboard", "operation": "write", "text": text }))
+                Ok((
+                    json!({ "id": id, "action": "clipboard", "operation": "write", "text": text }),
+                    None,
+                ))
             }
-            Some("copy") => Ok(json!({ "id": id, "action": "clipboard", "operation": "copy" })),
-            Some("paste") => Ok(json!({ "id": id, "action": "clipboard", "operation": "paste" })),
+            Some("copy") => Ok((
+                json!({ "id": id, "action": "clipboard", "operation": "copy" }),
+                None,
+            )),
+            Some("paste") => Ok((
+                json!({ "id": id, "action": "clipboard", "operation": "paste" }),
+                None,
+            )),
             Some(sub) => Err(ParseError::UnknownSubcommand {
                 subcommand: sub.to_string(),
                 valid_options: &["read", "write", "copy", "paste"],
@@ -1278,16 +1582,22 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                         context: "state save".to_string(),
                         usage: "state save <path>",
                     })?;
-                    Ok(json!({ "id": id, "action": "state_save", "path": path }))
+                    Ok((
+                        json!({ "id": id, "action": "state_save", "path": path }),
+                        None,
+                    ))
                 }
                 Some("load") => {
                     let path = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
                         context: "state load".to_string(),
                         usage: "state load <path>",
                     })?;
-                    Ok(json!({ "id": id, "action": "state_load", "path": path }))
+                    Ok((
+                        json!({ "id": id, "action": "state_load", "path": path }),
+                        None,
+                    ))
                 }
-                Some("list") => Ok(json!({ "id": id, "action": "state_list" })),
+                Some("list") => Ok((json!({ "id": id, "action": "state_list" }), None)),
                 Some("clear") => {
                     let mut session_name: Option<&str> = None;
                     let mut all = false;
@@ -1321,14 +1631,17 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                     if let Some(name) = session_name {
                         cmd["sessionName"] = json!(name);
                     }
-                    Ok(cmd)
+                    Ok((cmd, None))
                 }
                 Some("show") => {
                     let filename = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
                         context: "state show".to_string(),
                         usage: "state show <filename>",
                     })?;
-                    Ok(json!({ "id": id, "action": "state_show", "path": filename }))
+                    Ok((
+                        json!({ "id": id, "action": "state_show", "path": filename }),
+                        None,
+                    ))
                 }
                 Some("clean") => {
                     let mut days: Option<i64> = None;
@@ -1349,7 +1662,10 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                         usage: "state clean --older-than <days>",
                     })?;
 
-                    Ok(json!({ "id": id, "action": "state_clean", "days": days }))
+                    Ok((
+                        json!({ "id": id, "action": "state_clean", "days": days }),
+                        None,
+                    ))
                 }
                 Some("rename") => {
                     let old_name = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
@@ -1374,9 +1690,10 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                         });
                     }
 
-                    Ok(
+                    Ok((
                         json!({ "id": id, "action": "state_rename", "oldName": old_name, "newName": new_name }),
-                    )
+                        None,
+                    ))
                 }
                 Some(sub) => Err(ParseError::UnknownSubcommand {
                     subcommand: sub.to_string(),
@@ -1396,7 +1713,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 context: "tap".to_string(),
                 usage: "tap <selector>",
             })?;
-            Ok(json!({ "id": id, "action": "tap", "selector": sel }))
+            Ok((json!({ "id": id, "action": "tap", "selector": sel }), None))
         }
         "swipe" => {
             let direction = rest.first().ok_or_else(|| ParseError::MissingArguments {
@@ -1418,13 +1735,13 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                         .insert("distance".to_string(), json!(d));
                 }
             }
-            Ok(cmd)
+            Ok((cmd, None))
         }
         "device" => {
             match rest.first().copied() {
                 Some("list") | None => {
                     // List available iOS simulators
-                    Ok(json!({ "id": id, "action": "device_list" }))
+                    Ok((json!({ "id": id, "action": "device_list" }), None))
                 }
                 Some(sub) => Err(ParseError::UnknownSubcommand {
                     subcommand: sub.to_string(),
@@ -1433,7 +1750,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
             }
         }
 
-        "diff" => parse_diff(&rest, &id),
+        "diff" => parse_diff(&rest, &id).map(|cmd| (cmd, None)),
 
         // === Batch ===
         "batch" => {
@@ -1443,7 +1760,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
             if !commands.is_empty() {
                 cmd["commands"] = json!(commands);
             }
-            Ok(cmd)
+            Ok((cmd, None))
         }
 
         _ => Err(ParseError::UnknownCommand {
@@ -2423,19 +2740,20 @@ mod tests {
 
     #[test]
     fn test_cookies_get() {
-        let cmd = parse_command(&args("cookies"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("cookies"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "cookies_get");
     }
 
     #[test]
     fn test_cookies_get_explicit() {
-        let cmd = parse_command(&args("cookies get"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("cookies get"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "cookies_get");
     }
 
     #[test]
     fn test_cookies_set() {
-        let cmd = parse_command(&args("cookies set mycookie myvalue"), &default_flags()).unwrap();
+        let (cmd, _) =
+            parse_command(&args("cookies set mycookie myvalue"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "cookies_set");
         assert_eq!(cmd["cookies"][0]["name"], "mycookie");
         assert_eq!(cmd["cookies"][0]["value"], "myvalue");
@@ -2449,13 +2767,13 @@ mod tests {
 
     #[test]
     fn test_cookies_clear() {
-        let cmd = parse_command(&args("cookies clear"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("cookies clear"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "cookies_clear");
     }
 
     #[test]
     fn test_cookies_set_with_url() {
-        let cmd = parse_command(
+        let (cmd, _) = parse_command(
             &args("cookies set mycookie myvalue --url https://example.com"),
             &default_flags(),
         )
@@ -2468,7 +2786,7 @@ mod tests {
 
     #[test]
     fn test_cookies_set_with_domain() {
-        let cmd = parse_command(
+        let (cmd, _) = parse_command(
             &args("cookies set mycookie myvalue --domain example.com"),
             &default_flags(),
         )
@@ -2481,7 +2799,7 @@ mod tests {
 
     #[test]
     fn test_cookies_set_with_path() {
-        let cmd = parse_command(
+        let (cmd, _) = parse_command(
             &args("cookies set mycookie myvalue --path /api"),
             &default_flags(),
         )
@@ -2494,7 +2812,7 @@ mod tests {
 
     #[test]
     fn test_cookies_set_with_httponly() {
-        let cmd = parse_command(
+        let (cmd, _) = parse_command(
             &args("cookies set mycookie myvalue --httpOnly"),
             &default_flags(),
         )
@@ -2507,7 +2825,7 @@ mod tests {
 
     #[test]
     fn test_cookies_set_with_secure() {
-        let cmd = parse_command(
+        let (cmd, _) = parse_command(
             &args("cookies set mycookie myvalue --secure"),
             &default_flags(),
         )
@@ -2520,7 +2838,7 @@ mod tests {
 
     #[test]
     fn test_cookies_set_with_samesite() {
-        let cmd = parse_command(
+        let (cmd, _) = parse_command(
             &args("cookies set mycookie myvalue --sameSite Strict"),
             &default_flags(),
         )
@@ -2533,7 +2851,7 @@ mod tests {
 
     #[test]
     fn test_cookies_set_with_expires() {
-        let cmd = parse_command(
+        let (cmd, _) = parse_command(
             &args("cookies set mycookie myvalue --expires 1234567890"),
             &default_flags(),
         )
@@ -2546,7 +2864,7 @@ mod tests {
 
     #[test]
     fn test_cookies_set_with_multiple_flags() {
-        let cmd = parse_command(&args("cookies set mycookie myvalue --url https://example.com --httpOnly --secure --sameSite Lax"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("cookies set mycookie myvalue --url https://example.com --httpOnly --secure --sameSite Lax"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "cookies_set");
         assert_eq!(cmd["cookies"][0]["name"], "mycookie");
         assert_eq!(cmd["cookies"][0]["value"], "myvalue");
@@ -2558,7 +2876,7 @@ mod tests {
 
     #[test]
     fn test_cookies_set_with_all_flags() {
-        let cmd = parse_command(&args("cookies set mycookie myvalue --url https://example.com --domain example.com --path /api --httpOnly --secure --sameSite None --expires 9999999999"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("cookies set mycookie myvalue --url https://example.com --domain example.com --path /api --httpOnly --secure --sameSite None --expires 9999999999"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "cookies_set");
         assert_eq!(cmd["cookies"][0]["name"], "mycookie");
         assert_eq!(cmd["cookies"][0]["value"], "myvalue");
@@ -2584,7 +2902,7 @@ mod tests {
 
     #[test]
     fn test_storage_local_get() {
-        let cmd = parse_command(&args("storage local"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("storage local"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "storage_get");
         assert_eq!(cmd["type"], "local");
         assert!(cmd.get("key").is_none());
@@ -2592,7 +2910,7 @@ mod tests {
 
     #[test]
     fn test_storage_local_get_key() {
-        let cmd = parse_command(&args("storage local get mykey"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("storage local get mykey"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "storage_get");
         assert_eq!(cmd["type"], "local");
         assert_eq!(cmd["key"], "mykey");
@@ -2600,7 +2918,7 @@ mod tests {
 
     #[test]
     fn test_storage_local_get_implicit_key() {
-        let cmd = parse_command(&args("storage local mykey"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("storage local mykey"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "storage_get");
         assert_eq!(cmd["type"], "local");
         assert_eq!(cmd["key"], "mykey");
@@ -2608,14 +2926,14 @@ mod tests {
 
     #[test]
     fn test_storage_session_get() {
-        let cmd = parse_command(&args("storage session"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("storage session"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "storage_get");
         assert_eq!(cmd["type"], "session");
     }
 
     #[test]
     fn test_storage_session_get_implicit_key() {
-        let cmd = parse_command(&args("storage session mykey"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("storage session mykey"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "storage_get");
         assert_eq!(cmd["type"], "session");
         assert_eq!(cmd["key"], "mykey");
@@ -2623,7 +2941,7 @@ mod tests {
 
     #[test]
     fn test_storage_local_set() {
-        let cmd =
+        let (cmd, _) =
             parse_command(&args("storage local set mykey myvalue"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "storage_set");
         assert_eq!(cmd["type"], "local");
@@ -2633,7 +2951,7 @@ mod tests {
 
     #[test]
     fn test_storage_session_set() {
-        let cmd =
+        let (cmd, _) =
             parse_command(&args("storage session set skey svalue"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "storage_set");
         assert_eq!(cmd["type"], "session");
@@ -2649,14 +2967,14 @@ mod tests {
 
     #[test]
     fn test_storage_local_clear() {
-        let cmd = parse_command(&args("storage local clear"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("storage local clear"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "storage_clear");
         assert_eq!(cmd["type"], "local");
     }
 
     #[test]
     fn test_storage_session_clear() {
-        let cmd = parse_command(&args("storage session clear"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("storage session clear"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "storage_clear");
         assert_eq!(cmd["type"], "session");
     }
@@ -2671,14 +2989,14 @@ mod tests {
 
     #[test]
     fn test_navigate_with_https() {
-        let cmd = parse_command(&args("open https://example.com"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("open https://example.com"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "navigate");
         assert_eq!(cmd["url"], "https://example.com");
     }
 
     #[test]
     fn test_navigate_without_protocol() {
-        let cmd = parse_command(&args("open example.com"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("open example.com"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "navigate");
         assert_eq!(cmd["url"], "https://example.com");
     }
@@ -2687,7 +3005,7 @@ mod tests {
     fn test_navigate_with_headers() {
         let mut flags = default_flags();
         flags.headers = Some(r#"{"Authorization": "Bearer token"}"#.to_string());
-        let cmd = parse_command(&args("open api.example.com"), &flags).unwrap();
+        let (cmd, _) = parse_command(&args("open api.example.com"), &flags).unwrap();
         assert_eq!(cmd["action"], "navigate");
         assert_eq!(cmd["url"], "https://api.example.com");
         assert_eq!(cmd["headers"]["Authorization"], "Bearer token");
@@ -2698,14 +3016,14 @@ mod tests {
         let mut flags = default_flags();
         flags.headers =
             Some(r#"{"Authorization": "Bearer token", "X-Custom": "value"}"#.to_string());
-        let cmd = parse_command(&args("open api.example.com"), &flags).unwrap();
+        let (cmd, _) = parse_command(&args("open api.example.com"), &flags).unwrap();
         assert_eq!(cmd["headers"]["Authorization"], "Bearer token");
         assert_eq!(cmd["headers"]["X-Custom"], "value");
     }
 
     #[test]
     fn test_navigate_without_headers_flag() {
-        let cmd = parse_command(&args("open example.com"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("open example.com"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "navigate");
         // headers should not be present when flag is not set
         assert!(cmd.get("headers").is_none());
@@ -2725,7 +3043,7 @@ mod tests {
 
     #[test]
     fn test_navigate_chrome_extension_url() {
-        let cmd = parse_command(
+        let (cmd, _) = parse_command(
             &args("open chrome-extension://abcdefghijklmnop/popup.html"),
             &default_flags(),
         )
@@ -2736,9 +3054,44 @@ mod tests {
 
     #[test]
     fn test_navigate_chrome_url() {
-        let cmd = parse_command(&args("open chrome://extensions"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("open chrome://extensions"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "navigate");
         assert_eq!(cmd["url"], "chrome://extensions");
+    }
+
+    #[test]
+    fn test_navigate_headers_inline_after_url() {
+        let (cmd, _) = parse_command(
+            &args(r#"open https://api.example.com --headers {"Authorization":"Bearer"}"#),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["url"], "https://api.example.com");
+        assert_eq!(cmd["headers"]["Authorization"], "Bearer");
+    }
+
+    #[test]
+    fn test_navigate_headers_inline_before_url() {
+        let (cmd, _) = parse_command(
+            &args(r#"open --headers {"Authorization":"Bearer"} https://api.example.com"#),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["url"], "https://api.example.com");
+        assert_eq!(cmd["headers"]["Authorization"], "Bearer");
+    }
+
+    #[test]
+    fn test_navigate_headers_inline_invalid_json() {
+        let result = parse_command(
+            &args("open https://example.com --headers not-valid-json"),
+            &default_flags(),
+        );
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .format()
+            .contains("Invalid JSON for --headers"));
     }
 
     // === Set Headers Tests ===
@@ -2750,7 +3103,7 @@ mod tests {
             "headers".to_string(),
             r#"{"Authorization":"Bearer token"}"#.to_string(),
         ];
-        let cmd = parse_command(&input, &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&input, &default_flags()).unwrap();
         assert_eq!(cmd["action"], "headers");
         // Headers should be an object, not a string
         assert!(cmd["headers"].is_object());
@@ -2764,7 +3117,7 @@ mod tests {
             "headers".to_string(),
             r#"{"Authorization": "Bearer token", "X-Custom": "value"}"#.to_string(),
         ];
-        let cmd = parse_command(&input, &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&input, &default_flags()).unwrap();
         assert_eq!(cmd["headers"]["Authorization"], "Bearer token");
         assert_eq!(cmd["headers"]["X-Custom"], "value");
     }
@@ -2782,19 +3135,19 @@ mod tests {
 
     #[test]
     fn test_back() {
-        let cmd = parse_command(&args("back"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("back"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "back");
     }
 
     #[test]
     fn test_forward() {
-        let cmd = parse_command(&args("forward"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("forward"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "forward");
     }
 
     #[test]
     fn test_reload() {
-        let cmd = parse_command(&args("reload"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("reload"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "reload");
     }
 
@@ -2802,14 +3155,14 @@ mod tests {
 
     #[test]
     fn test_click() {
-        let cmd = parse_command(&args("click #button"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("click #button"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "click");
         assert_eq!(cmd["selector"], "#button");
     }
 
     #[test]
     fn test_fill() {
-        let cmd = parse_command(&args("fill #input hello world"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("fill #input hello world"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "fill");
         assert_eq!(cmd["selector"], "#input");
         assert_eq!(cmd["value"], "hello world");
@@ -2817,7 +3170,7 @@ mod tests {
 
     #[test]
     fn test_type_command() {
-        let cmd = parse_command(&args("type #input some text"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("type #input some text"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "type");
         assert_eq!(cmd["selector"], "#input");
         assert_eq!(cmd["text"], "some text");
@@ -2825,7 +3178,7 @@ mod tests {
 
     #[test]
     fn test_select() {
-        let cmd = parse_command(&args("select #menu option1"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("select #menu option1"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "select");
         assert_eq!(cmd["selector"], "#menu");
         assert_eq!(cmd["values"], "option1");
@@ -2833,7 +3186,8 @@ mod tests {
 
     #[test]
     fn test_select_multiple_values() {
-        let cmd = parse_command(&args("select #menu opt1 opt2 opt3"), &default_flags()).unwrap();
+        let (cmd, _) =
+            parse_command(&args("select #menu opt1 opt2 opt3"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "select");
         assert_eq!(cmd["selector"], "#menu");
         assert_eq!(cmd["values"], json!(["opt1", "opt2", "opt3"]));
@@ -2841,7 +3195,7 @@ mod tests {
 
     #[test]
     fn test_frame_main() {
-        let cmd = parse_command(&args("frame main"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("frame main"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "mainframe");
     }
 
@@ -2849,7 +3203,7 @@ mod tests {
 
     #[test]
     fn test_tab_new() {
-        let cmd = parse_command(&args("tab new"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("tab new"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "tab_new");
         assert!(
             cmd.get("url").is_none(),
@@ -2859,54 +3213,55 @@ mod tests {
 
     #[test]
     fn test_tab_new_with_url() {
-        let cmd = parse_command(&args("tab new https://example.com"), &default_flags()).unwrap();
+        let (cmd, _) =
+            parse_command(&args("tab new https://example.com"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "tab_new");
         assert_eq!(cmd["url"], "https://example.com");
     }
 
     #[test]
     fn test_tab_list() {
-        let cmd = parse_command(&args("tab list"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("tab list"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "tab_list");
     }
 
     #[test]
     fn test_tab_switch_by_id() {
-        let cmd = parse_command(&args("tab t2"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("tab t2"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "tab_switch");
         assert_eq!(cmd["tabId"], "t2");
     }
 
     #[test]
     fn test_tab_switch_by_label() {
-        let cmd = parse_command(&args("tab docs"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("tab docs"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "tab_switch");
         assert_eq!(cmd["tabId"], "docs");
     }
 
     #[test]
     fn test_tab_close() {
-        let cmd = parse_command(&args("tab close"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("tab close"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "tab_close");
     }
 
     #[test]
     fn test_tab_close_with_id() {
-        let cmd = parse_command(&args("tab close t2"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("tab close t2"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "tab_close");
         assert_eq!(cmd["tabId"], "t2");
     }
 
     #[test]
     fn test_tab_close_with_label() {
-        let cmd = parse_command(&args("tab close docs"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("tab close docs"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "tab_close");
         assert_eq!(cmd["tabId"], "docs");
     }
 
     #[test]
     fn test_tab_sends_string_tab_id() {
-        let cmd = parse_command(&args("tab t2"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("tab t2"), &default_flags()).unwrap();
         assert!(
             cmd["tabId"].is_string(),
             "tabId must be a string, got: {:?}",
@@ -2917,14 +3272,14 @@ mod tests {
 
     #[test]
     fn test_tab_new_with_label() {
-        let cmd = parse_command(&args("tab new --label docs"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("tab new --label docs"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "tab_new");
         assert_eq!(cmd["label"], "docs");
     }
 
     #[test]
     fn test_tab_new_with_label_and_url() {
-        let cmd = parse_command(
+        let (cmd, _) = parse_command(
             &args("tab new --label docs https://docs.example.com"),
             &default_flags(),
         )
@@ -2936,7 +3291,7 @@ mod tests {
 
     #[test]
     fn test_tab_new_with_url_then_label() {
-        let cmd = parse_command(
+        let (cmd, _) = parse_command(
             &args("tab new https://docs.example.com --label docs"),
             &default_flags(),
         )
@@ -2947,7 +3302,7 @@ mod tests {
 
     #[test]
     fn test_tab_no_args_defaults_to_list() {
-        let cmd = parse_command(&args("tab"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("tab"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "tab_list");
     }
 
@@ -2971,7 +3326,7 @@ mod tests {
         // After the shift to `t<N>`/label ids, non-keyword tokens (`select`,
         // `docs`, etc.) are valid label refs; `tab <something>` routes to
         // tab_switch and the runtime decides whether the label exists.
-        let cmd = parse_command(&args("tab select"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("tab select"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "tab_switch");
         assert_eq!(cmd["tabId"], "select");
     }
@@ -2980,20 +3335,21 @@ mod tests {
 
     #[test]
     fn test_network_har_start() {
-        let cmd = parse_command(&args("network har start"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("network har start"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "har_start");
     }
 
     #[test]
     fn test_network_har_stop_with_path() {
-        let cmd = parse_command(&args("network har stop ./capture.har"), &default_flags()).unwrap();
+        let (cmd, _) =
+            parse_command(&args("network har stop ./capture.har"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "har_stop");
         assert_eq!(cmd["path"], "./capture.har");
     }
 
     #[test]
     fn test_network_har_stop_without_path() {
-        let cmd = parse_command(&args("network har stop"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("network har stop"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "har_stop");
         assert!(cmd.get("path").is_none());
     }
@@ -3006,7 +3362,7 @@ mod tests {
 
     #[test]
     fn test_network_requests_type_filter() {
-        let cmd =
+        let (cmd, _) =
             parse_command(&args("network requests --type xhr,fetch"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "requests");
         assert_eq!(cmd["type"], "xhr,fetch");
@@ -3014,21 +3370,23 @@ mod tests {
 
     #[test]
     fn test_network_requests_method_filter() {
-        let cmd = parse_command(&args("network requests --method POST"), &default_flags()).unwrap();
+        let (cmd, _) =
+            parse_command(&args("network requests --method POST"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "requests");
         assert_eq!(cmd["method"], "POST");
     }
 
     #[test]
     fn test_network_requests_status_filter() {
-        let cmd = parse_command(&args("network requests --status 2xx"), &default_flags()).unwrap();
+        let (cmd, _) =
+            parse_command(&args("network requests --status 2xx"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "requests");
         assert_eq!(cmd["status"], "2xx");
     }
 
     #[test]
     fn test_network_requests_combined_filters() {
-        let cmd = parse_command(
+        let (cmd, _) = parse_command(
             &args("network requests --filter api --type xhr --method GET --status 200"),
             &default_flags(),
         )
@@ -3041,7 +3399,7 @@ mod tests {
 
     #[test]
     fn test_network_request_detail() {
-        let cmd = parse_command(&args("network request 1234.5"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("network request 1234.5"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "request_detail");
         assert_eq!(cmd["requestId"], "1234.5");
     }
@@ -3056,7 +3414,7 @@ mod tests {
 
     #[test]
     fn test_screenshot() {
-        let cmd = parse_command(&args("screenshot"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("screenshot"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "screenshot");
         assert_eq!(cmd["path"], serde_json::Value::Null);
         assert_eq!(cmd["selector"], serde_json::Value::Null);
@@ -3064,28 +3422,28 @@ mod tests {
 
     #[test]
     fn test_screenshot_path() {
-        let cmd = parse_command(&args("screenshot out.png"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("screenshot out.png"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "screenshot");
         assert_eq!(cmd["path"], "out.png");
     }
 
     #[test]
     fn test_screenshot_full_page() {
-        let cmd = parse_command(&args("screenshot --full"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("screenshot --full"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "screenshot");
         assert_eq!(cmd["fullPage"], true);
     }
 
     #[test]
     fn test_screenshot_full_page_shorthand() {
-        let cmd = parse_command(&args("screenshot -f"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("screenshot -f"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "screenshot");
         assert_eq!(cmd["fullPage"], true);
     }
 
     #[test]
     fn test_screenshot_with_ref() {
-        let cmd = parse_command(&args("screenshot @e1"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("screenshot @e1"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "screenshot");
         assert_eq!(cmd["selector"], "@e1");
         assert_eq!(cmd["path"], serde_json::Value::Null);
@@ -3093,7 +3451,7 @@ mod tests {
 
     #[test]
     fn test_screenshot_with_css_class() {
-        let cmd = parse_command(&args("screenshot .my-button"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("screenshot .my-button"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "screenshot");
         assert_eq!(cmd["selector"], ".my-button");
         assert_eq!(cmd["path"], serde_json::Value::Null);
@@ -3101,7 +3459,7 @@ mod tests {
 
     #[test]
     fn test_screenshot_with_css_id() {
-        let cmd = parse_command(&args("screenshot #header"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("screenshot #header"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "screenshot");
         assert_eq!(cmd["selector"], "#header");
         assert_eq!(cmd["path"], serde_json::Value::Null);
@@ -3109,7 +3467,7 @@ mod tests {
 
     #[test]
     fn test_screenshot_with_path() {
-        let cmd = parse_command(&args("screenshot ./output.png"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("screenshot ./output.png"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "screenshot");
         assert_eq!(cmd["selector"], serde_json::Value::Null);
         assert_eq!(cmd["path"], "./output.png");
@@ -3117,37 +3475,169 @@ mod tests {
 
     #[test]
     fn test_screenshot_with_selector_and_path() {
-        let cmd = parse_command(&args("screenshot .btn ./button.png"), &default_flags()).unwrap();
+        let (cmd, _) =
+            parse_command(&args("screenshot .btn ./button.png"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "screenshot");
         assert_eq!(cmd["selector"], ".btn");
         assert_eq!(cmd["path"], "./button.png");
+    }
+
+    #[test]
+    fn test_screenshot_annotate_flag() {
+        let (cmd, _) = parse_command(&args("screenshot --annotate"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "screenshot");
+        assert_eq!(cmd["annotate"], true);
+        assert_eq!(cmd["selector"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn test_screenshot_annotate_not_treated_as_selector() {
+        // Regression for issue #1261: in batch mode, `screenshot --annotate` must treat
+        // --annotate as a flag, not fall through to positional/selector logic.
+        let (cmd, _) = parse_command(&args("screenshot --annotate"), &default_flags()).unwrap();
+        assert_eq!(cmd["annotate"], true);
+        assert_eq!(
+            cmd["selector"],
+            serde_json::Value::Null,
+            "--annotate was treated as a CSS selector"
+        );
+    }
+
+    #[test]
+    fn test_batch_issue_1261_scenario() {
+        // The exact 3-command sequence from issue #1261.
+        // run_batch parses each sub-command independently; verify each token
+        // sequence produces the correct parsed value and no parse error.
+        let flags = default_flags();
+
+        let (open_cmd, open_opts) =
+            parse_command(&args("open https://example.com/"), &flags).unwrap();
+        assert_eq!(open_cmd["action"], "navigate");
+        assert!(open_opts.is_none());
+
+        let (wait_cmd, wait_opts) =
+            parse_command(&args("wait --load networkidle"), &flags).unwrap();
+        assert_eq!(wait_cmd["action"], "waitforloadstate");
+        assert!(wait_opts.is_none());
+
+        let (screenshot_cmd, screenshot_opts) =
+            parse_command(&args("screenshot --annotate"), &flags).unwrap();
+        assert_eq!(screenshot_cmd["action"], "screenshot");
+        assert_eq!(screenshot_cmd["annotate"], true);
+        assert_eq!(
+            screenshot_cmd["selector"],
+            serde_json::Value::Null,
+            "--annotate must not fall through to selector"
+        );
+        assert!(screenshot_opts.is_none());
+    }
+
+    #[test]
+    fn test_screenshot_annotate_with_full() {
+        let (cmd, _) =
+            parse_command(&args("screenshot --full --annotate"), &default_flags()).unwrap();
+        assert_eq!(cmd["fullPage"], true);
+        assert_eq!(cmd["annotate"], true);
+    }
+
+    #[test]
+    fn test_screenshot_format_flag() {
+        let (cmd, _) = parse_command(
+            &args("screenshot --screenshot-format jpeg"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["format"], "jpeg");
+    }
+
+    #[test]
+    fn test_screenshot_quality_flag() {
+        let (cmd, _) = parse_command(
+            &args("screenshot --screenshot-format jpeg --screenshot-quality 80"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["format"], "jpeg");
+        assert_eq!(cmd["quality"], 80);
+    }
+
+    #[test]
+    fn test_screenshot_dir_flag() {
+        let (cmd, _) = parse_command(
+            &args("screenshot --screenshot-dir /tmp/shots"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["screenshotDir"], "/tmp/shots");
+    }
+
+    #[test]
+    fn test_screenshot_unknown_flag_errors() {
+        let result = parse_command(&args("screenshot --unknown-flag"), &default_flags());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_screenshot_format_invalid_value() {
+        let result = parse_command(
+            &args("screenshot --screenshot-format gif"),
+            &default_flags(),
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().format().contains("png, jpeg, or webp"));
+    }
+
+    #[test]
+    fn test_screenshot_quality_out_of_range() {
+        let result = parse_command(
+            &args("screenshot --screenshot-quality 101"),
+            &default_flags(),
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().format().contains("between 0 and 100"));
+    }
+
+    #[test]
+    fn test_screenshot_flags_inherited_from_outer() {
+        let flags = Flags {
+            annotate: true,
+            screenshot_format: Some("jpeg".to_string()),
+            screenshot_quality: Some(90),
+            screenshot_dir: Some("/tmp".to_string()),
+            ..default_flags()
+        };
+        let (cmd, _) = parse_command(&args("screenshot"), &flags).unwrap();
+        assert_eq!(cmd["annotate"], true);
+        assert_eq!(cmd["format"], "jpeg");
+        assert_eq!(cmd["quality"], 90);
+        assert_eq!(cmd["screenshotDir"], "/tmp");
     }
 
     // === Snapshot ===
 
     #[test]
     fn test_snapshot() {
-        let cmd = parse_command(&args("snapshot"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("snapshot"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "snapshot");
     }
 
     #[test]
     fn test_snapshot_interactive() {
-        let cmd = parse_command(&args("snapshot -i"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("snapshot -i"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "snapshot");
         assert_eq!(cmd["interactive"], true);
     }
 
     #[test]
     fn test_snapshot_cursor() {
-        let cmd = parse_command(&args("snapshot -C"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("snapshot -C"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "snapshot");
         assert_eq!(cmd["cursor"], true);
     }
 
     #[test]
     fn test_snapshot_interactive_cursor() {
-        let cmd = parse_command(&args("snapshot -i -C"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("snapshot -i -C"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "snapshot");
         assert_eq!(cmd["interactive"], true);
         assert_eq!(cmd["cursor"], true);
@@ -3155,21 +3645,21 @@ mod tests {
 
     #[test]
     fn test_snapshot_compact() {
-        let cmd = parse_command(&args("snapshot --compact"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("snapshot --compact"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "snapshot");
         assert_eq!(cmd["compact"], true);
     }
 
     #[test]
     fn test_snapshot_depth() {
-        let cmd = parse_command(&args("snapshot -d 3"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("snapshot -d 3"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "snapshot");
         assert_eq!(cmd["maxDepth"], 3);
     }
 
     #[test]
     fn test_snapshot_urls() {
-        let cmd = parse_command(&args("snapshot -i --urls"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("snapshot -i --urls"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "snapshot");
         assert_eq!(cmd["interactive"], true);
         assert_eq!(cmd["urls"], true);
@@ -3177,37 +3667,90 @@ mod tests {
 
     #[test]
     fn test_snapshot_urls_short() {
-        let cmd = parse_command(&args("snapshot -i -u"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("snapshot -i -u"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "snapshot");
         assert_eq!(cmd["urls"], true);
+    }
+
+    #[test]
+    fn test_snapshot_content_boundaries_inline() {
+        let (cmd, output_opts) =
+            parse_command(&args("snapshot --content-boundaries"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "snapshot");
+        assert!(cmd.get("_cli_output").is_none());
+        let output_opts = output_opts.unwrap();
+        assert!(output_opts.content_boundaries);
+        assert_eq!(output_opts.max_output, None);
+    }
+
+    #[test]
+    fn test_snapshot_max_output_inline() {
+        let (cmd, output_opts) =
+            parse_command(&args("snapshot --max-output 500"), &default_flags()).unwrap();
+        assert!(cmd.get("_cli_output").is_none());
+        let output_opts = output_opts.unwrap();
+        assert!(!output_opts.content_boundaries);
+        assert_eq!(output_opts.max_output, Some(500));
+    }
+
+    #[test]
+    fn test_snapshot_max_output_invalid() {
+        let result = parse_command(&args("snapshot --max-output abc"), &default_flags());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_snapshot_no_cli_output_without_inline_flags() {
+        let flags = Flags {
+            content_boundaries: true,
+            ..default_flags()
+        };
+        let (cmd, output_opts) = parse_command(&args("snapshot"), &flags).unwrap();
+        assert!(cmd.get("_cli_output").is_none());
+        assert!(output_opts.is_none());
+    }
+
+    #[test]
+    fn test_snapshot_cli_output_merges_outer_flags() {
+        // inline --max-output combined with outer flags.content_boundaries
+        let flags = Flags {
+            content_boundaries: true,
+            ..default_flags()
+        };
+        let (cmd, output_opts) =
+            parse_command(&args("snapshot --max-output 1000"), &flags).unwrap();
+        assert!(cmd.get("_cli_output").is_none());
+        let output_opts = output_opts.unwrap();
+        assert!(output_opts.content_boundaries);
+        assert_eq!(output_opts.max_output, Some(1000));
     }
 
     // === Wait ===
 
     #[test]
     fn test_wait_selector() {
-        let cmd = parse_command(&args("wait #element"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("wait #element"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "wait");
         assert_eq!(cmd["selector"], "#element");
     }
 
     #[test]
     fn test_wait_timeout() {
-        let cmd = parse_command(&args("wait 5000"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("wait 5000"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "wait");
         assert_eq!(cmd["timeout"], 5000);
     }
 
     #[test]
     fn test_wait_url() {
-        let cmd = parse_command(&args("wait --url **/dashboard"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("wait --url **/dashboard"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "waitforurl");
         assert_eq!(cmd["url"], "**/dashboard");
     }
 
     #[test]
     fn test_wait_load() {
-        let cmd = parse_command(&args("wait --load networkidle"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("wait --load networkidle"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "waitforloadstate");
         assert_eq!(cmd["state"], "networkidle");
     }
@@ -3224,14 +3767,14 @@ mod tests {
 
     #[test]
     fn test_wait_fn() {
-        let cmd = parse_command(&args("wait --fn window.ready"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("wait --fn window.ready"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "waitforfunction");
         assert_eq!(cmd["expression"], "window.ready");
     }
 
     #[test]
     fn test_wait_text() {
-        let cmd = parse_command(&args("wait --text Welcome"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("wait --text Welcome"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "wait");
         assert_eq!(cmd["text"], "Welcome");
         assert!(cmd.get("timeout").is_none());
@@ -3239,7 +3782,7 @@ mod tests {
 
     #[test]
     fn test_wait_text_with_timeout() {
-        let cmd = parse_command(
+        let (cmd, _) = parse_command(
             &args("wait --text Welcome --timeout 5000"),
             &default_flags(),
         )
@@ -3253,21 +3796,21 @@ mod tests {
 
     #[test]
     fn test_clipboard_read_default() {
-        let cmd = parse_command(&args("clipboard"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("clipboard"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "clipboard");
         assert_eq!(cmd["operation"], "read");
     }
 
     #[test]
     fn test_clipboard_read_explicit() {
-        let cmd = parse_command(&args("clipboard read"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("clipboard read"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "clipboard");
         assert_eq!(cmd["operation"], "read");
     }
 
     #[test]
     fn test_clipboard_write() {
-        let cmd = parse_command(&args("clipboard write hello"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("clipboard write hello"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "clipboard");
         assert_eq!(cmd["operation"], "write");
         assert_eq!(cmd["text"], "hello");
@@ -3275,7 +3818,8 @@ mod tests {
 
     #[test]
     fn test_clipboard_write_multi_word() {
-        let cmd = parse_command(&args("clipboard write hello world"), &default_flags()).unwrap();
+        let (cmd, _) =
+            parse_command(&args("clipboard write hello world"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "clipboard");
         assert_eq!(cmd["operation"], "write");
         assert_eq!(cmd["text"], "hello world");
@@ -3283,14 +3827,14 @@ mod tests {
 
     #[test]
     fn test_clipboard_copy() {
-        let cmd = parse_command(&args("clipboard copy"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("clipboard copy"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "clipboard");
         assert_eq!(cmd["operation"], "copy");
     }
 
     #[test]
     fn test_clipboard_paste() {
-        let cmd = parse_command(&args("clipboard paste"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("clipboard paste"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "clipboard");
         assert_eq!(cmd["operation"], "paste");
     }
@@ -3313,7 +3857,7 @@ mod tests {
 
     #[test]
     fn test_record_start() {
-        let cmd = parse_command(&args("record start output.webm"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("record start output.webm"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "recording_start");
         assert_eq!(cmd["path"], "output.webm");
         assert!(cmd.get("url").is_none());
@@ -3321,7 +3865,7 @@ mod tests {
 
     #[test]
     fn test_record_start_with_url() {
-        let cmd = parse_command(
+        let (cmd, _) = parse_command(
             &args("record start demo.webm https://example.com"),
             &default_flags(),
         )
@@ -3333,7 +3877,7 @@ mod tests {
 
     #[test]
     fn test_record_start_with_url_no_protocol() {
-        let cmd = parse_command(
+        let (cmd, _) = parse_command(
             &args("record start demo.webm example.com"),
             &default_flags(),
         )
@@ -3345,7 +3889,7 @@ mod tests {
 
     #[test]
     fn test_record_start_with_chrome_extension_url() {
-        let cmd = parse_command(
+        let (cmd, _) = parse_command(
             &args("record start demo.webm chrome-extension://abcdef/popup.html"),
             &default_flags(),
         )
@@ -3367,13 +3911,14 @@ mod tests {
 
     #[test]
     fn test_record_stop() {
-        let cmd = parse_command(&args("record stop"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("record stop"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "recording_stop");
     }
 
     #[test]
     fn test_record_restart() {
-        let cmd = parse_command(&args("record restart output.webm"), &default_flags()).unwrap();
+        let (cmd, _) =
+            parse_command(&args("record restart output.webm"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "recording_restart");
         assert_eq!(cmd["path"], "output.webm");
         assert!(cmd.get("url").is_none());
@@ -3381,7 +3926,7 @@ mod tests {
 
     #[test]
     fn test_record_restart_with_url() {
-        let cmd = parse_command(
+        let (cmd, _) = parse_command(
             &args("record restart demo.webm https://example.com"),
             &default_flags(),
         )
@@ -3425,14 +3970,14 @@ mod tests {
 
     #[test]
     fn test_profiler_start() {
-        let cmd = parse_command(&args("profiler start"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("profiler start"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "profiler_start");
         assert!(cmd.get("categories").is_none());
     }
 
     #[test]
     fn test_profiler_start_with_categories() {
-        let cmd = parse_command(
+        let (cmd, _) = parse_command(
             &args("profiler start --categories devtools.timeline,v8.execute"),
             &default_flags(),
         )
@@ -3456,14 +4001,14 @@ mod tests {
 
     #[test]
     fn test_profiler_stop_with_path() {
-        let cmd = parse_command(&args("profiler stop trace.json"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("profiler stop trace.json"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "profiler_stop");
         assert_eq!(cmd["path"], "trace.json");
     }
 
     #[test]
     fn test_profiler_stop_no_path() {
-        let cmd = parse_command(&args("profiler stop"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("profiler stop"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "profiler_stop");
         assert!(cmd.get("path").is_none());
     }
@@ -3492,7 +4037,7 @@ mod tests {
 
     #[test]
     fn test_eval_basic() {
-        let cmd = parse_command(&args("eval document.title"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("eval document.title"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "evaluate");
         assert_eq!(cmd["script"], "document.title");
     }
@@ -3500,7 +4045,8 @@ mod tests {
     #[test]
     fn test_eval_base64_short_flag() {
         // "document.title" in base64
-        let cmd = parse_command(&args("eval -b ZG9jdW1lbnQudGl0bGU="), &default_flags()).unwrap();
+        let (cmd, _) =
+            parse_command(&args("eval -b ZG9jdW1lbnQudGl0bGU="), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "evaluate");
         assert_eq!(cmd["script"], "document.title");
     }
@@ -3508,7 +4054,7 @@ mod tests {
     #[test]
     fn test_eval_base64_long_flag() {
         // "document.title" in base64
-        let cmd = parse_command(
+        let (cmd, _) = parse_command(
             &args("eval --base64 ZG9jdW1lbnQudGl0bGU="),
             &default_flags(),
         )
@@ -3520,7 +4066,7 @@ mod tests {
     #[test]
     fn test_eval_base64_with_special_chars() {
         // "document.querySelector('[src*=\"_next\"]')" in base64
-        let cmd = parse_command(
+        let (cmd, _) = parse_command(
             &args("eval -b ZG9jdW1lbnQucXVlcnlTZWxlY3RvcignW3NyYyo9Il9uZXh0Il0nKQ=="),
             &default_flags(),
         )
@@ -3592,7 +4138,7 @@ mod tests {
 
     #[test]
     fn test_mouse_wheel() {
-        let cmd = parse_command(&args("mouse wheel 100 50"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("mouse wheel 100 50"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "wheel");
         assert_eq!(cmd["deltaY"], 100);
         assert_eq!(cmd["deltaX"], 50);
@@ -3600,7 +4146,7 @@ mod tests {
 
     #[test]
     fn test_set_media() {
-        let cmd = parse_command(&args("set media dark"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("set media dark"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "emulatemedia");
         assert_eq!(cmd["colorScheme"], "dark");
         assert_eq!(cmd["reducedMotion"], "no-preference");
@@ -3608,7 +4154,8 @@ mod tests {
 
     #[test]
     fn test_set_media_reduced_motion() {
-        let cmd = parse_command(&args("set media light reduced-motion"), &default_flags()).unwrap();
+        let (cmd, _) =
+            parse_command(&args("set media light reduced-motion"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "emulatemedia");
         assert_eq!(cmd["colorScheme"], "light");
         assert_eq!(cmd["reducedMotion"], "reduce");
@@ -3616,7 +4163,7 @@ mod tests {
 
     #[test]
     fn test_set_viewport() {
-        let cmd = parse_command(&args("set viewport 1920 1080"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("set viewport 1920 1080"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "viewport");
         assert_eq!(cmd["width"], 1920);
         assert_eq!(cmd["height"], 1080);
@@ -3625,7 +4172,7 @@ mod tests {
 
     #[test]
     fn test_set_viewport_with_scale() {
-        let cmd = parse_command(&args("set viewport 1920 1080 2"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("set viewport 1920 1080 2"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "viewport");
         assert_eq!(cmd["width"], 1920);
         assert_eq!(cmd["height"], 1080);
@@ -3634,7 +4181,7 @@ mod tests {
 
     #[test]
     fn test_set_viewport_with_fractional_scale() {
-        let cmd = parse_command(&args("set viewport 375 812 3"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("set viewport 375 812 3"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "viewport");
         assert_eq!(cmd["width"], 375);
         assert_eq!(cmd["height"], 812);
@@ -3655,7 +4202,7 @@ mod tests {
 
     #[test]
     fn test_find_first_no_value() {
-        let cmd = parse_command(&args("find first a click"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("find first a click"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "nth");
         assert_eq!(cmd["index"], 0);
         assert!(cmd.get("value").is_none());
@@ -3663,7 +4210,8 @@ mod tests {
 
     #[test]
     fn test_find_first_with_value() {
-        let cmd = parse_command(&args("find first input fill hello"), &default_flags()).unwrap();
+        let (cmd, _) =
+            parse_command(&args("find first input fill hello"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "nth");
         assert_eq!(cmd["index"], 0);
         assert_eq!(cmd["value"], "hello");
@@ -3671,7 +4219,7 @@ mod tests {
 
     #[test]
     fn test_find_nth_no_value() {
-        let cmd = parse_command(&args("find nth 2 a click"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("find nth 2 a click"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "nth");
         assert_eq!(cmd["index"], 2);
         assert!(cmd.get("value").is_none());
@@ -3679,7 +4227,7 @@ mod tests {
 
     #[test]
     fn test_find_role_fill_does_not_include_flags_in_value() {
-        let cmd = parse_command(
+        let (cmd, _) = parse_command(
             &args("find role textbox fill hello --name username --exact"),
             &default_flags(),
         )
@@ -3696,7 +4244,7 @@ mod tests {
 
     #[test]
     fn test_download() {
-        let cmd = parse_command(&args("download #btn ./file.pdf"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("download #btn ./file.pdf"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "download");
         assert_eq!(cmd["selector"], "#btn");
         assert_eq!(cmd["path"], "./file.pdf");
@@ -3704,7 +4252,8 @@ mod tests {
 
     #[test]
     fn test_download_with_ref() {
-        let cmd = parse_command(&args("download @e5 ./report.xlsx"), &default_flags()).unwrap();
+        let (cmd, _) =
+            parse_command(&args("download @e5 ./report.xlsx"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "download");
         assert_eq!(cmd["selector"], "@e5");
         assert_eq!(cmd["path"], "./report.xlsx");
@@ -3730,25 +4279,47 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn test_download_path_flag_inline() {
+        let (cmd, _) = parse_command(
+            &args("download #btn --download-path /tmp/report.pdf"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["selector"], "#btn");
+        assert_eq!(cmd["path"], "/tmp/report.pdf");
+    }
+
+    #[test]
+    fn test_download_positional_wins_over_flag() {
+        let (cmd, _) = parse_command(
+            &args("download #btn ./local.pdf --download-path /tmp/report.pdf"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["path"], "./local.pdf");
+    }
+
     // === Wait for Download Tests ===
 
     #[test]
     fn test_wait_download() {
-        let cmd = parse_command(&args("wait --download"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("wait --download"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "waitfordownload");
         assert!(cmd.get("path").is_none());
     }
 
     #[test]
     fn test_wait_download_with_path() {
-        let cmd = parse_command(&args("wait --download ./file.pdf"), &default_flags()).unwrap();
+        let (cmd, _) =
+            parse_command(&args("wait --download ./file.pdf"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "waitfordownload");
         assert_eq!(cmd["path"], "./file.pdf");
     }
 
     #[test]
     fn test_wait_download_with_timeout() {
-        let cmd =
+        let (cmd, _) =
             parse_command(&args("wait --download --timeout 30000"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "waitfordownload");
         assert_eq!(cmd["timeout"], 30000);
@@ -3756,7 +4327,7 @@ mod tests {
 
     #[test]
     fn test_wait_download_with_path_and_timeout() {
-        let cmd = parse_command(
+        let (cmd, _) = parse_command(
             &args("wait --download ./file.pdf --timeout 30000"),
             &default_flags(),
         )
@@ -3768,7 +4339,7 @@ mod tests {
 
     #[test]
     fn test_wait_download_short_flag() {
-        let cmd = parse_command(&args("wait -d ./file.pdf"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("wait -d ./file.pdf"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "waitfordownload");
         assert_eq!(cmd["path"], "./file.pdf");
     }
@@ -3784,7 +4355,7 @@ mod tests {
     #[test]
     fn test_wait_selector_inherits_default_timeout() {
         let flags = flags_with_default_timeout(3000);
-        let cmd = parse_command(&args("wait #element"), &flags).unwrap();
+        let (cmd, _) = parse_command(&args("wait #element"), &flags).unwrap();
         assert_eq!(cmd["action"], "wait");
         assert_eq!(cmd["selector"], "#element");
         assert_eq!(cmd["timeout"], 3000);
@@ -3793,7 +4364,7 @@ mod tests {
     #[test]
     fn test_wait_url_inherits_default_timeout() {
         let flags = flags_with_default_timeout(4000);
-        let cmd = parse_command(&args("wait --url **/dashboard"), &flags).unwrap();
+        let (cmd, _) = parse_command(&args("wait --url **/dashboard"), &flags).unwrap();
         assert_eq!(cmd["action"], "waitforurl");
         assert_eq!(cmd["timeout"], 4000);
     }
@@ -3801,7 +4372,7 @@ mod tests {
     #[test]
     fn test_wait_load_inherits_default_timeout() {
         let flags = flags_with_default_timeout(4000);
-        let cmd = parse_command(&args("wait --load networkidle"), &flags).unwrap();
+        let (cmd, _) = parse_command(&args("wait --load networkidle"), &flags).unwrap();
         assert_eq!(cmd["action"], "waitforloadstate");
         assert_eq!(cmd["timeout"], 4000);
     }
@@ -3809,7 +4380,7 @@ mod tests {
     #[test]
     fn test_wait_fn_inherits_default_timeout() {
         let flags = flags_with_default_timeout(4000);
-        let cmd = parse_command(&args("wait --fn window.ready"), &flags).unwrap();
+        let (cmd, _) = parse_command(&args("wait --fn window.ready"), &flags).unwrap();
         assert_eq!(cmd["action"], "waitforfunction");
         assert_eq!(cmd["timeout"], 4000);
     }
@@ -3817,7 +4388,7 @@ mod tests {
     #[test]
     fn test_wait_text_inherits_default_timeout() {
         let flags = flags_with_default_timeout(2000);
-        let cmd = parse_command(&args("wait --text Welcome"), &flags).unwrap();
+        let (cmd, _) = parse_command(&args("wait --text Welcome"), &flags).unwrap();
         assert_eq!(cmd["action"], "wait");
         assert_eq!(cmd["text"], "Welcome");
         assert_eq!(cmd["timeout"], 2000);
@@ -3826,7 +4397,7 @@ mod tests {
     #[test]
     fn test_wait_download_inherits_default_timeout() {
         let flags = flags_with_default_timeout(5000);
-        let cmd = parse_command(&args("wait --download"), &flags).unwrap();
+        let (cmd, _) = parse_command(&args("wait --download"), &flags).unwrap();
         assert_eq!(cmd["action"], "waitfordownload");
         assert_eq!(cmd["timeout"], 5000);
     }
@@ -3834,13 +4405,13 @@ mod tests {
     #[test]
     fn test_wait_explicit_timeout_overrides_default() {
         let flags = flags_with_default_timeout(5000);
-        let cmd = parse_command(&args("wait --text Welcome --timeout 1000"), &flags).unwrap();
+        let (cmd, _) = parse_command(&args("wait --text Welcome --timeout 1000"), &flags).unwrap();
         assert_eq!(cmd["timeout"], 1000);
     }
 
     #[test]
     fn test_wait_no_default_timeout_omits_field() {
-        let cmd = parse_command(&args("wait #element"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("wait #element"), &default_flags()).unwrap();
         assert!(cmd.get("timeout").is_none());
     }
 
@@ -3848,7 +4419,7 @@ mod tests {
 
     #[test]
     fn test_connect_with_port() {
-        let cmd = parse_command(&args("connect 9222"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("connect 9222"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "launch");
         assert_eq!(cmd["cdpPort"], 9222);
         assert!(cmd.get("cdpUrl").is_none());
@@ -3860,7 +4431,7 @@ mod tests {
             "connect".to_string(),
             "ws://localhost:9222/devtools/browser/abc123".to_string(),
         ];
-        let cmd = parse_command(&input, &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&input, &default_flags()).unwrap();
         assert_eq!(cmd["action"], "launch");
         assert_eq!(cmd["cdpUrl"], "ws://localhost:9222/devtools/browser/abc123");
         assert!(cmd.get("cdpPort").is_none());
@@ -3872,7 +4443,7 @@ mod tests {
             "connect".to_string(),
             "wss://remote-browser.example.com/cdp?token=xyz".to_string(),
         ];
-        let cmd = parse_command(&input, &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&input, &default_flags()).unwrap();
         assert_eq!(cmd["action"], "launch");
         assert_eq!(
             cmd["cdpUrl"],
@@ -3884,7 +4455,7 @@ mod tests {
     #[test]
     fn test_connect_with_http_url() {
         let input: Vec<String> = vec!["connect".to_string(), "http://localhost:9222".to_string()];
-        let cmd = parse_command(&input, &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&input, &default_flags()).unwrap();
         assert_eq!(cmd["action"], "launch");
         assert_eq!(cmd["cdpUrl"], "http://localhost:9222");
         assert!(cmd.get("cdpPort").is_none());
@@ -3930,14 +4501,14 @@ mod tests {
 
     #[test]
     fn test_connect_port_max_valid() {
-        let cmd = parse_command(&args("connect 65535"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("connect 65535"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "launch");
         assert_eq!(cmd["cdpPort"], 65535);
     }
 
     #[test]
     fn test_connect_port_min_valid() {
-        let cmd = parse_command(&args("connect 1"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("connect 1"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "launch");
         assert_eq!(cmd["cdpPort"], 1);
     }
@@ -3946,27 +4517,27 @@ mod tests {
 
     #[test]
     fn test_stream_enable_auto_port() {
-        let cmd = parse_command(&args("stream enable"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("stream enable"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "stream_enable");
         assert!(cmd.get("port").is_none());
     }
 
     #[test]
     fn test_stream_enable_with_port() {
-        let cmd = parse_command(&args("stream enable --port 9223"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("stream enable --port 9223"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "stream_enable");
         assert_eq!(cmd["port"], 9223);
     }
 
     #[test]
     fn test_stream_status() {
-        let cmd = parse_command(&args("stream status"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("stream status"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "stream_status");
     }
 
     #[test]
     fn test_stream_disable() {
-        let cmd = parse_command(&args("stream disable"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("stream disable"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "stream_disable");
     }
 
@@ -3986,20 +4557,20 @@ mod tests {
 
     #[test]
     fn test_trace_start() {
-        let cmd = parse_command(&args("trace start"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("trace start"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "trace_start");
     }
 
     #[test]
     fn test_trace_stop_with_path() {
-        let cmd = parse_command(&args("trace stop ./trace.zip"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("trace stop ./trace.zip"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "trace_stop");
         assert_eq!(cmd["path"], "./trace.zip");
     }
 
     #[test]
     fn test_trace_stop_without_path() {
-        let cmd = parse_command(&args("trace stop"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("trace stop"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "trace_stop");
         assert!(cmd.get("path").is_none() || cmd["path"].is_null());
     }
@@ -4008,13 +4579,13 @@ mod tests {
 
     #[test]
     fn test_diff_snapshot_basic() {
-        let cmd = parse_command(&args("diff snapshot"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("diff snapshot"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "diff_snapshot");
     }
 
     #[test]
     fn test_diff_snapshot_baseline() {
-        let cmd = parse_command(
+        let (cmd, _) = parse_command(
             &args("diff snapshot --baseline before.txt"),
             &default_flags(),
         )
@@ -4025,7 +4596,7 @@ mod tests {
 
     #[test]
     fn test_diff_snapshot_selector_compact_depth() {
-        let cmd = parse_command(
+        let (cmd, _) = parse_command(
             &args("diff snapshot --selector #main --compact --depth 3"),
             &default_flags(),
         )
@@ -4038,7 +4609,7 @@ mod tests {
 
     #[test]
     fn test_diff_snapshot_short_flags() {
-        let cmd = parse_command(
+        let (cmd, _) = parse_command(
             &args("diff snapshot -b snap.txt -s .content -c -d 2"),
             &default_flags(),
         )
@@ -4052,7 +4623,7 @@ mod tests {
 
     #[test]
     fn test_diff_screenshot_baseline() {
-        let cmd = parse_command(
+        let (cmd, _) = parse_command(
             &args("diff screenshot --baseline before.png"),
             &default_flags(),
         )
@@ -4063,7 +4634,7 @@ mod tests {
 
     #[test]
     fn test_diff_screenshot_all_options() {
-        let cmd = parse_command(
+        let (cmd, _) = parse_command(
             &args("diff screenshot --baseline b.png --output d.png --threshold 0.2 --selector #hero --full"),
             &default_flags(),
         )
@@ -4088,7 +4659,7 @@ mod tests {
 
     #[test]
     fn test_diff_screenshot_command_full_flag() {
-        let cmd = parse_command(
+        let (cmd, _) = parse_command(
             &args("diff screenshot --baseline b.png --full"),
             &default_flags(),
         )
@@ -4099,7 +4670,7 @@ mod tests {
 
     #[test]
     fn test_diff_screenshot_command_full_flag_shorthand() {
-        let cmd = parse_command(
+        let (cmd, _) = parse_command(
             &args("diff screenshot --baseline b.png -f"),
             &default_flags(),
         )
@@ -4110,7 +4681,7 @@ mod tests {
 
     #[test]
     fn test_diff_url_basic() {
-        let cmd = parse_command(
+        let (cmd, _) = parse_command(
             &args("diff url https://a.com https://b.com"),
             &default_flags(),
         )
@@ -4122,7 +4693,7 @@ mod tests {
 
     #[test]
     fn test_diff_url_with_screenshot_full() {
-        let cmd = parse_command(
+        let (cmd, _) = parse_command(
             &args("diff url https://a.com https://b.com --screenshot --full"),
             &default_flags(),
         )
@@ -4134,7 +4705,7 @@ mod tests {
 
     #[test]
     fn test_diff_url_with_wait_until() {
-        let cmd = parse_command(
+        let (cmd, _) = parse_command(
             &args("diff url https://a.com https://b.com --wait-until networkidle"),
             &default_flags(),
         )
@@ -4145,7 +4716,7 @@ mod tests {
 
     #[test]
     fn test_diff_url_command_full_flag() {
-        let cmd = parse_command(
+        let (cmd, _) = parse_command(
             &args("diff url https://a.com https://b.com --full"),
             &default_flags(),
         )
@@ -4355,7 +4926,7 @@ mod tests {
 
     #[test]
     fn test_diff_url_with_selector() {
-        let cmd = parse_command(
+        let (cmd, _) = parse_command(
             &args("diff url https://a.com https://b.com --selector #main"),
             &default_flags(),
         )
@@ -4366,7 +4937,7 @@ mod tests {
 
     #[test]
     fn test_diff_url_with_compact_depth() {
-        let cmd = parse_command(
+        let (cmd, _) = parse_command(
             &args("diff url https://a.com https://b.com --compact --depth 3"),
             &default_flags(),
         )
@@ -4378,7 +4949,7 @@ mod tests {
 
     #[test]
     fn test_diff_url_with_short_snapshot_flags() {
-        let cmd = parse_command(
+        let (cmd, _) = parse_command(
             &args("diff url https://a.com https://b.com -s .content -c -d 2"),
             &default_flags(),
         )
@@ -4442,7 +5013,7 @@ mod tests {
 
     #[test]
     fn test_scroll_defaults() {
-        let cmd = parse_command(&args("scroll"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("scroll"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "scroll");
         assert_eq!(cmd["direction"], "down");
         assert_eq!(cmd["amount"], 300);
@@ -4451,7 +5022,7 @@ mod tests {
 
     #[test]
     fn test_scroll_direction_and_amount() {
-        let cmd = parse_command(&args("scroll up 200"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("scroll up 200"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "scroll");
         assert_eq!(cmd["direction"], "up");
         assert_eq!(cmd["amount"], 200);
@@ -4459,7 +5030,7 @@ mod tests {
 
     #[test]
     fn test_scroll_with_selector() {
-        let cmd = parse_command(
+        let (cmd, _) = parse_command(
             &args("scroll down 500 --selector div.scroll-container"),
             &default_flags(),
         )
@@ -4472,7 +5043,8 @@ mod tests {
 
     #[test]
     fn test_scroll_with_selector_short_flag() {
-        let cmd = parse_command(&args("scroll left 100 -s .sidebar"), &default_flags()).unwrap();
+        let (cmd, _) =
+            parse_command(&args("scroll left 100 -s .sidebar"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "scroll");
         assert_eq!(cmd["direction"], "left");
         assert_eq!(cmd["amount"], 100);
@@ -4481,7 +5053,7 @@ mod tests {
 
     #[test]
     fn test_scroll_selector_before_positional() {
-        let cmd =
+        let (cmd, _) =
             parse_command(&args("scroll --selector .panel down 400"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "scroll");
         assert_eq!(cmd["direction"], "down");
@@ -4491,7 +5063,8 @@ mod tests {
 
     #[test]
     fn test_scroll_selector_only() {
-        let cmd = parse_command(&args("scroll --selector .content"), &default_flags()).unwrap();
+        let (cmd, _) =
+            parse_command(&args("scroll --selector .content"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "scroll");
         assert_eq!(cmd["direction"], "down");
         assert_eq!(cmd["amount"], 300);
@@ -4512,13 +5085,13 @@ mod tests {
 
     #[test]
     fn test_inspect() {
-        let cmd = parse_command(&args("inspect"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("inspect"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "inspect");
     }
 
     #[test]
     fn test_get_cdp_url() {
-        let cmd = parse_command(&args("get cdp-url"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("get cdp-url"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "cdp_url");
     }
 
@@ -4526,14 +5099,14 @@ mod tests {
 
     #[test]
     fn test_batch_default() {
-        let cmd = parse_command(&args("batch"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("batch"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "batch");
         assert_eq!(cmd["bail"], false);
     }
 
     #[test]
     fn test_batch_with_bail() {
-        let cmd = parse_command(&args("batch --bail"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("batch --bail"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "batch");
         assert_eq!(cmd["bail"], true);
     }
@@ -4545,7 +5118,7 @@ mod tests {
             "open https://example.com".to_string(),
             "screenshot".to_string(),
         ];
-        let cmd = parse_command(&cmd_args, &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&cmd_args, &default_flags()).unwrap();
         assert_eq!(cmd["action"], "batch");
         assert_eq!(cmd["bail"], false);
         let commands = cmd["commands"].as_array().unwrap();
@@ -4562,7 +5135,7 @@ mod tests {
             "open https://example.com".to_string(),
             "screenshot".to_string(),
         ];
-        let cmd = parse_command(&cmd_args, &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&cmd_args, &default_flags()).unwrap();
         assert_eq!(cmd["action"], "batch");
         assert_eq!(cmd["bail"], true);
         let commands = cmd["commands"].as_array().unwrap();
@@ -4571,7 +5144,7 @@ mod tests {
 
     #[test]
     fn test_batch_no_args_no_commands_field() {
-        let cmd = parse_command(&args("batch"), &default_flags()).unwrap();
+        let (cmd, _) = parse_command(&args("batch"), &default_flags()).unwrap();
         assert!(cmd.get("commands").is_none());
     }
 }
