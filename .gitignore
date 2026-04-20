@@ -67,3 +67,11 @@ docs/package-lock.json
 # next
 .next/
 out/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+packages/camoufox-sidecar/.venv/

@@ -56,6 +56,83 @@ if (dashboardPkg.version !== version) {
   console.log(`  packages/dashboard/package.json already up to date`);
 }
 
+// Convert the npm-style version (which may contain multiple `-` separators
+// like `0.26.0-celeria-stealth.2`) into a PEP 440-compliant local version
+// identifier (`0.26.0+celeria.stealth.2`). PEP 440 does not allow hyphens
+// inside the public release segment, but `+` followed by dot-separated
+// alphanumerics is valid and preserves our pre-release labeling intent.
+function toPep440(npmVersion) {
+  const dashIdx = npmVersion.indexOf("-");
+  if (dashIdx === -1) return npmVersion;
+  const release = npmVersion.slice(0, dashIdx);
+  const local = npmVersion.slice(dashIdx + 1).replace(/-/g, ".");
+  return `${release}+${local}`;
+}
+
+const pep440Version = toPep440(version);
+
+// Update packages/camoufox-sidecar/pyproject.toml
+const sidecarPyprojectPath = join(
+  rootDir,
+  "packages",
+  "camoufox-sidecar",
+  "pyproject.toml"
+);
+let sidecarPyproject = readFileSync(sidecarPyprojectPath, "utf-8");
+const sidecarVersionRegex = /^version\s*=\s*"[^"]*"/m;
+const newSidecarVersion = `version = "${pep440Version}"`;
+if (sidecarVersionRegex.test(sidecarPyproject)) {
+  const oldMatch = sidecarPyproject.match(sidecarVersionRegex)?.[0];
+  if (oldMatch !== newSidecarVersion) {
+    sidecarPyproject = sidecarPyproject.replace(
+      sidecarVersionRegex,
+      newSidecarVersion
+    );
+    writeFileSync(sidecarPyprojectPath, sidecarPyproject);
+    console.log(
+      `  Updated packages/camoufox-sidecar/pyproject.toml: ${oldMatch} -> ${newSidecarVersion}`
+    );
+  } else {
+    console.log(`  packages/camoufox-sidecar/pyproject.toml already up to date`);
+  }
+} else {
+  console.error(
+    "  Could not find version field in packages/camoufox-sidecar/pyproject.toml"
+  );
+  process.exit(1);
+}
+
+// Update packages/camoufox-sidecar/camoufox_sidecar/__init__.py
+const sidecarInitPath = join(
+  rootDir,
+  "packages",
+  "camoufox-sidecar",
+  "camoufox_sidecar",
+  "__init__.py"
+);
+let sidecarInit = readFileSync(sidecarInitPath, "utf-8");
+const sidecarInitRegex = /^__version__\s*=\s*"[^"]*"/m;
+const newSidecarInit = `__version__ = "${pep440Version}"`;
+if (sidecarInitRegex.test(sidecarInit)) {
+  const oldMatch = sidecarInit.match(sidecarInitRegex)?.[0];
+  if (oldMatch !== newSidecarInit) {
+    sidecarInit = sidecarInit.replace(sidecarInitRegex, newSidecarInit);
+    writeFileSync(sidecarInitPath, sidecarInit);
+    console.log(
+      `  Updated packages/camoufox-sidecar/camoufox_sidecar/__init__.py: ${oldMatch} -> ${newSidecarInit}`
+    );
+  } else {
+    console.log(
+      `  packages/camoufox-sidecar/camoufox_sidecar/__init__.py already up to date`
+    );
+  }
+} else {
+  console.error(
+    "  Could not find __version__ in packages/camoufox-sidecar/camoufox_sidecar/__init__.py"
+  );
+  process.exit(1);
+}
+
 // Update Cargo.lock to match Cargo.toml
 if (cargoTomlUpdated) {
   try {

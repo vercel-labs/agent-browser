@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "camoufox-sidecar"
+version = "0.26.0+celeria.stealth.2"
+description = "Sidecar process that drives Camoufox on behalf of agent-browser"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Celeria" }]
+dependencies = [
+    "camoufox[geoip]>=0.4.11",
+    "playwright>=1.48",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=7.4",
+    "pytest-asyncio>=0.23",
+    "psutil>=5.9",
+]
+
+[project.scripts]
+camoufox-sidecar = "camoufox_sidecar.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["camoufox_sidecar*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
