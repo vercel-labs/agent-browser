@@ -1649,9 +1649,21 @@ mod tests {
                 vec!["2", "3", "4"],
                 false,
             ),
-            make_ax_node("2", "StaticText", "You posted again yesterday.", vec![], false),
+            make_ax_node(
+                "2",
+                "StaticText",
+                "You posted again yesterday.",
+                vec![],
+                false,
+            ),
             make_ax_node("3", "StaticText", " ", vec![], true),
-            make_ax_node("4", "StaticText", "Two likes. One from your mom.", vec![], false),
+            make_ax_node(
+                "4",
+                "StaticText",
+                "Two likes. One from your mom.",
+                vec![],
+                false,
+            ),
         ];
 
         let (tree_nodes, _) = build_tree(&nodes);
