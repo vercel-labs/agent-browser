@@ -7,6 +7,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
 
+use super::backend::BrowserBackend;
 use super::cdp::client::CdpClient;
 use super::cdp::types::{
     AttachToTargetParams, AttachToTargetResult, CloseTargetParams, CreateTargetParams,
@@ -245,14 +246,15 @@ async fn collect_storage_in_target(
 }
 
 pub async fn save_state(
-    client: &CdpClient,
+    backend: &BrowserBackend,
     session_id: &str,
     path: Option<&str>,
     session_name: Option<&str>,
     session_id_str: &str,
     visited_origins: &HashSet<String>,
 ) -> Result<String, String> {
-    let cookies = cookies::get_all_cookies(client, session_id).await?;
+    let client = backend.require_cdp()?;
+    let cookies = cookies::get_all_cookies(backend, session_id).await?;
 
     let origin_js = r#"(() => {
         const result = { origin: location.origin, localStorage: [], sessionStorage: [] };
@@ -333,7 +335,12 @@ pub async fn save_state(
     Ok(save_path)
 }
 
-pub async fn load_state(client: &CdpClient, session_id: &str, path: &str) -> Result<(), String> {
+pub async fn load_state(
+    backend: &BrowserBackend,
+    session_id: &str,
+    path: &str,
+) -> Result<(), String> {
+    let client = backend.require_cdp()?;
     let json_str = if path.ends_with(".enc") {
         let key = std::env::var("AGENT_BROWSER_ENCRYPTION_KEY").map_err(|_| {
             "Encrypted state file requires AGENT_BROWSER_ENCRYPTION_KEY".to_string()
@@ -373,7 +380,7 @@ pub async fn load_state(client: &CdpClient, session_id: &str, path: &str) -> Res
             .iter()
             .map(|c| serde_json::to_value(c).unwrap_or(Value::Null))
             .collect();
-        cookies::set_cookies(client, session_id, cookie_values, None).await?;
+        cookies::set_cookies(backend, session_id, cookie_values, None).await?;
     }
 
     // Load storage per origin

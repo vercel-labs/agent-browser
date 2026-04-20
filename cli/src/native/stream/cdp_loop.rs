@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use tokio::sync::{broadcast, watch, Mutex, RwLock};
 
+use crate::native::backend::BrowserBackend;
 use crate::native::cdp::client::CdpClient;
 use crate::native::network;
 
@@ -278,14 +279,19 @@ pub(super) async fn cdp_event_loop(
     }
 }
 
+/// Chrome-only entry point — asserts the backend is `BrowserBackend::Cdp`
+/// and surfaces `engine-incompatible` on Camoufox, which does not speak raw
+/// CDP screencast. Internal helpers below still take `&CdpClient` directly
+/// because they are only reachable through this assertion.
 pub async fn start_screencast(
-    client: &CdpClient,
+    backend: &BrowserBackend,
     session_id: &str,
     format: &str,
     quality: i32,
     max_width: i32,
     max_height: i32,
 ) -> Result<(), String> {
+    let client = backend.require_cdp_for("screencast")?;
     client
         .send_command(
             "Page.startScreencast",
@@ -302,7 +308,8 @@ pub async fn start_screencast(
     Ok(())
 }
 
-pub async fn stop_screencast(client: &CdpClient, session_id: &str) -> Result<(), String> {
+pub async fn stop_screencast(backend: &BrowserBackend, session_id: &str) -> Result<(), String> {
+    let client = backend.require_cdp_for("screencast")?;
     client
         .send_command_no_params("Page.stopScreencast", Some(session_id))
         .await?;
@@ -310,10 +317,11 @@ pub async fn stop_screencast(client: &CdpClient, session_id: &str) -> Result<(),
 }
 
 pub async fn ack_screencast_frame(
-    client: &CdpClient,
+    backend: &BrowserBackend,
     session_id: &str,
     screencast_session_id: i64,
 ) -> Result<(), String> {
+    let client = backend.require_cdp_for("screencast")?;
     client
         .send_command(
             "Page.screencastFrameAck",

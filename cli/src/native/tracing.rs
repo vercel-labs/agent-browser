@@ -1,6 +1,7 @@
 use serde_json::{json, Value};
 use std::path::PathBuf;
 
+use super::backend::BrowserBackend;
 use super::cdp::client::CdpClient;
 
 const MAX_PROFILE_EVENTS: usize = 5_000_000;
@@ -40,10 +41,11 @@ impl TracingState {
 }
 
 pub async fn trace_start(
-    client: &CdpClient,
+    backend: &BrowserBackend,
     session_id: &str,
     tracing_state: &mut TracingState,
 ) -> Result<Value, String> {
+    let client = backend.require_cdp()?;
     if tracing_state.active {
         return Err("Tracing already active".to_string());
     }
@@ -69,11 +71,12 @@ pub async fn trace_start(
 }
 
 pub async fn trace_stop(
-    client: &CdpClient,
+    backend: &BrowserBackend,
     session_id: &str,
     tracing_state: &mut TracingState,
     path: Option<&str>,
 ) -> Result<Value, String> {
+    let client = backend.require_cdp()?;
     if !tracing_state.active {
         return Err("No tracing in progress".to_string());
     }
@@ -181,11 +184,12 @@ pub async fn trace_stop(
 }
 
 pub async fn profiler_start(
-    client: &CdpClient,
+    backend: &BrowserBackend,
     session_id: &str,
     tracing_state: &mut TracingState,
     categories: Option<Vec<String>>,
 ) -> Result<Value, String> {
+    let client = backend.require_cdp()?;
     if tracing_state.active {
         return Err("Profiling/tracing already active".to_string());
     }
@@ -219,11 +223,12 @@ pub async fn profiler_start(
 }
 
 pub async fn profiler_stop(
-    client: &CdpClient,
+    backend: &BrowserBackend,
     session_id: &str,
     tracing_state: &mut TracingState,
     path: Option<&str>,
 ) -> Result<Value, String> {
+    let client = backend.require_cdp()?;
     if !tracing_state.active {
         return Err("No profiling in progress".to_string());
     }

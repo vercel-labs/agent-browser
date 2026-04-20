@@ -2,12 +2,12 @@ use std::collections::HashMap;
 
 use serde_json::Value;
 
-use super::cdp::client::CdpClient;
+use super::backend::BrowserBackend;
 use super::cdp::types::*;
 use super::element::{resolve_element_center, resolve_element_object_id, RefMap};
 
 pub async fn click(
-    client: &CdpClient,
+    client: &BrowserBackend,
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
@@ -27,7 +27,7 @@ pub async fn click(
 }
 
 pub async fn dblclick(
-    client: &CdpClient,
+    client: &BrowserBackend,
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
@@ -46,7 +46,7 @@ pub async fn dblclick(
 }
 
 pub async fn hover(
-    client: &CdpClient,
+    client: &BrowserBackend,
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
@@ -81,7 +81,7 @@ pub async fn hover(
 }
 
 pub async fn fill(
-    client: &CdpClient,
+    client: &BrowserBackend,
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
@@ -148,7 +148,7 @@ pub async fn fill(
 
 #[allow(clippy::too_many_arguments)]
 pub async fn type_text(
-    client: &CdpClient,
+    client: &BrowserBackend,
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
@@ -206,7 +206,7 @@ pub async fn type_text(
 }
 
 pub async fn type_text_into_active_context(
-    client: &CdpClient,
+    client: &BrowserBackend,
     session_id: &str,
     text: &str,
     delay_ms: Option<u64>,
@@ -273,7 +273,7 @@ pub async fn type_text_into_active_context(
     Ok(())
 }
 
-pub async fn press_key(client: &CdpClient, session_id: &str, key: &str) -> Result<(), String> {
+pub async fn press_key(client: &BrowserBackend, session_id: &str, key: &str) -> Result<(), String> {
     press_key_with_modifiers(client, session_id, key, None).await
 }
 
@@ -285,7 +285,7 @@ pub async fn press_key(client: &CdpClient, session_id: &str, key: &str) -> Resul
 /// Callers that need a platform-appropriate modifier (e.g. Cmd on macOS,
 /// Ctrl elsewhere) must choose the value themselves -- see `cfg!(target_os)`.
 pub async fn press_key_with_modifiers(
-    client: &CdpClient,
+    client: &BrowserBackend,
     session_id: &str,
     key: &str,
     modifiers: Option<i32>,
@@ -339,7 +339,7 @@ pub async fn press_key_with_modifiers(
 }
 
 pub async fn scroll(
-    client: &CdpClient,
+    client: &BrowserBackend,
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: Option<&str>,
@@ -391,7 +391,7 @@ pub async fn scroll(
 }
 
 pub async fn select_option(
-    client: &CdpClient,
+    client: &BrowserBackend,
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
@@ -437,7 +437,7 @@ pub async fn select_option(
 }
 
 pub async fn check(
-    client: &CdpClient,
+    client: &BrowserBackend,
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
@@ -489,7 +489,7 @@ pub async fn check(
 }
 
 pub async fn uncheck(
-    client: &CdpClient,
+    client: &BrowserBackend,
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
@@ -548,7 +548,7 @@ pub async fn uncheck(
 /// 3. If the element has a nested `<input>` → `.click()` that input.
 /// 4. Otherwise → `.click()` the element itself (handles ARIA role controls).
 async fn js_click_checkbox(
-    client: &CdpClient,
+    client: &BrowserBackend,
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
@@ -605,7 +605,7 @@ async fn js_click_checkbox(
 }
 
 pub async fn focus(
-    client: &CdpClient,
+    client: &BrowserBackend,
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
@@ -638,7 +638,7 @@ pub async fn focus(
 }
 
 pub async fn clear(
-    client: &CdpClient,
+    client: &BrowserBackend,
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
@@ -677,7 +677,7 @@ pub async fn clear(
 }
 
 pub async fn select_all(
-    client: &CdpClient,
+    client: &BrowserBackend,
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
@@ -722,7 +722,7 @@ pub async fn select_all(
 }
 
 pub async fn scroll_into_view(
-    client: &CdpClient,
+    client: &BrowserBackend,
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
@@ -757,7 +757,7 @@ pub async fn scroll_into_view(
 }
 
 pub async fn dispatch_event(
-    client: &CdpClient,
+    client: &BrowserBackend,
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
@@ -802,7 +802,7 @@ pub async fn dispatch_event(
 }
 
 pub async fn highlight(
-    client: &CdpClient,
+    client: &BrowserBackend,
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
@@ -844,7 +844,7 @@ pub async fn highlight(
 }
 
 pub async fn tap_touch(
-    client: &CdpClient,
+    client: &BrowserBackend,
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
@@ -885,7 +885,7 @@ pub async fn tap_touch(
 }
 
 async fn dispatch_click(
-    client: &CdpClient,
+    client: &BrowserBackend,
     session_id: &str,
     x: f64,
     y: f64,

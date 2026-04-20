@@ -587,7 +587,7 @@ impl DaemonState {
             if let Some(ref browser) = self.browser {
                 if let Ok(session_id) = browser.active_session_id() {
                     for ack_sid in drained.pending_acks {
-                        let _ = stream::ack_screencast_frame(&browser.client, session_id, ack_sid)
+                        let _ = stream::ack_screencast_frame(&browser.backend, session_id, ack_sid)
                             .await;
                     }
                 }
@@ -655,7 +655,7 @@ impl DaemonState {
                     if let Some(ref filter) = *df {
                         let has_proxy_creds = self.proxy_credentials.read().await.is_some();
                         let _ = network::install_domain_filter(
-                            &mgr.client,
+                            &mgr.backend,
                             &attach.session_id,
                             &filter.allowed_domains,
                             has_proxy_creds,
@@ -1610,7 +1610,7 @@ async fn auto_launch(state: &mut DaemonState) -> Result<(), String> {
     if has_proxy_auth {
         if let Some(ref mgr) = state.browser {
             if let Ok(session_id) = mgr.active_session_id() {
-                let _ = network::install_domain_filter_fetch(&mgr.client, session_id, true).await;
+                let _ = network::install_domain_filter_fetch(&mgr.backend, session_id, true).await;
             }
         }
     }
@@ -1675,7 +1675,7 @@ async fn try_auto_restore_state(state: &mut DaemonState) {
     if let Some(path) = state::find_auto_state_file(&session_name) {
         if let Some(ref mgr) = state.browser {
             if let Ok(session_id) = mgr.active_session_id() {
-                let _ = state::load_state(&mgr.client, session_id, &path).await;
+                let _ = state::load_state(&mgr.backend, session_id, &path).await;
             }
         }
     }
@@ -1689,7 +1689,7 @@ async fn load_storage_state(state: &DaemonState, path: &Option<String>) -> Resul
     if let Some(ref path) = path {
         if let Some(ref mgr) = state.browser {
             if let Ok(session_id) = mgr.active_session_id() {
-                state::load_state(&mgr.client, session_id, path).await?;
+                state::load_state(&mgr.backend, session_id, path).await?;
             }
         }
     }
@@ -2023,18 +2023,18 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
                 if let Ok(session_id) = mgr.active_session_id() {
                     if let Some(ref filter) = *df {
                         let _ = network::install_domain_filter(
-                            &mgr.client,
+                            &mgr.backend,
                             session_id,
                             &filter.allowed_domains,
                             has_proxy_auth,
                         )
                         .await;
-                        network::sanitize_existing_pages(&mgr.client, &mgr.pages_list(), filter)
+                        network::sanitize_existing_pages(&mgr.backend, &mgr.pages_list(), filter)
                             .await;
                     } else {
                         // No domain filter, but proxy auth needs Fetch.enable
                         let _ = network::install_domain_filter_fetch(
-                            &mgr.client,
+                            &mgr.backend,
                             session_id,
                             has_proxy_auth,
                         )
@@ -2244,6 +2244,10 @@ fn handle_cdp_url(state: &DaemonState) -> Result<Value, String> {
 async fn handle_inspect(state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
 
+    // Chrome-only: the DevTools inspect proxy forwards raw CDP and has no
+    // Playwright/Camoufox analogue. Fail loud with an actionable error.
+    let cdp_client = mgr.backend.require_cdp_for("inspect (DevTools proxy)")?;
+
     // Shut down any existing inspect server so we always target the current page
     if let Some(server) = state.inspect_server.take() {
         server.shutdown();
@@ -2251,7 +2255,7 @@ async fn handle_inspect(state: &mut DaemonState) -> Result<Value, String> {
 
     let target_id = mgr.active_target_id()?.to_string();
     let chrome_hp = mgr.chrome_host_port().to_string();
-    let proxy_handle = mgr.client.inspect_handle();
+    let proxy_handle = cdp_client.inspect_handle();
 
     let server = InspectServer::start(proxy_handle, target_id, chrome_hp).await?;
     let url = format!("http://127.0.0.1:{}", server.port());
@@ -2334,7 +2338,7 @@ async fn handle_close(state: &mut DaemonState) -> Result<Value, String> {
         if let Some(ref session_name) = state.session_name {
             if let Ok(session_id) = mgr.active_session_id() {
                 let _ = state::save_state(
-                    &mgr.client,
+                    &mgr.backend,
                     session_id,
                     None,
                     Some(session_name.as_str()),
@@ -2416,7 +2420,7 @@ async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
 
     state.ref_map.clear();
     let tree = snapshot::take_snapshot(
-        &mgr.client,
+        &mgr.backend,
         &session_id,
         &options,
         &mut state.ref_map,
@@ -2519,7 +2523,7 @@ async fn handle_screenshot(cmd: &Value, state: &mut DaemonState) -> Result<Value
     if annotate {
         state.ref_map.clear();
         let _ = snapshot::take_snapshot(
-            &mgr.client,
+            &mgr.backend,
             &session_id,
             &SnapshotOptions {
                 interactive: true,
@@ -2533,7 +2537,7 @@ async fn handle_screenshot(cmd: &Value, state: &mut DaemonState) -> Result<Value
     }
 
     let result = screenshot::take_screenshot(
-        &mgr.client,
+        &mgr.backend,
         &session_id,
         &state.ref_map,
         &options,
@@ -2571,7 +2575,7 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
     if new_tab {
         use super::element::resolve_element_object_id;
         let (object_id, effective_session_id) = resolve_element_object_id(
-            &mgr.client,
+            &mgr.backend,
             &session_id,
             &state.ref_map,
             selector,
@@ -2614,7 +2618,7 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
     let click_count = cmd.get("clickCount").and_then(|v| v.as_i64()).unwrap_or(1) as i32;
 
     interaction::click(
-        &mgr.client,
+        &mgr.backend,
         &session_id,
         &state.ref_map,
         selector,
@@ -2636,7 +2640,7 @@ async fn handle_dblclick(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         .ok_or("Missing 'selector' parameter")?;
 
     interaction::dblclick(
-        &mgr.client,
+        &mgr.backend,
         &session_id,
         &state.ref_map,
         selector,
@@ -2667,7 +2671,7 @@ async fn handle_fill(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
     let session_id = mgr.active_session_id()?.to_string();
 
     interaction::fill(
-        &mgr.client,
+        &mgr.backend,
         &session_id,
         &state.ref_map,
         selector,
@@ -2693,7 +2697,7 @@ async fn handle_type(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
     let delay = cmd.get("delay").and_then(|v| v.as_u64());
 
     interaction::type_text(
-        &mgr.client,
+        &mgr.backend,
         &session_id,
         &state.ref_map,
         selector,
@@ -2717,7 +2721,7 @@ async fn handle_press(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
     // Parse modifier+key chords like "Control+a", "Shift+Enter", "Control+Shift+a"
     let (actual_key, modifiers) = parse_key_chord(key);
 
-    interaction::press_key_with_modifiers(&mgr.client, &session_id, &actual_key, modifiers).await?;
+    interaction::press_key_with_modifiers(&mgr.backend, &session_id, &actual_key, modifiers).await?;
     Ok(json!({ "pressed": key }))
 }
 
@@ -2770,7 +2774,7 @@ async fn handle_hover(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         .ok_or("Missing 'selector' parameter")?;
 
     interaction::hover(
-        &mgr.client,
+        &mgr.backend,
         &session_id,
         &state.ref_map,
         selector,
@@ -2802,7 +2806,7 @@ async fn handle_scroll(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     }
 
     interaction::scroll(
-        &mgr.client,
+        &mgr.backend,
         &session_id,
         &state.ref_map,
         selector,
@@ -2836,7 +2840,7 @@ async fn handle_select(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     };
 
     interaction::select_option(
-        &mgr.client,
+        &mgr.backend,
         &session_id,
         &state.ref_map,
         selector,
@@ -2856,7 +2860,7 @@ async fn handle_check(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         .ok_or("Missing 'selector' parameter")?;
 
     interaction::check(
-        &mgr.client,
+        &mgr.backend,
         &session_id,
         &state.ref_map,
         selector,
@@ -2875,7 +2879,7 @@ async fn handle_uncheck(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
         .ok_or("Missing 'selector' parameter")?;
 
     interaction::uncheck(
-        &mgr.client,
+        &mgr.backend,
         &session_id,
         &state.ref_map,
         selector,
@@ -2891,7 +2895,7 @@ async fn handle_wait(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
     let timeout_ms = state.timeout_ms(cmd);
 
     if let Some(text) = cmd.get("text").and_then(|v| v.as_str()) {
-        wait_for_text(&mgr.client, &session_id, text, timeout_ms).await?;
+        wait_for_text(&mgr.backend, &session_id, text, timeout_ms).await?;
         return Ok(json!({ "waited": "text", "text": text }));
     }
 
@@ -2900,17 +2904,17 @@ async fn handle_wait(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
             .get("state")
             .and_then(|v| v.as_str())
             .unwrap_or("visible");
-        wait_for_selector(&mgr.client, &session_id, selector, state_str, timeout_ms).await?;
+        wait_for_selector(&mgr.backend, &session_id, selector, state_str, timeout_ms).await?;
         return Ok(json!({ "waited": "selector", "selector": selector }));
     }
 
     if let Some(url_pattern) = cmd.get("url").and_then(|v| v.as_str()) {
-        wait_for_url(&mgr.client, &session_id, url_pattern, timeout_ms).await?;
+        wait_for_url(&mgr.backend, &session_id, url_pattern, timeout_ms).await?;
         return Ok(json!({ "waited": "url", "url": url_pattern }));
     }
 
     if let Some(fn_str) = cmd.get("function").and_then(|v| v.as_str()) {
-        wait_for_function(&mgr.client, &session_id, fn_str, timeout_ms).await?;
+        wait_for_function(&mgr.backend, &session_id, fn_str, timeout_ms).await?;
         return Ok(json!({ "waited": "function" }));
     }
 
@@ -2935,7 +2939,7 @@ async fn handle_gettext(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
         .ok_or("Missing 'selector' parameter")?;
 
     let text = super::element::get_element_text(
-        &mgr.client,
+        &mgr.backend,
         &session_id,
         &state.ref_map,
         selector,
@@ -2959,7 +2963,7 @@ async fn handle_getattribute(cmd: &Value, state: &mut DaemonState) -> Result<Val
         .ok_or("Missing 'attribute' parameter")?;
 
     let value = super::element::get_element_attribute(
-        &mgr.client,
+        &mgr.backend,
         &session_id,
         &state.ref_map,
         selector,
@@ -2980,7 +2984,7 @@ async fn handle_isvisible(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         .ok_or("Missing 'selector' parameter")?;
 
     let visible = super::element::is_element_visible(
-        &mgr.client,
+        &mgr.backend,
         &session_id,
         &state.ref_map,
         selector,
@@ -3000,7 +3004,7 @@ async fn handle_isenabled(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         .ok_or("Missing 'selector' parameter")?;
 
     let enabled = super::element::is_element_enabled(
-        &mgr.client,
+        &mgr.backend,
         &session_id,
         &state.ref_map,
         selector,
@@ -3020,7 +3024,7 @@ async fn handle_ischecked(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         .ok_or("Missing 'selector' parameter")?;
 
     let checked = super::element::is_element_checked(
-        &mgr.client,
+        &mgr.backend,
         &session_id,
         &state.ref_map,
         selector,
@@ -3112,7 +3116,7 @@ async fn handle_reload(state: &mut DaemonState) -> Result<Value, String> {
 // ---------------------------------------------------------------------------
 
 async fn wait_for_selector(
-    client: &super::cdp::client::CdpClient,
+    client: &super::backend::BrowserBackend,
     session_id: &str,
     selector: &str,
     state: &str,
@@ -3152,7 +3156,7 @@ async fn wait_for_selector(
 }
 
 async fn wait_for_url(
-    client: &super::cdp::client::CdpClient,
+    client: &super::backend::BrowserBackend,
     session_id: &str,
     pattern: &str,
     timeout_ms: u64,
@@ -3165,7 +3169,7 @@ async fn wait_for_url(
 }
 
 async fn wait_for_text(
-    client: &super::cdp::client::CdpClient,
+    client: &super::backend::BrowserBackend,
     session_id: &str,
     text: &str,
     timeout_ms: u64,
@@ -3178,7 +3182,7 @@ async fn wait_for_text(
 }
 
 async fn wait_for_function(
-    client: &super::cdp::client::CdpClient,
+    client: &super::backend::BrowserBackend,
     session_id: &str,
     fn_str: &str,
     timeout_ms: u64,
@@ -3188,7 +3192,7 @@ async fn wait_for_function(
 }
 
 async fn poll_until_true(
-    client: &super::cdp::client::CdpClient,
+    client: &super::backend::BrowserBackend,
     session_id: &str,
     expression: &str,
     timeout_ms: u64,
@@ -3246,7 +3250,7 @@ async fn handle_cookies_get(cmd: &Value, state: &DaemonState) -> Result<Value, S
             .collect()
     });
 
-    let cookies_list = cookies::get_cookies(&mgr.client, &session_id, urls).await?;
+    let cookies_list = cookies::get_cookies(&mgr.backend, &session_id, urls).await?;
     Ok(json!({ "cookies": cookies_list }))
 }
 
@@ -3271,14 +3275,14 @@ async fn handle_cookies_set(cmd: &Value, state: &DaemonState) -> Result<Value, S
         vec![Value::Object(cookie)]
     };
 
-    cookies::set_cookies(&mgr.client, &session_id, cookie_values, url.as_deref()).await?;
+    cookies::set_cookies(&mgr.backend, &session_id, cookie_values, url.as_deref()).await?;
     Ok(json!({ "set": true }))
 }
 
 async fn handle_cookies_clear(state: &DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
-    cookies::clear_cookies(&mgr.client, &session_id).await?;
+    cookies::clear_cookies(&mgr.backend, &session_id).await?;
     Ok(json!({ "cleared": true }))
 }
 
@@ -3287,7 +3291,7 @@ async fn handle_storage_get(cmd: &Value, state: &DaemonState) -> Result<Value, S
     let session_id = mgr.active_session_id()?.to_string();
     let storage_type = cmd.get("type").and_then(|v| v.as_str()).unwrap_or("local");
     let key = cmd.get("key").and_then(|v| v.as_str());
-    storage::storage_get(&mgr.client, &session_id, storage_type, key).await
+    storage::storage_get(&mgr.backend, &session_id, storage_type, key).await
 }
 
 async fn handle_storage_set(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
@@ -3302,7 +3306,7 @@ async fn handle_storage_set(cmd: &Value, state: &DaemonState) -> Result<Value, S
         .get("value")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'value' parameter")?;
-    storage::storage_set(&mgr.client, &session_id, storage_type, key, value).await?;
+    storage::storage_set(&mgr.backend, &session_id, storage_type, key, value).await?;
     Ok(json!({ "set": true }))
 }
 
@@ -3310,7 +3314,7 @@ async fn handle_storage_clear(cmd: &Value, state: &DaemonState) -> Result<Value,
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
     let storage_type = cmd.get("type").and_then(|v| v.as_str()).unwrap_or("local");
-    storage::storage_clear(&mgr.client, &session_id, storage_type).await?;
+    storage::storage_clear(&mgr.backend, &session_id, storage_type).await?;
     Ok(json!({ "cleared": true }))
 }
 
@@ -3321,7 +3325,7 @@ async fn handle_setcontent(cmd: &Value, state: &DaemonState) -> Result<Value, St
         .get("html")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'html' parameter")?;
-    network::set_content(&mgr.client, &session_id, html).await?;
+    network::set_content(&mgr.backend, &session_id, html).await?;
     Ok(json!({ "set": true }))
 }
 
@@ -3340,7 +3344,7 @@ async fn handle_headers(cmd: &Value, state: &DaemonState) -> Result<Value, Strin
         })
         .unwrap_or_default();
 
-    network::set_extra_headers(&mgr.client, &session_id, &headers).await?;
+    network::set_extra_headers(&mgr.backend, &session_id, &headers).await?;
     Ok(json!({ "set": true }))
 }
 
@@ -3348,7 +3352,7 @@ async fn handle_offline(cmd: &Value, state: &DaemonState) -> Result<Value, Strin
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
     let offline = cmd.get("offline").and_then(|v| v.as_bool()).unwrap_or(true);
-    network::set_offline(&mgr.client, &session_id, offline).await?;
+    network::set_offline(&mgr.backend, &session_id, offline).await?;
     Ok(json!({ "offline": offline }))
 }
 
@@ -3373,7 +3377,7 @@ async fn handle_state_save(cmd: &Value, state: &DaemonState) -> Result<Value, St
     let path = cmd.get("path").and_then(|v| v.as_str());
 
     let saved_path = state::save_state(
-        &mgr.client,
+        &mgr.backend,
         &session_id,
         path,
         state.session_name.as_deref(),
@@ -3393,7 +3397,7 @@ async fn handle_state_load(cmd: &Value, state: &DaemonState) -> Result<Value, St
         .and_then(|v| v.as_str())
         .ok_or("Missing 'path' parameter")?;
 
-    state::load_state(&mgr.client, &session_id, path).await?;
+    state::load_state(&mgr.backend, &session_id, path).await?;
     Ok(json!({ "loaded": true, "path": path }))
 }
 
@@ -3425,7 +3429,7 @@ async fn handle_diff_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Va
         ..SnapshotOptions::default()
     };
     let current = snapshot::take_snapshot(
-        &mgr.client,
+        &mgr.backend,
         &session_id,
         &options,
         &mut state.ref_map,
@@ -3477,7 +3481,7 @@ async fn handle_diff_url(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     let session_id = mgr.active_session_id()?.to_string();
     let options = SnapshotOptions::default();
     let snap1 = snapshot::take_snapshot(
-        &mgr.client,
+        &mgr.backend,
         &session_id,
         &options,
         &mut state.ref_map,
@@ -3490,7 +3494,7 @@ async fn handle_diff_url(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     mgr.navigate(url2, wait_until).await?;
     state.ref_map.clear();
     let snap2 = snapshot::take_snapshot(
-        &mgr.client,
+        &mgr.backend,
         &session_id,
         &options,
         &mut state.ref_map,
@@ -3594,7 +3598,7 @@ async fn handle_keyboard(cmd: &Value, state: &DaemonState) -> Result<Value, Stri
                 .get("text")
                 .and_then(|v| v.as_str())
                 .ok_or("Missing 'text' parameter")?;
-            interaction::type_text_into_active_context(&mgr.client, &session_id, text, None)
+            interaction::type_text_into_active_context(&mgr.backend, &session_id, text, None)
                 .await?;
             return Ok(json!({ "typed": text }));
         }
@@ -3824,7 +3828,7 @@ async fn handle_download(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
 
     // Click the element to trigger the download
     interaction::click(
-        &mgr.client,
+        &mgr.backend,
         &session_id,
         &state.ref_map,
         selector,
@@ -3934,14 +3938,14 @@ async fn handle_download(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
 async fn handle_trace_start(state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
-    native_tracing::trace_start(&mgr.client, &session_id, &mut state.tracing_state).await
+    native_tracing::trace_start(&mgr.backend, &session_id, &mut state.tracing_state).await
 }
 
 async fn handle_trace_stop(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
     let path = cmd.get("path").and_then(|v| v.as_str());
-    native_tracing::trace_stop(&mgr.client, &session_id, &mut state.tracing_state, path).await
+    native_tracing::trace_stop(&mgr.backend, &session_id, &mut state.tracing_state, path).await
 }
 
 async fn handle_profiler_start(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -3953,7 +3957,7 @@ async fn handle_profiler_start(cmd: &Value, state: &mut DaemonState) -> Result<V
             .collect()
     });
     native_tracing::profiler_start(
-        &mgr.client,
+        &mgr.backend,
         &session_id,
         &mut state.tracing_state,
         categories,
@@ -3965,7 +3969,7 @@ async fn handle_profiler_stop(cmd: &Value, state: &mut DaemonState) -> Result<Va
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
     let path = cmd.get("path").and_then(|v| v.as_str());
-    native_tracing::profiler_stop(&mgr.client, &session_id, &mut state.tracing_state, path).await
+    native_tracing::profiler_stop(&mgr.backend, &session_id, &mut state.tracing_state, path).await
 }
 
 async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -4217,7 +4221,7 @@ async fn handle_focus(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         .ok_or("Missing 'selector' parameter")?;
 
     interaction::focus(
-        &mgr.client,
+        &mgr.backend,
         &session_id,
         &state.ref_map,
         selector,
@@ -4236,7 +4240,7 @@ async fn handle_clear(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         .ok_or("Missing 'selector' parameter")?;
 
     interaction::clear(
-        &mgr.client,
+        &mgr.backend,
         &session_id,
         &state.ref_map,
         selector,
@@ -4255,7 +4259,7 @@ async fn handle_selectall(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         .ok_or("Missing 'selector' parameter")?;
 
     interaction::select_all(
-        &mgr.client,
+        &mgr.backend,
         &session_id,
         &state.ref_map,
         selector,
@@ -4274,7 +4278,7 @@ async fn handle_scrollintoview(cmd: &Value, state: &mut DaemonState) -> Result<V
         .ok_or("Missing 'selector' parameter")?;
 
     interaction::scroll_into_view(
-        &mgr.client,
+        &mgr.backend,
         &session_id,
         &state.ref_map,
         selector,
@@ -4299,7 +4303,7 @@ async fn handle_dispatch(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     let event_init = cmd.get("eventInit");
 
     interaction::dispatch_event(
-        &mgr.client,
+        &mgr.backend,
         &session_id,
         &state.ref_map,
         selector,
@@ -4320,7 +4324,7 @@ async fn handle_highlight(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         .ok_or("Missing 'selector' parameter")?;
 
     interaction::highlight(
-        &mgr.client,
+        &mgr.backend,
         &session_id,
         &state.ref_map,
         selector,
@@ -4348,7 +4352,7 @@ async fn handle_tap(cmd: &Value, state: &mut DaemonState) -> Result<Value, Strin
     let session_id = mgr.active_session_id()?.to_string();
 
     interaction::tap_touch(
-        &mgr.client,
+        &mgr.backend,
         &session_id,
         &state.ref_map,
         sel,
@@ -4367,7 +4371,7 @@ async fn handle_boundingbox(cmd: &Value, state: &mut DaemonState) -> Result<Valu
         .ok_or("Missing 'selector' parameter")?;
 
     let bbox = super::element::get_element_bounding_box(
-        &mgr.client,
+        &mgr.backend,
         &session_id,
         &state.ref_map,
         selector,
@@ -4386,7 +4390,7 @@ async fn handle_innertext(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         .ok_or("Missing 'selector' parameter")?;
 
     let text = super::element::get_element_inner_text(
-        &mgr.client,
+        &mgr.backend,
         &session_id,
         &state.ref_map,
         selector,
@@ -4405,7 +4409,7 @@ async fn handle_innerhtml(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         .ok_or("Missing 'selector' parameter")?;
 
     let html = super::element::get_element_inner_html(
-        &mgr.client,
+        &mgr.backend,
         &session_id,
         &state.ref_map,
         selector,
@@ -4424,7 +4428,7 @@ async fn handle_inputvalue(cmd: &Value, state: &mut DaemonState) -> Result<Value
         .ok_or("Missing 'selector' parameter")?;
 
     let value = super::element::get_element_input_value(
-        &mgr.client,
+        &mgr.backend,
         &session_id,
         &state.ref_map,
         selector,
@@ -4447,7 +4451,7 @@ async fn handle_setvalue(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         .ok_or("Missing 'value' parameter")?;
 
     super::element::set_element_value(
-        &mgr.client,
+        &mgr.backend,
         &session_id,
         &state.ref_map,
         selector,
@@ -4466,7 +4470,7 @@ async fn handle_count(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         .and_then(|v| v.as_str())
         .ok_or("Missing 'selector' parameter")?;
 
-    let count = super::element::get_element_count(&mgr.client, &session_id, selector).await?;
+    let count = super::element::get_element_count(&mgr.backend, &session_id, selector).await?;
     Ok(json!({ "count": count, "selector": selector }))
 }
 
@@ -4485,7 +4489,7 @@ async fn handle_styles(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     });
 
     let styles = super::element::get_element_styles(
-        &mgr.client,
+        &mgr.backend,
         &session_id,
         &state.ref_map,
         selector,
@@ -4736,12 +4740,12 @@ async fn handle_clipboard(cmd: &Value, state: &DaemonState) -> Result<Value, Str
             Ok(json!({ "written": text }))
         }
         "copy" => {
-            interaction::press_key_with_modifiers(&mgr.client, &session_id, "c", Some(modifier))
+            interaction::press_key_with_modifiers(&mgr.backend, &session_id, "c", Some(modifier))
                 .await?;
             Ok(json!({ "copied": true }))
         }
         "paste" => {
-            interaction::press_key_with_modifiers(&mgr.client, &session_id, "v", Some(modifier))
+            interaction::press_key_with_modifiers(&mgr.backend, &session_id, "v", Some(modifier))
                 .await?;
             Ok(json!({ "pasted": true }))
         }
@@ -5006,7 +5010,7 @@ async fn handle_screencast_start(cmd: &Value, state: &mut DaemonState) -> Result
         .unwrap_or(default_h as i64) as i32;
 
     stream::start_screencast(
-        &mgr.client,
+        &mgr.backend,
         &session_id,
         format,
         quality,
@@ -5040,7 +5044,7 @@ async fn handle_screencast_stop(state: &mut DaemonState) -> Result<Value, String
         return Err("No screencast active".to_string());
     }
 
-    stream::stop_screencast(&mgr.client, session_id).await?;
+    stream::stop_screencast(&mgr.backend, session_id).await?;
     state.screencasting = false;
 
     if let Some(ref server) = state.stream_server {
@@ -5067,7 +5071,7 @@ async fn handle_waitforurl(cmd: &Value, state: &DaemonState) -> Result<Value, St
         .ok_or("Missing 'url' parameter")?;
     let timeout_ms = state.timeout_ms(cmd);
 
-    wait_for_url(&mgr.client, &session_id, url_pattern, timeout_ms).await?;
+    wait_for_url(&mgr.backend, &session_id, url_pattern, timeout_ms).await?;
     let url = mgr.get_url().await.unwrap_or_default();
     Ok(json!({ "url": url }))
 }
@@ -5098,7 +5102,7 @@ async fn handle_waitforfunction(cmd: &Value, state: &DaemonState) -> Result<Valu
         .ok_or("Missing 'expression' parameter")?;
     let timeout_ms = state.timeout_ms(cmd);
 
-    wait_for_function(&mgr.client, &session_id, expression, timeout_ms).await?;
+    wait_for_function(&mgr.backend, &session_id, expression, timeout_ms).await?;
 
     let result: super::cdp::types::EvaluateResult = mgr
         .client
@@ -5285,7 +5289,7 @@ async fn execute_subaction(
     match subaction {
         "click" => {
             interaction::click(
-                &mgr.client,
+                &mgr.backend,
                 &session_id,
                 &state.ref_map,
                 selector,
@@ -5302,7 +5306,7 @@ async fn execute_subaction(
                 .and_then(|v| v.as_str())
                 .ok_or("Missing 'value' for fill subaction")?;
             interaction::fill(
-                &mgr.client,
+                &mgr.backend,
                 &session_id,
                 &state.ref_map,
                 selector,
@@ -5314,7 +5318,7 @@ async fn execute_subaction(
         }
         "check" => {
             interaction::check(
-                &mgr.client,
+                &mgr.backend,
                 &session_id,
                 &state.ref_map,
                 selector,
@@ -5325,7 +5329,7 @@ async fn execute_subaction(
         }
         "hover" => {
             interaction::hover(
-                &mgr.client,
+                &mgr.backend,
                 &session_id,
                 &state.ref_map,
                 selector,
@@ -5336,7 +5340,7 @@ async fn execute_subaction(
         }
         "text" => {
             let text = super::element::get_element_text(
-                &mgr.client,
+                &mgr.backend,
                 &session_id,
                 &state.ref_map,
                 selector,
@@ -5724,7 +5728,7 @@ async fn handle_drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
         .ok_or("Missing 'target' parameter")?;
 
     let (sx, sy, source_session_id) = super::element::resolve_element_center(
-        &mgr.client,
+        &mgr.backend,
         &session_id,
         &state.ref_map,
         source,
@@ -5732,7 +5736,7 @@ async fn handle_drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
     )
     .await?;
     let (tx, ty, target_session_id) = super::element::resolve_element_center(
-        &mgr.client,
+        &mgr.backend,
         &session_id,
         &state.ref_map,
         target,
@@ -6064,7 +6068,7 @@ async fn handle_diff_screenshot(cmd: &Value, state: &DaemonState) -> Result<Valu
     };
 
     let result = screenshot::take_screenshot(
-        &mgr.client,
+        &mgr.backend,
         &session_id,
         &state.ref_map,
         &options,
@@ -6950,7 +6954,7 @@ async fn handle_http_credentials(cmd: &Value, state: &DaemonState) -> Result<Val
 
     let mut headers = HashMap::new();
     headers.insert("Authorization".to_string(), format!("Basic {}", encoded));
-    network::set_extra_headers(&mgr.client, &session_id, &headers).await?;
+    network::set_extra_headers(&mgr.backend, &session_id, &headers).await?;
 
     Ok(json!({ "set": true }))
 }
@@ -6964,7 +6968,7 @@ async fn handle_http_credentials(cmd: &Value, state: &DaemonState) -> Result<Val
 /// This is used by `auth_login` auto-detection so SPA login forms can render
 /// after initial navigation without requiring global network-idle.
 async fn wait_for_any_selector(
-    client: &super::cdp::client::CdpClient,
+    client: &super::backend::BrowserBackend,
     session_id: &str,
     selectors: &[&str],
     timeout_ms: u64,
@@ -7126,7 +7130,7 @@ async fn handle_auth_login(cmd: &Value, state: &mut DaemonState) -> Result<Value
 
     // Find and fill username
     let user_sel = if let Some(s) = username_sel {
-        wait_for_selector(&mgr.client, &session_id, &s, "visible", auth_timeout_ms)
+        wait_for_selector(&mgr.backend, &session_id, &s, "visible", auth_timeout_ms)
             .await
             .map_err(|_| format!("Timed out waiting for username selector '{}'", s))?;
         s
@@ -7135,7 +7139,7 @@ async fn handle_auth_login(cmd: &Value, state: &mut DaemonState) -> Result<Value
         let fallback_window_ms = auth_timeout_ms.saturating_sub(preferred_window_ms);
 
         match wait_for_any_selector(
-            &mgr.client,
+            &mgr.backend,
             &session_id,
             &preferred_user_selectors,
             preferred_window_ms,
@@ -7153,7 +7157,7 @@ async fn handle_auth_login(cmd: &Value, state: &mut DaemonState) -> Result<Value
                 }
 
                 wait_for_any_selector(
-                    &mgr.client,
+                    &mgr.backend,
                     &session_id,
                     &fallback_user_selectors,
                     fallback_window_ms,
@@ -7172,7 +7176,7 @@ async fn handle_auth_login(cmd: &Value, state: &mut DaemonState) -> Result<Value
         }
     };
     interaction::fill(
-        &mgr.client,
+        &mgr.backend,
         &session_id,
         &state.ref_map,
         &user_sel,
@@ -7184,7 +7188,7 @@ async fn handle_auth_login(cmd: &Value, state: &mut DaemonState) -> Result<Value
     // Find and fill password
     let pass_sel = password_sel.unwrap_or_else(|| "input[type=password]".to_string());
     wait_for_selector(
-        &mgr.client,
+        &mgr.backend,
         &session_id,
         &pass_sel,
         "visible",
@@ -7193,7 +7197,7 @@ async fn handle_auth_login(cmd: &Value, state: &mut DaemonState) -> Result<Value
     .await
     .map_err(|_| format!("Timed out waiting for password selector '{}'", pass_sel))?;
     interaction::fill(
-        &mgr.client,
+        &mgr.backend,
         &session_id,
         &state.ref_map,
         &pass_sel,
@@ -7204,13 +7208,13 @@ async fn handle_auth_login(cmd: &Value, state: &mut DaemonState) -> Result<Value
 
     // Find and click submit
     let sub_sel = if let Some(s) = submit_sel {
-        wait_for_selector(&mgr.client, &session_id, &s, "visible", auth_timeout_ms)
+        wait_for_selector(&mgr.backend, &session_id, &s, "visible", auth_timeout_ms)
             .await
             .map_err(|_| format!("Timed out waiting for submit selector '{}'", s))?;
         s
     } else {
         wait_for_any_selector(
-            &mgr.client,
+            &mgr.backend,
             &session_id,
             &auto_submit_selectors,
             auth_timeout_ms,
@@ -7224,7 +7228,7 @@ async fn handle_auth_login(cmd: &Value, state: &mut DaemonState) -> Result<Value
         })?
     };
     interaction::click(
-        &mgr.client,
+        &mgr.backend,
         &session_id,
         &state.ref_map,
         &sub_sel,

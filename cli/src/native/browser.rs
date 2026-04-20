@@ -5,6 +5,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, Mutex};
 
+use super::backend::{not_yet_implemented_error, BrowserBackend};
+use super::cdp::camoufox::CamoufoxProcess;
 use super::cdp::chrome::{auto_connect_cdp, launch_chrome, ChromeProcess, LaunchOptions};
 use super::cdp::client::CdpClient;
 use super::cdp::discovery::discover_cdp_url;
@@ -265,6 +267,10 @@ impl WaitUntil {
 pub enum BrowserProcess {
     Chrome(ChromeProcess),
     Lightpanda(LightpandaProcess),
+    /// Stub variant for engine=camoufox. Unit 1 never constructs one — launch
+    /// returns a not-yet-implemented error first — but the variant exists so
+    /// the enum is total once Unit 3 wires in the real sidecar subprocess.
+    Camoufox(CamoufoxProcess),
 }
 
 impl BrowserProcess {
@@ -272,6 +278,7 @@ impl BrowserProcess {
         match self {
             BrowserProcess::Chrome(p) => p.kill(),
             BrowserProcess::Lightpanda(p) => p.kill(),
+            BrowserProcess::Camoufox(p) => p.kill(),
         }
     }
 
@@ -279,6 +286,7 @@ impl BrowserProcess {
         match self {
             BrowserProcess::Chrome(p) => p.wait_or_kill(timeout),
             BrowserProcess::Lightpanda(p) => p.kill(),
+            BrowserProcess::Camoufox(p) => p.wait_or_kill(timeout),
         }
     }
 
@@ -287,11 +295,22 @@ impl BrowserProcess {
         match self {
             BrowserProcess::Chrome(p) => p.has_exited(),
             BrowserProcess::Lightpanda(_) => false,
+            BrowserProcess::Camoufox(_) => false,
         }
     }
 }
 
 pub struct BrowserManager {
+    /// Engine-tagged backend. In Unit 1 this is always `BrowserBackend::Cdp`
+    /// whenever a `BrowserManager` exists, since `launch` for engine=camoufox
+    /// returns a structured `not-yet-implemented` error before constructing
+    /// one. Unit 3 begins returning `BrowserBackend::Camoufox` here.
+    pub backend: BrowserBackend,
+    /// Direct handle to the CDP client. Kept as a convenience for the
+    /// Chrome-only code inside this module; always matches the `Cdp` arm of
+    /// `backend`. Once Camoufox launches land (Unit 3), methods that reach for
+    /// `self.client` on a non-CDP backend will move to `self.backend` dispatch
+    /// or early-return with `backend.require_cdp()?`.
     pub client: Arc<CdpClient>,
     browser_process: Option<BrowserProcess>,
     ws_url: String,
@@ -332,9 +351,15 @@ impl BrowserManager {
             "lightpanda" => {
                 validate_lightpanda_options(&options)?;
             }
+            "camoufox" => {
+                // Unit 1: validation is deferred to Unit 3; we stop here with a
+                // structured error so `agent-browser --engine camoufox open <url>`
+                // reaches this arm, surfaces a clean failure, and does not panic.
+                return Err(not_yet_implemented_error(Some("launch")));
+            }
             _ => {
                 return Err(format!(
-                    "Unknown engine '{}'. Supported engines: chrome, lightpanda",
+                    "Unknown engine '{}'. Supported engines: chrome, lightpanda, camoufox",
                     engine
                 ));
             }
@@ -370,7 +395,9 @@ impl BrowserManager {
             initialize_lightpanda_manager(ws_url, process).await?
         } else {
             let client = Arc::new(CdpClient::connect(&ws_url).await?);
+            let backend = BrowserBackend::Cdp(client.clone());
             let mut manager = Self {
+                backend,
                 client,
                 browser_process: Some(process),
                 ws_url,
@@ -460,10 +487,12 @@ impl BrowserManager {
     ) -> Result<Self, String> {
         let ws_url = resolve_cdp_url(url).await?;
         let client = Arc::new(CdpClient::connect_with_headers(&ws_url, headers).await?);
+        let backend = BrowserBackend::Cdp(client.clone());
         let stealth = std::env::var("AGENT_BROWSER_STEALTH")
             .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "True"))
             .unwrap_or(false);
         let mut manager = Self {
+            backend,
             client,
             browser_process: None,
             ws_url,
@@ -1366,7 +1395,7 @@ impl BrowserManager {
         let session_id = self.active_session_id()?;
 
         let (object_id, effective_session_id) =
-            resolve_element_object_id(&self.client, session_id, ref_map, selector, iframe_sessions)
+            resolve_element_object_id(&self.backend, session_id, ref_map, selector, iframe_sessions)
                 .await?;
 
         let describe: Value = self
@@ -1623,8 +1652,11 @@ async fn initialize_lightpanda_manager(
             }
         };
 
+        let client = Arc::new(client);
+        let backend = BrowserBackend::Cdp(client.clone());
         let mut manager = BrowserManager {
-            client: Arc::new(client),
+            backend,
+            client,
             browser_process: None,
             ws_url: ws_url.clone(),
             pages: Vec::new(),

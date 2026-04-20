@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use serde_json::Value;
 
+use super::backend::BrowserBackend;
 use super::cdp::client::CdpClient;
 use super::cdp::types::{
     AXNode, AXProperty, AXValue, EvaluateParams, EvaluateResult, GetFullAXTreeResult,
@@ -214,13 +215,14 @@ impl RoleNameTracker {
 }
 
 pub async fn take_snapshot(
-    client: &CdpClient,
+    backend: &BrowserBackend,
     session_id: &str,
     options: &SnapshotOptions,
     ref_map: &mut RefMap,
     frame_id: Option<&str>,
     iframe_sessions: &HashMap<String, String>,
 ) -> Result<String, String> {
+    let client = backend.require_cdp()?;
     client
         .send_command_no_params("DOM.enable", Some(session_id))
         .await?;
@@ -505,7 +507,7 @@ pub async fn take_snapshot(
                 // Snapshot the child frame; errors are silently ignored
                 // (e.g. cross-origin iframes)
                 if let Ok(child_text) = Box::pin(take_snapshot(
-                    client,
+                    backend,
                     session_id,
                     options,
                     ref_map,

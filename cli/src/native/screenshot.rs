@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use std::collections::HashMap;
 
+use super::backend::BrowserBackend;
 use super::cdp::client::CdpClient;
 use super::cdp::types::*;
 use super::element::RefMap;
@@ -98,16 +99,17 @@ impl Serialize for ScreenshotAnnotation {
 /// Captures a screenshot via CDP and optionally overlays numbered annotations
 /// that mirror the Node.js screenshot `annotate` mode.
 pub async fn take_screenshot(
-    client: &CdpClient,
+    backend: &BrowserBackend,
     session_id: &str,
     ref_map: &RefMap,
     options: &ScreenshotOptions,
     iframe_sessions: &HashMap<String, String>,
 ) -> Result<ScreenshotResult, String> {
+    let client = backend.require_cdp()?;
     let target_rect = if options.annotate {
         match options.selector.as_deref() {
             Some(selector) => {
-                get_rect_for_selector(client, session_id, ref_map, selector, iframe_sessions)
+                get_rect_for_selector(backend, session_id, ref_map, selector, iframe_sessions)
                     .await?
             }
             None => None,
@@ -117,7 +119,7 @@ pub async fn take_screenshot(
     };
 
     let raw_annotations = if options.annotate {
-        collect_annotations(client, session_id, ref_map).await?
+        collect_annotations(backend, session_id, ref_map).await?
     } else {
         Vec::new()
     };
@@ -131,7 +133,7 @@ pub async fn take_screenshot(
     };
 
     let base64 =
-        capture_screenshot_base64(client, session_id, ref_map, options, iframe_sessions).await;
+        capture_screenshot_base64(backend, session_id, ref_map, options, iframe_sessions).await;
 
     if overlay_injected {
         let _ = remove_annotation_overlay(client, session_id).await;
@@ -169,12 +171,13 @@ pub async fn take_screenshot(
 }
 
 async fn capture_screenshot_base64(
-    client: &CdpClient,
+    backend: &BrowserBackend,
     session_id: &str,
     ref_map: &RefMap,
     options: &ScreenshotOptions,
     iframe_sessions: &HashMap<String, String>,
 ) -> Result<String, String> {
+    let client = backend.require_cdp()?;
     let mut params = CaptureScreenshotParams {
         format: Some(options.format.clone()),
         quality: if options.format == "jpeg" {
@@ -209,7 +212,7 @@ async fn capture_screenshot_base64(
         }
     } else if let Some(ref selector) = options.selector {
         if let Some(rect) =
-            get_rect_for_selector(client, session_id, ref_map, selector, iframe_sessions).await?
+            get_rect_for_selector(backend, session_id, ref_map, selector, iframe_sessions).await?
         {
             params.clip = Some(Viewport {
                 x: rect.x,
@@ -229,10 +232,11 @@ async fn capture_screenshot_base64(
 }
 
 async fn collect_annotations(
-    client: &CdpClient,
+    backend: &BrowserBackend,
     session_id: &str,
     ref_map: &RefMap,
 ) -> Result<Vec<RawAnnotation>, String> {
+    let client = backend.require_cdp()?;
     let entries = ref_map.entries_sorted();
     if entries.is_empty() {
         return Ok(Vec::new());
@@ -322,20 +326,21 @@ async fn collect_annotations(
 }
 
 async fn get_rect_for_selector(
-    client: &CdpClient,
+    backend: &BrowserBackend,
     session_id: &str,
     ref_map: &RefMap,
     selector: &str,
     iframe_sessions: &HashMap<String, String>,
 ) -> Result<Option<Rect>, String> {
     let (object_id, effective_session_id) = super::element::resolve_element_object_id(
-        client,
+        backend,
         session_id,
         ref_map,
         selector,
         iframe_sessions,
     )
     .await?;
+    let client = backend.require_cdp()?;
     get_rect_for_object(client, &effective_session_id, &object_id).await
 }
 

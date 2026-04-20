@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use serde_json::Value;
 
-use super::cdp::client::CdpClient;
+use super::backend::BrowserBackend;
 use super::cdp::types::*;
 
 #[derive(Debug, Clone)]
@@ -147,7 +147,7 @@ pub fn parse_ref(input: &str) -> Option<String> {
 }
 
 pub async fn resolve_element_center(
-    client: &CdpClient,
+    client: &BrowserBackend,
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
@@ -214,7 +214,7 @@ pub async fn resolve_element_center(
 }
 
 pub async fn resolve_element_object_id(
-    client: &CdpClient,
+    client: &BrowserBackend,
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
@@ -338,7 +338,7 @@ fn resolve_frame_session<'a>(
 /// (Accessibility.getFullAXTree) that built the ref map during snapshot,
 /// so role/name matching is guaranteed to be consistent.
 async fn find_node_id_by_role_name(
-    client: &CdpClient,
+    client: &BrowserBackend,
     session_id: &str,
     role: &str,
     name: &str,
@@ -439,7 +439,7 @@ fn build_selector_js(selector: &str) -> String {
 }
 
 async fn resolve_by_selector(
-    client: &CdpClient,
+    client: &BrowserBackend,
     session_id: &str,
     selector: &str,
 ) -> Result<(f64, f64), String> {
@@ -479,7 +479,7 @@ fn box_model_center(model: &BoxModel) -> (f64, f64) {
 }
 
 pub async fn get_element_text(
-    client: &CdpClient,
+    client: &BrowserBackend,
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
@@ -517,7 +517,7 @@ pub async fn get_element_text(
 }
 
 pub async fn get_element_attribute(
-    client: &CdpClient,
+    client: &BrowserBackend,
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
@@ -554,7 +554,7 @@ pub async fn get_element_attribute(
 }
 
 pub async fn is_element_visible(
-    client: &CdpClient,
+    client: &BrowserBackend,
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
@@ -599,7 +599,7 @@ pub async fn is_element_visible(
 }
 
 pub async fn is_element_enabled(
-    client: &CdpClient,
+    client: &BrowserBackend,
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
@@ -636,7 +636,7 @@ pub async fn is_element_enabled(
 }
 
 pub async fn is_element_checked(
-    client: &CdpClient,
+    client: &BrowserBackend,
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
@@ -706,7 +706,7 @@ pub async fn is_element_checked(
 }
 
 pub async fn get_element_inner_text(
-    client: &CdpClient,
+    client: &BrowserBackend,
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
@@ -743,7 +743,7 @@ pub async fn get_element_inner_text(
 }
 
 pub async fn get_element_inner_html(
-    client: &CdpClient,
+    client: &BrowserBackend,
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
@@ -780,7 +780,7 @@ pub async fn get_element_inner_html(
 }
 
 pub async fn get_element_input_value(
-    client: &CdpClient,
+    client: &BrowserBackend,
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
@@ -819,7 +819,7 @@ pub async fn get_element_input_value(
 }
 
 pub async fn set_element_value(
-    client: &CdpClient,
+    client: &BrowserBackend,
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
@@ -858,7 +858,7 @@ pub async fn set_element_value(
 }
 
 pub async fn get_element_bounding_box(
-    client: &CdpClient,
+    client: &BrowserBackend,
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
@@ -898,7 +898,7 @@ pub async fn get_element_bounding_box(
 }
 
 pub async fn get_element_count(
-    client: &CdpClient,
+    client: &BrowserBackend,
     session_id: &str,
     selector: &str,
 ) -> Result<i64, String> {
@@ -920,7 +920,7 @@ pub async fn get_element_count(
 }
 
 pub async fn get_element_styles(
-    client: &CdpClient,
+    client: &BrowserBackend,
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,

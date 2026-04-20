@@ -3,7 +3,11 @@ pub mod actions;
 #[allow(dead_code)]
 pub mod auth;
 #[allow(dead_code)]
+pub mod backend;
+#[allow(dead_code)]
 pub mod browser;
+#[allow(dead_code)]
+pub mod camoufox_client;
 #[allow(dead_code)]
 pub mod cdp;
 #[allow(dead_code)]

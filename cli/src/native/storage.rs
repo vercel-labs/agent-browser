@@ -1,14 +1,16 @@
 use serde_json::{json, Value};
 
+use super::backend::BrowserBackend;
 use super::cdp::client::CdpClient;
 use super::cdp::types::EvaluateParams;
 
 pub async fn storage_get(
-    client: &CdpClient,
+    backend: &BrowserBackend,
     session_id: &str,
     storage_type: &str,
     key: Option<&str>,
 ) -> Result<Value, String> {
+    let client = backend.require_cdp()?;
     let st = storage_js_name(storage_type);
 
     if let Some(k) = key {
@@ -38,12 +40,13 @@ pub async fn storage_get(
 }
 
 pub async fn storage_set(
-    client: &CdpClient,
+    backend: &BrowserBackend,
     session_id: &str,
     storage_type: &str,
     key: &str,
     value: &str,
 ) -> Result<(), String> {
+    let client = backend.require_cdp()?;
     let st = storage_js_name(storage_type);
     let js = format!(
         "{}.setItem({}, {})",
@@ -56,10 +59,11 @@ pub async fn storage_set(
 }
 
 pub async fn storage_clear(
-    client: &CdpClient,
+    backend: &BrowserBackend,
     session_id: &str,
     storage_type: &str,
 ) -> Result<(), String> {
+    let client = backend.require_cdp()?;
     let st = storage_js_name(storage_type);
     let js = format!("{}.clear()", st);
     eval_simple(client, session_id, &js).await?;
@@ -73,6 +77,9 @@ fn storage_js_name(storage_type: &str) -> &str {
     }
 }
 
+/// Internal helper: only reachable once the caller has already extracted a
+/// CDP client from `BrowserBackend::Cdp`, so the raw `&CdpClient` is an
+/// enum-arm body, not a user-facing interface.
 async fn eval_simple(client: &CdpClient, session_id: &str, js: &str) -> Result<Value, String> {
     let result: super::cdp::types::EvaluateResult = client
         .send_command_typed(

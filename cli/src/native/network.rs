@@ -1,13 +1,14 @@
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
-use super::cdp::client::CdpClient;
+use super::backend::BrowserBackend;
 
 pub async fn set_extra_headers(
-    client: &CdpClient,
+    backend: &BrowserBackend,
     session_id: &str,
     headers: &HashMap<String, String>,
 ) -> Result<(), String> {
+    let client = backend.require_cdp()?;
     let headers_value: Value = headers
         .iter()
         .map(|(k, v)| (k.clone(), Value::String(v.clone())))
@@ -26,10 +27,11 @@ pub async fn set_extra_headers(
 }
 
 pub async fn set_offline(
-    client: &CdpClient,
+    backend: &BrowserBackend,
     session_id: &str,
     offline: bool,
 ) -> Result<(), String> {
+    let client = backend.require_cdp()?;
     client
         .send_command(
             "Network.emulateNetworkConditions",
@@ -45,7 +47,12 @@ pub async fn set_offline(
     Ok(())
 }
 
-pub async fn set_content(client: &CdpClient, session_id: &str, html: &str) -> Result<(), String> {
+pub async fn set_content(
+    backend: &BrowserBackend,
+    session_id: &str,
+    html: &str,
+) -> Result<(), String> {
+    let client = backend.require_cdp()?;
     // Get current frame ID
     let tree_result = client
         .send_command_no_params("Page.getFrameTree", Some(session_id))
@@ -134,10 +141,13 @@ fn parse_domain_list(input: &str) -> Vec<String> {
 }
 
 pub async fn sanitize_existing_pages(
-    client: &CdpClient,
+    backend: &BrowserBackend,
     pages: &[super::browser::PageInfo],
     filter: &DomainFilter,
 ) {
+    let Ok(client) = backend.require_cdp() else {
+        return;
+    };
     for page in pages {
         if page.url.is_empty() || page.url == "about:blank" {
             continue;
@@ -159,10 +169,11 @@ pub async fn sanitize_existing_pages(
 }
 
 pub async fn install_domain_filter_script(
-    client: &CdpClient,
+    backend: &BrowserBackend,
     session_id: &str,
     allowed_domains: &[String],
 ) -> Result<(), String> {
+    let client = backend.require_cdp()?;
     if allowed_domains.is_empty() {
         return Ok(());
     }
@@ -231,10 +242,11 @@ pub async fn install_domain_filter_script(
 /// The actual handling of `Fetch.requestPaused` events happens in
 /// `resolve_fetch_paused` in the actions module.
 pub async fn install_domain_filter_fetch(
-    client: &CdpClient,
+    backend: &BrowserBackend,
     session_id: &str,
     handle_auth_requests: bool,
 ) -> Result<(), String> {
+    let client = backend.require_cdp()?;
     let mut params = json!({
         "patterns": [{ "urlPattern": "*" }]
     });
@@ -251,13 +263,13 @@ pub async fn install_domain_filter_fetch(
 /// 1. JS patching (WebSocket, EventSource, sendBeacon)
 /// 2. Fetch-based network interception
 pub async fn install_domain_filter(
-    client: &CdpClient,
+    backend: &BrowserBackend,
     session_id: &str,
     allowed_domains: &[String],
     handle_auth_requests: bool,
 ) -> Result<(), String> {
-    install_domain_filter_script(client, session_id, allowed_domains).await?;
-    install_domain_filter_fetch(client, session_id, handle_auth_requests).await?;
+    install_domain_filter_script(backend, session_id, allowed_domains).await?;
+    install_domain_filter_fetch(backend, session_id, handle_auth_requests).await?;
     Ok(())
 }
 

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use super::cdp::client::CdpClient;
+use super::backend::BrowserBackend;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -24,7 +24,11 @@ pub struct Cookie {
     pub same_site: Option<String>,
 }
 
-pub async fn get_all_cookies(client: &CdpClient, session_id: &str) -> Result<Vec<Cookie>, String> {
+pub async fn get_all_cookies(
+    backend: &BrowserBackend,
+    session_id: &str,
+) -> Result<Vec<Cookie>, String> {
+    let client = backend.require_cdp()?;
     let result = client
         .send_command_no_params("Network.getAllCookies", Some(session_id))
         .await?;
@@ -38,10 +42,11 @@ pub async fn get_all_cookies(client: &CdpClient, session_id: &str) -> Result<Vec
 }
 
 pub async fn get_cookies(
-    client: &CdpClient,
+    backend: &BrowserBackend,
     session_id: &str,
     urls: Option<Vec<String>>,
 ) -> Result<Vec<Cookie>, String> {
+    let client = backend.require_cdp()?;
     let params = match urls {
         Some(ref u) if !u.is_empty() => json!({ "urls": u }),
         _ => json!({}),
@@ -60,11 +65,12 @@ pub async fn get_cookies(
 }
 
 pub async fn set_cookies(
-    client: &CdpClient,
+    backend: &BrowserBackend,
     session_id: &str,
     cookies: Vec<Value>,
     current_url: Option<&str>,
 ) -> Result<(), String> {
+    let client = backend.require_cdp()?;
     let cookies: Vec<Value> = cookies
         .into_iter()
         .map(|mut c| {
@@ -92,7 +98,8 @@ pub async fn set_cookies(
     Ok(())
 }
 
-pub async fn clear_cookies(client: &CdpClient, session_id: &str) -> Result<(), String> {
+pub async fn clear_cookies(backend: &BrowserBackend, session_id: &str) -> Result<(), String> {
+    let client = backend.require_cdp()?;
     client
         .send_command_no_params("Network.clearBrowserCookies", Some(session_id))
         .await?;
