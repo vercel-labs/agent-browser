@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, Mutex};
 
-use super::backend::{not_yet_implemented_error, BrowserBackend};
+use super::backend::BrowserBackend;
 use super::cdp::camoufox::CamoufoxProcess;
 use super::cdp::chrome::{auto_connect_cdp, launch_chrome, ChromeProcess, LaunchOptions};
 use super::cdp::client::CdpClient;
@@ -85,6 +85,38 @@ fn validate_lightpanda_options(options: &LaunchOptions) -> Result<(), String> {
     if !options.args.is_empty() {
         return Err(
             "Custom Chrome arguments (--args) are not supported with Lightpanda".to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// Mirrors `validate_lightpanda_options`: rejects options that have no
+/// equivalent on the Camoufox path. The sidecar re-validates launch kwargs
+/// against its own allowlist, but these are shaped at the Rust launch-option
+/// level and are easier to reject up-front with a clear message.
+fn validate_camoufox_options(options: &LaunchOptions) -> Result<(), String> {
+    if options
+        .extensions
+        .as_ref()
+        .map(|e| !e.is_empty())
+        .unwrap_or(false)
+    {
+        return Err("Extensions are not supported with Camoufox".to_string());
+    }
+    if options.profile.is_some() {
+        return Err("Profiles are not supported with Camoufox".to_string());
+    }
+    if options.storage_state.is_some() {
+        return Err("Storage state is not supported with Camoufox".to_string());
+    }
+    if options.allow_file_access {
+        return Err("File access is not supported with Camoufox".to_string());
+    }
+    if !options.args.is_empty() {
+        return Err(
+            "Custom Chrome arguments (--args) are not supported with Camoufox; \
+             pass engine-specific kwargs through the sidecar config instead."
+                .to_string(),
         );
     }
     Ok(())
@@ -295,23 +327,16 @@ impl BrowserProcess {
         match self {
             BrowserProcess::Chrome(p) => p.has_exited(),
             BrowserProcess::Lightpanda(_) => false,
-            BrowserProcess::Camoufox(_) => false,
+            BrowserProcess::Camoufox(p) => p.has_exited(),
         }
     }
 }
 
 pub struct BrowserManager {
-    /// Engine-tagged backend. In Unit 1 this is always `BrowserBackend::Cdp`
-    /// whenever a `BrowserManager` exists, since `launch` for engine=camoufox
-    /// returns a structured `not-yet-implemented` error before constructing
-    /// one. Unit 3 begins returning `BrowserBackend::Camoufox` here.
+    /// Engine-tagged backend. Either a `Cdp` arm (Chrome / Lightpanda) or a
+    /// `Camoufox` arm (Python sidecar). All engine-specific transport lives
+    /// here; the rest of the struct is engine-agnostic.
     pub backend: BrowserBackend,
-    /// Direct handle to the CDP client. Kept as a convenience for the
-    /// Chrome-only code inside this module; always matches the `Cdp` arm of
-    /// `backend`. Once Camoufox launches land (Unit 3), methods that reach for
-    /// `self.client` on a non-CDP backend will move to `self.backend` dispatch
-    /// or early-return with `backend.require_cdp()?`.
-    pub client: Arc<CdpClient>,
     browser_process: Option<BrowserProcess>,
     ws_url: String,
     pages: Vec<PageInfo>,
@@ -334,6 +359,37 @@ const LIGHTPANDA_CDP_CONNECT_POLL_INTERVAL: Duration = Duration::from_millis(100
 const LIGHTPANDA_TARGET_INIT_TIMEOUT: Duration = Duration::from_secs(10);
 
 impl BrowserManager {
+    /// CDP client accessor. Most internal `BrowserManager` methods still
+    /// assume a CDP backend (Chrome/Lightpanda); this helper centralises the
+    /// lookup so a future conversion of those methods to `backend`-dispatch
+    /// only has to touch one site.
+    ///
+    /// Panics if called on a Camoufox backend. Callers on mixed-engine paths
+    /// must guard with `self.backend.require_cdp()?` (or `.is_cdp()`) first;
+    /// reaching this accessor on Camoufox is a programmer bug, not a runtime
+    /// failure mode.
+    pub fn client(&self) -> &Arc<CdpClient> {
+        match &self.backend {
+            BrowserBackend::Cdp(c) => c,
+            BrowserBackend::Camoufox(_) => panic!(
+                "BrowserManager::client() called on Camoufox backend; use self.backend.require_cdp()? first"
+            ),
+        }
+    }
+
+    /// Camoufox sidecar client accessor. Symmetric with `client()` above;
+    /// panics on a CDP backend. Camoufox-specific code paths in this module
+    /// (e.g. navigate-via-sidecar) use this after a `backend.is_camoufox()`
+    /// check.
+    fn camoufox_client(&self) -> &Arc<crate::native::camoufox_client::CamoufoxClient> {
+        match &self.backend {
+            BrowserBackend::Camoufox(c) => c,
+            BrowserBackend::Cdp(_) => panic!(
+                "BrowserManager::camoufox_client() called on CDP backend; check backend.is_camoufox() first"
+            ),
+        }
+    }
+
     pub async fn launch(options: LaunchOptions, engine: Option<&str>) -> Result<Self, String> {
         let engine = engine.unwrap_or("chrome");
 
@@ -352,10 +408,7 @@ impl BrowserManager {
                 validate_lightpanda_options(&options)?;
             }
             "camoufox" => {
-                // Unit 1: validation is deferred to Unit 3; we stop here with a
-                // structured error so `agent-browser --engine camoufox open <url>`
-                // reaches this arm, surfaces a clean failure, and does not panic.
-                return Err(not_yet_implemented_error(Some("launch")));
+                validate_camoufox_options(&options)?;
             }
             _ => {
                 return Err(format!(
@@ -370,6 +423,14 @@ impl BrowserManager {
         let color_scheme = options.color_scheme.clone();
         let download_path = options.download_path.clone();
         let stealth = options.stealth;
+
+        if engine == "camoufox" {
+            // Camoufox has its own process lifecycle (Python sidecar driving
+            // a Playwright/Camoufox browser) and doesn't share the CDP
+            // WebSocket path. Return early with a fully-constructed
+            // BrowserManager from the sidecar.
+            return initialize_camoufox_manager(&options).await;
+        }
 
         let (ws_url, process) = match engine {
             "lightpanda" => {
@@ -398,7 +459,6 @@ impl BrowserManager {
             let backend = BrowserBackend::Cdp(client.clone());
             let mut manager = Self {
                 backend,
-                client,
                 browser_process: Some(process),
                 ws_url,
                 pages: Vec::new(),
@@ -418,7 +478,7 @@ impl BrowserManager {
 
         if ignore_https_errors {
             let _ = manager
-                .client
+                .client()
                 .send_command(
                     "Security.setIgnoreCertificateErrors",
                     Some(json!({ "ignore": true })),
@@ -429,7 +489,7 @@ impl BrowserManager {
 
         if let Some(ref ua) = user_agent {
             let _ = manager
-                .client
+                .client()
                 .send_command(
                     "Emulation.setUserAgentOverride",
                     Some(json!({ "userAgent": ua })),
@@ -440,7 +500,7 @@ impl BrowserManager {
 
         if let Some(ref scheme) = color_scheme {
             let _ = manager
-                .client
+                .client()
                 .send_command(
                     "Emulation.setEmulatedMedia",
                     Some(json!({ "features": [{ "name": "prefers-color-scheme", "value": scheme }] })),
@@ -451,7 +511,7 @@ impl BrowserManager {
 
         if let Some(ref path) = download_path {
             let _ = manager
-                .client
+                .client()
                 .send_command(
                     "Browser.setDownloadBehavior",
                     Some(json!({ "behavior": "allow", "downloadPath": path })),
@@ -487,13 +547,12 @@ impl BrowserManager {
     ) -> Result<Self, String> {
         let ws_url = resolve_cdp_url(url).await?;
         let client = Arc::new(CdpClient::connect_with_headers(&ws_url, headers).await?);
-        let backend = BrowserBackend::Cdp(client.clone());
+        let backend = BrowserBackend::Cdp(client);
         let stealth = std::env::var("AGENT_BROWSER_STEALTH")
             .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "True"))
             .unwrap_or(false);
         let mut manager = Self {
             backend,
-            client,
             browser_process: None,
             ws_url,
             pages: Vec::new(),
@@ -531,7 +590,7 @@ impl BrowserManager {
     }
 
     async fn discover_and_attach_targets(&mut self) -> Result<(), String> {
-        self.client
+        self.client()
             .send_command_typed::<_, Value>(
                 "Target.setDiscoverTargets",
                 &SetDiscoverTargetsParams { discover: true },
@@ -540,7 +599,7 @@ impl BrowserManager {
             .await?;
 
         let result: GetTargetsResult = self
-            .client
+            .client()
             .send_command_typed("Target.getTargets", &json!({}), None)
             .await?;
 
@@ -553,7 +612,7 @@ impl BrowserManager {
         if page_targets.is_empty() {
             // Create a new tab
             let result: CreateTargetResult = self
-                .client
+                .client()
                 .send_command_typed(
                     "Target.createTarget",
                     &CreateTargetParams {
@@ -564,7 +623,7 @@ impl BrowserManager {
                 .await?;
 
             let attach_result: AttachToTargetResult = self
-                .client
+                .client()
                 .send_command_typed(
                     "Target.attachToTarget",
                     &AttachToTargetParams {
@@ -591,7 +650,7 @@ impl BrowserManager {
         } else {
             for target in &page_targets {
                 let attach_result: AttachToTargetResult = self
-                    .client
+                    .client()
                     .send_command_typed(
                         "Target.attachToTarget",
                         &AttachToTargetParams {
@@ -628,12 +687,12 @@ impl BrowserManager {
     }
 
     async fn enable_domains(&self, session_id: &str) -> Result<(), String> {
-        self.client
+        self.client()
             .send_command_no_params("Page.enable", Some(session_id))
             .await?;
         if self.stealth {
             let _ = self
-                .client
+                .client()
                 .send_command(
                     "Page.addScriptToEvaluateOnNewDocument",
                     Some(json!({ "source": super::stealth::STEALTH_INIT_SCRIPT })),
@@ -641,24 +700,24 @@ impl BrowserManager {
                 )
                 .await;
         }
-        self.client
+        self.client()
             .send_command_no_params("Runtime.enable", Some(session_id))
             .await?;
         // Resume the target if it is paused waiting for the debugger.
         // This is needed for real browser sessions (Chrome 144+) where targets
         // are paused after attach until explicitly resumed. No-op otherwise.
         let _ = self
-            .client
+            .client()
             .send_command_no_params("Runtime.runIfWaitingForDebugger", Some(session_id))
             .await;
-        self.client
+        self.client()
             .send_command_no_params("Network.enable", Some(session_id))
             .await?;
         // Enable auto-attach for cross-origin iframe support.
         // flatten: true gives each iframe its own session_id.
         // Ignored on engines that don't support it (e.g. Lightpanda).
         let _ = self
-            .client
+            .client()
             .send_command(
                 "Target.setAutoAttach",
                 Some(json!({
@@ -674,12 +733,12 @@ impl BrowserManager {
 
     /// Enable domains on a direct page connection (no session_id needed).
     async fn enable_domains_direct(&self) -> Result<(), String> {
-        self.client
+        self.client()
             .send_command_no_params("Page.enable", None)
             .await?;
         if self.stealth {
             let _ = self
-                .client
+                .client()
                 .send_command(
                     "Page.addScriptToEvaluateOnNewDocument",
                     Some(json!({ "source": super::stealth::STEALTH_INIT_SCRIPT })),
@@ -687,14 +746,14 @@ impl BrowserManager {
                 )
                 .await;
         }
-        self.client
+        self.client()
             .send_command_no_params("Runtime.enable", None)
             .await?;
         let _ = self
-            .client
+            .client()
             .send_command_no_params("Runtime.runIfWaitingForDebugger", None)
             .await;
-        self.client
+        self.client()
             .send_command_no_params("Network.enable", None)
             .await?;
         Ok(())
@@ -708,11 +767,14 @@ impl BrowserManager {
     }
 
     pub async fn navigate(&mut self, url: &str, wait_until: WaitUntil) -> Result<Value, String> {
+        if self.backend.is_camoufox() {
+            return self.camoufox_navigate(url, wait_until).await;
+        }
         let session_id = self.active_session_id()?.to_string();
-        let mut lifecycle_rx = self.client.subscribe();
+        let mut lifecycle_rx = self.client().subscribe();
 
         let nav_result: PageNavigateResult = self
-            .client
+            .client()
             .send_command_typed(
                 "Page.navigate",
                 &PageNavigateParams {
@@ -749,6 +811,45 @@ impl BrowserManager {
         if let Some(page) = self.pages.get_mut(self.active_page_index) {
             page.url = page_url.clone();
             page.title = title.clone();
+        }
+
+        Ok(json!({ "url": page_url, "title": title }))
+    }
+
+    /// Camoufox path for `navigate`: delegates to the sidecar's `page.goto`
+    /// command. In Unit 3 the response carries `{url, title}` so the CLI
+    /// output shape matches the Chrome path; richer parity (wait_until
+    /// options, redirect tracking) lands in Unit 4.
+    async fn camoufox_navigate(
+        &mut self,
+        url: &str,
+        wait_until: WaitUntil,
+    ) -> Result<Value, String> {
+        let wait_until_str = match wait_until {
+            WaitUntil::Load => "load",
+            WaitUntil::DomContentLoaded => "domcontentloaded",
+            WaitUntil::NetworkIdle => "networkidle",
+            WaitUntil::None => "none",
+        };
+        let args = json!({ "url": url, "waitUntil": wait_until_str });
+        let result = self.camoufox_client().call("page.goto", args).await?;
+
+        let page_url = result
+            .get("url")
+            .and_then(|v| v.as_str())
+            .unwrap_or(url)
+            .to_string();
+        let title = result
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+
+        if let Ok(parsed) = url::Url::parse(&page_url) {
+            let origin = parsed.origin().ascii_serialization();
+            if origin != "null" {
+                self.visited_origins.insert(origin);
+            }
         }
 
         Ok(json!({ "url": page_url, "title": title }))
@@ -819,7 +920,7 @@ impl BrowserManager {
         let session_id = self.active_session_id()?.to_string();
 
         let result: EvaluateResult = self
-            .client
+            .client()
             .send_command_typed(
                 "Runtime.evaluate",
                 &EvaluateParams {
@@ -852,18 +953,34 @@ impl BrowserManager {
         wait_until: WaitUntil,
         session_id: &str,
     ) -> Result<(), String> {
-        let mut rx = self.client.subscribe();
+        let mut rx = self.client().subscribe();
         self.wait_for_lifecycle(wait_until, session_id, &mut rx)
             .await
     }
 
     pub async fn close(&mut self) -> Result<(), String> {
+        if self.backend.is_camoufox() {
+            // Graceful path: tell the sidecar to close its browser and exit.
+            // The sidecar acknowledges the `close` command and then drops its
+            // shutdown event; we still need to wait on the child process
+            // separately (see CamoufoxProcess::wait_or_kill below).
+            let _ = self.camoufox_client().close().await;
+            if let Some(mut process) = self.browser_process.take() {
+                let timeout = std::time::Duration::from_secs(5);
+                let _ = tokio::task::spawn_blocking(move || {
+                    process.wait_or_kill(timeout);
+                })
+                .await;
+            }
+            return Ok(());
+        }
+
         if self.browser_process.is_some() {
             // Only send Browser.close when we launched the browser ourselves.
             // For external connections (--auto-connect, --cdp) we just disconnect
             // without shutting down the user's browser.
             let _ = self
-                .client
+                .client()
                 .send_command_no_params("Browser.close", None)
                 .await;
         }
@@ -890,10 +1007,17 @@ impl BrowserManager {
     /// Checks if the CDP connection is alive by sending a simple command.
     /// Returns false if the command times out or fails.
     pub async fn is_connection_alive(&self) -> bool {
+        // Camoufox has no CDP connection; we use the sidecar child liveness
+        // as the proxy for "connection alive". If the handshake completed
+        // and the child hasn't been reaped, consider the session healthy.
+        if self.backend.is_camoufox() {
+            return self.browser_process.is_some();
+        }
+
         let timeout = tokio::time::Duration::from_secs(3);
         let result = tokio::time::timeout(
             timeout,
-            self.client
+            self.client()
                 .send_command_no_params("Browser.getVersion", None),
         )
         .await;
@@ -948,8 +1072,16 @@ impl BrowserManager {
             return Ok(());
         }
 
+        // Camoufox manages its page set via Playwright inside the sidecar;
+        // tab ids sync in Unit 5. In Unit 3 we short-circuit so the open
+        // flow (which calls `ensure_page` before navigate) doesn't panic —
+        // `camoufox_navigate` creates the page lazily in the sidecar.
+        if self.backend.is_camoufox() {
+            return Ok(());
+        }
+
         let result: CreateTargetResult = self
-            .client
+            .client()
             .send_command_typed(
                 "Target.createTarget",
                 &CreateTargetParams {
@@ -960,7 +1092,7 @@ impl BrowserManager {
             .await?;
 
         let attach_result: AttachToTargetResult = self
-            .client
+            .client()
             .send_command_typed(
                 "Target.attachToTarget",
                 &AttachToTargetParams {
@@ -1087,7 +1219,7 @@ impl BrowserManager {
         let target_url = url.unwrap_or("about:blank");
 
         let result: CreateTargetResult = self
-            .client
+            .client()
             .send_command_typed(
                 "Target.createTarget",
                 &CreateTargetParams {
@@ -1098,7 +1230,7 @@ impl BrowserManager {
             .await?;
 
         let attach: AttachToTargetResult = self
-            .client
+            .client()
             .send_command_typed(
                 "Target.attachToTarget",
                 &AttachToTargetParams {
@@ -1149,7 +1281,7 @@ impl BrowserManager {
 
         // Bring tab to front
         let _ = self
-            .client
+            .client()
             .send_command("Page.bringToFront", None, Some(&session_id))
             .await;
 
@@ -1186,7 +1318,7 @@ impl BrowserManager {
         let closed_tab_id = page.tab_id;
         let closed_label = page.label.clone();
         let _ = self
-            .client
+            .client()
             .send_command_typed::<_, Value>(
                 "Target.closeTarget",
                 &CloseTargetParams {
@@ -1218,7 +1350,7 @@ impl BrowserManager {
         mobile: bool,
     ) -> Result<(), String> {
         let session_id = self.active_session_id()?;
-        self.client
+        self.client()
             .send_command(
                 "Emulation.setDeviceMetricsOverride",
                 Some(json!({
@@ -1235,7 +1367,7 @@ impl BrowserManager {
         // viewport, so resize the content area to match.
         if let Ok(target_id) = self.active_target_id() {
             if let Ok(window_info) = self
-                .client
+                .client()
                 .send_command(
                     "Browser.getWindowForTarget",
                     Some(json!({ "targetId": target_id })),
@@ -1245,7 +1377,7 @@ impl BrowserManager {
             {
                 if let Some(window_id) = window_info.get("windowId").and_then(|v| v.as_i64()) {
                     if let Err(e) = self
-                        .client
+                        .client()
                         .send_command(
                             "Browser.setContentsSize",
                             Some(json!({
@@ -1268,7 +1400,7 @@ impl BrowserManager {
 
     pub async fn set_user_agent(&self, user_agent: &str) -> Result<(), String> {
         let session_id = self.active_session_id()?;
-        self.client
+        self.client()
             .send_command(
                 "Emulation.setUserAgentOverride",
                 Some(json!({ "userAgent": user_agent })),
@@ -1295,7 +1427,7 @@ impl BrowserManager {
                 .collect();
             params["features"] = Value::Array(features_arr);
         }
-        self.client
+        self.client()
             .send_command("Emulation.setEmulatedMedia", Some(params), Some(session_id))
             .await?;
         Ok(())
@@ -1303,7 +1435,7 @@ impl BrowserManager {
 
     pub async fn bring_to_front(&self) -> Result<(), String> {
         let session_id = self.active_session_id()?;
-        self.client
+        self.client()
             .send_command("Page.bringToFront", None, Some(session_id))
             .await?;
         Ok(())
@@ -1311,7 +1443,7 @@ impl BrowserManager {
 
     pub async fn set_timezone(&self, timezone_id: &str) -> Result<(), String> {
         let session_id = self.active_session_id()?;
-        self.client
+        self.client()
             .send_command(
                 "Emulation.setTimezoneOverride",
                 Some(json!({ "timezoneId": timezone_id })),
@@ -1323,7 +1455,7 @@ impl BrowserManager {
 
     pub async fn set_locale(&self, locale: &str) -> Result<(), String> {
         let session_id = self.active_session_id()?;
-        self.client
+        self.client()
             .send_command(
                 "Emulation.setLocaleOverride",
                 Some(json!({ "locale": locale })),
@@ -1340,7 +1472,7 @@ impl BrowserManager {
         accuracy: Option<f64>,
     ) -> Result<(), String> {
         let session_id = self.active_session_id()?;
-        self.client
+        self.client()
             .send_command(
                 "Emulation.setGeolocationOverride",
                 Some(json!({
@@ -1355,7 +1487,7 @@ impl BrowserManager {
     }
 
     pub async fn grant_permissions(&self, permissions: &[String]) -> Result<(), String> {
-        self.client
+        self.client()
             .send_command(
                 "Browser.grantPermissions",
                 Some(json!({ "permissions": permissions })),
@@ -1375,7 +1507,7 @@ impl BrowserManager {
         if let Some(text) = prompt_text {
             params["promptText"] = Value::String(text.to_string());
         }
-        self.client
+        self.client()
             .send_command(
                 "Page.handleJavaScriptDialog",
                 Some(params),
@@ -1399,7 +1531,7 @@ impl BrowserManager {
                 .await?;
 
         let describe: Value = self
-            .client
+            .client()
             .send_command(
                 "DOM.describeNode",
                 Some(json!({ "objectId": object_id })),
@@ -1413,7 +1545,7 @@ impl BrowserManager {
             .and_then(|v| v.as_i64())
             .ok_or("Could not get backendNodeId for file input")?;
 
-        self.client
+        self.client()
             .send_command(
                 "DOM.setFileInputFiles",
                 Some(json!({
@@ -1430,7 +1562,7 @@ impl BrowserManager {
     pub async fn add_script_to_evaluate(&self, source: &str) -> Result<String, String> {
         let session_id = self.active_session_id()?;
         let result = self
-            .client
+            .client()
             .send_command(
                 "Page.addScriptToEvaluateOnNewDocument",
                 Some(json!({ "source": source })),
@@ -1517,7 +1649,7 @@ impl BrowserManager {
 
     pub async fn set_download_behavior(&self, download_path: &str) -> Result<(), String> {
         let session_id = self.active_session_id()?;
-        self.client
+        self.client()
             .send_command(
                 "Browser.setDownloadBehavior",
                 Some(json!({
@@ -1627,6 +1759,56 @@ async fn connect_cdp_with_retry(
     }
 }
 
+async fn initialize_camoufox_manager(options: &LaunchOptions) -> Result<BrowserManager, String> {
+    use super::cdp::camoufox::{launch_camoufox_sidecar, CamoufoxLaunchOptions};
+
+    let mut extra = serde_json::Map::new();
+    if let Some(ref scheme) = options.color_scheme {
+        // Camoufox accepts `locale` / various knobs; colour-scheme is exposed
+        // as a kwarg-level hint that the sidecar forwards to Playwright's
+        // BrowserContext options. The sidecar validates the key against its
+        // allowlist, so the launch fails cleanly if the kwarg is not supported.
+        extra.insert("color_scheme".to_string(), json!(scheme));
+    }
+    if options.ignore_https_errors {
+        extra.insert("ignore_https_errors".to_string(), json!(true));
+    }
+
+    let cf_options = CamoufoxLaunchOptions {
+        headless: options.headless,
+        executable_path: options.executable_path.clone(),
+        proxy: options.proxy.as_ref().map(|s| json!({ "server": s })),
+        extra,
+    };
+
+    if options.stealth {
+        eprintln!(
+            "[agent-browser] warning: --stealth is redundant with --engine camoufox; \
+             Camoufox's C++ stealth supersedes the JS init script — proceeding without \
+             injected scripts."
+        );
+    }
+
+    let (process, client) = launch_camoufox_sidecar(&cf_options).await?;
+    let backend = BrowserBackend::Camoufox(client);
+
+    Ok(BrowserManager {
+        backend,
+        browser_process: Some(BrowserProcess::Camoufox(process)),
+        ws_url: String::new(),
+        pages: Vec::new(),
+        active_page_index: 0,
+        default_timeout_ms: 25_000,
+        download_path: options.download_path.clone(),
+        ignore_https_errors: options.ignore_https_errors,
+        visited_origins: HashSet::new(),
+        next_tab_id: 1,
+        // Camoufox supersedes JS-injection stealth. Always false so
+        // `enable_domains` never tries to inject `STEALTH_INIT_SCRIPT`.
+        stealth: false,
+    })
+}
+
 async fn initialize_lightpanda_manager(
     ws_url: String,
     process: BrowserProcess,
@@ -1653,10 +1835,9 @@ async fn initialize_lightpanda_manager(
         };
 
         let client = Arc::new(client);
-        let backend = BrowserBackend::Cdp(client.clone());
+        let backend = BrowserBackend::Cdp(client);
         let mut manager = BrowserManager {
             backend,
-            client,
             browser_process: None,
             ws_url: ws_url.clone(),
             pages: Vec::new(),

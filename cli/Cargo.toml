@@ -35,6 +35,15 @@ hex = "0.4"
 chrono = "0.4"
 urlencoding = "2"
 rust-embed = "8"
+include_dir = "0.7"
+
+[features]
+# Enables the `cli/tests/camoufox_launch.rs` integration suite. Off by default
+# because it requires a working Python 3 install with the `camoufox` package
+# and the browser binary fetched. Turn on locally with
+# `cargo test --features camoufox-integration` when testing the Camoufox
+# engine end-to-end.
+camoufox-integration = []
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

@@ -9,6 +9,8 @@ pub mod browser;
 #[allow(dead_code)]
 pub mod camoufox_client;
 #[allow(dead_code)]
+pub mod camoufox_embed;
+#[allow(dead_code)]
 pub mod cdp;
 #[allow(dead_code)]
 pub mod cookies;

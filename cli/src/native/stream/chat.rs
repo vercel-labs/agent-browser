@@ -145,7 +145,7 @@ RULES:
 - Keep responses concise.
 - For screenshots, omit the path argument so they save to the default location (which will be displayed inline). Screenshots from tool calls are ALREADY shown to the user. Do NOT re-display them with markdown image syntax in your text response. Never use `![...]()` to reference screenshots.
 - To create a new session: add `--session <name>` to any command (e.g. `agent-browser --session my-session open https://example.com`). If the session does not exist, it will be created automatically.
-- To use a different browser engine: add `--engine <engine>` (e.g. `agent-browser --session lp-session --engine lightpanda open https://example.com`). Supported engines: chrome (default), lightpanda.
+- To use a different browser engine: add `--engine <engine>` (e.g. `agent-browser --session lp-session --engine lightpanda open https://example.com`). Supported engines: chrome (default), lightpanda, camoufox.
 
 The following skill references describe agent-browser capabilities in detail. Use them when deciding which commands to run and how to approach tasks.
 {sections}"#,

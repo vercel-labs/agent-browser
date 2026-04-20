@@ -1,12 +1,13 @@
-//! Smoke + characterization tests for the `BrowserBackend` refactor (Unit 1
-//! of the Camoufox engine plan).
+//! Smoke + characterization tests for the `BrowserBackend` refactor (Units 1
+//! and 3 of the Camoufox engine plan).
 //!
-//! These tests cover two things Unit 1 must guarantee:
+//! These tests cover two things the refactor must guarantee:
 //!
-//! 1. `agent-browser --engine camoufox open <url>` reaches the stub and
-//!    returns a **structured** `not-yet-implemented` error, not a panic.
-//!    This is the plan's exit criterion for Unit 1 and also the characterization
-//!    snapshot: every subsequent commit must keep this error shape stable.
+//! 1. `agent-browser --engine camoufox open <url>` does **not** panic. It
+//!    must exit cleanly with a structured JSON error whose message
+//!    mentions Camoufox — either the Unit 1 `not-yet-implemented` stub or
+//!    the Unit 3 launch-failure message (Python missing / sidecar failed
+//!    readiness) depending on how much of the plan has landed.
 //!
 //! 2. Unknown engines are rejected with a message that enumerates
 //!    `chrome, lightpanda, camoufox` — proves the launch dispatch table
@@ -45,12 +46,19 @@ fn build_cmd(tmp: &TempDir, args: &[&str]) -> Command {
 }
 
 #[test]
-fn camoufox_engine_returns_structured_not_yet_implemented_error() {
+fn camoufox_engine_returns_structured_error_without_panic() {
     let tmp = TempDir::new().unwrap();
 
+    // Point the sidecar at a non-existent python so Unit 3's launch path
+    // exits cleanly on environments that don't have Camoufox installed —
+    // CI will otherwise spend minutes in the Python probe.
     let output = build_cmd(
         &tmp,
         &["--engine", "camoufox", "--json", "open", "https://example.com"],
+    )
+    .env(
+        "AGENT_BROWSER_CAMOUFOX_PYTHON",
+        "/definitely/not/a/real/python3",
     )
     .output()
     .expect("failed to invoke agent-browser");
@@ -72,14 +80,14 @@ fn camoufox_engine_returns_structured_not_yet_implemented_error() {
 
     let stdout = String::from_utf8(output.stdout).expect("stdout should be utf8");
 
-    // JSON output must parse and carry the not-yet-implemented marker.
+    // JSON output must parse and carry a failure payload.
     let payload: serde_json::Value = serde_json::from_str(&stdout)
         .unwrap_or_else(|e| panic!("stdout was not JSON: {}\n---\n{}", e, stdout));
 
     assert_eq!(
         payload.get("success").and_then(|v| v.as_bool()),
         Some(false),
-        "expected success:false for camoufox stub, got payload:\n{}",
+        "expected success:false for camoufox launch failure, got payload:\n{}",
         stdout
     );
 
@@ -87,9 +95,13 @@ fn camoufox_engine_returns_structured_not_yet_implemented_error() {
         .get("error")
         .and_then(|v| v.as_str())
         .expect("payload must contain an error string");
+    // Accept either the Unit 1 stub shape or the Unit 3 "python missing"
+    // shape; both are characterised by a mention of camoufox or the python
+    // env var we set above.
     assert!(
-        error.contains("not-yet-implemented") && error.contains("camoufox"),
-        "error message did not mention not-yet-implemented/camoufox: {:?}",
+        error.to_lowercase().contains("camoufox")
+            || error.contains("AGENT_BROWSER_CAMOUFOX_PYTHON"),
+        "error message did not mention camoufox/python: {:?}",
         error
     );
 }

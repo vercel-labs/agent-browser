@@ -70,6 +70,7 @@ class Session:
     def __init__(self) -> None:
         self._camoufox_cm: Optional[Any] = None  # AsyncCamoufox context manager
         self._browser: Optional[Any] = None
+        self._page: Optional[Any] = None  # lazily created on first goto
         self._launched: bool = False
 
     @property
@@ -138,6 +139,7 @@ class Session:
         cm = self._camoufox_cm
         self._camoufox_cm = None
         self._browser = None
+        self._page = None
         self._launched = False
         if cm is None:
             return {"closed": False}
@@ -148,6 +150,45 @@ class Session:
             # Don't re-raise; the sidecar is shutting down either way and
             # leaving a half-closed state just masks the root cause.
         return {"closed": True}
+
+    async def goto(self, args: Optional[dict] = None) -> dict:
+        """Navigate the single session page to ``args['url']``.
+
+        Unit 3 covers only single-tab open+close+goto as the smoke flow for
+        `agent-browser --engine camoufox open <url>`. Multi-tab routing and
+        ref-aware snapshot/click ride on top of this in Units 4 and 5.
+        """
+        if not self._launched or self._browser is None:
+            raise LaunchError(
+                "not-launched",
+                "Camoufox browser is not launched; send `launch` first",
+            )
+        args = args or {}
+        url = args.get("url")
+        if not isinstance(url, str) or not url:
+            raise LaunchError(
+                "invalid-args",
+                "`page.goto` requires a non-empty `url` string",
+            )
+        wait_until = args.get("waitUntil", "load")
+        if wait_until == "none":
+            wait_until = "commit"
+
+        if self._page is None:
+            self._page = await self._browser.new_page()
+
+        try:
+            response = await self._page.goto(url, wait_until=wait_until)
+        except Exception as exc:  # noqa: BLE001
+            raise LaunchError("navigation-failed", str(exc)) from exc
+
+        try:
+            title = await self._page.title()
+        except Exception:  # noqa: BLE001
+            title = ""
+        final_url = self._page.url
+        status = response.status if response is not None else None
+        return {"url": final_url, "title": title, "status": status}
 
 
 def _validate_launch_args(args: dict) -> dict:

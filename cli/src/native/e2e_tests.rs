@@ -4127,7 +4127,7 @@ async fn e2e_externally_opened_tab_detected() {
     // opens a tab while agent-browser is connected via --cdp.
     let browser = state.browser.as_ref().expect("browser should be launched");
     let _: Value = browser
-        .client
+        .client()
         .send_command(
             "Target.createTarget",
             Some(json!({ "url": "data:text/html,<h1>External Tab</h1>" })),

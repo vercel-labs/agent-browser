@@ -120,8 +120,13 @@ async def _cmd_launch(sidecar: "Sidecar", args: dict) -> dict:
     return await sidecar.session.launch(args)
 
 
+async def _cmd_page_goto(sidecar: "Sidecar", args: dict) -> dict:
+    return await sidecar.session.goto(args)
+
+
 _HANDLERS: dict[str, Handler] = {
     "launch": _cmd_launch,
+    "page.goto": _cmd_page_goto,
 }
 
 

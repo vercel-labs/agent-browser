@@ -344,7 +344,13 @@ impl DaemonState {
 
     fn subscribe_to_browser_events(&mut self) {
         if let Some(ref browser) = self.browser {
-            self.event_rx = Some(browser.client.subscribe());
+            // Camoufox events are surfaced through `CamoufoxClient::subscribe`
+            // rather than a CDP broadcast. Units 4/5 wire up a sidecar
+            // event bridge; Unit 3's open+close flow doesn't depend on it,
+            // so skip silently here on the Camoufox backend.
+            if let Ok(client) = browser.backend.require_cdp() {
+                self.event_rx = Some(client.subscribe());
+            }
         }
     }
 
@@ -362,8 +368,14 @@ impl DaemonState {
             return;
         };
 
-        let client = browser.client.clone();
-        let mut rx = browser.client.subscribe();
+        // Fetch.* is a CDP-only surface; Camoufox routes requests through
+        // Playwright's Route API (Unit 4+). Leave the handler idle on
+        // non-CDP backends.
+        let Ok(cdp) = browser.backend.require_cdp() else {
+            return;
+        };
+        let client = cdp.clone();
+        let mut rx = cdp.subscribe();
         let domain_filter = self.domain_filter.clone();
         let routes = self.routes.clone();
         let origin_headers = self.origin_headers.clone();
@@ -477,8 +489,15 @@ impl DaemonState {
             return;
         };
 
-        let client = browser.client.clone();
-        let mut rx = browser.client.subscribe();
+        // Dialog handling is wired up through CDP's Page.javascriptDialog
+        // events. Camoufox will eventually surface dialogs through the
+        // sidecar (Unit 4/5); for now Unit 3's open/close flow doesn't
+        // depend on this handler.
+        let Ok(cdp) = browser.backend.require_cdp() else {
+            return;
+        };
+        let client = cdp.clone();
+        let mut rx = cdp.subscribe();
 
         self.dialog_handler_task = Some(tokio::spawn(async move {
             loop {
@@ -524,7 +543,11 @@ impl DaemonState {
     pub async fn update_stream_client(&self) {
         if let Some(ref slot) = self.stream_client {
             let mut guard = slot.write().await;
-            *guard = self.browser.as_ref().map(|m| Arc::clone(&m.client));
+            *guard = self
+                .browser
+                .as_ref()
+                .filter(|m| m.backend.is_cdp())
+                .map(|m| Arc::clone(m.client()));
         }
         if let Some(ref server) = self.stream_server {
             // Update the CDP page session ID so screencast commands target the right page
@@ -607,23 +630,23 @@ impl DaemonState {
                 .insert(frame_id.clone(), iframe_sid.clone());
             if let Some(ref mgr) = self.browser {
                 let _ = mgr
-                    .client
+                    .client()
                     .send_command_no_params(
                         "Runtime.runIfWaitingForDebugger",
                         Some(iframe_sid.as_str()),
                     )
                     .await;
                 let _ = mgr
-                    .client
+                    .client()
                     .send_command_no_params("DOM.enable", Some(iframe_sid.as_str()))
                     .await;
                 let _ = mgr
-                    .client
+                    .client()
                     .send_command_no_params("Accessibility.enable", Some(iframe_sid.as_str()))
                     .await;
                 if self.har_recording || self.request_tracking {
                     let _ = mgr
-                        .client
+                        .client()
                         .send_command_no_params("Network.enable", Some(iframe_sid.as_str()))
                         .await;
                 }
@@ -637,7 +660,7 @@ impl DaemonState {
         for te in &drained.new_targets {
             if let Some(ref mut mgr) = self.browser {
                 let attach_result: Result<AttachToTargetResult, String> = mgr
-                    .client
+                    .client()
                     .send_command_typed(
                         "Target.attachToTarget",
                         &AttachToTargetParams {
@@ -1494,7 +1517,7 @@ async fn connect_auto_with_fresh_tab() -> Result<BrowserManager, String> {
     mgr.tab_new(None, None).await?;
     let session_id = mgr.active_session_id()?.to_string();
     let _ = mgr
-        .client
+        .client()
         .send_command("Page.bringToFront", None, Some(&session_id))
         .await;
     Ok(mgr)
@@ -2211,7 +2234,7 @@ async fn handle_navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
                 if has_proxy_creds {
                     params["handleAuthRequests"] = json!(true);
                 }
-                mgr.client
+                mgr.client()
                     .send_command("Fetch.enable", Some(params), Some(&session_id))
                     .await?;
             }
@@ -2588,7 +2611,7 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
             "returnByValue": true
         });
         let call_result = mgr
-            .client
+            .client()
             .send_command(
                 "Runtime.callFunctionOn",
                 Some(call_params),
@@ -3084,11 +3107,11 @@ async fn handle_reload(state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
 
-    mgr.client
+    mgr.client()
         .send_command_no_params("Page.reload", Some(&session_id))
         .await?;
 
-    let mut rx = mgr.client.subscribe();
+    let mut rx = mgr.client().subscribe();
     let _ = tokio::time::timeout(tokio::time::Duration::from_secs(10), async {
         loop {
             match rx.recv().await {
@@ -3571,7 +3594,7 @@ async fn handle_mouse(cmd: &Value, state: &DaemonState) -> Result<Value, String>
     let button = cmd.get("button").and_then(|v| v.as_str()).unwrap_or("none");
     let click_count = cmd.get("clickCount").and_then(|v| v.as_i64()).unwrap_or(0);
 
-    mgr.client
+    mgr.client()
         .send_command(
             "Input.dispatchMouseEvent",
             Some(json!({
@@ -3607,7 +3630,7 @@ async fn handle_keyboard(cmd: &Value, state: &DaemonState) -> Result<Value, Stri
                 .get("text")
                 .and_then(|v| v.as_str())
                 .ok_or("Missing 'text' parameter")?;
-            mgr.client
+            mgr.client()
                 .send_command(
                     "Input.insertText",
                     Some(json!({ "text": text })),
@@ -3638,7 +3661,7 @@ async fn handle_keyboard(cmd: &Value, state: &DaemonState) -> Result<Value, Stri
         params["text"] = Value::String(t.to_string());
     }
 
-    mgr.client
+    mgr.client()
         .send_command("Input.dispatchKeyEvent", Some(params), Some(&session_id))
         .await?;
 
@@ -3824,7 +3847,7 @@ async fn handle_download(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     mgr.set_download_behavior(download_dir_str).await?;
 
     // Subscribe to CDP events before clicking so we don't miss the download event
-    let mut rx = mgr.client.subscribe();
+    let mut rx = mgr.client().subscribe();
 
     // Click the element to trigger the download
     interaction::click(
@@ -4000,14 +4023,14 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
 
         // Capture current cookies
         let cookies_result = mgr
-            .client
+            .client()
             .send_command_no_params("Network.getAllCookies", Some(&old_session_id))
             .await
             .ok();
 
         // Create new browser context
         let ctx_result = mgr
-            .client
+            .client()
             .send_command_no_params("Target.createBrowserContext", None)
             .await?;
         let context_id = ctx_result
@@ -4018,7 +4041,7 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
 
         // Create page in new context
         let create_result: CreateTargetResult = mgr
-            .client
+            .client()
             .send_command_typed(
                 "Target.createTarget",
                 &json!({ "url": "about:blank", "browserContextId": context_id }),
@@ -4027,7 +4050,7 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
             .await?;
 
         let attach_result: AttachToTargetResult = mgr
-            .client
+            .client()
             .send_command_typed(
                 "Target.attachToTarget",
                 &AttachToTargetParams {
@@ -4046,7 +4069,7 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
         // because Browser.setDownloadBehavior at launch only applies to the default context.
         if let Some(ref dl_path) = mgr.download_path {
             let _ = mgr
-                .client
+                .client()
                 .send_command(
                     "Browser.setDownloadBehavior",
                     Some(json!({
@@ -4064,7 +4087,7 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
         // Security.setIgnoreCertificateErrors at launch only applies to the session it was sent on.
         if mgr.ignore_https_errors {
             let _ = mgr
-                .client
+                .client()
                 .send_command(
                     "Security.setIgnoreCertificateErrors",
                     Some(json!({ "ignore": true })),
@@ -4078,7 +4101,7 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
             if let Some(cookie_arr) = cr.get("cookies").and_then(|v| v.as_array()) {
                 if !cookie_arr.is_empty() {
                     let _ = mgr
-                        .client
+                        .client()
                         .send_command(
                             "Network.setCookies",
                             Some(json!({ "cookies": cookie_arr })),
@@ -4108,7 +4131,7 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
         // Navigate to URL
         if nav_url != "about:blank" {
             let _ = mgr
-                .client
+                .client()
                 .send_command(
                     "Page.navigate",
                     Some(json!({ "url": nav_url })),
@@ -4118,7 +4141,7 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
             tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
         }
 
-        (mgr.client.clone(), new_session_id)
+        (mgr.client().clone(), new_session_id)
     };
 
     let result = recording::recording_start(&mut state.recording_state, path)?;
@@ -4154,7 +4177,7 @@ async fn handle_recording_restart(cmd: &Value, state: &mut DaemonState) -> Resul
     if let Some(ref browser) = state.browser {
         let session_id = browser.active_session_id()?.to_string();
         state
-            .start_recording_task(browser.client.clone(), session_id)
+            .start_recording_task(browser.client().clone(), session_id)
             .await?;
     }
 
@@ -4172,7 +4195,7 @@ async fn handle_pdf(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
     });
 
     let result = mgr
-        .client
+        .client()
         .send_command("Page.printToPDF", Some(params), Some(&session_id))
         .await?;
 
@@ -4764,7 +4787,7 @@ async fn handle_wheel(cmd: &Value, state: &DaemonState) -> Result<Value, String>
     let delta_x = cmd.get("deltaX").and_then(|v| v.as_f64()).unwrap_or(0.0);
     let delta_y = cmd.get("deltaY").and_then(|v| v.as_f64()).unwrap_or(0.0);
 
-    mgr.client
+    mgr.client()
         .send_command(
             "Input.dispatchMouseEvent",
             Some(json!({
@@ -5105,7 +5128,7 @@ async fn handle_waitforfunction(cmd: &Value, state: &DaemonState) -> Result<Valu
     wait_for_function(&mgr.backend, &session_id, expression, timeout_ms).await?;
 
     let result: super::cdp::types::EvaluateResult = mgr
-        .client
+        .client()
         .send_command_typed(
             "Runtime.evaluate",
             &super::cdp::types::EvaluateParams {
@@ -5137,7 +5160,7 @@ async fn handle_frame(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
     }
 
     let tree_result = mgr
-        .client
+        .client()
         .send_command_no_params("Page.getFrameTree", Some(&session_id))
         .await?;
 
@@ -5185,7 +5208,7 @@ async fn handle_frame(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
             // This works reliably for all iframes, including those without
             // name, id, or src attributes.
             let describe: Value = mgr
-                .client
+                .client()
                 .send_command(
                     "DOM.describeNode",
                     Some(json!({ "backendNodeId": backend_node_id, "depth": 1 })),
@@ -5406,7 +5429,7 @@ async fn handle_getbyrole(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     );
 
     let result: super::cdp::types::EvaluateResult = mgr
-        .client
+        .client()
         .send_command_typed(
             "Runtime.evaluate",
             &super::cdp::types::EvaluateParams {
@@ -5536,7 +5559,7 @@ async fn handle_semantic_locator(
     };
 
     let result: super::cdp::types::EvaluateResult = mgr
-        .client
+        .client()
         .send_command_typed(
             "Runtime.evaluate",
             &super::cdp::types::EvaluateParams {
@@ -5622,7 +5645,7 @@ async fn handle_nth(cmd: &Value, state: &mut DaemonState) -> Result<Value, Strin
     );
 
     let result: super::cdp::types::EvaluateResult = mgr
-        .client
+        .client()
         .send_command_typed(
             "Runtime.evaluate",
             &super::cdp::types::EvaluateParams {
@@ -5695,7 +5718,7 @@ async fn handle_evalhandle(cmd: &Value, state: &DaemonState) -> Result<Value, St
         .ok_or("Missing 'script' parameter")?;
 
     let result: super::cdp::types::EvaluateResult = mgr
-        .client
+        .client()
         .send_command_typed(
             "Runtime.evaluate",
             &super::cdp::types::EvaluateParams {
@@ -5745,14 +5768,14 @@ async fn handle_drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
     .await?;
 
     // Mouse down at source
-    mgr.client
+    mgr.client()
         .send_command(
             "Input.dispatchMouseEvent",
             Some(json!({ "type": "mouseMoved", "x": sx, "y": sy })),
             Some(&source_session_id),
         )
         .await?;
-    mgr.client
+    mgr.client()
         .send_command(
             "Input.dispatchMouseEvent",
             Some(json!({ "type": "mousePressed", "x": sx, "y": sy, "button": "left", "buttons": 1, "clickCount": 1 })),
@@ -5766,7 +5789,7 @@ async fn handle_drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
     for i in 1..=steps {
         let cx = sx + (tx - sx) * (i as f64) / (steps as f64);
         let cy = sy + (ty - sy) * (i as f64) / (steps as f64);
-        mgr.client
+        mgr.client()
             .send_command(
                 "Input.dispatchMouseEvent",
                 Some(json!({ "type": "mouseMoved", "x": cx, "y": cy, "button": "left", "buttons": 1 })),
@@ -5777,7 +5800,7 @@ async fn handle_drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
     }
 
     // Mouse up at target
-    mgr.client
+    mgr.client()
         .send_command(
             "Input.dispatchMouseEvent",
             Some(json!({ "type": "mouseReleased", "x": tx, "y": ty, "button": "left", "buttons": 0, "clickCount": 1 })),
@@ -5796,7 +5819,7 @@ async fn handle_expose(cmd: &Value, state: &DaemonState) -> Result<Value, String
         .and_then(|v| v.as_str())
         .ok_or("Missing 'name' parameter")?;
 
-    mgr.client
+    mgr.client()
         .send_command(
             "Runtime.addBinding",
             Some(json!({ "name": name })),
@@ -5856,7 +5879,7 @@ async fn handle_responsebody(cmd: &Value, state: &DaemonState) -> Result<Value, 
         .ok_or("Missing 'url' parameter")?;
     let timeout_ms = state.timeout_ms(cmd);
 
-    let mut rx = mgr.client.subscribe();
+    let mut rx = mgr.client().subscribe();
     let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
 
     loop {
@@ -5899,7 +5922,7 @@ async fn handle_responsebody(cmd: &Value, state: &DaemonState) -> Result<Value, 
                                 .unwrap_or(json!({}));
 
                             let body_result = mgr
-                                .client
+                                .client()
                                 .send_command(
                                     "Network.getResponseBody",
                                     Some(json!({ "requestId": request_id })),
@@ -5935,7 +5958,7 @@ async fn handle_waitfordownload(cmd: &Value, state: &DaemonState) -> Result<Valu
     let session_id = mgr.active_session_id()?.to_string();
     let timeout_ms = state.timeout_ms(cmd);
 
-    let mut rx = mgr.client.subscribe();
+    let mut rx = mgr.client().subscribe();
     let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
 
     loop {
@@ -5974,7 +5997,7 @@ async fn handle_window_new(cmd: &Value, state: &mut DaemonState) -> Result<Value
 
     // Create a new browser context
     let context_result = mgr
-        .client
+        .client()
         .send_command_no_params("Target.createBrowserContext", None)
         .await?;
     let context_id = context_result
@@ -5984,7 +6007,7 @@ async fn handle_window_new(cmd: &Value, state: &mut DaemonState) -> Result<Value
         .to_string();
 
     let create_result: super::cdp::types::CreateTargetResult = mgr
-        .client
+        .client()
         .send_command_typed(
             "Target.createTarget",
             &json!({ "url": "about:blank", "browserContextId": context_id }),
@@ -5993,7 +6016,7 @@ async fn handle_window_new(cmd: &Value, state: &mut DaemonState) -> Result<Value
         .await?;
 
     let attach: super::cdp::types::AttachToTargetResult = mgr
-        .client
+        .client()
         .send_command_typed(
             "Target.attachToTarget",
             &super::cdp::types::AttachToTargetParams {
@@ -6120,7 +6143,7 @@ async fn handle_video_start(cmd: &Value, state: &mut DaemonState) -> Result<Valu
 
     recording::recording_start(&mut state.recording_state, path)?;
     state
-        .start_recording_task(mgr.client.clone(), session_id)
+        .start_recording_task(mgr.client().clone(), session_id)
         .await?;
 
     Ok(json!({
@@ -6145,14 +6168,14 @@ async fn handle_video_stop(state: &mut DaemonState) -> Result<Value, String> {
 async fn handle_har_start(state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
-    mgr.client
+    mgr.client()
         .send_command_no_params("Network.enable", Some(&session_id))
         .await?;
     // Also enable Network on cross-origin iframe sessions so their
     // requests are captured in the HAR output.
     for iframe_sid in state.iframe_sessions.values() {
         let _ = mgr
-            .client
+            .client()
             .send_command_no_params("Network.enable", Some(iframe_sid.as_str()))
             .await;
     }
@@ -6493,7 +6516,7 @@ async fn har_browser_metadata(state: &DaemonState) -> Option<Value> {
     }
 
     let version = mgr
-        .client
+        .client()
         .send_command_no_params("Browser.getVersion", None)
         .await
         .ok()?;
@@ -6774,7 +6797,7 @@ async fn handle_route(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
 
     let patterns = build_fetch_patterns(state).await;
     let params = build_fetch_enable_params(state, patterns).await;
-    mgr.client
+    mgr.client()
         .send_command("Fetch.enable", Some(params), Some(&session_id))
         .await?;
 
@@ -6801,12 +6824,12 @@ async fn handle_unroute(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
 
     let patterns = build_fetch_patterns(state).await;
     if patterns.is_empty() {
-        mgr.client
+        mgr.client()
             .send_command("Fetch.disable", None, Some(&session_id))
             .await?;
     } else {
         let params = build_fetch_enable_params(state, patterns).await;
-        mgr.client
+        mgr.client()
             .send_command("Fetch.enable", Some(params), Some(&session_id))
             .await?;
     }
@@ -6845,7 +6868,7 @@ async fn handle_requests(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         if let Some(ref mgr) = state.browser {
             if let Ok(session_id) = mgr.active_session_id() {
                 let _ = mgr
-                    .client
+                    .client()
                     .send_command_no_params("Network.enable", Some(session_id))
                     .await;
             }
@@ -6907,7 +6930,7 @@ async fn handle_request_detail(cmd: &Value, state: &mut DaemonState) -> Result<V
     if let Some(ref mgr) = state.browser {
         if let Ok(session_id) = mgr.active_session_id() {
             if let Ok(body_result) = mgr
-                .client
+                .client()
                 .send_command(
                     "Network.getResponseBody",
                     Some(json!({ "requestId": request_id })),
@@ -7239,7 +7262,7 @@ async fn handle_auth_login(cmd: &Value, state: &mut DaemonState) -> Result<Value
     .await?;
 
     // Wait for navigation after submit (with fallback timeout)
-    let mut rx = mgr.client.subscribe();
+    let mut rx = mgr.client().subscribe();
     let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(10);
     let mut navigated = false;
 
@@ -7363,7 +7386,7 @@ async fn handle_swipe(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         let cx = start_x;
         let cy = start_y;
 
-        mgr.client
+        mgr.client()
             .send_command(
                 "Input.dispatchTouchEvent",
                 Some(json!({ "type": "touchStart", "touchPoints": [{ "x": cx, "y": cy }] })),
@@ -7375,7 +7398,7 @@ async fn handle_swipe(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         for i in 1..=steps {
             let x = cx + dx * (i as f64) / (steps as f64);
             let y = cy + dy * (i as f64) / (steps as f64);
-            mgr.client
+            mgr.client()
                 .send_command(
                     "Input.dispatchTouchEvent",
                     Some(json!({ "type": "touchMove", "touchPoints": [{ "x": x, "y": y }] })),
@@ -7385,7 +7408,7 @@ async fn handle_swipe(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
             tokio::time::sleep(tokio::time::Duration::from_millis(16)).await;
         }
 
-        mgr.client
+        mgr.client()
             .send_command(
                 "Input.dispatchTouchEvent",
                 Some(json!({ "type": "touchEnd", "touchPoints": [] })),
@@ -7397,7 +7420,7 @@ async fn handle_swipe(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
     }
 
     // Manual coordinates
-    mgr.client
+    mgr.client()
         .send_command(
             "Input.dispatchTouchEvent",
             Some(json!({ "type": "touchStart", "touchPoints": [{ "x": start_x, "y": start_y }] })),
@@ -7409,7 +7432,7 @@ async fn handle_swipe(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
     for i in 1..=steps {
         let x = start_x + (end_x - start_x) * (i as f64) / (steps as f64);
         let y = start_y + (end_y - start_y) * (i as f64) / (steps as f64);
-        mgr.client
+        mgr.client()
             .send_command(
                 "Input.dispatchTouchEvent",
                 Some(json!({ "type": "touchMove", "touchPoints": [{ "x": x, "y": y }] })),
@@ -7419,7 +7442,7 @@ async fn handle_swipe(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         tokio::time::sleep(tokio::time::Duration::from_millis(16)).await;
     }
 
-    mgr.client
+    mgr.client()
         .send_command(
             "Input.dispatchTouchEvent",
             Some(json!({ "type": "touchEnd", "touchPoints": [] })),
@@ -7550,7 +7573,7 @@ async fn handle_input_mouse(cmd: &Value, state: &mut DaemonState) -> Result<Valu
             .map(|v| v as i32),
     );
 
-    mgr.client
+    mgr.client()
         .send_command_typed::<_, Value>("Input.dispatchMouseEvent", &params, Some(&session_id))
         .await?;
     Ok(json!({ "dispatched": event_type }))
@@ -7571,7 +7594,7 @@ async fn handle_input_keyboard(cmd: &Value, state: &DaemonState) -> Result<Value
         }
     }
 
-    mgr.client
+    mgr.client()
         .send_command("Input.dispatchKeyEvent", Some(params), Some(&session_id))
         .await?;
     Ok(json!({ "dispatched": event_type }))
@@ -7585,7 +7608,7 @@ async fn handle_input_touch(cmd: &Value, state: &DaemonState) -> Result<Value, S
         .and_then(|v| v.as_str())
         .unwrap_or("touchStart");
 
-    mgr.client
+    mgr.client()
         .send_command(
             "Input.dispatchTouchEvent",
             Some(json!({
@@ -7606,7 +7629,7 @@ async fn handle_keydown(cmd: &Value, state: &DaemonState) -> Result<Value, Strin
         .and_then(|v| v.as_str())
         .ok_or("Missing 'key' parameter")?;
 
-    mgr.client
+    mgr.client()
         .send_command(
             "Input.dispatchKeyEvent",
             Some(json!({ "type": "keyDown", "key": key })),
@@ -7624,7 +7647,7 @@ async fn handle_keyup(cmd: &Value, state: &DaemonState) -> Result<Value, String>
         .and_then(|v| v.as_str())
         .ok_or("Missing 'key' parameter")?;
 
-    mgr.client
+    mgr.client()
         .send_command(
             "Input.dispatchKeyEvent",
             Some(json!({ "type": "keyUp", "key": key })),
@@ -7642,7 +7665,7 @@ async fn handle_inserttext(cmd: &Value, state: &DaemonState) -> Result<Value, St
         .and_then(|v| v.as_str())
         .ok_or("Missing 'text' parameter")?;
 
-    mgr.client
+    mgr.client()
         .send_command(
             "Input.insertText",
             Some(json!({ "text": text })),
@@ -7670,7 +7693,7 @@ async fn handle_mousemove(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         None,
     );
 
-    mgr.client
+    mgr.client()
         .send_command_typed::<_, Value>("Input.dispatchMouseEvent", &params, Some(&session_id))
         .await?;
     Ok(json!({ "moved": true }))
@@ -7693,7 +7716,7 @@ async fn handle_mousedown(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         None,
     );
 
-    mgr.client
+    mgr.client()
         .send_command_typed::<_, Value>("Input.dispatchMouseEvent", &params, Some(&session_id))
         .await?;
     Ok(json!({ "pressed": true }))
@@ -7716,7 +7739,7 @@ async fn handle_mouseup(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
         None,
     );
 
-    mgr.client
+    mgr.client()
         .send_command_typed::<_, Value>("Input.dispatchMouseEvent", &params, Some(&session_id))
         .await?;
     Ok(json!({ "released": true }))
