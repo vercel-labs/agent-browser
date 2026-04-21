@@ -1,0 +1,34 @@
+{
+    "success": true,
+    "data": {
+        "origin": "file:///Users/davide/git/agent-browser/cli/tests/fixtures/form.html",
+        "refs": {
+            "e1": {
+                "name": "Contact Form",
+                "role": "heading"
+            },
+            "e2": {
+                "name": " Subscribe to updates",
+                "role": "checkbox"
+            },
+            "e3": {
+                "name": "Submit",
+                "role": "button"
+            },
+            "e4": {
+                "name": "Name",
+                "role": "textbox"
+            },
+            "e5": {
+                "name": "Email",
+                "role": "textbox"
+            },
+            "e6": {
+                "name": "Message",
+                "role": "textbox"
+            }
+        },
+        "snapshot": "- heading \"Contact Form\" [level=1, ref=e1]\n- paragraph\n  - StaticText \"Fill out the form below.\"\n- generic\n  - LabelText\n    - StaticText \"Name\"\n    - textbox \"Name\" [ref=e4]\n  - LabelText\n    - StaticText \"Email\"\n    - textbox \"Email\" [ref=e5]\n  - LabelText\n    - StaticText \"Message\"\n    - textbox \"Message\" [ref=e6]\n  - checkbox \" Subscribe to updates\" [checked=false, ref=e2]\n  - button \"Submit\" [ref=e3]\n- paragraph\n  - StaticText \"Idle\""
+    },
+    "error": null
+}

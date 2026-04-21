@@ -124,9 +124,30 @@ async def _cmd_page_goto(sidecar: "Sidecar", args: dict) -> dict:
     return await sidecar.session.goto(args)
 
 
+async def _cmd_page_snapshot(sidecar: "Sidecar", args: dict) -> dict:
+    return await sidecar.session.snapshot(args)
+
+
+async def _cmd_page_click(sidecar: "Sidecar", args: dict) -> dict:
+    return await sidecar.session.click(args)
+
+
+async def _cmd_page_fill(sidecar: "Sidecar", args: dict) -> dict:
+    return await sidecar.session.fill(args)
+
+
+async def _cmd_page_get_text(sidecar: "Sidecar", args: dict) -> dict:
+    return await sidecar.session.get_text(args)
+
+
 _HANDLERS: dict[str, Handler] = {
     "launch": _cmd_launch,
     "page.goto": _cmd_page_goto,
+    "page.navigate": _cmd_page_goto,  # alias for CDP-side naming parity
+    "page.snapshot": _cmd_page_snapshot,
+    "page.click": _cmd_page_click,
+    "page.fill": _cmd_page_fill,
+    "page.getText": _cmd_page_get_text,
 }
 
 

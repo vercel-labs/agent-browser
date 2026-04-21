@@ -1,8 +1,9 @@
 """Session holds the AsyncCamoufox browser for the sidecar's lifetime.
 
-Unit 2 owns the lifecycle (launch / close / cleanup); later units add the
-command handlers (navigate, snapshot, click, ...). The launch-kwarg allowlist
-lives here because it's the public contract with the Rust side.
+Unit 2 owned lifecycle (launch / close); Unit 4 grows the per-page command
+surface: snapshot, click, fill, get_text, navigate. The single
+``self._page`` held here is a stopgap — Unit 5 (tabs) will replace it with a
+per-tab map.
 """
 
 from __future__ import annotations
@@ -10,6 +11,8 @@ from __future__ import annotations
 from typing import Any, Optional
 
 from .protocol import log
+from .refs import RefCache, RefStale, parse_ref
+from .snapshot import SnapshotError, take_snapshot
 
 # Allowlist derived from https://camoufox.com/python/usage/ — keep in sync with
 # the plan's Unit 2 Approach. New kwargs must be added deliberately so the
@@ -49,6 +52,10 @@ REJECTED_LAUNCH_KWARGS: frozenset[str] = frozenset(
     }
 )
 
+# Default timeout for per-element actions (ms). Matches agent-browser's
+# default_timeout_ms on the Rust side (see BrowserManager::launch).
+DEFAULT_ACTION_TIMEOUT_MS: int = 25_000
+
 
 class LaunchError(Exception):
     """Structured error surfaced as a {"ok": false, "error": {...}} response."""
@@ -72,6 +79,7 @@ class Session:
         self._browser: Optional[Any] = None
         self._page: Optional[Any] = None  # lazily created on first goto
         self._launched: bool = False
+        self._ref_cache: RefCache = RefCache()
 
     @property
     def is_launched(self) -> bool:
@@ -141,6 +149,7 @@ class Session:
         self._browser = None
         self._page = None
         self._launched = False
+        self._ref_cache.invalidate()
         if cm is None:
             return {"closed": False}
         try:
@@ -151,6 +160,37 @@ class Session:
             # leaving a half-closed state just masks the root cause.
         return {"closed": True}
 
+    async def _ensure_page(self) -> Any:
+        if not self._launched or self._browser is None:
+            raise LaunchError(
+                "not-launched",
+                "Camoufox browser is not launched; send `launch` first",
+            )
+        if self._page is None:
+            self._page = await self._browser.new_page()
+            self._wire_page_events(self._page)
+        return self._page
+
+    def _wire_page_events(self, page: Any) -> None:
+        """Invalidate the ref cache on navigation and forward lifecycle events.
+
+        Playwright's ``framenavigated`` fires for every frame, including
+        subframes, so we scope invalidation to main-frame navigations only.
+        Unit 4/5 adds ``page.console``/``page.crashed`` forwarding.
+        """
+
+        def _on_framenavigated(frame: Any) -> None:
+            try:
+                if frame == page.main_frame:
+                    self._ref_cache.invalidate()
+            except Exception as exc:  # noqa: BLE001
+                log(f"framenavigated handler: {exc}")
+
+        try:
+            page.on("framenavigated", _on_framenavigated)
+        except Exception as exc:  # noqa: BLE001
+            log(f"could not attach framenavigated handler: {exc}")
+
     async def goto(self, args: Optional[dict] = None) -> dict:
         """Navigate the single session page to ``args['url']``.
 
@@ -158,11 +198,6 @@ class Session:
         `agent-browser --engine camoufox open <url>`. Multi-tab routing and
         ref-aware snapshot/click ride on top of this in Units 4 and 5.
         """
-        if not self._launched or self._browser is None:
-            raise LaunchError(
-                "not-launched",
-                "Camoufox browser is not launched; send `launch` first",
-            )
         args = args or {}
         url = args.get("url")
         if not isinstance(url, str) or not url:
@@ -174,21 +209,228 @@ class Session:
         if wait_until == "none":
             wait_until = "commit"
 
-        if self._page is None:
-            self._page = await self._browser.new_page()
+        page = await self._ensure_page()
+        # Any navigation request invalidates prior refs, even before
+        # ``framenavigated`` fires; clearing here closes the window in which
+        # an agent could click on a stale ref after issuing ``navigate``.
+        self._ref_cache.invalidate()
 
         try:
-            response = await self._page.goto(url, wait_until=wait_until)
+            response = await page.goto(url, wait_until=wait_until)
         except Exception as exc:  # noqa: BLE001
             raise LaunchError("navigation-failed", str(exc)) from exc
 
         try:
-            title = await self._page.title()
+            title = await page.title()
         except Exception:  # noqa: BLE001
             title = ""
-        final_url = self._page.url
+        final_url = page.url
         status = response.status if response is not None else None
         return {"url": final_url, "title": title, "status": status}
+
+    # ------------------------------------------------------------------
+    # Unit 4: core command surface
+    # ------------------------------------------------------------------
+
+    async def snapshot(self, args: Optional[dict] = None) -> dict:
+        args = args or {}
+        page = await self._ensure_page()
+        try:
+            return await take_snapshot(
+                page,
+                self._ref_cache,
+                interactive_only=bool(args.get("interactive", False)),
+                selector=args.get("selector"),
+            )
+        except SnapshotError as exc:
+            raise LaunchError(exc.code, exc.message) from exc
+
+    async def click(self, args: Optional[dict] = None) -> dict:
+        args = args or {}
+        selector_or_ref = _require_str(args, "selector")
+        button = args.get("button", "left")
+        click_count = int(args.get("clickCount", 1) or 1)
+        timeout = int(args.get("timeoutMs") or DEFAULT_ACTION_TIMEOUT_MS)
+
+        page = await self._ensure_page()
+        ref_id = parse_ref(selector_or_ref)
+        if ref_id is not None:
+            handle = self._require_ref(ref_id)
+            await _try_click_handle(handle, button, click_count, timeout)
+        else:
+            await _try_click_locator(page.locator(selector_or_ref), selector_or_ref, button, click_count, timeout)
+        return {"clicked": selector_or_ref}
+
+    async def fill(self, args: Optional[dict] = None) -> dict:
+        args = args or {}
+        selector_or_ref = _require_str(args, "selector")
+        value = args.get("value")
+        if not isinstance(value, str):
+            raise LaunchError("invalid-args", "`fill` requires a string `value` argument")
+        timeout = int(args.get("timeoutMs") or DEFAULT_ACTION_TIMEOUT_MS)
+
+        page = await self._ensure_page()
+        ref_id = parse_ref(selector_or_ref)
+        if ref_id is not None:
+            handle = self._require_ref(ref_id)
+            await _try_fill_handle(handle, value, timeout)
+        else:
+            await _try_fill_locator(page.locator(selector_or_ref), selector_or_ref, value, timeout)
+        return {"filled": selector_or_ref}
+
+    async def get_text(self, args: Optional[dict] = None) -> dict:
+        args = args or {}
+        selector_or_ref = _require_str(args, "selector")
+        timeout = int(args.get("timeoutMs") or DEFAULT_ACTION_TIMEOUT_MS)
+
+        page = await self._ensure_page()
+        ref_id = parse_ref(selector_or_ref)
+        if ref_id is not None:
+            handle = self._require_ref(ref_id)
+            text = await _handle_text(handle, timeout)
+        else:
+            text = await _locator_text(page.locator(selector_or_ref), selector_or_ref, timeout)
+        return {"text": text, "origin": page.url}
+
+    def _require_ref(self, ref_id: str) -> Any:
+        try:
+            return self._ref_cache.require(ref_id)
+        except RefStale as exc:
+            raise LaunchError("ref-stale", exc.message) from exc
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers — kept module-level so Session stays focused on lifecycle
+# and command dispatch, not Playwright error translation.
+# ---------------------------------------------------------------------------
+
+
+def _require_str(args: dict, key: str) -> str:
+    value = args.get(key)
+    if not isinstance(value, str) or not value:
+        raise LaunchError("invalid-args", f"missing required `{key}` string argument")
+    return value
+
+
+def _classify_playwright_error(exc: Exception, selector_or_ref: str) -> LaunchError:
+    """Translate Playwright errors into agent-browser error codes.
+
+    Keeping this logic in one place means new error codes (e.g. ``timeout``)
+    pick up the same behaviour across click/fill/get_text without each handler
+    reimplementing the pattern match.
+    """
+    msg = str(exc)
+    lowered = msg.lower()
+    if "strict mode violation" in lowered or "resolved to" in lowered and "elements" in lowered:
+        # Try to parse the match count from the message ("resolved to N elements").
+        import re
+
+        match = re.search(r"resolved to\s+(\d+)\s+elements", msg)
+        count = int(match.group(1)) if match else 0
+        return LaunchError(
+            "ambiguous-selector",
+            f"Selector {selector_or_ref!r} matched {count} elements; refine it or use a ref",
+        )
+    if "element is not attached" in lowered or "node is detached" in lowered or "detached" in lowered:
+        return LaunchError("element-detached", msg)
+    if "timeout" in lowered and "exceeded" in lowered:
+        return LaunchError("timeout", msg)
+    if "no element matches" in lowered or "no elements match" in lowered:
+        return LaunchError("selector-not-found", msg)
+    return LaunchError("action-failed", msg)
+
+
+async def _try_click_handle(handle: Any, button: str, click_count: int, timeout: int) -> None:
+    try:
+        await handle.click(button=button, click_count=click_count, timeout=timeout)
+    except Exception as exc:  # noqa: BLE001
+        raise _classify_playwright_error(exc, "<ref>") from exc
+
+
+async def _try_click_locator(
+    locator: Any, selector: str, button: str, click_count: int, timeout: int
+) -> None:
+    try:
+        count = await locator.count()
+    except Exception as exc:  # noqa: BLE001
+        raise _classify_playwright_error(exc, selector) from exc
+    if count == 0:
+        raise LaunchError(
+            "selector-not-found",
+            f"Selector {selector!r} did not match any element",
+        )
+    if count > 1:
+        raise LaunchError(
+            "ambiguous-selector",
+            f"Selector {selector!r} matched {count} elements; refine it or use a ref",
+        )
+    try:
+        await locator.click(button=button, click_count=click_count, timeout=timeout)
+    except Exception as exc:  # noqa: BLE001
+        raise _classify_playwright_error(exc, selector) from exc
+
+
+async def _try_fill_handle(handle: Any, value: str, timeout: int) -> None:
+    try:
+        await handle.fill(value, timeout=timeout)
+    except Exception as exc:  # noqa: BLE001
+        raise _classify_playwright_error(exc, "<ref>") from exc
+
+
+async def _try_fill_locator(locator: Any, selector: str, value: str, timeout: int) -> None:
+    try:
+        count = await locator.count()
+    except Exception as exc:  # noqa: BLE001
+        raise _classify_playwright_error(exc, selector) from exc
+    if count == 0:
+        raise LaunchError(
+            "selector-not-found",
+            f"Selector {selector!r} did not match any element",
+        )
+    if count > 1:
+        raise LaunchError(
+            "ambiguous-selector",
+            f"Selector {selector!r} matched {count} elements; refine it or use a ref",
+        )
+    try:
+        await locator.fill(value, timeout=timeout)
+    except Exception as exc:  # noqa: BLE001
+        raise _classify_playwright_error(exc, selector) from exc
+
+
+async def _handle_text(handle: Any, timeout: int) -> str:
+    # ElementHandle.text_content does not accept a ``timeout`` kwarg (only the
+    # Locator variant does) — if the handle is still live in the cache we
+    # already know the element is attached, so no additional timeout gymnastics
+    # are needed.
+    _ = timeout
+    try:
+        raw = await handle.text_content()
+    except Exception as exc:  # noqa: BLE001
+        raise _classify_playwright_error(exc, "<ref>") from exc
+    return (raw or "").strip()
+
+
+async def _locator_text(locator: Any, selector: str, timeout: int) -> str:
+    try:
+        count = await locator.count()
+    except Exception as exc:  # noqa: BLE001
+        raise _classify_playwright_error(exc, selector) from exc
+    if count == 0:
+        raise LaunchError(
+            "selector-not-found",
+            f"Selector {selector!r} did not match any element",
+        )
+    if count > 1:
+        raise LaunchError(
+            "ambiguous-selector",
+            f"Selector {selector!r} matched {count} elements; refine it or use a ref",
+        )
+    try:
+        raw = await locator.text_content(timeout=timeout)
+    except Exception as exc:  # noqa: BLE001
+        raise _classify_playwright_error(exc, selector) from exc
+    return (raw or "").strip()
 
 
 def _validate_launch_args(args: dict) -> dict:

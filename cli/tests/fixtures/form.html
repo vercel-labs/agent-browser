@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Form Parity Fixture</title>
+</head>
+<body>
+  <h1>Contact Form</h1>
+  <p id="intro">Fill out the form below.</p>
+  <form id="contact">
+    <label>Name<input type="text" id="name" name="name"></label>
+    <label>Email<input type="email" id="email" name="email"></label>
+    <label>Message<textarea id="message" name="message"></textarea></label>
+    <label><input type="checkbox" id="subscribe" name="subscribe"> Subscribe to updates</label>
+    <button type="button" id="submit">Submit</button>
+  </form>
+  <p id="status">Idle</p>
+  <script>
+    document.getElementById('submit').addEventListener('click', function () {
+      document.getElementById('status').textContent = 'Submitted';
+    });
+  </script>
+</body>
+</html>

@@ -2208,6 +2208,11 @@ async fn handle_navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         .filter(|m| !m.is_empty());
 
     if let Some(headers_map) = scoped_headers {
+        if mgr.backend.is_camoufox() {
+            return Err(
+                "not-yet-supported: per-request --headers on engine=camoufox (Fetch.* is Chrome-only)".to_string(),
+            );
+        }
         if let Some(origin) = url::Url::parse(url)
             .ok()
             .map(|u| u.origin().ascii_serialization())
@@ -2419,6 +2424,23 @@ async fn handle_close(state: &mut DaemonState) -> Result<Value, String> {
 
 async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+
+    // Camoufox path: the sidecar owns snapshot + ref assignment. The Rust
+    // side mirrors the returned `refs` map into `state.ref_map` so that
+    // anything on the Rust side that introspects ref metadata (diffing,
+    // screenshot annotation, etc.) keeps working — even though click/fill
+    // themselves don't use the Rust ref_map on this engine.
+    if mgr.backend.is_camoufox() {
+        state.ref_map.clear();
+        let args = json!({
+            "interactive": cmd.get("interactive").and_then(|v| v.as_bool()).unwrap_or(false),
+            "selector": cmd.get("selector").and_then(|v| v.as_str()),
+        });
+        let result = mgr.camoufox_client().call("page.snapshot", args).await?;
+        mirror_camoufox_refs_into(&result, &mut state.ref_map);
+        return Ok(result);
+    }
+
     let session_id = mgr.active_session_id()?.to_string();
 
     let options = SnapshotOptions {
@@ -2467,6 +2489,27 @@ async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         .collect();
 
     Ok(json!({ "snapshot": tree, "origin": url, "refs": refs }))
+}
+
+/// Copy the sidecar's ``refs`` map into the Rust-side `RefMap` so any code
+/// that reads ref metadata (screenshot annotation, diff output) keeps
+/// working on Camoufox. The actual click/fill path goes back through the
+/// sidecar and does not consult this map.
+fn mirror_camoufox_refs_into(result: &Value, ref_map: &mut RefMap) {
+    let Some(refs) = result.get("refs").and_then(|v| v.as_object()) else {
+        return;
+    };
+    for (ref_id, entry) in refs {
+        let role = entry
+            .get("role")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let name = entry
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        ref_map.add(ref_id.clone(), None, role, name, None);
+    }
 }
 
 async fn handle_screenshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -2591,6 +2634,25 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
     }
 
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+
+    // Camoufox path: forward the click to the sidecar. Ref resolution, strict
+    // selector-count checks, and error code normalisation happen there so
+    // the Rust side stays free of CDP-specific scaffolding for this arm.
+    if mgr.backend.is_camoufox() {
+        let new_tab = cmd.get("newTab").and_then(|v| v.as_bool()).unwrap_or(false);
+        if new_tab {
+            return Err(
+                "not-yet-supported: --new-tab is not yet wired through the Camoufox engine".to_string(),
+            );
+        }
+        let args = json!({
+            "selector": selector,
+            "button": cmd.get("button").and_then(|v| v.as_str()).unwrap_or("left"),
+            "clickCount": cmd.get("clickCount").and_then(|v| v.as_i64()).unwrap_or(1),
+        });
+        return mgr.camoufox_client().call("page.click", args).await;
+    }
+
     let session_id = mgr.active_session_id()?.to_string();
 
     let new_tab = cmd.get("newTab").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -2691,6 +2753,12 @@ async fn handle_fill(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
     }
 
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+
+    if mgr.backend.is_camoufox() {
+        let args = json!({ "selector": selector, "value": value });
+        return mgr.camoufox_client().call("page.fill", args).await;
+    }
+
     let session_id = mgr.active_session_id()?.to_string();
 
     interaction::fill(
@@ -2955,12 +3023,17 @@ async fn handle_wait(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
 
 async fn handle_gettext(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let session_id = mgr.active_session_id()?.to_string();
     let selector = cmd
         .get("selector")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'selector' parameter")?;
 
+    if mgr.backend.is_camoufox() {
+        let args = json!({ "selector": selector });
+        return mgr.camoufox_client().call("page.getText", args).await;
+    }
+
+    let session_id = mgr.active_session_id()?.to_string();
     let text = super::element::get_element_text(
         &mgr.backend,
         &session_id,

@@ -379,9 +379,9 @@ impl BrowserManager {
 
     /// Camoufox sidecar client accessor. Symmetric with `client()` above;
     /// panics on a CDP backend. Camoufox-specific code paths in this module
-    /// (e.g. navigate-via-sidecar) use this after a `backend.is_camoufox()`
-    /// check.
-    fn camoufox_client(&self) -> &Arc<crate::native::camoufox_client::CamoufoxClient> {
+    /// and in `actions.rs` (e.g. handle_snapshot's Camoufox arm) use this
+    /// after a `backend.is_camoufox()` check.
+    pub fn camoufox_client(&self) -> &Arc<crate::native::camoufox_client::CamoufoxClient> {
         match &self.backend {
             BrowserBackend::Camoufox(c) => c,
             BrowserBackend::Cdp(_) => panic!(
