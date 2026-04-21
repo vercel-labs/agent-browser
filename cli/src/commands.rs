@@ -2064,13 +2064,12 @@ fn parse_get(rest: &[&str], id: &str) -> Result<Value, ParseError> {
         Some("attr") => {
             let sel = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
                 context: "get attr".to_string(),
-                usage: "get attr <selector> <attribute>",
+                usage: "get attr <selector> [attribute]",
             })?;
-            let attr = rest.get(2).ok_or_else(|| ParseError::MissingArguments {
-                context: "get attr".to_string(),
-                usage: "get attr <selector> <attribute>",
-            })?;
-            Ok(json!({ "id": id, "action": "getattribute", "selector": sel, "attribute": attr }))
+            match rest.get(2) {
+                Some(attr) => Ok(json!({ "id": id, "action": "getattribute", "selector": sel, "attribute": attr })),
+                None => Ok(json!({ "id": id, "action": "getattributes", "selector": sel })),
+            }
         }
         Some("url") => Ok(json!({ "id": id, "action": "url" })),
         Some("cdp-url") => Ok(json!({ "id": id, "action": "cdp_url" })),
