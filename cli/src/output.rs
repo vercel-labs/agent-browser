@@ -1174,6 +1174,35 @@ Examples:
   agent-browser click @e3 --new-tab
 "##
         }
+        "clickjs" => {
+            r##"
+agent-browser clickjs - Click an element using JavaScript
+
+Usage: agent-browser clickjs <selector>
+
+Clicks on the specified element using JavaScript element.click() instead of
+coordinate-based CDP mouse events. This bypasses coordinate resolution issues
+(overlapping elements, viewport offsets, fixed-position elements) that can
+cause the standard click to target the wrong element or miss entirely.
+
+When to Use:
+  - The standard click reports success but nothing happens
+  - Elements with complex positioning (fixed, absolute, overlapping layers)
+  - Floating action buttons or elements behind overlays
+
+Note: CDP mouse events do trigger React synthetic events (React 17+ attaches
+at the root). The benefit here is avoiding coordinate resolution problems.
+
+Global Options:
+  --json               Output as JSON
+  --session <name>     Use specific session
+
+Examples:
+  agent-browser clickjs "button"
+  agent-browser clickjs @e1
+  agent-browser clickjs "[data-testid='add-button']"
+"##
+        }
         "dblclick" => {
             r##"
 agent-browser dblclick - Double-click an element

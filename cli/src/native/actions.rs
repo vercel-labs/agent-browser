@@ -1294,6 +1294,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         "snapshot" => handle_snapshot(cmd, state).await,
         "screenshot" => handle_screenshot(cmd, state).await,
         "click" => handle_click(cmd, state).await,
+        "clickjs" => handle_clickjs(cmd, state).await,
         "dblclick" => handle_dblclick(cmd, state).await,
         "fill" => handle_fill(cmd, state).await,
         "type" => handle_type(cmd, state).await,
@@ -2683,6 +2684,35 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
     .await?;
 
     Ok(json!({ "clicked": selector }))
+}
+
+/// Handles clickjs command — JavaScript-based click that bypasses coordinate
+/// resolution issues (e.g. overlapping elements, viewport offsets).
+async fn handle_clickjs(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let selector = cmd
+        .get("selector")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'selector' parameter")?;
+
+    if let Some(ref wb) = state.webdriver_backend {
+        if state.browser.is_none() {
+            wb.click(selector).await?;
+            return Ok(json!({ "clicked": selector, "method": "javascript" }));
+        }
+    }
+
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?.to_string();
+
+    interaction::clickjs(
+        &mgr.client,
+        &session_id,
+        &state.ref_map,
+        selector,
+        &state.iframe_sessions,
+    )
+    .await?;
+    Ok(json!({ "clicked": selector, "method": "javascript" }))
 }
 
 async fn handle_dblclick(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {

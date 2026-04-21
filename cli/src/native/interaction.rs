@@ -26,6 +26,56 @@ pub async fn click(
     dispatch_click(client, &effective_session_id, x, y, button, click_count).await
 }
 
+/// Clicks an element using JavaScript `element.click()` instead of CDP coordinate-based
+/// mouse events. This bypasses coordinate resolution issues (overlapping elements,
+/// viewport offsets, fixed-position elements) that can cause `click` to target the
+/// wrong element or miss entirely.
+///
+/// Note: CDP mouse events *do* trigger React synthetic events (React 17+ attaches at
+/// the root). The benefit here is avoiding coordinate resolution problems, not event
+/// system compatibility.
+pub async fn clickjs(
+    client: &CdpClient,
+    session_id: &str,
+    ref_map: &RefMap,
+    selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
+) -> Result<(), String> {
+    let (object_id, effective_session_id) = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
+
+    // Call element.click() via CDP Runtime.callFunctionOn to bypass coordinate resolution
+    let params = CallFunctionOnParams {
+        object_id: Some(object_id),
+        function_declaration: "function() { 
+            // Scroll element into view first
+            this.scrollIntoView({ behavior: 'instant', block: 'center' });
+            // Trigger the native click
+            this.click(); 
+        }"
+        .to_string(),
+        arguments: None,
+        return_by_value: Some(true),
+        await_promise: None,
+    };
+
+    client
+        .send_command_typed::<_, Value>(
+            "Runtime.callFunctionOn",
+            &params,
+            Some(&effective_session_id),
+        )
+        .await?;
+
+    Ok(())
+}
+
 pub async fn dblclick(
     client: &CdpClient,
     session_id: &str,

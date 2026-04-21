@@ -101,6 +101,7 @@ agent-browser find role button click --name "Submit"
 agent-browser open                    # Launch browser (no navigation); stays on about:blank
 agent-browser open <url>              # Launch + navigate to URL (aliases: goto, navigate)
 agent-browser click <sel>             # Click element (--new-tab to open in new tab)
+agent-browser clickjs <sel>           # Click element via JavaScript (bypasses coordinate issues)
 agent-browser dblclick <sel>          # Double-click element
 agent-browser focus <sel>             # Focus element
 agent-browser type <sel> <text>       # Type into element
