@@ -25,7 +25,10 @@ from .session import LaunchError, Session
 class Sidecar:
     def __init__(self) -> None:
         self.protocol = Protocol()
-        self.session = Session()
+        # Hand the protocol to the session so per-page events (console, crash)
+        # can fan out to the Rust daemon without the session holding a
+        # stdout handle of its own.
+        self.session = Session(protocol=self.protocol)
         self._shutdown = asyncio.Event()
 
     async def run(self) -> int:
@@ -140,6 +143,26 @@ async def _cmd_page_get_text(sidecar: "Sidecar", args: dict) -> dict:
     return await sidecar.session.get_text(args)
 
 
+async def _cmd_page_screenshot(sidecar: "Sidecar", args: dict) -> dict:
+    return await sidecar.session.screenshot(args)
+
+
+async def _cmd_tab_new(sidecar: "Sidecar", args: dict) -> dict:
+    return await sidecar.session.tab_new(args)
+
+
+async def _cmd_tab_switch(sidecar: "Sidecar", args: dict) -> dict:
+    return await sidecar.session.tab_switch(args)
+
+
+async def _cmd_tab_close(sidecar: "Sidecar", args: dict) -> dict:
+    return await sidecar.session.tab_close(args)
+
+
+async def _cmd_tab_list(sidecar: "Sidecar", args: dict) -> dict:
+    return sidecar.session.tab_list(args)
+
+
 _HANDLERS: dict[str, Handler] = {
     "launch": _cmd_launch,
     "page.goto": _cmd_page_goto,
@@ -148,6 +171,11 @@ _HANDLERS: dict[str, Handler] = {
     "page.click": _cmd_page_click,
     "page.fill": _cmd_page_fill,
     "page.getText": _cmd_page_get_text,
+    "page.screenshot": _cmd_page_screenshot,
+    "tab.new": _cmd_tab_new,
+    "tab.switch": _cmd_tab_switch,
+    "tab.close": _cmd_tab_close,
+    "tab.list": _cmd_tab_list,
 }
 
 

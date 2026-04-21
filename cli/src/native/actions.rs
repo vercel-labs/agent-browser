@@ -2266,6 +2266,10 @@ async fn handle_url(state: &DaemonState) -> Result<Value, String> {
 
 fn handle_cdp_url(state: &DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    // `cdp_url` exposes the raw CDP WebSocket endpoint for DevTools / custom
+    // clients to attach to. Camoufox's Juggler isn't CDP, so there's no
+    // WebSocket to hand back. Fail loud rather than return an empty string.
+    let _ = mgr.backend.require_cdp_for("cdp_url")?;
     Ok(json!({ "cdpUrl": mgr.get_cdp_url() }))
 }
 
@@ -2555,6 +2559,47 @@ async fn handle_screenshot(cmd: &Value, state: &mut DaemonState) -> Result<Value
         }
     }
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+
+    // Camoufox path: the sidecar runs Playwright's ``page.screenshot``
+    // directly; ``--full-page`` maps to the ``full_page`` kwarg. Ref-based
+    // annotation is Chrome-only because it relies on CDP's
+    // ``DOM.getBoxModel``/``DOM.requestNode`` round-trips that have no
+    // Playwright analogue in v1. Emitting a structured error here keeps
+    // the failure mode discoverable rather than degrading silently.
+    if mgr.backend.is_camoufox() {
+        if annotate {
+            return Err(
+                "not-yet-supported: --annotate on engine=camoufox (ref-annotated screenshots need CDP DOM methods; v2 item)".to_string(),
+            );
+        }
+        let mut args = json!({
+            "fullPage": cmd
+                .get("fullPage")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            "format": cmd
+                .get("format")
+                .or_else(|| cmd.get("type"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("png"),
+        });
+        if let Some(path) = cmd.get("path").and_then(|v| v.as_str()) {
+            args["path"] = json!(path);
+        }
+        if let Some(q) = cmd.get("quality").and_then(|v| v.as_i64()) {
+            args["quality"] = json!(q);
+        }
+        let result = mgr
+            .camoufox_client()
+            .call("page.screenshot", args)
+            .await?;
+        // Shape the response to match the Chrome path so CLI consumers
+        // don't need to switch on engine. ``annotations`` is intentionally
+        // omitted — the `annotate` path above already rejects upstream.
+        let path = result.get("path").cloned().unwrap_or(Value::Null);
+        return Ok(json!({ "path": path }));
+    }
+
     let session_id = mgr.active_session_id()?.to_string();
 
     let format = cmd
@@ -3758,6 +3803,9 @@ async fn handle_tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
     state.ref_map.clear();
     state.iframe_sessions.clear();
     state.active_frame_id = None;
+    if mgr.backend.is_camoufox() {
+        return mgr.camoufox_tab_new(url, label).await;
+    }
     mgr.tab_new(url, label).await
 }
 
@@ -3772,6 +3820,9 @@ async fn handle_tab_switch(cmd: &Value, state: &mut DaemonState) -> Result<Value
     state.ref_map.clear();
     state.iframe_sessions.clear();
     state.active_frame_id = None;
+    if mgr.backend.is_camoufox() {
+        return mgr.camoufox_tab_switch(tab_id).await;
+    }
     let result = mgr.tab_switch_by_id(tab_id).await?;
 
     if let Some(ref server) = state.stream_server {
@@ -3807,6 +3858,9 @@ async fn handle_tab_close(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     state.ref_map.clear();
     state.iframe_sessions.clear();
     state.active_frame_id = None;
+    if mgr.backend.is_camoufox() {
+        return mgr.camoufox_tab_close(tab_id).await;
+    }
     mgr.tab_close_by_id(tab_id).await
 }
 
@@ -5082,6 +5136,11 @@ async fn handle_stream_status(state: &DaemonState) -> Result<Value, String> {
 
 async fn handle_screencast_start(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    // Screencast is a raw CDP streaming surface (``Page.startScreencast``).
+    // Playwright's only equivalent is video recording, which has a different
+    // shape (file-at-end, not frame-by-frame) — not an in-scope swap for
+    // agent-browser's UI contract. Camoufox will never ship this.
+    let _ = mgr.backend.require_cdp_for("screencast_start")?;
     let session_id = mgr.active_session_id()?.to_string();
 
     if state.screencasting {
@@ -5134,6 +5193,7 @@ async fn handle_screencast_start(cmd: &Value, state: &mut DaemonState) -> Result
 
 async fn handle_screencast_stop(state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let _ = mgr.backend.require_cdp_for("screencast_stop")?;
     let session_id = mgr.active_session_id()?;
 
     if !state.screencasting {

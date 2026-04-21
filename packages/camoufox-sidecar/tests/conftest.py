@@ -45,15 +45,32 @@ class Sidecar:
     def pid(self) -> int:
         return self.proc.pid
 
-    async def read_frame(self, timeout: float = 5.0) -> dict:
+    async def read_frame(
+        self,
+        timeout: float = 5.0,
+        *,
+        include_events: bool = False,
+    ) -> dict:
+        """Read one frame from the sidecar.
+
+        Defaults to skipping ``{"event": ...}`` frames so callers awaiting
+        a response don't race the async ``page.console`` / ``page.crashed``
+        broadcasts wired up in Unit 5. Set ``include_events=True`` to get
+        every frame in order (used by ``expect_event`` and by tests that
+        explicitly want to observe events).
+        """
         assert self.proc.stdout is not None
-        line = await asyncio.wait_for(self.proc.stdout.readline(), timeout=timeout)
-        if not line:
-            raise RuntimeError("sidecar closed stdout before sending a frame")
-        return json.loads(line.decode("utf-8"))
+        while True:
+            line = await asyncio.wait_for(self.proc.stdout.readline(), timeout=timeout)
+            if not line:
+                raise RuntimeError("sidecar closed stdout before sending a frame")
+            frame = json.loads(line.decode("utf-8"))
+            if not include_events and "event" in frame:
+                continue
+            return frame
 
     async def expect_event(self, name: str, timeout: float = 5.0) -> dict:
-        frame = await self.read_frame(timeout=timeout)
+        frame = await self.read_frame(timeout=timeout, include_events=True)
         assert frame.get("event") == name, f"expected event {name!r}, got {frame!r}"
         return frame
 

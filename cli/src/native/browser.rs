@@ -817,21 +817,36 @@ impl BrowserManager {
     }
 
     /// Camoufox path for `navigate`: delegates to the sidecar's `page.goto`
-    /// command. In Unit 3 the response carries `{url, title}` so the CLI
-    /// output shape matches the Chrome path; richer parity (wait_until
-    /// options, redirect tracking) lands in Unit 4.
+    /// command. In Unit 3 the response carried `{url, title}` so the CLI
+    /// output shape matches the Chrome path; Unit 5 adds tab routing — the
+    /// first navigate with no active tab allocates ``t1`` through the
+    /// Rust-side counter so subsequent tabs don't collide.
     async fn camoufox_navigate(
         &mut self,
         url: &str,
         wait_until: WaitUntil,
     ) -> Result<Value, String> {
+        // Ensure at least one tab exists, allocating its id through the
+        // authoritative Rust counter. Without this the sidecar would have
+        // to mint its own "t1", and the "tab ids never reuse" guarantee
+        // would depend on two counters staying in lockstep across a
+        // process boundary.
+        if self.active_page_index >= self.pages.len() {
+            self.camoufox_tab_new(None, None).await?;
+        }
+        let tab_id_str = format_tab_id(self.pages[self.active_page_index].tab_id);
+
         let wait_until_str = match wait_until {
             WaitUntil::Load => "load",
             WaitUntil::DomContentLoaded => "domcontentloaded",
             WaitUntil::NetworkIdle => "networkidle",
             WaitUntil::None => "none",
         };
-        let args = json!({ "url": url, "waitUntil": wait_until_str });
+        let args = json!({
+            "url": url,
+            "waitUntil": wait_until_str,
+            "tabId": tab_id_str,
+        });
         let result = self.camoufox_client().call("page.goto", args).await?;
 
         let page_url = result
@@ -850,6 +865,15 @@ impl BrowserManager {
             if origin != "null" {
                 self.visited_origins.insert(origin);
             }
+        }
+
+        // Keep Rust-side bookkeeping honest so ``tab_list`` / external state
+        // queries see the current URL + title. Without this the PageInfo
+        // entry minted in ``camoufox_tab_new`` stays frozen at its
+        // registration-time values, silently diverging from reality.
+        if let Some(page) = self.pages.get_mut(self.active_page_index) {
+            page.url = page_url.clone();
+            page.title = title.clone();
         }
 
         Ok(json!({ "url": page_url, "title": title }))
@@ -1662,6 +1686,176 @@ impl BrowserManager {
             .await?;
         Ok(())
     }
+
+    // -----------------------------------------------------------------------
+    // Camoufox tab management (Unit 5)
+    //
+    // Tab ID coordination: the Rust side owns ``next_tab_id`` and hands
+    // each freshly assigned ``t<N>`` string down to the sidecar. The sidecar
+    // stores Playwright ``Page`` objects keyed by that string. This keeps
+    // "tab ids never reuse" as a single invariant with one authoritative
+    // counter; the alternative (sidecar-assigned ids relayed back up)
+    // splits that invariant across a process boundary for no gain.
+    // -----------------------------------------------------------------------
+
+    /// Camoufox analogue of ``tab_new`` — delegates to the sidecar, which
+    /// creates a Playwright ``Page`` and registers it under the ``t<N>``
+    /// string the Rust side assigned. Keeps ``self.pages`` in sync so the
+    /// rest of the daemon (``tab_list``, ``resolve_tab_ref``, ``has_tab_id``)
+    /// stays engine-agnostic.
+    pub async fn camoufox_tab_new(
+        &mut self,
+        url: Option<&str>,
+        label: Option<&str>,
+    ) -> Result<Value, String> {
+        if let Some(label) = label {
+            if !is_valid_label(label) {
+                return Err(format!(
+                    "Invalid tab label `{}`; labels must start with a letter and contain only \
+                     letters, digits, `-`, and `_`",
+                    label
+                ));
+            }
+            if self.has_label(label) {
+                return Err(format!(
+                    "Label `{}` is already used by another tab; labels must be unique within a \
+                     session",
+                    label
+                ));
+            }
+        }
+
+        let tab_id = self.next_tab_id;
+        self.next_tab_id += 1;
+        let tab_id_str = format_tab_id(tab_id);
+
+        let mut args = json!({ "tabId": tab_id_str });
+        if let Some(u) = url {
+            args["url"] = json!(u);
+        }
+
+        // Roll the counter back on sidecar failure so we don't burn an id
+        // that never corresponded to a live tab. The counter bump is cheap
+        // but "tab ids never reuse" is a guarantee agents rely on, so the
+        // failure path must not leave `next_tab_id` pointing past a gap
+        // that no agent will ever see.
+        let result = match self.camoufox_client().call("tab.new", args).await {
+            Ok(v) => v,
+            Err(e) => {
+                self.next_tab_id -= 1;
+                return Err(e);
+            }
+        };
+
+        let current_url = result
+            .get("url")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let title = result
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        let index = self.pages.len();
+        let label_owned = label.map(|s| s.to_string());
+        self.pages.push(PageInfo {
+            tab_id,
+            label: label_owned.clone(),
+            target_id: tab_id_str.clone(), // sidecar doesn't expose CDP targets; reuse id
+            session_id: String::new(),
+            url: current_url.clone(),
+            title,
+            target_type: "page".to_string(),
+        });
+        self.active_page_index = index;
+
+        Ok(json!({
+            "tabId": tab_id_str,
+            "label": label_owned,
+            "url": current_url,
+            "total": self.pages.len(),
+        }))
+    }
+
+    pub async fn camoufox_tab_switch(&mut self, tab_id: u32) -> Result<Value, String> {
+        let index = self
+            .pages
+            .iter()
+            .position(|p| p.tab_id == tab_id)
+            .ok_or_else(|| format!("Tab ID {} not found", format_tab_id(tab_id)))?;
+        let tab_id_str = format_tab_id(tab_id);
+        let result = self
+            .camoufox_client()
+            .call("tab.switch", json!({ "tabId": tab_id_str }))
+            .await?;
+        self.active_page_index = index;
+        let url = result
+            .get("url")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let title = result
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if let Some(page) = self.pages.get_mut(index) {
+            page.url = url.clone();
+            page.title = title.clone();
+        }
+        let label = self.pages[index].label.clone();
+        Ok(json!({
+            "tabId": tab_id_str,
+            "label": label,
+            "url": url,
+            "title": title,
+        }))
+    }
+
+    pub async fn camoufox_tab_close(
+        &mut self,
+        tab_id: Option<u32>,
+    ) -> Result<Value, String> {
+        let target_index = match tab_id {
+            Some(id) => self
+                .pages
+                .iter()
+                .position(|p| p.tab_id == id)
+                .ok_or_else(|| format!("Tab ID {} not found", format_tab_id(id)))?,
+            None => self.active_page_index,
+        };
+        if target_index >= self.pages.len() {
+            return Err(format!("Tab index {} out of range", target_index));
+        }
+        if self.pages.len() <= 1 {
+            // Match the Chrome path's behavior: refuse to close the last
+            // tab via `tab close`. Agents that want the "browser is gone"
+            // state call `close` instead, which tears down both the sidecar
+            // and the Playwright browser through a single, tested path.
+            return Err("Cannot close the last tab".to_string());
+        }
+        let page = &self.pages[target_index];
+        let closed_tab_id = page.tab_id;
+        let closed_tab_id_str = format_tab_id(closed_tab_id);
+        let closed_label = page.label.clone();
+        // Tell the sidecar first; only drop our Rust-side bookkeeping once
+        // the Playwright page.close() has actually succeeded, otherwise we
+        // end up with a phantom page in the sidecar.
+        let _ = self
+            .camoufox_client()
+            .call("tab.close", json!({ "tabId": closed_tab_id_str }))
+            .await?;
+        self.pages.remove(target_index);
+        self.update_active_page_after_removal(target_index);
+        Ok(json!({
+            "tabId": closed_tab_id_str,
+            "label": closed_label,
+            "closed": true,
+        }))
+    }
+
 }
 
 /// Core network-idle polling loop, extracted so it can be unit-tested without a
