@@ -46,6 +46,7 @@ installed version.
 - Fast native Rust CLI, not a Node.js wrapper
 - Works with any AI agent (Cursor, Claude Code, Codex, Continue, Windsurf, etc.)
 - Chrome/Chromium via CDP with no Playwright or Puppeteer dependency
+- Automatically hardens Chrome launch in constrained Linux environments by adding `--no-sandbox` and `--disable-dev-shm-usage` when needed
 - Accessibility-tree snapshots with element refs for reliable interaction
 - Sessions, authentication vault, state persistence, video recording
 - Specialized skills for Electron apps, Slack, exploratory testing, cloud providers
