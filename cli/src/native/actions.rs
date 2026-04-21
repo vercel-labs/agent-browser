@@ -1195,6 +1195,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
                 return error_response(
                     &id,
                     &format!("Action '{}' denied by policy: {}", action, reason),
+                    &state.engine,
                 );
             }
             PolicyResult::RequiresConfirmation => {
@@ -1276,7 +1277,11 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
                 state.update_stream_client().await;
             }
             if let Err(e) = auto_launch(state).await {
-                return error_response(&id, &format!("Auto-launch failed: {}", e));
+                return error_response(
+                    &id,
+                    &format!("Auto-launch failed: {}", e),
+                    &state.engine,
+                );
             }
         }
 
@@ -1297,6 +1302,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
                 "Action '{}' is not supported on the WebDriver backend",
                 action
             ),
+            &state.engine,
         );
     }
 
@@ -1459,8 +1465,12 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
     };
 
     let mut resp = match result {
-        Ok(data) => success_response(&id, data),
-        Err(e) => error_response(&id, &super::browser::to_ai_friendly_error(&e)),
+        Ok(data) => success_response(&id, data, &state.engine),
+        Err(e) => error_response(
+            &id,
+            &super::browser::to_ai_friendly_error(&e),
+            &state.engine,
+        ),
     };
 
     // Auto-report pending JavaScript dialog so agents know why commands may hang
@@ -7882,19 +7892,21 @@ async fn handle_mouseup(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
 // Response helpers
 // ---------------------------------------------------------------------------
 
-fn success_response(id: &str, data: Value) -> Value {
+fn success_response(id: &str, data: Value, engine: &str) -> Value {
     json!({
         "id": id,
         "success": true,
         "data": data,
+        "engine": engine,
     })
 }
 
-fn error_response(id: &str, error: &str) -> Value {
+fn error_response(id: &str, error: &str, engine: &str) -> Value {
     json!({
         "id": id,
         "success": false,
         "error": error,
+        "engine": engine,
     })
 }
 
@@ -8094,19 +8106,21 @@ mod tests {
 
     #[test]
     fn test_success_response_structure() {
-        let resp = success_response("cmd-1", json!({"url": "https://example.com"}));
+        let resp = success_response("cmd-1", json!({"url": "https://example.com"}), "chrome");
         assert_eq!(resp["id"], "cmd-1");
         assert_eq!(resp["success"], true);
         assert!(resp["data"].is_object());
         assert_eq!(resp["data"]["url"], "https://example.com");
+        assert_eq!(resp["engine"], "chrome");
     }
 
     #[test]
     fn test_error_response_structure() {
-        let resp = error_response("cmd-2", "Something went wrong");
+        let resp = error_response("cmd-2", "Something went wrong", "camoufox");
         assert_eq!(resp["id"], "cmd-2");
         assert_eq!(resp["success"], false);
         assert_eq!(resp["error"], "Something went wrong");
+        assert_eq!(resp["engine"], "camoufox");
     }
 
     #[tokio::test]

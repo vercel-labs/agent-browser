@@ -8,6 +8,7 @@
 //! repairs (reinstalling Chrome, purging old state files, generating a
 //! missing encryption key) are gated behind `--fix`.
 
+mod camoufox;
 mod chrome;
 mod config;
 mod daemon;
@@ -98,6 +99,7 @@ pub fn run_doctor(opts: DoctorOptions) -> i32 {
 
     environment::check(&mut checks);
     chrome::check(&mut checks);
+    camoufox::check(&mut checks);
     daemon::check(&mut checks);
     config::check(&mut checks);
     security::check(&mut checks);

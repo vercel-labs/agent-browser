@@ -33,6 +33,12 @@ pub struct Response {
     pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
+    /// Engine label the daemon was driving when this response was produced
+    /// ("chrome", "lightpanda", "camoufox", "safari"). Optional on the wire
+    /// so local-only commands and older daemons without engine context still
+    /// round-trip through this struct cleanly.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub engine: Option<String>,
 }
 
 #[allow(dead_code)]

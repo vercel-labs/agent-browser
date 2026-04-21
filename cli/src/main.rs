@@ -703,12 +703,14 @@ fn main() {
                 data: Some(data),
                 error: None,
                 warning: None,
+                engine: None,
             },
             Err(e) => connection::Response {
                 success: false,
                 data: None,
                 error: Some(e),
                 warning: None,
+                engine: None,
             },
         };
         let output_opts = OutputOptions::from_flags(&flags);
@@ -1159,13 +1161,19 @@ fn main() {
 
         match send_command(launch_cmd, &flags.session) {
             Ok(resp) if !resp.success => {
-                // Launch command failed (e.g., invalid state file, profile error)
-                let error_msg = resp
-                    .error
-                    .unwrap_or_else(|| "Browser launch failed".to_string());
+                // Launch command failed (e.g., invalid state file, profile error).
+                // Route through `print_response_with_opts` so the engine label
+                // (set by the daemon before validation) survives to --json
+                // callers — telemetry needs to know which engine rejected the
+                // launch.
                 if flags.json {
-                    print_json_error(error_msg);
+                    let output_opts = OutputOptions::from_flags(&flags);
+                    print_response_with_opts(&resp, None, &output_opts);
                 } else {
+                    let error_msg = resp
+                        .error
+                        .as_deref()
+                        .unwrap_or("Browser launch failed");
                     eprintln!("{} {}", color::error_indicator(), error_msg);
                 }
                 exit(1);
