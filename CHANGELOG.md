@@ -1,8 +1,71 @@
 # agent-browser
 
-## 0.25.3
+## 0.26.0
 
 <!-- release:start -->
+### New Features
+
+- **`doctor` command** - Added `agent-browser doctor` for one-shot diagnosis of an install. Checks environment, Chrome, running daemons, config files, security, providers, and network connectivity; auto-cleans stale daemon sidecar files on every run; and performs a live headless launch test. Supports `--offline` to skip network probes, `--quick` to skip the launch test, `--fix` for opt-in repairs (install missing Chrome, close version-mismatched daemons, prune expired state files), and `--json` for structured output (#1254)
+- **Stable tab ids and labels** - Tabs now have stable string ids like `t1`, `t2`, `t3` that don't shift when other tabs close or popups appear. Tabs can be created with a memorable label via `tab new --label <name> [<url>]`, and labels are interchangeable with `t<N>` ids everywhere a tab ref is accepted (`tab <id|label>`, `tab close <id|label>`). Bare-integer input is rejected with a teaching error so agents can't mistake stable handles for positional indices (#892, #1249, #1250)
+- **`core` skill** - Renamed the built-in `agent-browser` skill to `core` and replaced its ~40-line discovery stub with a ~420-line usage guide covering the core snapshot-ref-act loop, reading, interacting, waiting, common workflows, troubleshooting, and global flags. `agent-browser skills get core` now returns content agents can use directly; `--full` adds references and templates. Added a `hidden:` frontmatter flag so the original `agent-browser` stub stays reachable for `npx skills add` discovery without polluting `skills list` (#1253)
+- **JSON Schema for config files** - Added `agent-browser.schema.json` describing every config option with types and descriptions, enabling IDE autocomplete and validation when referenced via `$schema` in `agent-browser.json` or `~/.agent-browser/config.json`. The schema is served from the docs site at `https://agent-browser.dev/schema.json` (#1242, #1248)
+
+### Bug Fixes
+
+- Fixed **`--state` / `AGENT_BROWSER_STATE`** not actually loading saved browser state (cookies and localStorage) at launch. The flag had been fully plumbed through parsing, env propagation, and validation since the native Rust rewrite, but the load step was never wired up. Storage state now loads after launch across all four paths: explicit launch, auto-connect, provider, and local Chrome (#1241)
+
+### Documentation
+
+- `--help` output now shows the **skills** section first so agents discover `skills get core` (the canonical usage guide) before the core command list (#1251)
+
+### Contributors
+
+- @ctate
+- @DJRHails
+- @michael-farah
+- @tomdale
+<!-- release:end -->
+
+## 0.25.5
+
+### Bug Fixes
+
+- Fixed **`--auto-connect` CDP discovery** preferring HTTP endpoint discovery over the DevToolsActivePort websocket path, which could fail on some setups. The CLI now reads the websocket path from DevToolsActivePort first and only falls back to HTTP discovery (#1218)
+- Fixed **recording context viewport** not inheriting the active viewport dimensions, causing recordings to use default resolution instead of the configured viewport (#1208)
+- Fixed **`get box` and `get styles`** printing no data in text mode (#1231, #1233)
+- Fixed **active page changing** when closing or removing earlier tabs. The previously focused page is now preserved correctly (#1220)
+
+### Contributors
+
+- @ctate
+- @jin-2-kakaoent
+- @officialasishkumar
+
+## 0.25.4
+
+### New Features
+
+- **`skills` command** - Added `agent-browser skills` command for discovering and installing agent skills, with built-in evaluation support for testing skills against live browser sessions (#1225, #1227)
+
+### Bug Fixes
+
+- Fixed **custom viewport dimensions** not being used in streaming frame metadata and image resolution (#1033)
+- Fixed **`--ignore-https-errors`** not being re-applied to recording contexts, causing TLS errors during screen recordings (#1178)
+- Fixed **duplicate option numbering** in the auth skill documentation (#1161)
+
+### Documentation
+
+- The docs site header now **dynamically fetches** the GitHub star count (#1202)
+
+### Contributors
+
+- @ctate
+- @jin-2-kakaoent
+- @juniper929
+- @Marshall-Sun
+
+## 0.25.3
+
 ### Bug Fixes
 
 - Fixed **hidden radio/checkbox inputs missing from snapshot refs** when a `<label>` wraps a `display:none` `<input type="radio">` or `<input type="checkbox">`. Chrome excludes these inputs from the accessibility tree entirely, making it impossible for AI agents to identify radio buttons and checkboxes via refs. Hidden inputs inside elements are now detected during cursor-interactive scanning and their parent nodes are promoted to the correct role with proper name and checked state (#1085)
@@ -16,7 +79,6 @@
 - @ctate
 - @jin-2-kakaoent
 - @hyunjinee
-<!-- release:end -->
 
 ## 0.25.2
 

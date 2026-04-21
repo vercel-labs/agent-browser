@@ -121,6 +121,9 @@ jobs:
         run: |
           cargo run --manifest-path cli/Cargo.toml -- install --with-deps
 
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
       - name: Run e2e tests
         run: cargo test --profile ci --manifest-path cli/Cargo.toml e2e -- --ignored --test-threads=1
 

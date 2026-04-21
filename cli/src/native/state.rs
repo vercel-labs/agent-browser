@@ -714,12 +714,19 @@ pub fn dispatch_state_command(cmd: &Value) -> Option<Result<Value, String>> {
     }
 }
 
-pub fn get_sessions_dir() -> PathBuf {
+/// Return the agent-browser state root (`~/.agent-browser`, falling back to
+/// `<tempdir>/agent-browser` when the home directory can't be resolved).
+/// This is the parent of `sessions/`, auth storage, and the encryption key.
+pub fn get_state_dir() -> PathBuf {
     if let Some(home) = dirs::home_dir() {
-        home.join(".agent-browser").join("sessions")
+        home.join(".agent-browser")
     } else {
-        std::env::temp_dir().join("agent-browser").join("sessions")
+        std::env::temp_dir().join("agent-browser")
     }
+}
+
+pub fn get_sessions_dir() -> PathBuf {
+    get_state_dir().join("sessions")
 }
 
 #[cfg(test)]

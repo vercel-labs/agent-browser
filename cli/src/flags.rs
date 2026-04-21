@@ -771,6 +771,10 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--verbose",
         "-q",
         "--quiet",
+        // doctor-specific flags; harmless on other commands (ignored)
+        "--offline",
+        "--quick",
+        "--fix",
     ];
     // Global flags that always take a value (need to skip the next arg too)
     const GLOBAL_FLAGS_WITH_VALUE: &[&str] = &[

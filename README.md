@@ -290,11 +290,30 @@ agent-browser network har stop [output.har]    # Stop and save HAR (temp path if
 ### Tabs & Windows
 
 ```bash
-agent-browser tab                     # List tabs
-agent-browser tab new [url]           # New tab (optionally with URL)
-agent-browser tab <n>                 # Switch to tab n
-agent-browser tab close [n]           # Close tab
-agent-browser window new              # New window
+agent-browser tab                              # List tabs (shows `tabId` and optional label)
+agent-browser tab new [url]                    # New tab (optionally with URL)
+agent-browser tab new --label docs [url]       # New tab with a user-assigned label
+agent-browser tab <t<N>|label>                 # Switch to a tab by id or label
+agent-browser tab close [t<N>|label]           # Close a tab (defaults to active)
+agent-browser window new                       # New window
+```
+
+Tab ids are stable strings of the form `t1`, `t2`, `t3`. They're never reused
+within a session, so scripts and agents can keep referring to the same tab
+even after other tabs are opened or closed. Positional integers like `tab 2`
+are **not** accepted; the `t` prefix disambiguates handles from indices and
+mirrors the `@e1` convention used for element refs.
+
+You can also assign a memorable label (`docs`, `app`, `admin`) and use it
+interchangeably with the id. Labels are never auto-generated and never
+rewritten on navigation — they're yours to name and keep:
+
+```bash
+agent-browser tab new --label docs https://docs.example.com
+agent-browser tab docs               # switch to the docs tab
+agent-browser snapshot               # populate refs for docs
+agent-browser click @e3              # click uses docs's refs
+agent-browser tab close docs         # close by label
 ```
 
 ### Frames
@@ -369,7 +388,28 @@ agent-browser reload                  # Reload page
 agent-browser install                 # Download Chrome from Chrome for Testing (Google's official automation channel)
 agent-browser install --with-deps     # Also install system deps (Linux)
 agent-browser upgrade                 # Upgrade agent-browser to the latest version
+agent-browser doctor                  # Diagnose the install and auto-clean stale daemon files
+agent-browser doctor --fix            # Also run destructive repairs (reinstall Chrome, purge old state, ...)
+agent-browser doctor --offline --quick  # Skip network probes and the live launch test
 ```
+
+`doctor` checks your environment, Chrome install, daemon state, config files,
+encryption key, providers, network reachability, and runs a live headless
+browser launch test. Stale socket/pid sidecar files are auto-cleaned. Output
+is also available as `--json` for agents.
+
+### Skills
+
+```bash
+agent-browser skills                  # List available skills
+agent-browser skills list             # Same as above
+agent-browser skills get <name>       # Output a skill's full content
+agent-browser skills get <name> --full  # Include references and templates
+agent-browser skills get --all        # Output every skill
+agent-browser skills path [name]      # Print skill directory path
+```
+
+Serves bundled skill content that always matches the installed CLI version. AI agents use this to get current instructions rather than relying on cached copies. Set `AGENT_BROWSER_SKILLS_DIR` to override the skills directory path.
 
 ## Authentication
 
@@ -716,6 +756,15 @@ AGENT_BROWSER_CONFIG=./ci-config.json agent-browser open example.com
 ```
 
 All options from the table above can be set in the config file using camelCase keys (e.g., `--executable-path` becomes `"executablePath"`, `--proxy-bypass` becomes `"proxyBypass"`). Unknown keys are ignored for forward compatibility.
+
+A [JSON Schema](agent-browser.schema.json) is available for IDE autocomplete and validation. Add a `$schema` key to your config file to enable it:
+
+```json
+{
+  "$schema": "https://agent-browser.dev/schema.json",
+  "headed": true
+}
+```
 
 Boolean flags accept an optional `true`/`false` value to override config settings. For example, `--headed false` disables `"headed": true` from config. A bare `--headed` is equivalent to `--headed true`.
 
@@ -1144,7 +1193,7 @@ Install as a Claude Code skill:
 npx skills add vercel-labs/agent-browser
 ```
 
-This adds the skill to `.claude/skills/agent-browser/SKILL.md` in your project. The skill teaches Claude Code the full agent-browser workflow, including the snapshot-ref interaction pattern, session management, and timeout handling.
+This adds a thin discovery stub at `.claude/skills/agent-browser/SKILL.md`. The stub is intentionally minimal — it points Claude Code at `agent-browser skills get core` to load the actual workflow content at runtime. This way the instructions always match the installed CLI version instead of going stale between releases.
 
 ### AGENTS.md / CLAUDE.md
 

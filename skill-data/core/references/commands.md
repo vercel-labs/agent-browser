@@ -166,13 +166,40 @@ agent-browser network requests --filter api    # Filter requests
 ## Tabs and Windows
 
 ```bash
-agent-browser tab                 # List tabs
-agent-browser tab new [url]       # New tab
-agent-browser tab 2               # Switch to tab by index
-agent-browser tab close           # Close current tab
-agent-browser tab close 2         # Close tab by index
-agent-browser window new          # New window
+agent-browser tab                              # List tabs with tabId and label
+agent-browser tab new [url]                    # New tab
+agent-browser tab new --label docs [url]       # New tab with a memorable label
+agent-browser tab t2                           # Switch to tab by id
+agent-browser tab docs                         # Switch to tab by label
+agent-browser tab close                        # Close current tab
+agent-browser tab close t2                     # Close tab by id
+agent-browser tab close docs                   # Close tab by label
+agent-browser window new                       # New window
 ```
+
+Tab ids are stable strings of the form `t1`, `t2`, `t3`. They're never reused
+within a session, so the same id keeps referring to the same tab across
+commands. Positional integers are **not** accepted — `tab 2` errors with a
+teaching message; use `t2`.
+
+User-assigned labels (`docs`, `app`, `admin`) are interchangeable with ids
+everywhere a tab ref is accepted. Labels are the agent-friendly way to write
+multi-tab workflows:
+
+```bash
+agent-browser tab new --label docs https://docs.example.com
+agent-browser tab new --label app  https://app.example.com
+agent-browser tab docs                   # switch to docs
+agent-browser snapshot                   # populate refs for docs
+agent-browser click @e1                  # ref click on docs
+agent-browser tab app                    # switch to app
+agent-browser tab close docs             # close by label
+```
+
+Labels are never auto-generated, never rewritten on navigation, and must be
+unique within a session. To interact with another tab, switch to it first:
+the daemon maintains a single active tab, so refs (`@eN`) belong to the tab
+that was active when the snapshot ran.
 
 ## Frames
 

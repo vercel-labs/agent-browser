@@ -1,0 +1,16 @@
+{
+  "name": "agent-browser-evals",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "eval": "bun run run.ts",
+    "eval:claude": "bun run run.ts --provider claude",
+    "eval:codex": "bun run run.ts --provider codex",
+    "eval:judge": "bun run run.ts --judge",
+    "eval:json": "bun run run.ts --json"
+  },
+  "devDependencies": {
+    "bun-types": "^1.3.12"
+  }
+}

@@ -1010,28 +1010,55 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
         }
 
         // === Tabs ===
-        "tab" => match rest.first().copied() {
-            Some("new") => {
-                let mut cmd = json!({ "id": id, "action": "tab_new" });
-                if let Some(url) = rest.get(1) {
-                    cmd["url"] = json!(url);
+        "tab" => {
+            match rest.first().copied() {
+                Some("new") => {
+                    // Accepted forms:
+                    //   tab new [url]
+                    //   tab new --label <name> [url]
+                    //   tab new [url] --label <name>
+                    let mut cmd = json!({ "id": id, "action": "tab_new" });
+                    let mut i = 1;
+                    while i < rest.len() {
+                        match rest[i] {
+                            "--label" => {
+                                let name = rest.get(i + 1).ok_or(ParseError::MissingArguments {
+                                    context: "tab new --label".to_string(),
+                                    usage: "tab new --label <name> [url]",
+                                })?;
+                                cmd["label"] = json!(name);
+                                i += 2;
+                            }
+                            other if !other.starts_with("--") && cmd.get("url").is_none() => {
+                                cmd["url"] = json!(other);
+                                i += 1;
+                            }
+                            other => {
+                                return Err(ParseError::UnknownSubcommand {
+                                    subcommand: other.to_string(),
+                                    valid_options: &["--label", "<url>"],
+                                });
+                            }
+                        }
+                    }
+                    Ok(cmd)
                 }
-                Ok(cmd)
-            }
-            Some("list") => Ok(json!({ "id": id, "action": "tab_list" })),
-            Some("close") => {
-                let mut cmd = json!({ "id": id, "action": "tab_close" });
-                if let Some(index) = rest.get(1).and_then(|s| s.parse::<i32>().ok()) {
-                    cmd["index"] = json!(index);
+                Some("list") => Ok(json!({ "id": id, "action": "tab_list" })),
+                Some("close") => {
+                    let mut cmd = json!({ "id": id, "action": "tab_close" });
+                    if let Some(tab_ref) = rest.get(1) {
+                        cmd["tabId"] = json!(tab_ref);
+                    }
+                    Ok(cmd)
                 }
-                Ok(cmd)
+                Some(tab_ref) => Ok(json!({
+                    "id": id,
+                    "action": "tab_switch",
+                    "tabId": tab_ref,
+                })),
+                None => Ok(json!({ "id": id, "action": "tab_list" })),
             }
-            Some(n) if n.parse::<i32>().is_ok() => {
-                let index = n.parse::<i32>().expect("already checked parse succeeds");
-                Ok(json!({ "id": id, "action": "tab_switch", "index": index }))
-            }
-            _ => Ok(json!({ "id": id, "action": "tab_list" })),
-        },
+        }
 
         // === Window ===
         "window" => {
@@ -2844,16 +2871,109 @@ mod tests {
     }
 
     #[test]
-    fn test_tab_switch() {
-        let cmd = parse_command(&args("tab 2"), &default_flags()).unwrap();
+    fn test_tab_switch_by_id() {
+        let cmd = parse_command(&args("tab t2"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "tab_switch");
-        assert_eq!(cmd["index"], 2);
+        assert_eq!(cmd["tabId"], "t2");
+    }
+
+    #[test]
+    fn test_tab_switch_by_label() {
+        let cmd = parse_command(&args("tab docs"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "tab_switch");
+        assert_eq!(cmd["tabId"], "docs");
     }
 
     #[test]
     fn test_tab_close() {
         let cmd = parse_command(&args("tab close"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "tab_close");
+    }
+
+    #[test]
+    fn test_tab_close_with_id() {
+        let cmd = parse_command(&args("tab close t2"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "tab_close");
+        assert_eq!(cmd["tabId"], "t2");
+    }
+
+    #[test]
+    fn test_tab_close_with_label() {
+        let cmd = parse_command(&args("tab close docs"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "tab_close");
+        assert_eq!(cmd["tabId"], "docs");
+    }
+
+    #[test]
+    fn test_tab_sends_string_tab_id() {
+        let cmd = parse_command(&args("tab t2"), &default_flags()).unwrap();
+        assert!(
+            cmd["tabId"].is_string(),
+            "tabId must be a string, got: {:?}",
+            cmd["tabId"]
+        );
+        assert!(cmd.get("index").is_none());
+    }
+
+    #[test]
+    fn test_tab_new_with_label() {
+        let cmd = parse_command(&args("tab new --label docs"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "tab_new");
+        assert_eq!(cmd["label"], "docs");
+    }
+
+    #[test]
+    fn test_tab_new_with_label_and_url() {
+        let cmd = parse_command(
+            &args("tab new --label docs https://docs.example.com"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "tab_new");
+        assert_eq!(cmd["label"], "docs");
+        assert_eq!(cmd["url"], "https://docs.example.com");
+    }
+
+    #[test]
+    fn test_tab_new_with_url_then_label() {
+        let cmd = parse_command(
+            &args("tab new https://docs.example.com --label docs"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["url"], "https://docs.example.com");
+        assert_eq!(cmd["label"], "docs");
+    }
+
+    #[test]
+    fn test_tab_no_args_defaults_to_list() {
+        let cmd = parse_command(&args("tab"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "tab_list");
+    }
+
+    #[test]
+    fn test_tab_unknown_flag_errors() {
+        // Unknown flags on `tab new` must error instead of being silently
+        // dropped. This protects against typos like `--labl` or `--new-tab`.
+        let result = parse_command(
+            &args("tab new --unknown-flag https://example.com"),
+            &default_flags(),
+        );
+        assert!(
+            result.is_err(),
+            "tab new with an unknown flag must error, got: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_tab_non_keyword_treated_as_ref() {
+        // After the shift to `t<N>`/label ids, non-keyword tokens (`select`,
+        // `docs`, etc.) are valid label refs; `tab <something>` routes to
+        // tab_switch and the runtime decides whether the label exists.
+        let cmd = parse_command(&args("tab select"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "tab_switch");
+        assert_eq!(cmd["tabId"], "select");
     }
 
     // === Network ===

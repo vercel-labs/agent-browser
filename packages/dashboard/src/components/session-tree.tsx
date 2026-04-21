@@ -160,7 +160,7 @@ function TabNode({ tab, isViewed, isSessionActive, onClose, onSwitch, onSelectSe
         >
           <TabFavicon url={tab.url} />
           <span className="min-w-0 flex-1 truncate">
-            {tab.title || tab.url || `Tab ${tab.index}`}
+            {tab.title || tab.url || `Tab ${tab.label ?? tab.tabId}`}
           </span>
           {tab.active && (
             <span className="shrink-0 rounded border border-border px-1 py-px text-[9px] leading-none text-muted-foreground">
@@ -199,9 +199,9 @@ function SessionNode({
   expanded: boolean;
   onSelect: () => void;
   onToggle: () => void;
-  onCloseTab: (tabIndex: number) => void;
+  onCloseTab: (tabRef: string) => void;
   onAddTab: () => void;
-  onSwitchTab: (tabIndex: number) => void;
+  onSwitchTab: (tabRef: string) => void;
   onClose: () => void;
   onKill: () => void;
 }) {
@@ -319,9 +319,20 @@ function SessionNode({
       </Dialog>
       <CollapsibleContent>
         <div className="overflow-hidden pb-1">
-          {tabs.map((tab) => (
-            <TabNode key={tab.index} tab={tab} isViewed={isActive && tab.active} isSessionActive={isActive} onClose={() => onCloseTab(tab.index)} onSwitch={() => onSwitchTab(tab.index)} onSelectSession={onSelect} />
-          ))}
+          {tabs.map((tab) => {
+            const tabRef = tab.label ?? tab.tabId;
+            return (
+              <TabNode
+                key={tab.tabId}
+                tab={tab}
+                isViewed={isActive && tab.active}
+                isSessionActive={isActive}
+                onClose={() => onCloseTab(tabRef)}
+                onSwitch={() => onSwitchTab(tabRef)}
+                onSelectSession={onSelect}
+              />
+            );
+          })}
           <button
             onClick={onAddTab}
             className="flex w-full items-center gap-2 py-1 pr-1 pl-7 text-xs text-muted-foreground hover:text-foreground"
@@ -447,9 +458,9 @@ export function SessionTree() {
                 expanded={isExpanded(s.port)}
                 onSelect={() => setActivePort(s.port)}
                 onToggle={() => toggleExpanded(s.port)}
-                onCloseTab={(tabIndex) => dispatchCloseTab({ port: s.port, tabIndex })}
+                onCloseTab={(tabRef) => dispatchCloseTab({ port: s.port, tabRef })}
                 onAddTab={() => dispatchAddTab(s.port)}
-                onSwitchTab={(tabIndex) => dispatchSwitchTab({ port: s.port, tabIndex })}
+                onSwitchTab={(tabRef) => dispatchSwitchTab({ port: s.port, tabRef })}
                 onClose={() => dispatchCloseSession(s.port)}
                 onKill={() => dispatchKillSession(s.port)}
               />
