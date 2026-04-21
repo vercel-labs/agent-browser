@@ -49,6 +49,21 @@ yarn.lock
 # Windows debug instance config
 scripts/windows-debug/.instance
 
+# Browser auth/session state (never commit)
+auth.json
+my-auth.json
+oauth-state.json
+*.auth.json
+*.auth-state.json
+*.storage-state.json
+*.session.json
+*.cookies.json
+*.state.json
+.agent-browser/
+browser-data/
+browser-profile/
+playwright/.auth/
+
 # opensrc - source code for packages
 opensrc/
 

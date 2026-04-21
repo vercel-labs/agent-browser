@@ -1447,6 +1447,30 @@ impl BrowserManager {
         self.pages.iter().any(|p| p.target_id == target_id)
     }
 
+    pub fn find_page_index_by_target_id(&self, target_id: &str) -> Option<usize> {
+        self.pages.iter().position(|p| p.target_id == target_id)
+    }
+
+    /// Switch the active tab to the page with the given `target_id`.
+    /// Returns the page index on success.  If the target_id is already active
+    /// the switch is a no-op.
+    pub async fn switch_to_target(&mut self, target_id: &str) -> Result<usize, String> {
+        let index = self
+            .find_page_index_by_target_id(target_id)
+            .ok_or_else(|| format!("Named tab target '{}' no longer exists", target_id))?;
+        if index != self.active_page_index {
+            self.tab_switch(index).await?;
+        }
+        Ok(index)
+    }
+
+    /// Returns the target_id of the currently active page, if any.
+    pub fn active_target_id(&self) -> Option<&str> {
+        self.pages
+            .get(self.active_page_index)
+            .map(|p| p.target_id.as_str())
+    }
+
     pub fn page_count(&self) -> usize {
         self.pages.len()
     }

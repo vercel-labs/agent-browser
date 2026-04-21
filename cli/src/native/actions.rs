@@ -199,6 +199,21 @@ fn launch_hash(opts: &LaunchOptions) -> u64 {
     h.finish()
 }
 
+/// Per-tab state preserved between commands when `--tabname` routing is used.
+/// Each named tab has its own element ref map, active frame, and iframe sessions
+/// so that multiple tabs can be driven independently within the same daemon.
+#[derive(Debug)]
+pub struct NamedTabState {
+    /// CDP target_id of the browser tab backing this named slot.
+    pub target_id: String,
+    /// Element ref map for this tab (populated by snapshot commands).
+    pub ref_map: RefMap,
+    /// Active cross-origin frame id, if any.
+    pub active_frame_id: Option<String>,
+    /// Frame-id → CDP session-id for cross-origin iframes.
+    pub iframe_sessions: HashMap<String, String>,
+}
+
 pub struct DaemonState {
     pub browser: Option<BrowserManager>,
     pub appium: Option<AppiumManager>,
@@ -210,6 +225,8 @@ pub struct DaemonState {
     pub event_tracker: EventTracker,
     pub session_name: Option<String>,
     pub session_id: String,
+    /// Named tab bindings managed by `--tabname`.
+    pub named_tabs: HashMap<String, NamedTabState>,
     pub tracing_state: TracingState,
     pub recording_state: RecordingState,
     event_rx: Option<broadcast::Receiver<CdpEvent>>,
@@ -280,6 +297,7 @@ impl DaemonState {
             event_tracker: EventTracker::new(),
             session_name: env::var("AGENT_BROWSER_SESSION_NAME").ok(),
             session_id: env::var("AGENT_BROWSER_SESSION").unwrap_or_else(|_| "default".to_string()),
+            named_tabs: HashMap::new(),
             tracing_state: TracingState::new(),
             recording_state: RecordingState::new(),
             event_rx: None,
@@ -1150,6 +1168,133 @@ impl Drop for DaemonState {
     }
 }
 
+// ─── Named tab helpers ────────────────────────────────────────────────────────
+
+/// Route the daemon to the named tab before a command executes.
+/// Creates the tab in the browser if it doesn't exist yet, or re-creates it if
+/// the backing page was closed.  Restores the tab's per-tab state (ref_map,
+/// active_frame_id, iframe_sessions) into the daemon's active slots.
+async fn setup_named_tab(tab_name: &str, state: &mut DaemonState) -> Result<(), String> {
+    // Phase 1: Read existing target_id from named_tabs *before* touching browser,
+    // to avoid holding simultaneous borrows of state.browser and state.named_tabs.
+    let existing_target_id: Option<String> =
+        state.named_tabs.get(tab_name).map(|n| n.target_id.clone());
+
+    // Phase 2: Decide which target_id to use.  Check browser liveness without
+    // holding a named_tabs borrow.
+    let target_id: String = match existing_target_id {
+        Some(ref tid)
+            if state
+                .browser
+                .as_ref()
+                .map_or(false, |b| b.find_page_index_by_target_id(tid).is_some()) =>
+        {
+            // Existing tab is still alive – reuse it.
+            tid.clone()
+        }
+        _ => {
+            // No existing entry, or the backing page was closed externally.
+            // Create a new browser tab.
+            let browser = state
+                .browser
+                .as_mut()
+                .ok_or("Browser not launched")?;
+            browser.tab_new(None).await?;
+            browser
+                .active_target_id()
+                .ok_or("No active page after tab_new")?
+                .to_string()
+        }
+    };
+
+    // Phase 3: Switch the browser's active page to target_id.
+    // Drop the browser borrow at end of this block before touching named_tabs.
+    {
+        let browser = state.browser.as_mut().ok_or("Browser not launched")?;
+        browser.switch_to_target(&target_id).await?;
+    }
+
+    // Phase 4: Restore per-tab isolated state into the daemon's active slots.
+    if let Some(named) = state.named_tabs.get(tab_name) {
+        let saved_ref_map = named.ref_map.clone();
+        let saved_frame = named.active_frame_id.clone();
+        let saved_iframe = named.iframe_sessions.clone();
+        state.ref_map = saved_ref_map;
+        state.active_frame_id = saved_frame;
+        state.iframe_sessions = saved_iframe;
+    } else {
+        // First visit: clear daemon slots and register the new entry.
+        state.ref_map = RefMap::new();
+        state.active_frame_id = None;
+        state.iframe_sessions = HashMap::new();
+        state.named_tabs.insert(
+            tab_name.to_string(),
+            NamedTabState {
+                target_id: target_id.clone(),
+                ref_map: RefMap::new(),
+                active_frame_id: None,
+                iframe_sessions: HashMap::new(),
+            },
+        );
+    }
+
+    // Phase 5: Always keep stored target_id in sync (handles recreation case).
+    if let Some(named) = state.named_tabs.get_mut(tab_name) {
+        named.target_id = target_id;
+    }
+
+    Ok(())
+}
+
+/// Persist the daemon's current per-tab state back into the named tab slot
+/// after a command finishes.
+fn save_named_tab(tab_name: &str, state: &mut DaemonState) {
+    // Collect all values *before* taking a mutable borrow on named_tabs to
+    // avoid simultaneous borrow conflicts with state.browser / state.ref_map.
+    let current_target_id: Option<String> = state
+        .browser
+        .as_ref()
+        .and_then(|b| b.active_target_id())
+        .map(|s| s.to_string());
+    let ref_map_snap = state.ref_map.clone();
+    let frame_id = state.active_frame_id.clone();
+    let iframe_sessions = state.iframe_sessions.clone();
+
+    if let Some(named) = state.named_tabs.get_mut(tab_name) {
+        if let Some(tid) = current_target_id {
+            named.target_id = tid;
+        }
+        named.ref_map = ref_map_snap;
+        named.active_frame_id = frame_id;
+        named.iframe_sessions = iframe_sessions;
+    }
+}
+
+/// Handle the `tab_name_list` action: return all registered named tabs with
+/// their current URL and title (looked up from the browser page list).
+async fn handle_tab_name_list(state: &mut DaemonState) -> Result<Value, String> {
+    let mut tabs = Vec::new();
+    let pages = state
+        .browser
+        .as_ref()
+        .map(|b| b.pages_list())
+        .unwrap_or_default();
+
+    for (name, named) in &state.named_tabs {
+        let page_info = pages.iter().find(|p| p.target_id == named.target_id);
+        tabs.push(json!({
+            "name": name,
+            "target_id": named.target_id,
+            "url": page_info.map(|p| p.url.as_str()).unwrap_or(""),
+            "title": page_info.map(|p| p.title.as_str()).unwrap_or(""),
+            "alive": page_info.is_some(),
+        }));
+    }
+    Ok(json!({ "tabs": tabs }))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
     let action = cmd.get("action").and_then(|v| v.as_str()).unwrap_or("");
     let id = cmd
@@ -1281,6 +1426,30 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         );
     }
 
+    // Named-tab routing: if the command carries a `tab_name` field, switch the
+    // browser's active page to that named slot before executing the action, then
+    // persist any state changes back afterwards.
+    let tab_name_opt: Option<String> = cmd
+        .get("tab_name")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    if let Some(ref tab_name) = tab_name_opt {
+        // `tab_name_list` is meta – it doesn't modify tab state, handle it directly.
+        if action == "tab_name_list" {
+            let res = handle_tab_name_list(state).await;
+            let data = match res {
+                Ok(v) => v,
+                Err(e) => return error_response(&id, &e),
+            };
+            return json!({ "id": id, "success": true, "data": data });
+        }
+
+        if let Err(e) = setup_named_tab(tab_name, state).await {
+            return error_response(&id, &format!("Named tab setup failed: {}", e));
+        }
+    }
+
     let result = match action {
         "launch" => handle_launch(cmd, state).await,
         "navigate" => handle_navigate(cmd, state).await,
@@ -1341,6 +1510,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         "tab_new" => handle_tab_new(cmd, state).await,
         "tab_switch" => handle_tab_switch(cmd, state).await,
         "tab_close" => handle_tab_close(cmd, state).await,
+        "tab_name_list" => handle_tab_name_list(state).await,
         "viewport" => handle_viewport(cmd, state).await,
         "useragent" | "user_agent" => handle_user_agent(cmd, state).await,
         "set_media" => handle_set_media(cmd, state).await,
@@ -1446,6 +1616,11 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         "mouseup" => handle_mouseup(cmd, state).await,
         _ => Err(format!("Not yet implemented: {}", action)),
     };
+
+    // Persist per-tab state changes back to the named tab slot.
+    if let Some(ref tab_name) = tab_name_opt {
+        save_named_tab(tab_name, state);
+    }
 
     let mut resp = match result {
         Ok(data) => success_response(&id, data),
