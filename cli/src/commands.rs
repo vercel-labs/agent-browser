@@ -71,6 +71,155 @@ pub fn gen_id() -> String {
     )
 }
 
+/// Parse a cookies file in one of three auto-detected formats:
+///
+/// 1. JSON array — `[{"name":"x","value":"y"}, ...]`
+/// 2. cURL dump  — the output of DevTools → Network → Copy → Copy as cURL
+///    (the Cookie header is extracted from `-H 'cookie: ...'` or
+///    `-b '...'`/`--cookie '...'`)
+/// 3. Bare cookie header — `name=value; name2=value2`
+///
+/// Returns a JSON array of cookie objects (each `{ name, value }`) suitable
+/// for the `cookies_set` daemon action. Error text never echoes the secret
+/// value.
+pub fn parse_curl_cookies(raw: &str) -> Result<Vec<Value>, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("cookies file is empty".to_string());
+    }
+
+    if trimmed.starts_with('[') {
+        let arr: Vec<Value> = serde_json::from_str(trimmed)
+            .map_err(|e| format!("cookies JSON parse error: {}", e))?;
+        let mut out = Vec::with_capacity(arr.len());
+        for (i, c) in arr.into_iter().enumerate() {
+            let name = c
+                .get("name")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| format!("cookies[{}] missing string name", i))?;
+            let value = c
+                .get("value")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| format!("cookies[{}] missing string value", i))?;
+            out.push(json!({ "name": name, "value": value }));
+        }
+        return Ok(out);
+    }
+
+    // Heuristic: cURL commands start with `curl` followed by space/quote.
+    let looks_like_curl = {
+        let head: String = trimmed.chars().take(5).collect::<String>().to_lowercase();
+        head.starts_with("curl") && head.len() > 4 && {
+            let c = head.chars().nth(4).unwrap();
+            c.is_whitespace() || c == '\'' || c == '"'
+        }
+    };
+
+    let header = if looks_like_curl {
+        extract_cookie_header_from_curl(trimmed).ok_or_else(|| {
+            "no Cookie header found in this cURL - right-click an authenticated request in DevTools → Network → Copy → Copy as cURL".to_string()
+        })?
+    } else {
+        trimmed.to_string()
+    };
+
+    parse_cookie_header(&header)
+}
+
+fn extract_cookie_header_from_curl(curl: &str) -> Option<String> {
+    // Strip bash (`\`) and cmd (`^`) line continuations so -H is on one line.
+    let joined = curl
+        .replace("\\\r\n", " ")
+        .replace("\\\n", " ")
+        .replace("^\r\n", " ")
+        .replace("^\n", " ");
+    if let Some(v) = match_quoted_arg(&joined, "-H", Some("cookie")) {
+        return Some(v);
+    }
+    if let Some(v) = match_quoted_arg(&joined, "-b", None) {
+        return Some(v);
+    }
+    if let Some(v) = match_quoted_arg(&joined, "--cookie", None) {
+        return Some(v);
+    }
+    None
+}
+
+/// Find `flag <quote>[header:]value<quote>` in haystack and return the value.
+/// When `expect_header` is set, the quoted value must start with that header
+/// name followed by a colon (case-insensitive) and the prefix is stripped.
+fn match_quoted_arg(haystack: &str, flag: &str, expect_header: Option<&str>) -> Option<String> {
+    let bytes = haystack.as_bytes();
+    let flag_b = flag.as_bytes();
+    let mut i = 0;
+    while i + flag_b.len() < bytes.len() {
+        if &bytes[i..i + flag_b.len()] != flag_b {
+            i += 1;
+            continue;
+        }
+        // Must be at a word boundary on the left (start of string or whitespace).
+        if i > 0 && !bytes[i - 1].is_ascii_whitespace() {
+            i += 1;
+            continue;
+        }
+        let mut j = i + flag_b.len();
+        // Require a whitespace separator after the flag.
+        if j >= bytes.len() || !bytes[j].is_ascii_whitespace() {
+            i += 1;
+            continue;
+        }
+        while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+            j += 1;
+        }
+        if j >= bytes.len() {
+            return None;
+        }
+        let quote = bytes[j];
+        if quote != b'\'' && quote != b'"' {
+            i = j;
+            continue;
+        }
+        let start = j + 1;
+        let mut k = start;
+        while k < bytes.len() && bytes[k] != quote {
+            k += 1;
+        }
+        if k >= bytes.len() {
+            return None;
+        }
+        let value = String::from_utf8_lossy(&bytes[start..k]).into_owned();
+        if let Some(header) = expect_header {
+            let lower = value.to_lowercase();
+            let prefix = format!("{}:", header.to_lowercase());
+            if let Some(stripped) = lower.strip_prefix(&prefix) {
+                let _ = stripped;
+                return Some(value[prefix.len()..].trim().to_string());
+            }
+            i = k + 1;
+            continue;
+        }
+        return Some(value);
+    }
+    None
+}
+
+fn parse_cookie_header(header: &str) -> Result<Vec<Value>, String> {
+    let mut out = Vec::new();
+    for piece in header.split(';') {
+        let piece = piece.trim();
+        let Some(eq) = piece.find('=') else { continue };
+        let name = piece[..eq].trim();
+        let value = piece[eq + 1..].trim();
+        if !name.is_empty() {
+            out.push(json!({ "name": name, "value": value }));
+        }
+    }
+    if out.is_empty() {
+        return Err("no cookies found in input".to_string());
+    }
+    Ok(out)
+}
+
 pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError> {
     let mut result = parse_command_inner(args, flags)?;
 
@@ -111,10 +260,24 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
         // === Navigation ===
         // Maps to "navigate" action in protocol; reflected in ACTION_CATEGORIES in action-policy.ts
         "open" | "goto" | "navigate" => {
-            let url = rest.first().ok_or_else(|| ParseError::MissingArguments {
-                context: cmd.to_string(),
-                usage: "open <url>",
-            })?;
+            // `open` without a URL launches the browser but stays on
+            // about:blank. Lets agents set up routes, cookies, or init
+            // scripts before the first real navigation (see `batch`).
+            // `goto` and `navigate` still require a URL since those verbs
+            // imply the navigation itself.
+            let first_url = rest.iter().find(|a| !a.starts_with("--"));
+            let url = match first_url {
+                Some(u) => *u,
+                None if cmd == "open" => {
+                    return Ok(json!({ "id": id, "action": "launch", "headless": !flags.headed }));
+                }
+                None => {
+                    return Err(ParseError::MissingArguments {
+                        context: cmd.to_string(),
+                        usage: "goto <url>",
+                    });
+                }
+            };
             let url_lower = url.to_lowercase();
             let url = if url_lower.starts_with("http://")
                 || url_lower.starts_with("https://")
@@ -901,13 +1064,60 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
             let op = rest.first().unwrap_or(&"get");
             match *op {
                 "set" => {
+                    // --curl <file> mode: import cookies from a JSON array,
+                    // raw cURL dump, or bare Cookie header. Scoped to the
+                    // host of --domain if provided; otherwise the cookies
+                    // have no scope (daemon falls back to current origin).
+                    if let Some(curl_idx) = rest.iter().position(|a| *a == "--curl") {
+                        let path =
+                            rest.get(curl_idx + 1)
+                                .ok_or_else(|| {
+                                    ParseError::MissingArguments {
+                            context: "cookies set --curl".to_string(),
+                            usage: "cookies set --curl <file> [--domain <domain>] [--url <url>]",
+                        }
+                                })?;
+                        let raw = std::fs::read_to_string(path).map_err(|e| {
+                            ParseError::InvalidValue {
+                                message: format!("cookies --curl: cannot read '{}': {}", path, e),
+                                usage: "cookies set --curl <file>",
+                            }
+                        })?;
+                        let mut cookies =
+                            parse_curl_cookies(&raw).map_err(|e| ParseError::InvalidValue {
+                                message: format!("cookies --curl: {}", e),
+                                usage: "cookies set --curl <file>",
+                            })?;
+
+                        let domain_idx = rest.iter().position(|a| *a == "--domain");
+                        let domain = domain_idx.and_then(|i| rest.get(i + 1).copied());
+                        let url_idx = rest.iter().position(|a| *a == "--url");
+                        let url = url_idx.and_then(|i| rest.get(i + 1).copied());
+
+                        for cookie in cookies.iter_mut() {
+                            if let Some(d) = domain {
+                                cookie["domain"] = json!(d);
+                                cookie["path"] = cookie.get("path").cloned().unwrap_or(json!("/"));
+                            }
+                            if let Some(u) = url {
+                                cookie["url"] = json!(u);
+                            }
+                        }
+
+                        return Ok(json!({
+                            "id": id,
+                            "action": "cookies_set",
+                            "cookies": cookies,
+                        }));
+                    }
+
                     let name = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
                         context: "cookies set".to_string(),
-                        usage: "cookies set <name> <value> [--url <url>] [--domain <domain>] [--path <path>] [--httpOnly] [--secure] [--sameSite <Strict|Lax|None>] [--expires <timestamp>]",
+                        usage: "cookies set <name> <value> [--url <url>] [--domain <domain>] [--path <path>] [--httpOnly] [--secure] [--sameSite <Strict|Lax|None>] [--expires <timestamp>]\n  or:  cookies set --curl <file> [--domain <domain>] [--url <url>]",
                     })?;
                     let value = rest.get(2).ok_or_else(|| ParseError::MissingArguments {
                         context: "cookies set".to_string(),
-                        usage: "cookies set <name> <value> [--url <url>] [--domain <domain>] [--path <path>] [--httpOnly] [--secure] [--sameSite <Strict|Lax|None>] [--expires <timestamp>]",
+                        usage: "cookies set <name> <value> [--url <url>] [--domain <domain>] [--path <path>] [--httpOnly] [--secure] [--sameSite <Strict|Lax|None>] [--expires <timestamp>]\n  or:  cookies set --curl <file> [--domain <domain>] [--url <url>]",
                     })?;
 
                     let mut cookie = json!({ "name": name, "value": value });
@@ -1012,28 +1222,55 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
         }
 
         // === Tabs ===
-        "tab" => match rest.first().copied() {
-            Some("new") => {
-                let mut cmd = json!({ "id": id, "action": "tab_new" });
-                if let Some(url) = rest.get(1) {
-                    cmd["url"] = json!(url);
+        "tab" => {
+            match rest.first().copied() {
+                Some("new") => {
+                    // Accepted forms:
+                    //   tab new [url]
+                    //   tab new --label <name> [url]
+                    //   tab new [url] --label <name>
+                    let mut cmd = json!({ "id": id, "action": "tab_new" });
+                    let mut i = 1;
+                    while i < rest.len() {
+                        match rest[i] {
+                            "--label" => {
+                                let name = rest.get(i + 1).ok_or(ParseError::MissingArguments {
+                                    context: "tab new --label".to_string(),
+                                    usage: "tab new --label <name> [url]",
+                                })?;
+                                cmd["label"] = json!(name);
+                                i += 2;
+                            }
+                            other if !other.starts_with("--") && cmd.get("url").is_none() => {
+                                cmd["url"] = json!(other);
+                                i += 1;
+                            }
+                            other => {
+                                return Err(ParseError::UnknownSubcommand {
+                                    subcommand: other.to_string(),
+                                    valid_options: &["--label", "<url>"],
+                                });
+                            }
+                        }
+                    }
+                    Ok(cmd)
                 }
-                Ok(cmd)
-            }
-            Some("list") => Ok(json!({ "id": id, "action": "tab_list" })),
-            Some("close") => {
-                let mut cmd = json!({ "id": id, "action": "tab_close" });
-                if let Some(index) = rest.get(1).and_then(|s| s.parse::<i32>().ok()) {
-                    cmd["index"] = json!(index);
+                Some("list") => Ok(json!({ "id": id, "action": "tab_list" })),
+                Some("close") => {
+                    let mut cmd = json!({ "id": id, "action": "tab_close" });
+                    if let Some(tab_ref) = rest.get(1) {
+                        cmd["tabId"] = json!(tab_ref);
+                    }
+                    Ok(cmd)
                 }
-                Ok(cmd)
+                Some(tab_ref) => Ok(json!({
+                    "id": id,
+                    "action": "tab_switch",
+                    "tabId": tab_ref,
+                })),
+                None => Ok(json!({ "id": id, "action": "tab_list" })),
             }
-            Some(n) if n.parse::<i32>().is_ok() => {
-                let index = n.parse::<i32>().expect("already checked parse succeeds");
-                Ok(json!({ "id": id, "action": "tab_switch", "index": index }))
-            }
-            _ => Ok(json!({ "id": id, "action": "tab_list" })),
-        },
+        }
 
         // === Window ===
         "window" => {
@@ -1421,8 +1658,107 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
             Ok(cmd)
         }
 
+        // === React (requires `open --enable react-devtools`) ===
+        "react" => parse_react(&rest, &id),
+
+        // === Core Web Vitals + hydration ===
+        "vitals" | "web-vitals" => {
+            let mut cmd = json!({ "id": id, "action": "vitals" });
+            let json_out = rest.contains(&"--json");
+            if json_out {
+                cmd["json"] = json!(true);
+            }
+            if let Some(url) = rest.iter().find(|a| !a.starts_with("--")) {
+                cmd["url"] = json!(url);
+            }
+            Ok(cmd)
+        }
+
+        // === SPA client-side navigation ===
+        "pushstate" => {
+            let url = rest.first().ok_or_else(|| ParseError::MissingArguments {
+                context: "pushstate".to_string(),
+                usage: "pushstate <url>",
+            })?;
+            Ok(json!({ "id": id, "action": "pushstate", "url": url }))
+        }
+
+        // === Remove init script ===
+        "removeinitscript" => {
+            let identifier = rest.first().ok_or_else(|| ParseError::MissingArguments {
+                context: "removeinitscript".to_string(),
+                usage: "removeinitscript <identifier>",
+            })?;
+            Ok(json!({ "id": id, "action": "removeinitscript", "identifier": identifier }))
+        }
+
         _ => Err(ParseError::UnknownCommand {
             command: cmd.to_string(),
+        }),
+    }
+}
+
+fn parse_react(rest: &[&str], id: &str) -> Result<Value, ParseError> {
+    const VALID: &[&str] = &["tree", "inspect", "renders", "suspense"];
+    let sub = rest.first().copied().ok_or(ParseError::MissingArguments {
+        context: "react".to_string(),
+        usage: "react <tree|inspect|renders|suspense>",
+    })?;
+    let json_out = rest.contains(&"--json");
+    let flag = |key: &str| -> Value {
+        if json_out {
+            json!({ "id": id, "action": key, "json": true })
+        } else {
+            json!({ "id": id, "action": key })
+        }
+    };
+    match sub {
+        "tree" => Ok(flag("react_tree")),
+        "inspect" => {
+            let id_arg = rest
+                .iter()
+                .skip(1)
+                .find(|a| !a.starts_with("--"))
+                .copied()
+                .ok_or(ParseError::MissingArguments {
+                    context: "react inspect".to_string(),
+                    usage: "react inspect <id>",
+                })?;
+            let numeric: i64 = id_arg.parse().map_err(|_| ParseError::InvalidValue {
+                message: format!("react inspect id must be a number, got '{}'", id_arg),
+                usage: "react inspect <id>",
+            })?;
+            let mut cmd = json!({ "id": id, "action": "react_inspect", "fiberId": numeric });
+            if json_out {
+                cmd["json"] = json!(true);
+            }
+            Ok(cmd)
+        }
+        "renders" => {
+            let op = rest.get(1).copied().unwrap_or("start");
+            match op {
+                "start" => Ok(flag("react_renders_start")),
+                "stop" => Ok(flag("react_renders_stop")),
+                other => Err(ParseError::UnknownSubcommand {
+                    subcommand: other.to_string(),
+                    valid_options: &["start", "stop"],
+                }),
+            }
+        }
+        "suspense" => {
+            let only_dynamic = rest.contains(&"--only-dynamic");
+            let mut cmd = json!({ "id": id, "action": "react_suspense" });
+            if json_out {
+                cmd["json"] = json!(true);
+            }
+            if only_dynamic {
+                cmd["onlyDynamic"] = json!(true);
+            }
+            Ok(cmd)
+        }
+        other => Err(ParseError::UnknownSubcommand {
+            subcommand: other.to_string(),
+            valid_options: VALID,
         }),
     }
 }
@@ -2169,12 +2505,21 @@ fn parse_network(rest: &[&str], id: &str) -> Result<Value, ParseError> {
         Some("route") => {
             let url = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
                 context: "network route".to_string(),
-                usage: "network route <url> [--abort|--body <json>]",
+                usage: "network route <url> [--abort|--body <json>] [--resource-type <csv>]",
             })?;
             let abort = rest.contains(&"--abort");
             let body_idx = rest.iter().position(|&s| s == "--body");
             let body = body_idx.and_then(|i| rest.get(i + 1).copied());
-            Ok(json!({ "id": id, "action": "route", "url": url, "abort": abort, "body": body }))
+            let rt_idx = rest
+                .iter()
+                .position(|&s| s == "--resource-type" || s == "--resource-types");
+            let resource_type = rt_idx.and_then(|i| rest.get(i + 1).copied());
+            let mut cmd =
+                json!({ "id": id, "action": "route", "url": url, "abort": abort, "body": body });
+            if let Some(rt) = resource_type {
+                cmd["resourceType"] = json!(rt);
+            }
+            Ok(cmd)
         }
         Some("unroute") => {
             let mut cmd = json!({ "id": id, "action": "unroute" });
@@ -2343,6 +2688,8 @@ mod tests {
             headers: None,
             executable_path: None,
             extensions: Vec::new(),
+            init_scripts: Vec::new(),
+            enable: Vec::new(),
             cdp: None,
             profile: None,
             state: None,
@@ -2358,6 +2705,8 @@ mod tests {
             session_name: None,
             cli_executable_path: false,
             cli_extensions: false,
+            cli_init_scripts: false,
+            cli_enable: false,
             cli_profile: false,
             cli_state: false,
             cli_args: false,
@@ -2426,6 +2775,192 @@ mod tests {
     fn test_cookies_clear() {
         let cmd = parse_command(&args("cookies clear"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "cookies_clear");
+    }
+
+    #[test]
+    fn test_parse_curl_cookies_json_array() {
+        let input = r#"[{"name":"a","value":"1"},{"name":"b","value":"2"}]"#;
+        let out = parse_curl_cookies(input).unwrap();
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0]["name"], "a");
+        assert_eq!(out[0]["value"], "1");
+        assert_eq!(out[1]["name"], "b");
+        assert_eq!(out[1]["value"], "2");
+    }
+
+    #[test]
+    fn test_parse_curl_cookies_bare_header() {
+        let input = "sid=abc; token=xyz; other=";
+        let out = parse_curl_cookies(input).unwrap();
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[0]["name"], "sid");
+        assert_eq!(out[0]["value"], "abc");
+        assert_eq!(out[2]["name"], "other");
+        assert_eq!(out[2]["value"], "");
+    }
+
+    #[test]
+    fn test_parse_curl_cookies_from_curl_bash() {
+        let input = "curl 'https://example.com/api' \\\n  -H 'accept: application/json' \\\n  -H 'cookie: sid=abc; token=xyz'";
+        let out = parse_curl_cookies(input).unwrap();
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0]["name"], "sid");
+        assert_eq!(out[1]["name"], "token");
+    }
+
+    #[test]
+    fn test_parse_curl_cookies_from_curl_b_flag() {
+        let input = "curl 'https://example.com/api' -b 'sid=abc; token=xyz'";
+        let out = parse_curl_cookies(input).unwrap();
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0]["name"], "sid");
+    }
+
+    #[test]
+    fn test_parse_curl_cookies_empty_error() {
+        assert!(parse_curl_cookies("").is_err());
+        assert!(parse_curl_cookies("   ").is_err());
+    }
+
+    #[test]
+    fn test_parse_curl_cookies_never_echoes_values_in_errors() {
+        // Error messages must never echo cookie values or any bytes from the
+        // input that could be a secret. Use a distinct recognizable token per
+        // case so a regression surfaces the leaking code path clearly.
+
+        // JSON array with a missing `name` field.
+        let name_secret = "LEAK_VIA_MISSING_NAME_xY9zQ";
+        let input = format!(r#"[{{"value":"{}"}}]"#, name_secret);
+        let err = parse_curl_cookies(&input).unwrap_err();
+        assert!(
+            !err.contains(name_secret),
+            "missing-name error leaked secret value: {}",
+            err
+        );
+
+        // Truncated / malformed JSON containing a secret. Depends on
+        // serde_json's Display impl to report position only, not payload.
+        let parse_secret = "LEAK_VIA_JSON_PARSE_aA1bB2";
+        let input = format!(r#"[{{"name":"sid","value":"{}"#, parse_secret);
+        let err = parse_curl_cookies(&input).unwrap_err();
+        assert!(
+            !err.contains(parse_secret),
+            "malformed-JSON error leaked secret value: {}",
+            err
+        );
+
+        // Valid cURL dump with no Cookie header but a secret in another
+        // header. Should error on "no Cookie header found" without echoing.
+        let curl_secret = "LEAK_VIA_CURL_NO_COOKIE_pP7qQ";
+        let input = format!("curl 'https://example.com/' -H 'x-token: {}'", curl_secret);
+        let err = parse_curl_cookies(&input).unwrap_err();
+        assert!(
+            !err.contains(curl_secret),
+            "cURL-without-cookie error leaked secret value: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_react_tree_command() {
+        let cmd = parse_command(&args("react tree"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "react_tree");
+    }
+
+    #[test]
+    fn test_react_tree_json() {
+        let cmd = parse_command(&args("react tree --json"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "react_tree");
+        assert_eq!(cmd["json"], true);
+    }
+
+    #[test]
+    fn test_react_inspect_command() {
+        let cmd = parse_command(&args("react inspect 12345"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "react_inspect");
+        assert_eq!(cmd["fiberId"], 12345);
+    }
+
+    #[test]
+    fn test_react_inspect_requires_numeric_id() {
+        let err = parse_command(&args("react inspect not-a-number"), &default_flags());
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn test_react_renders_start_stop() {
+        let start = parse_command(&args("react renders start"), &default_flags()).unwrap();
+        assert_eq!(start["action"], "react_renders_start");
+        let stop = parse_command(&args("react renders stop"), &default_flags()).unwrap();
+        assert_eq!(stop["action"], "react_renders_stop");
+        let stop_json =
+            parse_command(&args("react renders stop --json"), &default_flags()).unwrap();
+        assert_eq!(stop_json["json"], true);
+    }
+
+    #[test]
+    fn test_react_suspense() {
+        let cmd = parse_command(&args("react suspense"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "react_suspense");
+        // onlyDynamic defaults to unset; absence means the full report
+        assert!(cmd.get("onlyDynamic").is_none());
+    }
+
+    #[test]
+    fn test_react_suspense_only_dynamic() {
+        let cmd = parse_command(&args("react suspense --only-dynamic"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "react_suspense");
+        assert_eq!(cmd["onlyDynamic"], true);
+    }
+
+    #[test]
+    fn test_react_suspense_only_dynamic_with_json() {
+        let cmd = parse_command(
+            &args("react suspense --only-dynamic --json"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "react_suspense");
+        assert_eq!(cmd["onlyDynamic"], true);
+        assert_eq!(cmd["json"], true);
+    }
+
+    #[test]
+    fn test_vitals_command() {
+        let cmd = parse_command(&args("vitals"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "vitals");
+        let cmd = parse_command(
+            &args("vitals http://localhost:3000/dashboard"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["url"], "http://localhost:3000/dashboard");
+    }
+
+    #[test]
+    fn test_pushstate_command() {
+        let cmd = parse_command(&args("pushstate /foo"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "pushstate");
+        assert_eq!(cmd["url"], "/foo");
+    }
+
+    #[test]
+    fn test_removeinitscript_command() {
+        let cmd = parse_command(&args("removeinitscript abc123"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "removeinitscript");
+        assert_eq!(cmd["identifier"], "abc123");
+    }
+
+    #[test]
+    fn test_network_route_resource_type() {
+        let cmd = parse_command(
+            &args("network route * --abort --resource-type script"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "route");
+        assert_eq!(cmd["resourceType"], "script");
+        assert_eq!(cmd["abort"], true);
     }
 
     #[test]
@@ -2645,6 +3180,28 @@ mod tests {
     // === Navigation Tests ===
 
     #[test]
+    fn test_open_without_url_launches() {
+        let cmd = parse_command(&args("open"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "launch");
+        assert_eq!(cmd["headless"], true);
+    }
+
+    #[test]
+    fn test_open_without_url_headed() {
+        let mut flags = default_flags();
+        flags.headed = true;
+        let cmd = parse_command(&args("open"), &flags).unwrap();
+        assert_eq!(cmd["action"], "launch");
+        assert_eq!(cmd["headless"], false);
+    }
+
+    #[test]
+    fn test_goto_still_requires_url() {
+        assert!(parse_command(&args("goto"), &default_flags()).is_err());
+        assert!(parse_command(&args("navigate"), &default_flags()).is_err());
+    }
+
+    #[test]
     fn test_navigate_with_https() {
         let cmd = parse_command(&args("open https://example.com"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "navigate");
@@ -2846,16 +3403,109 @@ mod tests {
     }
 
     #[test]
-    fn test_tab_switch() {
-        let cmd = parse_command(&args("tab 2"), &default_flags()).unwrap();
+    fn test_tab_switch_by_id() {
+        let cmd = parse_command(&args("tab t2"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "tab_switch");
-        assert_eq!(cmd["index"], 2);
+        assert_eq!(cmd["tabId"], "t2");
+    }
+
+    #[test]
+    fn test_tab_switch_by_label() {
+        let cmd = parse_command(&args("tab docs"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "tab_switch");
+        assert_eq!(cmd["tabId"], "docs");
     }
 
     #[test]
     fn test_tab_close() {
         let cmd = parse_command(&args("tab close"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "tab_close");
+    }
+
+    #[test]
+    fn test_tab_close_with_id() {
+        let cmd = parse_command(&args("tab close t2"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "tab_close");
+        assert_eq!(cmd["tabId"], "t2");
+    }
+
+    #[test]
+    fn test_tab_close_with_label() {
+        let cmd = parse_command(&args("tab close docs"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "tab_close");
+        assert_eq!(cmd["tabId"], "docs");
+    }
+
+    #[test]
+    fn test_tab_sends_string_tab_id() {
+        let cmd = parse_command(&args("tab t2"), &default_flags()).unwrap();
+        assert!(
+            cmd["tabId"].is_string(),
+            "tabId must be a string, got: {:?}",
+            cmd["tabId"]
+        );
+        assert!(cmd.get("index").is_none());
+    }
+
+    #[test]
+    fn test_tab_new_with_label() {
+        let cmd = parse_command(&args("tab new --label docs"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "tab_new");
+        assert_eq!(cmd["label"], "docs");
+    }
+
+    #[test]
+    fn test_tab_new_with_label_and_url() {
+        let cmd = parse_command(
+            &args("tab new --label docs https://docs.example.com"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "tab_new");
+        assert_eq!(cmd["label"], "docs");
+        assert_eq!(cmd["url"], "https://docs.example.com");
+    }
+
+    #[test]
+    fn test_tab_new_with_url_then_label() {
+        let cmd = parse_command(
+            &args("tab new https://docs.example.com --label docs"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["url"], "https://docs.example.com");
+        assert_eq!(cmd["label"], "docs");
+    }
+
+    #[test]
+    fn test_tab_no_args_defaults_to_list() {
+        let cmd = parse_command(&args("tab"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "tab_list");
+    }
+
+    #[test]
+    fn test_tab_unknown_flag_errors() {
+        // Unknown flags on `tab new` must error instead of being silently
+        // dropped. This protects against typos like `--labl` or `--new-tab`.
+        let result = parse_command(
+            &args("tab new --unknown-flag https://example.com"),
+            &default_flags(),
+        );
+        assert!(
+            result.is_err(),
+            "tab new with an unknown flag must error, got: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_tab_non_keyword_treated_as_ref() {
+        // After the shift to `t<N>`/label ids, non-keyword tokens (`select`,
+        // `docs`, etc.) are valid label refs; `tab <something>` routes to
+        // tab_switch and the runtime decides whether the label exists.
+        let cmd = parse_command(&args("tab select"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "tab_switch");
+        assert_eq!(cmd["tabId"], "select");
     }
 
     // === Network ===

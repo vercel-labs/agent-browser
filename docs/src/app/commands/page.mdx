@@ -3,7 +3,8 @@
 ## Core
 
 ```bash
-agent-browser open <url>              # Navigate (aliases: goto, navigate)
+agent-browser open                    # Launch browser (no nav); stays on about:blank
+agent-browser open <url>              # Launch + navigate (aliases: goto, navigate)
 agent-browser click <sel>             # Click element (--new-tab to open in new tab)
 agent-browser dblclick <sel>          # Double-click
 agent-browser fill <sel> <text>       # Clear and fill
@@ -173,6 +174,7 @@ agent-browser storage session         # Same for sessionStorage
 agent-browser network route <url>              # Intercept requests
 agent-browser network route <url> --abort      # Block requests
 agent-browser network route <url> --body <json>  # Mock response
+agent-browser network route '*' --abort --resource-type script  # Block scripts only
 agent-browser network unroute [url]            # Remove routes
 agent-browser network requests                 # View tracked requests
 agent-browser network requests --clear         # Clear request log
@@ -188,14 +190,48 @@ agent-browser network har stop [output.har]    # Stop and save HAR (temp path if
 ## Tabs & frames
 
 ```bash
-agent-browser tab                     # List tabs
-agent-browser tab new [url]           # New tab
-agent-browser tab <n>                 # Switch to tab
-agent-browser tab close [n]           # Close tab
-agent-browser window new              # Open new browser window
-agent-browser frame <sel>             # Switch to iframe by CSS selector
-agent-browser frame @e3               # Switch to iframe by element ref
-agent-browser frame main              # Back to main frame
+agent-browser tab                              # List tabs (each row shows tabId and label)
+agent-browser tab new [url]                    # New tab
+agent-browser tab new --label docs [url]       # New tab with a user-assigned label
+agent-browser tab <t<N>|label>                 # Switch to a tab by id or label
+agent-browser tab close [t<N>|label]           # Close a tab (defaults to active)
+agent-browser window new                       # Open new browser window
+agent-browser frame <sel>                      # Switch to iframe by CSS selector
+agent-browser frame @e3                        # Switch to iframe by element ref
+agent-browser frame main                       # Back to main frame
+```
+
+### Stable tab ids and labels
+
+Tab ids are stable strings of the form `t1`, `t2`, `t3`. They're never reused
+within a session, so `t2` keeps pointing at the same tab even as other tabs
+are opened or closed. The `t` prefix mirrors the `@e1` element-ref convention
+and is not interchangeable with positional integers — `agent-browser tab 2`
+errors with a teaching message; use `t2`.
+
+You can also assign a memorable label (`docs`, `app`, `admin`) at tab-creation
+time and use it anywhere an id is accepted:
+
+```bash
+agent-browser tab new --label docs https://docs.example.com
+agent-browser tab docs          # switch to the docs tab
+agent-browser snapshot          # populate refs for docs
+agent-browser click @e3         # click uses docs's refs
+agent-browser tab close docs    # close by label
+```
+
+Labels are never auto-generated and never rewritten on navigation — an agent
+that names a tab `docs` keeps that name until the tab is closed. Labels are
+unique within a session; creating a second tab with an existing label
+errors.
+
+Refs (`@e1`, etc.) are scoped to the tab that was active when the snapshot
+ran, so switch tabs first, then snapshot and interact:
+
+```bash
+agent-browser tab docs          # switch first
+agent-browser snapshot          # refs for docs
+agent-browser click @e3         # uses docs's refs
 ```
 
 ### Iframe support
@@ -345,6 +381,19 @@ agent-browser dashboard start --port <n>  # Start on a specific port
 agent-browser dashboard stop          # Stop the dashboard server
 ```
 
+## Doctor
+
+Diagnose your install, auto-clean stale daemon files, and optionally repair common problems.
+
+```bash
+agent-browser doctor                     # Full diagnosis (env, Chrome, daemons, config, providers, network, launch test)
+agent-browser doctor --offline --quick   # Local-only, fastest
+agent-browser doctor --fix               # Also run destructive repairs (reinstall Chrome, purge old state, ...)
+agent-browser doctor --json              # Structured JSON output for agents
+```
+
+Exit code is `0` if all checks pass (warnings are fine), `1` if any fail. See the [Installation page](/installation#doctor) for the full check catalog.
+
 ## Chat
 
 Use natural language to control the browser via AI. The `chat` command translates instructions into agent-browser commands, executes them, and streams the AI response. Requires `AI_GATEWAY_API_KEY` to be set.
@@ -373,6 +422,51 @@ Chat-specific options:
 agent-browser back                    # Go back
 agent-browser forward                 # Go forward
 agent-browser reload                  # Reload page
+agent-browser pushstate <url>         # SPA client-side nav; auto-detects window.next.router.push,
+                                      # falls back to history.pushState + popstate
+```
+
+## Pre-navigation setup
+
+Some flows need routes, cookies, or init scripts configured *before* the
+first navigation (SSR debug, auth on protected origins, etc.). `open`
+without a URL launches the browser but stays on `about:blank`, leaving
+room to stage state. `batch` makes it one CLI invocation:
+
+```bash
+agent-browser batch \
+  '["open"]' \
+  '["network","route","*","--abort","--resource-type","script"]' \
+  '["cookies","set","--curl","cookies.curl","--domain","localhost"]' \
+  '["navigate","http://localhost:3000/target"]'
+```
+
+## React / Web Vitals
+
+React commands require `--enable react-devtools` at launch (installs the
+React DevTools hook before any page JS runs). `vitals` and `pushstate`
+work on any site.
+
+```bash
+agent-browser open --enable react-devtools <url>   # Launch with React hook installed
+agent-browser react tree                           # Full component tree
+agent-browser react inspect <fiberId>              # Inspect one component
+agent-browser react renders start                  # Begin fiber render recording
+agent-browser react renders stop [--json]          # Stop + print profile
+agent-browser react suspense [--only-dynamic] [--json]  # Suspense boundaries + classifier
+                                                         # --only-dynamic hides the "static" list
+agent-browser vitals [url] [--json]                # LCP/CLS/TTFB/FCP/INP + hydration
+```
+
+Works on any React app (Next.js, Remix, Vite+React, CRA, TanStack Start,
+React Native Web, etc.). `vitals` and `pushstate` are framework-agnostic.
+
+## Init scripts
+
+```bash
+agent-browser open --init-script <path>           # Register before first navigation (repeatable)
+agent-browser addinitscript <js>                  # Register at runtime (returns identifier)
+agent-browser removeinitscript <identifier>       # Remove a previously registered init script
 ```
 
 ## Global options
@@ -385,6 +479,8 @@ agent-browser reload                  # Reload page
 --headers <json>         # HTTP headers scoped to URL's origin
 --executable-path <path> # Custom browser executable
 --extension <path>       # Load browser extension (repeatable)
+--init-script <path>     # Register a page init script before first navigation (repeatable)
+--enable <feature>       # Built-in init scripts: react-devtools (repeatable or comma-list)
 --args <args>            # Browser launch args (comma separated)
 --user-agent <ua>        # Custom User-Agent string
 --proxy <url>            # Proxy server URL
