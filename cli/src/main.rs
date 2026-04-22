@@ -231,7 +231,7 @@ fn get_dashboard_pid_path() -> std::path::PathBuf {
     get_socket_dir().join("dashboard.pid")
 }
 
-fn run_dashboard_start(port: u16, json_mode: bool) {
+fn run_dashboard_start(addr: &str, port: u16, json_mode: bool) {
     let pid_path = get_dashboard_pid_path();
 
     // Check if already running
