@@ -538,6 +538,50 @@ pub async fn uncheck(
     Ok(())
 }
 
+/// DOM-level click via `element.click()`. Bypasses CDP coordinate-based
+/// input, working around pointer-events:none, viewport issues, and SPA
+/// routers that don't respond to Input.dispatchMouseEvent.
+///
+/// This mirrors the fallback path used by `check()`/`uncheck()` via
+/// `js_click_checkbox()`, generalized for any clickable element.
+pub async fn js_click(
+    client: &CdpClient,
+    session_id: &str,
+    ref_map: &RefMap,
+    selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
+) -> Result<(), String> {
+    let (object_id, effective_session_id) = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
+
+    let js = r#"function() {
+            this.scrollIntoView({ block: 'center', behavior: 'instant' });
+            this.click();
+        }"#;
+
+    client
+        .send_command_typed::<_, Value>(
+            "Runtime.callFunctionOn",
+            &CallFunctionOnParams {
+                function_declaration: js.to_string(),
+                object_id: Some(object_id),
+                arguments: None,
+                return_by_value: Some(true),
+                await_promise: Some(false),
+            },
+            Some(&effective_session_id),
+        )
+        .await?;
+
+    Ok(())
+}
+
 /// Fallback for when the coordinate-based CDP click did not toggle the
 /// checkbox/radio state. This mirrors how Playwright dispatches clicks
 /// through the DOM rather than via raw Input.dispatchMouseEvent coordinates.

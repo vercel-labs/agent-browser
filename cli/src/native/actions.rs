@@ -2625,6 +2625,19 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
     let session_id = mgr.active_session_id()?.to_string();
 
     let new_tab = cmd.get("newTab").and_then(|v| v.as_bool()).unwrap_or(false);
+    let js_click = cmd.get("jsClick").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    if js_click {
+        interaction::js_click(
+            &mgr.client,
+            &session_id,
+            &state.ref_map,
+            selector,
+            &state.iframe_sessions,
+        )
+        .await?;
+        return Ok(json!({ "clicked": selector, "method": "js" }));
+    }
 
     if new_tab {
         use super::element::resolve_element_object_id;
