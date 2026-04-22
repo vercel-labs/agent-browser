@@ -2554,6 +2554,11 @@ Running 'agent-browser dashboard' with no subcommand is equivalent to 'dashboard
 
 The dashboard runs as a standalone background process, independent of
 browser sessions. All sessions automatically stream to the dashboard.
+It works from http://localhost:4848 or a proxied/forwarded URL that
+reaches the dashboard server, such as https://dashboard.agent-browser.localhost
+or a Coder workspace URL. The browser stays on the dashboard origin;
+session tabs, status, and stream traffic are proxied internally, so
+session ports do not need to be exposed.
 
 Options:
   --port <n>           Port for the dashboard server (default: 4848)
