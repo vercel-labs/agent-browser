@@ -772,9 +772,11 @@ fn connect(session: &str) -> Result<Connection, String> {
 }
 
 pub fn send_command(cmd: Value, session: &str) -> Result<Response, String> {
-    // Retry logic for transient errors (EAGAIN/EWOULDBLOCK/connection issues)
-    const MAX_RETRIES: u32 = 5;
-    const RETRY_DELAY_MS: u64 = 200;
+    // Retry logic for transient errors (EAGAIN/EWOULDBLOCK/connection issues).
+    // Use generous retries to handle slow or resource-constrained environments
+    // (e.g. VMs) where the daemon may be slow to start or respond.
+    const MAX_RETRIES: u32 = 8;
+    const RETRY_DELAY_MS: u64 = 500;
 
     let mut last_error = String::new();
 
@@ -837,6 +839,9 @@ fn send_command_once(cmd: &Value, session: &str) -> Result<Response, String> {
 
     stream
         .write_all(json_str.as_bytes())
+        .map_err(|e| format!("Failed to send: {}", e))?;
+    stream
+        .flush()
         .map_err(|e| format!("Failed to send: {}", e))?;
 
     let mut reader = BufReader::new(stream);
