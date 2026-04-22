@@ -54,7 +54,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
 
       - name: Install pnpm
         uses: pnpm/action-setup@v4
@@ -209,7 +209,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable

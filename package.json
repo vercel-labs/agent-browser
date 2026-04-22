@@ -1,6 +1,6 @@
 {
   "name": "agent-browser",
-  "version": "0.25.5",
+  "version": "0.26.0",
   "description": "Browser automation CLI for AI agents",
   "type": "module",
   "files": [

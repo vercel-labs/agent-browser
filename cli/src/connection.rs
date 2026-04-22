@@ -12,6 +12,11 @@ use std::time::Duration;
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
 
+#[cfg(windows)]
+use windows_sys::Win32::Foundation::CloseHandle;
+#[cfg(windows)]
+use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+
 #[derive(Serialize)]
 #[allow(dead_code)]
 pub struct Request {
@@ -144,6 +149,186 @@ pub fn cleanup_stale_files(session: &str) {
     }
 }
 
+/// Returns whether a process with the given PID is currently alive.
+///
+/// On unix, EPERM (process exists but we can't signal it) counts as alive
+/// so we don't mis-clean a live daemon owned by a different uid. Only ESRCH
+/// ("no such process") is treated as dead.
+pub fn is_pid_alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    unsafe {
+        if libc::kill(pid as i32, 0) == 0 {
+            return true;
+        }
+        std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+    }
+    #[cfg(windows)]
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle != 0 {
+            CloseHandle(handle);
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// A currently-running daemon session discovered by [`walk_daemons`].
+#[derive(Debug, Clone)]
+pub struct ActiveSession {
+    pub name: String,
+    pub pid: u32,
+    /// Contents of the session's `.version` file if present and non-empty.
+    pub version: Option<String>,
+}
+
+/// Why a session's sidecar files were cleaned up during a walk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CleanReason {
+    /// The `.pid` file referenced a process that no longer exists.
+    ProcessGone,
+    /// The `.pid` file could not be parsed as a PID.
+    UnreadablePidFile,
+    /// A `.sock` file had no corresponding `.pid` file (unix only).
+    OrphanedSocket,
+    /// The `dashboard.pid` referenced a process that no longer exists.
+    DashboardGone,
+}
+
+/// A session whose sidecar files were removed as a side effect of a walk.
+#[derive(Debug, Clone)]
+pub struct CleanedSession {
+    pub name: String,
+    pub reason: CleanReason,
+}
+
+/// Information about the standalone dashboard process, if any.
+#[derive(Debug, Clone, Copy)]
+pub struct DashboardInfo {
+    pub pid: u32,
+    pub alive: bool,
+}
+
+/// Snapshot of daemon state under [`get_socket_dir()`] after a walk. Stale
+/// sidecar files are cleaned up as a side effect and recorded in `cleaned`.
+#[derive(Debug, Default)]
+pub struct DaemonInventory {
+    pub sessions: Vec<ActiveSession>,
+    pub cleaned: Vec<CleanedSession>,
+    pub dashboard: Option<DashboardInfo>,
+}
+
+/// Read the session's `.version` sidecar if present and non-empty.
+pub fn read_session_version(session: &str) -> Option<String> {
+    let path = get_socket_dir().join(format!("{}.version", session));
+    fs::read_to_string(&path)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Walk the socket directory and classify each `.pid` / `.sock` entry.
+///
+/// - Live daemons go into `sessions` with their `.version` file contents.
+/// - Stale entries (process gone, unreadable pid, orphaned `.sock`) are
+///   cleaned via [`cleanup_stale_files`] and recorded in `cleaned`.
+/// - `dashboard.pid` lands in `dashboard` with liveness info; if the
+///   process is gone, the pid file is removed and a `DashboardGone` entry
+///   is added to `cleaned`.
+///
+/// If the socket directory doesn't exist, returns an empty inventory with
+/// no side effects.
+pub fn walk_daemons() -> DaemonInventory {
+    let socket_dir = get_socket_dir();
+    let mut inventory = DaemonInventory::default();
+
+    let entries = match fs::read_dir(&socket_dir) {
+        Ok(e) => e,
+        Err(_) => return inventory,
+    };
+
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+
+        if name == "dashboard.pid" {
+            if let Ok(s) = fs::read_to_string(entry.path()) {
+                if let Ok(pid) = s.trim().parse::<u32>() {
+                    let alive = is_pid_alive(pid);
+                    inventory.dashboard = Some(DashboardInfo { pid, alive });
+                    if !alive {
+                        let _ = fs::remove_file(entry.path());
+                        inventory.cleaned.push(CleanedSession {
+                            name: "dashboard".to_string(),
+                            reason: CleanReason::DashboardGone,
+                        });
+                    }
+                }
+            }
+            continue;
+        }
+
+        let session_name = match name.strip_suffix(".pid") {
+            Some(s) if !s.is_empty() => s.to_string(),
+            _ => continue,
+        };
+
+        let pid = match fs::read_to_string(entry.path())
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+        {
+            Some(p) => p,
+            None => {
+                cleanup_stale_files(&session_name);
+                inventory.cleaned.push(CleanedSession {
+                    name: session_name,
+                    reason: CleanReason::UnreadablePidFile,
+                });
+                continue;
+            }
+        };
+
+        if !is_pid_alive(pid) {
+            cleanup_stale_files(&session_name);
+            inventory.cleaned.push(CleanedSession {
+                name: session_name,
+                reason: CleanReason::ProcessGone,
+            });
+            continue;
+        }
+
+        let version = read_session_version(&session_name);
+        inventory.sessions.push(ActiveSession {
+            name: session_name,
+            pid,
+            version,
+        });
+    }
+
+    // Orphaned .sock files without a corresponding .pid (unix only).
+    #[cfg(unix)]
+    if let Ok(entries) = fs::read_dir(&socket_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if let Some(session_name) = name.strip_suffix(".sock") {
+                if session_name.is_empty() {
+                    continue;
+                }
+                let pid_path = socket_dir.join(format!("{}.pid", session_name));
+                if !pid_path.exists() {
+                    cleanup_stale_files(session_name);
+                    inventory.cleaned.push(CleanedSession {
+                        name: session_name.to_string(),
+                        reason: CleanReason::OrphanedSocket,
+                    });
+                }
+            }
+        }
+    }
+
+    inventory
+}
+
 #[cfg(windows)]
 fn get_port_path(session: &str) -> PathBuf {
     get_socket_dir().join(format!("{}.port", session))
@@ -204,6 +389,8 @@ pub struct DaemonOptions<'a> {
     pub debug: bool,
     pub executable_path: Option<&'a str>,
     pub extensions: &'a [String],
+    pub init_scripts: &'a [String],
+    pub enable: &'a [String],
     pub args: Option<&'a str>,
     pub user_agent: Option<&'a str>,
     pub proxy: Option<&'a str>,
@@ -245,6 +432,12 @@ fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
     }
     if !opts.extensions.is_empty() {
         cmd.env("AGENT_BROWSER_EXTENSIONS", opts.extensions.join(","));
+    }
+    if !opts.init_scripts.is_empty() {
+        cmd.env("AGENT_BROWSER_INIT_SCRIPTS", opts.init_scripts.join(","));
+    }
+    if !opts.enable.is_empty() {
+        cmd.env("AGENT_BROWSER_ENABLE", opts.enable.join(","));
     }
     if let Some(a) = opts.args {
         cmd.env("AGENT_BROWSER_ARGS", a);

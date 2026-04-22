@@ -8,7 +8,7 @@ const RUBRIC = `
 5 - Agent follows the optimal workflow: navigate, snapshot, interact with refs, re-snapshot as needed
 `.trim();
 
-const COMMAND_CONTEXT = `You already ran \`agent-browser skills get agent-browser\` and loaded these commands:
+const COMMAND_CONTEXT = `You already ran \`agent-browser skills get core\` and loaded these commands:
 - agent-browser open <url> (navigate to a page)
 - agent-browser snapshot -i (get interactive elements with refs like @e1, @e2)
 - agent-browser click @ref (click element)

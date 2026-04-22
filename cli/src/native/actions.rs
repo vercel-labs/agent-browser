@@ -28,6 +28,7 @@ use super::interaction;
 use super::network::{self, DomainFilter, EventTracker};
 use super::policy::{ActionPolicy, ConfirmActions, PolicyResult};
 use super::providers;
+use super::react;
 use super::recording::{self, RecordingState};
 use super::screenshot::{self, ScreenshotOptions};
 use super::snapshot::{self, SnapshotOptions};
@@ -95,6 +96,10 @@ pub struct RouteEntry {
     pub url_pattern: String,
     pub response: Option<RouteResponse>,
     pub abort: bool,
+    /// When non-empty, only requests whose `resourceType` (as reported by
+    /// CDP Fetch.requestPaused) is in this list are matched. Values are
+    /// compared case-insensitively. Empty means "match any resource type".
+    pub resource_types: Vec<String>,
 }
 
 pub struct RouteResponse {
@@ -169,8 +174,12 @@ struct DrainedEvents {
 /// Compute a hash of the [`LaunchOptions`] fields that require a browser
 /// relaunch when changed (baked into the Chrome process at startup).
 ///
-/// Fields NOT hashed (adjustable at runtime via CDP without relaunch):
-/// ignore_https_errors, color_scheme, download_path, storage_state
+/// Fields NOT hashed:
+/// ignore_https_errors, color_scheme, download_path
+///
+/// `storage_state` is handled separately in `handle_launch()`: explicit
+/// `storageState` launches always require a clean local browser so the loaded
+/// state replaces the prior session instead of merging into it.
 fn launch_hash(opts: &LaunchOptions) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
@@ -665,7 +674,10 @@ impl DaemonState {
                         .await;
                     }
 
+                    let tab_id = mgr.assign_tab_id();
                     mgr.add_page(super::browser::PageInfo {
+                        tab_id,
+                        label: None,
                         target_id: te.target_info.target_id.clone(),
                         session_id: attach.session_id,
                         url: te.target_info.url.clone(),
@@ -1067,16 +1079,14 @@ impl DaemonState {
                                 }
                             }
                         }
-                        "Page.screencastFrame" => {
-                            // Frame broadcasting and acks are handled in real-time by the
-                            // stream server's background CDP event loop. Here we just
-                            // collect acks as a fallback for non-streaming mode.
-                            if self.stream_server.is_none() {
-                                if let Some(sid) =
-                                    event.params.get("sessionId").and_then(|v| v.as_i64())
-                                {
-                                    pending_acks.push(sid);
-                                }
+                        // Frame broadcasting and acks are handled in real-time by the
+                        // stream server's background CDP event loop. Here we just
+                        // collect acks as a fallback for non-streaming mode.
+                        "Page.screencastFrame" if self.stream_server.is_none() => {
+                            if let Some(sid) =
+                                event.params.get("sessionId").and_then(|v| v.as_i64())
+                            {
+                                pending_acks.push(sid);
                             }
                         }
                         "Page.javascriptDialogOpening" => {
@@ -1373,7 +1383,15 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         "upload" => handle_upload(cmd, state).await,
         "addscript" => handle_addscript(cmd, state).await,
         "addinitscript" => handle_addinitscript(cmd, state).await,
+        "removeinitscript" => handle_removeinitscript(cmd, state).await,
         "addstyle" => handle_addstyle(cmd, state).await,
+        "react_tree" => handle_react_tree(cmd, state).await,
+        "react_inspect" => handle_react_inspect(cmd, state).await,
+        "react_renders_start" => handle_react_renders_start(cmd, state).await,
+        "react_renders_stop" => handle_react_renders_stop(cmd, state).await,
+        "react_suspense" => handle_react_suspense(cmd, state).await,
+        "vitals" => handle_vitals(cmd, state).await,
+        "pushstate" => handle_pushstate(cmd, state).await,
         "clipboard" => handle_clipboard(cmd, state).await,
         "wheel" => handle_wheel(cmd, state).await,
         "device" => handle_device(cmd, state).await,
@@ -1492,7 +1510,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
 /// subsequent navigations don't hijack the user's existing tabs.
 async fn connect_auto_with_fresh_tab(background: bool) -> Result<BrowserManager, String> {
     let mut mgr = BrowserManager::connect_auto().await?;
-    mgr.tab_new(None, background).await?;
+    mgr.tab_new(None, None, background).await?;
     if !background {
         let session_id = mgr.active_session_id()?.to_string();
         let _ = mgr
@@ -1512,6 +1530,9 @@ async fn auto_launch(state: &mut DaemonState) -> Result<(), String> {
         options.viewport_size = Some(server.viewport().await);
     }
     let engine = env::var("AGENT_BROWSER_ENGINE").ok();
+
+    // Extract storage_state before options is moved into BrowserManager::launch.
+    let storage_state_path = options.storage_state.clone();
 
     // Store proxy credentials for Fetch.authRequired handling
     let has_proxy_auth = options.proxy_username.is_some();
@@ -1535,7 +1556,9 @@ async fn auto_launch(state: &mut DaemonState) -> Result<(), String> {
         state.start_fetch_handler();
         state.start_dialog_handler();
         state.update_stream_client().await;
+        apply_launch_init_scripts(state).await;
         try_auto_restore_state(state).await;
+        try_load_storage_state(state, &storage_state_path).await;
         return Ok(());
     }
 
@@ -1546,7 +1569,9 @@ async fn auto_launch(state: &mut DaemonState) -> Result<(), String> {
         state.start_fetch_handler();
         state.start_dialog_handler();
         state.update_stream_client().await;
+        apply_launch_init_scripts(state).await;
         try_auto_restore_state(state).await;
+        try_load_storage_state(state, &storage_state_path).await;
         return Ok(());
     }
 
@@ -1580,7 +1605,9 @@ async fn auto_launch(state: &mut DaemonState) -> Result<(), String> {
                     state.start_dialog_handler();
                     state.update_stream_client().await;
                     write_provider_file(&state.session_id, &p);
+                    apply_launch_init_scripts(state).await;
                     try_auto_restore_state(state).await;
+                    try_load_storage_state(state, &storage_state_path).await;
                     return Ok(());
                 }
                 Err(e) => {
@@ -1612,8 +1639,57 @@ async fn auto_launch(state: &mut DaemonState) -> Result<(), String> {
         }
     }
 
+    apply_launch_init_scripts(state).await;
     try_auto_restore_state(state).await;
+    try_load_storage_state(state, &storage_state_path).await;
     Ok(())
+}
+
+/// Apply AGENT_BROWSER_ENABLE (built-in init scripts like `react-devtools`)
+/// and AGENT_BROWSER_INIT_SCRIPTS (user-provided files) to the browser so the
+/// scripts are registered before any page JS runs on the next navigation.
+/// Also evaluates each script on the current page (if any) so the effect is
+/// immediate for already-loaded pages.
+async fn apply_launch_init_scripts(state: &DaemonState) {
+    let Some(mgr) = state.browser.as_ref() else {
+        return;
+    };
+
+    // Built-in features via --enable / AGENT_BROWSER_ENABLE.
+    if let Ok(raw) = env::var("AGENT_BROWSER_ENABLE") {
+        for feature in raw
+            .split([',', '\n'])
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
+            match feature {
+                "react-devtools" | "react" => {
+                    let _ = mgr.add_script_to_evaluate(react::INSTALL_HOOK_JS).await;
+                }
+                other => {
+                    eprintln!("warning: unknown --enable feature '{}'", other);
+                }
+            }
+        }
+    }
+
+    // User init scripts via --init-script / AGENT_BROWSER_INIT_SCRIPTS.
+    if let Ok(raw) = env::var("AGENT_BROWSER_INIT_SCRIPTS") {
+        for path in raw
+            .split([',', '\n'])
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
+            match fs::read_to_string(path) {
+                Ok(source) => {
+                    let _ = mgr.add_script_to_evaluate(&source).await;
+                }
+                Err(e) => {
+                    eprintln!("warning: failed to read --init-script '{}': {}", path, e);
+                }
+            }
+        }
+    }
 }
 
 fn launch_options_from_env() -> LaunchOptions {
@@ -1674,6 +1750,64 @@ async fn try_auto_restore_state(state: &mut DaemonState) {
     }
 }
 
+/// Load storage state if a path is configured.
+///
+/// Explicit launch should surface this error. Best-effort callers can ignore
+/// the returned `Result` and keep their previous behavior.
+async fn load_storage_state(state: &DaemonState, path: &Option<String>) -> Result<(), String> {
+    if let Some(ref path) = path {
+        if let Some(ref mgr) = state.browser {
+            if let Ok(session_id) = mgr.active_session_id() {
+                state::load_state(&mgr.client, session_id, path).await?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn rollback_failed_launch(state: &mut DaemonState) -> Result<(), String> {
+    let close_error = if let Some(mut mgr) = state.browser.take() {
+        mgr.close().await.err()
+    } else {
+        None
+    };
+
+    state.launch_hash = None;
+    state.screencasting = false;
+    state.reset_input_state();
+    state.ref_map.clear();
+    state.update_stream_client().await;
+
+    if let Some(err) = close_error {
+        return Err(err);
+    }
+
+    Ok(())
+}
+
+async fn load_storage_state_or_rollback(
+    state: &mut DaemonState,
+    path: &Option<String>,
+) -> Result<(), String> {
+    if let Err(err) = load_storage_state(state, path).await {
+        if let Err(close_err) = rollback_failed_launch(state).await {
+            return Err(format!(
+                "{} (also failed to roll back browser after launch: {})",
+                err, close_err
+            ));
+        }
+        return Err(err);
+    }
+
+    Ok(())
+}
+
+/// Load storage state from AGENT_BROWSER_STATE if set.
+async fn try_load_storage_state(state: &DaemonState, path: &Option<String>) {
+    let _ = load_storage_state(state, path).await;
+}
+
 // ---------------------------------------------------------------------------
 // Phase 1 handlers
 // ---------------------------------------------------------------------------
@@ -1697,6 +1831,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
                 .collect()
         });
     let storage_state = cmd.get("storageState").and_then(|v| v.as_str());
+    let storage_state_owned = storage_state.map(|s| s.to_string());
 
     let launch_options = LaunchOptions {
         headless,
@@ -1777,8 +1912,10 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         let is_external = cdp_url.is_some() || cdp_port.is_some() || auto_connect;
         let was_external = mgr.is_cdp_connection();
         let hash_changed = !is_external && state.launch_hash != Some(new_hash);
+        let storage_state_requires_clean_launch = storage_state_owned.is_some() && !is_external;
         is_external != was_external
             || hash_changed
+            || storage_state_requires_clean_launch
             || mgr.has_process_exited()
             || !mgr.is_connection_alive().await
     } else {
@@ -1795,6 +1932,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
             state.update_stream_client().await;
         }
     } else {
+        load_storage_state(state, &storage_state_owned).await?;
         return Ok(json!({ "launched": true, "reused": true }));
     }
     state.ref_map.clear();
@@ -1816,6 +1954,8 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         state.start_fetch_handler();
         state.start_dialog_handler();
         state.update_stream_client().await;
+        load_storage_state_or_rollback(state, &storage_state_owned).await?;
+        apply_launch_init_scripts(state).await;
         return Ok(json!({ "launched": true }));
     }
 
@@ -1826,6 +1966,8 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         state.start_fetch_handler();
         state.start_dialog_handler();
         state.update_stream_client().await;
+        load_storage_state_or_rollback(state, &storage_state_owned).await?;
+        apply_launch_init_scripts(state).await;
         return Ok(json!({ "launched": true }));
     }
 
@@ -1836,6 +1978,8 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         state.start_fetch_handler();
         state.start_dialog_handler();
         state.update_stream_client().await;
+        load_storage_state_or_rollback(state, &storage_state_owned).await?;
+        apply_launch_init_scripts(state).await;
         return Ok(json!({ "launched": true }));
     }
 
@@ -1872,6 +2016,8 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
                         state.start_dialog_handler();
                         state.update_stream_client().await;
                         write_provider_file(&state.session_id, provider);
+                        load_storage_state_or_rollback(state, &storage_state_owned).await?;
+                        apply_launch_init_scripts(state).await;
 
                         if let Some(info) = providers::get_agentcore_info() {
                             return Ok(json!({
@@ -1963,6 +2109,13 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
             }
         }
     }
+
+    // Load storage state only after Fetch interception is active so replayed
+    // origin navigations go through the same domain and proxy handling as
+    // normal browser traffic.
+    load_storage_state_or_rollback(state, &storage_state_owned).await?;
+
+    apply_launch_init_scripts(state).await;
 
     Ok(json!({ "launched": true }))
 }
@@ -2530,7 +2683,7 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
 
         let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
         state.ref_map.clear();
-        mgr.tab_new(Some(&href), state.background).await?;
+        mgr.tab_new(Some(&href), None, state.background).await?;
 
         return Ok(json!({ "clicked": selector, "newTab": true, "url": href }));
     }
@@ -3579,22 +3732,25 @@ async fn handle_tab_list(state: &DaemonState) -> Result<Value, String> {
 async fn handle_tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
     let url = cmd.get("url").and_then(|v| v.as_str());
+    let label = cmd.get("label").and_then(|v| v.as_str());
     state.ref_map.clear();
     state.iframe_sessions.clear();
     state.active_frame_id = None;
-    mgr.tab_new(url, state.background).await
+    mgr.tab_new(url, label, state.background).await
 }
 
 async fn handle_tab_switch(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
-    let index = cmd
-        .get("index")
-        .and_then(|v| v.as_u64())
-        .ok_or("Missing 'index' parameter")? as usize;
+    let tab_ref_str = cmd
+        .get("tabId")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'tabId' parameter (expected `t<N>` or a label)")?;
+    let tab_ref = super::browser::TabRef::parse(tab_ref_str)?;
+    let tab_id = mgr.resolve_tab_ref(&tab_ref)?;
     state.ref_map.clear();
     state.iframe_sessions.clear();
     state.active_frame_id = None;
-    let result = mgr.tab_switch(index, state.background).await?;
+    let result = mgr.tab_switch_by_id(tab_id, state.background).await?;
 
     if let Some(ref server) = state.stream_server {
         if let Ok(dims) = mgr
@@ -3619,14 +3775,17 @@ async fn handle_tab_switch(cmd: &Value, state: &mut DaemonState) -> Result<Value
 
 async fn handle_tab_close(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
-    let index = cmd
-        .get("index")
-        .and_then(|v| v.as_u64())
-        .map(|i| i as usize);
+    let tab_id = match cmd.get("tabId").and_then(|v| v.as_str()) {
+        Some(s) => {
+            let tab_ref = super::browser::TabRef::parse(s)?;
+            Some(mgr.resolve_tab_ref(&tab_ref)?)
+        }
+        None => None,
+    };
     state.ref_map.clear();
     state.iframe_sessions.clear();
     state.active_frame_id = None;
-    mgr.tab_close(index).await
+    mgr.tab_close_by_id(tab_id).await
 }
 
 async fn handle_viewport(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -4005,7 +4164,10 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
         }
 
         // Add page and switch to it
+        let tab_id = mgr.assign_tab_id();
         mgr.add_page(super::browser::PageInfo {
+            tab_id,
+            label: None,
             target_id: create_result.target_id,
             session_id: new_session_id.clone(),
             url: nav_url.clone(),
@@ -4582,6 +4744,280 @@ async fn handle_addinitscript(cmd: &Value, state: &DaemonState) -> Result<Value,
 
     let identifier = mgr.add_script_to_evaluate(source).await?;
     Ok(json!({ "added": true, "identifier": identifier }))
+}
+
+async fn handle_removeinitscript(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let identifier = cmd
+        .get("identifier")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'identifier' parameter")?;
+    mgr.remove_script_to_evaluate(identifier).await?;
+    Ok(json!({ "removed": true, "identifier": identifier }))
+}
+
+// === React / Web primitives ===
+
+/// Parse a `Runtime.evaluate` result whose expression returned a JSON string.
+/// Returns a helpful error if parsing fails.
+fn parse_json_string(value: Value, what: &str) -> Result<Value, String> {
+    let s = value
+        .as_str()
+        .ok_or_else(|| format!("{} returned non-string value", what))?;
+    serde_json::from_str(s).map_err(|e| format!("{} returned invalid JSON: {}", what, e))
+}
+
+async fn handle_react_tree(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let result = mgr.evaluate(react::scripts::TREE_SNAPSHOT, None).await?;
+    let nodes_json = parse_json_string(result, "react tree")?;
+    let nodes: Vec<react::TreeNode> = serde_json::from_value(nodes_json)
+        .map_err(|e| format!("Failed to parse tree nodes: {}", e))?;
+
+    let return_json = cmd.get("json").and_then(|v| v.as_bool()).unwrap_or(false);
+    if return_json {
+        let nodes_value: Vec<Value> = nodes
+            .iter()
+            .map(|n| {
+                json!({
+                    "id": n.id,
+                    "type": n.node_type,
+                    "name": n.name,
+                    "key": n.key,
+                    "parent": n.parent,
+                })
+            })
+            .collect();
+        Ok(json!({ "nodes": nodes_value }))
+    } else {
+        Ok(json!({ "tree": react::format_tree(&nodes) }))
+    }
+}
+
+async fn handle_react_inspect(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let fiber_id = cmd
+        .get("fiberId")
+        .and_then(|v| v.as_i64())
+        .ok_or("Missing 'fiberId' parameter (numeric React fiber id)")?;
+
+    let script = react::scripts::TREE_INSPECT.replace("{{ID}}", &fiber_id.to_string());
+    let result = mgr.evaluate(&script, None).await?;
+    let parsed = parse_json_string(result, "react inspect")?;
+    Ok(parsed)
+}
+
+async fn handle_react_renders_start(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    // Install for future navigations, then evaluate immediately so the
+    // current page starts recording without a reload.
+    let identifier = mgr
+        .add_script_to_evaluate(react::scripts::RENDERS_INIT)
+        .await?;
+    mgr.evaluate(react::scripts::RENDERS_INIT, None).await?;
+    let _ = cmd;
+    Ok(json!({
+        "recording": true,
+        "identifier": identifier,
+        "message": "recording renders - interact with the page, then run `react renders stop`"
+    }))
+}
+
+async fn handle_react_renders_stop(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let result = mgr.evaluate(react::scripts::RENDERS_STOP, None).await?;
+    let data_json = parse_json_string(result, "react renders stop")?;
+    let data: react::RendersData = serde_json::from_value(data_json.clone())
+        .map_err(|e| format!("Failed to parse renders data: {}", e))?;
+
+    let return_json = cmd.get("json").and_then(|v| v.as_bool()).unwrap_or(false);
+    if return_json {
+        Ok(data_json)
+    } else {
+        Ok(json!({ "report": react::format_renders_report(&data) }))
+    }
+}
+
+async fn handle_react_suspense(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let result = mgr.evaluate(react::scripts::SUSPENSE_WALK, None).await?;
+    let boundaries_json = parse_json_string(result, "react suspense")?;
+    let boundaries: Vec<react::Boundary> = serde_json::from_value(boundaries_json.clone())
+        .map_err(|e| format!("Failed to parse suspense boundaries: {}", e))?;
+
+    let return_json = cmd.get("json").and_then(|v| v.as_bool()).unwrap_or(false);
+    let only_dynamic = cmd
+        .get("onlyDynamic")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if return_json {
+        // When only-dynamic is set, filter the JSON payload too so callers
+        // get consistent output regardless of format choice.
+        if only_dynamic {
+            let filtered: Vec<&react::Boundary> = boundaries
+                .iter()
+                .filter(|b| {
+                    b.parent_id != 0
+                        && (b.is_suspended
+                            || !b.suspended_by.is_empty()
+                            || b.unknown_suspenders.is_some())
+                })
+                .collect();
+            Ok(json!({ "boundaries": filtered }))
+        } else {
+            Ok(json!({ "boundaries": boundaries_json }))
+        }
+    } else {
+        Ok(json!({ "report": react::format_suspense_report(&boundaries, only_dynamic) }))
+    }
+}
+
+async fn handle_vitals(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    // Install observers BEFORE the navigation/reload that we want to measure.
+    // The script is idempotent — a no-op if already installed on the current page.
+    {
+        let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+        let _ = mgr.evaluate(react::scripts::VITALS_INIT, None).await?;
+    }
+
+    // Register as an init script too, so navigations done via `vitals --url`
+    // start observing from the first paint.
+    {
+        let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+        let _ = mgr
+            .add_script_to_evaluate(react::scripts::VITALS_INIT)
+            .await;
+    }
+
+    // Navigate to the target URL (or reload the current page) to trigger a
+    // full page load the observers can capture.
+    let target = cmd.get("url").and_then(|v| v.as_str()).map(String::from);
+    if let Some(url) = target {
+        let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
+        let _ = mgr.navigate(&url, WaitUntil::Load).await?;
+    } else {
+        handle_reload(state).await?;
+    }
+
+    // Give layout shifts and React effects a chance to settle.
+    tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
+
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let url = mgr.get_url().await.unwrap_or_default();
+    let result = mgr.evaluate(react::scripts::VITALS_READ, None).await?;
+    let raw = parse_json_string(result, "vitals")?;
+
+    // The raw payload has { cwv, timing, ttfb }. Merge with URL and process
+    // timing into React hydration phases + per-component durations.
+    let cwv = raw.get("cwv").cloned().unwrap_or(json!({}));
+    let timing = raw
+        .get("timing")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let ttfb = raw.get("ttfb").and_then(|v| v.as_f64());
+    let lcp = cwv.get("lcp").cloned().unwrap_or(Value::Null);
+    let cls_score = cwv.get("cls").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let cls_entries = cwv.get("clsEntries").cloned().unwrap_or(json!([]));
+    let fcp = cwv.get("fcp").and_then(|v| v.as_f64());
+    let inp = cwv.get("inp").and_then(|v| v.as_f64());
+
+    let round = |n: f64| (n * 100.0).round() / 100.0;
+
+    let mut hydration_phases: Vec<Value> = Vec::new();
+    let mut hydration_start = f64::INFINITY;
+    let mut hydration_end = 0.0f64;
+    let mut hydrated_components: Vec<Value> = Vec::new();
+    // React's profiling build emits `console.timeStamp(label, start, end,
+    // track, trackGroup, color)` entries whose `track` / `trackGroup`
+    // fields are literal strings containing the atom glyph (e.g.
+    // "Scheduler ⚛", "Components ⚛"). The comparisons below match those
+    // exact strings — don't "clean up" the glyphs.
+    for e in &timing {
+        let label = e.get("label").and_then(|v| v.as_str()).unwrap_or("");
+        let track = e.get("track").and_then(|v| v.as_str()).unwrap_or("");
+        let track_group = e.get("trackGroup").and_then(|v| v.as_str()).unwrap_or("");
+        let color = e.get("color").and_then(|v| v.as_str()).unwrap_or("");
+        let start = e.get("startTime").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let end = e.get("endTime").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        if end <= start {
+            continue;
+        }
+        if track_group == "Scheduler ⚛" {
+            hydration_phases.push(json!({
+                "label": label,
+                "startTime": round(start),
+                "endTime": round(end),
+                "duration": round(end - start),
+            }));
+            if label == "Hydrated" {
+                if start < hydration_start {
+                    hydration_start = start;
+                }
+                if end > hydration_end {
+                    hydration_end = end;
+                }
+            }
+        } else if track == "Components ⚛" && color.starts_with("tertiary") {
+            hydrated_components.push(json!({
+                "name": label,
+                "startTime": round(start),
+                "endTime": round(end),
+                "duration": round(end - start),
+            }));
+        }
+    }
+    hydrated_components.sort_by(|a, b| {
+        let da = a.get("duration").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let db = b.get("duration").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        db.partial_cmp(&da).unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let hydration = if hydration_start.is_finite() && hydration_end > 0.0 {
+        json!({
+            "startTime": round(hydration_start),
+            "endTime": round(hydration_end),
+            "duration": round(hydration_end - hydration_start),
+        })
+    } else {
+        Value::Null
+    };
+
+    let data_value = json!({
+        "url": url,
+        "ttfb": ttfb,
+        "lcp": lcp,
+        "cls": { "score": round(cls_score), "entries": cls_entries },
+        "fcp": fcp,
+        "inp": inp,
+        "hydration": hydration,
+        "phases": hydration_phases,
+        "hydratedComponents": hydrated_components,
+    });
+
+    let return_json = cmd.get("json").and_then(|v| v.as_bool()).unwrap_or(false);
+    if return_json {
+        Ok(data_value)
+    } else {
+        let data: react::VitalsData = serde_json::from_value(data_value.clone())
+            .map_err(|e| format!("Failed to parse vitals data: {}", e))?;
+        Ok(json!({ "report": react::format_vitals_report(&data) }))
+    }
+}
+
+async fn handle_pushstate(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let url = cmd
+        .get("url")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'url' parameter")?;
+    let script = react::scripts::PUSHSTATE.replace(
+        "{{URL}}",
+        &serde_json::to_string(url).unwrap_or_else(|_| "\"\"".to_string()),
+    );
+    let result = mgr.evaluate(&script, None).await?;
+    let after = result.as_str().map(String::from).unwrap_or_default();
+    Ok(json!({ "url": after }))
 }
 
 async fn handle_addstyle(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
@@ -5916,7 +6352,10 @@ async fn handle_window_new(cmd: &Value, state: &mut DaemonState) -> Result<Value
         )
         .await?;
 
+    let tab_id = mgr.assign_tab_id();
     mgr.add_page(super::browser::PageInfo {
+        tab_id,
+        label: None,
         target_id: create_result.target_id,
         session_id: attach.session_id,
         url: "about:blank".to_string(),
@@ -5944,7 +6383,10 @@ async fn handle_window_new(cmd: &Value, state: &mut DaemonState) -> Result<Value
     let total = mgr.page_count();
     state.ref_map.clear();
 
-    Ok(json!({ "index": total - 1, "total": total }))
+    Ok(json!({
+        "tabId": super::browser::format_tab_id(tab_id),
+        "total": total,
+    }))
 }
 
 async fn handle_diff_screenshot(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
@@ -6501,7 +6943,7 @@ async fn resolve_fetch_paused(
 
     // Route matching
     for route in routes {
-        let matches = if route.url_pattern == "*" {
+        let url_matches = if route.url_pattern == "*" {
             true
         } else if route.url_pattern.contains('*') {
             let parts: Vec<&str> = route.url_pattern.split('*').collect();
@@ -6513,6 +6955,14 @@ async fn resolve_fetch_paused(
         } else {
             paused.url.contains(&route.url_pattern)
         };
+
+        let resource_type_matches = route.resource_types.is_empty()
+            || route
+                .resource_types
+                .iter()
+                .any(|rt| rt.eq_ignore_ascii_case(&paused.resource_type));
+
+        let matches = url_matches && resource_type_matches;
 
         if matches {
             if route.abort {
@@ -6648,6 +7098,28 @@ async fn handle_route(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         .to_string();
     let abort = cmd.get("abort").and_then(|v| v.as_bool()).unwrap_or(false);
 
+    let resource_types: Vec<String> = cmd
+        .get("resourceType")
+        .or_else(|| cmd.get("resourceTypes"))
+        .and_then(|v| {
+            if let Some(s) = v.as_str() {
+                Some(
+                    s.split(',')
+                        .map(|p| p.trim().to_string())
+                        .filter(|p| !p.is_empty())
+                        .collect(),
+                )
+            } else {
+                v.as_array().map(|arr| {
+                    arr.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                })
+            }
+        })
+        .unwrap_or_default();
+
     let response = cmd.get("response").and_then(|v| {
         if v.is_null() {
             return None;
@@ -6675,6 +7147,7 @@ async fn handle_route(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
             url_pattern: url_pattern.clone(),
             response,
             abort,
+            resource_types,
         });
     }
 
@@ -8379,6 +8852,7 @@ mod tests {
                 url_pattern: "https://example.com/*".to_string(),
                 response: None,
                 abort: true,
+                resource_types: Vec::new(),
             });
         }
         let patterns = build_fetch_patterns(&state).await;
@@ -8421,6 +8895,7 @@ mod tests {
                 url_pattern: "*".to_string(),
                 response: None,
                 abort: false,
+                resource_types: Vec::new(),
             });
         }
         {
