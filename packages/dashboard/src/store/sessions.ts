@@ -160,10 +160,10 @@ export const closeAllSessionsAtom = atom(null, (get, set) => {
 
 export const closeTabAtom = atom(
   null,
-  (get, _set, { port, tabIndex }: { port: number; tabIndex: number }) => {
+  (get, _set, { port, tabRef }: { port: number; tabRef: string }) => {
     const sessions = get(sessionsAtom);
     const s = sessions.find((x) => x.port === port)?.session;
-    if (s) execCommand(sessionArgs(s, "tab", "close", String(tabIndex)));
+    if (s) execCommand(sessionArgs(s, "tab", "close", tabRef));
   },
 );
 
@@ -175,10 +175,10 @@ export const addTabAtom = atom(null, (get, _set, port: number) => {
 
 export const switchTabAtom = atom(
   null,
-  (get, _set, { port, tabIndex }: { port: number; tabIndex: number }) => {
+  (get, _set, { port, tabRef }: { port: number; tabRef: string }) => {
     const sessions = get(sessionsAtom);
     const s = sessions.find((x) => x.port === port)?.session;
-    if (s) execCommand(sessionArgs(s, "tab", String(tabIndex)));
+    if (s) execCommand(sessionArgs(s, "tab", tabRef));
   },
 );
 

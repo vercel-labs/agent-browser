@@ -83,11 +83,11 @@ export const cases: EvalCase[] = [
   },
   {
     id: "ss-08",
-    name: "Selects agent-browser skill for general browser tasks",
+    name: "Selects core skill for general browser tasks",
     category: "skill-selection",
     prompt: "Navigate to hacker news and screenshot the front page",
     expectedPatterns: [
-      "skills get agent-browser",
+      "skills get core",
     ],
     rubric: RUBRIC,
   },

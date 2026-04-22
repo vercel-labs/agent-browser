@@ -67,7 +67,10 @@ export interface ErrorMessage {
 }
 
 export interface TabInfo {
-  index: number;
+  /** Stable tab id like `t1`, `t2`. Never reused within a session. */
+  tabId: string;
+  /** Optional user-assigned label (e.g. `docs`). Interchangeable with `tabId`. */
+  label?: string | null;
   title: string;
   url: string;
   type: string;
