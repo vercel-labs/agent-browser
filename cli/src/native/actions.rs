@@ -2299,6 +2299,74 @@ fn handle_cdp_url(state: &DaemonState) -> Result<Value, String> {
     Ok(json!({ "cdpUrl": mgr.get_cdp_url() }))
 }
 
+fn is_vscode_webview_url(url: &str) -> bool {
+    url.starts_with("vscode-webview://")
+}
+
+fn find_frame_id(tree: &Value, name: Option<&str>, url: Option<&str>) -> Option<String> {
+    let frame = tree.get("frame")?;
+    let frame_name = frame.get("name").and_then(|v| v.as_str()).unwrap_or("");
+    let frame_url = frame.get("url").and_then(|v| v.as_str()).unwrap_or("");
+    let frame_id = frame.get("id").and_then(|v| v.as_str())?;
+
+    if let Some(n) = name {
+        if frame_name == n {
+            return Some(frame_id.to_string());
+        }
+    }
+    if let Some(u) = url {
+        if frame_url.contains(u) {
+            return Some(frame_id.to_string());
+        }
+    }
+
+    if let Some(children) = tree.get("childFrames").and_then(|v| v.as_array()) {
+        for child in children {
+            if let Some(id) = find_frame_id(child, name, url) {
+                return Some(id);
+            }
+        }
+    }
+
+    None
+}
+
+async fn resolve_vscode_active_frame_id(
+    mgr: &BrowserManager,
+    session_id: &str,
+    url: &str,
+) -> Result<Option<String>, String> {
+    // VS Code webview targets expose the rendered extension UI inside a nested
+    // iframe named `active-frame`, not on the wrapper target itself.
+    if !is_vscode_webview_url(url) {
+        return Ok(None);
+    }
+
+    let tree_result = mgr
+        .client
+        .send_command_no_params("Page.getFrameTree", Some(session_id))
+        .await?;
+    Ok(find_frame_id(
+        &tree_result["frameTree"],
+        Some("active-frame"),
+        None,
+    ))
+}
+
+fn sync_iframe_sessions_from_pages(state: &mut DaemonState) {
+    let Some(mgr) = state.browser.as_ref() else {
+        return;
+    };
+
+    for page in mgr.pages_list() {
+        if page.target_type == "iframe" {
+            state
+                .iframe_sessions
+                .insert(page.target_id, page.session_id);
+        }
+    }
+}
+
 async fn handle_inspect(state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
 
@@ -2449,8 +2517,15 @@ async fn handle_close(state: &mut DaemonState) -> Result<Value, String> {
 // ---------------------------------------------------------------------------
 
 async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    sync_iframe_sessions_from_pages(state);
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
+    let url = mgr.get_url().await.unwrap_or_default();
+    let frame_id = if state.active_frame_id.is_some() {
+        state.active_frame_id.clone()
+    } else {
+        resolve_vscode_active_frame_id(mgr, &session_id, &url).await?
+    };
 
     let options = SnapshotOptions {
         selector: cmd
@@ -2478,12 +2553,10 @@ async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         &session_id,
         &options,
         &mut state.ref_map,
-        state.active_frame_id.as_deref(),
+        frame_id.as_deref(),
         &state.iframe_sessions,
     )
     .await?;
-
-    let url = mgr.get_url().await.unwrap_or_default();
 
     let refs: serde_json::Map<String, Value> = state
         .ref_map
@@ -5453,6 +5526,7 @@ async fn handle_waitforfunction(cmd: &Value, state: &DaemonState) -> Result<Valu
 // ---------------------------------------------------------------------------
 
 async fn handle_frame(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    sync_iframe_sessions_from_pages(state);
     let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
 
@@ -5468,33 +5542,6 @@ async fn handle_frame(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         .client
         .send_command_no_params("Page.getFrameTree", Some(&session_id))
         .await?;
-
-    fn find_frame(tree: &Value, name: Option<&str>, url: Option<&str>) -> Option<String> {
-        let frame = tree.get("frame")?;
-        let frame_name = frame.get("name").and_then(|v| v.as_str()).unwrap_or("");
-        let frame_url = frame.get("url").and_then(|v| v.as_str()).unwrap_or("");
-        let frame_id = frame.get("id").and_then(|v| v.as_str())?;
-
-        if let Some(n) = name {
-            if frame_name == n {
-                return Some(frame_id.to_string());
-            }
-        }
-        if let Some(u) = url {
-            if frame_url.contains(u) {
-                return Some(frame_id.to_string());
-            }
-        }
-
-        if let Some(children) = tree.get("childFrames").and_then(|v| v.as_array()) {
-            for child in children {
-                if let Some(id) = find_frame(child, name, url) {
-                    return Some(id);
-                }
-            }
-        }
-        None
-    }
 
     let frame_tree = &tree_result["frameTree"];
 
@@ -5578,13 +5625,13 @@ async fn handle_frame(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         );
         let result = mgr.evaluate(&js, None).await?;
         let frame_name = result.as_str().ok_or("Could not find frame for selector")?;
-        if let Some(frame_id) = find_frame(frame_tree, Some(frame_name), None) {
+        if let Some(frame_id) = find_frame_id(frame_tree, Some(frame_name), None) {
             state.active_frame_id = Some(frame_id);
             return Ok(json!({ "frame": frame_name }));
         }
     }
 
-    if let Some(frame_id) = find_frame(frame_tree, name, url) {
+    if let Some(frame_id) = find_frame_id(frame_tree, name, url) {
         let label = name.or(url).unwrap_or("frame");
         state.active_frame_id = Some(frame_id);
         return Ok(json!({ "frame": label }));
@@ -8310,6 +8357,40 @@ mod tests {
         assert_eq!(resp["id"], "cmd-2");
         assert_eq!(resp["success"], false);
         assert_eq!(resp["error"], "Something went wrong");
+    }
+
+    #[test]
+    fn test_find_frame_id_finds_vscode_active_frame() {
+        let tree = json!({
+            "frame": {
+                "id": "root",
+                "name": "",
+                "url": "vscode-file://vscode-app/Applications/Visual%20Studio%20Code.app/Contents/Resources/app/out/vs/code/electron-browser/workbench/workbench.html"
+            },
+            "childFrames": [
+                {
+                    "frame": {
+                        "id": "wrapper",
+                        "name": "webview-host",
+                        "url": "vscode-webview://1l4q6f4e6i2l8rb3q0r4d0v6kq2b6jgg/index.html?id=webview-element-uuid"
+                    },
+                    "childFrames": [
+                        {
+                            "frame": {
+                                "id": "active",
+                                "name": "active-frame",
+                                "url": "vscode-webview://1l4q6f4e6i2l8rb3q0r4d0v6kq2b6jgg/index.html?id=webview-element-uuid&origin=tabby"
+                            }
+                        }
+                    ]
+                }
+            ]
+        });
+
+        assert_eq!(
+            find_frame_id(&tree, Some("active-frame"), None),
+            Some("active".to_string())
+        );
     }
 
     #[tokio::test]
