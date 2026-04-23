@@ -98,7 +98,8 @@ agent-browser find role button click --name "Submit"
 ### Core Commands
 
 ```bash
-agent-browser open <url>              # Navigate to URL (aliases: goto, navigate)
+agent-browser open                    # Launch browser (no navigation); stays on about:blank
+agent-browser open <url>              # Launch + navigate to URL (aliases: goto, navigate)
 agent-browser click <sel>             # Click element (--new-tab to open in new tab)
 agent-browser dblclick <sel>          # Double-click element
 agent-browser focus <sel>             # Focus element
@@ -260,6 +261,8 @@ agent-browser set media [dark|light]  # Emulate color scheme
 ```bash
 agent-browser cookies                 # Get all cookies
 agent-browser cookies set <name> <val> # Set cookie
+agent-browser cookies set --curl <file> # Import cookies from a Copy-as-cURL dump,
+                                        # JSON array, or bare Cookie header (auto-detected)
 agent-browser cookies clear           # Clear cookies
 
 agent-browser storage local           # Get all localStorage
@@ -276,6 +279,7 @@ agent-browser storage session         # Same for sessionStorage
 agent-browser network route <url>              # Intercept requests
 agent-browser network route <url> --abort      # Block requests
 agent-browser network route <url> --body <json>  # Mock response
+agent-browser network route '*' --abort --resource-type script  # Block scripts only
 agent-browser network unroute [url]            # Remove routes
 agent-browser network requests                 # View tracked requests
 agent-browser network requests --filter api    # Filter requests
@@ -290,11 +294,30 @@ agent-browser network har stop [output.har]    # Stop and save HAR (temp path if
 ### Tabs & Windows
 
 ```bash
-agent-browser tab                     # List tabs
-agent-browser tab new [url]           # New tab (optionally with URL)
-agent-browser tab <n>                 # Switch to tab n
-agent-browser tab close [n]           # Close tab
-agent-browser window new              # New window
+agent-browser tab                              # List tabs (shows `tabId` and optional label)
+agent-browser tab new [url]                    # New tab (optionally with URL)
+agent-browser tab new --label docs [url]       # New tab with a user-assigned label
+agent-browser tab <t<N>|label>                 # Switch to a tab by id or label
+agent-browser tab close [t<N>|label]           # Close a tab (defaults to active)
+agent-browser window new                       # New window
+```
+
+Tab ids are stable strings of the form `t1`, `t2`, `t3`. They're never reused
+within a session, so scripts and agents can keep referring to the same tab
+even after other tabs are opened or closed. Positional integers like `tab 2`
+are **not** accepted; the `t` prefix disambiguates handles from indices and
+mirrors the `@e1` convention used for element refs.
+
+You can also assign a memorable label (`docs`, `app`, `admin`) and use it
+interchangeably with the id. Labels are never auto-generated and never
+rewritten on navigation — they're yours to name and keep:
+
+```bash
+agent-browser tab new --label docs https://docs.example.com
+agent-browser tab docs               # switch to the docs tab
+agent-browser snapshot               # populate refs for docs
+agent-browser click @e3              # click uses docs's refs
+agent-browser tab close docs         # close by label
 ```
 
 ### Frames
@@ -361,6 +384,60 @@ agent-browser state clean --older-than <days>  # Delete old states
 agent-browser back                    # Go back
 agent-browser forward                 # Go forward
 agent-browser reload                  # Reload page
+agent-browser pushstate <url>         # SPA client-side nav; auto-detects window.next.router.push,
+                                      # falls back to history.pushState + popstate
+```
+
+### Pre-navigation setup
+
+Some flows (SSR debug, auth cookies for protected origins, init scripts)
+need state set up *before* the first navigation. Use `open` with no URL
+to launch the browser, then stage cookies / routes / init scripts, then
+navigate. `batch` sends it all in one CLI call:
+
+```bash
+agent-browser batch \
+  '["open"]' \
+  '["network","route","*","--abort","--resource-type","script"]' \
+  '["cookies","set","--curl","cookies.curl","--domain","localhost"]' \
+  '["navigate","http://localhost:3000/target"]'
+```
+
+Without `batch` the same sequence is three commands that all reuse the
+same daemon (fast, but not one turn).
+
+### React / Web Vitals
+
+Agent-browser ships with first-class React introspection and universal Web
+Vitals metrics. The React commands need the React DevTools hook installed at
+launch; Web Vitals and pushstate are framework-agnostic.
+
+```bash
+agent-browser open --enable react-devtools <url>   # Launch with React hook installed
+agent-browser react tree                           # Full component tree
+agent-browser react inspect <fiberId>              # props, hooks, state, source
+agent-browser react renders start                  # Begin fiber render recording
+agent-browser react renders stop [--json]          # Stop and print profile (--json for raw data)
+agent-browser react suspense [--only-dynamic] [--json]  # Suspense boundaries + classifier
+                                                         # --only-dynamic hides the "static" list
+agent-browser vitals [url] [--json]                # LCP/CLS/TTFB/FCP/INP + React hydration phases
+```
+
+Each `react ...` subcommand requires `--enable react-devtools` to have been
+passed at launch (the React DevTools `installHook.js` is embedded in the
+binary). Without it the commands error with `React DevTools hook not installed
+- relaunch with --enable react-devtools`.
+
+Works on any React app — Next.js, Remix, Vite+React, CRA, TanStack Start,
+React Native Web, etc. `vitals` and `pushstate` are framework-agnostic.
+
+### Init scripts
+
+```bash
+agent-browser open --init-script <path>           # Register page init script before first navigation
+                                                  # (repeatable; also AGENT_BROWSER_INIT_SCRIPTS env)
+agent-browser addinitscript <js>                  # Register at runtime (returns identifier)
+agent-browser removeinitscript <identifier>       # Remove a previously registered init script
 ```
 
 ### Setup
@@ -369,7 +446,28 @@ agent-browser reload                  # Reload page
 agent-browser install                 # Download Chrome from Chrome for Testing (Google's official automation channel)
 agent-browser install --with-deps     # Also install system deps (Linux)
 agent-browser upgrade                 # Upgrade agent-browser to the latest version
+agent-browser doctor                  # Diagnose the install and auto-clean stale daemon files
+agent-browser doctor --fix            # Also run destructive repairs (reinstall Chrome, purge old state, ...)
+agent-browser doctor --offline --quick  # Skip network probes and the live launch test
 ```
+
+`doctor` checks your environment, Chrome install, daemon state, config files,
+encryption key, providers, network reachability, and runs a live headless
+browser launch test. Stale socket/pid sidecar files are auto-cleaned. Output
+is also available as `--json` for agents.
+
+### Skills
+
+```bash
+agent-browser skills                  # List available skills
+agent-browser skills list             # Same as above
+agent-browser skills get <name>       # Output a skill's full content
+agent-browser skills get <name> --full  # Include references and templates
+agent-browser skills get --all        # Output every skill
+agent-browser skills path [name]      # Print skill directory path
+```
+
+Serves bundled skill content that always matches the installed CLI version. AI agents use this to get current instructions rather than relying on cached copies. Set `AGENT_BROWSER_SKILLS_DIR` to override the skills directory path.
 
 ## Authentication
 
@@ -602,6 +700,8 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 | `--headers <json>` | Set HTTP headers scoped to the URL's origin |
 | `--executable-path <path>` | Custom browser executable (or `AGENT_BROWSER_EXECUTABLE_PATH` env) |
 | `--extension <path>` | Load browser extension (repeatable; or `AGENT_BROWSER_EXTENSIONS` env) |
+| `--init-script <path>` | Register a page init script before the first navigation (repeatable; or `AGENT_BROWSER_INIT_SCRIPTS` env) |
+| `--enable <feature>` | Built-in init scripts: `react-devtools` (repeatable or comma-list; or `AGENT_BROWSER_ENABLE` env) |
 | `--args <args>` | Browser launch args, comma or newline separated (or `AGENT_BROWSER_ARGS` env) |
 | `--user-agent <ua>` | Custom User-Agent string (or `AGENT_BROWSER_USER_AGENT` env) |
 | `--proxy <url>` | Proxy server URL with optional auth (or `AGENT_BROWSER_PROXY` env) |
@@ -716,6 +816,15 @@ AGENT_BROWSER_CONFIG=./ci-config.json agent-browser open example.com
 ```
 
 All options from the table above can be set in the config file using camelCase keys (e.g., `--executable-path` becomes `"executablePath"`, `--proxy-bypass` becomes `"proxyBypass"`). Unknown keys are ignored for forward compatibility.
+
+A [JSON Schema](agent-browser.schema.json) is available for IDE autocomplete and validation. Add a `$schema` key to your config file to enable it:
+
+```json
+{
+  "$schema": "https://agent-browser.dev/schema.json",
+  "headed": true
+}
+```
 
 Boolean flags accept an optional `true`/`false` value to override config settings. For example, `--headed false` disables `"headed": true` from config. A bare `--headed` is equivalent to `--headed true`.
 
@@ -1144,7 +1253,7 @@ Install as a Claude Code skill:
 npx skills add vercel-labs/agent-browser
 ```
 
-This adds the skill to `.claude/skills/agent-browser/SKILL.md` in your project. The skill teaches Claude Code the full agent-browser workflow, including the snapshot-ref interaction pattern, session management, and timeout handling.
+This adds a thin discovery stub at `.claude/skills/agent-browser/SKILL.md`. The stub is intentionally minimal — it points Claude Code at `agent-browser skills get core` to load the actual workflow content at runtime. This way the instructions always match the installed CLI version instead of going stale between releases.
 
 ### AGENTS.md / CLAUDE.md
 

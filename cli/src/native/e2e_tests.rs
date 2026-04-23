@@ -46,6 +46,54 @@ fn native_test_fixture_url(name: &str) -> String {
     )
 }
 
+async fn create_storage_state_with_cookie(path: &str, cookie_name: &str, cookie_value: &str) {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({
+            "id": "1",
+            "action": "launch",
+            "headless": true,
+            "args": ["--no-sandbox", "--disable-dev-shm-usage"]
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": "https://example.com" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "3",
+            "action": "cookies_set",
+            "name": cookie_name,
+            "value": cookie_value,
+            "domain": ".example.com",
+            "path": "/",
+            "expires": 2000000000
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "state_save", "path": path }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(&json!({ "id": "5", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 // ---------------------------------------------------------------------------
 // Core: launch, navigate, evaluate, url, title, close
 // ---------------------------------------------------------------------------
@@ -857,12 +905,13 @@ async fn e2e_tabs() {
     .await;
     assert_success(&resp);
 
-    // Tab list should show 1 tab
+    // Tab list should show 1 tab with tabId 1
     let resp = execute_command(&json!({ "id": "3", "action": "tab_list" }), &mut state).await;
     assert_success(&resp);
     let tabs = get_data(&resp)["tabs"].as_array().unwrap();
     assert_eq!(tabs.len(), 1);
     assert_eq!(tabs[0]["active"], true);
+    assert_eq!(tabs[0]["tabId"], "t1", "First tab should have tabId t1");
 
     // Open new tab
     let resp = execute_command(
@@ -871,18 +920,25 @@ async fn e2e_tabs() {
     )
     .await;
     assert_success(&resp);
-    assert_eq!(get_data(&resp)["index"], 1);
+    assert_eq!(
+        get_data(&resp)["tabId"],
+        "t2",
+        "New tab should have tabId t2"
+    );
+    assert_eq!(get_data(&resp)["total"], 2);
 
-    // Tab list should show 2 tabs
+    // Tab list should show 2 tabs with distinct, incrementing tabIds
     let resp = execute_command(&json!({ "id": "5", "action": "tab_list" }), &mut state).await;
     assert_success(&resp);
     let tabs = get_data(&resp)["tabs"].as_array().unwrap();
     assert_eq!(tabs.len(), 2);
     assert_eq!(tabs[1]["active"], true);
+    assert_eq!(tabs[0]["tabId"], "t1", "First tab should keep tabId t1");
+    assert_eq!(tabs[1]["tabId"], "t2", "Second tab should have tabId t2");
 
     // Switch to first tab
     let resp = execute_command(
-        &json!({ "id": "6", "action": "tab_switch", "index": 0 }),
+        &json!({ "id": "6", "action": "tab_switch", "tabId": "t1" }),
         &mut state,
     )
     .await;
@@ -898,7 +954,7 @@ async fn e2e_tabs() {
 
     // Close second tab
     let resp = execute_command(
-        &json!({ "id": "8", "action": "tab_close", "index": 1 }),
+        &json!({ "id": "8", "action": "tab_close", "tabId": "t2" }),
         &mut state,
     )
     .await;
@@ -909,6 +965,289 @@ async fn e2e_tabs() {
     assert_success(&resp);
     let tabs = get_data(&resp)["tabs"].as_array().unwrap();
     assert_eq!(tabs.len(), 1);
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_tab_ids_not_reused() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // First tab gets tabId 1
+    let resp = execute_command(&json!({ "id": "2", "action": "tab_list" }), &mut state).await;
+    assert_success(&resp);
+    let tabs = get_data(&resp)["tabs"].as_array().unwrap();
+    assert_eq!(tabs[0]["tabId"], "t1");
+
+    // Open tab 2 and tab 3
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "tab_new", "url": "data:text/html,<h1>Tab 2</h1>" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["tabId"], "t2");
+
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "tab_new", "url": "data:text/html,<h1>Tab 3</h1>" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["tabId"], "t3");
+
+    // Close tab 2
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "tab_close", "tabId": "t2" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Open a new tab — should get tabId 4, NOT 2
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "tab_new", "url": "data:text/html,<h1>Tab 4</h1>" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["tabId"],
+        "t4",
+        "Tab IDs must not be reused after closing"
+    );
+
+    // Verify final state: tabs t1, t3, t4
+    let resp = execute_command(&json!({ "id": "7", "action": "tab_list" }), &mut state).await;
+    assert_success(&resp);
+    let tabs = get_data(&resp)["tabs"].as_array().unwrap();
+    assert_eq!(tabs.len(), 3);
+    let ids: Vec<String> = tabs
+        .iter()
+        .map(|t| t["tabId"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(ids, vec!["t1", "t3", "t4"]);
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+/// `tab_close` with an explicit `tabId` must close that tab regardless of
+/// whether it's active, and leave the remaining tab active without leaking
+/// per-tab state (refs, iframe sessions, frame id) from the closed tab.
+#[tokio::test]
+#[ignore]
+async fn e2e_tab_close_with_tab_id_closes_active_tab() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": "data:text/html,<title>A</title>" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "tab_new", "url": "data:text/html,<title>B</title>" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "tab_close", "tabId": "t2" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(&json!({ "id": "5", "action": "title" }), &mut state).await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["title"], "A");
+    assert!(state.ref_map.get("e1").is_none());
+    assert!(state.iframe_sessions.is_empty());
+    assert!(state.active_frame_id.is_none());
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+/// Tabs can be opened with a user-assigned label and then addressed by that
+/// label anywhere a `t<N>` id is accepted (switch, close, and JSON `tabId`
+/// on `tab_switch` / `tab_close`). Labels are the agent-friendly way to
+/// write multi-tab workflows without memorizing ids.
+#[tokio::test]
+#[ignore]
+async fn e2e_tab_new_with_label_can_be_switched_and_closed() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": "data:text/html,<title>Home</title>" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Open a labeled tab and verify the response echoes the label and a
+    // `t<N>` style tabId.
+    let resp = execute_command(
+        &json!({
+            "id": "3",
+            "action": "tab_new",
+            "url": "data:text/html,<title>Docs</title>",
+            "label": "docs",
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["tabId"], "t2");
+    assert_eq!(get_data(&resp)["label"], "docs");
+
+    // tab_list exposes the label alongside the id.
+    let resp = execute_command(&json!({ "id": "4", "action": "tab_list" }), &mut state).await;
+    assert_success(&resp);
+    let tabs = get_data(&resp)["tabs"].as_array().unwrap();
+    let docs = tabs
+        .iter()
+        .find(|t| t["tabId"] == "t2")
+        .expect("docs tab should be present");
+    assert_eq!(docs["label"], "docs");
+
+    // tab_switch accepts the label.
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "tab_switch", "tabId": "t1" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(state.browser.as_ref().unwrap().active_tab_id(), Some(1));
+
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "tab_switch", "tabId": "docs" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(state.browser.as_ref().unwrap().active_tab_id(), Some(2));
+
+    // Once switched, the active tab is the labeled one and normal commands
+    // work against it.
+    let resp = execute_command(&json!({ "id": "7", "action": "title" }), &mut state).await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["title"], "Docs");
+
+    // tab_close accepts the label.
+    let resp = execute_command(
+        &json!({ "id": "8", "action": "tab_close", "tabId": "docs" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["label"], "docs");
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+/// Duplicate labels must be rejected so agents can treat a label as a unique
+/// handle. The first tab keeps the label; the second tab's creation errors.
+#[tokio::test]
+#[ignore]
+async fn e2e_tab_new_with_duplicate_label_errors() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "tab_new", "url": "about:blank", "label": "docs" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "tab_new", "url": "about:blank", "label": "docs" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(
+        resp.get("success").and_then(|v| v.as_bool()),
+        Some(false),
+        "duplicate label should error: {}",
+        serde_json::to_string_pretty(&resp).unwrap_or_default()
+    );
+    let err = resp.get("error").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        err.contains("already used"),
+        "error should explain the collision: {}",
+        err
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+/// Positional integers passed as `tabId` on tab-switch / tab-close must be
+/// rejected by the daemon-layer parser, not silently coerced. The error
+/// should teach the user the correct form (`t<N>`).
+#[tokio::test]
+#[ignore]
+async fn e2e_tab_switch_rejects_bare_integer() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "tab_switch", "tabId": "2" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(
+        resp.get("success").and_then(|v| v.as_bool()),
+        Some(false),
+        "bare integer tabId on tab_switch should error: {}",
+        serde_json::to_string_pretty(&resp).unwrap_or_default()
+    );
+    let err = resp.get("error").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        err.contains("t2") && err.contains("positional integers"),
+        "error should teach `t<N>` convention: {}",
+        err
+    );
 
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     assert_success(&resp);
@@ -4052,6 +4391,140 @@ async fn e2e_offscreen_scroll_before_interactions() {
 }
 
 // ---------------------------------------------------------------------------
+// Stream: custom viewport is reflected in screencast frame metadata
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore]
+async fn e2e_stream_frame_metadata_respects_custom_viewport() {
+    let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "AGENT_BROWSER_SESSION"]);
+    let socket_dir = std::env::temp_dir().join(format!(
+        "agent-browser-e2e-stream-viewport-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&socket_dir).expect("socket dir should be created");
+    guard.set(
+        "AGENT_BROWSER_SOCKET_DIR",
+        socket_dir.to_str().expect("socket dir should be utf-8"),
+    );
+    guard.set("AGENT_BROWSER_SESSION", "e2e-stream-viewport");
+
+    let mut state = DaemonState::new();
+
+    // Enable stream on an ephemeral port
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "stream_enable", "port": 0 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let port = get_data(&resp)["port"]
+        .as_u64()
+        .expect("stream enable should report the bound port");
+
+    // Set a custom viewport before launching the browser
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "viewport", "width": 800, "height": 600 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Connect a WebSocket client
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}"))
+        .await
+        .expect("websocket client should connect to runtime stream");
+
+    // Navigate to trigger browser launch and screencast
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "navigate", "url": "data:text/html,<h1>Viewport Test</h1>" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Wait for a frame whose JPEG dimensions match the custom viewport.
+    // Early frames may arrive before Chrome fully applies the viewport resize,
+    // so skip frames with stale dimensions rather than failing immediately.
+    let mut found_frame = false;
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(15);
+    while tokio::time::Instant::now() < deadline {
+        let msg = tokio::time::timeout(tokio::time::Duration::from_secs(3), ws.next()).await;
+        let Some(Ok(message)) = msg.ok().flatten() else {
+            continue;
+        };
+        if !message.is_text() {
+            continue;
+        }
+        let parsed: Value =
+            serde_json::from_str(message.to_text().expect("text message should be readable"))
+                .expect("stream payload should be valid JSON");
+        if parsed.get("type") == Some(&json!("frame")) {
+            let meta = &parsed["metadata"];
+            assert_eq!(
+                meta["deviceWidth"], 800,
+                "frame metadata deviceWidth should match custom viewport, got: {}",
+                meta
+            );
+            assert_eq!(
+                meta["deviceHeight"], 600,
+                "frame metadata deviceHeight should match custom viewport, got: {}",
+                meta
+            );
+
+            let data_str = parsed
+                .get("data")
+                .and_then(|v| v.as_str())
+                .expect("frame message should include base64-encoded 'data' field");
+            use base64::Engine;
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(data_str)
+                .expect("frame data should be valid base64");
+            let (img_w, img_h) =
+                jpeg_dimensions(&bytes).expect("frame data should be a valid JPEG with SOF marker");
+            if img_w != 800 || img_h != 600 {
+                continue;
+            }
+
+            found_frame = true;
+            break;
+        }
+    }
+    assert!(
+        found_frame,
+        "should have received a frame with JPEG dimensions 800x600 within the deadline"
+    );
+
+    // Cleanup
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "stream_disable" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+    let _ = std::fs::remove_dir_all(&socket_dir);
+}
+
+/// Extract width and height from a JPEG's SOF0 (0xFFC0) or SOF2 (0xFFC2) marker.
+fn jpeg_dimensions(data: &[u8]) -> Option<(u32, u32)> {
+    for i in 0..data.len().saturating_sub(8) {
+        if data[i] == 0xFF && (data[i + 1] == 0xC0 || data[i + 1] == 0xC2) {
+            let height = u16::from_be_bytes([data[i + 5], data[i + 6]]) as u32;
+            let width = u16::from_be_bytes([data[i + 7], data[i + 8]]) as u32;
+            return Some((width, height));
+        }
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
 // Upload: ref-based selector support (issue #1107)
 // ---------------------------------------------------------------------------
 
@@ -4142,4 +4615,890 @@ async fn e2e_upload_with_css_selector() {
     let _ = std::fs::remove_file(&tmp);
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     assert_success(&resp);
+}
+
+// ---------------------------------------------------------------------------
+// Recording: viewport inheritance
+// ---------------------------------------------------------------------------
+
+/// Verify that `recording_start` inherits the current viewport dimensions
+/// into the newly created recording context. Without this, the recording
+/// context falls back to the default 1280×720 regardless of what the user set.
+#[tokio::test]
+#[ignore]
+async fn e2e_recording_inherits_viewport() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": "data:text/html,<h1>Viewport</h1>" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "viewport", "width": 800, "height": 600 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let tmp_dir = std::env::temp_dir();
+    let rec_path = tmp_dir.join(format!("ab-e2e-rec-viewport-{}.webm", std::process::id()));
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "recording_start", "path": rec_path.to_string_lossy() }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "evaluate", "script": "window.innerWidth" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let rec_width = get_data(&resp)["result"].as_i64().unwrap();
+
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "evaluate", "script": "window.innerHeight" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let rec_height = get_data(&resp)["result"].as_i64().unwrap();
+
+    assert_eq!(
+        rec_width, 800,
+        "Recording context width should be 800 (inherited from viewport), got {rec_width}"
+    );
+    assert_eq!(
+        rec_height, 600,
+        "Recording context height should be 600 (inherited from viewport), got {rec_height}"
+    );
+
+    let resp = execute_command(
+        &json!({ "id": "7", "action": "recording_stop" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let _ = std::fs::remove_file(&rec_path);
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+// ---------------------------------------------------------------------------
+// --state / storageState flag: cookies should be loaded at launch time
+// ---------------------------------------------------------------------------
+
+/// Verify that launching with `storageState` in the launch command restores
+/// cookies that were previously saved with `state_save`.
+///
+/// This is the e2e equivalent of `agent-browser --state ./auth.json open <url>`.
+/// The launch command accepts a `storageState` field that should load the
+/// state file (cookies + localStorage) before the first navigation.
+#[tokio::test]
+#[ignore]
+async fn e2e_state_flag_restores_cookies() {
+    let state_path = std::env::temp_dir()
+        .join(format!(
+            "agent-browser-e2e-state-flag-{}.json",
+            uuid::Uuid::new_v4()
+        ))
+        .to_string_lossy()
+        .to_string();
+
+    // Session 1: launch, set a cookie, save state, close
+    {
+        let mut state = DaemonState::new();
+
+        let resp = execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        let resp = execute_command(
+            &json!({ "id": "2", "action": "navigate", "url": "https://example.com" }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        let resp = execute_command(
+            &json!({
+                "id": "3",
+                "action": "cookies_set",
+                "name": "state_flag_test",
+                "value": "from_state_file",
+                "domain": ".example.com",
+                "path": "/",
+                "expires": 2000000000
+            }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        let resp = execute_command(
+            &json!({ "id": "4", "action": "state_save", "path": &state_path }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        let resp = execute_command(&json!({ "id": "5", "action": "close" }), &mut state).await;
+        assert_success(&resp);
+    }
+
+    // Session 2: launch with storageState pointing to saved file, verify
+    // cookies are present before any explicit state_load call.
+    {
+        let mut state = DaemonState::new();
+
+        let resp = execute_command(
+            &json!({
+                "id": "10",
+                "action": "launch",
+                "headless": true,
+                "storageState": &state_path
+            }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        let resp = execute_command(
+            &json!({ "id": "11", "action": "navigate", "url": "https://example.com" }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        let resp =
+            execute_command(&json!({ "id": "12", "action": "cookies_get" }), &mut state).await;
+        assert_success(&resp);
+        let cookies = get_data(&resp)["cookies"].as_array().unwrap();
+        let found = cookies
+            .iter()
+            .any(|c| c["name"] == "state_flag_test" && c["value"] == "from_state_file");
+        assert!(
+            found,
+            "Cookie from state file should be present after launch with storageState. \
+             Cookies found: {:?}",
+            cookies
+                .iter()
+                .map(|c| c["name"].as_str().unwrap_or("?"))
+                .collect::<Vec<_>>()
+        );
+
+        let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+        assert_success(&resp);
+    }
+
+    let _ = std::fs::remove_file(&state_path);
+}
+
+/// Verify that explicit `launch` surfaces storageState load failures instead
+/// of reporting success with an empty browser state.
+#[tokio::test]
+#[ignore]
+async fn e2e_state_flag_missing_file_fails_launch() {
+    let guard = EnvGuard::new(&["CI"]);
+    guard.set("CI", "1");
+
+    let missing_path = std::env::temp_dir()
+        .join(format!(
+            "agent-browser-e2e-missing-state-{}.json",
+            uuid::Uuid::new_v4()
+        ))
+        .to_string_lossy()
+        .to_string();
+
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({
+            "id": "10",
+            "action": "launch",
+            "headless": true,
+            "args": ["--no-sandbox", "--disable-dev-shm-usage"],
+            "storageState": &missing_path
+        }),
+        &mut state,
+    )
+    .await;
+
+    assert_eq!(resp["success"], false);
+    let error = resp["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("Failed to read state from") || error.contains("storage state"),
+        "Unexpected error for missing storageState file: {}",
+        error
+    );
+    assert!(
+        state.browser.is_none(),
+        "failed storageState launch should roll back the browser"
+    );
+}
+
+/// Repeated launch calls with `storageState` should relaunch a clean browser so
+/// stale cookies do not survive from the previous state file.
+#[tokio::test]
+#[ignore]
+async fn e2e_storage_state_launch_restarts_clean_browser() {
+    let state_one = std::env::temp_dir()
+        .join(format!(
+            "agent-browser-e2e-storage-reuse-1-{}.json",
+            uuid::Uuid::new_v4()
+        ))
+        .to_string_lossy()
+        .to_string();
+    let state_two = std::env::temp_dir()
+        .join(format!(
+            "agent-browser-e2e-storage-reuse-2-{}.json",
+            uuid::Uuid::new_v4()
+        ))
+        .to_string_lossy()
+        .to_string();
+
+    create_storage_state_with_cookie(&state_one, "storage_reload_first", "first").await;
+    create_storage_state_with_cookie(&state_two, "storage_reload_second", "second").await;
+
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({
+            "id": "10",
+            "action": "launch",
+            "headless": true,
+            "args": ["--no-sandbox", "--disable-dev-shm-usage"],
+            "storageState": &state_one
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert!(
+        get_data(&resp).get("reused").is_none(),
+        "first launch must create the browser"
+    );
+
+    let resp = execute_command(
+        &json!({ "id": "11", "action": "navigate", "url": "https://example.com" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(&json!({ "id": "12", "action": "cookies_get" }), &mut state).await;
+    assert_success(&resp);
+    let cookies = get_data(&resp)["cookies"].as_array().unwrap();
+    assert!(
+        cookies
+            .iter()
+            .any(|c| c["name"] == "storage_reload_first" && c["value"] == "first"),
+        "first storageState should be applied on the initial launch"
+    );
+
+    let resp = execute_command(
+        &json!({
+            "id": "13",
+            "action": "launch",
+            "headless": true,
+            "args": ["--no-sandbox", "--disable-dev-shm-usage"],
+            "storageState": &state_two
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp).get("reused"),
+        None,
+        "storageState launch should start from a clean browser"
+    );
+
+    let resp = execute_command(
+        &json!({ "id": "14", "action": "navigate", "url": "https://example.com" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(&json!({ "id": "15", "action": "cookies_get" }), &mut state).await;
+    assert_success(&resp);
+    let cookies = get_data(&resp)["cookies"].as_array().unwrap();
+    assert!(
+        cookies
+            .iter()
+            .any(|c| c["name"] == "storage_reload_second" && c["value"] == "second"),
+        "second storageState should be applied after relaunch"
+    );
+    assert!(
+        !cookies
+            .iter()
+            .any(|c| c["name"] == "storage_reload_first" && c["value"] == "first"),
+        "stale cookies from the first storageState should not survive relaunch"
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+
+    let _ = std::fs::remove_file(&state_one);
+    let _ = std::fs::remove_file(&state_two);
+}
+
+/// Verify that AGENT_BROWSER_STATE env var restores cookies at auto-launch
+/// time (when the browser is lazily launched by a command like `navigate`
+/// rather than an explicit `launch` command).
+#[tokio::test]
+#[ignore]
+async fn e2e_state_env_restores_cookies_on_auto_launch() {
+    let state_path = std::env::temp_dir()
+        .join(format!(
+            "agent-browser-e2e-state-env-{}.json",
+            uuid::Uuid::new_v4()
+        ))
+        .to_string_lossy()
+        .to_string();
+
+    // Session 1: launch, set a cookie, save state, close
+    {
+        let mut state = DaemonState::new();
+
+        let resp = execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        let resp = execute_command(
+            &json!({ "id": "2", "action": "navigate", "url": "https://example.com" }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        let resp = execute_command(
+            &json!({
+                "id": "3",
+                "action": "cookies_set",
+                "name": "env_state_test",
+                "value": "from_env_state",
+                "domain": ".example.com",
+                "path": "/",
+                "expires": 2000000000
+            }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        let resp = execute_command(
+            &json!({ "id": "4", "action": "state_save", "path": &state_path }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        let resp = execute_command(&json!({ "id": "5", "action": "close" }), &mut state).await;
+        assert_success(&resp);
+    }
+
+    // Session 2: set AGENT_BROWSER_STATE env var and let auto_launch pick it
+    // up. No explicit `launch` command — just navigate, which triggers
+    // auto_launch internally.
+    {
+        let env = EnvGuard::new(&["AGENT_BROWSER_STATE"]);
+        env.set("AGENT_BROWSER_STATE", &state_path);
+
+        let mut state = DaemonState::new();
+
+        // Navigate without explicit launch — triggers auto_launch
+        let resp = execute_command(
+            &json!({ "id": "10", "action": "navigate", "url": "https://example.com" }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        let resp =
+            execute_command(&json!({ "id": "11", "action": "cookies_get" }), &mut state).await;
+        assert_success(&resp);
+        let cookies = get_data(&resp)["cookies"].as_array().unwrap();
+        let found = cookies
+            .iter()
+            .any(|c| c["name"] == "env_state_test" && c["value"] == "from_env_state");
+        assert!(
+            found,
+            "Cookie should be restored via AGENT_BROWSER_STATE env on auto-launch. \
+             Cookies found: {:?}",
+            cookies
+                .iter()
+                .map(|c| c["name"].as_str().unwrap_or("?"))
+                .collect::<Vec<_>>()
+        );
+
+        let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+        assert_success(&resp);
+    }
+
+    let _ = std::fs::remove_file(&state_path);
+}
+
+/// Verify that --session-name auto-restores cookies saved from a prior
+/// session with the same name.
+#[tokio::test]
+#[ignore]
+async fn e2e_session_name_auto_restores_cookies() {
+    let session_name = format!(
+        "e2e-session-name-{}",
+        &uuid::Uuid::new_v4().to_string()[..8]
+    );
+
+    let env = EnvGuard::new(&["AGENT_BROWSER_SESSION_NAME"]);
+    env.set("AGENT_BROWSER_SESSION_NAME", &session_name);
+
+    // Session 1: launch, set a cookie, close (which auto-saves state)
+    {
+        let mut state = DaemonState::new();
+
+        let resp = execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        let resp = execute_command(
+            &json!({ "id": "2", "action": "navigate", "url": "https://example.com" }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        let resp = execute_command(
+            &json!({
+                "id": "3",
+                "action": "cookies_set",
+                "name": "session_name_test",
+                "value": "auto_restored",
+                "domain": ".example.com",
+                "path": "/",
+                "expires": 2000000000
+            }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        // close triggers auto-save when session_name is set
+        let resp = execute_command(&json!({ "id": "5", "action": "close" }), &mut state).await;
+        assert_success(&resp);
+    }
+
+    // Session 2: fresh DaemonState with same session_name. Navigate without
+    // explicit launch — this triggers auto_launch which calls
+    // try_auto_restore_state.
+    //
+    // NOTE: an explicit `launch` command skips auto_launch entirely, so
+    // session-name auto-restore only fires via the auto_launch path.
+    {
+        let mut state = DaemonState::new();
+
+        // Navigate without explicit launch — triggers auto_launch → try_auto_restore_state
+        let resp = execute_command(
+            &json!({ "id": "10", "action": "navigate", "url": "https://example.com" }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        let resp =
+            execute_command(&json!({ "id": "12", "action": "cookies_get" }), &mut state).await;
+        assert_success(&resp);
+        let cookies = get_data(&resp)["cookies"].as_array().unwrap();
+        let found = cookies
+            .iter()
+            .any(|c| c["name"] == "session_name_test" && c["value"] == "auto_restored");
+        assert!(
+            found,
+            "Cookie should be auto-restored via --session-name. Cookies found: {:?}",
+            cookies
+                .iter()
+                .map(|c| c["name"].as_str().unwrap_or("?"))
+                .collect::<Vec<_>>()
+        );
+
+        let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+        assert_success(&resp);
+    }
+
+    // Clean up auto-saved state files
+    let sessions_dir = dirs::home_dir()
+        .unwrap()
+        .join(".agent-browser")
+        .join("sessions");
+    if let Ok(entries) = std::fs::read_dir(&sessions_dir) {
+        for entry in entries.flatten() {
+            let fname = entry.file_name().to_string_lossy().to_string();
+            if fname.starts_with(&format!("{}-", session_name)) {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+}
+
+/// Verify that explicit `state_load` restores cookies into an existing
+/// session (baseline sanity check — this path is known to work).
+#[tokio::test]
+#[ignore]
+async fn e2e_explicit_state_load_restores_cookies() {
+    let state_path = std::env::temp_dir()
+        .join(format!(
+            "agent-browser-e2e-explicit-load-{}.json",
+            uuid::Uuid::new_v4()
+        ))
+        .to_string_lossy()
+        .to_string();
+
+    // Session 1: set cookie, save state
+    {
+        let mut state = DaemonState::new();
+
+        let resp = execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        let resp = execute_command(
+            &json!({ "id": "2", "action": "navigate", "url": "https://example.com" }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        let resp = execute_command(
+            &json!({
+                "id": "3",
+                "action": "cookies_set",
+                "name": "explicit_load_test",
+                "value": "manually_loaded",
+                "domain": ".example.com",
+                "path": "/",
+                "expires": 2000000000
+            }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        let resp = execute_command(
+            &json!({ "id": "4", "action": "state_save", "path": &state_path }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        let resp = execute_command(&json!({ "id": "5", "action": "close" }), &mut state).await;
+        assert_success(&resp);
+    }
+
+    // Session 2: launch clean, then explicitly load state
+    {
+        let mut state = DaemonState::new();
+
+        let resp = execute_command(
+            &json!({ "id": "10", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        let resp = execute_command(
+            &json!({ "id": "11", "action": "state_load", "path": &state_path }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        let resp = execute_command(
+            &json!({ "id": "12", "action": "navigate", "url": "https://example.com" }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        let resp =
+            execute_command(&json!({ "id": "13", "action": "cookies_get" }), &mut state).await;
+        assert_success(&resp);
+        let cookies = get_data(&resp)["cookies"].as_array().unwrap();
+        let found = cookies
+            .iter()
+            .any(|c| c["name"] == "explicit_load_test" && c["value"] == "manually_loaded");
+        assert!(
+            found,
+            "Cookie should be present after explicit state_load. Cookies found: {:?}",
+            cookies
+                .iter()
+                .map(|c| c["name"].as_str().unwrap_or("?"))
+                .collect::<Vec<_>>()
+        );
+
+        let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+        assert_success(&resp);
+    }
+
+    let _ = std::fs::remove_file(&state_path);
+}
+
+// === React / Web Vitals primitives ===
+
+const REACT_FIXTURE_HTML: &str = r#"<!doctype html>
+<html>
+  <head><title>React fixture</title></head>
+  <body>
+    <div id="root"></div>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script>
+      const { useState, createElement: h } = React;
+      function Counter({ label }) {
+        const [n, setN] = useState(0);
+        return h("button", { onClick: () => setN(n + 1) }, label + ": " + n);
+      }
+      function App() {
+        return h("div", {}, [
+          h("h1", { key: "t" }, "Hello"),
+          h(Counter, { key: "c1", label: "A" }),
+          h(Counter, { key: "c2", label: "B" }),
+        ]);
+      }
+      ReactDOM.createRoot(document.getElementById("root")).render(h(App));
+    </script>
+  </body>
+</html>
+"#;
+
+fn react_fixture_url() -> String {
+    format!(
+        "data:text/html;base64,{}",
+        STANDARD.encode(REACT_FIXTURE_HTML)
+    )
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_react_tree_errors_without_hook() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": "https://example.com" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Without --enable react-devtools, the hook isn't installed and the
+    // command should error.
+    let resp = execute_command(&json!({ "id": "3", "action": "react_tree" }), &mut state).await;
+    let err = resp
+        .get("error")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    assert!(
+        err.contains("React DevTools") || err.contains("renderer"),
+        "Expected hook-missing error, got: {:?}",
+        resp
+    );
+
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_react_tree_with_enable_hook() {
+    let guard = EnvGuard::new(&["AGENT_BROWSER_ENABLE"]);
+    guard.set("AGENT_BROWSER_ENABLE", "react-devtools");
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": &react_fixture_url() }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Give React a moment to boot and register with the hook.
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+
+    let resp = execute_command(&json!({ "id": "3", "action": "react_tree" }), &mut state).await;
+    assert_success(&resp);
+    let tree = get_data(&resp)
+        .get("tree")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        tree.contains("App"),
+        "Expected tree to contain 'App': {}",
+        tree
+    );
+    assert!(
+        tree.contains("Counter"),
+        "Expected tree to contain 'Counter': {}",
+        tree
+    );
+
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_vitals_reports_metrics() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": &react_fixture_url() }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(&json!({ "id": "3", "action": "vitals" }), &mut state).await;
+    assert_success(&resp);
+    let report = get_data(&resp)
+        .get("report")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    assert!(
+        report.contains("Core Web Vitals"),
+        "Expected vitals report, got: {}",
+        report
+    );
+    assert!(report.contains("TTFB"));
+    assert!(report.contains("CLS"));
+
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_pushstate_changes_url() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": "https://example.com/" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "pushstate", "url": "/newpath" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let url = get_data(&resp)
+        .get("url")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    assert!(
+        url.ends_with("/newpath"),
+        "Expected pushstate URL to end with /newpath, got: {}",
+        url
+    );
+
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_removeinitscript_roundtrip() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": "https://example.com" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "3",
+            "action": "addinitscript",
+            "script": "window.__AB_ROUNDTRIP__ = 1;"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let identifier = get_data(&resp)["identifier"]
+        .as_str()
+        .expect("addinitscript should return an identifier")
+        .to_string();
+    assert!(!identifier.is_empty());
+
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "removeinitscript", "identifier": identifier }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["removed"], true);
+
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
 }

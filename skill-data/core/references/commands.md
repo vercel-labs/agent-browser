@@ -5,15 +5,37 @@ Complete reference for all agent-browser commands. For quick start and common pa
 ## Navigation
 
 ```bash
-agent-browser open <url>      # Navigate to URL (aliases: goto, navigate)
+agent-browser open            # Launch browser (no navigation); stays on about:blank.
+                              # Pair with `network route`, `cookies set --curl`, or
+                              # `addinitscript` to stage state before the first navigation.
+agent-browser open <url>      # Launch + navigate (aliases: goto, navigate)
                               # Supports: https://, http://, file://, about:, data://
                               # Auto-prepends https:// if no protocol given
 agent-browser back            # Go back
 agent-browser forward         # Go forward
 agent-browser reload          # Reload page
+agent-browser pushstate <url> # SPA client-side navigation. Auto-detects
+                              # window.next.router.push (triggers RSC fetch on Next.js);
+                              # falls back to history.pushState + popstate/navigate events.
 agent-browser close           # Close browser (aliases: quit, exit)
 agent-browser connect 9222    # Connect to browser via CDP port
 ```
+
+### Pre-navigation setup (one-turn batch)
+
+```bash
+agent-browser batch \
+  '["open"]' \
+  '["network","route","*","--abort","--resource-type","script"]' \
+  '["cookies","set","--curl","cookies.curl","--domain","localhost"]' \
+  '["navigate","http://localhost:3000/target"]'
+```
+
+`open` with no URL gives you a clean launch so any interception, cookies,
+or init scripts you register take effect on the *first* real navigation.
+Use for SSR-only debug (`--resource-type script`), protected-origin auth,
+or capturing fresh `react suspense`/`vitals` state without noise from a
+prior page.
 
 ## Snapshot (page analysis)
 
@@ -166,13 +188,40 @@ agent-browser network requests --filter api    # Filter requests
 ## Tabs and Windows
 
 ```bash
-agent-browser tab                 # List tabs
-agent-browser tab new [url]       # New tab
-agent-browser tab 2               # Switch to tab by index
-agent-browser tab close           # Close current tab
-agent-browser tab close 2         # Close tab by index
-agent-browser window new          # New window
+agent-browser tab                              # List tabs with tabId and label
+agent-browser tab new [url]                    # New tab
+agent-browser tab new --label docs [url]       # New tab with a memorable label
+agent-browser tab t2                           # Switch to tab by id
+agent-browser tab docs                         # Switch to tab by label
+agent-browser tab close                        # Close current tab
+agent-browser tab close t2                     # Close tab by id
+agent-browser tab close docs                   # Close tab by label
+agent-browser window new                       # New window
 ```
+
+Tab ids are stable strings of the form `t1`, `t2`, `t3`. They're never reused
+within a session, so the same id keeps referring to the same tab across
+commands. Positional integers are **not** accepted — `tab 2` errors with a
+teaching message; use `t2`.
+
+User-assigned labels (`docs`, `app`, `admin`) are interchangeable with ids
+everywhere a tab ref is accepted. Labels are the agent-friendly way to write
+multi-tab workflows:
+
+```bash
+agent-browser tab new --label docs https://docs.example.com
+agent-browser tab new --label app  https://app.example.com
+agent-browser tab docs                   # switch to docs
+agent-browser snapshot                   # populate refs for docs
+agent-browser click @e1                  # ref click on docs
+agent-browser tab app                    # switch to app
+agent-browser tab close docs             # close by label
+```
+
+Labels are never auto-generated, never rewritten on navigation, and must be
+unique within a session. To interact with another tab, switch to it first:
+the daemon maintains a single active tab, so refs (`@eN`) belong to the tab
+that was active when the snapshot ran.
 
 ## Frames
 
@@ -283,12 +332,57 @@ agent-browser profiler start              # Start Chrome DevTools profiling
 agent-browser profiler stop trace.json    # Stop and save profile
 ```
 
+## React / Web Vitals
+
+Requires `--enable react-devtools` at launch for the `react ...` commands.
+`vitals` and `pushstate` are framework-agnostic.
+
+```bash
+agent-browser open --enable react-devtools <url>    # Launch with React hook installed
+agent-browser react tree                            # Full component tree
+agent-browser react inspect <fiberId>               # Props, hooks, state, source
+agent-browser react renders start                   # Begin re-render recording
+agent-browser react renders stop [--json]           # Stop and print render profile
+agent-browser react suspense [--only-dynamic] [--json]  # Suspense boundaries + classifier
+                                                         # --only-dynamic hides the "static" list
+agent-browser vitals [url] [--json]                 # LCP/CLS/TTFB/FCP/INP + hydration
+agent-browser pushstate <url>                       # SPA client-side nav (auto-detects Next router)
+```
+
+## Init scripts
+
+```bash
+agent-browser open --init-script <path>             # Register before first navigation (repeatable)
+agent-browser addinitscript <js>                    # Register at runtime (returns identifier)
+agent-browser removeinitscript <identifier>         # Remove a previously registered init script
+```
+
+## cURL cookie import
+
+```bash
+agent-browser cookies set --curl <file>                             # Auto-detects JSON/cURL/Cookie-header
+agent-browser cookies set --curl <file> --domain example.com        # Scope to a domain
+```
+
+Supported formats: JSON array of `{name, value}`, a cURL dump from
+DevTools -> Network -> Copy as cURL, or a bare Cookie header. Errors never
+echo cookie values.
+
+## Network route by resource type
+
+```bash
+agent-browser network route '*' --abort --resource-type script       # Block scripts only (SSR-lock pattern)
+agent-browser network route '*' --resource-type image,font --body '' # Stub images and fonts
+```
+
 ## Environment Variables
 
 ```bash
 AGENT_BROWSER_SESSION="mysession"            # Default session name
 AGENT_BROWSER_EXECUTABLE_PATH="/path/chrome" # Custom browser path
 AGENT_BROWSER_EXTENSIONS="/ext1,/ext2"       # Comma-separated extension paths
+AGENT_BROWSER_INIT_SCRIPTS="/a.js,/b.js"     # Comma-separated init script paths
+AGENT_BROWSER_ENABLE="react-devtools"        # Comma-separated built-in init script features
 AGENT_BROWSER_PROVIDER="browserbase"         # Cloud browser provider
 AGENT_BROWSER_STREAM_PORT="9223"             # Override WebSocket streaming port (default: OS-assigned)
 AGENT_BROWSER_HOME="/path/to/agent-browser"  # Custom install location
