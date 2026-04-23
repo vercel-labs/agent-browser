@@ -1042,6 +1042,9 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
         // === Is (state checks) ===
         "is" => parse_is(&rest, &id),
 
+        // === Assert (state/value checks) ===
+        "assert" => parse_assert(&rest, &id),
+
         // === Find (locators) ===
         "find" => parse_find(&rest, &id),
 
@@ -2139,6 +2142,92 @@ fn parse_is(rest: &[&str], id: &str) -> Result<Value, ParseError> {
         None => Err(ParseError::MissingArguments {
             context: "is".to_string(),
             usage: "is <visible|enabled|checked> <selector>",
+        }),
+    }
+}
+
+// Assert commands reuse existing daemon actions and attach assert metadata so
+// the CLI can evaluate pass/fail locally (including in batch mode).
+fn parse_assert(rest: &[&str], id: &str) -> Result<Value, ParseError> {
+    const VALID: &[&str] = &[
+        "visible", "hidden", "enabled", "checked", "text", "url", "title",
+    ];
+
+    match rest.first().copied() {
+        Some("visible") => {
+            let sel = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
+                context: "assert visible".to_string(),
+                usage: "assert visible <selector>",
+            })?;
+            Ok(
+                json!({ "id": id, "action": "isvisible", "selector": sel, "assert": true, "assert_type": "visible" }),
+            )
+        }
+        Some("hidden") => {
+            let sel = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
+                context: "assert hidden".to_string(),
+                usage: "assert hidden <selector>",
+            })?;
+            Ok(
+                json!({ "id": id, "action": "isvisible", "selector": sel, "assert": true, "assert_type": "hidden", "assert_negate": true }),
+            )
+        }
+        Some("enabled") => {
+            let sel = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
+                context: "assert enabled".to_string(),
+                usage: "assert enabled <selector>",
+            })?;
+            Ok(
+                json!({ "id": id, "action": "isenabled", "selector": sel, "assert": true, "assert_type": "enabled" }),
+            )
+        }
+        Some("checked") => {
+            let sel = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
+                context: "assert checked".to_string(),
+                usage: "assert checked <selector>",
+            })?;
+            Ok(
+                json!({ "id": id, "action": "ischecked", "selector": sel, "assert": true, "assert_type": "checked" }),
+            )
+        }
+        Some("text") => {
+            let sel = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
+                context: "assert text".to_string(),
+                usage: "assert text <selector> <expected>",
+            })?;
+            let expected = rest.get(2).ok_or_else(|| ParseError::MissingArguments {
+                context: "assert text".to_string(),
+                usage: "assert text <selector> <expected>",
+            })?;
+            Ok(
+                json!({ "id": id, "action": "gettext", "selector": sel, "assert": true, "assert_type": "text", "assert_expected": expected }),
+            )
+        }
+        Some("url") => {
+            let expected = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
+                context: "assert url".to_string(),
+                usage: "assert url <pattern>",
+            })?;
+            Ok(
+                json!({ "id": id, "action": "url", "assert": true, "assert_type": "url", "assert_expected": expected }),
+            )
+        }
+        Some("title") => {
+            let expected = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
+                context: "assert title".to_string(),
+                usage: "assert title <expected>",
+            })?;
+            Ok(
+                json!({ "id": id, "action": "title", "assert": true, "assert_type": "title", "assert_expected": expected }),
+            )
+        }
+        Some(sub) => Err(ParseError::UnknownSubcommand {
+            subcommand: sub.to_string(),
+            valid_options: VALID,
+        }),
+        None => Err(ParseError::MissingArguments {
+            context: "assert".to_string(),
+            usage: "assert <visible|hidden|enabled|checked|text|url|title> [args...]",
         }),
     }
 }
@@ -4116,6 +4205,89 @@ mod tests {
         let err = result.unwrap_err();
         assert!(matches!(err, ParseError::MissingArguments { .. }));
         assert!(err.format().contains("get text"));
+    }
+
+    #[test]
+    fn test_assert_visible() {
+        let cmd = parse_command(&args("assert visible @e1"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "isvisible");
+        assert_eq!(cmd["selector"], "@e1");
+        assert_eq!(cmd["assert"], true);
+        assert_eq!(cmd["assert_type"], "visible");
+    }
+
+    #[test]
+    fn test_assert_hidden() {
+        let cmd = parse_command(&args("assert hidden #modal"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "isvisible");
+        assert_eq!(cmd["selector"], "#modal");
+        assert_eq!(cmd["assert"], true);
+        assert_eq!(cmd["assert_type"], "hidden");
+        assert_eq!(cmd["assert_negate"], true);
+    }
+
+    #[test]
+    fn test_assert_enabled() {
+        let cmd = parse_command(&args("assert enabled #submit"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "isenabled");
+        assert_eq!(cmd["selector"], "#submit");
+        assert_eq!(cmd["assert"], true);
+        assert_eq!(cmd["assert_type"], "enabled");
+    }
+
+    #[test]
+    fn test_assert_checked() {
+        let cmd = parse_command(&args("assert checked #agree"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "ischecked");
+        assert_eq!(cmd["selector"], "#agree");
+        assert_eq!(cmd["assert"], true);
+        assert_eq!(cmd["assert_type"], "checked");
+    }
+
+    #[test]
+    fn test_assert_text() {
+        let cmd = parse_command(&args("assert text @e3 Welcome"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "gettext");
+        assert_eq!(cmd["selector"], "@e3");
+        assert_eq!(cmd["assert"], true);
+        assert_eq!(cmd["assert_type"], "text");
+        assert_eq!(cmd["assert_expected"], "Welcome");
+    }
+
+    #[test]
+    fn test_assert_url() {
+        let cmd = parse_command(&args("assert url **/dashboard"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "url");
+        assert_eq!(cmd["assert"], true);
+        assert_eq!(cmd["assert_type"], "url");
+        assert_eq!(cmd["assert_expected"], "**/dashboard");
+    }
+
+    #[test]
+    fn test_assert_title() {
+        let cmd = parse_command(&args("assert title Dashboard"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "title");
+        assert_eq!(cmd["assert"], true);
+        assert_eq!(cmd["assert_type"], "title");
+        assert_eq!(cmd["assert_expected"], "Dashboard");
+    }
+
+    #[test]
+    fn test_assert_missing_subcommand() {
+        let result = parse_command(&args("assert"), &default_flags());
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, ParseError::MissingArguments { .. }));
+        assert!(err.format().contains("assert"));
+    }
+
+    #[test]
+    fn test_assert_text_missing_expected() {
+        let result = parse_command(&args("assert text @e3"), &default_flags());
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, ParseError::MissingArguments { .. }));
+        assert!(err.format().contains("assert text"));
     }
 
     // === Protocol alignment tests ===
