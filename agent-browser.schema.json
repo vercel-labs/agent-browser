@@ -1,0 +1,166 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Agent Browser Configuration",
+  "description": "Configuration file for agent-browser (e.g., agent-browser.json or ~/.agent-browser/config.json)",
+  "type": "object",
+  "properties": {
+    "headed": {
+      "type": "boolean",
+      "description": "Show browser window instead of running headless."
+    },
+    "json": {
+      "type": "boolean",
+      "description": "Output in JSON format."
+    },
+    "debug": {
+      "type": "boolean",
+      "description": "Enable debug output."
+    },
+    "session": {
+      "type": "string",
+      "description": "Session identifier."
+    },
+    "sessionName": {
+      "type": "string",
+      "description": "Auto-save/load state persistence name."
+    },
+    "executablePath": {
+      "type": "string",
+      "description": "Path to a custom browser executable."
+    },
+    "extensions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Paths to browser extensions. Extensions from user-level and project-level configs are concatenated."
+    },
+    "profile": {
+      "type": "string",
+      "description": "Path to the browser profile data directory."
+    },
+    "state": {
+      "type": "string",
+      "description": "Path to load/save browser state."
+    },
+    "proxy": {
+      "type": "string",
+      "description": "Proxy server URL (e.g., http://localhost:8080)."
+    },
+    "proxyBypass": {
+      "type": "string",
+      "description": "Comma-separated domains to bypass the proxy (e.g., localhost,*.internal.com)."
+    },
+    "args": {
+      "type": "string",
+      "description": "Additional comma-separated launch arguments for the browser."
+    },
+    "userAgent": {
+      "type": "string",
+      "description": "Custom User-Agent string."
+    },
+    "provider": {
+      "type": "string",
+      "description": "Provider to use, such as 'ios'."
+    },
+    "device": {
+      "type": "string",
+      "description": "Device name or identifier for emulation or providers (e.g., 'iPhone 16 Pro')."
+    },
+    "ignoreHttpsErrors": {
+      "type": "boolean",
+      "description": "Ignore HTTPS errors during navigation."
+    },
+    "allowFileAccess": {
+      "type": "boolean",
+      "description": "Allow file:// URLs to access local files."
+    },
+    "cdp": {
+      "type": "string",
+      "description": "Chrome DevTools Protocol endpoint URL."
+    },
+    "autoConnect": {
+      "type": "boolean",
+      "description": "Auto-discover and connect to a running Chrome instance."
+    },
+    "annotate": {
+      "type": "boolean",
+      "description": "Annotated screenshot with numbered element labels."
+    },
+    "colorScheme": {
+      "type": "string",
+      "enum": ["dark", "light", "no-preference"],
+      "description": "Color scheme preference."
+    },
+    "downloadPath": {
+      "type": "string",
+      "description": "Default directory for browser downloads."
+    },
+    "contentBoundaries": {
+      "type": "boolean",
+      "description": "Wrap page output in boundary markers for LLM safety."
+    },
+    "maxOutput": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Max characters for page output (truncates beyond limit)."
+    },
+    "allowedDomains": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Allowed domain patterns (e.g., ['example.com', '*.example.com'])."
+    },
+    "actionPolicy": {
+      "type": "string",
+      "description": "Path to action policy JSON file."
+    },
+    "confirmActions": {
+      "type": "string",
+      "description": "Comma-separated action categories requiring confirmation."
+    },
+    "confirmInteractive": {
+      "type": "boolean",
+      "description": "Enable interactive confirmation prompts (auto-denies if stdin is not a TTY)."
+    },
+    "engine": {
+      "type": "string",
+      "enum": ["chrome", "lightpanda"],
+      "default": "chrome",
+      "description": "Browser engine to use."
+    },
+    "screenshotDir": {
+      "type": "string",
+      "description": "Default screenshot output directory."
+    },
+    "screenshotQuality": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100,
+      "description": "JPEG quality for screenshots (0-100)."
+    },
+    "screenshotFormat": {
+      "type": "string",
+      "enum": ["png", "jpeg"],
+      "description": "Screenshot format."
+    },
+    "idleTimeout": {
+      "type": "string",
+      "description": "Auto-shutdown the daemon after inactivity (e.g., '30s', '5m', '1h', or raw milliseconds like '60000')."
+    },
+    "model": {
+      "type": "string",
+      "description": "AI model for chat command (e.g., 'openai/gpt-4o')."
+    },
+    "noAutoDialog": {
+      "type": "boolean",
+      "description": "Disable automatic dismissal of alert/beforeunload dialogs."
+    },
+    "headers": {
+      "type": "string",
+      "description": "Custom HTTP headers supplied as a JSON-formatted string."
+    }
+  },
+  "additionalProperties": true
+}

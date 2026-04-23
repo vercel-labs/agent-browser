@@ -27,13 +27,32 @@ function extractText(children: React.ReactNode): string {
 export function useMDXComponents(components: MDXComponents): MDXComponents {
   return {
     ...components,
+    h1: ({ children }: { children?: React.ReactNode }) => {
+      const id = slugify(extractText(children));
+      return (
+        <h1 id={id} className="heading-anchor">
+          {children}
+          <a href={`#${id}`} aria-label="Link to this section">#</a>
+        </h1>
+      );
+    },
     h2: ({ children }: { children?: React.ReactNode }) => {
       const id = slugify(extractText(children));
-      return <h2 id={id}>{children}</h2>;
+      return (
+        <h2 id={id} className="heading-anchor">
+          {children}
+          <a href={`#${id}`} aria-label="Link to this section">#</a>
+        </h2>
+      );
     },
     h3: ({ children }: { children?: React.ReactNode }) => {
       const id = slugify(extractText(children));
-      return <h3 id={id}>{children}</h3>;
+      return (
+        <h3 id={id} className="heading-anchor">
+          {children}
+          <a href={`#${id}`} aria-label="Link to this section">#</a>
+        </h3>
+      );
     },
     a: ({
       href,

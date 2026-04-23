@@ -105,11 +105,18 @@ impl StreamServer {
         *self.screencasting.lock().await
     }
 
-    /// Update the stored viewport dimensions used by status messages and screencast.
-    /// Also notifies the screencast event loop to restart with the new dimensions.
+    /// Update the stored viewport dimensions and restart the active screencast (if any)
+    /// so frames are captured at the new size.
     pub async fn set_viewport(&self, width: u32, height: u32) {
-        *self.viewport_width.lock().await = width;
-        *self.viewport_height.lock().await = height;
+        let mut vw = self.viewport_width.lock().await;
+        let mut vh = self.viewport_height.lock().await;
+        if *vw == width && *vh == height {
+            return;
+        }
+        *vw = width;
+        *vh = height;
+        drop(vw);
+        drop(vh);
         self.client_notify.notify_one();
     }
 

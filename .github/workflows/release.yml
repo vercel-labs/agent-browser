@@ -10,6 +10,7 @@ concurrency: ${{ github.workflow }}-${{ github.ref }}
 
 permissions:
   contents: write
+  id-token: write
 
 jobs:
   check-release:
@@ -112,7 +113,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: '24'
           cache: pnpm
 
       - name: Install npm dependencies
@@ -200,7 +201,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: '24'
           cache: pnpm
           registry-url: 'https://registry.npmjs.org'
 
@@ -255,9 +256,7 @@ jobs:
           echo "All 7 platform binaries present and valid"
 
       - name: Publish to npm
-        run: pnpm publish --no-git-checks
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_VERCEL_TOKEN_ELEVATED }}
+        run: npm publish --provenance
 
   github-release:
     name: Create GitHub Release
