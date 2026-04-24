@@ -1516,6 +1516,54 @@ Optional configuration via environment variables:
 
 When enabled, agent-browser connects to an AgentCore cloud browser session instead of launching a local browser. All commands work identically.
 
+
+## ❓ FAQ & Troubleshooting
+
+### General
+
+**Q: Does agent-browser require Playwright or Puppeteer?**
+No. The native Rust binary does not require Playwright or Node.js. It manages its own Chrome instance via the `agent-browser install` command, which downloads Chrome from [Chrome for Testing](https://developer.chrome.com/blog/chrome-for-testing/). Existing Playwright/Puppeteer Chrome installations are detected automatically.
+
+**Q: Which cloud browser providers are supported?**
+agent-browser supports four cloud providers: **Browserbase**, **Browser Use**, **Kernel**, and **AWS Bedrock AgentCore**. Select a provider with the `-p` flag or set `AGENT_BROWSER_PROVIDER`. Each requires its own API key configured via environment variables.
+
+**Q: Can I use agent-browser in CI/CD pipelines?**
+Yes. Use a cloud provider (Browserbase, Browser Use, Kernel, or AgentCore) for serverless/CI environments where a local browser isn't available. Set the provider and API key as environment variables in your CI configuration.
+
+**Q: How do I reuse my existing Chrome login sessions?**
+Use the `--chrome-profile` flag to reuse your default Chrome profile's cookies and logins, or specify a named profile. Alternatively, use **Persistent Profiles** (`--profile-name`) to save and restore authenticated sessions across runs.
+
+### Troubleshooting
+
+**Q: `agent-browser install` fails or Chrome won't start.**
+- Ensure you have sufficient disk space (~300MB for Chrome)
+- On Linux, run `agent-browser install --with-deps` to install system dependencies (X11, GTK, etc.)
+- Check that no other process is blocking the Chrome executable
+- Try removing the cached Chrome: `rm -rf ~/.agent-browser/chrome/` and reinstall
+
+**Q: Snapshot or act commands return empty or unexpected results.**
+- Verify the page has fully loaded — use `--wait-for-network-idle` or `--wait-for-selector` flags
+- Some sites use shadow DOM or iframes; agent-browser handles these automatically, but complex SPAs may need extra wait time
+- Check that the URL is accessible and not behind a firewall or CAPTCHA
+- Run with `--debug` to see detailed browser communication logs
+
+**Q: Cloud provider sessions fail to connect.**
+- Confirm your API key is set correctly in the environment variable (e.g., `BROWSERBASE_API_KEY`, `KERNEL_API_KEY`)
+- Check the provider's status page for outages
+- Verify your account has available session credits
+- Test with a simple URL first: `agent-browser -p <provider> open https://example.com`
+
+**Q: Authenticated sessions don't persist across runs.**
+- Ensure you've saved the session first using `agent-browser auth save --session-name <name>`
+- Verify the session exists: `agent-browser session list`
+- Check that session encryption is not blocking access (if `AGENT_BROWSER_ENCRYPTION_KEY` is set, the same key must be used for load/save)
+- For persistent profiles, confirm `--profile-name` matches between runs
+
+**Q: `agent-browser snapshot` shows different refs than expected.**
+- Refs are generated from the accessibility tree and may change if the page layout changes
+- Use `--format json` for structured output that's easier to parse programmatically
+- If refs shift between snapshots, use `--wait-for-network-idle` to ensure a stable page state before capturing
+
 ## License
 
 Apache-2.0
