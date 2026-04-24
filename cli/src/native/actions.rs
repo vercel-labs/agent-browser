@@ -12,7 +12,9 @@ use tokio::sync::{broadcast, oneshot, RwLock};
 use crate::connection::get_socket_dir;
 
 use super::auth;
-use super::browser::{should_track_target, BrowserManager, WaitUntil};
+use super::browser::{
+    should_track_target, BrowserManager, WaitUntil, LIVE_CDP_TARGET_INIT_TIMEOUT,
+};
 use super::cdp::chrome::LaunchOptions;
 use super::cdp::client::CdpClient;
 use super::cdp::types::{
@@ -1503,11 +1505,17 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
 /// subsequent navigations don't hijack the user's existing tabs.
 async fn connect_auto_with_fresh_tab() -> Result<BrowserManager, String> {
     let mut mgr = BrowserManager::connect_auto().await?;
-    mgr.tab_new(None, None).await?;
+    mgr.tab_new_with_target_init_timeout(None, None, LIVE_CDP_TARGET_INIT_TIMEOUT)
+        .await?;
     let session_id = mgr.active_session_id()?.to_string();
     let _ = mgr
         .client
-        .send_command("Page.bringToFront", None, Some(&session_id))
+        .send_command_with_timeout(
+            "Page.bringToFront",
+            None,
+            Some(&session_id),
+            LIVE_CDP_TARGET_INIT_TIMEOUT,
+        )
         .await;
     Ok(mgr)
 }

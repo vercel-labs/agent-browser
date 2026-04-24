@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
@@ -17,6 +18,8 @@ type PendingMap = Arc<Mutex<HashMap<u64, oneshot::Sender<CdpMessage>>>>;
 /// Interval between WebSocket ping frames sent to keep the connection alive
 /// through intermediate proxies (reverse proxies, load balancers, service meshes).
 const WS_KEEPALIVE_INTERVAL_SECS: u64 = 30;
+const DEFAULT_CDP_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+const DEFAULT_CDP_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Raw incoming CDP message (text) broadcast to all subscribers.
 /// Used by the inspect proxy to forward responses and events to DevTools.
@@ -54,6 +57,15 @@ impl CdpClient {
         url: &str,
         headers: Option<Vec<(String, String)>>,
     ) -> Result<Self, String> {
+        Self::connect_with_headers_timeout(url, headers, DEFAULT_CDP_CONNECT_TIMEOUT).await
+    }
+
+    pub async fn connect_with_headers_timeout(
+        url: &str,
+        headers: Option<Vec<(String, String)>>,
+        timeout: Duration,
+    ) -> Result<Self, String> {
+        let url_for_error = url.to_string();
         let mut request = url
             .into_client_request()
             .map_err(|e| format!("Invalid WebSocket URL: {}", e))?;
@@ -76,10 +88,19 @@ impl CdpClient {
             ..Default::default()
         };
 
-        let (ws_stream, _) =
-            tokio_tungstenite::connect_async_with_config(request, Some(ws_config), false)
-                .await
-                .map_err(|e| format!("CDP WebSocket connect failed: {}", e))?;
+        let (ws_stream, _) = tokio::time::timeout(
+            timeout,
+            tokio_tungstenite::connect_async_with_config(request, Some(ws_config), false),
+        )
+        .await
+        .map_err(|_| {
+            format!(
+                "CDP WebSocket connect timed out after {}ms: {}",
+                timeout.as_millis(),
+                url_for_error
+            )
+        })?
+        .map_err(|e| format!("CDP WebSocket connect failed: {}", e))?;
 
         enable_tcp_keepalive(ws_stream.get_ref());
 
@@ -209,6 +230,17 @@ impl CdpClient {
         params: Option<Value>,
         session_id: Option<&str>,
     ) -> Result<Value, String> {
+        self.send_command_with_timeout(method, params, session_id, DEFAULT_CDP_COMMAND_TIMEOUT)
+            .await
+    }
+
+    pub async fn send_command_with_timeout(
+        &self,
+        method: &str,
+        params: Option<Value>,
+        session_id: Option<&str>,
+        timeout: Duration,
+    ) -> Result<Value, String> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
 
         let cmd = CdpCommand {
@@ -230,13 +262,13 @@ impl CdpClient {
 
         {
             let mut ws_tx = self.ws_tx.lock().await;
-            ws_tx
-                .send(Message::Text(json))
-                .await
-                .map_err(|e| format!("Failed to send CDP command: {}", e))?;
+            if let Err(e) = ws_tx.send(Message::Text(json)).await {
+                self.pending.lock().await.remove(&id);
+                return Err(format!("Failed to send CDP command: {}", e));
+            }
         }
 
-        let response = match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
+        let response = match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(resp)) => resp,
             Ok(Err(_)) => return Err("CDP response channel closed".to_string()),
             Err(_) => {
@@ -281,6 +313,25 @@ impl CdpClient {
             .map_err(|e| format!("Failed to serialize params: {}", e))?;
         let result = self
             .send_command(method, Some(params_value), session_id)
+            .await?;
+        serde_json::from_value(result)
+            .map_err(|e| format!("Failed to deserialize CDP response for {}: {}", method, e))
+    }
+
+    pub async fn send_command_typed_with_timeout<
+        P: serde::Serialize,
+        R: serde::de::DeserializeOwned,
+    >(
+        &self,
+        method: &str,
+        params: &P,
+        session_id: Option<&str>,
+        timeout: Duration,
+    ) -> Result<R, String> {
+        let params_value = serde_json::to_value(params)
+            .map_err(|e| format!("Failed to serialize params: {}", e))?;
+        let result = self
+            .send_command_with_timeout(method, Some(params_value), session_id, timeout)
             .await?;
         serde_json::from_value(result)
             .map_err(|e| format!("Failed to deserialize CDP response for {}: {}", method, e))
@@ -358,4 +409,42 @@ fn enable_tcp_keepalive(stream: &tokio_tungstenite::MaybeTlsStream<tokio::net::T
     let keepalive = keepalive.with_interval(std::time::Duration::from_secs(10));
 
     let _ = sock.set_tcp_keepalive(&keepalive);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn connect_with_headers_timeout_bounds_unresponsive_handshake() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            if let Ok((stream, _)) = listener.accept().await {
+                let _stream = stream;
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+        });
+
+        let start = std::time::Instant::now();
+        let err = match CdpClient::connect_with_headers_timeout(
+            &format!("ws://{}/devtools/browser/test", addr),
+            None,
+            Duration::from_millis(50),
+        )
+        .await
+        {
+            Ok(_) => panic!("unresponsive WebSocket handshake should time out"),
+            Err(err) => err,
+        };
+
+        server.abort();
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "connect timeout took too long: {:?}",
+            start.elapsed()
+        );
+        assert!(err.contains("CDP WebSocket connect timed out"));
+    }
 }

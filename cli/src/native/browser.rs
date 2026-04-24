@@ -310,6 +310,32 @@ pub struct BrowserManager {
 const LIGHTPANDA_CDP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const LIGHTPANDA_CDP_CONNECT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const LIGHTPANDA_TARGET_INIT_TIMEOUT: Duration = Duration::from_secs(10);
+const DEFAULT_CDP_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+const LIVE_CDP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) const LIVE_CDP_TARGET_INIT_TIMEOUT: Duration = Duration::from_secs(5);
+const MIN_LIVE_CDP_TARGET_INIT_COMMAND_TIMEOUT: Duration = Duration::from_millis(1);
+
+#[derive(Clone, Copy)]
+struct CdpConnectOptions {
+    connect_timeout: Duration,
+    target_init_timeout: Option<Duration>,
+}
+
+impl CdpConnectOptions {
+    fn standard() -> Self {
+        Self {
+            connect_timeout: DEFAULT_CDP_CONNECT_TIMEOUT,
+            target_init_timeout: None,
+        }
+    }
+
+    fn live_auto_connect() -> Self {
+        Self {
+            connect_timeout: LIVE_CDP_CONNECT_TIMEOUT,
+            target_init_timeout: Some(LIVE_CDP_TARGET_INIT_TIMEOUT),
+        }
+    }
+}
 
 impl BrowserManager {
     pub async fn launch(options: LaunchOptions, engine: Option<&str>) -> Result<Self, String> {
@@ -432,29 +458,33 @@ impl BrowserManager {
     }
 
     pub async fn connect_cdp(url: &str) -> Result<Self, String> {
-        Self::connect_cdp_inner(url, false, None).await
+        Self::connect_cdp_inner(url, false, None, CdpConnectOptions::standard()).await
     }
 
     /// Connect to a provider CDP proxy where the WebSocket IS the page session.
     /// Skips browser-level Target.* commands that most proxies don't support.
     pub async fn connect_cdp_direct(url: &str) -> Result<Self, String> {
-        Self::connect_cdp_inner(url, true, None).await
+        Self::connect_cdp_inner(url, true, None, CdpConnectOptions::standard()).await
     }
 
     pub async fn connect_cdp_with_headers(
         url: &str,
         headers: Option<Vec<(String, String)>>,
     ) -> Result<Self, String> {
-        Self::connect_cdp_inner(url, false, headers).await
+        Self::connect_cdp_inner(url, false, headers, CdpConnectOptions::standard()).await
     }
 
     async fn connect_cdp_inner(
         url: &str,
         direct_page: bool,
         headers: Option<Vec<(String, String)>>,
+        options: CdpConnectOptions,
     ) -> Result<Self, String> {
         let ws_url = resolve_cdp_url(url).await?;
-        let client = Arc::new(CdpClient::connect_with_headers(&ws_url, headers).await?);
+        let client = Arc::new(
+            CdpClient::connect_with_headers_timeout(&ws_url, headers, options.connect_timeout)
+                .await?,
+        );
         let mut manager = Self {
             client,
             browser_process: None,
@@ -482,28 +512,57 @@ impl BrowserManager {
             manager.active_page_index = 0;
             manager.enable_domains_direct().await?;
         } else {
-            manager.discover_and_attach_targets().await?;
+            if let Some(timeout) = options.target_init_timeout {
+                manager
+                    .discover_and_attach_targets_with_timeout(timeout)
+                    .await?;
+            } else {
+                manager.discover_and_attach_targets().await?;
+            }
         }
         Ok(manager)
     }
 
     pub async fn connect_auto() -> Result<Self, String> {
         let ws_url = auto_connect_cdp().await?;
-        Self::connect_cdp(&ws_url).await
+        Self::connect_cdp_inner(&ws_url, false, None, CdpConnectOptions::live_auto_connect()).await
     }
 
     async fn discover_and_attach_targets(&mut self) -> Result<(), String> {
-        self.client
-            .send_command_typed::<_, Value>(
-                "Target.setDiscoverTargets",
-                &SetDiscoverTargetsParams { discover: true },
-                None,
-            )
-            .await?;
+        self.discover_and_attach_targets_until(None, None).await
+    }
+
+    async fn discover_and_attach_targets_with_timeout(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<(), String> {
+        let deadline = Instant::now() + timeout;
+        self.discover_and_attach_targets_until(Some(deadline), Some(timeout))
+            .await
+    }
+
+    async fn discover_and_attach_targets_until(
+        &mut self,
+        deadline: Option<Instant>,
+        total_timeout: Option<Duration>,
+    ) -> Result<(), String> {
+        self.send_target_init_typed::<_, Value>(
+            "Target.setDiscoverTargets",
+            &SetDiscoverTargetsParams { discover: true },
+            None,
+            deadline,
+            total_timeout,
+        )
+        .await?;
 
         let result: GetTargetsResult = self
-            .client
-            .send_command_typed("Target.getTargets", &json!({}), None)
+            .send_target_init_typed(
+                "Target.getTargets",
+                &json!({}),
+                None,
+                deadline,
+                total_timeout,
+            )
             .await?;
 
         let page_targets: Vec<TargetInfo> = result
@@ -515,25 +574,27 @@ impl BrowserManager {
         if page_targets.is_empty() {
             // Create a new tab
             let result: CreateTargetResult = self
-                .client
-                .send_command_typed(
+                .send_target_init_typed(
                     "Target.createTarget",
                     &CreateTargetParams {
                         url: "about:blank".to_string(),
                     },
                     None,
+                    deadline,
+                    total_timeout,
                 )
                 .await?;
 
             let attach_result: AttachToTargetResult = self
-                .client
-                .send_command_typed(
+                .send_target_init_typed(
                     "Target.attachToTarget",
                     &AttachToTargetParams {
                         target_id: result.target_id.clone(),
                         flatten: true,
                     },
                     None,
+                    deadline,
+                    total_timeout,
                 )
                 .await?;
 
@@ -549,18 +610,20 @@ impl BrowserManager {
                 target_type: "page".to_string(),
             });
             self.active_page_index = 0;
-            self.enable_domains(&attach_result.session_id).await?;
+            self.enable_domains_until(&attach_result.session_id, deadline, total_timeout)
+                .await?;
         } else {
             for target in &page_targets {
                 let attach_result: AttachToTargetResult = self
-                    .client
-                    .send_command_typed(
+                    .send_target_init_typed(
                         "Target.attachToTarget",
                         &AttachToTargetParams {
                             target_id: target.target_id.clone(),
                             flatten: true,
                         },
                         None,
+                        deadline,
+                        total_timeout,
                     )
                     .await?;
 
@@ -579,10 +642,62 @@ impl BrowserManager {
 
             self.active_page_index = 0;
             let session_id = self.pages[0].session_id.clone();
-            self.enable_domains(&session_id).await?;
+            self.enable_domains_until(&session_id, deadline, total_timeout)
+                .await?;
         }
 
         Ok(())
+    }
+
+    async fn send_target_init_command(
+        &self,
+        method: &str,
+        params: Option<Value>,
+        session_id: Option<&str>,
+        deadline: Option<Instant>,
+        total_timeout: Option<Duration>,
+    ) -> Result<Value, String> {
+        match (deadline, total_timeout) {
+            (Some(deadline), Some(total_timeout)) => {
+                let timeout = remaining_until(deadline)
+                    .unwrap_or(MIN_LIVE_CDP_TARGET_INIT_COMMAND_TIMEOUT)
+                    .max(MIN_LIVE_CDP_TARGET_INIT_COMMAND_TIMEOUT);
+                self.client
+                    .send_command_with_timeout(method, params, session_id, timeout)
+                    .await
+                    .map_err(|err| {
+                        if is_cdp_timeout_error(&err) {
+                            live_cdp_target_init_timeout(total_timeout, method, Some(&err))
+                        } else {
+                            err
+                        }
+                    })
+            }
+            _ => self.client.send_command(method, params, session_id).await,
+        }
+    }
+
+    async fn send_target_init_typed<P: serde::Serialize, R: serde::de::DeserializeOwned>(
+        &self,
+        method: &str,
+        params: &P,
+        session_id: Option<&str>,
+        deadline: Option<Instant>,
+        total_timeout: Option<Duration>,
+    ) -> Result<R, String> {
+        let params_value = serde_json::to_value(params)
+            .map_err(|e| format!("Failed to serialize params: {}", e))?;
+        let result = self
+            .send_target_init_command(
+                method,
+                Some(params_value),
+                session_id,
+                deadline,
+                total_timeout,
+            )
+            .await?;
+        serde_json::from_value(result)
+            .map_err(|e| format!("Failed to deserialize CDP response for {}: {}", method, e))
     }
 
     pub async fn enable_domains_pub(&self, session_id: &str) -> Result<(), String> {
@@ -590,28 +705,56 @@ impl BrowserManager {
     }
 
     async fn enable_domains(&self, session_id: &str) -> Result<(), String> {
-        self.client
-            .send_command_no_params("Page.enable", Some(session_id))
-            .await?;
-        self.client
-            .send_command_no_params("Runtime.enable", Some(session_id))
-            .await?;
+        self.enable_domains_until(session_id, None, None).await
+    }
+
+    async fn enable_domains_until(
+        &self,
+        session_id: &str,
+        deadline: Option<Instant>,
+        total_timeout: Option<Duration>,
+    ) -> Result<(), String> {
+        self.send_target_init_command(
+            "Page.enable",
+            None,
+            Some(session_id),
+            deadline,
+            total_timeout,
+        )
+        .await?;
+        self.send_target_init_command(
+            "Runtime.enable",
+            None,
+            Some(session_id),
+            deadline,
+            total_timeout,
+        )
+        .await?;
         // Resume the target if it is paused waiting for the debugger.
         // This is needed for real browser sessions (Chrome 144+) where targets
         // are paused after attach until explicitly resumed. No-op otherwise.
         let _ = self
-            .client
-            .send_command_no_params("Runtime.runIfWaitingForDebugger", Some(session_id))
+            .send_target_init_command(
+                "Runtime.runIfWaitingForDebugger",
+                None,
+                Some(session_id),
+                deadline,
+                total_timeout,
+            )
             .await;
-        self.client
-            .send_command_no_params("Network.enable", Some(session_id))
-            .await?;
+        self.send_target_init_command(
+            "Network.enable",
+            None,
+            Some(session_id),
+            deadline,
+            total_timeout,
+        )
+        .await?;
         // Enable auto-attach for cross-origin iframe support.
         // flatten: true gives each iframe its own session_id.
         // Ignored on engines that don't support it (e.g. Lightpanda).
         let _ = self
-            .client
-            .send_command(
+            .send_target_init_command(
                 "Target.setAutoAttach",
                 Some(json!({
                     "autoAttach": true,
@@ -619,6 +762,8 @@ impl BrowserManager {
                     "flatten": true
                 })),
                 Some(session_id),
+                deadline,
+                total_timeout,
             )
             .await;
         Ok(())
@@ -1009,6 +1154,27 @@ impl BrowserManager {
         url: Option<&str>,
         label: Option<&str>,
     ) -> Result<Value, String> {
+        self.tab_new_until(url, label, None, None).await
+    }
+
+    pub(crate) async fn tab_new_with_target_init_timeout(
+        &mut self,
+        url: Option<&str>,
+        label: Option<&str>,
+        timeout: Duration,
+    ) -> Result<Value, String> {
+        let deadline = Instant::now() + timeout;
+        self.tab_new_until(url, label, Some(deadline), Some(timeout))
+            .await
+    }
+
+    async fn tab_new_until(
+        &mut self,
+        url: Option<&str>,
+        label: Option<&str>,
+        deadline: Option<Instant>,
+        total_timeout: Option<Duration>,
+    ) -> Result<Value, String> {
         if let Some(label) = label {
             if !is_valid_label(label) {
                 return Err(format!(
@@ -1029,29 +1195,32 @@ impl BrowserManager {
         let target_url = url.unwrap_or("about:blank");
 
         let result: CreateTargetResult = self
-            .client
-            .send_command_typed(
+            .send_target_init_typed(
                 "Target.createTarget",
                 &CreateTargetParams {
                     url: target_url.to_string(),
                 },
                 None,
+                deadline,
+                total_timeout,
             )
             .await?;
 
         let attach: AttachToTargetResult = self
-            .client
-            .send_command_typed(
+            .send_target_init_typed(
                 "Target.attachToTarget",
                 &AttachToTargetParams {
                     target_id: result.target_id.clone(),
                     flatten: true,
                 },
                 None,
+                deadline,
+                total_timeout,
             )
             .await?;
 
-        self.enable_domains(&attach.session_id).await?;
+        self.enable_domains_until(&attach.session_id, deadline, total_timeout)
+            .await?;
 
         let tab_id = self.next_tab_id;
         self.next_tab_id += 1;
@@ -1678,6 +1847,28 @@ fn lightpanda_target_init_timeout(last_error: Option<&str>) -> String {
     message
 }
 
+fn live_cdp_target_init_timeout(
+    total_timeout: Duration,
+    step: &str,
+    last_error: Option<&str>,
+) -> String {
+    let mut message = format!(
+        "Timed out after {}ms initializing live CDP targets during {}. \
+         Chrome may be waiting for remote-debugging consent or exposing a non-responsive \
+         default-profile target.",
+        total_timeout.as_millis(),
+        step,
+    );
+    if let Some(last_error) = last_error {
+        message.push_str(&format!("\nLast error: {}", last_error));
+    }
+    message
+}
+
+fn is_cdp_timeout_error(err: &str) -> bool {
+    err.to_ascii_lowercase().contains("timed out")
+}
+
 async fn resolve_cdp_url(input: &str) -> Result<String, String> {
     if input.starts_with("ws://") || input.starts_with("wss://") {
         return Ok(input.to_string());
@@ -2014,6 +2205,129 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(err, "Target.getTargets failed");
+    }
+
+    #[tokio::test]
+    async fn test_live_cdp_target_init_timeout_bounds_hung_get_targets() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio::net::TcpListener;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(message)) = ws.next().await {
+                let Message::Text(text) = message else {
+                    continue;
+                };
+                let command: Value = serde_json::from_str(&text).unwrap();
+                let id = command.get("id").and_then(|v| v.as_u64()).unwrap();
+                let method = command.get("method").and_then(|v| v.as_str()).unwrap();
+                if method == "Target.setDiscoverTargets" {
+                    let response = json!({ "id": id, "result": {} }).to_string();
+                    ws.send(Message::Text(response)).await.unwrap();
+                } else if method == "Target.getTargets" {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    break;
+                }
+            }
+        });
+
+        let start = Instant::now();
+        let err = match BrowserManager::connect_cdp_inner(
+            &format!("ws://{}/devtools/browser/test", addr),
+            false,
+            None,
+            CdpConnectOptions {
+                connect_timeout: Duration::from_secs(1),
+                target_init_timeout: Some(Duration::from_millis(75)),
+            },
+        )
+        .await
+        {
+            Ok(_) => panic!("hung Target.getTargets should time out"),
+            Err(err) => err,
+        };
+
+        server.abort();
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "live target init timeout took too long: {:?}",
+            start.elapsed()
+        );
+        assert!(err.contains("Timed out after 75ms initializing live CDP targets"));
+        assert!(err.contains("Target.getTargets"));
+    }
+
+    #[tokio::test]
+    async fn test_live_cdp_target_init_timeout_bounds_expired_deadline_sends_current_step() {
+        use futures_util::StreamExt;
+        use tokio::net::TcpListener;
+        use tokio::sync::oneshot;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (method_tx, method_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            if let Some(Ok(Message::Text(text))) = ws.next().await {
+                let command: Value = serde_json::from_str(&text).unwrap();
+                let method = command
+                    .get("method")
+                    .and_then(|v| v.as_str())
+                    .unwrap()
+                    .to_string();
+                let _ = method_tx.send(method);
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+        });
+
+        let ws_url = format!("ws://{}/devtools/browser/test", addr);
+        let client = Arc::new(
+            CdpClient::connect_with_headers_timeout(&ws_url, None, Duration::from_secs(1))
+                .await
+                .unwrap(),
+        );
+        let manager = BrowserManager {
+            client,
+            browser_process: None,
+            ws_url,
+            pages: Vec::new(),
+            active_page_index: 0,
+            default_timeout_ms: 30_000,
+            download_path: None,
+            ignore_https_errors: false,
+            visited_origins: HashSet::new(),
+            next_tab_id: 1,
+        };
+        let deadline = Instant::now()
+            .checked_sub(Duration::from_millis(1))
+            .expect("past instant should be representable");
+        let err = manager
+            .send_target_init_command(
+                "Network.enable",
+                None,
+                Some("session-1"),
+                Some(deadline),
+                Some(Duration::from_millis(75)),
+            )
+            .await
+            .unwrap_err();
+
+        let observed_method = tokio::time::timeout(Duration::from_secs(1), method_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        server.abort();
+
+        assert_eq!(observed_method, "Network.enable");
+        assert!(err.contains("Timed out after 75ms initializing live CDP targets"));
+        assert!(err.contains("Network.enable"));
+        assert!(!err.contains("deadline expired"));
     }
 
     #[test]
