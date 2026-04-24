@@ -13,6 +13,12 @@ npm install -g agent-browser
 agent-browser install  # Download Chrome from Chrome for Testing (first time only)
 ```
 
+Slow networks can extend the browser download timeout:
+
+```bash
+agent-browser install --timeout 600
+```
+
 ### Project Installation (local dependency)
 
 For projects that want to pin the version in `package.json`:
@@ -445,6 +451,7 @@ agent-browser removeinitscript <identifier>       # Remove a previously register
 ```bash
 agent-browser install                 # Download Chrome from Chrome for Testing (Google's official automation channel)
 agent-browser install --with-deps     # Also install system deps (Linux)
+agent-browser install --timeout 600   # Extend Chrome download timeout for slow networks
 agent-browser upgrade                 # Upgrade agent-browser to the latest version
 agent-browser doctor                  # Diagnose the install and auto-clean stale daemon files
 agent-browser doctor --fix            # Also run destructive repairs (reinstall Chrome, purge old state, ...)

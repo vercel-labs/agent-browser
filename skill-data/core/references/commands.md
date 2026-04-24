@@ -387,3 +387,11 @@ AGENT_BROWSER_PROVIDER="browserbase"         # Cloud browser provider
 AGENT_BROWSER_STREAM_PORT="9223"             # Override WebSocket streaming port (default: OS-assigned)
 AGENT_BROWSER_HOME="/path/to/agent-browser"  # Custom install location
 ```
+
+## Install
+
+```bash
+agent-browser install                 # Download Chrome for Testing
+agent-browser install --with-deps     # Also install system dependencies on Linux
+agent-browser install --timeout 600   # Extend the browser download timeout in seconds
+```
