@@ -38,10 +38,9 @@ pub(super) fn check(checks: &mut Vec<Check>) {
     let state_dir = get_state_dir();
     let socket_dir = get_socket_dir();
 
-    // Under the default setup, state and socket dirs are the same
-    // (~/.agent-browser). Collapse to a single line when they match;
-    // split when XDG_RUNTIME_DIR or AGENT_BROWSER_SOCKET_DIR diverts
-    // sockets elsewhere.
+    // Under the default setup, runtime files can live separately from
+    // persistent data. Collapse to a single line only when an override makes
+    // them identical.
     if state_dir == socket_dir {
         push_dir_check(
             checks,

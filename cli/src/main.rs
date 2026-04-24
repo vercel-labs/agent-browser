@@ -7,6 +7,7 @@ mod flags;
 mod install;
 mod native;
 mod output;
+mod paths;
 mod skills;
 #[cfg(test)]
 mod test_utils;

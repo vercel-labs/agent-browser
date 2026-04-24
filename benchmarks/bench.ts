@@ -417,7 +417,7 @@ async function getDistributionSize(
       sandbox,
       [
         `size=0`,
-        `for d in "$HOME/.cache/agent-browser" "$HOME/.cache/ms-playwright" "$HOME/.agent-browser/chrome"; do`,
+        `for d in "$HOME/.cache/agent-browser" "$HOME/.cache/ms-playwright" "$HOME/.local/share/agent-browser/browsers"; do`,
         `  if [ -d "$d" ]; then size=$(du -sb "$d" 2>/dev/null | awk '{print $1}'); break; fi`,
         `done`,
         `echo $size`,

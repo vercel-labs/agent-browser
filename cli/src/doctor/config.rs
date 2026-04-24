@@ -1,4 +1,4 @@
-//! Check user config files: `~/.agent-browser/config.json`,
+//! Check user config files: `$XDG_CONFIG_HOME/agent-browser/config.json`,
 //! `./agent-browser.json`, and any file referenced by
 //! `AGENT_BROWSER_CONFIG`.
 
@@ -7,11 +7,12 @@ use std::path::PathBuf;
 
 use super::helpers::parse_json_file;
 use super::{Check, Status};
+use crate::paths;
 
 pub(super) fn check(checks: &mut Vec<Check>) {
     let category = "Config";
 
-    let user_path = dirs::home_dir().map(|d| d.join(".agent-browser").join("config.json"));
+    let user_path = Some(paths::user_config_file());
     if let Some(p) = user_path {
         if p.exists() {
             match parse_json_file(&p) {

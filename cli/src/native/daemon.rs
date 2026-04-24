@@ -7,6 +7,8 @@ use std::process;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::paths;
+
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::signal;
 use tokio::sync::{mpsc, Notify, RwLock};
@@ -488,17 +490,7 @@ fn get_daemon_socket_dir() -> PathBuf {
         }
     }
 
-    if let Ok(xdg) = env::var("XDG_RUNTIME_DIR") {
-        if !xdg.is_empty() {
-            return PathBuf::from(xdg).join("agent-browser");
-        }
-    }
-
-    if let Some(home) = dirs::home_dir() {
-        return home.join(".agent-browser");
-    }
-
-    std::env::temp_dir().join("agent-browser")
+    paths::runtime_dir()
 }
 
 #[cfg(windows)]

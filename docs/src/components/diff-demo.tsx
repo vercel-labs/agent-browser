@@ -263,7 +263,7 @@ export function DiffDemo() {
               &#x2717; 2.37% pixels differ
             </div>
             <div className="opacity-50">
-              Diff image: ~/.agent-browser/tmp/diffs/diff-1708473621.png
+              Diff image: ~/.cache/agent-browser/tmp/diffs/diff-1708473621.png
             </div>
             <div className="opacity-50">
               <span className="text-red-400">1,137</span> different /{" "}

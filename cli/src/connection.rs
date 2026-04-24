@@ -9,6 +9,8 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
 
+use crate::paths;
+
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
 
@@ -89,7 +91,7 @@ impl Connection {
 }
 
 /// Get the base directory for socket/pid files.
-/// Priority: AGENT_BROWSER_SOCKET_DIR > XDG_RUNTIME_DIR > ~/.agent-browser > tmpdir
+/// Priority: AGENT_BROWSER_SOCKET_DIR > XDG_RUNTIME_DIR > platform data dir
 pub fn get_socket_dir() -> PathBuf {
     // 1. Explicit override (ignore empty string)
     if let Ok(dir) = env::var("AGENT_BROWSER_SOCKET_DIR") {
@@ -98,20 +100,8 @@ pub fn get_socket_dir() -> PathBuf {
         }
     }
 
-    // 2. XDG_RUNTIME_DIR (Linux standard, ignore empty string)
-    if let Ok(runtime_dir) = env::var("XDG_RUNTIME_DIR") {
-        if !runtime_dir.is_empty() {
-            return PathBuf::from(runtime_dir).join("agent-browser");
-        }
-    }
-
-    // 3. Home directory fallback (like Docker Desktop's ~/.docker/run/)
-    if let Some(home) = dirs::home_dir() {
-        return home.join(".agent-browser");
-    }
-
-    // 4. Last resort: temp dir
-    env::temp_dir().join("agent-browser")
+    // 2. Runtime dir / platform fallback.
+    paths::runtime_dir()
 }
 
 #[cfg(unix)]
@@ -872,7 +862,7 @@ mod tests {
 
         assert!(get_socket_dir()
             .to_string_lossy()
-            .ends_with(".agent-browser"));
+            .ends_with("agent-browser/run"));
     }
 
     #[test]
@@ -897,7 +887,7 @@ mod tests {
 
         assert!(get_socket_dir()
             .to_string_lossy()
-            .ends_with(".agent-browser"));
+            .ends_with("agent-browser/run"));
     }
 
     #[test]
@@ -908,7 +898,7 @@ mod tests {
         _guard.remove("XDG_RUNTIME_DIR");
 
         let result = get_socket_dir();
-        assert!(result.to_string_lossy().ends_with(".agent-browser"));
+        assert!(result.to_string_lossy().ends_with("agent-browser/run"));
         assert!(
             result.to_string_lossy().contains("home") || result.to_string_lossy().contains("Users")
         );

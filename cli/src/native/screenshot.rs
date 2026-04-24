@@ -4,6 +4,8 @@ use std::path::PathBuf;
 
 use std::collections::HashMap;
 
+use crate::paths;
+
 use super::cdp::client::CdpClient;
 use super::cdp::types::*;
 use super::element::RefMap;
@@ -588,13 +590,7 @@ fn round(value: f64) -> i64 {
 }
 
 fn get_screenshot_dir() -> PathBuf {
-    if let Some(home) = dirs::home_dir() {
-        home.join(".agent-browser").join("tmp").join("screenshots")
-    } else {
-        std::env::temp_dir()
-            .join("agent-browser")
-            .join("screenshots")
-    }
+    paths::cache_tmp_dir().join("screenshots")
 }
 
 #[cfg(test)]

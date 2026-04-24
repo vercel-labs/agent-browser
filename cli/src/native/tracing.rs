@@ -1,6 +1,8 @@
 use serde_json::{json, Value};
 use std::path::PathBuf;
 
+use crate::paths;
+
 use super::cdp::client::CdpClient;
 
 const MAX_PROFILE_EVENTS: usize = 5_000_000;
@@ -357,17 +359,9 @@ fn get_clock_domain() -> Option<&'static str> {
 }
 
 fn get_traces_dir() -> PathBuf {
-    if let Some(home) = dirs::home_dir() {
-        home.join(".agent-browser").join("tmp").join("traces")
-    } else {
-        std::env::temp_dir().join("agent-browser").join("traces")
-    }
+    paths::cache_tmp_dir().join("traces")
 }
 
 fn get_profiles_dir() -> PathBuf {
-    if let Some(home) = dirs::home_dir() {
-        home.join(".agent-browser").join("tmp").join("profiles")
-    } else {
-        std::env::temp_dir().join("agent-browser").join("profiles")
-    }
+    paths::cache_tmp_dir().join("profiles")
 }
