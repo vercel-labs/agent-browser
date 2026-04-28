@@ -915,7 +915,7 @@ mod tests {
                 {
                     "s3": {
                         "bucket": "my-extension-bucket",
-                        "key": "extensions/my-extension.crx"
+                        "key": "extensions/my-extension.zip"
                     }
                 }
             ]

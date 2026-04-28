@@ -116,7 +116,7 @@ export AGENTCORE_EXTENSION_CONFIG='{
     {
       "s3": {
         "bucket": "my-extension-bucket",
-        "key": "extensions/my-extension.crx"
+        "key": "extensions/my-extension.zip"
       }
     }
   ]
@@ -124,7 +124,7 @@ export AGENTCORE_EXTENSION_CONFIG='{
 agent-browser -p agentcore open https://example.com
 ```
 
-**Important:** The `--extension` flag applies only to local Chrome/Lightpanda browsers. For AgentCore, use `AGENTCORE_EXTENSION_CONFIG` to load extensions stored in S3. The browser session must have IAM permissions to read from the specified S3 bucket.
+**Important:** The `--extension` flag applies only to local Chrome/Lightpanda browsers. For AgentCore, use `AGENTCORE_EXTENSION_CONFIG` to load extensions packaged as `.zip` files in S3. The browser session must have IAM permissions to read from the specified S3 bucket.
 
 ## Live View
 
