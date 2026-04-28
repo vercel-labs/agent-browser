@@ -1,0 +1,47 @@
+# Steel
+
+[Steel](https://steel.dev) provides cloud browser infrastructure for AI agents with built-in proxy support, CAPTCHA solving, and persistent profiles. Use it when running agent-browser in environments where a local browser isn't available.
+
+## Setup
+
+```bash
+export STEEL_API_KEY="your-api-key"
+agent-browser -p steel open https://example.com
+```
+
+Or use environment variables for CI/scripts:
+
+```bash
+export AGENT_BROWSER_PROVIDER=steel
+export STEEL_API_KEY="your-api-key"
+agent-browser open https://example.com
+```
+
+The `-p` flag takes precedence over `AGENT_BROWSER_PROVIDER`.
+
+## Configuration
+
+<table>
+  <thead>
+    <tr><th>Variable</th><th>Description</th><th>Default</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>STEEL_API_KEY</code></td><td>API key (required)</td><td></td></tr>
+    <tr><td><code>STEEL_TIMEOUT_MS</code></td><td>Session timeout in milliseconds (positive integer)</td><td>provider default</td></tr>
+    <tr><td><code>STEEL_HEADLESS</code></td><td>Run browser headless (<code>true</code>, <code>false</code>, <code>1</code>, <code>0</code>)</td><td>provider default</td></tr>
+    <tr><td><code>STEEL_SOLVE_CAPTCHA</code></td><td>Enable Steel's automatic CAPTCHA solving</td><td>provider default</td></tr>
+    <tr><td><code>STEEL_USE_PROXY</code></td><td>Route session through Steel's residential proxy</td><td>provider default</td></tr>
+    <tr><td><code>STEEL_PROXY_URL</code></td><td>Custom proxy URL (overrides Steel's built-in proxy)</td><td></td></tr>
+    <tr><td><code>STEEL_REGION</code></td><td>Datacenter region (e.g. <code>lax</code>, <code>ord</code>, <code>iad</code>)</td><td>provider default</td></tr>
+    <tr><td><code>STEEL_BLOCK_ADS</code></td><td>Enable ad blocking for the session</td><td>provider default</td></tr>
+    <tr><td><code>STEEL_PROFILE_ID</code></td><td>UUID of an existing Steel profile to load</td><td></td></tr>
+    <tr><td><code>STEEL_PERSIST_PROFILE</code></td><td>Persist profile changes across runs</td><td>provider default</td></tr>
+    <tr><td><code>STEEL_DEVICE</code></td><td>Device emulation profile (<code>desktop</code> or <code>mobile</code>)</td><td><code>desktop</code></td></tr>
+  </tbody>
+</table>
+
+Boolean variables accept `true`, `false`, `1`, or `0` (case-insensitive). `STEEL_TIMEOUT_MS` must be a positive integer. `STEEL_DEVICE` must be exactly `desktop` or `mobile`.
+
+When enabled, agent-browser creates a Steel session via `POST https://api.steel.dev/v1/sessions`, connects over CDP, and explicitly releases the session on close via `POST /v1/sessions/{id}/release`. All commands work identically to a local browser.
+
+Get your API key from the [Steel Dashboard](https://app.steel.dev/settings/api-keys). See the [Steel API docs](https://docs.steel.dev) for the full provider feature reference.
