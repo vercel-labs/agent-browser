@@ -111,19 +111,19 @@ Policies are applied at session creation time and control browser behavior, secu
 
 ## Browser Extensions
 
-Use `AGENTCORE_EXTENSION_CONFIG` to load browser extensions from S3. The value must be valid JSON:
+Use `AGENTCORE_EXTENSION_CONFIG` to load browser extensions from S3. The value must be a JSON array:
 
 ```bash
-export AGENTCORE_EXTENSION_CONFIG='{
-  "extensions": [
-    {
+export AGENTCORE_EXTENSION_CONFIG='[
+  {
+    "location": {
       "s3": {
         "bucket": "my-extension-bucket",
-        "key": "extensions/my-extension.zip"
+        "prefix": "extensions/my-extension.zip"
       }
     }
-  ]
-}'
+  }
+]'
 agent-browser -p agentcore open https://example.com
 ```
 

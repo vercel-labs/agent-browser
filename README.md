@@ -1560,16 +1560,16 @@ agent-browser -p agentcore open https://example.com
 **Browser extensions:** Use `AGENTCORE_EXTENSION_CONFIG` to load browser extensions from S3:
 
 ```bash
-export AGENTCORE_EXTENSION_CONFIG='{
-  "extensions": [
-    {
+export AGENTCORE_EXTENSION_CONFIG='[
+  {
+    "location": {
       "s3": {
         "bucket": "my-extension-bucket",
-        "key": "extensions/my-extension.zip"
+        "prefix": "extensions/my-extension.zip"
       }
     }
-  ]
-}'
+  }
+]'
 agent-browser -p agentcore open https://example.com
 ```
 

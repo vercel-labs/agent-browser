@@ -474,7 +474,7 @@ mod agentcore {
                 match serde_json::from_str::<serde_json::Value>(&extension_config) {
                     Ok(extension_json) => {
                         body_json.as_object_mut().unwrap().insert(
-                            "extensionConfiguration".to_string(),
+                            "extensions".to_string(),
                             extension_json,
                         );
                     }
@@ -909,22 +909,22 @@ mod tests {
 
     #[test]
     fn test_agentcore_extension_config_parsing() {
-        // Test valid JSON
-        let valid_json = r#"{
-            "extensions": [
-                {
+        // Test valid JSON - array of extension locations
+        let valid_json = r#"[
+            {
+                "location": {
                     "s3": {
                         "bucket": "my-extension-bucket",
-                        "key": "extensions/my-extension.zip"
+                        "prefix": "extensions/my-extension.zip"
                     }
                 }
-            ]
-        }"#;
+            }
+        ]"#;
         let result = serde_json::from_str::<serde_json::Value>(valid_json);
         assert!(result.is_ok());
         let parsed = result.unwrap();
-        assert!(parsed.get("extensions").is_some());
-        let extensions = parsed.get("extensions").unwrap().as_array().unwrap();
+        assert!(parsed.is_array());
+        let extensions = parsed.as_array().unwrap();
         assert_eq!(extensions.len(), 1);
 
         // Test invalid JSON
