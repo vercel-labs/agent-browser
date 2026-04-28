@@ -303,6 +303,7 @@ agent-browser --headed ...            # Show browser window (not headless)
 agent-browser --full ...              # Full page screenshot (-f)
 agent-browser --cdp <port> ...        # Connect via Chrome DevTools Protocol
 agent-browser -p <provider> ...       # Cloud browser provider (--provider)
+# Providers: browserbase, browserless, browseruse, kernel, agentcore, steel
 agent-browser --proxy <url> ...       # Use proxy server
 agent-browser --proxy-bypass <hosts>  # Hosts to bypass proxy
 agent-browser --headers <json> ...    # HTTP headers scoped to URL's origin
@@ -384,6 +385,10 @@ AGENT_BROWSER_EXTENSIONS="/ext1,/ext2"       # Comma-separated extension paths
 AGENT_BROWSER_INIT_SCRIPTS="/a.js,/b.js"     # Comma-separated init script paths
 AGENT_BROWSER_ENABLE="react-devtools"        # Comma-separated built-in init script features
 AGENT_BROWSER_PROVIDER="browserbase"         # Cloud browser provider
+# Cloud providers: browserbase, browserless, browseruse, kernel, agentcore, steel
+# Steel: set STEEL_API_KEY; optional STEEL_TIMEOUT_MS, STEEL_HEADLESS,
+# STEEL_SOLVE_CAPTCHA, STEEL_USE_PROXY, STEEL_PROXY_URL, STEEL_REGION,
+# STEEL_BLOCK_ADS, STEEL_PROFILE_ID, STEEL_PERSIST_PROFILE, STEEL_DEVICE
 AGENT_BROWSER_STREAM_PORT="9223"             # Override WebSocket streaming port (default: OS-assigned)
 AGENT_BROWSER_HOME="/path/to/agent-browser"  # Custom install location
 ```

@@ -11,7 +11,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::signal;
 use tokio::sync::{mpsc, Notify, RwLock};
 
-use super::actions::{execute_command, DaemonState};
+use super::actions::{close_browser_for_shutdown, execute_command, DaemonState};
 use super::cdp::client::CdpClient;
 use super::state;
 use super::stream::StreamServer;
@@ -207,15 +207,17 @@ async fn run_socket_server(
             }
             _ = drain_interval.tick() => {
                 let mut s = state.lock().await;
-                if let Some(ref mut mgr) = s.browser {
-                    if mgr.has_process_exited() {
-                        let _ = mgr.close().await;
-                        s.browser = None;
-                        s.screencasting = false;
-                        s.update_stream_client().await;
-                    } else {
-                        s.drain_cdp_events_background().await;
-                    }
+                let process_exited = s
+                    .browser
+                    .as_mut()
+                    .map(|mgr| mgr.has_process_exited())
+                    .unwrap_or(false);
+                if process_exited {
+                    close_browser_for_shutdown(&mut s).await;
+                    s.screencasting = false;
+                    s.update_stream_client().await;
+                } else if s.browser.is_some() {
+                    s.drain_cdp_events_background().await;
                 }
             }
             _ = async {
@@ -225,9 +227,7 @@ async fn run_socket_server(
                 }
             }, if idle_timeout_ms.is_some() => {
                 let mut s = state.lock().await;
-                if let Some(ref mut mgr) = s.browser {
-                    let _ = mgr.close().await;
-                }
+                close_browser_for_shutdown(&mut s).await;
                 break;
             }
             _ = reset_rx.recv(), if idle_timeout_ms.is_some() => {
@@ -243,9 +243,7 @@ async fn run_socket_server(
             }
             _ = shutdown_signal() => {
                 let mut s = state.lock().await;
-                if let Some(ref mut mgr) = s.browser {
-                    let _ = mgr.close().await;
-                }
+                close_browser_for_shutdown(&mut s).await;
                 break;
             }
         }
@@ -325,9 +323,7 @@ async fn run_socket_server(
                 }
             }, if idle_timeout_ms.is_some() => {
                 let mut s = state.lock().await;
-                if let Some(ref mut mgr) = s.browser {
-                    let _ = mgr.close().await;
-                }
+                close_browser_for_shutdown(&mut s).await;
                 let _ = fs::remove_file(&port_path);
                 break;
             }
@@ -342,9 +338,7 @@ async fn run_socket_server(
             }
             _ = shutdown_signal() => {
                 let mut s = state.lock().await;
-                if let Some(ref mut mgr) = s.browser {
-                    let _ = mgr.close().await;
-                }
+                close_browser_for_shutdown(&mut s).await;
                 let _ = fs::remove_file(&port_path);
                 break;
             }

@@ -756,7 +756,7 @@ The dashboard displays:
 - **Live viewport** -- real-time JPEG frames from the browser
 - **Activity feed** -- chronological command/result stream with timing and expandable details
 - **Console output** -- browser console messages (log, warn, error)
-- **Session creation** -- create new sessions from the UI with local engines (Chrome, Lightpanda) or cloud providers (AgentCore, Browserbase, Browserless, Browser Use, Kernel)
+- **Session creation** — create new sessions from the UI with local engines (Chrome, Lightpanda) or cloud providers (AgentCore, Browserbase, Browserless, Browser Use, Kernel, Steel)
 - **AI Chat** -- chat with an AI assistant directly in the dashboard (requires Vercel AI Gateway configuration)
 
 ### AI Chat

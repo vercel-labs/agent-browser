@@ -82,6 +82,7 @@ pub(super) fn check(checks: &mut Vec<Check>) {
                 env::var("KERNEL_ENDPOINT")
                     .unwrap_or_else(|_| "https://api.onkernel.com".to_string()),
             ),
+            "steel" => Some("https://api.steel.dev".to_string()),
             _ => None,
         };
         if let Some(url) = url {
