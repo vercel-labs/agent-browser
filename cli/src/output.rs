@@ -130,6 +130,129 @@ fn format_stream_status_text(action: Option<&str>, data: &serde_json::Value) -> 
     }
 }
 
+fn format_json_scalar(value: &serde_json::Value) -> String {
+    value
+        .as_str()
+        .map(ToString::to_string)
+        .unwrap_or_else(|| value.to_string())
+}
+
+fn format_cascade_styles_text(data: &serde_json::Value) -> Option<String> {
+    let matches = data.get("matches").and_then(|v| v.as_array())?;
+    let mut lines = Vec::new();
+
+    for (idx, element) in matches.iter().enumerate() {
+        if idx > 0 {
+            lines.push(String::new());
+        }
+
+        let tag = element.get("tag").and_then(|v| v.as_str()).unwrap_or("");
+        let text = element.get("text").and_then(|v| v.as_str()).unwrap_or("");
+        let label = if text.is_empty() {
+            tag.to_string()
+        } else {
+            format!("{} \"{}\"", tag, text)
+        };
+        lines.push(label);
+
+        lines.push("computed:".to_string());
+        if let Some(computed) = element.get("computed").and_then(|v| v.as_object()) {
+            if computed.is_empty() {
+                lines.push("  (none)".to_string());
+            } else {
+                for (name, value) in computed {
+                    lines.push(format!("  {}: {}", name, format_json_scalar(value)));
+                }
+            }
+        } else {
+            lines.push("  (none)".to_string());
+        }
+
+        lines.push(String::new());
+        lines.push("matched rules:".to_string());
+        if let Some(rules) = element.get("rules").and_then(|v| v.as_array()) {
+            if rules.is_empty() {
+                lines.push("  (none)".to_string());
+            }
+            for rule in rules {
+                let selector = rule
+                    .get("selector")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("<unknown>");
+                let source = rule
+                    .get("source")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("<unknown>");
+                lines.push(format!("  {}  {}", selector, source));
+
+                if let Some(properties) = rule.get("properties").and_then(|v| v.as_array()) {
+                    for property in properties {
+                        let name = property
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("<unknown>");
+                        let value = property.get("value").and_then(|v| v.as_str()).unwrap_or("");
+                        let important = property
+                            .get("important")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+                        let status = property
+                            .get("status")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_else(|| {
+                                if property
+                                    .get("active")
+                                    .and_then(|v| v.as_bool())
+                                    .unwrap_or(false)
+                                {
+                                    "active"
+                                } else {
+                                    "overridden"
+                                }
+                            });
+                        let important_label = if important { " !important" } else { "" };
+                        lines.push(format!(
+                            "    {}: {}{}  {}",
+                            name, value, important_label, status
+                        ));
+                    }
+                }
+            }
+        } else {
+            lines.push("  (none)".to_string());
+        }
+
+        if let Some(ancestors) = element.get("ancestors").and_then(|v| v.as_array()) {
+            if !ancestors.is_empty() {
+                lines.push(String::new());
+                lines.push("ancestors:".to_string());
+                for ancestor in ancestors {
+                    let tag = ancestor.get("tag").and_then(|v| v.as_str()).unwrap_or("");
+                    let id = ancestor.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                    let class = ancestor.get("class").and_then(|v| v.as_str()).unwrap_or("");
+                    let mut label = tag.to_string();
+                    if !id.is_empty() {
+                        label.push('#');
+                        label.push_str(id);
+                    }
+                    if !class.is_empty() {
+                        label.push('.');
+                        label.push_str(&class.split_whitespace().collect::<Vec<_>>().join("."));
+                    }
+                    lines.push(format!("  {}", label));
+                    if let Some(computed) = ancestor.get("computed").and_then(|v| v.as_object()) {
+                        for (name, value) in computed {
+                            lines.push(format!("    {}: {}", name, format_json_scalar(value)));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Some(lines.join("\n"))
+}
+
 pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &OutputOptions) {
     if opts.json {
         if opts.content_boundaries {
@@ -309,6 +432,13 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
                 println!("height: {}", h);
             }
             return;
+        }
+        // CSS cascade (get styles --cascade)
+        if action == Some("styles") {
+            if let Some(output) = format_cascade_styles_text(data) {
+                println!("{}", output);
+                return;
+            }
         }
         // Computed styles (get styles)
         if let Some(styles) = data.get("styles").and_then(|v| v.as_object()) {
@@ -1762,6 +1892,12 @@ Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
 
+Styles Options:
+  --cascade            Include matched CSS rules and active/overridden declarations
+  --properties <list>  Comma-separated CSS properties to return
+  --ancestors          Include layout-critical computed styles for ancestors
+  --include-user-agent Include user-agent stylesheet rules in cascade output
+
 Examples:
   agent-browser get text @e1
   agent-browser get html "#content"
@@ -1773,6 +1909,7 @@ Examples:
   agent-browser get box "#header"
   agent-browser get styles "button"
   agent-browser get styles @e1
+  agent-browser get styles "h1" --cascade --properties color,font-size
 "##
         }
 
@@ -2949,6 +3086,7 @@ Navigation:
 
 Get Info:  agent-browser get <what> [selector]
   text, html, value, attr <name>, title, url, count, box, styles, cdp-url
+  styles supports --cascade, --properties, --ancestors, --include-user-agent
 
 Check State:  agent-browser is <what> <selector>
   visible, enabled, checked
@@ -3311,7 +3449,7 @@ pub fn print_version() {
 
 #[cfg(test)]
 mod tests {
-    use super::format_storage_text;
+    use super::{format_cascade_styles_text, format_storage_text};
     use serde_json::json;
 
     #[test]
@@ -3376,5 +3514,51 @@ mod tests {
         let rendered = format_storage_text(&data).unwrap();
 
         assert_eq!(rendered, "No storage entries");
+    }
+
+    #[test]
+    fn test_format_cascade_styles_text() {
+        let data = json!({
+            "selector": "h1",
+            "matches": [{
+                "tag": "h1",
+                "text": "Building useful software.",
+                "computed": {
+                    "color": "rgb(10, 10, 10)",
+                    "font-size": "128px"
+                },
+                "rules": [{
+                    "selector": ".text-ink",
+                    "source": "style-sheet-1",
+                    "origin": "regular",
+                    "properties": [{
+                        "name": "color",
+                        "value": "rgb(10, 10, 10)",
+                        "important": false,
+                        "active": true,
+                        "status": "active"
+                    }]
+                }, {
+                    "selector": ".text-muted",
+                    "source": "style-sheet-1",
+                    "origin": "regular",
+                    "properties": [{
+                        "name": "color",
+                        "value": "rgb(100, 100, 100)",
+                        "important": true,
+                        "active": false,
+                        "status": "overridden"
+                    }]
+                }]
+            }]
+        });
+
+        let rendered = format_cascade_styles_text(&data).unwrap();
+
+        assert!(rendered.contains("h1 \"Building useful software.\""));
+        assert!(rendered.contains("computed:\n  color: rgb(10, 10, 10)"));
+        assert!(rendered.contains(".text-ink  style-sheet-1"));
+        assert!(rendered.contains("color: rgb(10, 10, 10)  active"));
+        assert!(rendered.contains("color: rgb(100, 100, 100) !important  overridden"));
     }
 }

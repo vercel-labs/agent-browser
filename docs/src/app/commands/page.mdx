@@ -51,7 +51,10 @@ agent-browser get cdp-url             # Get CDP WebSocket URL
 agent-browser get count <sel>         # Count matching elements
 agent-browser get box <sel>           # Get bounding box
 agent-browser get styles <sel>        # Get computed styles
+agent-browser get styles <sel> --cascade --properties color,font-size
 ```
+
+`get styles` returns computed CSS properties by default. Add `--cascade` to include matched CSS rules, stylesheet identifiers, declaration values, `!important`, and active or overridden status. Use `--properties` with a comma-separated property list to keep output focused. Cascade output filters browser user-agent stylesheet rules unless `--include-user-agent` is set. Use `--ancestors` to include layout-critical computed styles for nearby ancestors.
 
 ## Check state
 

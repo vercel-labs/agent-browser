@@ -105,7 +105,17 @@ async fn e2e_launch_navigate_evaluate_close() {
 
     // Launch headless Chrome
     let resp = execute_command(
-        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &json!({
+            "id": "1",
+            "action": "launch",
+            "headless": true,
+            "args": [
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-crash-reporter",
+                "--disable-crashpad"
+            ]
+        }),
         &mut state,
     )
     .await;
@@ -420,6 +430,127 @@ async fn e2e_snapshot_and_click_ref() {
         url.contains("iana.org"),
         "Should have navigated to iana.org, got: {}",
         url
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_get_styles_cascade_selector_and_ref() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "2",
+            "action": "setcontent",
+            "html": r##"
+                <html>
+                  <head>
+                    <style>
+                      .text-blue { color: blue; font-size: 12px; }
+                      .text-blue.large { font-size: 20px; }
+                      #target.text-blue { color: red; }
+                    </style>
+                  </head>
+                  <body>
+                    <h1 id="target" class="text-blue large">Cascade Title</h1>
+                  </body>
+                </html>
+            "##,
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "3",
+            "action": "styles",
+            "selector": "#target",
+            "cascade": true,
+            "properties": ["color", "font-size"]
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let data = get_data(&resp);
+    assert_eq!(data["selector"], "#target");
+    let first = &data["matches"][0];
+    assert_eq!(first["text"], "Cascade Title");
+    assert_eq!(first["computed"]["color"], "rgb(255, 0, 0)");
+    assert!(first["computed"].get("display").is_none());
+
+    let rules = first["rules"].as_array().expect("cascade rules");
+    assert!(rules.iter().any(|rule| {
+        rule["selector"] == ".text-blue"
+            && rule["properties"].as_array().unwrap().iter().any(|prop| {
+                prop["name"] == "color"
+                    && prop["value"] == "blue"
+                    && prop["status"] == "overridden"
+                    && prop["active"] == false
+            })
+    }));
+    assert!(rules.iter().any(|rule| {
+        rule["selector"] == "#target.text-blue"
+            && rule["properties"].as_array().unwrap().iter().any(|prop| {
+                prop["name"] == "color"
+                    && prop["value"] == "red"
+                    && prop["status"] == "active"
+                    && prop["active"] == true
+            })
+    }));
+    assert!(rules.iter().any(|rule| {
+        rule["selector"] == ".text-blue.large"
+            && rule["properties"].as_array().unwrap().iter().any(|prop| {
+                prop["name"] == "font-size" && prop["value"] == "20px" && prop["status"] == "active"
+            })
+    }));
+
+    let resp = execute_command(&json!({ "id": "4", "action": "snapshot" }), &mut state).await;
+    assert_success(&resp);
+    let snapshot = get_data(&resp)["snapshot"].as_str().unwrap();
+    let heading_ref = snapshot
+        .lines()
+        .find_map(|line| {
+            if line.contains("Cascade Title") && line.contains("ref=") {
+                let start = line.find("ref=")? + 4;
+                let rest = &line[start..];
+                let end = rest
+                    .find(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+                    .unwrap_or(rest.len());
+                Some(format!("@{}", &rest[..end]))
+            } else {
+                None
+            }
+        })
+        .expect("snapshot should include heading ref");
+
+    let resp = execute_command(
+        &json!({
+            "id": "5",
+            "action": "styles",
+            "selector": heading_ref,
+            "cascade": true,
+            "properties": ["color"]
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["matches"][0]["computed"]["color"],
+        "rgb(255, 0, 0)"
     );
 
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;

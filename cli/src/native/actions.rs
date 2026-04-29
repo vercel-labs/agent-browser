@@ -4541,6 +4541,18 @@ async fn handle_styles(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
             .filter_map(|v| v.as_str().map(String::from))
             .collect()
     });
+    let cascade = cmd
+        .get("cascade")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let include_ancestors = cmd
+        .get("ancestors")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let include_user_agent = cmd
+        .get("includeUserAgent")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     let styles = super::element::get_element_styles(
         &mgr.client,
@@ -4548,10 +4560,17 @@ async fn handle_styles(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         &state.ref_map,
         selector,
         properties,
+        cascade,
+        include_ancestors,
+        include_user_agent,
         &state.iframe_sessions,
     )
     .await?;
-    Ok(json!({ "styles": styles }))
+    if cascade {
+        Ok(styles)
+    } else {
+        Ok(json!({ "styles": styles }))
+    }
 }
 
 async fn handle_bringtofront(state: &DaemonState) -> Result<Value, String> {
