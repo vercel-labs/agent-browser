@@ -60,6 +60,47 @@ fn print_json_error_with_type(message: impl AsRef<str>, error_type: &str) {
     }));
 }
 
+fn parse_browser_args(s: &str) -> Vec<String> {
+    let mut result = Vec::new();
+    let mut current = String::new();
+    let chars: Vec<char> = s.chars().collect();
+    let mut i = 0;
+
+    while i < chars.len() {
+        match chars[i] {
+            '\n' => {
+                let trimmed = current.trim().to_string();
+                if !trimmed.is_empty() {
+                    result.push(trimmed);
+                }
+                current.clear();
+            }
+            ',' => {
+                // Only use comma as separator when the next non-space token starts a new flag
+                let mut j = i + 1;
+                while j < chars.len() && chars[j] == ' ' {
+                    j += 1;
+                }
+                if j < chars.len() && chars[j] == '-' && !current.trim().is_empty() {
+                    result.push(current.trim().to_string());
+                    current.clear();
+                } else {
+                    current.push(',');
+                }
+            }
+            c => current.push(c),
+        }
+        i += 1;
+    }
+
+    let trimmed = current.trim().to_string();
+    if !trimmed.is_empty() {
+        result.push(trimmed);
+    }
+
+    result
+}
+
 struct ParsedProxy {
     server: String,
     username: Option<String>,
@@ -1116,13 +1157,7 @@ fn main() {
         }
 
         if let Some(ref a) = flags.args {
-            // Parse args (comma or newline separated)
-            let args_vec: Vec<String> = a
-                .split(&[',', '\n'][..])
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
-            cmd_obj.insert("args".to_string(), json!(args_vec));
+            cmd_obj.insert("args".to_string(), json!(parse_browser_args(a)));
         }
 
         if !flags.extensions.is_empty() {
@@ -1473,6 +1508,42 @@ mod tests {
         assert_eq!(result.server, "http://proxy.com:8080");
         assert_eq!(result.username.as_deref(), Some("user"));
         assert_eq!(result.password.as_deref(), Some("p@ss:w0rd"));
+    }
+
+    #[test]
+    fn test_parse_browser_args_simple_comma_separated() {
+        assert_eq!(
+            parse_browser_args("--no-sandbox,--disable-gpu"),
+            vec!["--no-sandbox", "--disable-gpu"]
+        );
+    }
+
+    #[test]
+    fn test_parse_browser_args_preserves_comma_in_flag_value() {
+        assert_eq!(
+            parse_browser_args(
+                "--disable-features=HttpsUpgrades,HttpsFirstModeV2,HttpsFirstModeV2ForEngagedSites"
+            ),
+            vec![
+                "--disable-features=HttpsUpgrades,HttpsFirstModeV2,HttpsFirstModeV2ForEngagedSites"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_browser_args_mixed_value_comma_and_flag_comma() {
+        assert_eq!(
+            parse_browser_args("--disable-features=A,B,C, --no-sandbox"),
+            vec!["--disable-features=A,B,C", "--no-sandbox"]
+        );
+    }
+
+    #[test]
+    fn test_parse_browser_args_newline_separated() {
+        assert_eq!(
+            parse_browser_args("--disable-features=A,B,C\n--no-sandbox"),
+            vec!["--disable-features=A,B,C", "--no-sandbox"]
+        );
     }
 
     #[test]

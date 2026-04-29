@@ -46,6 +46,10 @@ fn native_test_fixture_url(name: &str) -> String {
     )
 }
 
+fn inline_html_url(html: &str) -> String {
+    format!("data:text/html;base64,{}", STANDARD.encode(html))
+}
+
 async fn create_storage_state_with_cookie(path: &str, cookie_name: &str, cookie_value: &str) {
     let mut state = DaemonState::new();
 
@@ -5341,6 +5345,76 @@ async fn e2e_removeinitscript_roundtrip() {
     .await;
     assert_success(&resp);
     assert_eq!(get_data(&resp)["removed"], true);
+
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+// ---------------------------------------------------------------------------
+// Issue #1286 – empty table cells must receive refs
+// A <td></td> (truly empty, no &nbsp;) has an empty accessible name.
+// Previously, CONTENT_ROLES only got refs when name was non-empty, so these
+// cells were rendered as `- cell` with no ref, making them unreachable by AI.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore]
+async fn e2e_snapshot_empty_table_cell_gets_ref() {
+    let url = inline_html_url(
+        r#"<table>
+      <thead><tr><th>No.</th><th>prod_pn</th><th>Part Name</th><th>Order QTY</th></tr></thead>
+      <tbody><tr>
+        <td><div>1</div></td>
+        <td><div></div></td>
+        <td><div>&nbsp;</div></td>
+        <td><div>10,000</div></td>
+      </tr></tbody>
+    </table>"#,
+    );
+
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(&json!({ "id": "3", "action": "snapshot" }), &mut state).await;
+    assert_success(&resp);
+    let snapshot = get_data(&resp)["snapshot"].as_str().unwrap();
+
+    // All four body cells must appear in the snapshot with a ref.
+    // Before the fix, the truly-empty <td><div></div></td> rendered as
+    // `- cell` with no ref, while the &nbsp; cell got `- cell "" [ref=eN]`.
+    assert!(
+        snapshot.contains("cell \"1\""),
+        "cell with text '1' should appear: {snapshot}"
+    );
+    assert!(
+        snapshot.contains("cell \"10,000\""),
+        "cell with text '10,000' should appear: {snapshot}"
+    );
+
+    // Count how many `cell` lines carry a ref= tag — must be exactly 4
+    // (the two content cells + the truly-empty cell + the &nbsp; cell).
+    let cell_refs: Vec<&str> = snapshot
+        .lines()
+        .filter(|l| l.contains("- cell") && l.contains("ref="))
+        .collect();
+    assert_eq!(
+        cell_refs.len(),
+        4,
+        "All 4 body cells should have refs, got {}: {snapshot}",
+        cell_refs.len()
+    );
 
     let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
 }

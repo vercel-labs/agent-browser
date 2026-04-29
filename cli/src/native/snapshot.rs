@@ -31,16 +31,18 @@ const INTERACTIVE_ROLES: &[&str] = &[
 
 const CONTENT_ROLES: &[&str] = &[
     "heading",
-    "cell",
-    "gridcell",
-    "columnheader",
-    "rowheader",
     "listitem",
     "article",
     "region",
     "main",
     "navigation",
 ];
+
+// Table cell roles always receive refs regardless of accessible name, because
+// empty cells are visually indistinguishable from cells that contain only
+// whitespace (e.g. &nbsp;), and AI agents need to reference any cell by
+// position in order to read or fill it.
+const TABLE_CELL_ROLES: &[&str] = &["cell", "gridcell", "columnheader", "rowheader"];
 
 const STRUCTURAL_ROLES: &[&str] = &[
     "generic",
@@ -353,13 +355,14 @@ pub async fn take_snapshot(
 
     for (idx, node) in tree_nodes.iter().enumerate() {
         let role = node.role.as_str();
-        let mut should_ref = if INTERACTIVE_ROLES.contains(&role) {
-            true
-        } else if CONTENT_ROLES.contains(&role) {
-            !node.name.is_empty()
-        } else {
-            false
-        };
+        let mut should_ref =
+            if INTERACTIVE_ROLES.contains(&role) || TABLE_CELL_ROLES.contains(&role) {
+                true
+            } else if CONTENT_ROLES.contains(&role) {
+                !node.name.is_empty()
+            } else {
+                false
+            };
 
         if node
             .backend_node_id
