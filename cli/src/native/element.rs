@@ -1,9 +1,33 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::cdp::client::CdpClient;
 use super::cdp::types::*;
+
+const CASCADE_DEFAULT_PROPERTIES: &[&str] = &[
+    "display",
+    "position",
+    "top",
+    "right",
+    "bottom",
+    "left",
+    "z-index",
+    "width",
+    "height",
+    "margin",
+    "padding",
+    "font-size",
+    "font-weight",
+    "line-height",
+    "color",
+    "background-color",
+    "border",
+    "border-radius",
+    "opacity",
+    "transform",
+];
 
 #[derive(Debug, Clone)]
 pub struct RefEntry {
@@ -919,23 +943,452 @@ pub async fn get_element_count(
     Ok(result.result.value.and_then(|v| v.as_i64()).unwrap_or(0))
 }
 
-pub async fn get_element_styles(
-    client: &CdpClient,
-    session_id: &str,
-    ref_map: &RefMap,
-    selector_or_ref: &str,
-    properties: Option<Vec<String>>,
-    iframe_sessions: &HashMap<String, String>,
-) -> Result<Value, String> {
-    let (object_id, effective_session_id) = resolve_element_object_id(
-        client,
-        session_id,
-        ref_map,
-        selector_or_ref,
-        iframe_sessions,
-    )
-    .await?;
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DomRequestNodeParams {
+    object_id: String,
+}
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DomRequestNodeResult {
+    node_id: i64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CssGetMatchedStylesForNodeParams {
+    node_id: i64,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
+struct Specificity {
+    a: i64,
+    b: i64,
+    c: i64,
+}
+
+impl Specificity {
+    fn zero() -> Self {
+        Self { a: 0, b: 0, c: 0 }
+    }
+
+    fn inline() -> Self {
+        Self {
+            a: 1_000_000,
+            b: 0,
+            c: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CascadeDeclaration {
+    selector: String,
+    source: String,
+    origin: String,
+    name: String,
+    value: String,
+    important: bool,
+    active: bool,
+    inline: bool,
+    specificity: Specificity,
+    source_order: usize,
+}
+
+fn normalize_property_list(properties: Option<Vec<String>>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::new();
+
+    for prop in properties
+        .unwrap_or_else(|| {
+            CASCADE_DEFAULT_PROPERTIES
+                .iter()
+                .map(|prop| prop.to_string())
+                .collect()
+        })
+        .into_iter()
+    {
+        let prop = prop.trim().to_ascii_lowercase();
+        if !prop.is_empty() && seen.insert(prop.clone()) {
+            normalized.push(prop);
+        }
+    }
+
+    normalized
+}
+
+fn property_allowed(name: &str, properties: &[String]) -> bool {
+    properties
+        .iter()
+        .any(|prop| prop.eq_ignore_ascii_case(name.trim()))
+}
+
+fn selector_specificity(selector: &Value) -> Specificity {
+    let Some(specificity) = selector.get("specificity") else {
+        return selector
+            .get("text")
+            .and_then(|v| v.as_str())
+            .map(compute_specificity_fallback)
+            .unwrap_or_else(Specificity::zero);
+    };
+
+    Specificity {
+        a: specificity.get("a").and_then(|v| v.as_i64()).unwrap_or(0),
+        b: specificity.get("b").and_then(|v| v.as_i64()).unwrap_or(0),
+        c: specificity.get("c").and_then(|v| v.as_i64()).unwrap_or(0),
+    }
+}
+
+fn compute_specificity_fallback(selector: &str) -> Specificity {
+    let mut a = 0;
+    let mut b = 0;
+    let mut c = 0;
+    let chars = selector.chars().collect::<Vec<_>>();
+    let mut i = 0;
+    let mut expect_type = true;
+
+    while i < chars.len() {
+        let ch = chars[i];
+        match ch {
+            '\\' => {
+                i += 2;
+            }
+            '#' => {
+                a += 1;
+                i += 1;
+                while i < chars.len() && is_selector_ident_char(chars[i]) {
+                    i += 1;
+                }
+                expect_type = false;
+            }
+            '.' => {
+                b += 1;
+                i += 1;
+                while i < chars.len() && is_selector_ident_char(chars[i]) {
+                    i += 1;
+                }
+                expect_type = false;
+            }
+            '[' => {
+                b += 1;
+                i += 1;
+                while i < chars.len() && chars[i] != ']' {
+                    if chars[i] == '\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+                i += 1;
+                expect_type = false;
+            }
+            ':' => {
+                if chars.get(i + 1) == Some(&':') {
+                    c += 1;
+                    i += 2;
+                } else {
+                    b += 1;
+                    i += 1;
+                }
+                while i < chars.len() && is_selector_ident_char(chars[i]) {
+                    i += 1;
+                }
+                expect_type = false;
+            }
+            '*' => {
+                i += 1;
+                expect_type = false;
+            }
+            '>' | '+' | '~' | ',' => {
+                i += 1;
+                expect_type = true;
+            }
+            ch if ch.is_whitespace() => {
+                i += 1;
+                expect_type = true;
+            }
+            ch if expect_type && is_selector_ident_start(ch) => {
+                c += 1;
+                i += 1;
+                while i < chars.len() && is_selector_ident_char(chars[i]) {
+                    i += 1;
+                }
+                expect_type = false;
+            }
+            _ => {
+                i += 1;
+            }
+        }
+    }
+
+    Specificity { a, b, c }
+}
+
+fn is_selector_ident_start(ch: char) -> bool {
+    ch.is_ascii_alphabetic() || ch == '_' || ch == '-'
+}
+
+fn is_selector_ident_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' || ch == '\\'
+}
+
+fn matched_selector(rule_match: &Value) -> (String, Specificity) {
+    let selectors = rule_match
+        .get("rule")
+        .and_then(|rule| rule.get("selectorList"))
+        .and_then(|list| list.get("selectors"))
+        .and_then(|selectors| selectors.as_array());
+    let matching = rule_match
+        .get("matchingSelectors")
+        .and_then(|matches| matches.as_array());
+
+    if let (Some(selectors), Some(matching)) = (selectors, matching) {
+        let mut texts = Vec::new();
+        let mut specificity = Specificity::zero();
+        for idx in matching.iter().filter_map(|idx| idx.as_u64()) {
+            if let Some(selector) = selectors.get(idx as usize) {
+                if let Some(text) = selector.get("text").and_then(|v| v.as_str()) {
+                    texts.push(text.to_string());
+                }
+                specificity = specificity.max(selector_specificity(selector));
+            }
+        }
+        if !texts.is_empty() {
+            return (texts.join(", "), specificity);
+        }
+    }
+
+    let text = rule_match
+        .get("rule")
+        .and_then(|rule| rule.get("selectorList"))
+        .and_then(|list| list.get("text"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("<unknown>")
+        .to_string();
+    let specificity = compute_specificity_fallback(&text);
+    (text, specificity)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_style_declarations(
+    style: Option<&Value>,
+    selector: &str,
+    source: &str,
+    origin: &str,
+    specificity: Specificity,
+    inline: bool,
+    base_order: usize,
+    properties: &[String],
+    declarations: &mut Vec<CascadeDeclaration>,
+) {
+    let Some(style) = style else {
+        return;
+    };
+    let Some(css_properties) = style.get("cssProperties").and_then(|v| v.as_array()) else {
+        return;
+    };
+
+    for (property_order, property) in css_properties.iter().enumerate() {
+        if property
+            .get("disabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        if !property
+            .get("parsedOk")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true)
+        {
+            continue;
+        }
+
+        let Some(name) = property.get("name").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if !property_allowed(name, properties) {
+            continue;
+        }
+        let value = property
+            .get("value")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        declarations.push(CascadeDeclaration {
+            selector: selector.to_string(),
+            source: source.to_string(),
+            origin: origin.to_string(),
+            name: name.to_ascii_lowercase(),
+            value,
+            important: property
+                .get("important")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            active: false,
+            inline,
+            specificity,
+            source_order: base_order + property_order,
+        });
+    }
+}
+
+fn declaration_wins(candidate: &CascadeDeclaration, current: &CascadeDeclaration) -> bool {
+    (
+        candidate.important,
+        candidate.inline,
+        candidate.specificity,
+        candidate.source_order,
+    ) > (
+        current.important,
+        current.inline,
+        current.specificity,
+        current.source_order,
+    )
+}
+
+fn mark_active_declarations(declarations: &mut [CascadeDeclaration]) {
+    let mut winners: HashMap<String, usize> = HashMap::new();
+
+    for idx in 0..declarations.len() {
+        let name = declarations[idx].name.clone();
+        match winners.get(&name).copied() {
+            Some(current_idx)
+                if declaration_wins(&declarations[idx], &declarations[current_idx]) =>
+            {
+                winners.insert(name, idx);
+            }
+            Some(_) => {}
+            None => {
+                winners.insert(name, idx);
+            }
+        }
+    }
+
+    for idx in winners.values() {
+        declarations[*idx].active = true;
+    }
+}
+
+fn declarations_to_rules(declarations: &[CascadeDeclaration]) -> Vec<Value> {
+    let mut rules: Vec<Value> = Vec::new();
+    let mut rule_index: BTreeMap<(String, String), usize> = BTreeMap::new();
+
+    for declaration in declarations {
+        let key = (declaration.selector.clone(), declaration.source.clone());
+        let idx = match rule_index.get(&key).copied() {
+            Some(idx) => idx,
+            None => {
+                let idx = rules.len();
+                rule_index.insert(key, idx);
+                rules.push(serde_json::json!({
+                    "selector": declaration.selector,
+                    "source": declaration.source,
+                    "origin": declaration.origin,
+                    "properties": []
+                }));
+                idx
+            }
+        };
+
+        if let Some(properties) = rules[idx]
+            .get_mut("properties")
+            .and_then(|v| v.as_array_mut())
+        {
+            properties.push(serde_json::json!({
+                "name": declaration.name,
+                "value": declaration.value,
+                "important": declaration.important,
+                "active": declaration.active,
+                "status": if declaration.active { "active" } else { "overridden" },
+            }));
+        }
+    }
+
+    rules
+}
+
+fn cascade_rules_from_matched_styles(
+    matched_styles: &Value,
+    properties: &[String],
+    include_user_agent: bool,
+) -> Vec<Value> {
+    let mut declarations = Vec::new();
+
+    collect_style_declarations(
+        matched_styles.get("attributesStyle"),
+        "attribute style",
+        "attributes",
+        "attribute",
+        Specificity::zero(),
+        false,
+        0,
+        properties,
+        &mut declarations,
+    );
+
+    if let Some(matches) = matched_styles
+        .get("matchedCSSRules")
+        .and_then(|v| v.as_array())
+    {
+        for (rule_order, rule_match) in matches.iter().enumerate() {
+            let Some(rule) = rule_match.get("rule") else {
+                continue;
+            };
+            let origin = rule
+                .get("origin")
+                .and_then(|v| v.as_str())
+                .unwrap_or("regular");
+            if origin == "user-agent" && !include_user_agent {
+                continue;
+            }
+            let (selector, specificity) = matched_selector(rule_match);
+            let source = rule
+                .get("styleSheetId")
+                .or_else(|| {
+                    rule.get("style")
+                        .and_then(|style| style.get("styleSheetId"))
+                })
+                .and_then(|v| v.as_str())
+                .unwrap_or(origin);
+
+            collect_style_declarations(
+                rule.get("style"),
+                &selector,
+                source,
+                origin,
+                specificity,
+                false,
+                10_000 + (rule_order * 1_000),
+                properties,
+                &mut declarations,
+            );
+        }
+    }
+
+    collect_style_declarations(
+        matched_styles.get("inlineStyle"),
+        "element.style",
+        "inline",
+        "inline",
+        Specificity::inline(),
+        true,
+        usize::MAX / 2,
+        properties,
+        &mut declarations,
+    );
+
+    mark_active_declarations(&mut declarations);
+    declarations_to_rules(&declarations)
+}
+
+async fn get_computed_styles_for_object(
+    client: &CdpClient,
+    effective_session_id: &str,
+    object_id: String,
+    properties: Option<Vec<String>>,
+) -> Result<Value, String> {
     let js = match properties {
         Some(props) => {
             let props_json = serde_json::to_string(&props).unwrap_or("[]".to_string());
@@ -972,16 +1425,171 @@ pub async fn get_element_styles(
                 return_by_value: Some(true),
                 await_promise: Some(false),
             },
-            Some(&effective_session_id),
+            Some(effective_session_id),
         )
         .await?;
 
     Ok(result.result.value.unwrap_or(Value::Null))
 }
 
+async fn get_cascade_element_summary(
+    client: &CdpClient,
+    effective_session_id: &str,
+    object_id: String,
+    properties: &[String],
+    include_ancestors: bool,
+) -> Result<Value, String> {
+    let props_json = serde_json::to_string(properties).unwrap_or("[]".to_string());
+    let ancestors_json = if include_ancestors { "true" } else { "false" };
+    let js = format!(
+        r#"function() {{
+            const props = {};
+            const includeAncestors = {};
+            const readComputed = (el, names) => {{
+                const style = window.getComputedStyle(el);
+                const out = {{}};
+                for (const name of names) out[name] = style.getPropertyValue(name);
+                return out;
+            }};
+            const compactText = (el) => (el.innerText || el.textContent || "")
+                .replace(/\s+/g, " ")
+                .trim()
+                .slice(0, 200);
+            const rect = this.getBoundingClientRect();
+            const result = {{
+                tag: this.tagName ? this.tagName.toLowerCase() : "",
+                text: compactText(this),
+                box: {{ x: rect.x, y: rect.y, width: rect.width, height: rect.height }},
+                computed: readComputed(this, props),
+            }};
+
+            if (includeAncestors) {{
+                const ancestorProps = ["display", "position", "overflow", "overflow-x", "overflow-y", "z-index", "opacity", "transform"];
+                result.ancestors = [];
+                let node = this.parentElement;
+                while (node && node.nodeType === Node.ELEMENT_NODE && result.ancestors.length < 5) {{
+                    const ancestorRect = node.getBoundingClientRect();
+                    result.ancestors.push({{
+                        tag: node.tagName ? node.tagName.toLowerCase() : "",
+                        id: node.id || "",
+                        class: typeof node.className === "string" ? node.className : "",
+                        text: compactText(node),
+                        box: {{ x: ancestorRect.x, y: ancestorRect.y, width: ancestorRect.width, height: ancestorRect.height }},
+                        computed: readComputed(node, ancestorProps),
+                    }});
+                    node = node.parentElement;
+                }}
+            }}
+
+            return result;
+        }}"#,
+        props_json, ancestors_json
+    );
+
+    let result: EvaluateResult = client
+        .send_command_typed(
+            "Runtime.callFunctionOn",
+            &CallFunctionOnParams {
+                function_declaration: js,
+                object_id: Some(object_id),
+                arguments: None,
+                return_by_value: Some(true),
+                await_promise: Some(false),
+            },
+            Some(effective_session_id),
+        )
+        .await?;
+
+    Ok(result.result.value.unwrap_or(Value::Null))
+}
+
+/// Return computed styles by default, or a focused DevTools-style CSS cascade
+/// report when cascade mode is enabled.
+#[allow(clippy::too_many_arguments)]
+pub async fn get_element_styles(
+    client: &CdpClient,
+    session_id: &str,
+    ref_map: &RefMap,
+    selector_or_ref: &str,
+    properties: Option<Vec<String>>,
+    cascade: bool,
+    include_ancestors: bool,
+    include_user_agent: bool,
+    iframe_sessions: &HashMap<String, String>,
+) -> Result<Value, String> {
+    let (object_id, effective_session_id) = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
+
+    if !cascade {
+        return get_computed_styles_for_object(
+            client,
+            &effective_session_id,
+            object_id,
+            properties,
+        )
+        .await;
+    }
+
+    let properties = normalize_property_list(properties);
+    let summary = get_cascade_element_summary(
+        client,
+        &effective_session_id,
+        object_id.clone(),
+        &properties,
+        include_ancestors,
+    )
+    .await?;
+
+    client
+        .send_command_no_params("DOM.enable", Some(&effective_session_id))
+        .await?;
+    client
+        .send_command_no_params("CSS.enable", Some(&effective_session_id))
+        .await?;
+    client
+        .send_command_no_params("DOM.getDocument", Some(&effective_session_id))
+        .await?;
+
+    let node: DomRequestNodeResult = client
+        .send_command_typed(
+            "DOM.requestNode",
+            &DomRequestNodeParams { object_id },
+            Some(&effective_session_id),
+        )
+        .await?;
+    let matched_styles: Value = client
+        .send_command_typed(
+            "CSS.getMatchedStylesForNode",
+            &CssGetMatchedStylesForNodeParams {
+                node_id: node.node_id,
+            },
+            Some(&effective_session_id),
+        )
+        .await?;
+
+    let rules = cascade_rules_from_matched_styles(&matched_styles, &properties, include_user_agent);
+    let mut match_obj = summary
+        .as_object()
+        .cloned()
+        .unwrap_or_else(serde_json::Map::new);
+    match_obj.insert("rules".to_string(), Value::Array(rules));
+
+    Ok(serde_json::json!({
+        "selector": selector_or_ref,
+        "matches": [Value::Object(match_obj)]
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn test_parse_ref_at_prefix() {
@@ -1035,6 +1643,148 @@ mod tests {
     fn test_build_selector_js_xpath_empty() {
         let js = build_selector_js("xpath=");
         assert!(js.contains("document.evaluate"));
+    }
+
+    #[test]
+    fn test_cascade_marks_competing_rules_active_and_overridden() {
+        let matched_styles = json!({
+            "matchedCSSRules": [{
+                "matchingSelectors": [0],
+                "rule": {
+                    "styleSheetId": "style-sheet-1",
+                    "origin": "regular",
+                    "selectorList": {
+                        "text": ".text-blue",
+                        "selectors": [{
+                            "text": ".text-blue",
+                            "specificity": { "a": 0, "b": 1, "c": 0 }
+                        }]
+                    },
+                    "style": {
+                        "cssProperties": [{
+                            "name": "color",
+                            "value": "blue",
+                            "important": false,
+                            "parsedOk": true
+                        }]
+                    }
+                }
+            }, {
+                "matchingSelectors": [0],
+                "rule": {
+                    "styleSheetId": "style-sheet-1",
+                    "origin": "regular",
+                    "selectorList": {
+                        "text": "#target.text-blue",
+                        "selectors": [{
+                            "text": "#target.text-blue",
+                            "specificity": { "a": 1, "b": 1, "c": 0 }
+                        }]
+                    },
+                    "style": {
+                        "cssProperties": [{
+                            "name": "color",
+                            "value": "red",
+                            "important": false,
+                            "parsedOk": true
+                        }]
+                    }
+                }
+            }]
+        });
+
+        let rules =
+            cascade_rules_from_matched_styles(&matched_styles, &["color".to_string()], false);
+        let declarations = rules
+            .iter()
+            .flat_map(|rule| {
+                let selector = rule
+                    .get("selector")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                rule.get("properties")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(move |prop| (selector.clone(), prop))
+            })
+            .collect::<Vec<_>>();
+
+        assert!(declarations.iter().any(|(selector, prop)| {
+            selector == ".text-blue"
+                && prop.get("value").and_then(|v| v.as_str()) == Some("blue")
+                && prop.get("active").and_then(|v| v.as_bool()) == Some(false)
+                && prop.get("status").and_then(|v| v.as_str()) == Some("overridden")
+        }));
+        assert!(declarations.iter().any(|(selector, prop)| {
+            selector == "#target.text-blue"
+                && prop.get("value").and_then(|v| v.as_str()) == Some("red")
+                && prop.get("active").and_then(|v| v.as_bool()) == Some(true)
+                && prop.get("status").and_then(|v| v.as_str()) == Some("active")
+        }));
+    }
+
+    #[test]
+    fn test_cascade_properties_filter_and_user_agent_default() {
+        let matched_styles = json!({
+            "matchedCSSRules": [{
+                "matchingSelectors": [0],
+                "rule": {
+                    "origin": "user-agent",
+                    "selectorList": {
+                        "text": "h1",
+                        "selectors": [{
+                            "text": "h1",
+                            "specificity": { "a": 0, "b": 0, "c": 1 }
+                        }]
+                    },
+                    "style": {
+                        "cssProperties": [{
+                            "name": "display",
+                            "value": "block"
+                        }]
+                    }
+                }
+            }, {
+                "matchingSelectors": [0],
+                "rule": {
+                    "styleSheetId": "style-sheet-1",
+                    "origin": "regular",
+                    "selectorList": {
+                        "text": ".title",
+                        "selectors": [{
+                            "text": ".title",
+                            "specificity": { "a": 0, "b": 1, "c": 0 }
+                        }]
+                    },
+                    "style": {
+                        "cssProperties": [{
+                            "name": "color",
+                            "value": "black"
+                        }, {
+                            "name": "font-size",
+                            "value": "20px"
+                        }]
+                    }
+                }
+            }]
+        });
+
+        let rules =
+            cascade_rules_from_matched_styles(&matched_styles, &["color".to_string()], false);
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0]["selector"], ".title");
+        assert_eq!(rules[0]["properties"].as_array().unwrap().len(), 1);
+        assert_eq!(rules[0]["properties"][0]["name"], "color");
+
+        let rules = cascade_rules_from_matched_styles(
+            &matched_styles,
+            &["display".to_string(), "color".to_string()],
+            true,
+        );
+        assert!(rules.iter().any(|rule| rule["selector"] == "h1"));
     }
 
     #[test]

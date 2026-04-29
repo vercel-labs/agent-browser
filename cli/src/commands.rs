@@ -2092,9 +2092,9 @@ fn parse_get(rest: &[&str], id: &str) -> Result<Value, ParseError> {
         Some("styles") => {
             let sel = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
                 context: "get styles".to_string(),
-                usage: "get styles <selector>",
+                usage: "get styles <selector> [--cascade] [--properties <name,...>] [--ancestors] [--include-user-agent]",
             })?;
-            Ok(json!({ "id": id, "action": "styles", "selector": sel }))
+            parse_get_styles(rest, id, sel)
         }
         Some(sub) => Err(ParseError::UnknownSubcommand {
             subcommand: sub.to_string(),
@@ -2105,6 +2105,62 @@ fn parse_get(rest: &[&str], id: &str) -> Result<Value, ParseError> {
             usage: "get <text|html|value|attr|url|title|count|box|styles|cdp-url> [args...]",
         }),
     }
+}
+
+fn parse_get_styles(rest: &[&str], id: &str, selector: &str) -> Result<Value, ParseError> {
+    let mut cmd = json!({ "id": id, "action": "styles", "selector": selector });
+    let mut i = 2;
+
+    while i < rest.len() {
+        match rest[i] {
+            "--cascade" => {
+                cmd["cascade"] = json!(true);
+                i += 1;
+            }
+            "--ancestors" => {
+                cmd["ancestors"] = json!(true);
+                i += 1;
+            }
+            "--include-user-agent" => {
+                cmd["includeUserAgent"] = json!(true);
+                i += 1;
+            }
+            "--properties" => {
+                let raw = rest.get(i + 1).ok_or_else(|| ParseError::MissingArguments {
+                    context: "get styles --properties".to_string(),
+                    usage: "get styles <selector> [--cascade] [--properties <name,...>] [--ancestors] [--include-user-agent]",
+                })?;
+                let properties = raw
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|prop| !prop.is_empty())
+                    .map(String::from)
+                    .collect::<Vec<_>>();
+                if properties.is_empty() {
+                    return Err(ParseError::InvalidValue {
+                        message: "--properties requires at least one CSS property name".to_string(),
+                        usage: "get styles <selector> [--cascade] [--properties <name,...>] [--ancestors] [--include-user-agent]",
+                    });
+                }
+                cmd["properties"] = json!(properties);
+                i += 2;
+            }
+            flag if flag.starts_with("--") => {
+                return Err(ParseError::InvalidValue {
+                    message: format!("Unknown flag for get styles: {}", flag),
+                    usage: "get styles <selector> [--cascade] [--properties <name,...>] [--ancestors] [--include-user-agent]",
+                });
+            }
+            extra => {
+                return Err(ParseError::InvalidValue {
+                    message: format!("Unexpected argument for get styles: {}", extra),
+                    usage: "get styles <selector> [--cascade] [--properties <name,...>] [--ancestors] [--include-user-agent]",
+                });
+            }
+        }
+    }
+
+    Ok(cmd)
 }
 
 fn parse_is(rest: &[&str], id: &str) -> Result<Value, ParseError> {
@@ -4116,6 +4172,39 @@ mod tests {
         let err = result.unwrap_err();
         assert!(matches!(err, ParseError::MissingArguments { .. }));
         assert!(err.format().contains("get text"));
+    }
+
+    #[test]
+    fn test_get_styles_cascade_flags() {
+        let cmd = parse_command(
+            &args("get styles @e1 --cascade --properties color,font-size --ancestors --include-user-agent"),
+            &default_flags(),
+        )
+        .unwrap();
+
+        assert_eq!(cmd["action"], "styles");
+        assert_eq!(cmd["selector"], "@e1");
+        assert_eq!(cmd["cascade"], true);
+        assert_eq!(cmd["ancestors"], true);
+        assert_eq!(cmd["includeUserAgent"], true);
+        assert_eq!(cmd["properties"], json!(["color", "font-size"]));
+    }
+
+    #[test]
+    fn test_get_styles_default_shape_is_unchanged() {
+        let cmd = parse_command(&args("get styles button"), &default_flags()).unwrap();
+
+        assert_eq!(
+            cmd,
+            json!({ "id": cmd["id"], "action": "styles", "selector": "button" })
+        );
+    }
+
+    #[test]
+    fn test_get_styles_rejects_empty_properties() {
+        let result = parse_command(&args("get styles button --properties ,"), &default_flags());
+
+        assert!(matches!(result, Err(ParseError::InvalidValue { .. })));
     }
 
     // === Protocol alignment tests ===

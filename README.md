@@ -148,7 +148,10 @@ agent-browser get cdp-url             # Get CDP WebSocket URL (for DevTools, deb
 agent-browser get count <sel>         # Count matching elements
 agent-browser get box <sel>           # Get bounding box
 agent-browser get styles <sel>        # Get computed styles
+agent-browser get styles <sel> --cascade --properties color,font-size
 ```
+
+`get styles` returns computed CSS properties by default. Add `--cascade` to include matched CSS rules, stylesheet identifiers, declaration values, `!important`, and active or overridden status for the selected properties. Use `--properties` with a comma-separated list to keep output focused. Cascade mode filters browser user-agent stylesheet rules by default; pass `--include-user-agent` to include them. Pass `--ancestors` to include layout-critical computed styles for nearby ancestors.
 
 ### Check State
 
@@ -711,6 +714,10 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 | `-p, --provider <name>` | Cloud browser provider (or `AGENT_BROWSER_PROVIDER` env) |
 | `--device <name>` | iOS device name, e.g. "iPhone 15 Pro" (or `AGENT_BROWSER_IOS_DEVICE` env) |
 | `--json` | JSON output (for agents) |
+| `--cascade` | For `get styles`, include matched CSS rules and active or overridden declarations |
+| `--properties <list>` | For `get styles`, return a comma-separated list of CSS properties |
+| `--ancestors` | For `get styles --cascade`, include layout-critical computed styles for ancestors |
+| `--include-user-agent` | For `get styles --cascade`, include browser user-agent stylesheet rules |
 | `--annotate` | Annotated screenshot with numbered element labels (or `AGENT_BROWSER_ANNOTATE` env) |
 | `--screenshot-dir <path>` | Default screenshot output directory (or `AGENT_BROWSER_SCREENSHOT_DIR` env) |
 | `--screenshot-quality <n>` | JPEG quality 0-100 (or `AGENT_BROWSER_SCREENSHOT_QUALITY` env) |
