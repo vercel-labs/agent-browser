@@ -73,6 +73,7 @@ const BROWSER_OPTIONS: { id: string; label: string; engine?: string; provider?: 
   { id: "browserless", label: "Browserless", provider: "browserless" },
   { id: "browser-use", label: "Browser Use", provider: "browser-use" },
   { id: "kernel", label: "Kernel", provider: "kernel" },
+  { id: "steel", label: "Steel", provider: "steel" },
 ];
 
 function BrandLogo({ name, logos }: { name: string; logos: Record<string, string> }) {

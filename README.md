@@ -756,7 +756,7 @@ The dashboard displays:
 - **Live viewport** -- real-time JPEG frames from the browser
 - **Activity feed** -- chronological command/result stream with timing and expandable details
 - **Console output** -- browser console messages (log, warn, error)
-- **Session creation** -- create new sessions from the UI with local engines (Chrome, Lightpanda) or cloud providers (AgentCore, Browserbase, Browserless, Browser Use, Kernel)
+- **Session creation** — create new sessions from the UI with local engines (Chrome, Lightpanda) or cloud providers (AgentCore, Browserbase, Browserless, Browser Use, Kernel, Steel)
 - **AI Chat** -- chat with an AI assistant directly in the dashboard (requires Vercel AI Gateway configuration)
 
 ### AI Chat
@@ -1515,6 +1515,44 @@ Optional configuration via environment variables:
 **Browser profiles:** When `AGENTCORE_PROFILE_ID` is set, browser state (cookies, localStorage) is persisted across sessions automatically.
 
 When enabled, agent-browser connects to an AgentCore cloud browser session instead of launching a local browser. All commands work identically.
+
+### Steel
+
+[Steel](https://steel.dev) provides cloud browser infrastructure for AI agents with built-in proxy support, CAPTCHA solving, and persistent profiles.
+
+To enable Steel, use the `-p` flag:
+
+```bash
+export STEEL_API_KEY="your-api-key"
+agent-browser -p steel open https://example.com
+```
+
+Or use environment variables for CI/scripts:
+
+```bash
+export AGENT_BROWSER_PROVIDER=steel
+export STEEL_API_KEY="your-api-key"
+agent-browser open https://example.com
+```
+
+Optional configuration via environment variables:
+
+| Variable                 | Description                                                              | Default            |
+| ------------------------ | ------------------------------------------------------------------------ | ------------------ |
+| `STEEL_TIMEOUT_MS`       | Session timeout in milliseconds (positive integer)                       | (provider default) |
+| `STEEL_HEADLESS`         | Run browser headless (`true`/`false`/`1`/`0`)                            | (provider default) |
+| `STEEL_SOLVE_CAPTCHA`    | Enable Steel's automatic CAPTCHA solving                                 | (provider default) |
+| `STEEL_USE_PROXY`        | Route session through Steel's residential proxy                          | (provider default) |
+| `STEEL_PROXY_URL`        | Custom proxy URL (overrides Steel's built-in proxy)                      | (none)             |
+| `STEEL_REGION`           | Datacenter region (e.g. `lax`, `ord`, `iad`)                             | (provider default) |
+| `STEEL_BLOCK_ADS`        | Enable ad blocking for the session                                       | (provider default) |
+| `STEEL_PROFILE_ID`       | UUID of an existing Steel profile to load                                | (none)             |
+| `STEEL_PERSIST_PROFILE`  | Persist profile changes across runs                                      | (provider default) |
+| `STEEL_DEVICE`           | Device emulation profile (`desktop` or `mobile`)                         | `desktop`          |
+
+When enabled, agent-browser creates a Steel session via `POST /v1/sessions`, connects over CDP, and explicitly releases the session on close. All commands work identically.
+
+Get your API key from the [Steel Dashboard](https://app.steel.dev/settings/api-keys).
 
 ## License
 
