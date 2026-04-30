@@ -924,7 +924,9 @@ fn main() {
 
     // Connect via CDP if --cdp flag is set
     // Accepts either a port number (e.g., "9222") or a full URL (e.g., "ws://..." or "wss://...")
-    // Skip when daemon already running — it already holds the CDP connection.
+    // Skip when daemon already running unless --cdp was explicitly passed on the CLI —
+    // explicit --cdp means the user wants to (re)connect, e.g. after Chrome restarts with
+    // a new webSocketDebuggerUrl.
     if let Some(ref cdp_value) = flags.cdp {
         // Validate CDP value eagerly (even when daemon is already running) so
         // the user gets an immediate error for bad input instead of a silent no-op.
@@ -984,7 +986,10 @@ fn main() {
             })
         };
 
-        if !daemon_result.already_running {
+        // Always send the CDP launch command when --cdp was explicitly passed
+        // (reconnection scenario). Only skip when daemon is already running
+        // and --cdp came from config/env (not a user-initiated reconnect).
+        if !daemon_result.already_running || flags.cli_cdp {
             let mut launch_cmd = launch_cmd;
 
             if flags.ignore_https_errors {
