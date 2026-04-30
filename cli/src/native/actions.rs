@@ -85,6 +85,10 @@ pub struct HarEntry {
     pub redirect_url: String,
     /// Updated by `Network.loadingFinished` for final accuracy.
     pub response_body_size: i64,
+    /// Response body captured via `Network.getResponseBody` after loading finishes.
+    pub response_content_text: Option<String>,
+    /// HAR `response.content.encoding`, set to `base64` for binary CDP bodies.
+    pub response_content_encoding: Option<String>,
     /// Raw CDP `ResourceTiming` object from `Network.responseReceived`.
     pub cdp_timing: Option<Value>,
     /// Monotonic timestamp (seconds) from `Network.loadingFinished`; used to
@@ -165,10 +169,16 @@ struct DrainedEvents {
     new_targets: Vec<TargetCreatedEvent>,
     changed_targets: Vec<TargetInfoChangedEvent>,
     destroyed_targets: Vec<String>,
+    har_finished_bodies: Vec<HarBodyRequest>,
     /// Cross-origin iframe (frame_id, session_id) pairs from Target.attachedToTarget.
     attached_iframe_sessions: Vec<(String, String)>,
     /// Session IDs from Target.detachedFromTarget.
     detached_iframe_sessions: Vec<String>,
+}
+
+struct HarBodyRequest {
+    request_id: String,
+    session_id: Option<String>,
 }
 
 /// Compute a hash of the [`LaunchOptions`] fields that require a browser
@@ -598,6 +608,73 @@ impl DaemonState {
             }
         }
 
+        // Capture HAR response bodies after loading finishes. CDP only allows
+        // `Network.getResponseBody` once response data is available, and some
+        // requests cannot provide a body; treat those as best-effort misses.
+        if !drained.har_finished_bodies.is_empty() {
+            let body_client = self.browser.as_ref().map(|mgr| mgr.client.clone());
+            let active_session_id = self
+                .browser
+                .as_ref()
+                .and_then(|mgr| mgr.active_session_id().ok().map(String::from));
+
+            if let Some(client) = body_client {
+                for body_request in &drained.har_finished_bodies {
+                    let session_id = body_request
+                        .session_id
+                        .as_deref()
+                        .or(active_session_id.as_deref());
+
+                    // Network events are session-scoped so session_id
+                    // should always be present; skip if we cannot determine
+                    // the target session to avoid querying the wrong page.
+                    let Some(sid) = session_id else {
+                        continue;
+                    };
+
+                    let body_result = client
+                        .send_command(
+                            "Network.getResponseBody",
+                            Some(json!({ "requestId": body_request.request_id })),
+                            Some(sid),
+                        )
+                        .await;
+
+                    let Ok(body_result) = body_result else {
+                        if std::env::var("AGENT_BROWSER_DEBUG").is_ok() {
+                            let _ = writeln!(
+                                std::io::stderr(),
+                                "[har] getResponseBody failed for request {}",
+                                body_request.request_id,
+                            );
+                        }
+                        continue;
+                    };
+
+                    let body = body_result
+                        .get("body")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let base64_encoded = body_result
+                        .get("base64Encoded")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+
+                    if let Some(entry) = self
+                        .har_entries
+                        .iter_mut()
+                        .rev()
+                        .find(|e| e.request_id == body_request.request_id)
+                    {
+                        entry.response_content_text = Some(body);
+                        entry.response_content_encoding =
+                            base64_encoded.then(|| "base64".to_string());
+                    }
+                }
+            }
+        }
+
         // Remove destroyed targets
         for target_id in &drained.destroyed_targets {
             if let Some(ref mut mgr) = self.browser {
@@ -700,6 +777,7 @@ impl DaemonState {
         let mut new_target_ids: HashSet<String> = HashSet::new();
         let mut changed_targets: Vec<TargetInfoChangedEvent> = Vec::new();
         let mut destroyed_targets: Vec<String> = Vec::new();
+        let mut har_finished_bodies: Vec<HarBodyRequest> = Vec::new();
         let mut attached_iframe_sessions: Vec<(String, String)> = Vec::new();
         let mut detached_iframe_sessions: Vec<String> = Vec::new();
 
@@ -913,6 +991,8 @@ impl DaemonState {
                                         mime_type: String::new(),
                                         redirect_url: String::new(),
                                         response_body_size: -1,
+                                        response_content_text: None,
+                                        response_content_encoding: None,
                                         cdp_timing: None,
                                         loading_finished_timestamp: None,
                                     });
@@ -1043,6 +1123,12 @@ impl DaemonState {
                                 if let Some(len) = encoded_data_length {
                                     entry.response_body_size = len;
                                 }
+                                if entry.response_content_text.is_none() && !request_id.is_empty() {
+                                    har_finished_bodies.push(HarBodyRequest {
+                                        request_id: request_id.to_string(),
+                                        session_id: event.session_id.clone(),
+                                    });
+                                }
                             }
                         }
                         "Network.loadingFailed" if self.har_recording => {
@@ -1131,6 +1217,7 @@ impl DaemonState {
             new_targets,
             changed_targets,
             destroyed_targets,
+            har_finished_bodies,
             attached_iframe_sessions,
             detached_iframe_sessions,
         }
@@ -6493,6 +6580,7 @@ async fn handle_har_start(state: &mut DaemonState) -> Result<Value, String> {
 async fn handle_har_stop(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let path = har_output_path(cmd.get("path").and_then(|v| v.as_str()));
 
+    state.drain_cdp_events_background().await;
     state.har_recording = false;
 
     let entries: Vec<Value> = state.har_entries.drain(..).map(har_entry_to_json).collect();
@@ -6592,6 +6680,17 @@ fn har_entry_to_json(e: HarEntry) -> Value {
         request["postData"] = json!({ "mimeType": post_content_type, "text": body });
     }
 
+    let mut content = json!({
+        "size": e.response_body_size,
+        "mimeType": mime_type,
+    });
+    if let Some(text) = e.response_content_text {
+        content["text"] = json!(text);
+    }
+    if let Some(encoding) = e.response_content_encoding {
+        content["encoding"] = json!(encoding);
+    }
+
     json!({
         "startedDateTime": started_date_time,
         "time": total_time,
@@ -6602,10 +6701,7 @@ fn har_entry_to_json(e: HarEntry) -> Value {
             "httpVersion": e.http_version,
             "cookies": resp_cookies,
             "headers": resp_headers,
-            "content": {
-                "size": e.response_body_size,
-                "mimeType": mime_type,
-            },
+            "content": content,
             "redirectURL": e.redirect_url,
             "headersSize": -1,
             "bodySize": e.response_body_size,
@@ -8474,6 +8570,8 @@ mod tests {
             mime_type: "application/json".to_string(),
             redirect_url: "https://example.com/api/1".to_string(),
             response_body_size: 42,
+            response_content_text: Some(r#"{"ok":true}"#.to_string()),
+            response_content_encoding: None,
             cdp_timing: None,
             loading_finished_timestamp: None,
         };
@@ -8495,10 +8593,40 @@ mod tests {
         assert_eq!(har["response"]["statusText"], "Created");
         assert_eq!(har["response"]["content"]["mimeType"], "application/json");
         assert_eq!(har["response"]["content"]["size"], 42);
+        assert_eq!(har["response"]["content"]["text"], r#"{"ok":true}"#);
         assert_eq!(har["response"]["redirectURL"], "https://example.com/api/1");
         assert_eq!(har["response"]["cookies"][0]["name"], "token");
         assert_eq!(har["response"]["cookies"][0]["value"], "xyz");
         assert_eq!(har["_resourceType"], "XHR");
+    }
+
+    #[test]
+    fn test_har_entry_to_json_marks_base64_response_content() {
+        let entry = HarEntry {
+            request_id: "r".to_string(),
+            wall_time: 1773576000.0,
+            method: "GET".to_string(),
+            url: "https://example.com/image.png".to_string(),
+            request_headers: vec![],
+            post_data: None,
+            request_body_size: 0,
+            resource_type: "Image".to_string(),
+            status: Some(200),
+            status_text: "OK".to_string(),
+            http_version: "HTTP/2.0".to_string(),
+            response_headers: vec![],
+            mime_type: "image/png".to_string(),
+            redirect_url: String::new(),
+            response_body_size: 4,
+            response_content_text: Some("iVBORw==".to_string()),
+            response_content_encoding: Some("base64".to_string()),
+            cdp_timing: None,
+            loading_finished_timestamp: None,
+        };
+
+        let har = har_entry_to_json(entry);
+        assert_eq!(har["response"]["content"]["text"], "iVBORw==");
+        assert_eq!(har["response"]["content"]["encoding"], "base64");
     }
 
     #[test]
@@ -8556,6 +8684,8 @@ mod tests {
             mime_type: "text/html".to_string(),
             redirect_url: String::new(),
             response_body_size: 0,
+            response_content_text: None,
+            response_content_encoding: None,
             cdp_timing: None,
             loading_finished_timestamp: None,
         };
@@ -8611,6 +8741,8 @@ mod tests {
             mime_type: "text/html".to_string(),
             redirect_url: String::new(),
             response_body_size: 128,
+            response_content_text: None,
+            response_content_encoding: None,
             cdp_timing: None,
             loading_finished_timestamp: None,
         });
@@ -8658,6 +8790,8 @@ mod tests {
             mime_type: "text/html".to_string(),
             redirect_url: String::new(),
             response_body_size: 64,
+            response_content_text: None,
+            response_content_encoding: None,
             cdp_timing: None,
             loading_finished_timestamp: None,
         });
