@@ -2002,6 +2002,8 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
                     Ok(mgr) => {
                         state.reset_input_state();
                         state.browser = Some(mgr);
+                        state.engine = conn.engine.as_str().to_string();
+                        write_engine_file(&state.session_id, &state.engine);
                         state.subscribe_to_browser_events();
                         state.start_fetch_handler();
                         state.start_dialog_handler();
