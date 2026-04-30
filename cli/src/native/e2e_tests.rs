@@ -432,6 +432,69 @@ async fn e2e_snapshot_and_click_ref() {
 
 #[tokio::test]
 #[ignore]
+async fn e2e_video_recording_stop_flushes_webm() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": "https://example.com" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let output_path = std::env::temp_dir()
+        .join(format!("agent-browser-e2e-video-{}.webm", uuid::Uuid::new_v4()))
+        .to_string_lossy()
+        .to_string();
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "video_start", "path": output_path }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
+
+    let resp = tokio::time::timeout(
+        tokio::time::Duration::from_secs(5),
+        execute_command(&json!({ "id": "4", "action": "video_stop" }), &mut state),
+    )
+    .await
+    .expect("video_stop should not hang");
+    assert_success(&resp);
+
+    let metadata = std::fs::metadata(&output_path).expect("Recorded video should exist");
+    assert!(
+        metadata.len() > 10 * 1024,
+        "Recorded video should be non-trivial size, got {} bytes",
+        metadata.len()
+    );
+
+    let ffprobe = std::process::Command::new("ffprobe")
+        .args(["-hide_banner", &output_path])
+        .output()
+        .expect("ffprobe should be installed for e2e recording validation");
+    assert!(
+        ffprobe.status.success(),
+        "ffprobe should accept the recorded webm: {}",
+        String::from_utf8_lossy(&ffprobe.stderr)
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+    let _ = std::fs::remove_file(&output_path);
+}
+
+#[tokio::test]
+#[ignore]
 async fn e2e_screenshot() {
     let mut state = DaemonState::new();
 

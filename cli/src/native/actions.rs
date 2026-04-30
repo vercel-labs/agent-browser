@@ -555,7 +555,7 @@ impl DaemonState {
         }
     }
 
-    /// Spawn a background task that polls screenshots and pipes them to ffmpeg.
+    /// Spawn a background task that polls screenshots and streams them into ffmpeg.
     async fn start_recording_task(
         &mut self,
         client: Arc<CdpClient>,
