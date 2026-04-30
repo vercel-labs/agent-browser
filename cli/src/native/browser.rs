@@ -520,6 +520,7 @@ impl BrowserManager {
                     "Target.createTarget",
                     &CreateTargetParams {
                         url: "about:blank".to_string(),
+                        background: None,
                     },
                     None,
                 )
@@ -896,6 +897,7 @@ impl BrowserManager {
                 "Target.createTarget",
                 &CreateTargetParams {
                     url: "about:blank".to_string(),
+                    background: None,
                 },
                 None,
             )
@@ -971,8 +973,6 @@ impl BrowserManager {
             .collect()
     }
 
-    /// Resolve a user-supplied `TabRef` (either `t<N>` or a label) to the
-    /// stable numeric `tab_id`. Returns a teaching error for unknown tabs.
     pub fn resolve_tab_ref(&self, tab_ref: &TabRef) -> Result<u32, String> {
         match tab_ref {
             TabRef::Id(id) => {
@@ -999,7 +999,6 @@ impl BrowserManager {
         }
     }
 
-    /// Returns true iff a tab already carries the given label.
     pub fn has_label(&self, label: &str) -> bool {
         self.pages.iter().any(|p| p.label.as_deref() == Some(label))
     }
@@ -1008,6 +1007,7 @@ impl BrowserManager {
         &mut self,
         url: Option<&str>,
         label: Option<&str>,
+        background: bool,
     ) -> Result<Value, String> {
         if let Some(label) = label {
             if !is_valid_label(label) {
@@ -1034,6 +1034,7 @@ impl BrowserManager {
                 "Target.createTarget",
                 &CreateTargetParams {
                     url: target_url.to_string(),
+                    background: if background { Some(true) } else { None },
                 },
                 None,
             )
@@ -1076,7 +1077,7 @@ impl BrowserManager {
         }))
     }
 
-    pub async fn tab_switch(&mut self, index: usize) -> Result<Value, String> {
+    pub async fn tab_switch(&mut self, index: usize, background: bool) -> Result<Value, String> {
         if index >= self.pages.len() {
             return Err(format!(
                 "Tab index {} out of range (0-{})",
@@ -1089,11 +1090,12 @@ impl BrowserManager {
         let session_id = self.pages[index].session_id.clone();
         self.enable_domains(&session_id).await?;
 
-        // Bring tab to front
-        let _ = self
-            .client
-            .send_command("Page.bringToFront", None, Some(&session_id))
-            .await;
+        if !background {
+            let _ = self
+                .client
+                .send_command("Page.bringToFront", None, Some(&session_id))
+                .await;
+        }
 
         let url = self.get_url().await.unwrap_or_default();
         let title = self.get_title().await.unwrap_or_default();
@@ -1398,13 +1400,13 @@ impl BrowserManager {
         Ok(())
     }
 
-    pub async fn tab_switch_by_id(&mut self, tab_id: u32) -> Result<Value, String> {
+    pub async fn tab_switch_by_id(&mut self, tab_id: u32, background: bool) -> Result<Value, String> {
         let index = self
             .pages
             .iter()
             .position(|p| p.tab_id == tab_id)
             .ok_or_else(|| format!("Tab ID {} not found", tab_id))?;
-        self.tab_switch(index).await
+        self.tab_switch(index, background).await
     }
 
     pub async fn tab_close_by_id(&mut self, tab_id: Option<u32>) -> Result<Value, String> {

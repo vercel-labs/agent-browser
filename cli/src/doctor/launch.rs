@@ -80,6 +80,7 @@ pub(super) fn check(checks: &mut Vec<Check>) {
         default_timeout: None,
         cdp: None,
         no_auto_dialog: false,
+        background: false,
     };
 
     let started = Instant::now();

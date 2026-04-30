@@ -119,6 +119,7 @@ async fn collect_storage_via_temp_target(
             "Target.createTarget",
             &CreateTargetParams {
                 url: "about:blank".to_string(),
+                background: None,
             },
             None,
         )
