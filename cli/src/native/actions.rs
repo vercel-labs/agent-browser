@@ -668,7 +668,7 @@ impl DaemonState {
                     }
 
                     let tab_id = mgr.assign_tab_id();
-                    mgr.add_page(super::browser::PageInfo {
+                    mgr.add_page_background(super::browser::PageInfo {
                         tab_id,
                         label: None,
                         target_id: te.target_info.target_id.clone(),
