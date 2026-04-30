@@ -397,6 +397,7 @@ pub(super) fn extract_ax_string(value: &Option<AXValue>) -> String {
 }
 
 /// Build a JS expression that finds a DOM element by CSS selector or XPath.
+/// Pierces Shadow DOM to find elements inside shadow roots.
 fn build_find_element_js(selector: &str) -> String {
     if let Some(xpath) = selector.strip_prefix("xpath=") {
         format!(
@@ -405,7 +406,21 @@ fn build_find_element_js(selector: &str) -> String {
         )
     } else {
         format!(
-            "document.querySelector({})",
+            r#"(() => {{
+                function querySelectorShadowDOM(sel, root = document) {{
+                    const el = root.querySelector(sel);
+                    if (el) return el;
+                    const allElements = root.querySelectorAll('*');
+                    for (const host of allElements) {{
+                        if (host.shadowRoot) {{
+                            const found = querySelectorShadowDOM(sel, host.shadowRoot);
+                            if (found) return found;
+                        }}
+                    }}
+                    return null;
+                }}
+                return querySelectorShadowDOM({});
+            }})()"#,
             serde_json::to_string(selector).unwrap_or_default()
         )
     }

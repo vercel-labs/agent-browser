@@ -5720,7 +5720,17 @@ async fn handle_getbyrole(cmd: &Value, state: &mut DaemonState) -> Result<Value,
 
     let js = format!(
         r#"(() => {{
-            const els = document.querySelectorAll('[role="{role}"], {role}');
+            function querySelectorAllShadowDOM(selector, root = document) {{
+                const results = [...root.querySelectorAll(selector)];
+                const allElements = root.querySelectorAll('*');
+                for (const host of allElements) {{
+                    if (host.shadowRoot) {{
+                        results.push(...querySelectorAllShadowDOM(selector, host.shadowRoot));
+                    }}
+                }}
+                return results;
+            }}
+            const els = querySelectorAllShadowDOM('[role="{role}"], {role}');
             for (const el of els) {{
                 if ({name_match}) {{
                     el.setAttribute('data-agent-browser-located', 'true');
@@ -5760,12 +5770,28 @@ async fn handle_getbyrole(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     let selector = "[data-agent-browser-located='true']";
     let result = execute_subaction(cmd, state, selector).await;
 
-    // Clean up the marker attribute
+    // Clean up the marker attribute (shadow DOM aware)
     if let Some(ref browser) = state.browser {
         if browser.active_session_id().is_ok() {
             let _ = browser
                 .evaluate(
-                    "document.querySelector('[data-agent-browser-located]')?.removeAttribute('data-agent-browser-located')",
+                    r#"(() => {
+                        function removeMarker(root = document) {
+                            const el = root.querySelector('[data-agent-browser-located]');
+                            if (el) {
+                                el.removeAttribute('data-agent-browser-located');
+                                return true;
+                            }
+                            const allElements = root.querySelectorAll('*');
+                            for (const host of allElements) {
+                                if (host.shadowRoot && removeMarker(host.shadowRoot)) {
+                                    return true;
+                                }
+                            }
+                            return false;
+                        }
+                        removeMarker();
+                    })()"#,
                     None,
                 )
                 .await;
@@ -5804,10 +5830,47 @@ async fn handle_semantic_locator(
     let query = match strategy {
         "label" => format!(
             r#"(() => {{
-                const label = Array.from(document.querySelectorAll('label')).find(el => {match_fn});
+                function findLabelShadowDOM(root = document) {{
+                    const labels = Array.from(root.querySelectorAll('label'));
+                    const found = labels.find(el => {match_fn});
+                    if (found) return found;
+                    const allElements = root.querySelectorAll('*');
+                    for (const host of allElements) {{
+                        if (host.shadowRoot) {{
+                            const foundInShadow = findLabelShadowDOM(host.shadowRoot);
+                            if (foundInShadow) return foundInShadow;
+                        }}
+                    }}
+                    return null;
+                }}
+                function getElementByIdShadowDOM(id, root = document) {{
+                    const el = root.getElementById ? root.getElementById(id) : root.querySelector('#' + CSS.escape(id));
+                    if (el) return el;
+                    const allElements = root.querySelectorAll('*');
+                    for (const host of allElements) {{
+                        if (host.shadowRoot) {{
+                            const found = getElementByIdShadowDOM(id, host.shadowRoot);
+                            if (found) return found;
+                        }}
+                    }}
+                    return null;
+                }}
+                function querySelectorShadowDOM(selector, root = document) {{
+                    const el = root.querySelector(selector);
+                    if (el) return el;
+                    const allElements = root.querySelectorAll('*');
+                    for (const host of allElements) {{
+                        if (host.shadowRoot) {{
+                            const found = querySelectorShadowDOM(selector, host.shadowRoot);
+                            if (found) return found;
+                        }}
+                    }}
+                    return null;
+                }}
+                const label = findLabelShadowDOM();
                 if (!label) return false;
                 const forId = label.getAttribute('for');
-                const target = forId ? document.getElementById(forId) : label.querySelector('input,select,textarea');
+                const target = forId ? getElementByIdShadowDOM(forId) : label.querySelector('input,select,textarea');
                 if (target) {{ target.setAttribute('data-agent-browser-located', 'true'); return true; }}
                 return false;
             }})()"#,
@@ -5815,7 +5878,19 @@ async fn handle_semantic_locator(
         ),
         "placeholder" => format!(
             r#"(() => {{
-                const el = document.querySelector('input[placeholder={val}], textarea[placeholder={val}]');
+                function querySelectorShadowDOM(selector, root = document) {{
+                    const el = root.querySelector(selector);
+                    if (el) return el;
+                    const allElements = root.querySelectorAll('*');
+                    for (const host of allElements) {{
+                        if (host.shadowRoot) {{
+                            const found = querySelectorShadowDOM(selector, host.shadowRoot);
+                            if (found) return found;
+                        }}
+                    }}
+                    return null;
+                }}
+                const el = querySelectorShadowDOM('input[placeholder={val}], textarea[placeholder={val}]');
                 if (el) {{ el.setAttribute('data-agent-browser-located', 'true'); return true; }}
                 return false;
             }})()"#,
@@ -5823,7 +5898,19 @@ async fn handle_semantic_locator(
         ),
         "alttext" => format!(
             r#"(() => {{
-                const el = document.querySelector('img[alt={val}], [alt={val}]');
+                function querySelectorShadowDOM(selector, root = document) {{
+                    const el = root.querySelector(selector);
+                    if (el) return el;
+                    const allElements = root.querySelectorAll('*');
+                    for (const host of allElements) {{
+                        if (host.shadowRoot) {{
+                            const found = querySelectorShadowDOM(selector, host.shadowRoot);
+                            if (found) return found;
+                        }}
+                    }}
+                    return null;
+                }}
+                const el = querySelectorShadowDOM('img[alt={val}], [alt={val}]');
                 if (el) {{ el.setAttribute('data-agent-browser-located', 'true'); return true; }}
                 return false;
             }})()"#,
@@ -5831,7 +5918,19 @@ async fn handle_semantic_locator(
         ),
         "title" => format!(
             r#"(() => {{
-                const el = document.querySelector('[title={val}]');
+                function querySelectorShadowDOM(selector, root = document) {{
+                    const el = root.querySelector(selector);
+                    if (el) return el;
+                    const allElements = root.querySelectorAll('*');
+                    for (const host of allElements) {{
+                        if (host.shadowRoot) {{
+                            const found = querySelectorShadowDOM(selector, host.shadowRoot);
+                            if (found) return found;
+                        }}
+                    }}
+                    return null;
+                }}
+                const el = querySelectorShadowDOM('[title={val}]');
                 if (el) {{ el.setAttribute('data-agent-browser-located', 'true'); return true; }}
                 return false;
             }})()"#,
@@ -5839,7 +5938,19 @@ async fn handle_semantic_locator(
         ),
         "testid" => format!(
             r#"(() => {{
-                const el = document.querySelector('[data-testid={val}]');
+                function querySelectorShadowDOM(selector, root = document) {{
+                    const el = root.querySelector(selector);
+                    if (el) return el;
+                    const allElements = root.querySelectorAll('*');
+                    for (const host of allElements) {{
+                        if (host.shadowRoot) {{
+                            const found = querySelectorShadowDOM(selector, host.shadowRoot);
+                            if (found) return found;
+                        }}
+                    }}
+                    return null;
+                }}
+                const el = querySelectorShadowDOM('[data-testid={val}]');
                 if (el) {{ el.setAttribute('data-agent-browser-located', 'true'); return true; }}
                 return false;
             }})()"#,
@@ -5849,13 +5960,24 @@ async fn handle_semantic_locator(
             // "text" strategy
             format!(
                 r#"(() => {{
-                    const all = document.querySelectorAll('*');
-                    for (const el of all) {{
-                        if (el.children.length === 0 && {match_fn}) {{
-                            el.setAttribute('data-agent-browser-located', 'true');
-                            return true;
+                    function findTextShadowDOM(root = document) {{
+                        const all = root.querySelectorAll('*');
+                        for (const el of all) {{
+                            if (el.children.length === 0 && {match_fn}) {{
+                                return el;
+                            }}
                         }}
+                        // Search in shadow roots
+                        for (const el of all) {{
+                            if (el.shadowRoot) {{
+                                const found = findTextShadowDOM(el.shadowRoot);
+                                if (found) return found;
+                            }}
+                        }}
+                        return null;
                     }}
+                    const el = findTextShadowDOM();
+                    if (el) {{ el.setAttribute('data-agent-browser-located', 'true'); return true; }}
                     return false;
                 }})()"#,
                 match_fn = match_fn,
@@ -5892,7 +6014,23 @@ async fn handle_semantic_locator(
     if let Some(ref browser) = state.browser {
         let _ = browser
             .evaluate(
-                "document.querySelector('[data-agent-browser-located]')?.removeAttribute('data-agent-browser-located')",
+                r#"(() => {
+                    function removeMarker(root = document) {
+                        const el = root.querySelector('[data-agent-browser-located]');
+                        if (el) {
+                            el.removeAttribute('data-agent-browser-located');
+                            return true;
+                        }
+                        const allElements = root.querySelectorAll('*');
+                        for (const host of allElements) {
+                            if (host.shadowRoot && removeMarker(host.shadowRoot)) {
+                                return true;
+                            }
+                        }
+                        return false;
+                    }
+                    removeMarker();
+                })()"#,
                 None,
             )
             .await;
@@ -5939,7 +6077,17 @@ async fn handle_nth(cmd: &Value, state: &mut DaemonState) -> Result<Value, Strin
 
     let js = format!(
         r#"(() => {{
-            const els = document.querySelectorAll({sel});
+            function querySelectorAllShadowDOM(selector, root = document) {{
+                const results = [...root.querySelectorAll(selector)];
+                const allElements = root.querySelectorAll('*');
+                for (const host of allElements) {{
+                    if (host.shadowRoot) {{
+                        results.push(...querySelectorAllShadowDOM(selector, host.shadowRoot));
+                    }}
+                }}
+                return results;
+            }}
+            const els = querySelectorAllShadowDOM({sel});
             const idx = {idx} < 0 ? els.length + {idx} : {idx};
             if (idx < 0 || idx >= els.length) return false;
             els[idx].setAttribute('data-agent-browser-located', 'true');
@@ -5981,7 +6129,23 @@ async fn handle_nth(cmd: &Value, state: &mut DaemonState) -> Result<Value, Strin
     if let Some(ref browser) = state.browser {
         let _ = browser
             .evaluate(
-                "document.querySelector('[data-agent-browser-located]')?.removeAttribute('data-agent-browser-located')",
+                r#"(() => {
+                    function removeMarker(root = document) {
+                        const el = root.querySelector('[data-agent-browser-located]');
+                        if (el) {
+                            el.removeAttribute('data-agent-browser-located');
+                            return true;
+                        }
+                        const allElements = root.querySelectorAll('*');
+                        for (const host of allElements) {
+                            if (host.shadowRoot && removeMarker(host.shadowRoot)) {
+                                return true;
+                            }
+                        }
+                        return false;
+                    }
+                    removeMarker();
+                })()"#,
                 None,
             )
             .await;
@@ -5999,7 +6163,17 @@ async fn handle_find(cmd: &Value, state: &DaemonState) -> Result<Value, String> 
 
     let js = format!(
         r#"(() => {{
-            const els = document.querySelectorAll({});
+            function querySelectorAllShadowDOM(selector, root = document) {{
+                const results = [...root.querySelectorAll(selector)];
+                const allElements = root.querySelectorAll('*');
+                for (const host of allElements) {{
+                    if (host.shadowRoot) {{
+                        results.push(...querySelectorAllShadowDOM(selector, host.shadowRoot));
+                    }}
+                }}
+                return results;
+            }}
+            const els = querySelectorAllShadowDOM({});
             return Array.from(els).map((el, i) => ({{
                 index: i,
                 tagName: el.tagName.toLowerCase(),
