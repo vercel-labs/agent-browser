@@ -410,11 +410,31 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
             Ok(json!({ "id": id, "action": "drag", "source": src, "target": tgt }))
         }
         "upload" => {
-            let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
-                context: "upload".to_string(),
-                usage: "upload <selector> <files...>",
-            })?;
-            Ok(json!({ "id": id, "action": "upload", "selector": sel, "files": &rest[1..] }))
+            if rest.is_empty() {
+                return Err(ParseError::MissingArguments {
+                    context: "upload".to_string(),
+                    usage: "upload [selector] <files...>",
+                });
+            }
+            let first = &rest[0];
+            let first_is_path = first.starts_with('/')
+                || first.starts_with("./")
+                || first.starts_with("../")
+                || first.starts_with(".\\")
+                || first.starts_with("..\\");
+            if first_is_path {
+                Ok(json!({ "id": id, "action": "upload", "files": &rest[..] }))
+            } else {
+                let files = &rest[1..];
+                if files.is_empty() {
+                    return Err(ParseError::MissingArguments {
+                        context: "upload".to_string(),
+                        usage: "upload <selector> <files...>\n  \
+                               Without selector: upload ./file (use ./ prefix, requires open file chooser)",
+                    });
+                }
+                Ok(json!({ "id": id, "action": "upload", "selector": first, "files": files }))
+            }
         }
         "download" => {
             let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
@@ -5066,6 +5086,45 @@ mod tests {
         let cmd = parse_command(&args("batch --bail"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "batch");
         assert_eq!(cmd["bail"], true);
+    }
+
+    // === Upload Tests ===
+
+    #[test]
+    fn test_upload_with_selector_and_file() {
+        let cmd =
+            parse_command(&args("upload #file-input ./document.pdf"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "upload");
+        assert_eq!(cmd["selector"], "#file-input");
+        assert_eq!(cmd["files"][0], "./document.pdf");
+    }
+
+    #[test]
+    fn test_upload_without_selector_path_with_slash() {
+        let cmd = parse_command(&args("upload ./document.pdf"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "upload");
+        assert!(cmd.get("selector").is_none());
+        assert_eq!(cmd["files"][0], "./document.pdf");
+    }
+
+    #[test]
+    fn test_upload_without_selector_absolute_path() {
+        let cmd = parse_command(&args("upload /tmp/file.txt"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "upload");
+        assert!(cmd.get("selector").is_none());
+        assert_eq!(cmd["files"][0], "/tmp/file.txt");
+    }
+
+    #[test]
+    fn test_upload_xpath_selector_not_misclassified_as_path() {
+        let cmd = parse_command(
+            &args("upload xpath=/html/body/input ./file.txt"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "upload");
+        assert_eq!(cmd["selector"], "xpath=/html/body/input");
+        assert_eq!(cmd["files"][0], "./file.txt");
     }
 
     #[test]

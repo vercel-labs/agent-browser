@@ -1343,8 +1343,16 @@ Examples:
 agent-browser upload - Upload files
 
 Usage: agent-browser upload <selector> <files...>
+       agent-browser upload <files...>          (when file chooser is open)
 
 Uploads one or more files to a file input element.
+
+When a file chooser dialog is open (triggered by clicking a file upload
+button), the selector can be omitted. This handles dynamically created
+file inputs that have no CSS selector.
+
+File paths must include a path separator (e.g. ./file.pdf, /tmp/file.pdf)
+so they are not mistaken for a CSS selector.
 
 Global Options:
   --json               Output as JSON
@@ -1353,6 +1361,7 @@ Global Options:
 Examples:
   agent-browser upload "#file-input" ./document.pdf
   agent-browser upload @e3 ./image1.png ./image2.png
+  agent-browser upload ./document.pdf                 # file chooser must be open
 "##
         }
         "download" => {
