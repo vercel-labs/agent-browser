@@ -104,7 +104,8 @@ Use `--session-name` to auto-save and restore cookies + localStorage by name, wi
 # Auto-saves state on close, auto-restores on next launch
 agent-browser --session-name twitter open https://twitter.com
 # ... login flow ...
-agent-browser close  # state saved to ~/.agent-browser/sessions/
+agent-browser close  # state saved to $AGENT_BROWSER_DATA_DIR/agent-browser/sessions/
+                     # or $XDG_DATA_HOME/agent-browser/sessions/
 
 # Next time: state is automatically restored
 agent-browser --session-name twitter open https://twitter.com

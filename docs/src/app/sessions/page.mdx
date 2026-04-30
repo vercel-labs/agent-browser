@@ -144,7 +144,7 @@ export AGENT_BROWSER_SESSION_NAME=twitter
 agent-browser open twitter.com
 ```
 
-State files are stored in `~/.agent-browser/sessions/` and automatically loaded on daemon start.
+State files are stored in `$AGENT_BROWSER_DATA_DIR/agent-browser/sessions/` or `$XDG_DATA_HOME/agent-browser/sessions/` and automatically loaded on daemon start. On most Linux systems that resolves to `~/.local/share/agent-browser/sessions/`.
 
 ### Session name rules
 

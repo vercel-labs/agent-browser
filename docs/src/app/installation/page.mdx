@@ -96,8 +96,8 @@ It checks:
 <tr><td>Environment</td><td>CLI version, platform, home directory, state and socket dirs, free disk space</td></tr>
 <tr><td>Chrome</td><td>Chrome install path and version, cache dir, Puppeteer fallback, user-data dir and profile count, optional <code>lightpanda</code> engine</td></tr>
 <tr><td>Daemons</td><td>Running daemons per session, stale <code>.sock</code> / <code>.pid</code> / <code>.version</code> / <code>.stream</code> files (auto-cleaned), version mismatch with the CLI, dashboard process liveness</td></tr>
-<tr><td>Config</td><td><code>~/.agent-browser/config.json</code>, <code>./agent-browser.json</code>, and any file at <code>AGENT_BROWSER_CONFIG</code> parse as valid JSON</td></tr>
-<tr><td>Security</td><td>Encryption key env var or <code>~/.agent-browser/.encryption-key</code> (with 0600 permissions on unix), state file count and age vs <code>AGENT_BROWSER_STATE_EXPIRE_DAYS</code>, action policy file</td></tr>
+<tr><td>Config</td><td><code>$AGENT_BROWSER_CONFIG_DIR/agent-browser/config.json</code>, else <code>$XDG_CONFIG_HOME/agent-browser/config.json</code>, <code>./agent-browser.json</code>, and any file at <code>AGENT_BROWSER_CONFIG</code> parse as valid JSON</td></tr>
+<tr><td>Security</td><td>Encryption key env var or <code>$AGENT_BROWSER_DATA_DIR/agent-browser/.encryption-key</code> (else <code>$XDG_DATA_HOME/agent-browser/.encryption-key</code>) with 0600 permissions on unix, state file count and age vs <code>AGENT_BROWSER_STATE_EXPIRE_DAYS</code>, action policy file</td></tr>
 <tr><td>Providers</td><td>Env vars for Browserless, Browserbase, Browser Use, Kernel, AgentCore (AWS creds), Appium (for <code>--provider ios</code>), and <code>AI_GATEWAY_API_KEY</code> for chat</td></tr>
 <tr><td>Network</td><td>Reachability of the Chrome for Testing CDN, AI Gateway (if configured), and any currently selected provider endpoint (skipped under <code>--offline</code>)</td></tr>
 <tr><td>Launch test</td><td>Spawns a scratch session, launches headless Chrome, navigates to <code>about:blank</code>, then closes. Measures wall time (skipped under <code>--quick</code>)</td></tr>
@@ -114,7 +114,7 @@ Stale sidecar files are always cleaned. Destructive actions are opt-in via `--fi
 <tr><td>Chrome missing</td><td>Runs <code>agent-browser install</code></td></tr>
 <tr><td>Version-mismatched daemons</td><td>Sends <code>close</code> to each and cleans files</td></tr>
 <tr><td>Old state files</td><td>Deletes state files older than <code>AGENT_BROWSER_STATE_EXPIRE_DAYS</code> (default 30)</td></tr>
-<tr><td>Missing encryption key</td><td>Generates a new key at <code>~/.agent-browser/.encryption-key</code> (0600, unix); never overwrites an existing key</td></tr>
+<tr><td>Missing encryption key</td><td>Generates a new key at <code>$AGENT_BROWSER_DATA_DIR/agent-browser/.encryption-key</code> or <code>$XDG_DATA_HOME/agent-browser/.encryption-key</code> (0600, unix); never overwrites an existing key</td></tr>
 </tbody>
 </table>
 

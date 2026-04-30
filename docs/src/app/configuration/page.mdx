@@ -11,7 +11,7 @@ agent-browser checks two locations, merged in priority order:
     <tr><th>Priority</th><th>Location</th><th>Scope</th></tr>
   </thead>
   <tbody>
-    <tr><td>1 (lowest)</td><td><code>~/.agent-browser/config.json</code></td><td>User-level defaults</td></tr>
+    <tr><td>1 (lowest)</td><td><code>$AGENT_BROWSER_CONFIG_DIR/agent-browser/config.json</code>, else <code>$XDG_CONFIG_HOME/agent-browser/config.json</code> (usually <code>~/.config/agent-browser/config.json</code>)</td><td>User-level defaults</td></tr>
     <tr><td>2</td><td><code>./agent-browser.json</code></td><td>Project-level overrides</td></tr>
     <tr><td>3</td><td><code>AGENT_BROWSER_*</code> env vars</td><td>Override config values</td></tr>
     <tr><td>4 (highest)</td><td>CLI flags</td><td>Override everything</td></tr>
@@ -160,7 +160,7 @@ This applies to all boolean flags: `--headed`, `--debug`, `--json`, `--ignore-ht
 
 ## Extensions Merging
 
-Extensions from user-level and project-level configs are **concatenated**, not replaced. For example, if `~/.agent-browser/config.json` specifies `["/ext1"]` and `./agent-browser.json` specifies `["/ext2"]`, the result is `["/ext1", "/ext2"]`.
+Extensions from user-level and project-level configs are **concatenated**, not replaced. For example, if `$AGENT_BROWSER_CONFIG_DIR/agent-browser/config.json` or `$XDG_CONFIG_HOME/agent-browser/config.json` specifies `["/ext1"]` and `./agent-browser.json` specifies `["/ext2"]`, the result is `["/ext1", "/ext2"]`.
 
 The `AGENT_BROWSER_EXTENSIONS` environment variable and CLI `--extension` flags follow the standard priority rules (env replaces config, CLI appends).
 
@@ -173,6 +173,14 @@ These environment variables configure additional daemon and runtime behavior:
     <tr><th>Variable</th><th>Description</th><th>Default</th></tr>
   </thead>
   <tbody>
+    <tr><td><code>AGENT_BROWSER_CONFIG_DIR</code></td><td>Override the base directory for the default user config file.</td><td>(unset)</td></tr>
+    <tr><td><code>AGENT_BROWSER_DATA_DIR</code></td><td>Override the base directory for installed browsers, saved sessions, auth profiles, and the generated encryption key.</td><td>(unset)</td></tr>
+    <tr><td><code>AGENT_BROWSER_CACHE_DIR</code></td><td>Override the base directory for screenshots, traces, HAR files, PDFs, and other re-creatable artifacts.</td><td>(unset)</td></tr>
+    <tr><td><code>AGENT_BROWSER_RUNTIME_DIR</code></td><td>Override the base directory for daemon runtime files before <code>XDG_RUNTIME_DIR</code> is considered.</td><td>(unset)</td></tr>
+    <tr><td><code>XDG_CONFIG_HOME</code></td><td>Base directory for the default user config file.</td><td><code>~/.config</code> on Linux</td></tr>
+    <tr><td><code>XDG_DATA_HOME</code></td><td>Base directory for installed browsers, saved sessions, auth profiles, and the generated encryption key.</td><td><code>~/.local/share</code> on Linux</td></tr>
+    <tr><td><code>XDG_CACHE_HOME</code></td><td>Base directory for screenshots, traces, HAR files, PDFs, and other re-creatable artifacts.</td><td><code>~/.cache</code> on Linux</td></tr>
+    <tr><td><code>XDG_RUNTIME_DIR</code></td><td>Base directory for daemon sockets and pid files.</td><td>OS/runtime provided</td></tr>
     <tr><td><code>AGENT_BROWSER_AUTO_CONNECT</code></td><td>Auto-discover and connect to a running Chrome instance.</td><td>(disabled)</td></tr>
     <tr><td><code>AGENT_BROWSER_ALLOW_FILE_ACCESS</code></td><td>Allow <code>file://</code> URLs to access local files.</td><td>(disabled)</td></tr>
     <tr><td><code>AGENT_BROWSER_COLOR_SCHEME</code></td><td>Color scheme preference (<code>dark</code>, <code>light</code>, <code>no-preference</code>).</td><td>(none)</td></tr>
@@ -204,7 +212,7 @@ These environment variables configure additional daemon and runtime behavior:
 
 ## Error Handling
 
-- **Auto-discovered config files** (`~/.agent-browser/config.json`, `./agent-browser.json`) that are missing are silently ignored.
+- **Auto-discovered config files** (`$AGENT_BROWSER_CONFIG_DIR/agent-browser/config.json`, else `$XDG_CONFIG_HOME/agent-browser/config.json`, and `./agent-browser.json`) that are missing are silently ignored.
 - **`--config <path>`** with a missing or malformed file exits with an error.
 - **Malformed JSON** in auto-discovered files prints a warning to stderr and continues without that file.
 - **Unknown keys** are silently ignored for forward compatibility.

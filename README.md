@@ -597,7 +597,9 @@ Alternatively, use `--session-name` to automatically save and restore cookies an
 agent-browser --session-name twitter open twitter.com
 
 # Login once, then state persists automatically
-# State files stored in ~/.agent-browser/sessions/
+# State files stored in $AGENT_BROWSER_DATA_DIR/agent-browser/sessions/
+# or $XDG_DATA_HOME/agent-browser/sessions/
+# (usually ~/.local/share/agent-browser/sessions/)
 
 # Or via environment variable
 export AGENT_BROWSER_SESSION_NAME=twitter
@@ -626,7 +628,7 @@ agent-browser --session-name secure open example.com
 
 agent-browser includes security features for safe AI agent deployments. All features are opt-in -- existing workflows are unaffected until you explicitly enable a feature:
 
-- **Authentication Vault** -- Store credentials locally (always encrypted), reference by name. The LLM never sees passwords. `auth login` navigates with `load` and then waits for login form selectors to appear (SPA-friendly, timeout follows the default action timeout). A key is auto-generated at `~/.agent-browser/.encryption-key` if `AGENT_BROWSER_ENCRYPTION_KEY` is not set: `echo "pass" | agent-browser auth save github --url https://github.com/login --username user --password-stdin` then `agent-browser auth login github`
+- **Authentication Vault** -- Store credentials locally (always encrypted), reference by name. The LLM never sees passwords. `auth login` navigates with `load` and then waits for login form selectors to appear (SPA-friendly, timeout follows the default action timeout). A key is auto-generated at `$AGENT_BROWSER_DATA_DIR/agent-browser/.encryption-key` or `$XDG_DATA_HOME/agent-browser/.encryption-key` (usually `~/.local/share/agent-browser/.encryption-key`) if `AGENT_BROWSER_ENCRYPTION_KEY` is not set: `echo "pass" | agent-browser auth save github --url https://github.com/login --username user --password-stdin` then `agent-browser auth login github`
 - **Content Boundary Markers** -- Wrap page output in delimiters so LLMs can distinguish tool output from untrusted content: `--content-boundaries`
 - **Domain Allowlist** -- Restrict navigation to trusted domains (wildcards like `*.example.com` also match the bare domain): `--allowed-domains "example.com,*.example.com"`. Sub-resource requests (scripts, images, fetch) and WebSocket/EventSource connections to non-allowed domains are also blocked. Include any CDN domains your target pages depend on (e.g., `*.cdn.example.com`).
 - **Action Policy** -- Gate destructive actions with a static policy file: `--action-policy ./policy.json`
@@ -791,7 +793,7 @@ Create an `agent-browser.json` file to set persistent defaults instead of repeat
 
 **Locations (lowest to highest priority):**
 
-1. `~/.agent-browser/config.json` -- user-level defaults
+1. `$AGENT_BROWSER_CONFIG_DIR/agent-browser/config.json`, else `$XDG_CONFIG_HOME/agent-browser/config.json` -- user-level defaults (usually `~/.config/agent-browser/config.json`)
 2. `./agent-browser.json` -- project-level overrides (in working directory)
 3. `AGENT_BROWSER_*` environment variables override config file values
 4. CLI flags override everything

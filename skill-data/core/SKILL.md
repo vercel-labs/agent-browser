@@ -54,6 +54,11 @@ agent-browser screenshot result.png
 The browser stays running across commands so these feel like a single
 session. Use `agent-browser close` (or `close --all`) when you're done.
 
+User config lives at `$AGENT_BROWSER_CONFIG_DIR/agent-browser/config.json`
+or `$XDG_CONFIG_HOME/agent-browser/config.json`, and persistent browser/session
+data lives under `$AGENT_BROWSER_DATA_DIR/agent-browser` or
+`$XDG_DATA_HOME/agent-browser`.
+
 ## Reading a page
 
 ```bash
