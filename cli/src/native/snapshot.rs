@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde_json::Value;
 
@@ -180,6 +180,13 @@ struct CursorElementInfo {
     text: String, // textContent from the DOM element (fallback when ARIA name is empty)
     hidden_input_kind: Option<HiddenInputKind>,
     hidden_input_checked: Option<String>, // "true", "false", or "mixed" (tristate)
+    fallback_role: Option<String>,
+    checked: Option<String>,
+    expanded: Option<bool>,
+    selected: Option<bool>,
+    disabled: Option<bool>,
+    required: Option<bool>,
+    value_text: Option<String>,
 }
 
 struct RoleNameTracker {
@@ -406,7 +413,9 @@ pub async fn take_snapshot(
     for (idx, _) in &nodes_with_refs {
         if let Some(bid) = tree_nodes[*idx].backend_node_id {
             if let Some(cursor_info) = cursor_elements.get(&bid) {
-                tree_nodes[*idx].cursor_info = Some((*cursor_info).clone());
+                if !cursor_info.hints.is_empty() || cursor_info.hidden_input_kind.is_some() {
+                    tree_nodes[*idx].cursor_info = Some((*cursor_info).clone());
+                }
             }
         }
     }
@@ -556,6 +565,15 @@ pub async fn take_snapshot(
         }
     }
 
+    append_missing_dom_interactive_refs(
+        &mut output,
+        &tree_nodes,
+        &cursor_elements,
+        selector_backend_ids.as_ref(),
+        ref_map,
+        frame_id,
+    );
+
     if options.compact {
         output = compact_tree(&output, options.interactive);
     }
@@ -610,12 +628,12 @@ async fn find_cursor_interactive_elements(
     client: &CdpClient,
     session_id: &str,
 ) -> Result<HashMap<i64, CursorElementInfo>, String> {
-    // Single JS evaluation that matches the v0.19.0 Node.js findCursorInteractiveElements():
+    // Single JS evaluation that matches the v0.19.0 Node.js findCursorInteractiveElements()
+    // and also records semantic interactive elements. The semantic fallback is
+    // used only when Chrome's AX tree omits a visible DOM control over remote CDP.
     // - Uses querySelectorAll('*') to walk all elements
     // - Checks getComputedStyle(el).cursor === 'pointer'
     // - Checks onclick attribute/handler and tabindex
-    // - Skips interactiveTags (a, button, input, select, textarea, details, summary)
-    // - Skips elements with interactive ARIA roles
     // - Deduplicates inherited cursor:pointer from parent
     // - Skips empty text and zero-size elements
     // - Tags each matched element with data-__ab-ci for batch backendNodeId resolution
@@ -629,9 +647,66 @@ async fn find_cursor_interactive_elements(
         'menuitem':1, 'menuitemcheckbox':1, 'menuitemradio':1, 'option':1, 'searchbox':1,
         'slider':1, 'spinbutton':1, 'switch':1, 'tab':1, 'treeitem':1
     };
-    var interactiveTags = {
-        'a':1, 'button':1, 'input':1, 'select':1, 'textarea':1, 'details':1, 'summary':1
-    };
+
+    function norm(s) {
+        return (s || '').replace(/\s+/g, ' ').trim();
+    }
+
+    function textById(id) {
+        if (!id) return '';
+        var parts = id.split(/\s+/).map(function(part) {
+            var node = document.getElementById(part);
+            return node ? norm(node.textContent || '') : '';
+        }).filter(Boolean);
+        return parts.join(' ');
+    }
+
+    function labelText(el) {
+        if (!el) return '';
+        if (el.labels && el.labels.length) {
+            var labels = [];
+            for (var i = 0; i < el.labels.length; i++) labels.push(norm(el.labels[i].textContent || ''));
+            return labels.filter(Boolean).join(' ');
+        }
+        if (el.id) {
+            var label = document.querySelector('label[for="' + CSS.escape(el.id) + '"]');
+            if (label) return norm(label.textContent || '');
+        }
+        return '';
+    }
+
+    function accessibleName(el, fallbackText) {
+        return norm(
+            el.getAttribute('aria-label') ||
+            textById(el.getAttribute('aria-labelledby')) ||
+            labelText(el) ||
+            el.getAttribute('alt') ||
+            el.getAttribute('title') ||
+            fallbackText ||
+            el.value ||
+            ''
+        );
+    }
+
+    function semanticInfo(el, tagName) {
+        var role = (el.getAttribute('role') || '').trim().toLowerCase().split(/\s+/)[0];
+        if (interactiveRoles[role]) return { role: role };
+
+        if (tagName === 'a' && el.hasAttribute('href')) return { role: 'link' };
+        if (tagName === 'button' || tagName === 'summary') return { role: 'button' };
+        if (tagName === 'select') return { role: 'combobox' };
+        if (tagName === 'textarea') return { role: 'textbox' };
+        if (tagName !== 'input') return null;
+
+        var type = (el.type || 'text').toLowerCase();
+        if (type === 'hidden') return null;
+        if (type === 'radio') return { role: 'radio' };
+        if (type === 'checkbox') return { role: 'checkbox' };
+        if (type === 'range') return { role: 'slider' };
+        if (type === 'search') return { role: 'searchbox' };
+        if (type === 'button' || type === 'submit' || type === 'reset' || type === 'image') return { role: 'button' };
+        return { role: 'textbox' };
+    }
 
     var allElements = document.body.querySelectorAll('*');
     for (var i = 0; i < allElements.length; i++) {
@@ -640,12 +715,11 @@ async fn find_cursor_interactive_elements(
         if (el.closest && el.closest('[hidden], [aria-hidden="true"]')) continue;
 
         var tagName = el.tagName.toLowerCase();
-        if (interactiveTags[tagName]) continue;
-
-        var role = el.getAttribute('role');
-        if (role && interactiveRoles[role.toLowerCase()]) continue;
-
         var computedStyle = getComputedStyle(el);
+        if (computedStyle.display === 'none' || computedStyle.visibility === 'hidden') continue;
+
+        var text = (el.textContent || '').trim().slice(0, 100);
+        var semantic = semanticInfo(el, tagName);
         var hasCursorPointer = computedStyle.cursor === 'pointer';
         var hasOnClick = el.hasAttribute('onclick') || el.onclick !== null;
         var tabIndex = el.getAttribute('tabindex');
@@ -653,15 +727,13 @@ async fn find_cursor_interactive_elements(
         var ce = el.getAttribute('contenteditable');
         var isEditable = ce === '' || ce === 'true';
 
-        if (!hasCursorPointer && !hasOnClick && !hasTabIndex && !isEditable) continue;
+        if (!semantic && !hasCursorPointer && !hasOnClick && !hasTabIndex && !isEditable) continue;
 
         // Skip elements that only inherit cursor:pointer from an ancestor
-        if (hasCursorPointer && !hasOnClick && !hasTabIndex && !isEditable) {
+        if (!semantic && hasCursorPointer && !hasOnClick && !hasTabIndex && !isEditable) {
             var parent = el.parentElement;
             if (parent && getComputedStyle(parent).cursor === 'pointer') continue;
         }
-
-        var text = (el.textContent || '').trim().slice(0, 100);
 
         var rect = el.getBoundingClientRect();
         if (rect.width === 0 || rect.height === 0) continue;
@@ -683,16 +755,39 @@ async fn find_cursor_interactive_elements(
             }
         }
 
+        var name = accessibleName(el, text).slice(0, 100);
+        var checked = null;
+        if (semantic && (semantic.role === 'radio' || semantic.role === 'checkbox' || semantic.role === 'switch' || semantic.role === 'menuitemcheckbox' || semantic.role === 'menuitemradio')) {
+            if (el.getAttribute('aria-checked') !== null) {
+                checked = el.getAttribute('aria-checked');
+            } else if ('checked' in el) {
+                checked = el.indeterminate ? 'mixed' : String(el.checked);
+            }
+        }
+
+        var expanded = el.getAttribute('aria-expanded');
+        var selected = el.getAttribute('aria-selected');
+        var disabled = el.matches(':disabled') || el.getAttribute('aria-disabled') === 'true';
+        var required = el.matches(':required') || el.getAttribute('aria-required') === 'true';
+        var valueText = el.getAttribute('aria-valuetext') || ((tagName === 'input' || tagName === 'textarea' || tagName === 'select') ? el.value : null);
+
         el.setAttribute('data-__ab-ci', String(results.length));
         results.push({
-            text: text,
+            text: name || text,
             tagName: tagName,
             hasOnClick: hasOnClick,
             hasCursorPointer: hasCursorPointer,
             hasTabIndex: hasTabIndex,
             isEditable: isEditable,
             hiddenInputType: hiddenInputType,
-            hiddenInputChecked: hiddenInputChecked
+            hiddenInputChecked: hiddenInputChecked,
+            fallbackRole: semantic ? semantic.role : null,
+            checked: checked,
+            expanded: expanded === null ? null : expanded === 'true',
+            selected: selected === null ? null : selected === 'true',
+            disabled: disabled,
+            required: required,
+            valueText: valueText
         });
     }
     return results;
@@ -873,6 +968,23 @@ async fn find_cursor_interactive_elements(
             .get("hiddenInputChecked")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
+        let fallback_role = elem
+            .get("fallbackRole")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let checked = elem
+            .get("checked")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let expanded = elem.get("expanded").and_then(|v| v.as_bool());
+        let selected = elem.get("selected").and_then(|v| v.as_bool());
+        let disabled = elem.get("disabled").and_then(|v| v.as_bool());
+        let required = elem.get("required").and_then(|v| v.as_bool());
+        let value_text = elem
+            .get("valueText")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
 
         if let Some(bid) = backend_node_id {
             map.insert(
@@ -883,12 +995,128 @@ async fn find_cursor_interactive_elements(
                     text,
                     hidden_input_kind,
                     hidden_input_checked,
+                    fallback_role,
+                    checked,
+                    expanded,
+                    selected,
+                    disabled,
+                    required,
+                    value_text,
                 },
             );
         }
     }
 
     Ok(map)
+}
+
+fn append_missing_dom_interactive_refs(
+    output: &mut String,
+    tree_nodes: &[TreeNode],
+    cursor_elements: &HashMap<i64, CursorElementInfo>,
+    selector_backend_ids: Option<&HashSet<i64>>,
+    ref_map: &mut RefMap,
+    frame_id: Option<&str>,
+) {
+    let ax_backend_ids: HashSet<i64> = tree_nodes
+        .iter()
+        .filter_map(|node| node.backend_node_id)
+        .collect();
+
+    let mut next_ref = ref_map.next_ref_num();
+    let mut missing: Vec<(i64, &CursorElementInfo)> = cursor_elements
+        .iter()
+        .filter_map(|(&backend_id, info)| {
+            if info.fallback_role.is_some()
+                && !ax_backend_ids.contains(&backend_id)
+                && selector_backend_ids.is_none_or(|ids| ids.contains(&backend_id))
+            {
+                Some((backend_id, info))
+            } else {
+                None
+            }
+        })
+        .collect();
+    missing.sort_by_key(|(backend_id, _)| *backend_id);
+
+    for (backend_id, info) in missing {
+        let Some(role) = info.fallback_role.as_deref() else {
+            continue;
+        };
+        if info.text.is_empty() && !matches!(role, "textbox" | "searchbox" | "combobox") {
+            continue;
+        }
+
+        let ref_id = format!("e{}", next_ref);
+        next_ref += 1;
+        ref_map.add_with_frame(
+            ref_id.clone(),
+            Some(backend_id),
+            role,
+            &info.text,
+            None,
+            frame_id,
+        );
+
+        if !output.is_empty() && !output.ends_with('\n') {
+            output.push('\n');
+        }
+        output.push_str(&render_dom_fallback_line(role, &info.text, &ref_id, info));
+        output.push('\n');
+    }
+
+    ref_map.set_next_ref_num(next_ref);
+}
+
+fn render_dom_fallback_line(
+    role: &str,
+    name: &str,
+    ref_id: &str,
+    info: &CursorElementInfo,
+) -> String {
+    let mut line = format!("- {}", role);
+    let visible_name = name.replace(INVISIBLE_CHARS, "");
+    if !visible_name.is_empty() {
+        if let Ok(display_name) = serde_json::to_string(&visible_name) {
+            line.push_str(&format!(" {}", display_name));
+        }
+    }
+
+    let mut attrs = Vec::new();
+    if let Some(ref checked) = info.checked {
+        attrs.push(format!("checked={}", checked));
+    }
+    if let Some(expanded) = info.expanded {
+        attrs.push(format!("expanded={}", expanded));
+    }
+    if let Some(selected) = info.selected {
+        if selected {
+            attrs.push("selected".to_string());
+        }
+    }
+    if let Some(disabled) = info.disabled {
+        if disabled {
+            attrs.push("disabled".to_string());
+        }
+    }
+    if let Some(required) = info.required {
+        if required {
+            attrs.push("required".to_string());
+        }
+    }
+    attrs.push(format!("ref={}", ref_id));
+
+    if !attrs.is_empty() {
+        line.push_str(&format!(" [{}]", attrs.join(", ")));
+    }
+
+    if let Some(ref val) = info.value_text {
+        if !val.is_empty() && val != name {
+            line.push_str(&format!(": {}", val));
+        }
+    }
+
+    line
 }
 
 /// Promote LabelText/generic nodes that wrap a hidden radio/checkbox input.
@@ -1524,7 +1752,98 @@ mod tests {
             text: text.to_string(),
             hidden_input_kind: hidden_kind,
             hidden_input_checked: hidden_checked.map(|s| s.to_string()),
+            fallback_role: None,
+            checked: None,
+            expanded: None,
+            selected: None,
+            disabled: None,
+            required: None,
+            value_text: None,
         }
+    }
+
+    fn make_dom_fallback_info(role: &str, text: &str) -> CursorElementInfo {
+        CursorElementInfo {
+            fallback_role: Some(role.to_string()),
+            checked: None,
+            expanded: None,
+            selected: None,
+            disabled: None,
+            required: None,
+            value_text: None,
+            ..make_cursor_info(None, None, text)
+        }
+    }
+
+    #[test]
+    fn test_append_missing_dom_interactive_refs_adds_ax_omitted_role() {
+        let nodes = vec![make_node("RootWebArea", "", Some(1))];
+        let mut cursor_elements = HashMap::new();
+        let mut radio = make_dom_fallback_info("radio", "Plan A");
+        radio.checked = Some("false".to_string());
+        cursor_elements.insert(42, radio);
+
+        let mut output = String::new();
+        let mut ref_map = RefMap::new();
+        append_missing_dom_interactive_refs(
+            &mut output,
+            &nodes,
+            &cursor_elements,
+            None,
+            &mut ref_map,
+            None,
+        );
+
+        assert!(output.contains("- radio \"Plan A\" [checked=false, ref=e1]"));
+        let entry = ref_map.get("e1").expect("fallback ref should be stored");
+        assert_eq!(entry.backend_node_id, Some(42));
+        assert_eq!(entry.role, "radio");
+        assert_eq!(entry.name, "Plan A");
+        assert_eq!(ref_map.next_ref_num(), 2);
+    }
+
+    #[test]
+    fn test_append_missing_dom_interactive_refs_skips_ax_present_backend_node() {
+        let nodes = vec![make_node("button", "Submit", Some(42))];
+        let mut cursor_elements = HashMap::new();
+        cursor_elements.insert(42, make_dom_fallback_info("button", "Submit"));
+
+        let mut output = String::new();
+        let mut ref_map = RefMap::new();
+        append_missing_dom_interactive_refs(
+            &mut output,
+            &nodes,
+            &cursor_elements,
+            None,
+            &mut ref_map,
+            None,
+        );
+
+        assert!(output.is_empty());
+        assert!(ref_map.get("e1").is_none());
+        assert_eq!(ref_map.next_ref_num(), 1);
+    }
+
+    #[test]
+    fn test_append_missing_dom_interactive_refs_respects_selector_scope() {
+        let nodes = vec![make_node("RootWebArea", "", Some(1))];
+        let mut cursor_elements = HashMap::new();
+        cursor_elements.insert(42, make_dom_fallback_info("tab", "Settings"));
+
+        let selector_ids = HashSet::from([99]);
+        let mut output = String::new();
+        let mut ref_map = RefMap::new();
+        append_missing_dom_interactive_refs(
+            &mut output,
+            &nodes,
+            &cursor_elements,
+            Some(&selector_ids),
+            &mut ref_map,
+            None,
+        );
+
+        assert!(output.is_empty());
+        assert!(ref_map.get("e1").is_none());
     }
 
     #[test]
