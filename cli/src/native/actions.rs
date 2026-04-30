@@ -1899,8 +1899,9 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     // Hash comparison and fast process-exit check are evaluated before the
     // async is_connection_alive to skip the expensive CDP liveness probe
     // when a relaunch is already certain.
+    let has_provider = cmd.get("provider").and_then(|v| v.as_str()).is_some();
     let needs_relaunch = if let Some(ref mut mgr) = state.browser {
-        let is_external = cdp_url.is_some() || cdp_port.is_some() || auto_connect;
+        let is_external = cdp_url.is_some() || cdp_port.is_some() || auto_connect || has_provider;
         let was_external = mgr.is_cdp_connection();
         let hash_changed = !is_external && state.launch_hash != Some(new_hash);
         let storage_state_requires_clean_launch = storage_state_owned.is_some() && !is_external;

@@ -826,10 +826,26 @@ fn is_transient_error(error: &str) -> bool {
         || error.contains("os error 10054") // Connection reset by peer (Windows)
 }
 
+/// Returns the read-timeout (in seconds) for a daemon command.
+/// Provider launch commands involve remote API calls and credential resolution
+/// that can exceed the default 30 s, so they get a longer timeout to avoid
+/// premature EOF retries that create orphaned remote sessions.
+fn read_timeout_secs(cmd: &Value) -> u64 {
+    let is_launch = cmd.get("action").and_then(|v| v.as_str()) == Some("launch");
+    let has_provider = cmd.get("provider").is_some();
+    if is_launch && has_provider {
+        120
+    } else {
+        30
+    }
+}
+
 fn send_command_once(cmd: &Value, session: &str) -> Result<Response, String> {
     let mut stream = connect(session)?;
 
-    stream.set_read_timeout(Some(Duration::from_secs(30))).ok();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(read_timeout_secs(cmd))))
+        .ok();
     stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
 
     let mut json_str = serde_json::to_string(cmd).map_err(|e| e.to_string())?;
@@ -1020,6 +1036,26 @@ mod tests {
         assert!(!is_transient_error("Invalid JSON syntax"));
         assert!(!is_transient_error("Permission denied"));
         assert!(!is_transient_error("Daemon not found"));
+    }
+
+    // === Provider launch timeout tests ===
+
+    #[test]
+    fn test_provider_launch_gets_longer_timeout() {
+        let cmd = serde_json::json!({"action": "launch", "provider": "agentcore"});
+        assert_eq!(read_timeout_secs(&cmd), 120);
+    }
+
+    #[test]
+    fn test_regular_launch_gets_default_timeout() {
+        let cmd = serde_json::json!({"action": "launch", "headless": true});
+        assert_eq!(read_timeout_secs(&cmd), 30);
+    }
+
+    #[test]
+    fn test_navigate_gets_default_timeout() {
+        let cmd = serde_json::json!({"action": "navigate", "url": "https://example.com"});
+        assert_eq!(read_timeout_secs(&cmd), 30);
     }
 
     #[test]
