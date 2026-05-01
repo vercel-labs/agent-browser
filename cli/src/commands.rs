@@ -1442,6 +1442,26 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 }),
             }
         }
+        // === Replay (rrweb DOM recording) ===
+        "replay" => {
+            const VALID: &[&str] = &["start", "stop", "status"];
+            match rest.first().copied() {
+                Some("start") => Ok(json!({ "id": id, "action": "replay_start" })),
+                Some("stop") => {
+                    let path = rest.get(1).unwrap_or(&"/tmp/replay");
+                    Ok(json!({ "id": id, "action": "replay_stop", "path": path }))
+                }
+                Some("status") => Ok(json!({ "id": id, "action": "replay_status" })),
+                Some(sub) => Err(ParseError::UnknownSubcommand {
+                    subcommand: sub.to_string(),
+                    valid_options: VALID,
+                }),
+                None => Err(ParseError::MissingArguments {
+                    context: "replay".to_string(),
+                    usage: "replay <start|stop|status> [path]",
+                }),
+            }
+        }
         "console" => {
             let clear = rest.contains(&"--clear");
             Ok(json!({ "id": id, "action": "console", "clear": clear }))
