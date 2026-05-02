@@ -27,9 +27,12 @@ You can also use the runtime commands to control streaming on a running session:
 
 ```bash
 agent-browser stream enable --port 9223
+agent-browser stream enable --addr 0.0.0.0 --port 9223
 agent-browser stream status
 agent-browser stream disable
 ```
+
+Runtime streaming binds to `127.0.0.1` by default. Use `--addr 0.0.0.0` only when the stream must be reachable through a container port mapping or another trusted network boundary.
 
 ## Dashboard features
 

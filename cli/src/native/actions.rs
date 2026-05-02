@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::io::Write;
+use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
@@ -5247,6 +5248,11 @@ async fn current_stream_status(state: &DaemonState) -> Value {
 
     json!({
         "enabled": state.stream_server.is_some(),
+        "addr": state
+            .stream_server
+            .as_ref()
+            .map(|server| Value::from(server.bind_addr().to_string()))
+            .unwrap_or(Value::Null),
         "port": state
             .stream_server
             .as_ref()
@@ -5267,9 +5273,20 @@ async fn handle_stream_enable(cmd: &Value, state: &mut DaemonState) -> Result<Va
             .map_err(|_| format!("Invalid stream port '{}': expected 0-65535", raw))?,
         None => 0,
     };
+    let bind_addr = match cmd.get("addr").and_then(|value| value.as_str()) {
+        Some(raw) => raw
+            .parse::<IpAddr>()
+            .map_err(|_| format!("Invalid stream address '{}': expected an IP address", raw))?,
+        None => IpAddr::from(Ipv4Addr::LOCALHOST),
+    };
 
-    let (server, client_slot) =
-        StreamServer::start_without_client(requested_port, state.session_id.clone(), false).await?;
+    let (server, client_slot) = StreamServer::start_without_client_on_addr(
+        requested_port,
+        bind_addr,
+        state.session_id.clone(),
+        false,
+    )
+    .await?;
     let port = server.port();
     if let Err(err) = write_stream_file(&state.session_id, port) {
         server.shutdown().await;
@@ -8147,6 +8164,7 @@ mod tests {
             .expect("runtime stream should report a bound port");
         assert!(port > 0, "runtime stream should bind a non-zero port");
         assert_eq!(enabled_status["enabled"], true);
+        assert_eq!(enabled_status["addr"], "127.0.0.1");
         assert_eq!(enabled_status["connected"], false);
         assert_eq!(enabled_status["screencasting"], false);
 
@@ -8164,6 +8182,7 @@ mod tests {
             .await
             .expect("status should work after enable");
         assert_eq!(status["enabled"], true);
+        assert_eq!(status["addr"], "127.0.0.1");
         assert_eq!(status["port"], port);
 
         let disabled = handle_stream_disable(&mut state)
@@ -8181,6 +8200,7 @@ mod tests {
             .await
             .expect("status should work after disable");
         assert_eq!(final_status["enabled"], false);
+        assert_eq!(final_status["addr"], Value::Null);
         assert_eq!(final_status["port"], Value::Null);
 
         let disable_err = handle_stream_disable(&mut state)
@@ -8189,6 +8209,48 @@ mod tests {
         assert!(disable_err.contains("not enabled"));
 
         let _ = fs::remove_dir_all(&socket_dir);
+    }
+
+    #[tokio::test]
+    async fn test_stream_enable_uses_requested_addr() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "AGENT_BROWSER_SESSION"]);
+        let socket_dir = unique_socket_dir("stream-addr");
+        fs::create_dir_all(&socket_dir).expect("socket dir should be created");
+        guard.set(
+            "AGENT_BROWSER_SOCKET_DIR",
+            socket_dir.to_str().expect("socket dir should be utf-8"),
+        );
+        guard.set("AGENT_BROWSER_SESSION", "stream-addr-session");
+
+        let mut state = DaemonState::new();
+        let enabled_status =
+            handle_stream_enable(&json!({ "addr": "0.0.0.0", "port": 0 }), &mut state)
+                .await
+                .expect("stream enable should bind the requested address");
+
+        assert_eq!(enabled_status["enabled"], true);
+        assert_eq!(enabled_status["addr"], "0.0.0.0");
+        assert!(
+            enabled_status["port"].as_u64().is_some_and(|port| port > 0),
+            "runtime stream should report a bound port"
+        );
+
+        handle_stream_disable(&mut state)
+            .await
+            .expect("stream disable should clean up custom address stream");
+        let _ = fs::remove_dir_all(&socket_dir);
+    }
+
+    #[tokio::test]
+    async fn test_stream_enable_rejects_invalid_addr() {
+        let mut state = DaemonState::new();
+        let err = handle_stream_enable(&json!({ "addr": "localhost", "port": 0 }), &mut state)
+            .await
+            .expect_err("non-IP bind address should be rejected");
+
+        assert!(err.contains("Invalid stream address"));
+        assert!(state.stream_server.is_none());
+        assert!(state.stream_client.is_none());
     }
 
     #[tokio::test]
