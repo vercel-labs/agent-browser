@@ -7,26 +7,46 @@ use std::path::{Path, PathBuf};
 use super::helpers::which_exists;
 use super::{Check, Status};
 
-pub(super) fn check(checks: &mut Vec<Check>) {
+pub(super) fn check(checks: &mut Vec<Check>, executable_path: Option<&str>) {
     let category = "Chrome";
 
-    let chrome = crate::native::cdp::chrome::find_chrome();
+    let configured_path = executable_path.filter(|path| !path.trim().is_empty());
+    let using_configured_path = configured_path.is_some();
+    let chrome = configured_path
+        .map(PathBuf::from)
+        .or_else(crate::native::cdp::chrome::find_chrome);
+
     match chrome {
         Some(path) => {
             let label = path.display().to_string();
-            match query_chrome_version(&path) {
-                Some(version) => checks.push(Check::new(
+            if !path.exists() {
+                checks.push(
+                    Check::new(
+                        "chrome.installed",
+                        category,
+                        Status::Fail,
+                        format!("Configured browser executable not found at {}", label),
+                    )
+                    .with_fix("update executablePath or AGENT_BROWSER_EXECUTABLE_PATH"),
+                );
+            } else if let Some(version) = query_chrome_version(&path) {
+                checks.push(Check::new(
                     "chrome.installed",
                     category,
                     Status::Pass,
                     format!("{} at {}", version, label),
-                )),
-                None => checks.push(Check::new(
+                ));
+            } else {
+                checks.push(Check::new(
                     "chrome.installed",
                     category,
                     Status::Pass,
-                    format!("Chrome at {} (version unknown)", label),
-                )),
+                    if using_configured_path {
+                        format!("Browser executable at {} (version unknown)", label)
+                    } else {
+                        format!("Chrome at {} (version unknown)", label)
+                    },
+                ));
             }
         }
         None => checks.push(
@@ -140,6 +160,51 @@ pub(super) fn puppeteer_cache_dir() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn check_uses_configured_executable_path() {
+        let executable = std::env::current_exe().expect("test executable should resolve");
+        let mut checks = Vec::new();
+
+        check(&mut checks, executable.to_str());
+
+        let chrome_check = checks
+            .iter()
+            .find(|check| check.id == "chrome.installed")
+            .expect("chrome check should be present");
+        assert_eq!(chrome_check.status, Status::Pass);
+        assert!(
+            chrome_check
+                .message
+                .contains(&executable.display().to_string()),
+            "configured executable path should appear in message: {}",
+            chrome_check.message
+        );
+    }
+
+    #[test]
+    fn check_fails_when_configured_executable_path_is_missing() {
+        let missing = std::env::temp_dir().join(format!(
+            "agent-browser-missing-browser-{}",
+            std::process::id()
+        ));
+        let mut checks = Vec::new();
+
+        check(&mut checks, missing.to_str());
+
+        let chrome_check = checks
+            .iter()
+            .find(|check| check.id == "chrome.installed")
+            .expect("chrome check should be present");
+        assert_eq!(chrome_check.status, Status::Fail);
+        assert!(
+            chrome_check
+                .message
+                .contains("Configured browser executable"),
+            "missing executable should produce a targeted message: {}",
+            chrome_check.message
+        );
+    }
 
     #[test]
     fn test_puppeteer_cache_dir_returns_sensible_default() {
