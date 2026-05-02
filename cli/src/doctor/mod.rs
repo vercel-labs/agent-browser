@@ -23,12 +23,13 @@ use serde_json::{json, Value};
 
 use crate::color;
 
-#[derive(Default, Clone, Copy)]
+#[derive(Default, Clone)]
 pub struct DoctorOptions {
     pub offline: bool,
     pub quick: bool,
     pub fix: bool,
     pub json: bool,
+    pub executable_path: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -97,7 +98,7 @@ pub fn run_doctor(opts: DoctorOptions) -> i32 {
     let mut fixed: Vec<String> = Vec::new();
 
     environment::check(&mut checks);
-    chrome::check(&mut checks);
+    chrome::check(&mut checks, opts.executable_path.as_deref());
     daemon::check(&mut checks);
     config::check(&mut checks);
     security::check(&mut checks);
@@ -108,7 +109,7 @@ pub fn run_doctor(opts: DoctorOptions) -> i32 {
     }
 
     if !opts.quick {
-        launch::check(&mut checks);
+        launch::check(&mut checks, opts.executable_path.as_deref());
     }
 
     if opts.fix {

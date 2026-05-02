@@ -24,6 +24,7 @@ fn build_doctor_cmd(tmp: &TempDir, args: &[&str]) -> Command {
         // Keep the launch test's skip-logic deterministic across hosts.
         .env_remove("AGENT_BROWSER_PROVIDER")
         .env_remove("AGENT_BROWSER_CDP")
+        .env_remove("AGENT_BROWSER_EXECUTABLE_PATH")
         // Don't emit color codes into captured stdout.
         .env("NO_COLOR", "1");
     cmd
@@ -105,6 +106,43 @@ fn doctor_offline_quick_json_emits_valid_payload() {
             stdout
         );
     }
+}
+
+#[test]
+fn doctor_uses_configured_executable_path() {
+    let tmp = TempDir::new().unwrap();
+    let config_dir = tmp.path().join("home").join(".agent-browser");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("config.json"),
+        serde_json::json!({ "executablePath": BIN }).to_string(),
+    )
+    .unwrap();
+
+    let output = build_doctor_cmd(&tmp, &["doctor", "--offline", "--quick", "--json"])
+        .output()
+        .expect("failed to invoke agent-browser doctor");
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be utf8");
+    let payload: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("stdout was not JSON: {}\n---\n{}", e, stdout));
+
+    let checks = payload["checks"]
+        .as_array()
+        .expect("checks should be an array");
+    let chrome_check = checks
+        .iter()
+        .find(|check| check["id"] == "chrome.installed")
+        .expect("chrome check should be present");
+
+    assert_eq!(chrome_check["status"], "pass");
+    assert!(
+        chrome_check["message"]
+            .as_str()
+            .is_some_and(|message| message.contains(BIN)),
+        "chrome check should mention configured executable path: {}",
+        chrome_check
+    );
 }
 
 #[test]

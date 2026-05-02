@@ -558,6 +558,7 @@ fn main() {
             quick: args.iter().any(|a| a == "--quick"),
             fix: args.iter().any(|a| a == "--fix"),
             json: flags.json,
+            executable_path: flags.executable_path.clone(),
         };
         exit(doctor::run_doctor(opts));
     }
