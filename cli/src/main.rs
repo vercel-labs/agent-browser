@@ -29,7 +29,7 @@ use connection::{
     DaemonOptions,
 };
 use flags::{clean_args, parse_flags, Flags};
-use install::run_install;
+use install::{parse_install_args, run_install};
 use output::{
     print_command_help, print_help, print_response_with_opts, print_version, OutputOptions,
 };
@@ -539,8 +539,14 @@ fn main() {
 
     // Handle install separately
     if clean.first().map(|s| s.as_str()) == Some("install") {
-        let with_deps = args.iter().any(|a| a == "--with-deps" || a == "-d");
-        run_install(with_deps);
+        let install_options = match parse_install_args(&clean[1..]) {
+            Ok(options) => options,
+            Err(e) => {
+                eprintln!("{} {}", color::error_indicator(), e);
+                exit(1);
+            }
+        };
+        run_install(install_options);
         return;
     }
 
