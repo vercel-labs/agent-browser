@@ -126,7 +126,7 @@ agent-browser pdf <path>              # Save as PDF
 agent-browser snapshot                # Accessibility tree with refs (best for AI)
 agent-browser eval <js>               # Run JavaScript (-b for base64, --stdin for piped input)
 agent-browser connect <port>          # Connect to browser via CDP
-agent-browser stream enable [--port <port>]  # Start runtime WebSocket streaming
+agent-browser stream enable [--addr <addr>] [--port <port>]  # Start runtime WebSocket streaming
 agent-browser stream status           # Show runtime streaming state and bound port
 agent-browser stream disable          # Stop runtime WebSocket streaming
 agent-browser close                   # Close browser (aliases: quit, exit)
@@ -1142,6 +1142,7 @@ You can also manage streaming at runtime with `stream enable`, `stream disable`,
 
 ```bash
 agent-browser stream enable --port 9223   # Re-enable on a specific port
+agent-browser stream enable --addr 0.0.0.0 --port 9223  # Bind for container access
 agent-browser stream disable              # Stop streaming for the session
 ```
 

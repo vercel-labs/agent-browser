@@ -112,6 +112,11 @@ fn format_stream_status_text(action: Option<&str>, data: &serde_json::Value) -> 
                 return Some("Streaming disabled".to_string());
             }
 
+            let addr = data
+                .get("addr")
+                .and_then(|v| v.as_str())
+                .unwrap_or("127.0.0.1");
+            let host = format_ws_host(addr);
             let port = data.get("port").and_then(|v| v.as_u64())?;
             let connected = data
                 .get("connected")
@@ -123,10 +128,18 @@ fn format_stream_status_text(action: Option<&str>, data: &serde_json::Value) -> 
                 .unwrap_or(false);
 
             Some(format!(
-                "Streaming enabled on ws://127.0.0.1:{port}\nConnected: {connected}\nScreencasting: {screencasting}"
+                "Streaming enabled on ws://{host}:{port}\nConnected: {connected}\nScreencasting: {screencasting}"
             ))
         }
         _ => None,
+    }
+}
+
+fn format_ws_host(addr: &str) -> String {
+    if addr.contains(':') && !addr.starts_with('[') {
+        format!("[{addr}]")
+    } else {
+        addr.to_string()
     }
 }
 
@@ -2614,13 +2627,14 @@ Examples:
 agent-browser stream - Manage live WebSocket browser streaming
 
 Usage:
-  agent-browser stream enable [--port <port>]
+  agent-browser stream enable [--addr <addr>] [--port <port>]
   agent-browser stream disable
   agent-browser stream status
 
 Enables or disables the session-scoped WebSocket stream server without restarting
 an already-running daemon. If --port is omitted, agent-browser binds an
-available localhost port automatically and reports it back.
+available port automatically and reports it back. If --addr is omitted,
+agent-browser binds to 127.0.0.1.
 
 Notes:
   - 'stream enable' creates the WebSocket server.
@@ -2637,6 +2651,7 @@ Examples:
   agent-browser stream status
   agent-browser stream enable
   agent-browser stream enable --port 9223
+  agent-browser stream enable --addr 0.0.0.0 --port 9223
   agent-browser stream disable
 "##
         }
@@ -2995,7 +3010,8 @@ Debug:
   clipboard <op> [text]      Read/write clipboard (read, write, copy, paste)
 
 Streaming:
-  stream enable [--port <n>] Start runtime WebSocket streaming for this session
+  stream enable [--addr <addr>] [--port <n>]
+                             Start runtime WebSocket streaming for this session
   stream disable             Stop runtime WebSocket streaming
   stream status              Show streaming status and active port
 
@@ -3202,6 +3218,7 @@ Examples:
   agent-browser --cdp 9222 snapshot      # Connect via CDP port
   agent-browser --auto-connect snapshot  # Auto-discover running Chrome
   agent-browser stream enable            # Start runtime streaming on an auto-selected port
+  agent-browser stream enable --addr 0.0.0.0 --port 9223  # Bind for container access
   agent-browser stream status            # Inspect runtime streaming state
   agent-browser --color-scheme dark open example.com  # Dark mode
   agent-browser --profile Default open gmail.com        # Reuse Chrome login state
@@ -3318,6 +3335,7 @@ mod tests {
     fn test_format_stream_status_text_for_enabled_stream() {
         let data = json!({
             "enabled": true,
+            "addr": "127.0.0.1",
             "port": 9223,
             "connected": true,
             "screencasting": false
@@ -3328,6 +3346,24 @@ mod tests {
         assert_eq!(
             rendered,
             "Streaming enabled on ws://127.0.0.1:9223\nConnected: true\nScreencasting: false"
+        );
+    }
+
+    #[test]
+    fn test_format_stream_status_text_for_ipv6_addr() {
+        let data = json!({
+            "enabled": true,
+            "addr": "::1",
+            "port": 9223,
+            "connected": false,
+            "screencasting": false
+        });
+
+        let rendered = super::format_stream_status_text(Some("stream_enable"), &data).unwrap();
+
+        assert_eq!(
+            rendered,
+            "Streaming enabled on ws://[::1]:9223\nConnected: false\nScreencasting: false"
         );
     }
 

@@ -18,10 +18,11 @@ You can also manage streaming at runtime:
 ```bash
 agent-browser stream status            # Show streaming state and bound port
 agent-browser stream enable --port 9223  # Re-enable on a specific port
+agent-browser stream enable --addr 0.0.0.0 --port 9223  # Bind for container access
 agent-browser stream disable           # Stop streaming for the session
 ```
 
-`stream status` returns the enabled state, active port, browser connection state, and whether screencasting is active. `stream disable` tears the server down and removes the session's `.stream` metadata file.
+`stream enable` binds to `127.0.0.1` by default. Use `--addr 0.0.0.0` when the stream must be reachable through a container port mapping or another network namespace. `stream status` returns the enabled state, bind address, active port, browser connection state, and whether screencasting is active. `stream disable` tears the server down and removes the session's `.stream` metadata file.
 
 ## Runtime status response
 
@@ -30,13 +31,14 @@ agent-browser stream disable           # Stop streaming for the session
 ```json
 {
   "enabled": true,
+  "addr": "127.0.0.1",
   "port": 9223,
   "connected": true,
   "screencasting": true
 }
 ```
 
-`connected` reports whether the daemon currently has a browser attached. `screencasting` reports whether frames are actively being produced for the stream server.
+`addr` is the IP address the stream server is bound to. `connected` reports whether the daemon currently has a browser attached. `screencasting` reports whether frames are actively being produced for the stream server.
 
 ## Relationship to screencast commands
 
