@@ -58,6 +58,12 @@ On Linux, install system dependencies:
 agent-browser install --with-deps
 ```
 
+For slow or high-latency networks, increase the Chrome download timeout:
+
+```bash
+agent-browser install --timeout 600
+```
+
 ### Updating
 
 Upgrade to the latest version:
@@ -445,6 +451,7 @@ agent-browser removeinitscript <identifier>       # Remove a previously register
 ```bash
 agent-browser install                 # Download Chrome from Chrome for Testing (Google's official automation channel)
 agent-browser install --with-deps     # Also install system deps (Linux)
+agent-browser install --timeout 600   # Extend Chrome download timeout for slow networks
 agent-browser upgrade                 # Upgrade agent-browser to the latest version
 agent-browser doctor                  # Diagnose the install and auto-clean stale daemon files
 agent-browser doctor --fix            # Also run destructive repairs (reinstall Chrome, purge old state, ...)
