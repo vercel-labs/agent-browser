@@ -124,7 +124,15 @@ for (const name of itemNames) {
 
   // One round-trip: open detail in a new tab, wait, snapshot, extract URL,
   // close. The source tab is untouched throughout.
-  const result = ab(`batch --json "click @${current.linkRef} --new-tab" "wait 2000" "snapshot -i -c" "get url" "tab close"`);
+  const result = ab(`batch --json \
+    "click @${current.linkRef} --new-tab" \
+    "wait 2000" \
+    "snapshot -i -c" \
+    "get url" \
+    "tab close"`);
+
+  // batch --json returns a JSON array of per-command results:
+  // index 2 = snapshot output, index 3 = get-url output.
 
   const data = extractPlaceDetail(result);
   saveRecord(data);
