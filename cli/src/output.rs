@@ -81,6 +81,34 @@ fn format_storage_value(value: &serde_json::Value) -> String {
         .unwrap_or_else(|| serde_json::to_string(value).unwrap_or_default())
 }
 
+/// Format an error entry from `get_errors_json()` into a display string.
+///
+/// The error JSON has the structure:
+/// ```json
+/// {"text": "...", "url": "...", "line": N, "column": M}
+/// ```
+///
+/// Output format: `✗ <text> (<url>:<line>:<column>)`
+fn format_error_entry(err: &serde_json::Value) -> String {
+    let msg = err.get("text").and_then(|v| v.as_str()).unwrap_or("");
+    let url = err.get("url").and_then(|v| v.as_str());
+    let line = err.get("line").and_then(|v| v.as_i64());
+    let column = err.get("column").and_then(|v| v.as_i64());
+    if url.is_some() {
+        let col_str = column.map(|c| format!(":{}", c)).unwrap_or_default();
+        format!(
+            "{} {} ({}:{}{})",
+            color::error_indicator(),
+            msg,
+            url.unwrap_or(""),
+            line.unwrap_or(0),
+            col_str
+        )
+    } else {
+        format!("{} {}", color::error_indicator(), msg)
+    }
+}
+
 fn format_storage_text(data: &serde_json::Value) -> Option<String> {
     if let Some(entries) = data.get("data").and_then(|v| v.as_object()) {
         if entries.is_empty() {
@@ -506,8 +534,7 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
         // Errors
         if let Some(errors) = data.get("errors").and_then(|v| v.as_array()) {
             for err in errors {
-                let msg = err.get("message").and_then(|v| v.as_str()).unwrap_or("");
-                println!("{} {}", color::error_indicator(), msg);
+                println!("{}", format_error_entry(err));
             }
             return;
         }
@@ -3376,5 +3403,84 @@ mod tests {
         let rendered = format_storage_text(&data).unwrap();
 
         assert_eq!(rendered, "No storage entries");
+    }
+
+    #[test]
+    fn test_format_error_entry_with_location() {
+        // This is the structure returned by EventTracker::get_errors_json()
+        let err = serde_json::json!({
+            "text": "ReferenceError: x is not defined",
+            "url": "http://example.com/test.js",
+            "line": 10,
+            "column": 5
+        });
+
+        let formatted = super::format_error_entry(&err);
+
+        // Must contain the error message from "text" field
+        assert!(
+            formatted.contains("ReferenceError: x is not defined"),
+            "Should contain error text, got: {}",
+            formatted
+        );
+        // Must contain location info
+        assert!(
+            formatted.contains("test.js:10:5"),
+            "Should contain location, got: {}",
+            formatted
+        );
+        // Must have the error indicator
+        assert!(
+            formatted.contains("✗"),
+            "Should have error indicator, got: {}",
+            formatted
+        );
+    }
+
+    #[test]
+    fn test_format_error_entry_without_location() {
+        let err = serde_json::json!({
+            "text": "Error: something went wrong"
+        });
+
+        let formatted = super::format_error_entry(&err);
+
+        assert!(
+            formatted.contains("Error: something went wrong"),
+            "Should contain error text, got: {}",
+            formatted
+        );
+        assert!(
+            formatted.contains("✗"),
+            "Should have error indicator, got: {}",
+            formatted
+        );
+    }
+
+    #[test]
+    fn test_format_error_entry_uses_text_field_not_message() {
+        // The bug was that the code read "message" instead of "text"
+        // "message" doesn't exist in the daemon's error JSON
+        let err = serde_json::json!({
+            "text": "Actual error message",
+            "url": "http://example.com/test.js",
+            "line": 1,
+            "column": 1
+        });
+
+        let formatted = super::format_error_entry(&err);
+
+        // The formatted output should contain the text, not be empty
+        assert!(
+            formatted.contains("Actual error message"),
+            "Should read 'text' field, got: {}",
+            formatted
+        );
+        // Should NOT contain the "message" key's value (which is null/empty)
+        assert!(
+            !formatted.contains("null") && !formatted.contains("\"message\""),
+            "Should not contain message field, got: {}",
+            formatted
+        );
     }
 }
