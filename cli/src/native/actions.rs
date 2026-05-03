@@ -1243,7 +1243,9 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         let needs_launch = if let Some(ref mut mgr) = state.browser {
             mgr.has_process_exited() || !mgr.is_connection_alive().await
         } else {
-            true
+            // WebDriver backend (iOS/Safari) doesn't use state.browser —
+            // don't auto-launch Chrome when it's already active.
+            state.webdriver_backend.is_none()
         };
 
         if needs_launch {
@@ -2111,13 +2113,31 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     Ok(json!({ "launched": true }))
 }
 
+/// Resolve the iOS device name from the command JSON, falling back to
+/// the AGENT_BROWSER_IOS_DEVICE environment variable set by the CLI.
+fn resolve_ios_device_name(cmd: &Value) -> Option<String> {
+    cmd.get("deviceName")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .or_else(|| env::var("AGENT_BROWSER_IOS_DEVICE").ok())
+}
+
+/// Resolve the iOS device UDID from the command JSON, falling back to
+/// the AGENT_BROWSER_IOS_UDID environment variable.
+fn resolve_ios_device_udid(cmd: &Value) -> Option<String> {
+    cmd.get("udid")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .or_else(|| env::var("AGENT_BROWSER_IOS_UDID").ok())
+}
+
 async fn launch_ios(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let device_name = cmd.get("deviceName").and_then(|v| v.as_str());
-    let device_udid = cmd.get("udid").and_then(|v| v.as_str());
+    let device_name = resolve_ios_device_name(cmd);
+    let device_udid = resolve_ios_device_udid(cmd);
     let platform_version = cmd.get("platformVersion").and_then(|v| v.as_str());
 
     // Select device (or use default)
-    let device = ios::select_device(device_name, device_udid)?;
+    let device = ios::select_device(device_name.as_deref(), device_udid.as_deref())?;
 
     // Boot simulator if it's not real and not already booted
     if !device.is_real && device.state != "Booted" {
@@ -2944,44 +2964,62 @@ async fn handle_uncheck(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
 }
 
 async fn handle_wait(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let session_id = mgr.active_session_id()?.to_string();
     let timeout_ms = state.timeout_ms(cmd);
-
-    if let Some(text) = cmd.get("text").and_then(|v| v.as_str()) {
-        wait_for_text(&mgr.client, &session_id, text, timeout_ms).await?;
-        return Ok(json!({ "waited": "text", "text": text }));
-    }
 
     if let Some(selector) = cmd.get("selector").and_then(|v| v.as_str()) {
         let state_str = cmd
             .get("state")
             .and_then(|v| v.as_str())
             .unwrap_or("visible");
-        wait_for_selector(&mgr.client, &session_id, selector, state_str, timeout_ms).await?;
+        poll_until_true(&selector_check_js(selector, state_str), timeout_ms, state).await?;
         return Ok(json!({ "waited": "selector", "selector": selector }));
     }
 
+    if let Some(text) = cmd.get("text").and_then(|v| v.as_str()) {
+        poll_until_true(&text_check_js(text), timeout_ms, state).await?;
+        return Ok(json!({ "waited": "text", "text": text }));
+    }
+
     if let Some(url_pattern) = cmd.get("url").and_then(|v| v.as_str()) {
-        wait_for_url(&mgr.client, &session_id, url_pattern, timeout_ms).await?;
+        poll_until_true(&url_check_js(url_pattern), timeout_ms, state).await?;
         return Ok(json!({ "waited": "url", "url": url_pattern }));
     }
 
     if let Some(fn_str) = cmd.get("function").and_then(|v| v.as_str()) {
-        wait_for_function(&mgr.client, &session_id, fn_str, timeout_ms).await?;
+        poll_until_true(&function_check_js(fn_str), timeout_ms, state).await?;
         return Ok(json!({ "waited": "function" }));
     }
 
     if let Some(load_state) = cmd.get("loadState").and_then(|v| v.as_str()) {
+        let mgr = state
+            .browser
+            .as_ref()
+            .ok_or("loadState wait requires a CDP browser (not supported on WebDriver backends)")?;
+        let session_id = mgr.active_session_id()?.to_string();
         let wait_until = WaitUntil::from_str(load_state);
         mgr.wait_for_lifecycle_external(wait_until, &session_id)
             .await?;
         return Ok(json!({ "waited": "load", "state": load_state }));
     }
 
-    // Just a timeout wait
     tokio::time::sleep(tokio::time::Duration::from_millis(timeout_ms)).await;
     Ok(json!({ "waited": "timeout", "ms": timeout_ms }))
+}
+
+/// Routes JS expression polling to WebDriver or CDP based on active backend.
+async fn poll_until_true(
+    expression: &str,
+    timeout_ms: u64,
+    state: &DaemonState,
+) -> Result<(), String> {
+    if let Some(ref wb) = state.webdriver_backend {
+        if state.browser.is_none() {
+            return webdriver_poll_until_true(wb, expression, timeout_ms).await;
+        }
+    }
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?.to_string();
+    cdp_poll_until_true(&mgr.client, &session_id, expression, timeout_ms).await
 }
 
 async fn handle_gettext(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -3166,25 +3204,14 @@ async fn handle_reload(state: &mut DaemonState) -> Result<Value, String> {
 }
 
 // ---------------------------------------------------------------------------
-// Wait helpers
+// Wait helpers — shared JS expression builders (backend-agnostic)
 // ---------------------------------------------------------------------------
 
-async fn wait_for_selector(
-    client: &super::cdp::client::CdpClient,
-    session_id: &str,
-    selector: &str,
-    state: &str,
-    timeout_ms: u64,
-) -> Result<(), String> {
-    let check_fn = match state {
-        "attached" => format!(
-            "!!document.querySelector({})",
-            serde_json::to_string(selector).unwrap_or_default()
-        ),
-        "detached" => format!(
-            "!document.querySelector({})",
-            serde_json::to_string(selector).unwrap_or_default()
-        ),
+fn selector_check_js(selector: &str, state: &str) -> String {
+    let sel = serde_json::to_string(selector).unwrap_or_default();
+    match state {
+        "attached" => format!("!!document.querySelector({})", sel),
+        "detached" => format!("!document.querySelector({})", sel),
         "hidden" => format!(
             r#"(() => {{
                 const el = document.querySelector({sel});
@@ -3192,7 +3219,6 @@ async fn wait_for_selector(
                 const s = window.getComputedStyle(el);
                 return s.display === 'none' || s.visibility === 'hidden' || parseFloat(s.opacity) === 0;
             }})()"#,
-            sel = serde_json::to_string(selector).unwrap_or_default()
         ),
         _ => format!(
             r#"(() => {{
@@ -3202,11 +3228,42 @@ async fn wait_for_selector(
                 const s = window.getComputedStyle(el);
                 return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
             }})()"#,
-            sel = serde_json::to_string(selector).unwrap_or_default()
         ),
-    };
+    }
+}
 
-    poll_until_true(client, session_id, &check_fn, timeout_ms).await
+fn text_check_js(text: &str) -> String {
+    format!(
+        "(document.body.innerText || '').includes({})",
+        serde_json::to_string(text).unwrap_or_default()
+    )
+}
+
+fn url_check_js(pattern: &str) -> String {
+    format!(
+        "location.href.includes({})",
+        serde_json::to_string(pattern).unwrap_or_default()
+    )
+}
+
+fn function_check_js(fn_str: &str) -> String {
+    format!("!!({})", fn_str)
+}
+
+async fn wait_for_selector(
+    client: &super::cdp::client::CdpClient,
+    session_id: &str,
+    selector: &str,
+    state: &str,
+    timeout_ms: u64,
+) -> Result<(), String> {
+    cdp_poll_until_true(
+        client,
+        session_id,
+        &selector_check_js(selector, state),
+        timeout_ms,
+    )
+    .await
 }
 
 async fn wait_for_url(
@@ -3215,24 +3272,7 @@ async fn wait_for_url(
     pattern: &str,
     timeout_ms: u64,
 ) -> Result<(), String> {
-    let check_fn = format!(
-        "location.href.includes({})",
-        serde_json::to_string(pattern).unwrap_or_default()
-    );
-    poll_until_true(client, session_id, &check_fn, timeout_ms).await
-}
-
-async fn wait_for_text(
-    client: &super::cdp::client::CdpClient,
-    session_id: &str,
-    text: &str,
-    timeout_ms: u64,
-) -> Result<(), String> {
-    let check_fn = format!(
-        "(document.body.innerText || '').includes({})",
-        serde_json::to_string(text).unwrap_or_default()
-    );
-    poll_until_true(client, session_id, &check_fn, timeout_ms).await
+    cdp_poll_until_true(client, session_id, &url_check_js(pattern), timeout_ms).await
 }
 
 async fn wait_for_function(
@@ -3241,11 +3281,10 @@ async fn wait_for_function(
     fn_str: &str,
     timeout_ms: u64,
 ) -> Result<(), String> {
-    let check_fn = format!("!!({})", fn_str);
-    poll_until_true(client, session_id, &check_fn, timeout_ms).await
+    cdp_poll_until_true(client, session_id, &function_check_js(fn_str), timeout_ms).await
 }
 
-async fn poll_until_true(
+async fn cdp_poll_until_true(
     client: &super::cdp::client::CdpClient,
     session_id: &str,
     expression: &str,
@@ -3278,6 +3317,37 @@ async fn poll_until_true(
 
         if tokio::time::Instant::now() >= deadline {
             return Err(format!("Wait timed out after {}ms", timeout_ms));
+        }
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// WebDriver polling helpers (use execute_script instead of CDP Runtime.evaluate)
+// ---------------------------------------------------------------------------
+
+async fn webdriver_poll_until_true(
+    wb: &WebDriverBackend,
+    expression: &str,
+    timeout_ms: u64,
+) -> Result<(), String> {
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
+    let timeout_msg = format!("Wait timed out after {}ms", timeout_ms);
+
+    // WebDriver execute/sync treats the script as a function body,
+    // so it needs an explicit `return` to produce a value.
+    let script = format!("return {}", expression);
+
+    loop {
+        if let Ok(val) = wb.evaluate(&script).await {
+            if val.as_bool().unwrap_or(false) {
+                return Ok(());
+            }
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            return Err(timeout_msg);
         }
 
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
@@ -9032,5 +9102,128 @@ mod tests {
             let auto_handled = auto_dialog && matches!(*dialog_type, "beforeunload" | "alert");
             assert!(!auto_handled, "{dialog_type} should NOT be auto-handled");
         }
+    }
+
+    #[test]
+    fn test_resolve_ios_device_name_env_fallback() {
+        // resolve_ios_device_name should fall back to AGENT_BROWSER_IOS_DEVICE
+        // env var when deviceName is not in the command JSON.
+        let guard = EnvGuard::new(&["AGENT_BROWSER_IOS_DEVICE"]);
+        guard.set("AGENT_BROWSER_IOS_DEVICE", "iPhone 15 Pro");
+
+        let cmd = json!({ "action": "launch", "provider": "ios" });
+        let device_name = resolve_ios_device_name(&cmd);
+
+        assert_eq!(
+            device_name.as_deref(),
+            Some("iPhone 15 Pro"),
+            "Should read AGENT_BROWSER_IOS_DEVICE when deviceName not in cmd"
+        );
+    }
+
+    #[test]
+    fn test_resolve_ios_device_name_cmd_takes_priority() {
+        // When deviceName is in the command JSON, it should take priority
+        // over the env var.
+        let guard = EnvGuard::new(&["AGENT_BROWSER_IOS_DEVICE"]);
+        guard.set("AGENT_BROWSER_IOS_DEVICE", "iPhone 13");
+
+        let cmd = json!({ "action": "launch", "provider": "ios", "deviceName": "iPhone 17 Pro" });
+        let device_name = resolve_ios_device_name(&cmd);
+
+        assert_eq!(
+            device_name.as_deref(),
+            Some("iPhone 17 Pro"),
+            "cmd deviceName should take priority over env var"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_webdriver_wait_timeout_without_cdp() {
+        // When only WebDriver backend is active (no CDP browser),
+        // `wait` with a plain timeout should still work (sleep N ms).
+        let mut state = DaemonState::new();
+        let wd_client = super::super::webdriver::client::WebDriverClient::new_with_session(
+            19999,
+            "fake-sid".to_string(),
+        );
+        state.webdriver_backend = Some(WebDriverBackend::new(wd_client));
+        state.backend_type = BackendType::WebDriver;
+
+        let result = handle_wait(&json!({ "timeout": 50 }), &mut state).await;
+        assert!(
+            result.is_ok(),
+            "Timeout-only wait should work without CDP browser. Got: {:?}",
+            result
+        );
+        assert_eq!(result.unwrap()["waited"], "timeout");
+    }
+
+    #[tokio::test]
+    async fn test_webdriver_wait_selector_without_cdp() {
+        // When only WebDriver backend is active (no CDP browser),
+        // `wait` with a selector should attempt WebDriver-based polling,
+        // not fail with "Browser not launched".
+        let mut state = DaemonState::new();
+        let wd_client = super::super::webdriver::client::WebDriverClient::new_with_session(
+            19999,
+            "fake-sid".to_string(),
+        );
+        state.webdriver_backend = Some(WebDriverBackend::new(wd_client));
+        state.backend_type = BackendType::WebDriver;
+
+        let result = handle_wait(
+            &json!({ "selector": "#test-element", "timeout": 100 }),
+            &mut state,
+        )
+        .await;
+
+        // The fake WebDriver server is unreachable, so the poll will time out
+        // via the WebDriver polling path — not fail with "Browser not launched".
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("Wait timed out"),
+            "Should timeout via WebDriver polling, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_webdriver_backend_skips_auto_launch() {
+        // When webdriver_backend is active (e.g. iOS provider), execute_command
+        // should NOT attempt auto_launch (which would spawn Chrome).
+        // Instead it should route directly through the WebDriver backend.
+        let mut state = DaemonState::new();
+
+        // Set up a fake WebDriver backend (no real server, but state is set)
+        let wd_client = super::super::webdriver::client::WebDriverClient::new_with_session(
+            19999,
+            "fake-sid".to_string(),
+        );
+        state.webdriver_backend = Some(WebDriverBackend::new(wd_client));
+        state.backend_type = BackendType::WebDriver;
+
+        // Navigate command — should NOT try to auto_launch Chrome.
+        // The WebDriver client will fail (no real server at port 19999),
+        // but the error should come from the WebDriver navigate attempt,
+        // NOT from "Auto-launch failed".
+        let cmd = json!({
+            "action": "navigate",
+            "url": "https://example.com",
+            "id": "wd-nav-1"
+        });
+        let result = execute_command(&cmd, &mut state).await;
+
+        let error = result["error"].as_str().unwrap_or("");
+        assert!(
+            !error.contains("Auto-launch failed"),
+            "WebDriver backend active — auto_launch should not fire. Got: {}",
+            error
+        );
+        // browser should still be None (Chrome was never launched)
+        assert!(
+            state.browser.is_none(),
+            "Chrome should not be auto-launched when WebDriver backend is active"
+        );
     }
 }

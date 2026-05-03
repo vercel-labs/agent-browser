@@ -1032,6 +1032,9 @@ fn main() {
             if let Some(ref cs) = flags.color_scheme {
                 launch_cmd["colorScheme"] = json!(cs);
             }
+            if let Some(ref device) = flags.device {
+                launch_cmd["deviceName"] = json!(device);
+            }
 
             let err = match send_command(launch_cmd, &flags.session) {
                 Ok(resp) if resp.success => None,
