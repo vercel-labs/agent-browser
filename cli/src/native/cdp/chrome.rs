@@ -96,6 +96,7 @@ pub struct LaunchOptions {
     pub proxy_password: Option<String>,
     pub profile: Option<String>,
     pub args: Vec<String>,
+    pub ignore_default_args: Vec<String>,
     pub allow_file_access: bool,
     pub extensions: Option<Vec<String>>,
     pub storage_state: Option<String>,
@@ -123,6 +124,7 @@ impl Default for LaunchOptions {
             proxy_password: None,
             profile: None,
             args: Vec::new(),
+            ignore_default_args: Vec::new(),
             allow_file_access: false,
             extensions: None,
             storage_state: None,
@@ -159,6 +161,10 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
         "--enable-features=NetworkService,NetworkServiceInProcess".to_string(),
         "--metrics-recording-only".to_string(),
     ];
+
+    if !options.ignore_default_args.is_empty() {
+        args.retain(|arg| !options.ignore_default_args.contains(arg));
+    }
 
     if !options.use_real_keychain {
         args.push("--password-store=basic".to_string());
@@ -1956,5 +1962,70 @@ mod tests {
 
         let result = resolve_cdp_from_active_port(port, "/devtools/browser/dead").await;
         assert!(result.is_err(), "should fail when nothing is listening");
+    }
+
+    #[test]
+    fn test_build_args_ignore_default_args_exact_match() {
+        let opts = LaunchOptions {
+            ignore_default_args: vec![
+                "--disable-component-update".to_string(),
+                "--disable-sync".to_string(),
+            ],
+            ..Default::default()
+        };
+        let result = build_chrome_args(&opts).unwrap();
+        assert!(
+            !result
+                .args
+                .iter()
+                .any(|a| a == "--disable-component-update"),
+            "exact-matched flag should be removed"
+        );
+        assert!(
+            !result.args.iter().any(|a| a == "--disable-sync"),
+            "exact-matched flag should be removed"
+        );
+        assert!(
+            result.args.iter().any(|a| a == "--no-first-run"),
+            "non-ignored flags should remain"
+        );
+        if let Some(ref dir) = result.temp_user_data_dir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn test_build_args_ignore_default_args_no_prefix_match() {
+        let opts = LaunchOptions {
+            ignore_default_args: vec!["--disable-features".to_string()],
+            ..Default::default()
+        };
+        let result = build_chrome_args(&opts).unwrap();
+        assert!(
+            result
+                .args
+                .iter()
+                .any(|a| a.starts_with("--disable-features=")),
+            "--disable-features should not remove --disable-features=Translate (exact match only)"
+        );
+        if let Some(ref dir) = result.temp_user_data_dir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn test_build_args_ignore_default_args_empty_no_effect() {
+        let opts = LaunchOptions::default();
+        let result = build_chrome_args(&opts).unwrap();
+        assert!(
+            result
+                .args
+                .iter()
+                .any(|a| a == "--disable-component-update"),
+            "default flags should remain when ignore list is empty"
+        );
+        if let Some(ref dir) = result.temp_user_data_dir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 }

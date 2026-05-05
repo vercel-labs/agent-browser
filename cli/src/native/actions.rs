@@ -196,6 +196,7 @@ fn launch_hash(opts: &LaunchOptions) -> u64 {
     opts.proxy_password.hash(&mut h);
     opts.user_agent.hash(&mut h);
     opts.allow_file_access.hash(&mut h);
+    opts.ignore_default_args.hash(&mut h);
     h.finish()
 }
 
@@ -1724,6 +1725,14 @@ fn launch_options_from_env() -> LaunchOptions {
         download_path: env::var("AGENT_BROWSER_DOWNLOAD_PATH").ok(),
         viewport_size: None,
         use_real_keychain: false,
+        ignore_default_args: env::var("AGENT_BROWSER_IGNORE_DEFAULT_ARGS")
+            .map(|v| {
+                v.split([',', '\n'])
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default(),
     }
 }
 
@@ -1892,6 +1901,24 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
             .map(String::from),
         viewport_size: None,
         use_real_keychain: false,
+        ignore_default_args: cmd
+            .get("ignoreDefaultArgs")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_else(|| {
+                env::var("AGENT_BROWSER_IGNORE_DEFAULT_ARGS")
+                    .map(|v| {
+                        v.split([',', '\n'])
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            }),
     };
 
     let new_hash = launch_hash(&launch_options);

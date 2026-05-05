@@ -91,6 +91,7 @@ pub struct Config {
     pub idle_timeout: Option<String>,
     pub no_auto_dialog: Option<bool>,
     pub model: Option<String>,
+    pub ignore_default_args: Option<Vec<String>>,
 }
 
 impl Config {
@@ -152,6 +153,7 @@ impl Config {
             idle_timeout: other.idle_timeout.or(self.idle_timeout),
             no_auto_dialog: other.no_auto_dialog.or(self.no_auto_dialog),
             model: other.model.or(self.model),
+            ignore_default_args: other.ignore_default_args.or(self.ignore_default_args),
         }
     }
 }
@@ -240,6 +242,7 @@ fn extract_config_path(args: &[String]) -> Option<Option<String>> {
         "--screenshot-format",
         "--idle-timeout",
         "--model",
+        "--ignore-default-args",
     ];
     let mut i = 0;
     while i < args.len() {
@@ -328,6 +331,7 @@ pub struct Flags {
     pub model: Option<String>,
     pub verbose: bool,
     pub quiet: bool,
+    pub ignore_default_args: Option<Vec<String>>,
 
     // Track which launch-time options were explicitly passed via CLI
     // (as opposed to being set only via environment variables)
@@ -345,6 +349,7 @@ pub struct Flags {
     pub cli_annotate: bool,
     pub cli_download_path: bool,
     pub cli_headed: bool,
+    pub cli_ignore_default_args: bool,
 }
 
 pub fn parse_flags(args: &[String]) -> Flags {
@@ -503,6 +508,15 @@ pub fn parse_flags(args: &[String]) -> Flags {
         model: env::var("AI_GATEWAY_MODEL").ok().or(config.model),
         verbose: false,
         quiet: false,
+        ignore_default_args: env::var("AGENT_BROWSER_IGNORE_DEFAULT_ARGS")
+            .ok()
+            .map(|s| {
+                s.split([',', '\n'])
+                    .map(|f| f.trim().to_string())
+                    .filter(|f| !f.is_empty())
+                    .collect()
+            })
+            .or(config.ignore_default_args),
         cli_executable_path: false,
         cli_extensions: false,
         cli_init_scripts: false,
@@ -517,6 +531,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
         cli_annotate: false,
         cli_download_path: false,
         cli_headed: false,
+        cli_ignore_default_args: false,
     };
 
     let mut i = 0;
@@ -819,6 +834,18 @@ pub fn parse_flags(args: &[String]) -> Flags {
             "-q" | "--quiet" => {
                 flags.quiet = true;
             }
+            "--ignore-default-args" => {
+                if let Some(s) = args.get(i + 1) {
+                    flags.ignore_default_args = Some(
+                        s.split(',')
+                            .map(|f| f.trim().to_string())
+                            .filter(|f| !f.is_empty())
+                            .collect(),
+                    );
+                    flags.cli_ignore_default_args = true;
+                    i += 1;
+                }
+            }
             "--config" => {
                 // Already handled by load_config(); skip the value
                 i += 1;
@@ -887,6 +914,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--screenshot-format",
         "--idle-timeout",
         "--model",
+        "--ignore-default-args",
     ];
 
     let mut i = 0;
@@ -1522,6 +1550,40 @@ mod tests {
             "open".to_string(),
             "example.com".to_string(),
             "--no-auto-dialog".to_string(),
+        ];
+        let clean = clean_args(&input);
+        assert_eq!(clean, vec!["open", "example.com"]);
+    }
+
+    #[test]
+    fn test_parse_ignore_default_args_flag() {
+        let flags = parse_flags(&args(
+            "--ignore-default-args --disable-component-update,--disable-sync open example.com",
+        ));
+        assert_eq!(
+            flags.ignore_default_args,
+            Some(vec![
+                "--disable-component-update".to_string(),
+                "--disable-sync".to_string(),
+            ])
+        );
+        assert!(flags.cli_ignore_default_args);
+    }
+
+    #[test]
+    fn test_parse_ignore_default_args_not_set_without_flag() {
+        let flags = parse_flags(&args("open example.com"));
+        assert!(flags.ignore_default_args.is_none());
+        assert!(!flags.cli_ignore_default_args);
+    }
+
+    #[test]
+    fn test_clean_args_removes_ignore_default_args() {
+        let input: Vec<String> = vec![
+            "--ignore-default-args".to_string(),
+            "--disable-component-update,--disable-sync".to_string(),
+            "open".to_string(),
+            "example.com".to_string(),
         ];
         let clean = clean_args(&input);
         assert_eq!(clean, vec!["open", "example.com"]);

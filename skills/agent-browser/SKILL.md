@@ -49,3 +49,17 @@ installed version.
 - Accessibility-tree snapshots with element refs for reliable interaction
 - Sessions, authentication vault, state persistence, video recording
 - Specialized skills for Electron apps, Slack, exploratory testing, cloud providers
+
+## Removing Default Chrome Flags
+
+Use `--ignore-default-args` to selectively remove specific flags from the default set of Chrome launch arguments. This is useful when a default flag conflicts with your use case.
+
+```bash
+# Remove specific default flags (comma-separated)
+agent-browser --ignore-default-args "--disable-component-update,--disable-sync" open https://example.com
+
+# Via environment variable
+AGENT_BROWSER_IGNORE_DEFAULT_ARGS="--disable-component-update,--disable-sync" agent-browser open https://example.com
+```
+
+Only exact matches are removed. For example, `--disable-features` will not remove `--disable-features=TranslateUI` or other flags that share the same prefix.

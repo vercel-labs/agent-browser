@@ -2715,6 +2715,8 @@ mod tests {
             cli_annotate: false,
             cli_download_path: false,
             cli_headed: false,
+            cli_ignore_default_args: false,
+            ignore_default_args: None,
             annotate: false,
             color_scheme: None,
             download_path: None,
