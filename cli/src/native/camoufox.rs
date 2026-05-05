@@ -54,23 +54,7 @@ impl CamoufoxAdapter {
     }
 
     pub async fn launch_from_options(options: &LaunchOptions) -> Result<Self, String> {
-        let mut proxy = Value::Null;
-        if let Some(ref server) = options.proxy {
-            proxy = json!({
-                "server": server,
-                "username": options.proxy_username,
-                "password": options.proxy_password,
-            });
-        }
-
-        let cmd = json!({
-            "headless": options.headless,
-            "executablePath": options.executable_path,
-            "args": options.args,
-            "proxy": proxy,
-            "userAgent": options.user_agent,
-        });
-
+        let cmd = launch_command_from_options(options);
         Self::launch(&cmd).await
     }
 
@@ -158,6 +142,27 @@ impl CamoufoxAdapter {
     }
 }
 
+fn launch_command_from_options(options: &LaunchOptions) -> Value {
+    let mut proxy = Value::Null;
+    if let Some(ref server) = options.proxy {
+        proxy = json!({
+            "server": server,
+            "username": options.proxy_username,
+            "password": options.proxy_password,
+        });
+    }
+
+    json!({
+        "headless": options.headless,
+        "executablePath": options.executable_path,
+        "args": options.args,
+        "proxy": proxy,
+        "userAgent": options.user_agent,
+        "storageState": options.storage_state,
+        "ignoreHTTPSErrors": options.ignore_https_errors,
+    })
+}
+
 impl Drop for CamoufoxAdapter {
     fn drop(&mut self) {
         let _ = self.child.start_kill();
@@ -174,4 +179,25 @@ fn adapter_script_path() -> Result<PathBuf, String> {
         "Camoufox adapter script not found at {}",
         script.display()
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn launch_command_from_options_preserves_storage_state() {
+        let options = LaunchOptions {
+            storage_state: Some("/tmp/auth.json".to_string()),
+            ignore_https_errors: true,
+            user_agent: Some("agent-browser-test".to_string()),
+            ..Default::default()
+        };
+
+        let cmd = launch_command_from_options(&options);
+
+        assert_eq!(cmd["storageState"], "/tmp/auth.json");
+        assert_eq!(cmd["ignoreHTTPSErrors"], true);
+        assert_eq!(cmd["userAgent"], "agent-browser-test");
+    }
 }
