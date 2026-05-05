@@ -406,6 +406,8 @@ pub struct DaemonOptions<'a> {
     pub session_name: Option<&'a str>,
     pub download_path: Option<&'a str>,
     pub allowed_domains: Option<&'a [String]>,
+    pub navigation_domains: Option<&'a [String]>,
+    pub resource_domains: Option<&'a [String]>,
     pub action_policy: Option<&'a str>,
     pub confirm_actions: Option<&'a str>,
     pub engine: Option<&'a str>,
@@ -482,6 +484,12 @@ fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
     }
     if let Some(ad) = opts.allowed_domains {
         cmd.env("AGENT_BROWSER_ALLOWED_DOMAINS", ad.join(","));
+    }
+    if let Some(nd) = opts.navigation_domains {
+        cmd.env("AGENT_BROWSER_NAVIGATION_DOMAINS", nd.join(","));
+    }
+    if let Some(rd) = opts.resource_domains {
+        cmd.env("AGENT_BROWSER_RESOURCE_DOMAINS", rd.join(","));
     }
     if let Some(ap) = opts.action_policy {
         cmd.env("AGENT_BROWSER_ACTION_POLICY", ap);

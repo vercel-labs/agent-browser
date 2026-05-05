@@ -78,6 +78,15 @@ pub async fn set_content(client: &CdpClient, session_id: &str, html: &str) -> Re
 
 #[derive(Debug, Clone)]
 pub struct DomainFilter {
+    /// Domains the agent is allowed to navigate to (open, click, form submit).
+    /// When empty, all navigation is allowed.
+    pub navigation_domains: Vec<String>,
+    /// Domains the page is allowed to load sub-resources from (fetch, XHR,
+    /// images, scripts, WebSocket, etc.). When empty, all resources are allowed.
+    pub resource_domains: Vec<String>,
+    /// Legacy unified list. Kept for backwards compatibility: if
+    /// `navigation_domains` or `resource_domains` is empty, the corresponding
+    /// check falls back to this list.
     pub allowed_domains: Vec<String>,
 }
 
@@ -85,16 +94,59 @@ impl DomainFilter {
     pub fn new(domains: &str) -> Self {
         let allowed = parse_domain_list(domains);
         Self {
+            navigation_domains: Vec::new(),
+            resource_domains: Vec::new(),
             allowed_domains: allowed,
         }
     }
 
-    pub fn is_allowed(&self, hostname: &str) -> bool {
-        if self.allowed_domains.is_empty() {
+    pub fn with_split(
+        allowed: &str,
+        navigation: Option<&str>,
+        resource: Option<&str>,
+    ) -> Self {
+        Self {
+            allowed_domains: parse_domain_list(allowed),
+            navigation_domains: navigation
+                .map(|s| parse_domain_list(s))
+                .unwrap_or_default(),
+            resource_domains: resource
+                .map(|s| parse_domain_list(s))
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Check whether any filtering is active at all.
+    pub fn is_active(&self) -> bool {
+        !self.allowed_domains.is_empty()
+            || !self.navigation_domains.is_empty()
+            || !self.resource_domains.is_empty()
+    }
+
+    /// Returns the effective domain list for navigation checks.
+    fn effective_navigation_domains(&self) -> &[String] {
+        if !self.navigation_domains.is_empty() {
+            &self.navigation_domains
+        } else {
+            &self.allowed_domains
+        }
+    }
+
+    /// Returns the effective domain list for resource checks.
+    fn effective_resource_domains(&self) -> &[String] {
+        if !self.resource_domains.is_empty() {
+            &self.resource_domains
+        } else {
+            &self.allowed_domains
+        }
+    }
+
+    fn matches_domain_list(domains: &[String], hostname: &str) -> bool {
+        if domains.is_empty() {
             return true;
         }
         let hostname = hostname.to_lowercase();
-        for pattern in &self.allowed_domains {
+        for pattern in domains {
             if let Some(suffix) = pattern.strip_prefix("*.") {
                 if hostname == suffix || hostname.ends_with(&format!(".{}", suffix)) {
                     return true;
@@ -106,6 +158,42 @@ impl DomainFilter {
         false
     }
 
+    /// Check if a hostname is allowed for agent-initiated navigation.
+    pub fn is_navigation_allowed(&self, hostname: &str) -> bool {
+        Self::matches_domain_list(self.effective_navigation_domains(), hostname)
+    }
+
+    /// Check if a hostname is allowed for page-initiated sub-resource requests.
+    pub fn is_resource_allowed(&self, hostname: &str) -> bool {
+        Self::matches_domain_list(self.effective_resource_domains(), hostname)
+    }
+
+    /// Legacy: check if a hostname is allowed (uses `allowed_domains`).
+    pub fn is_allowed(&self, hostname: &str) -> bool {
+        Self::matches_domain_list(&self.allowed_domains, hostname)
+    }
+
+    /// Check a URL against the navigation domain filter.
+    pub fn check_navigation_url(&self, url: &str) -> Result<(), String> {
+        let domains = self.effective_navigation_domains();
+        if domains.is_empty() {
+            return Ok(());
+        }
+        let parsed = url::Url::parse(url).map_err(|_| format!("Invalid URL: {}", url))?;
+        let hostname = parsed
+            .host_str()
+            .ok_or_else(|| format!("No hostname in URL: {}", url))?;
+        if Self::matches_domain_list(domains, hostname) {
+            Ok(())
+        } else {
+            Err(format!(
+                "Domain '{}' is not in the allowed navigation domains list",
+                hostname
+            ))
+        }
+    }
+
+    /// Legacy check_url for backwards compatibility (uses allowed_domains).
     pub fn check_url(&self, url: &str) -> Result<(), String> {
         if self.allowed_domains.is_empty() {
             return Ok(());
@@ -144,7 +232,7 @@ pub async fn sanitize_existing_pages(
         }
         if let Ok(parsed) = url::Url::parse(&page.url) {
             if let Some(hostname) = parsed.host_str() {
-                if !filter.is_allowed(hostname) {
+                if !filter.is_navigation_allowed(hostname) {
                     let _ = client
                         .send_command(
                             "Page.navigate",
@@ -161,13 +249,14 @@ pub async fn sanitize_existing_pages(
 pub async fn install_domain_filter_script(
     client: &CdpClient,
     session_id: &str,
-    allowed_domains: &[String],
+    filter: &DomainFilter,
 ) -> Result<(), String> {
-    if allowed_domains.is_empty() {
+    let resource_domains = filter.effective_resource_domains();
+    if resource_domains.is_empty() {
         return Ok(());
     }
 
-    let domains_json = serde_json::to_string(allowed_domains).unwrap_or("[]".to_string());
+    let domains_json = serde_json::to_string(resource_domains).unwrap_or("[]".to_string());
     let script = format!(
         r#"(() => {{
             const _allowed = {};
@@ -253,10 +342,10 @@ pub async fn install_domain_filter_fetch(
 pub async fn install_domain_filter(
     client: &CdpClient,
     session_id: &str,
-    allowed_domains: &[String],
+    filter: &DomainFilter,
     handle_auth_requests: bool,
 ) -> Result<(), String> {
-    install_domain_filter_script(client, session_id, allowed_domains).await?;
+    install_domain_filter_script(client, session_id, filter).await?;
     install_domain_filter_fetch(client, session_id, handle_auth_requests).await?;
     Ok(())
 }
@@ -491,6 +580,87 @@ mod tests {
     fn test_parse_domain_list() {
         let domains = parse_domain_list("A.com, B.com , *.C.com");
         assert_eq!(domains, vec!["a.com", "b.com", "*.c.com"]);
+    }
+
+    #[test]
+    fn test_split_filter_navigation_only() {
+        let filter = DomainFilter::with_split("", Some("myapp.com"), None);
+        // Navigation restricted to myapp.com
+        assert!(filter.is_navigation_allowed("myapp.com"));
+        assert!(!filter.is_navigation_allowed("evil.com"));
+        // Resources unrestricted (no resource_domains, no allowed_domains)
+        assert!(filter.is_resource_allowed("anything.com"));
+        assert!(filter.is_resource_allowed("cdn.example.com"));
+    }
+
+    #[test]
+    fn test_split_filter_resource_only() {
+        let filter = DomainFilter::with_split("", None, Some("cdn.example.com"));
+        // Navigation unrestricted (no navigation_domains, no allowed_domains)
+        assert!(filter.is_navigation_allowed("anywhere.com"));
+        // Resources restricted to cdn.example.com
+        assert!(filter.is_resource_allowed("cdn.example.com"));
+        assert!(!filter.is_resource_allowed("other.com"));
+    }
+
+    #[test]
+    fn test_split_filter_both() {
+        let filter = DomainFilter::with_split(
+            "",
+            Some("myapp.com, *.myapp.com"),
+            Some("*.cdn.net, *.api.io"),
+        );
+        // Navigation: only myapp.com
+        assert!(filter.is_navigation_allowed("myapp.com"));
+        assert!(filter.is_navigation_allowed("sub.myapp.com"));
+        assert!(!filter.is_navigation_allowed("evil.com"));
+        // Resources: only cdn.net and api.io
+        assert!(filter.is_resource_allowed("img.cdn.net"));
+        assert!(filter.is_resource_allowed("v1.api.io"));
+        assert!(!filter.is_resource_allowed("evil.com"));
+    }
+
+    #[test]
+    fn test_split_filter_fallback_to_allowed_domains() {
+        // When split fields are empty, falls back to allowed_domains
+        let filter = DomainFilter::with_split("example.com, *.example.com", None, None);
+        assert!(filter.is_navigation_allowed("example.com"));
+        assert!(!filter.is_navigation_allowed("other.com"));
+        assert!(filter.is_resource_allowed("sub.example.com"));
+        assert!(!filter.is_resource_allowed("other.com"));
+    }
+
+    #[test]
+    fn test_split_filter_navigation_overrides_allowed() {
+        // navigation_domains takes priority over allowed_domains for navigation
+        let filter = DomainFilter::with_split(
+            "legacy.com",
+            Some("myapp.com"),
+            None,
+        );
+        // Navigation uses navigation_domains, not allowed_domains
+        assert!(filter.is_navigation_allowed("myapp.com"));
+        assert!(!filter.is_navigation_allowed("legacy.com"));
+        // Resources fall back to allowed_domains
+        assert!(filter.is_resource_allowed("legacy.com"));
+        assert!(!filter.is_resource_allowed("other.com"));
+    }
+
+    #[test]
+    fn test_split_filter_check_navigation_url() {
+        let filter = DomainFilter::with_split("", Some("myapp.com"), None);
+        assert!(filter.check_navigation_url("https://myapp.com/page").is_ok());
+        assert!(filter.check_navigation_url("https://evil.com/page").is_err());
+        // Resources still unrestricted
+        assert!(filter.is_resource_allowed("evil.com"));
+    }
+
+    #[test]
+    fn test_split_filter_is_active() {
+        assert!(!DomainFilter::with_split("", None, None).is_active());
+        assert!(DomainFilter::with_split("example.com", None, None).is_active());
+        assert!(DomainFilter::with_split("", Some("example.com"), None).is_active());
+        assert!(DomainFilter::with_split("", None, Some("example.com")).is_active());
     }
 
     #[test]

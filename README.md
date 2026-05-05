@@ -630,7 +630,17 @@ agent-browser includes security features for safe AI agent deployments. All feat
 
 - **Authentication Vault** -- Store credentials locally (always encrypted), reference by name. The LLM never sees passwords. `auth login` navigates with `load` and then waits for login form selectors to appear (SPA-friendly, timeout follows the default action timeout). A key is auto-generated at `~/.agent-browser/.encryption-key` if `AGENT_BROWSER_ENCRYPTION_KEY` is not set: `echo "pass" | agent-browser auth save github --url https://github.com/login --username user --password-stdin` then `agent-browser auth login github`
 - **Content Boundary Markers** -- Wrap page output in delimiters so LLMs can distinguish tool output from untrusted content: `--content-boundaries`
-- **Domain Allowlist** -- Restrict navigation to trusted domains (wildcards like `*.example.com` also match the bare domain): `--allowed-domains "example.com,*.example.com"`. Sub-resource requests (scripts, images, fetch) and WebSocket/EventSource connections to non-allowed domains are also blocked. Include any CDN domains your target pages depend on (e.g., `*.cdn.example.com`).
+- **Domain Allowlist** -- Restrict where the agent can navigate and what resources pages can load. Three controls are available:
+  - `--allowed-domains` / `allowedDomains` -- Restricts both navigation and sub-resources (legacy, still supported)
+  - `--navigation-domains` / `navigationDomains` -- Restricts only agent-initiated navigation (open, click, form submit)
+  - `--resource-domains` / `resourceDomains` -- Restricts only page-initiated sub-resources (fetch, XHR, scripts, WebSocket)
+
+  When `navigationDomains` or `resourceDomains` is set, it takes priority over `allowedDomains` for that scope. Omitting `resourceDomains` leaves sub-resources unrestricted, so you can lock navigation to your app while allowing pages to load their own dependencies:
+  ```json
+  {
+    "navigationDomains": ["myapp.com", "*.myapp.com"]
+  }
+  ```
 - **Action Policy** -- Gate destructive actions with a static policy file: `--action-policy ./policy.json`
 - **Action Confirmation** -- Require explicit approval for sensitive action categories: `--confirm-actions eval,download`
 - **Output Length Limits** -- Prevent context flooding: `--max-output 50000`
