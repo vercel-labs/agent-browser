@@ -1909,7 +1909,16 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
                     .filter_map(|v| v.as_str().map(|s| s.to_string()))
                     .collect()
             })
-            .unwrap_or_default(),
+            .unwrap_or_else(|| {
+                env::var("AGENT_BROWSER_IGNORE_DEFAULT_ARGS")
+                    .map(|v| {
+                        v.split([',', '\n'])
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            }),
     };
 
     let new_hash = launch_hash(&launch_options);
