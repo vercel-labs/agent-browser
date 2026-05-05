@@ -331,7 +331,7 @@ impl BrowserManager {
             }
             _ => {
                 return Err(format!(
-                    "Unknown engine '{}'. Supported engines: chrome, lightpanda",
+                    "Unknown engine '{}'. Supported engines: chrome, lightpanda, camoufox",
                     engine
                 ));
             }
