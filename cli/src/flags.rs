@@ -188,13 +188,16 @@ fn env_var_is_truthy(name: &str) -> bool {
 }
 
 /// Parse an optional boolean value after a flag. Returns (value, consumed_next_arg).
-/// Recognizes "true" as true, "false" as false. Bare flag defaults to true.
+/// Recognizes "true" as true and "false" as false, case-insensitively. Bare
+/// flag defaults to true.
 fn parse_bool_arg(args: &[String], i: usize) -> (bool, bool) {
     if let Some(v) = args.get(i + 1) {
-        match v.as_str() {
-            "true" => (true, true),
-            "false" => (false, true),
-            _ => (true, false),
+        if v.eq_ignore_ascii_case("true") {
+            (true, true)
+        } else if v.eq_ignore_ascii_case("false") {
+            (false, true)
+        } else {
+            (true, false)
         }
     } else {
         (true, false)
@@ -904,7 +907,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         }
         if GLOBAL_BOOL_FLAGS.contains(&arg.as_str()) {
             if let Some(v) = args.get(i + 1) {
-                if matches!(v.as_str(), "true" | "false") {
+                if v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("false") {
                     i += 1;
                 }
             }
@@ -1405,6 +1408,13 @@ mod tests {
     }
 
     #[test]
+    fn test_bool_flag_values_are_case_insensitive() {
+        let flags = parse_flags(&args("--headed FALSE --debug TRUE open example.com"));
+        assert!(!flags.headed);
+        assert!(flags.debug);
+    }
+
+    #[test]
     fn test_headed_true_explicit() {
         let flags = parse_flags(&args("--headed true open example.com"));
         assert!(flags.headed);
@@ -1450,6 +1460,12 @@ mod tests {
     #[test]
     fn test_clean_args_removes_bool_flag_with_value() {
         let cleaned = clean_args(&args("--headed false --debug true open example.com"));
+        assert_eq!(cleaned, vec!["open", "example.com"]);
+    }
+
+    #[test]
+    fn test_clean_args_removes_case_insensitive_bool_flag_values() {
+        let cleaned = clean_args(&args("--headed FALSE --debug TRUE open example.com"));
         assert_eq!(cleaned, vec!["open", "example.com"]);
     }
 
