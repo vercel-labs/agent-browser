@@ -489,7 +489,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
         screenshot_format: env::var("AGENT_BROWSER_SCREENSHOT_FORMAT")
             .ok()
             .or(config.screenshot_format)
-            .filter(|s| s == "png" || s == "jpeg"),
+            .filter(|s| s == "png" || s == "jpeg" || s == "webp"),
         idle_timeout: parse_idle_timeout_value(
             env::var("AGENT_BROWSER_IDLE_TIMEOUT_MS").ok(),
             "AGENT_BROWSER_IDLE_TIMEOUT_MS",
@@ -788,11 +788,11 @@ pub fn parse_flags(args: &[String]) -> Flags {
             }
             "--screenshot-format" => {
                 if let Some(s) = args.get(i + 1) {
-                    if s == "png" || s == "jpeg" {
+                    if s == "png" || s == "jpeg" || s == "webp" {
                         flags.screenshot_format = Some(s.clone());
                     } else {
                         eprintln!(
-                            "{} --screenshot-format must be png or jpeg, got '{}'",
+                            "{} --screenshot-format must be png, jpeg, or webp, got '{}'",
                             color::warning_indicator(),
                             s
                         );

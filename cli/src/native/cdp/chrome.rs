@@ -569,6 +569,7 @@ pub fn find_chrome() -> Option<PathBuf> {
             "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
             "/Applications/Chromium.app/Contents/MacOS/Chromium",
             "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+            "/Applications/Helium.app/Contents/MacOS/Helium",
         ];
         for c in &candidates {
             let p = PathBuf::from(c);
@@ -737,6 +738,7 @@ pub fn get_chrome_user_data_dirs() -> Vec<PathBuf> {
                 "Google/Chrome Canary",
                 "Chromium",
                 "BraveSoftware/Brave-Browser",
+                "Helium",
             ] {
                 dirs.push(base.join(name));
             }
