@@ -13,6 +13,7 @@ use crate::connection::get_socket_dir;
 
 use super::auth;
 use super::browser::{should_track_target, BrowserManager, WaitUntil};
+use super::camoufox::CamoufoxAdapter;
 use super::cdp::chrome::LaunchOptions;
 use super::cdp::client::CdpClient;
 use super::cdp::types::{
@@ -142,7 +143,27 @@ pub struct FetchPausedRequest {
 pub enum BackendType {
     Cdp,
     WebDriver,
+    Camoufox,
 }
+
+const CAMOUFOX_PASSTHROUGH_ACTIONS: &[&str] = &[
+    "launch",
+    "close",
+    "credentials_set",
+    "credentials_get",
+    "credentials_delete",
+    "credentials_list",
+    "auth_save",
+    "auth_show",
+    "auth_delete",
+    "auth_list",
+    "state_list",
+    "state_show",
+    "state_clear",
+    "state_clean",
+    "state_rename",
+    "device_list",
+];
 
 #[derive(Debug, Clone, Default)]
 pub struct PendingDialog {
@@ -201,6 +222,7 @@ fn launch_hash(opts: &LaunchOptions) -> u64 {
 
 pub struct DaemonState {
     pub browser: Option<BrowserManager>,
+    pub camoufox: Option<CamoufoxAdapter>,
     pub appium: Option<AppiumManager>,
     pub safari_driver: Option<safari::SafariDriverProcess>,
     pub webdriver_backend: Option<super::webdriver::backend::WebDriverBackend>,
@@ -266,6 +288,7 @@ impl DaemonState {
     pub fn new() -> Self {
         Self {
             browser: None,
+            camoufox: None,
             appium: None,
             safari_driver: None,
             webdriver_backend: None,
@@ -1242,6 +1265,8 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         // This avoids a 3-second CDP timeout when Chrome is already dead.
         let needs_launch = if let Some(ref mut mgr) = state.browser {
             mgr.has_process_exited() || !mgr.is_connection_alive().await
+        } else if let Some(ref mut adapter) = state.camoufox {
+            adapter.has_exited()
         } else {
             true
         };
@@ -1256,6 +1281,11 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
                 state.reset_input_state();
                 state.update_stream_client().await;
             }
+            if let Some(ref mut adapter) = state.camoufox {
+                let _ = adapter.close().await;
+                state.camoufox = None;
+                state.reset_input_state();
+            }
             if let Err(e) = auto_launch(state).await {
                 return error_response(&id, &format!("Auto-launch failed: {}", e));
             }
@@ -1266,6 +1296,16 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
                 let _ = mgr.ensure_page().await;
             }
         }
+    }
+
+    if matches!(state.backend_type, BackendType::Camoufox)
+        && !CAMOUFOX_PASSTHROUGH_ACTIONS.contains(&action)
+    {
+        let result = handle_camoufox_command(action, cmd, state).await;
+        return match result {
+            Ok(data) => success_response(&id, data),
+            Err(e) => error_response(&id, &super::browser::to_ai_friendly_error(&e)),
+        };
     }
 
     // WebDriver backend: reject unsupported CDP-only actions
@@ -1499,6 +1539,32 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
 // Auto-launch
 // ---------------------------------------------------------------------------
 
+async fn handle_camoufox_command(
+    action: &str,
+    cmd: &Value,
+    state: &mut DaemonState,
+) -> Result<Value, String> {
+    let adapter = state
+        .camoufox
+        .as_mut()
+        .ok_or_else(|| "Camoufox adapter not launched".to_string())?;
+    let data = adapter.send(action, cmd).await?;
+    if matches!(
+        action,
+        "navigate"
+            | "snapshot"
+            | "tab_new"
+            | "tab_switch"
+            | "tab_close"
+            | "reload"
+            | "back"
+            | "forward"
+    ) {
+        state.ref_map.clear();
+    }
+    Ok(data)
+}
+
 /// Connect to a running Chrome via auto-discovery and open a fresh tab so
 /// subsequent navigations don't hijack the user's existing tabs.
 async fn connect_auto_with_fresh_tab() -> Result<BrowserManager, String> {
@@ -1521,6 +1587,16 @@ async fn auto_launch(state: &mut DaemonState) -> Result<(), String> {
         options.viewport_size = Some(server.viewport().await);
     }
     let engine = env::var("AGENT_BROWSER_ENGINE").ok();
+
+    if engine.as_deref() == Some("camoufox") {
+        let adapter = CamoufoxAdapter::launch_from_options(&options).await?;
+        state.browser = None;
+        state.camoufox = Some(adapter);
+        state.backend_type = BackendType::Camoufox;
+        state.engine = "camoufox".to_string();
+        state.launch_hash = Some(launch_hash(&options));
+        return Ok(());
+    }
 
     // Extract storage_state before options is moved into BrowserManager::launch.
     let storage_state_path = options.storage_state.clone();
@@ -1909,6 +1985,15 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
             || storage_state_requires_clean_launch
             || mgr.has_process_exited()
             || !mgr.is_connection_alive().await
+    } else if let Some(ref mut adapter) = state.camoufox {
+        let requested_engine = cmd
+            .get("engine")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .or_else(|| env::var("AGENT_BROWSER_ENGINE").ok());
+        requested_engine.as_deref() != Some("camoufox")
+            || state.launch_hash != Some(new_hash)
+            || adapter.has_exited()
     } else {
         true
     };
@@ -1921,6 +2006,11 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
             state.screencasting = false;
             state.reset_input_state();
             state.update_stream_client().await;
+        }
+        if let Some(ref mut adapter) = state.camoufox {
+            let _ = adapter.close().await;
+            state.camoufox = None;
+            state.reset_input_state();
         }
     } else {
         load_storage_state(state, &storage_state_owned).await?;
@@ -2037,6 +2127,16 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         .and_then(|v| v.as_str())
         .map(String::from)
         .or_else(|| env::var("AGENT_BROWSER_ENGINE").ok());
+
+    if engine.as_deref() == Some("camoufox") {
+        state.backend_type = BackendType::Camoufox;
+        state.engine = "camoufox".to_string();
+        state.browser = None;
+        state.camoufox = Some(CamoufoxAdapter::launch(cmd).await?);
+        state.launch_hash = Some(new_hash);
+        state.reset_input_state();
+        return Ok(json!({ "launched": true, "engine": "camoufox" }));
+    }
 
     // Store proxy credentials for Fetch.authRequired handling
     let has_proxy_auth = launch_options.proxy_username.is_some();
@@ -2406,7 +2506,11 @@ async fn handle_close(state: &mut DaemonState) -> Result<Value, String> {
     if let Some(ref mut mgr) = state.browser {
         mgr.close().await?;
     }
+    if let Some(ref mut adapter) = state.camoufox {
+        let _ = adapter.close().await;
+    }
     state.browser = None;
+    state.camoufox = None;
     state.launch_hash = None;
     state.screencasting = false;
     state.reset_input_state();

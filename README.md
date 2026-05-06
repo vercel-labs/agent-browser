@@ -728,7 +728,7 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 | `--action-policy <path>` | Path to action policy JSON file (or `AGENT_BROWSER_ACTION_POLICY` env) |
 | `--confirm-actions <list>` | Action categories requiring confirmation (or `AGENT_BROWSER_CONFIRM_ACTIONS` env) |
 | `--confirm-interactive` | Interactive confirmation prompts; auto-denies if stdin is not a TTY (or `AGENT_BROWSER_CONFIRM_INTERACTIVE` env) |
-| `--engine <name>` | Browser engine: `chrome` (default), `lightpanda` (or `AGENT_BROWSER_ENGINE` env) |
+| `--engine <name>` | Browser engine: `chrome` (default), `lightpanda`, `camoufox` (or `AGENT_BROWSER_ENGINE` env) |
 | `--no-auto-dialog` | Disable automatic dismissal of `alert`/`beforeunload` dialogs (or `AGENT_BROWSER_NO_AUTO_DIALOG` env) |
 | `--model <name>` | AI model for chat command (or `AI_GATEWAY_MODEL` env) |
 | `-v`, `--verbose` | Show tool commands and their raw output (chat) |
@@ -1213,7 +1213,7 @@ agent-browser uses a client-daemon architecture:
 
 The daemon starts automatically on first command and persists between commands for fast subsequent operations. To auto-shutdown the daemon after a period of inactivity, set `AGENT_BROWSER_IDLE_TIMEOUT_MS` (value in milliseconds). When set, the daemon closes the browser and exits after receiving no commands for the specified duration.
 
-**Browser Engine:** Uses Chrome (from Chrome for Testing) by default. The `--engine` flag selects between `chrome` and `lightpanda`. Supported browsers: Chromium/Chrome (via CDP) and Safari (via WebDriver for iOS).
+**Browser Engine:** Uses Chrome (from Chrome for Testing) by default. The `--engine` flag selects between `chrome`, `lightpanda`, and `camoufox`. Supported browsers: Chromium/Chrome (via CDP), Lightpanda, Camoufox (via a Playwright sidecar), and Safari (via WebDriver for iOS). Camoufox requires Python with the `camoufox` package installed; set `AGENT_BROWSER_CAMOUFOX_PYTHON=/path/to/python` when it is not available from `python3`.
 
 ## Platforms
 

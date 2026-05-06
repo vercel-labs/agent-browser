@@ -194,7 +194,8 @@ These environment variables configure additional daemon and runtime behavior:
     <tr><td><code>AGENT_BROWSER_ACTION_POLICY</code></td><td>Path to action policy JSON file.</td><td>(none)</td></tr>
     <tr><td><code>AGENT_BROWSER_CONFIRM_ACTIONS</code></td><td>Comma-separated action categories requiring confirmation.</td><td>(none)</td></tr>
     <tr><td><code>AGENT_BROWSER_CONFIRM_INTERACTIVE</code></td><td>Enable interactive confirmation prompts (auto-denies if stdin is not a TTY).</td><td>(disabled)</td></tr>
-    <tr><td><code>AGENT_BROWSER_ENGINE</code></td><td>Browser engine to use: <code>chrome</code> (default), <code>lightpanda</code>.</td><td><code>chrome</code></td></tr>
+    <tr><td><code>AGENT_BROWSER_ENGINE</code></td><td>Browser engine to use: <code>chrome</code> (default), <code>lightpanda</code>, <code>camoufox</code>.</td><td><code>chrome</code></td></tr>
+    <tr><td><code>AGENT_BROWSER_CAMOUFOX_PYTHON</code></td><td>Python executable with the <code>camoufox</code> package installed, used when <code>AGENT_BROWSER_ENGINE=camoufox</code>.</td><td><code>python3</code></td></tr>
     <tr><td><code>AGENT_BROWSER_NO_AUTO_DIALOG</code></td><td>Disable automatic dismissal of <code>alert</code>/<code>beforeunload</code> dialogs.</td><td>(disabled)</td></tr>
     <tr><td><code>AI_GATEWAY_URL</code></td><td>Vercel AI Gateway base URL.</td><td><code>https://ai-gateway.vercel.sh</code></td></tr>
     <tr><td><code>AI_GATEWAY_API_KEY</code></td><td>API key for the Vercel AI Gateway. Required to enable AI chat.</td><td>(none)</td></tr>
