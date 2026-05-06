@@ -356,6 +356,14 @@ agent-browser diff url https://v1.com https://v2.com --wait-until networkidle  #
 agent-browser diff url https://v1.com https://v2.com --selector "#main"  # Scope to element
 ```
 
+### Screen Recording
+
+```bash
+agent-browser record start [path]     # Start recording video (.webm)
+agent-browser record stop             # Stop and save recording
+agent-browser record restart [path]   # Stop current + start new recording
+```
+
 ### Debug
 
 ```bash
