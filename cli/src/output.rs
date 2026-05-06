@@ -2473,16 +2473,18 @@ Examples:
             r##"
 agent-browser install - Install browser binaries
 
-Usage: agent-browser install [--with-deps]
+Usage: agent-browser install [--with-deps] [--timeout <seconds>]
 
 Downloads and installs browser binaries required for automation.
 
 Options:
   -d, --with-deps      Also install system dependencies (Linux only)
+  -t, --timeout <sec>  Download timeout in seconds (default: 120)
 
 Examples:
   agent-browser install
   agent-browser install --with-deps
+  agent-browser install --timeout 600
 "##
         }
 
@@ -3052,6 +3054,7 @@ Dashboard:
 Setup:
   install                    Install browser binaries
   install --with-deps        Also install system dependencies (Linux)
+  install --timeout <sec>    Set browser download timeout (default: 120)
   upgrade                    Upgrade to the latest version
   doctor [--fix]             Diagnose install; auto-clean stale files
   dashboard start            Start the observability dashboard
