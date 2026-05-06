@@ -1,4 +1,5 @@
 use serde_json::{json, Value};
+use std::fs;
 use std::path::PathBuf;
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -6,16 +7,19 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
 use super::cdp::chrome::LaunchOptions;
 
+const CAMOUFOX_ADAPTER_SCRIPT: &str = include_str!("../../scripts/camoufox_adapter.py");
+
 pub struct CamoufoxAdapter {
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
+    script_path: PathBuf,
     next_id: u64,
 }
 
 impl CamoufoxAdapter {
     pub async fn launch(cmd: &Value) -> Result<Self, String> {
-        let script = adapter_script_path()?;
+        let script = write_adapter_script()?;
         let python = std::env::var("AGENT_BROWSER_CAMOUFOX_PYTHON")
             .unwrap_or_else(|_| "python3".to_string());
 
@@ -27,6 +31,7 @@ impl CamoufoxAdapter {
             .stderr(Stdio::inherit())
             .spawn()
             .map_err(|e| {
+                let _ = fs::remove_file(&script);
                 format!(
                     "Failed to start Camoufox adapter with `{}`: {}. \
                      Set AGENT_BROWSER_CAMOUFOX_PYTHON to a Python executable with camoufox installed.",
@@ -34,19 +39,28 @@ impl CamoufoxAdapter {
                 )
             })?;
 
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| "Failed to open Camoufox adapter stdin".to_string())?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| "Failed to open Camoufox adapter stdout".to_string())?;
+        let stdin = match child.stdin.take() {
+            Some(stdin) => stdin,
+            None => {
+                let _ = child.kill().await;
+                let _ = fs::remove_file(&script);
+                return Err("Failed to open Camoufox adapter stdin".to_string());
+            }
+        };
+        let stdout = match child.stdout.take() {
+            Some(stdout) => stdout,
+            None => {
+                let _ = child.kill().await;
+                let _ = fs::remove_file(&script);
+                return Err("Failed to open Camoufox adapter stdout".to_string());
+            }
+        };
 
         let mut adapter = Self {
             child,
             stdin,
             stdout: BufReader::new(stdout),
+            script_path: script,
             next_id: 1,
         };
         adapter.send("launch", cmd).await?;
@@ -166,19 +180,23 @@ fn launch_command_from_options(options: &LaunchOptions) -> Value {
 impl Drop for CamoufoxAdapter {
     fn drop(&mut self) {
         let _ = self.child.start_kill();
+        let _ = fs::remove_file(&self.script_path);
     }
 }
 
-fn adapter_script_path() -> Result<PathBuf, String> {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let script = manifest_dir.join("scripts").join("camoufox_adapter.py");
-    if script.exists() {
-        return Ok(script);
-    }
-    Err(format!(
-        "Camoufox adapter script not found at {}",
-        script.display()
-    ))
+fn write_adapter_script() -> Result<PathBuf, String> {
+    let path = std::env::temp_dir().join(format!(
+        "agent-browser-camoufox-adapter-{}.py",
+        uuid::Uuid::new_v4()
+    ));
+    fs::write(&path, CAMOUFOX_ADAPTER_SCRIPT).map_err(|e| {
+        format!(
+            "Failed to write embedded Camoufox adapter script to {}: {}",
+            path.display(),
+            e
+        )
+    })?;
+    Ok(path)
 }
 
 #[cfg(test)]
@@ -199,5 +217,16 @@ mod tests {
         assert_eq!(cmd["storageState"], "/tmp/auth.json");
         assert_eq!(cmd["ignoreHTTPSErrors"], true);
         assert_eq!(cmd["userAgent"], "agent-browser-test");
+    }
+
+    #[test]
+    fn write_adapter_script_materializes_embedded_script() {
+        let path = write_adapter_script().unwrap();
+        let content = fs::read_to_string(&path).unwrap();
+
+        assert!(path.starts_with(std::env::temp_dir()));
+        assert!(content.contains("Camoufox sidecar for agent-browser"));
+
+        let _ = fs::remove_file(path);
     }
 }
