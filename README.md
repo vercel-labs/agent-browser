@@ -72,7 +72,7 @@ Detects your installation method (npm, Homebrew, or Cargo) and runs the appropri
 
 ### Requirements
 
-- **Chrome** - Run `agent-browser install` to download Chrome from [Chrome for Testing](https://developer.chrome.com/blog/chrome-for-testing/) (Google's official automation channel). Existing Chrome, Brave, Playwright, and Puppeteer installations are detected automatically. No Playwright or Node.js required for the daemon.
+- **Chrome** - Run `agent-browser install` to download Chrome from [Chrome for Testing](https://developer.chrome.com/blog/chrome-for-testing/) (Google's official automation channel). Existing Chrome, Brave, Helium, Playwright, and Puppeteer installations are detected automatically. No Playwright or Node.js required for the daemon.
 - **Rust** - Only needed when building from source (see From Source above).
 
 ## Quick Start
