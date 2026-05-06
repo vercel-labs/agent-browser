@@ -37,6 +37,9 @@ agent-browser close
 | `AGENTCORE_REGION` | AWS region | `us-east-1` |
 | `AGENTCORE_BROWSER_ID` | Browser identifier | `aws.browser.v1` |
 | `AGENTCORE_PROFILE_ID` | Persistent browser profile (cookies, localStorage) | (none) |
+| `AGENTCORE_PROXY_CONFIG` | JSON proxy configuration for the browser session | (none) |
+| `AGENTCORE_ENTERPRISE_POLICIES` | JSON array of enterprise policy configurations | (none) |
+| `AGENTCORE_EXTENSION_CONFIG` | JSON browser extension configuration from S3 | (none) |
 | `AGENTCORE_SESSION_TIMEOUT` | Session timeout in seconds | `3600` |
 | `AWS_PROFILE` | AWS CLI profile for credential resolution | `default` |
 
@@ -56,6 +59,72 @@ agent-browser close
 # Future runs: already authenticated
 AGENTCORE_PROFILE_ID=my-app agent-browser -p agentcore open https://app.example.com/dashboard
 ```
+
+## Proxy Configuration
+
+Use `AGENTCORE_PROXY_CONFIG` to configure proxy settings with authentication for the cloud browser session. The value must be valid JSON matching the AgentCore proxy configuration schema.
+
+**Important:** The `--proxy` flag applies only to local Chrome/Lightpanda browsers. For AgentCore, use `AGENTCORE_PROXY_CONFIG` to configure the remote browser's proxy settings.
+
+```bash
+export AGENTCORE_PROXY_CONFIG='{
+  "proxies": [{
+    "externalProxy": {
+      "server": "your-proxy.com",
+      "port": 8080,
+      "credentials": {
+        "basicAuth": {
+          "secretArn": "arn:aws:secretsmanager:region:account:secret:name"
+        }
+      }
+    }
+  }]
+}'
+agent-browser -p agentcore open https://example.com
+```
+
+The proxy configuration is passed directly to the AgentCore session API. Credentials can reference AWS Secrets Manager ARNs for secure authentication.
+
+## Enterprise Policies
+
+Use `AGENTCORE_ENTERPRISE_POLICIES` to apply enterprise browser policies stored in S3. The value must be a JSON array:
+
+```bash
+export AGENTCORE_ENTERPRISE_POLICIES='[
+  {
+    "type": "RECOMMENDED",
+    "location": {
+      "s3": {
+        "bucket": "my-policy-bucket",
+        "prefix": "policies/recommended-policies.json"
+      }
+    }
+  }
+]'
+agent-browser -p agentcore open https://example.com
+```
+
+Policies are applied at session creation time and control browser behavior, security settings, and feature availability.
+
+## Browser Extensions
+
+Use `AGENTCORE_EXTENSION_CONFIG` to load browser extensions from S3. The value must be a JSON array:
+
+```bash
+export AGENTCORE_EXTENSION_CONFIG='[
+  {
+    "location": {
+      "s3": {
+        "bucket": "my-extension-bucket",
+        "prefix": "extensions/my-extension.zip"
+      }
+    }
+  }
+]'
+agent-browser -p agentcore open https://example.com
+```
+
+**Important:** The `--extension` flag applies only to local Chrome/Lightpanda browsers. For AgentCore, use `AGENTCORE_EXTENSION_CONFIG` to load extensions packaged as `.zip` files in S3. The browser session must have IAM permissions to read from the specified S3 bucket.
 
 ## Live View
 

@@ -439,6 +439,51 @@ mod agentcore {
                 );
             }
         }
+        if let Ok(proxy_config) = env::var("AGENTCORE_PROXY_CONFIG") {
+            if !proxy_config.is_empty() {
+                match serde_json::from_str::<serde_json::Value>(&proxy_config) {
+                    Ok(proxy_json) => {
+                        body_json.as_object_mut().unwrap().insert(
+                            "proxyConfiguration".to_string(),
+                            proxy_json,
+                        );
+                    }
+                    Err(e) => {
+                        return Err(format!("Invalid AGENTCORE_PROXY_CONFIG JSON: {}", e));
+                    }
+                }
+            }
+        }
+        if let Ok(enterprise_policies) = env::var("AGENTCORE_ENTERPRISE_POLICIES") {
+            if !enterprise_policies.is_empty() {
+                match serde_json::from_str::<serde_json::Value>(&enterprise_policies) {
+                    Ok(policies_json) => {
+                        body_json.as_object_mut().unwrap().insert(
+                            "enterprisePolicies".to_string(),
+                            policies_json,
+                        );
+                    }
+                    Err(e) => {
+                        return Err(format!("Invalid AGENTCORE_ENTERPRISE_POLICIES JSON: {}", e));
+                    }
+                }
+            }
+        }
+        if let Ok(extension_config) = env::var("AGENTCORE_EXTENSION_CONFIG") {
+            if !extension_config.is_empty() {
+                match serde_json::from_str::<serde_json::Value>(&extension_config) {
+                    Ok(extension_json) => {
+                        body_json.as_object_mut().unwrap().insert(
+                            "extensions".to_string(),
+                            extension_json,
+                        );
+                    }
+                    Err(e) => {
+                        return Err(format!("Invalid AGENTCORE_EXTENSION_CONFIG JSON: {}", e));
+                    }
+                }
+            }
+        }
         let body = serde_json::to_string(&body_json)
             .map_err(|e| format!("Failed to serialize request body: {}", e))?;
 
@@ -812,5 +857,79 @@ mod tests {
         // Should be None after take
         let taken_again = take_agentcore_ws_headers();
         assert!(taken_again.is_none());
+    }
+
+    #[test]
+    fn test_agentcore_proxy_config_parsing() {
+        // Test valid JSON
+        let valid_json = r#"{
+            "proxies": [{
+                "externalProxy": {
+                    "server": "proxy.example.com",
+                    "port": 8080
+                }
+            }]
+        }"#;
+        let result = serde_json::from_str::<serde_json::Value>(valid_json);
+        assert!(result.is_ok());
+        let parsed = result.unwrap();
+        assert!(parsed.get("proxies").is_some());
+
+        // Test invalid JSON
+        let invalid_json = "not valid json";
+        let result = serde_json::from_str::<serde_json::Value>(invalid_json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_agentcore_enterprise_policies_parsing() {
+        // Test valid JSON
+        let valid_json = r#"[
+            {
+                "type": "RECOMMENDED",
+                "location": {
+                    "s3": {
+                        "bucket": "my-policy-bucket",
+                        "prefix": "policies/recommended-policies.json"
+                    }
+                }
+            }
+        ]"#;
+        let result = serde_json::from_str::<serde_json::Value>(valid_json);
+        assert!(result.is_ok());
+        let parsed = result.unwrap();
+        assert!(parsed.is_array());
+        assert_eq!(parsed.as_array().unwrap().len(), 1);
+
+        // Test invalid JSON
+        let invalid_json = "not valid json";
+        let result = serde_json::from_str::<serde_json::Value>(invalid_json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_agentcore_extension_config_parsing() {
+        // Test valid JSON - array of extension locations
+        let valid_json = r#"[
+            {
+                "location": {
+                    "s3": {
+                        "bucket": "my-extension-bucket",
+                        "prefix": "extensions/my-extension.zip"
+                    }
+                }
+            }
+        ]"#;
+        let result = serde_json::from_str::<serde_json::Value>(valid_json);
+        assert!(result.is_ok());
+        let parsed = result.unwrap();
+        assert!(parsed.is_array());
+        let extensions = parsed.as_array().unwrap();
+        assert_eq!(extensions.len(), 1);
+
+        // Test invalid JSON
+        let invalid_json = "not valid json";
+        let result = serde_json::from_str::<serde_json::Value>(invalid_json);
+        assert!(result.is_err());
     }
 }
