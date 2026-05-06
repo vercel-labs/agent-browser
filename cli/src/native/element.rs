@@ -5,6 +5,11 @@ use serde_json::Value;
 use super::cdp::client::CdpClient;
 use super::cdp::types::*;
 
+pub(super) enum CenterResult {
+    Found { x: f64, y: f64, vw: f64, vh: f64 },
+    Detached,
+}
+
 #[derive(Debug, Clone)]
 pub struct RefEntry {
     pub backend_node_id: Option<i64>,
@@ -146,71 +151,60 @@ pub fn parse_ref(input: &str) -> Option<String> {
     None
 }
 
-pub async fn resolve_element_center(
+/// Returns element center and viewport dimensions, or `Detached` if the
+/// element is no longer in the DOM. Checked inside the same JS call as
+/// `getBoundingClientRect` so there is no extra round-trip.
+pub(super) async fn get_center_and_viewport(
     client: &CdpClient,
     session_id: &str,
-    ref_map: &RefMap,
-    selector_or_ref: &str,
-    iframe_sessions: &HashMap<String, String>,
-) -> Result<(f64, f64, String), String> {
-    if let Some(ref_id) = parse_ref(selector_or_ref) {
-        let entry = ref_map
-            .get(&ref_id)
-            .ok_or_else(|| format!("Unknown ref: {}", ref_id))?;
-
-        let effective_session_id =
-            resolve_frame_session(entry.frame_id.as_deref(), session_id, iframe_sessions);
-
-        // Try cached backend_node_id first (fast path)
-        if let Some(backend_node_id) = entry.backend_node_id {
-            let result: Result<DomGetBoxModelResult, String> = client
-                .send_command_typed(
-                    "DOM.getBoxModel",
-                    &DomGetBoxModelParams {
-                        backend_node_id: Some(backend_node_id),
-                        node_id: None,
-                        object_id: None,
-                    },
-                    Some(effective_session_id),
-                )
-                .await;
-
-            if let Ok(r) = result {
-                let (x, y) = box_model_center(&r.model);
-                return Ok((x, y, effective_session_id.to_string()));
-            }
-            // backend_node_id is stale; re-query the accessibility tree below
-        }
-
-        // Fallback: re-query the accessibility tree to find a fresh node by role/name
-        let fresh_id = find_node_id_by_role_name(
-            client,
-            session_id,
-            &entry.role,
-            &entry.name,
-            entry.nth,
-            entry.frame_id.as_deref(),
-            iframe_sessions,
+    object_id: &str,
+) -> Result<CenterResult, String> {
+    let result: EvaluateResult = client
+        .send_command_typed(
+            "Runtime.callFunctionOn",
+            &CallFunctionOnParams {
+                function_declaration: r#"function() {
+                    if (!this.isConnected) return null;
+                    const r = this.getBoundingClientRect();
+                    return {
+                        x: r.left + r.width / 2,
+                        y: r.top + r.height / 2,
+                        vw: window.innerWidth,
+                        vh: window.innerHeight,
+                    };
+                }"#
+                .to_string(),
+                object_id: Some(object_id.to_string()),
+                arguments: None,
+                return_by_value: Some(true),
+                await_promise: Some(false),
+            },
+            Some(session_id),
         )
         .await?;
-        let result: DomGetBoxModelResult = client
-            .send_command_typed(
-                "DOM.getBoxModel",
-                &DomGetBoxModelParams {
-                    backend_node_id: Some(fresh_id),
-                    node_id: None,
-                    object_id: None,
-                },
-                Some(effective_session_id),
-            )
-            .await?;
-        let (x, y) = box_model_center(&result.model);
-        return Ok((x, y, effective_session_id.to_string()));
-    }
 
-    // CSS selector
-    let (x, y) = resolve_by_selector(client, session_id, selector_or_ref).await?;
-    Ok((x, y, session_id.to_string()))
+    let val = result.result.value.unwrap_or(Value::Null);
+    if val.is_null() {
+        return Ok(CenterResult::Detached);
+    }
+    let x = val
+        .get("x")
+        .and_then(|v| v.as_f64())
+        .ok_or("Failed to resolve element center")?;
+    let y = val
+        .get("y")
+        .and_then(|v| v.as_f64())
+        .ok_or("Failed to resolve element center")?;
+    let vw = val
+        .get("vw")
+        .and_then(|v| v.as_f64())
+        .ok_or("Failed to read viewport width")?;
+    let vh = val
+        .get("vh")
+        .and_then(|v| v.as_f64())
+        .ok_or("Failed to read viewport height")?;
+
+    Ok(CenterResult::Found { x, y, vw, vh })
 }
 
 pub async fn resolve_element_object_id(
@@ -220,6 +214,44 @@ pub async fn resolve_element_object_id(
     selector_or_ref: &str,
     iframe_sessions: &HashMap<String, String>,
 ) -> Result<(String, String), String> {
+    resolve_element_object_id_impl(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+        true,
+    )
+    .await
+}
+
+/// Skips the cached backend_node_id and forces a fresh accessibility tree lookup.
+pub(super) async fn resolve_element_object_id_fresh(
+    client: &CdpClient,
+    session_id: &str,
+    ref_map: &RefMap,
+    selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
+) -> Result<(String, String), String> {
+    resolve_element_object_id_impl(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+        false,
+    )
+    .await
+}
+
+async fn resolve_element_object_id_impl(
+    client: &CdpClient,
+    session_id: &str,
+    ref_map: &RefMap,
+    selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
+    use_cache: bool,
+) -> Result<(String, String), String> {
     if let Some(ref_id) = parse_ref(selector_or_ref) {
         let entry = ref_map
             .get(&ref_id)
@@ -228,29 +260,28 @@ pub async fn resolve_element_object_id(
         let effective_session_id =
             resolve_frame_session(entry.frame_id.as_deref(), session_id, iframe_sessions);
 
-        // Try cached backend_node_id first (fast path)
-        if let Some(backend_node_id) = entry.backend_node_id {
-            let result: Result<DomResolveNodeResult, String> = client
-                .send_command_typed(
-                    "DOM.resolveNode",
-                    &DomResolveNodeParams {
-                        backend_node_id: Some(backend_node_id),
-                        node_id: None,
-                        object_group: Some("agent-browser".to_string()),
-                    },
-                    Some(effective_session_id),
-                )
-                .await;
+        if use_cache {
+            if let Some(backend_node_id) = entry.backend_node_id {
+                let result: Result<DomResolveNodeResult, String> = client
+                    .send_command_typed(
+                        "DOM.resolveNode",
+                        &DomResolveNodeParams {
+                            backend_node_id: Some(backend_node_id),
+                            node_id: None,
+                            object_group: Some("agent-browser".to_string()),
+                        },
+                        Some(effective_session_id),
+                    )
+                    .await;
 
-            if let Ok(r) = result {
-                if let Some(object_id) = r.object.object_id {
-                    return Ok((object_id, effective_session_id.to_string()));
+                if let Ok(r) = result {
+                    if let Some(object_id) = r.object.object_id {
+                        return Ok((object_id, effective_session_id.to_string()));
+                    }
                 }
             }
-            // backend_node_id is stale; re-query the accessibility tree below
         }
 
-        // Fallback: re-query the accessibility tree to find a fresh node by role/name
         let fresh_id = find_node_id_by_role_name(
             client,
             session_id,
@@ -464,17 +495,6 @@ async fn resolve_by_selector(
     match (x, y) {
         (Some(x), Some(y)) => Ok((x, y)),
         _ => Err(format!("Element not found: {}", selector)),
-    }
-}
-
-fn box_model_center(model: &BoxModel) -> (f64, f64) {
-    // content quad: [x1,y1, x2,y2, x3,y3, x4,y4]
-    if model.content.len() >= 8 {
-        let x = (model.content[0] + model.content[2] + model.content[4] + model.content[6]) / 4.0;
-        let y = (model.content[1] + model.content[3] + model.content[5] + model.content[7]) / 4.0;
-        (x, y)
-    } else {
-        (0.0, 0.0)
     }
 }
 
@@ -1056,21 +1076,6 @@ mod tests {
         let js = build_count_elements_js("xpath=//li");
         assert!(js.contains("document.evaluate(\"//li\", document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null).snapshotLength"));
         assert!(!js.contains("querySelectorAll"));
-    }
-
-    #[test]
-    fn test_box_model_center() {
-        let model = BoxModel {
-            content: vec![10.0, 20.0, 110.0, 20.0, 110.0, 60.0, 10.0, 60.0],
-            padding: vec![],
-            border: vec![],
-            margin: vec![],
-            width: 100,
-            height: 40,
-        };
-        let (x, y) = box_model_center(&model);
-        assert!((x - 60.0).abs() < 0.01);
-        assert!((y - 40.0).abs() < 0.01);
     }
 
     // -----------------------------------------------------------------------
