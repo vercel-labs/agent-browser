@@ -381,6 +381,8 @@ agent-browser dashboard start --port <n>  # Start on a specific port
 agent-browser dashboard stop          # Stop the dashboard server
 ```
 
+Open the dashboard through `http://localhost:4848` or a proxied/forwarded dashboard URL such as `https://dashboard.agent-browser.localhost`. The browser stays on the dashboard origin; per-session tabs, status, and stream traffic are proxied internally, so session ports do not need to be exposed.
+
 ## Doctor
 
 Diagnose your install, auto-clean stale daemon files, and optionally repair common problems.

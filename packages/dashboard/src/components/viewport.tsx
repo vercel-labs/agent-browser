@@ -5,6 +5,7 @@ import { useAtomValue, useSetAtom } from "jotai/react";
 import { ArrowLeft, ArrowRight, Camera, Circle, FileCode, Maximize, Moon, RotateCw, Smartphone, Square, Sun, Wifi, WifiOff } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { execCommand, sessionArgs } from "@/lib/exec";
+import { getSessionStreamUrl } from "@/lib/dashboard-routes";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import {
@@ -550,7 +551,7 @@ export function Viewport() {
         </span>
         {browserConnected && (
           <span className="text-xs text-muted-foreground/60 font-mono">
-            ws://localhost:{streamPort}
+            {getSessionStreamUrl(streamPort)}
           </span>
         )}
         <div className="ml-auto flex items-center gap-2">
