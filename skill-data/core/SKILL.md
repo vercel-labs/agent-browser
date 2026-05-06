@@ -34,6 +34,7 @@ next ref interaction.
 ```bash
 # Install once
 npm i -g agent-browser && agent-browser install
+# Slow network: agent-browser install --timeout 600
 
 # Take a screenshot of a page
 agent-browser open https://example.com
@@ -343,6 +344,9 @@ agent-browser doctor --offline --quick   # fast, local-only
 agent-browser doctor --fix               # also run destructive repairs (reinstall Chrome, purge old state, ...)
 agent-browser doctor --json              # structured output for programmatic consumption
 ```
+
+If Chrome for Testing downloads time out on a slow network, retry with
+`agent-browser install --timeout 600` to extend the HTTP timeout in seconds.
 
 `doctor` auto-cleans stale socket/pid/version sidecar files on every run.
 Destructive actions require `--fix`. Exit code is `0` if all checks pass

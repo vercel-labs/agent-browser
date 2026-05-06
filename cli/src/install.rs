@@ -6,6 +6,66 @@ use std::process::{exit, Command, Stdio};
 
 const LAST_KNOWN_GOOD_URL: &str =
     "https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json";
+pub const DEFAULT_INSTALL_TIMEOUT_SECS: u64 = 120;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InstallOptions {
+    pub with_deps: bool,
+    /// HTTP request timeout for Chrome for Testing metadata and binary downloads.
+    pub timeout_secs: u64,
+}
+
+impl Default for InstallOptions {
+    fn default() -> Self {
+        Self {
+            with_deps: false,
+            timeout_secs: DEFAULT_INSTALL_TIMEOUT_SECS,
+        }
+    }
+}
+
+pub fn parse_install_args(args: &[String]) -> Result<InstallOptions, String> {
+    let mut options = InstallOptions::default();
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "-d" | "--with-deps" => {
+                options.with_deps = true;
+            }
+            "-t" | "--timeout" => {
+                let Some(raw) = args.get(i + 1) else {
+                    return Err("install --timeout requires a value in seconds".to_string());
+                };
+                options.timeout_secs = parse_install_timeout(raw)?;
+                i += 1;
+            }
+            arg => {
+                if let Some(raw) = arg.strip_prefix("--timeout=") {
+                    options.timeout_secs = parse_install_timeout(raw)?;
+                }
+            }
+        }
+        i += 1;
+    }
+
+    Ok(options)
+}
+
+fn parse_install_timeout(raw: &str) -> Result<u64, String> {
+    let timeout_secs = raw.parse::<u64>().map_err(|_| {
+        format!(
+            "invalid install timeout '{}': expected a positive number of seconds",
+            raw
+        )
+    })?;
+
+    if timeout_secs == 0 {
+        return Err("install timeout must be greater than 0 seconds".to_string());
+    }
+
+    Ok(timeout_secs)
+}
 
 pub fn get_browsers_dir() -> PathBuf {
     dirs::home_dir()
@@ -182,8 +242,8 @@ fn platform_key() -> &'static str {
     }
 }
 
-async fn fetch_download_url() -> Result<(String, String), String> {
-    let client = http_client()?;
+async fn fetch_download_url(timeout_secs: u64) -> Result<(String, String), String> {
+    let client = http_client(timeout_secs)?;
     let resp = client
         .get(LAST_KNOWN_GOOD_URL)
         .send()
@@ -236,17 +296,17 @@ fn format_reqwest_error(e: &reqwest::Error) -> String {
     msg
 }
 
-fn http_client() -> Result<reqwest::Client, String> {
+fn http_client(timeout_secs: u64) -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .user_agent(format!("agent-browser/{}", env!("CARGO_PKG_VERSION")))
-        .timeout(std::time::Duration::from_secs(120))
+        .timeout(std::time::Duration::from_secs(timeout_secs))
         .connect_timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {}", format_reqwest_error(&e)))
 }
 
-async fn download_bytes(url: &str) -> Result<Vec<u8>, String> {
-    let client = http_client()?;
+async fn download_bytes(url: &str, timeout_secs: u64) -> Result<Vec<u8>, String> {
+    let client = http_client(timeout_secs)?;
     let max_retries = 3;
     let mut last_err = String::new();
 
@@ -397,7 +457,7 @@ fn extract_zip(bytes: Vec<u8>, dest: &Path) -> Result<(), String> {
     Ok(())
 }
 
-pub fn run_install(with_deps: bool) {
+pub fn run_install(options: InstallOptions) {
     if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
         eprintln!(
             "{} Chrome for Testing does not provide Linux ARM64 builds.",
@@ -413,7 +473,7 @@ pub fn run_install(with_deps: bool) {
     let is_linux = cfg!(target_os = "linux");
 
     if is_linux {
-        if with_deps {
+        if options.with_deps {
             install_linux_deps();
         } else {
             println!(
@@ -439,7 +499,7 @@ pub fn run_install(with_deps: bool) {
             exit(1);
         });
 
-    let (version, url) = match rt.block_on(fetch_download_url()) {
+    let (version, url) = match rt.block_on(fetch_download_url(options.timeout_secs)) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("{} {}", color::error_indicator(), e);
@@ -463,7 +523,7 @@ pub fn run_install(with_deps: bool) {
     println!("  Downloading Chrome {} for {}", version, platform_key());
     println!("  {}", url);
 
-    let bytes = match rt.block_on(download_bytes(&url)) {
+    let bytes = match rt.block_on(download_bytes(&url, options.timeout_secs)) {
         Ok(b) => b,
         Err(e) => {
             eprintln!("{} {}", color::error_indicator(), e);
@@ -480,7 +540,7 @@ pub fn run_install(with_deps: bool) {
             );
             println!("  Location: {}", dest.display());
 
-            if is_linux && !with_deps {
+            if is_linux && !options.with_deps {
                 println!();
                 println!(
                     "{} If you see \"shared library\" errors when running, use:",
@@ -806,6 +866,54 @@ mod tests {
         request
     }
 
+    fn args(values: &[&str]) -> Vec<String> {
+        values.iter().map(|v| v.to_string()).collect()
+    }
+
+    #[test]
+    fn parse_install_args_defaults_timeout() {
+        let options = parse_install_args(&args(&[])).unwrap();
+        assert_eq!(options, InstallOptions::default());
+    }
+
+    #[test]
+    fn parse_install_args_accepts_timeout() {
+        let options = parse_install_args(&args(&["--timeout", "600"])).unwrap();
+        assert_eq!(options.timeout_secs, 600);
+        assert!(!options.with_deps);
+    }
+
+    #[test]
+    fn parse_install_args_accepts_short_timeout_and_with_deps() {
+        let options = parse_install_args(&args(&["-d", "-t", "300"])).unwrap();
+        assert_eq!(options.timeout_secs, 300);
+        assert!(options.with_deps);
+    }
+
+    #[test]
+    fn parse_install_args_accepts_equals_timeout() {
+        let options = parse_install_args(&args(&["--timeout=450"])).unwrap();
+        assert_eq!(options.timeout_secs, 450);
+    }
+
+    #[test]
+    fn parse_install_args_rejects_missing_timeout() {
+        let err = parse_install_args(&args(&["--timeout"])).unwrap_err();
+        assert!(err.contains("requires a value"));
+    }
+
+    #[test]
+    fn parse_install_args_rejects_invalid_timeout() {
+        let err = parse_install_args(&args(&["--timeout", "slow"])).unwrap_err();
+        assert!(err.contains("expected a positive number"));
+    }
+
+    #[test]
+    fn parse_install_args_rejects_zero_timeout() {
+        let err = parse_install_args(&args(&["--timeout", "0"])).unwrap_err();
+        assert!(err.contains("greater than 0"));
+    }
+
     #[tokio::test]
     async fn download_bytes_returns_body_on_200() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -818,7 +926,7 @@ mod tests {
         });
 
         let url = format!("http://127.0.0.1:{}/test.zip", port);
-        let result = download_bytes(&url).await;
+        let result = download_bytes(&url, DEFAULT_INSTALL_TIMEOUT_SECS).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), body);
         server.await.unwrap();
@@ -835,7 +943,7 @@ mod tests {
         });
 
         let url = format!("http://127.0.0.1:{}/test.zip", port);
-        let result = download_bytes(&url).await;
+        let result = download_bytes(&url, DEFAULT_INSTALL_TIMEOUT_SECS).await;
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
@@ -862,7 +970,7 @@ mod tests {
         });
 
         let url = format!("http://127.0.0.1:{}/test.zip", port);
-        let result = download_bytes(&url).await;
+        let result = download_bytes(&url, DEFAULT_INSTALL_TIMEOUT_SECS).await;
         assert!(
             result.is_ok(),
             "expected success after retries: {:?}",
@@ -886,7 +994,7 @@ mod tests {
         });
 
         let url = format!("http://127.0.0.1:{}/test.zip", port);
-        let result = download_bytes(&url).await;
+        let result = download_bytes(&url, DEFAULT_INSTALL_TIMEOUT_SECS).await;
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
@@ -909,7 +1017,7 @@ mod tests {
         });
 
         let url = format!("http://127.0.0.1:{}/test.zip", port);
-        let result = download_bytes(&url).await;
+        let result = download_bytes(&url, DEFAULT_INSTALL_TIMEOUT_SECS).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("HTTP 403"));
         server.await.unwrap();
@@ -926,7 +1034,7 @@ mod tests {
             req
         });
 
-        let client = http_client().unwrap();
+        let client = http_client(DEFAULT_INSTALL_TIMEOUT_SECS).unwrap();
         let url = format!("http://127.0.0.1:{}/test", port);
         let _ = client.get(&url).send().await;
         let request_text = server.await.unwrap();
@@ -946,7 +1054,10 @@ mod tests {
             .enable_all()
             .build()
             .unwrap();
-        let result = rt.block_on(download_bytes("http://127.0.0.1:1/test.zip"));
+        let result = rt.block_on(download_bytes(
+            "http://127.0.0.1:1/test.zip",
+            DEFAULT_INSTALL_TIMEOUT_SECS,
+        ));
         assert!(result.is_err());
         let err = result.unwrap_err();
         // The new code should include the root cause (connection refused)

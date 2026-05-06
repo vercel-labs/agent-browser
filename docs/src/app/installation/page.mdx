@@ -9,7 +9,7 @@ npm install -g agent-browser
 agent-browser install  # Download Chrome from Chrome for Testing (first time)
 ```
 
-This is the fastest option -- commands run through the native Rust CLI directly with sub-millisecond parsing overhead.
+This is the fastest option because commands run through the native Rust CLI directly with sub-millisecond parsing overhead.
 
 ## Quick start (no install)
 
@@ -63,6 +63,12 @@ On Linux, install system dependencies:
 
 ```bash
 agent-browser install --with-deps
+```
+
+For slow or high-latency networks, increase the Chrome download timeout:
+
+```bash
+agent-browser install --timeout 600
 ```
 
 ## Updating

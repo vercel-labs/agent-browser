@@ -381,6 +381,16 @@ agent-browser dashboard start --port <n>  # Start on a specific port
 agent-browser dashboard stop          # Stop the dashboard server
 ```
 
+## Install
+
+Download Chrome for Testing and optional Linux system dependencies.
+
+```bash
+agent-browser install                 # Download Chrome
+agent-browser install --with-deps     # Also install system dependencies on Linux
+agent-browser install --timeout 600   # Extend the Chrome download timeout for slow networks
+```
+
 ## Doctor
 
 Diagnose your install, auto-clean stale daemon files, and optionally repair common problems.
