@@ -647,6 +647,9 @@ async fn find_cursor_interactive_elements(
         'menuitem':1, 'menuitemcheckbox':1, 'menuitemradio':1, 'option':1, 'searchbox':1,
         'slider':1, 'spinbutton':1, 'switch':1, 'tab':1, 'treeitem':1
     };
+    var interactiveTags = {
+        'a':1, 'button':1, 'input':1, 'select':1, 'textarea':1, 'details':1, 'summary':1
+    };
 
     function norm(s) {
         return (s || '').replace(/\s+/g, ' ').trim();
@@ -720,17 +723,21 @@ async fn find_cursor_interactive_elements(
 
         var text = (el.textContent || '').trim().slice(0, 100);
         var semantic = semanticInfo(el, tagName);
+        var role = (el.getAttribute('role') || '').trim().toLowerCase().split(/\s+/)[0];
+        var suppressCursorHints = interactiveTags[tagName] || interactiveRoles[role];
         var hasCursorPointer = computedStyle.cursor === 'pointer';
         var hasOnClick = el.hasAttribute('onclick') || el.onclick !== null;
         var tabIndex = el.getAttribute('tabindex');
         var hasTabIndex = tabIndex !== null && tabIndex !== '-1';
         var ce = el.getAttribute('contenteditable');
         var isEditable = ce === '' || ce === 'true';
+        var hasCursorSignal = hasCursorPointer || hasOnClick || hasTabIndex || isEditable;
+        var includeCursorInfo = hasCursorSignal && !suppressCursorHints;
 
-        if (!semantic && !hasCursorPointer && !hasOnClick && !hasTabIndex && !isEditable) continue;
+        if (!semantic && !includeCursorInfo) continue;
 
         // Skip elements that only inherit cursor:pointer from an ancestor
-        if (!semantic && hasCursorPointer && !hasOnClick && !hasTabIndex && !isEditable) {
+        if (!semantic && includeCursorInfo && hasCursorPointer && !hasOnClick && !hasTabIndex && !isEditable) {
             var parent = el.parentElement;
             if (parent && getComputedStyle(parent).cursor === 'pointer') continue;
         }
@@ -775,10 +782,10 @@ async fn find_cursor_interactive_elements(
         results.push({
             text: name || text,
             tagName: tagName,
-            hasOnClick: hasOnClick,
-            hasCursorPointer: hasCursorPointer,
-            hasTabIndex: hasTabIndex,
-            isEditable: isEditable,
+            hasOnClick: includeCursorInfo && hasOnClick,
+            hasCursorPointer: includeCursorInfo && hasCursorPointer,
+            hasTabIndex: includeCursorInfo && hasTabIndex,
+            isEditable: includeCursorInfo && isEditable,
             hiddenInputType: hiddenInputType,
             hiddenInputChecked: hiddenInputChecked,
             fallbackRole: semantic ? semantic.role : null,
