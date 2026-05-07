@@ -140,18 +140,57 @@ fn normalize_origin_authority(origin: &str) -> Option<String> {
     })
 }
 
+fn normalize_host_authority(host: &str) -> String {
+    let host = host.trim().to_ascii_lowercase();
+
+    if let Some(bracket_end) = host.rfind(']') {
+        if bracket_end == host.len() - 1 {
+            return host;
+        }
+
+        if host.as_bytes().get(bracket_end + 1) == Some(&b':') {
+            let port = &host[bracket_end + 2..];
+            if port == "80" || port == "443" {
+                return host[..=bracket_end].to_string();
+            }
+        }
+
+        return host;
+    }
+
+    if let Some((name, port)) = host.rsplit_once(':') {
+        if !name.contains(':') && (port == "80" || port == "443") {
+            return name.to_string();
+        }
+    }
+
+    host
+}
+
+fn header_matches_host(request: &str, header_name: &str) -> Option<bool> {
+    let authority =
+        request_header_value(request, header_name).and_then(normalize_origin_authority)?;
+    let host = request_header_value(request, "host").map(normalize_host_authority)?;
+    Some(authority == host)
+}
+
 /// Validates that a proxied WebSocket request either has no Origin header or
 /// presents an Origin whose authority matches the request Host header.
 fn is_same_origin_ws_request(request: &str) -> bool {
-    let origin_authority = request_header_value(request, "origin").map(normalize_origin_authority);
-    let host = request_header_value(request, "host").map(|value| value.trim().to_ascii_lowercase());
-
-    match (origin_authority, host) {
-        (None, _) => true,
-        (Some(None), _) => false,
-        (Some(Some(_)), None) => false,
-        (Some(Some(origin)), Some(host)) => origin == host,
+    match header_matches_host(request, "origin") {
+        Some(matches) => matches,
+        None => request_header_value(request, "origin").is_none(),
     }
+}
+
+/// Validates that an HTTP session-proxy request came from a same-origin page.
+///
+/// For GET requests we require either a same-origin `Origin` or a same-origin
+/// `Referer` so browsers cannot hit the proxy routes via side-channel tags or
+/// arbitrary cross-origin fetches.
+fn is_same_origin_http_request(request: &str) -> bool {
+    matches!(header_matches_host(request, "origin"), Some(true))
+        || matches!(header_matches_host(request, "referer"), Some(true))
 }
 
 /// Parse a dashboard route of the form `/api/session/<port>/<endpoint>`.
@@ -534,6 +573,16 @@ async fn handle_dashboard_connection(mut stream: tokio::net::TcpStream) {
 
         match endpoint {
             SessionProxyEndpoint::Tabs | SessionProxyEndpoint::Status => {
+                if !is_same_origin_http_request(&request) {
+                    write_json_error_response_no_cors(
+                        &mut stream,
+                        "403 Forbidden",
+                        "Origin or Referer does not match Host header.",
+                    )
+                    .await;
+                    return;
+                }
+
                 match proxy_session_http_route(port, endpoint).await {
                     Ok((status, content_type, body)) => {
                         write_http_response_no_cors(&mut stream, &status, &content_type, &body)
@@ -776,6 +825,36 @@ mod tests {
             normalize_origin_authority("https://dashboard.agent-browser.localhost"),
             Some("dashboard.agent-browser.localhost".to_string())
         );
+    }
+
+    #[test]
+    fn test_same_origin_ws_request_default_https_port() {
+        let req = "GET /api/session/9222/stream HTTP/1.1\r\nHost: dashboard.agent-browser.localhost:443\r\nOrigin: https://dashboard.agent-browser.localhost\r\nUpgrade: websocket\r\n\r\n";
+        assert!(is_same_origin_ws_request(req));
+    }
+
+    #[test]
+    fn test_same_origin_http_request_matching_origin() {
+        let req = "GET /api/session/9222/tabs HTTP/1.1\r\nHost: localhost:4848\r\nOrigin: http://localhost:4848\r\n\r\n";
+        assert!(is_same_origin_http_request(req));
+    }
+
+    #[test]
+    fn test_same_origin_http_request_matching_referer() {
+        let req = "GET /api/session/9222/tabs HTTP/1.1\r\nHost: dashboard.agent-browser.localhost:443\r\nReferer: https://dashboard.agent-browser.localhost/sessions\r\n\r\n";
+        assert!(is_same_origin_http_request(req));
+    }
+
+    #[test]
+    fn test_same_origin_http_request_rejects_missing_origin_and_referer() {
+        let req = "GET /api/session/9222/tabs HTTP/1.1\r\nHost: localhost:4848\r\n\r\n";
+        assert!(!is_same_origin_http_request(req));
+    }
+
+    #[test]
+    fn test_same_origin_http_request_rejects_cross_origin_referer() {
+        let req = "GET /api/session/9222/tabs HTTP/1.1\r\nHost: localhost:4848\r\nReferer: https://evil.com/path\r\n\r\n";
+        assert!(!is_same_origin_http_request(req));
     }
 
     #[test]
