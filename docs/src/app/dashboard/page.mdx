@@ -11,9 +11,9 @@ agent-browser dashboard start
 agent-browser open example.com
 ```
 
-Then open `http://localhost:4848` in your browser to see the live dashboard.
+Then open `http://localhost:4848` or a proxied/forwarded dashboard URL such as `https://dashboard.agent-browser.localhost` in your browser to see the live dashboard.
 
-All sessions automatically stream to the dashboard. No extra flags are needed.
+All sessions automatically stream to the dashboard. No extra flags are needed. The browser stays on the dashboard origin while the server proxies per-session tabs, status, and stream traffic internally, so session ports do not need to be exposed.
 
 ### Custom stream port
 
@@ -122,7 +122,7 @@ The dashboard is a Next.js static export (`output: 'export'`) that produces plai
 pnpm build:dashboard
 ```
 
-The dashboard is embedded into the CLI binary at compile time using `rust-embed`. Plain HTTP requests serve the embedded dashboard assets, while WebSocket upgrade requests are handled as before.
+The dashboard is embedded into the CLI binary at compile time using `rust-embed`. Plain HTTP requests serve the embedded dashboard assets and same-origin API routes. Session-specific tabs, status, and stream WebSocket traffic are proxied through the dashboard server to loopback-only session ports.
 
 ## AI Chat
 
