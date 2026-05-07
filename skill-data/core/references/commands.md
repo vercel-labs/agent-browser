@@ -297,21 +297,22 @@ agent-browser state load auth.json    # Restore saved state
 ## Global Options
 
 ```bash
-agent-browser --session <name> ...    # Isolated browser session
-agent-browser --json ...              # JSON output for parsing
-agent-browser --headed ...            # Show browser window (not headless)
-agent-browser --full ...              # Full page screenshot (-f)
-agent-browser --cdp <port> ...        # Connect via Chrome DevTools Protocol
-agent-browser -p <provider> ...       # Cloud browser provider (--provider)
-agent-browser --proxy <url> ...       # Use proxy server
-agent-browser --proxy-bypass <hosts>  # Hosts to bypass proxy
-agent-browser --headers <json> ...    # HTTP headers scoped to URL's origin
-agent-browser --executable-path <p>   # Custom browser executable
-agent-browser --extension <path> ...  # Load browser extension (repeatable)
-agent-browser --ignore-https-errors   # Ignore SSL certificate errors
-agent-browser --help                  # Show help (-h)
-agent-browser --version               # Show version (-V)
-agent-browser <command> --help        # Show detailed help for a command
+agent-browser --session <name> ...       # Isolated browser session
+agent-browser --json ...                 # JSON output for parsing
+agent-browser --headed ...               # Show browser window (not headless)
+agent-browser --full ...                 # Full page screenshot (-f)
+agent-browser --cdp <port> ...           # Connect via Chrome DevTools Protocol
+agent-browser -p <provider> ...          # Cloud browser provider (--provider)
+agent-browser --proxy <url> ...          # Use proxy server
+agent-browser --proxy-bypass <hosts>     # Hosts to bypass proxy
+agent-browser --headers <json> ...       # HTTP headers scoped to URL's origin
+agent-browser --executable-path <p>      # Custom browser executable
+agent-browser --extension <path> ...     # Load browser extension (repeatable)
+agent-browser --ignore-https-errors      # Ignore SSL certificate errors
+agent-browser --ignore-default-args <f>  # Remove default Chrome flags (comma-separated)
+agent-browser --help                     # Show help (-h)
+agent-browser --version                  # Show version (-V)
+agent-browser <command> --help           # Show detailed help for a command
 ```
 
 ## Debugging
@@ -386,4 +387,5 @@ AGENT_BROWSER_ENABLE="react-devtools"        # Comma-separated built-in init scr
 AGENT_BROWSER_PROVIDER="browserbase"         # Cloud browser provider
 AGENT_BROWSER_STREAM_PORT="9223"             # Override WebSocket streaming port (default: OS-assigned)
 AGENT_BROWSER_HOME="/path/to/agent-browser"  # Custom install location
+AGENT_BROWSER_IGNORE_DEFAULT_ARGS="--f1,--f2" # Remove specific default Chrome flags
 ```

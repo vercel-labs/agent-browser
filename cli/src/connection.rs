@@ -414,6 +414,7 @@ pub struct DaemonOptions<'a> {
     pub default_timeout: Option<u64>,
     pub cdp: Option<&'a str>,
     pub no_auto_dialog: bool,
+    pub ignore_default_args: Option<&'a [String]>,
 }
 
 fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
@@ -506,6 +507,11 @@ fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
     }
     if opts.no_auto_dialog {
         cmd.env("AGENT_BROWSER_NO_AUTO_DIALOG", "1");
+    }
+    if let Some(ida) = opts.ignore_default_args {
+        if !ida.is_empty() {
+            cmd.env("AGENT_BROWSER_IGNORE_DEFAULT_ARGS", ida.join(","));
+        }
     }
 }
 
