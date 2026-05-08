@@ -2,6 +2,7 @@
 
 use std::fs;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 
 use serde_json::Value;
@@ -81,15 +82,19 @@ pub(super) fn parse_json_file(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Generate a unique `doctor-<pid>-<micros>` id for JSON command envelopes.
+/// Generate a unique `doctor-<pid>-<micros>-<sequence>` id for JSON command envelopes.
 pub(super) fn new_id() -> String {
+    static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+    let sequence = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+
     format!(
-        "doctor-{}-{}",
+        "doctor-{}-{}-{}",
         std::process::id(),
         SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .map(|d| d.as_micros())
-            .unwrap_or(0)
+            .unwrap_or(0),
+        sequence
     )
 }
 

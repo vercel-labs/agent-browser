@@ -9,13 +9,15 @@ on:
 concurrency: ${{ github.workflow }}-${{ github.ref }}
 
 permissions:
-  contents: write
-  id-token: write
+  contents: read
 
 jobs:
   check-release:
     name: Check for new version
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
     outputs:
       should_release: ${{ steps.check.outputs.should_release }}
       needs_github_release: ${{ steps.check.outputs.needs_github_release }}
@@ -189,6 +191,11 @@ jobs:
     needs: [check-release, build-binaries]
     if: needs.check-release.outputs.should_release == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: Release
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -263,6 +270,9 @@ jobs:
     needs: [check-release, build-binaries, publish]
     if: always() && needs.build-binaries.result == 'success' && needs.check-release.outputs.needs_github_release == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
