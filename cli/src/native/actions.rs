@@ -7672,18 +7672,15 @@ async fn handle_auth_login(cmd: &Value, state: &mut DaemonState) -> Result<Value
     )
     .await?;
 
-    let otp_code = if let Some(ref item) = one_password_item {
-        item.otp_reference
-            .as_deref()
-            .map(auth::resolve_1password_reference)
-            .transpose()?
+    let otp_reference = if let Some(ref item) = one_password_item {
+        item.otp_reference.clone()
     } else if let Some(otp_op_ref) = cred.otp_op_ref.as_deref() {
-        Some(auth::resolve_1password_reference(otp_op_ref)?)
+        Some(otp_op_ref.to_string())
     } else {
         None
     };
 
-    if let Some(otp_code) = otp_code {
+    if let Some(otp_reference) = otp_reference {
         let otp_selector = if let Some(selector) = cmd
             .get("otpSelector")
             .and_then(|v| v.as_str())
@@ -7699,6 +7696,7 @@ async fn handle_auth_login(cmd: &Value, state: &mut DaemonState) -> Result<Value
             wait_for_selector(&mgr.client, &session_id, &selector, "visible", 15_000).await?;
             selector
         };
+        let otp_code = auth::resolve_1password_reference(&otp_reference)?;
         interaction::fill(
             &mgr.client,
             &session_id,

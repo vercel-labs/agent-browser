@@ -27,7 +27,7 @@ These features are designed to mitigate the following threats when an LLM-based 
 Store credentials locally and reference them by name. The LLM never sees secrets. Profiles can store encrypted values directly, keep only a 1Password Login item name, or use field-level 1Password references that resolve at login time.
 
 ```bash
-# Save credentials (encrypted if AGENT_BROWSER_ENCRYPTION_KEY is set)
+# Save credentials (always encrypted)
 # Recommended: pipe password via stdin to avoid shell history / process listing exposure
 echo "pass" | agent-browser auth save github --url https://github.com/login --username user --password-stdin
 
@@ -68,7 +68,7 @@ agent-browser auth save myapp \
 
 Profiles are stored in `~/.agent-browser/auth/` and always encrypted with AES-256-GCM. If `AGENT_BROWSER_ENCRYPTION_KEY` is not set, a key is auto-generated at `~/.agent-browser/.encryption-key` on first use. Back up this file or set the environment variable explicitly for portability.
 
-For 1Password-backed profiles, the saved JSON contains only the item name or `op://...` references; the actual username, password, or OTP is fetched locally from the signed-in `op` CLI during `auth login`.
+For 1Password-backed profiles, the saved JSON contains only the item name or `op://...` references; the username, password, and OTP are fetched locally from the signed-in `op` CLI during `auth login`. OTP values are resolved after the OTP input is visible so slow MFA pages do not consume most of a TOTP window before the code can be entered.
 
 File permissions are enforced on both Unix (`chmod 600`/`700`) and Windows (`icacls` restricted to the current user) to prevent other users from reading encryption keys or auth profiles.
 

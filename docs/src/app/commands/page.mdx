@@ -313,17 +313,26 @@ agent-browser auth delete <name>         # Delete a saved profile
 Save options:
 
 - `--url <url>` -- login page URL (required)
-- `--username <user>` -- username (required)
-- `--password <pass>` -- password (required unless `--password-stdin`)
+- `--onepassword-item <item>` -- 1Password Login item name or ID for username/password and optional OTP
+- `--onepassword-vault <vault>` -- optional 1Password vault for `--onepassword-item`
+- `--username <user>` -- username (required unless using 1Password)
+- `--username-op <ref>` -- advanced 1Password secret reference for the username
+- `--password <pass>` -- password (required unless using `--password-stdin`, `--password-op`, or 1Password)
 - `--password-stdin` -- read password from stdin (recommended to avoid shell history exposure)
+- `--password-op <ref>` -- advanced 1Password secret reference for the password
 - `--username-selector <sel>` -- custom CSS selector for username field
 - `--password-selector <sel>` -- custom CSS selector for password field
 - `--submit-selector <sel>` -- custom CSS selector for submit button
+- `--otp-op <ref>` -- advanced 1Password secret reference for a TOTP/OTP code
+- `--otp-selector <sel>` -- custom CSS selector for the OTP input
+- `--otp-submit-selector <sel>` -- custom CSS selector for the OTP submit button
 
-`auth login` navigates with `load` and then waits for the username/password/submit selectors to appear before interacting. This improves reliability on SPA login pages where fields render after initial page load.
+`auth login` navigates with `load` and then waits for the username/password/submit selectors to appear before interacting. This improves reliability on SPA login pages where fields render after initial page load. When an OTP source is configured, `auth login` waits for the OTP input before resolving the current TOTP value from 1Password.
 
 ```bash
 echo "pass" | agent-browser auth save github --url https://github.com/login --username user --password-stdin
+agent-browser auth save github --url https://github.com/login --onepassword-item GitHub --onepassword-vault Work
+agent-browser auth save github --url https://github.com/login --username-op op://Work/GitHub/username --password-op op://Work/GitHub/password --otp-op 'op://Work/GitHub/one-time password?attribute=otp'
 agent-browser auth login github
 agent-browser auth list
 ```

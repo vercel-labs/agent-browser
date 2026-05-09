@@ -199,7 +199,7 @@ agent-browser state save ./oauth-state.json
 
 ## Two-Factor Authentication
 
-For sites that use a standard OTP field, you can keep the username, password, and optional TOTP in a single 1Password Login item and let `auth login` resolve them at runtime:
+For sites that use a standard OTP field, you can keep the username, password, and optional TOTP in a single 1Password Login item and let `auth login` resolve them at runtime. OTP values are resolved after the OTP input is visible so slow MFA pages do not consume most of a TOTP window before the code can be entered:
 
 ```bash
 agent-browser auth save myapp \

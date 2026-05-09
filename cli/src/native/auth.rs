@@ -394,6 +394,14 @@ fn is_field_name(field: &OnePasswordItemField, name: &str) -> bool {
 }
 
 fn append_query_parameter(reference: &str, query: &str) -> String {
+    if reference
+        .split_once('?')
+        .map(|(_, existing_query)| existing_query.split('&').any(|part| part == query))
+        .unwrap_or(false)
+    {
+        return reference.to_string();
+    }
+
     if reference.contains('?') {
         format!("{}&{}", reference, query)
     } else {
@@ -919,6 +927,28 @@ mod tests {
     fn test_validate_1password_reference() {
         assert!(validate_1password_reference("op://work/github/password").is_ok());
         assert!(validate_1password_reference("https://example.com").is_err());
+    }
+
+    #[test]
+    fn test_append_query_parameter_is_idempotent() {
+        assert_eq!(
+            append_query_parameter("op://work/github/one-time password", "attribute=otp"),
+            "op://work/github/one-time password?attribute=otp"
+        );
+        assert_eq!(
+            append_query_parameter(
+                "op://work/github/one-time password?attribute=otp",
+                "attribute=otp"
+            ),
+            "op://work/github/one-time password?attribute=otp"
+        );
+        assert_eq!(
+            append_query_parameter(
+                "op://work/github/one-time password?foo=bar",
+                "attribute=otp"
+            ),
+            "op://work/github/one-time password?foo=bar&attribute=otp"
+        );
     }
 
     #[test]
