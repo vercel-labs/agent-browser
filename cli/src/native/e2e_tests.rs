@@ -5481,9 +5481,9 @@ async fn e2e_cookies_isolated_between_contexts() {
     .await;
     assert_success(&resp);
 
-    // Abrir tab no context A — data: URL evita SecurityError em cookies
+    // Same origin in both contexts — isolation must come from BrowserContext, not origin
     let resp = execute_command(
-        &json!({ "id": "4", "action": "tab_new", "url": "data:text/html,<h1>ctx-a</h1>", "contextId": "c1" }),
+        &json!({ "id": "4", "action": "tab_new", "contextId": "c1" }),
         &mut state,
     )
     .await;
@@ -5500,22 +5500,28 @@ async fn e2e_cookies_isolated_between_contexts() {
     .await;
     assert_success(&resp);
 
-    // data: URLs nao permitem document.cookie; usar localStorage como proxy de isolamento
     let resp = execute_command(
-        &json!({ "id": "6", "action": "evaluate", "script": "localStorage.setItem('ctx-cookie','secret-a'); localStorage.getItem('ctx-cookie')" }),
+        &json!({ "id": "5b", "action": "navigate", "url": "https://example.com/" }),
         &mut state,
     )
     .await;
     assert_success(&resp);
-    assert_eq!(
-        get_data(&resp)["result"],
-        "secret-a",
-        "localStorage.setItem/getItem should work in context A tab"
+
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "evaluate", "script": "document.cookie = 'ctx_cookie=secret_a; path=/'; document.cookie" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let cookie_a = get_data(&resp)["result"].as_str().unwrap_or("");
+    assert!(
+        cookie_a.contains("ctx_cookie=secret_a"),
+        "cookie should be set in context A: {}",
+        cookie_a
     );
 
-    // Abrir tab no context B
     let resp = execute_command(
-        &json!({ "id": "7", "action": "tab_new", "url": "data:text/html,<h1>ctx-b</h1>", "contextId": "c2" }),
+        &json!({ "id": "7", "action": "tab_new", "contextId": "c2" }),
         &mut state,
     )
     .await;
@@ -5532,17 +5538,25 @@ async fn e2e_cookies_isolated_between_contexts() {
     .await;
     assert_success(&resp);
 
-    // Ler localStorage no context B — deve estar isolado (null)
     let resp = execute_command(
-        &json!({ "id": "9", "action": "evaluate", "script": "localStorage.getItem('ctx-cookie')" }),
+        &json!({ "id": "8b", "action": "navigate", "url": "https://example.com/" }),
         &mut state,
     )
     .await;
     assert_success(&resp);
-    assert_eq!(
-        get_data(&resp)["result"],
-        serde_json::Value::Null,
-        "localStorage in context B must not see data from context A"
+
+    // Ler cookies em context B — deve estar isolado (não vê o cookie de A)
+    let resp = execute_command(
+        &json!({ "id": "9", "action": "evaluate", "script": "document.cookie" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let cookie_b = get_data(&resp)["result"].as_str().unwrap_or("");
+    assert!(
+        !cookie_b.contains("ctx_cookie"),
+        "cookies in context B must not see ctx_cookie from context A: {}",
+        cookie_b
     );
 
     let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
@@ -5567,9 +5581,9 @@ async fn e2e_localstorage_isolated() {
     let resp = execute_command(&json!({ "id": "3", "action": "context_new" }), &mut state).await;
     assert_success(&resp);
 
-    // Tab em c1 — escrever localStorage
+    // Tab em c1 — abrir com about:blank, depois navigate para garantir load completo
     let resp = execute_command(
-        &json!({ "id": "4", "action": "tab_new", "url": "data:text/html,<h1>A</h1>", "contextId": "c1" }),
+        &json!({ "id": "4", "action": "tab_new", "contextId": "c1" }),
         &mut state,
     )
     .await;
@@ -5587,6 +5601,13 @@ async fn e2e_localstorage_isolated() {
     assert_success(&resp);
 
     let resp = execute_command(
+        &json!({ "id": "5b", "action": "navigate", "url": "https://example.com/" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
         &json!({ "id": "6", "action": "evaluate", "script": "localStorage.setItem('k','v1'); 'ok'" }),
         &mut state,
     )
@@ -5596,7 +5617,7 @@ async fn e2e_localstorage_isolated() {
 
     // Tab em c2 — ler localStorage deve retornar null
     let resp = execute_command(
-        &json!({ "id": "7", "action": "tab_new", "url": "data:text/html,<h1>B</h1>", "contextId": "c2" }),
+        &json!({ "id": "7", "action": "tab_new", "contextId": "c2" }),
         &mut state,
     )
     .await;
@@ -5608,6 +5629,13 @@ async fn e2e_localstorage_isolated() {
 
     let resp = execute_command(
         &json!({ "id": "8", "action": "tab_switch", "tabId": tab_c2 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "8b", "action": "navigate", "url": "https://example.com/" }),
         &mut state,
     )
     .await;
