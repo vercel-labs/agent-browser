@@ -1748,12 +1748,14 @@ async fn try_auto_restore_state(state: &mut DaemonState) {
 ///
 /// Explicit launch should surface this error. Best-effort callers can ignore
 /// the returned `Result` and keep their previous behavior.
-async fn load_storage_state(state: &DaemonState, path: &Option<String>) -> Result<(), String> {
+async fn load_storage_state(state: &mut DaemonState, path: &Option<String>) -> Result<(), String> {
     if let Some(ref path) = path {
-        if let Some(ref mgr) = state.browser {
-            if let Ok(session_id) = mgr.active_session_id() {
-                state::load_state(&mgr.client, session_id, path).await?;
-            }
+        if let Some(ref mut mgr) = state.browser {
+            // Use load_state_into_manager so any saved BrowserContext snapshots
+            // are also recreated with their cookies/localStorage. The older
+            // load_state path only restored global cookies/storage, silently
+            // dropping per-context state when launched with --state <path>.
+            state::load_state_into_manager(mgr, path).await?;
         }
     }
 
@@ -1798,7 +1800,7 @@ async fn load_storage_state_or_rollback(
 }
 
 /// Load storage state from AGENT_BROWSER_STATE if set.
-async fn try_load_storage_state(state: &DaemonState, path: &Option<String>) {
+async fn try_load_storage_state(state: &mut DaemonState, path: &Option<String>) {
     let _ = load_storage_state(state, path).await;
 }
 
