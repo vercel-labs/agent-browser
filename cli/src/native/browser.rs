@@ -156,6 +156,26 @@ pub fn to_ai_friendly_error(error: &str) -> String {
     error.to_string()
 }
 
+/// Tracking metadata for a Chrome BrowserContext (CDP `Target.createBrowserContext`).
+///
+/// Each active context is represented by one `ContextInfo` entry in
+/// [`BrowserManager::contexts`]. Stable refs (`c1`, `c2`, …) are exposed to
+/// callers via [`ref_id`](ContextInfo::ref_id); the raw CDP id is kept internal
+/// and resolved on demand by [`BrowserManager::resolve_context`].
+#[derive(Debug, Clone)]
+pub struct ContextInfo {
+    /// Short stable ref exposed to callers, e.g. `"c1"`. Assigned sequentially
+    /// by [`BrowserManager`] and never reused within a session.
+    pub ref_id: String,
+    /// Raw CDP browser context id (long hex string). Used only in CDP calls;
+    /// never shown to callers in normal output.
+    pub browser_context_id: String,
+    /// Optional human-readable label assigned at creation time via
+    /// `context new --label <name>`. Labels are unique within a session and
+    /// accepted anywhere a ref is accepted.
+    pub label: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct PageInfo {
     pub tab_id: u32,
@@ -170,6 +190,8 @@ pub struct PageInfo {
     pub url: String,
     pub title: String,
     pub target_type: String, // "page" or "webview"
+    /// CDP browserContextId this page belongs to. `None` = default context.
+    pub browser_context_id: Option<String>,
 }
 
 /// Canonical string form of a stable tab id: `t1`, `t2`, ... The `t` prefix
@@ -177,6 +199,12 @@ pub struct PageInfo {
 /// accepts) and matches the `@e<N>` convention used for element refs.
 pub fn format_tab_id(tab_id: u32) -> String {
     format!("t{}", tab_id)
+}
+
+/// Canonical string form of a stable context ref: `c1`, `c2`, …
+/// Parallel to `format_tab_id`.
+pub fn format_context_id(n: u32) -> String {
+    format!("c{}", n)
 }
 
 /// A tab reference as parsed from CLI/JSON input. Either a stable id like
@@ -305,6 +333,12 @@ pub struct BrowserManager {
     /// Origins visited during this session, used by save_state to collect cross-origin localStorage.
     visited_origins: HashSet<String>,
     next_tab_id: u32,
+    /// Counter for generating stable context refs (`c1`, `c2`, …).
+    /// Parallel to `next_tab_id`.
+    next_context_id: u32,
+    /// Browser contexts created via CDP `Target.createBrowserContext`.
+    /// Each entry isolates cookies/localStorage from other contexts in the same Chrome process.
+    pub contexts: Vec<ContextInfo>,
 }
 
 const LIGHTPANDA_CDP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -377,6 +411,8 @@ impl BrowserManager {
                 ignore_https_errors,
                 visited_origins: HashSet::new(),
                 next_tab_id: 1,
+                next_context_id: 1,
+                contexts: Vec::new(),
             };
             manager.discover_and_attach_targets().await?;
             manager
@@ -466,6 +502,8 @@ impl BrowserManager {
             ignore_https_errors: false,
             visited_origins: HashSet::new(),
             next_tab_id: 1,
+            next_context_id: 1,
+            contexts: Vec::new(),
         };
 
         if direct_page {
@@ -478,6 +516,7 @@ impl BrowserManager {
                 url: String::new(),
                 title: String::new(),
                 target_type: "page".to_string(),
+                browser_context_id: None,
             });
             manager.active_page_index = 0;
             manager.enable_domains_direct().await?;
@@ -520,6 +559,7 @@ impl BrowserManager {
                     "Target.createTarget",
                     &CreateTargetParams {
                         url: "about:blank".to_string(),
+                        browser_context_id: None,
                     },
                     None,
                 )
@@ -547,6 +587,7 @@ impl BrowserManager {
                 url: "about:blank".to_string(),
                 title: String::new(),
                 target_type: "page".to_string(),
+                browser_context_id: None,
             });
             self.active_page_index = 0;
             self.enable_domains(&attach_result.session_id).await?;
@@ -574,6 +615,8 @@ impl BrowserManager {
                     url: target.url.clone(),
                     title: target.title.clone(),
                     target_type: target.target_type.clone(),
+                    // Carry over CDP context id if Chrome reports it, else default context
+                    browser_context_id: target.browser_context_id.clone(),
                 });
             }
 
@@ -896,6 +939,7 @@ impl BrowserManager {
                 "Target.createTarget",
                 &CreateTargetParams {
                     url: "about:blank".to_string(),
+                    browser_context_id: None,
                 },
                 None,
             )
@@ -923,6 +967,7 @@ impl BrowserManager {
             url: "about:blank".to_string(),
             title: String::new(),
             target_type: "page".to_string(),
+            browser_context_id: None,
         });
         self.active_page_index = 0;
         self.enable_domains(&attach_result.session_id).await?;
@@ -1004,6 +1049,279 @@ impl BrowserManager {
         self.pages.iter().any(|p| p.label.as_deref() == Some(label))
     }
 
+    /// Create an isolated BrowserContext (incognito-like) inside the running Chrome.
+    ///
+    /// Calls `Target.createBrowserContext` via CDP, assigns the next stable ref
+    /// (`c1`, `c2`, …), registers the context in [`BrowserManager::contexts`],
+    /// and returns a JSON object with:
+    ///
+    /// - `contextId` — stable ref (e.g. `"c1"`) for use in subsequent commands
+    /// - `browserContextId` — raw CDP id (internal; included for debugging)
+    /// - `label` — the label passed in, or `null` if none
+    ///
+    /// `label` must start with a letter and contain only letters, digits, `-`,
+    /// and `_`. Labels are unique within a session; passing a duplicate returns
+    /// `Err` without touching CDP.
+    pub async fn context_new(&mut self, label: Option<&str>) -> Result<Value, String> {
+        if let Some(lbl) = label {
+            if !is_valid_label(lbl) {
+                return Err(format!(
+                    "Invalid context label `{}`; labels must start with a letter and contain \
+                     only letters, digits, `-`, and `_`",
+                    lbl
+                ));
+            }
+            // Labels are unique across contexts
+            if self
+                .contexts
+                .iter()
+                .any(|c| c.label.as_deref() == Some(lbl))
+            {
+                return Err(format!(
+                    "Label `{}` is already used by another context; labels must be unique",
+                    lbl
+                ));
+            }
+        }
+
+        let result: CreateBrowserContextResult = self
+            .client
+            .send_command_typed(
+                "Target.createBrowserContext",
+                &CreateBrowserContextParams {
+                    dispose_on_detach: Some(true),
+                },
+                None,
+            )
+            .await?;
+
+        let ref_id = format_context_id(self.next_context_id);
+        self.next_context_id += 1;
+
+        let cdp_id = result.browser_context_id.clone();
+        self.contexts.push(ContextInfo {
+            ref_id: ref_id.clone(),
+            browser_context_id: cdp_id.clone(),
+            label: label.map(|s| s.to_string()),
+        });
+
+        Ok(json!({
+            "contextId": ref_id,
+            "browserContextId": cdp_id,
+            "label": label,
+        }))
+    }
+
+    /// Resolve a caller-supplied string to the matching [`ContextInfo`].
+    ///
+    /// Accepts either:
+    /// - A stable ref of the form `"c1"`, `"c2"`, … (`ref_id` equality)
+    /// - A user-assigned label (`label` equality)
+    ///
+    /// Returns `None` if neither matches any registered context. Callers that
+    /// need an error should use `.ok_or_else(|| format!("Unknown context: {}", …))`.
+    pub fn resolve_context(&self, ref_or_label: &str) -> Option<&ContextInfo> {
+        self.contexts
+            .iter()
+            .find(|c| c.ref_id == ref_or_label || c.label.as_deref() == Some(ref_or_label))
+    }
+
+    /// Close a BrowserContext identified by its stable ref or label.
+    ///
+    /// The shutdown sequence is:
+    /// 1. Resolve `ref_or_label` — unknown input returns `Err` immediately
+    ///    without touching CDP.
+    /// 2. Find all [`PageInfo`] entries whose `browser_context_id` matches.
+    /// 3. Call `Target.closeTarget` for each (best-effort — already-closed
+    ///    targets emit a warning and are skipped).
+    /// 4. Adjust `active_page_index` to remain valid after the removals.
+    /// 5. Call `Target.disposeBrowserContext` (best-effort).
+    /// 6. Remove the [`ContextInfo`] entry from `contexts`.
+    ///
+    /// Returns `{ "contextId": "<ref>", "closed": true, "tabsClosed": N }`.
+    /// Returns `Err` only when `ref_or_label` cannot be resolved.
+    pub async fn context_close(&mut self, ref_or_label: &str) -> Result<Value, String> {
+        // Step 1: resolve context — unknown ref/label → clear error
+        let ctx = self
+            .resolve_context(ref_or_label)
+            .ok_or_else(|| format!("Unknown context: {}", ref_or_label))?;
+
+        // Step 2: capture identifiers before any mutations
+        let cdp_id = ctx.browser_context_id.clone();
+        let ref_id = ctx.ref_id.clone();
+
+        // Step 3: find indices of pages belonging to this context (back-to-front
+        // so that remove() on a lower index does not shift later ones)
+        let context_page_indices: Vec<usize> = self
+            .pages
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.browser_context_id.as_deref() == Some(&cdp_id))
+            .map(|(i, _)| i)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+
+        let tabs_closed = context_page_indices.len();
+
+        // Steps 4 & 5: close each tab via CDP (best-effort) and remove from pages
+        for idx in &context_page_indices {
+            let page = self.pages.remove(*idx);
+
+            // Best-effort CDP close — target may already be gone
+            if let Err(e) = self
+                .client
+                .send_command_typed::<_, Value>(
+                    "Target.closeTarget",
+                    &CloseTargetParams {
+                        target_id: page.target_id.clone(),
+                    },
+                    None,
+                )
+                .await
+            {
+                eprintln!(
+                    "Warning: Target.closeTarget failed for {} (already closed?): {}",
+                    page.target_id, e
+                );
+            }
+        }
+
+        // Step 6: adjust active_page_index after bulk removal.
+        // Count how many removed pages had an original index strictly less than
+        // the original active_page_index — each one shifts the active page left
+        // by one. Then clamp to the new page count.
+        let removed_before_active = context_page_indices
+            .iter()
+            .filter(|&&idx| idx < self.active_page_index)
+            .count();
+        self.active_page_index = self.active_page_index.saturating_sub(removed_before_active);
+        // Final bounds safety: clamp to valid range
+        self.update_active_page_if_needed();
+
+        // Step 7: dispose the BrowserContext — best-effort
+        if let Err(e) = self
+            .client
+            .send_command_typed::<DisposeBrowserContextParams, serde_json::Value>(
+                "Target.disposeBrowserContext",
+                &DisposeBrowserContextParams {
+                    browser_context_id: cdp_id,
+                },
+                None,
+            )
+            .await
+        {
+            eprintln!(
+                "Warning: Target.disposeBrowserContext failed for context {} ({}): {}",
+                ref_id, ref_or_label, e
+            );
+        }
+
+        // Step 8: remove ContextInfo from the registry
+        self.contexts.retain(|c| c.ref_id != ref_id);
+
+        // Step 9: return result
+        Ok(json!({
+            "contextId": ref_id,
+            "closed": true,
+            "tabsClosed": tabs_closed,
+        }))
+    }
+
+    /// Create a new tab, optionally inside an isolated browser context.
+    ///
+    /// When `context_id` is `Some`, resolves the stable ref (`"c1"`) or label
+    /// to its raw CDP `browserContextId` via [`resolve_context`](BrowserManager::resolve_context),
+    /// then passes that id to `Target.createTarget`. The new [`PageInfo`] entry
+    /// records `browser_context_id` so that [`context_close`](BrowserManager::context_close)
+    /// can find and close the tab later.
+    ///
+    /// When `context_id` is `None`, the tab opens in the default context (same
+    /// behaviour as `tab new` without `--context`).
+    ///
+    /// Returns `Err` immediately if `context_id` cannot be resolved before
+    /// any CDP call is made.
+    pub async fn tab_new_in_context(
+        &mut self,
+        url: Option<&str>,
+        label: Option<&str>,
+        context_id: Option<&str>,
+    ) -> Result<Value, String> {
+        if let Some(label) = label {
+            if !is_valid_label(label) {
+                return Err(format!("Invalid tab label `{}`", label));
+            }
+            if self.has_label(label) {
+                return Err(format!("Label `{}` already in use", label));
+            }
+        }
+
+        // Resolve the stable ref/label to the raw CDP browser context id
+        let (cdp_ctx_id, ref_id) = if let Some(ref_str) = context_id {
+            let ctx = self
+                .resolve_context(ref_str)
+                .ok_or_else(|| format!("Unknown context: {}", ref_str))?;
+            (
+                Some(ctx.browser_context_id.clone()),
+                Some(ctx.ref_id.clone()),
+            )
+        } else {
+            (None, None)
+        };
+
+        let target_url = url.unwrap_or("about:blank");
+
+        let result: CreateTargetResult = self
+            .client
+            .send_command_typed(
+                "Target.createTarget",
+                &CreateTargetParams {
+                    url: target_url.to_string(),
+                    browser_context_id: cdp_ctx_id.clone(),
+                },
+                None,
+            )
+            .await?;
+
+        let attach: AttachToTargetResult = self
+            .client
+            .send_command_typed(
+                "Target.attachToTarget",
+                &AttachToTargetParams {
+                    target_id: result.target_id.clone(),
+                    flatten: true,
+                },
+                None,
+            )
+            .await?;
+
+        self.enable_domains(&attach.session_id).await?;
+
+        let tab_id = self.next_tab_id;
+        self.next_tab_id += 1;
+        let index = self.pages.len();
+        let label_owned = label.map(|s| s.to_string());
+        self.pages.push(PageInfo {
+            tab_id,
+            label: label_owned.clone(),
+            target_id: result.target_id.clone(),
+            session_id: attach.session_id,
+            url: target_url.to_string(),
+            title: String::new(),
+            target_type: "page".to_string(),
+            browser_context_id: cdp_ctx_id,
+        });
+        self.active_page_index = index;
+
+        Ok(json!({
+            "tabId": format_tab_id(tab_id),
+            "contextId": ref_id,
+            "label": label_owned,
+            "url": target_url,
+        }))
+    }
+
     pub async fn tab_new(
         &mut self,
         url: Option<&str>,
@@ -1034,6 +1352,7 @@ impl BrowserManager {
                 "Target.createTarget",
                 &CreateTargetParams {
                     url: target_url.to_string(),
+                    browser_context_id: None,
                 },
                 None,
             )
@@ -1065,6 +1384,7 @@ impl BrowserManager {
             url: target_url.to_string(),
             title: String::new(),
             target_type: "page".to_string(),
+            browser_context_id: None,
         });
         self.active_page_index = index;
 
@@ -1617,6 +1937,8 @@ async fn initialize_lightpanda_manager(
             ignore_https_errors: false,
             visited_origins: HashSet::new(),
             next_tab_id: 1,
+            next_context_id: 1,
+            contexts: Vec::new(),
         };
 
         match discover_and_attach_lightpanda_targets(&mut manager, deadline).await {
@@ -1829,6 +2151,7 @@ mod tests {
             url: String::new(),
             title: String::new(),
             target_type: "page".to_string(),
+            browser_context_id: None,
         }];
         let target = TargetInfo {
             target_id: "popup-1".to_string(),

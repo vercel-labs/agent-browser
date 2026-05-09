@@ -141,6 +141,8 @@ pub struct SetDiscoverTargetsParams {
 #[serde(rename_all = "camelCase")]
 pub struct CreateTargetParams {
     pub url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub browser_context_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -153,6 +155,27 @@ pub struct CreateTargetResult {
 #[serde(rename_all = "camelCase")]
 pub struct CloseTargetParams {
     pub target_id: String,
+}
+
+// --- BrowserContext (POC: isolated cookies/storage in same Chrome process) ---
+
+#[derive(Debug, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateBrowserContextParams {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dispose_on_detach: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateBrowserContextResult {
+    pub browser_context_id: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DisposeBrowserContextParams {
+    pub browser_context_id: String,
 }
 
 // Target events
@@ -334,6 +357,27 @@ pub struct AXProperty {
 // ---------------------------------------------------------------------------
 // Network domain (minimal for Phase 1)
 // ---------------------------------------------------------------------------
+
+/// Params for `Network.getCookies`. `browser_context_id` limits results to a
+/// specific BrowserContext; `None` returns cookies from the default context.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetCookiesParams {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub urls: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub browser_context_id: Option<String>,
+}
+
+/// Params for `Network.setCookies`. `browser_context_id` scopes the cookies to
+/// a specific BrowserContext; `None` sets in the default context.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetCookiesParams {
+    pub cookies: Vec<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub browser_context_id: Option<String>,
+}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]

@@ -7,18 +7,43 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
 
+use super::browser::{BrowserManager, ContextInfo};
 use super::cdp::client::CdpClient;
 use super::cdp::types::{
     AttachToTargetParams, AttachToTargetResult, CloseTargetParams, CreateTargetParams,
-    CreateTargetResult, EvaluateParams,
+    CreateTargetResult, EvaluateParams, GetCookiesParams, SetCookiesParams,
 };
 use super::cookies::{self, Cookie};
+
+/// Snapshot of cookies and localStorage/sessionStorage for a single BrowserContext.
+///
+/// The `ref_id` field is informational only — after a `load_state` call the
+/// context is re-created by Chrome and receives a new CDP id, so the `c<N>`
+/// counter restarts. The `label` is preserved and used to re-create the context
+/// with the same human-readable name.
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextSnapshot {
+    /// Stable ref at save time (`"c1"`, `"c2"`, …). Informational — not
+    /// restored on load; the new context gets the next available `c<N>`.
+    pub ref_id: String,
+    /// Human-readable label assigned at `context new --label <name>`, if any.
+    pub label: Option<String>,
+    /// Cookies scoped to this BrowserContext.
+    pub cookies: Vec<Cookie>,
+    /// Per-origin localStorage/sessionStorage for this context.
+    pub origins: Vec<OriginStorage>,
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StorageState {
     pub cookies: Vec<Cookie>,
     pub origins: Vec<OriginStorage>,
+    /// Per-context snapshots. Absent in old state files — `#[serde(default)]`
+    /// ensures backward compatibility: old files deserialise with an empty vec.
+    #[serde(default)]
+    pub contexts: Vec<ContextSnapshot>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -109,16 +134,21 @@ async fn eval_origin_storage(
 /// Create a temporary CDP target, navigate it to each origin to collect localStorage,
 /// then close it. Uses Fetch interception to serve blank HTML instead of making real
 /// network requests.
+///
+/// `browser_context_id` scopes the target to a specific BrowserContext so that
+/// localStorage collected belongs to that context. Pass `None` for the default context.
 async fn collect_storage_via_temp_target(
     client: &CdpClient,
     origins: &[String],
     origin_js: &str,
+    browser_context_id: Option<&str>,
 ) -> Result<Vec<OriginStorage>, String> {
     let create_result: CreateTargetResult = client
         .send_command_typed(
             "Target.createTarget",
             &CreateTargetParams {
                 url: "about:blank".to_string(),
+                browser_context_id: browser_context_id.map(|s| s.to_string()),
             },
             None,
         )
@@ -244,6 +274,76 @@ async fn collect_storage_in_target(
     Ok(results)
 }
 
+/// Collect cookies and localStorage/sessionStorage for a single BrowserContext.
+///
+/// Cookies are fetched via `Network.getCookies` with `browserContextId` scoping.
+/// Storage is collected by opening a temporary target inside the context and
+/// navigating it to each origin with active data (all origins visited during the
+/// session that have not yet been deduplicated — we use a blank-HTML approach so
+/// no real network requests are made).
+async fn collect_context_snapshot(
+    client: &CdpClient,
+    ctx: &ContextInfo,
+    origin_js: &str,
+) -> Result<ContextSnapshot, String> {
+    // Recolher cookies do contexto usando browserContextId
+    let result = client
+        .send_command_typed::<_, Value>(
+            "Network.getCookies",
+            &GetCookiesParams {
+                urls: None,
+                browser_context_id: Some(ctx.browser_context_id.clone()),
+            },
+            None,
+        )
+        .await
+        .unwrap_or(Value::Null);
+
+    let cookies: Vec<Cookie> = result
+        .get("cookies")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+
+    // Collect origins that belong to this context by inspecting pages in the
+    // context. We open a temp target scoped to the context and iterate the
+    // unique origins from the cookie domains.
+    let cookie_origins: Vec<String> = {
+        let mut seen = HashSet::new();
+        for c in &cookies {
+            let domain = c.domain.trim_start_matches('.');
+            if !domain.is_empty() {
+                let origin = if c.secure {
+                    format!("https://{}", domain)
+                } else {
+                    format!("http://{}", domain)
+                };
+                seen.insert(origin);
+            }
+        }
+        seen.into_iter().collect()
+    };
+
+    let origins = if !cookie_origins.is_empty() {
+        collect_storage_via_temp_target(
+            client,
+            &cookie_origins,
+            origin_js,
+            Some(&ctx.browser_context_id),
+        )
+        .await
+        .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    Ok(ContextSnapshot {
+        ref_id: ctx.ref_id.clone(),
+        label: ctx.label.clone(),
+        cookies,
+        origins,
+    })
+}
+
 pub async fn save_state(
     client: &CdpClient,
     session_id: &str,
@@ -251,6 +351,7 @@ pub async fn save_state(
     session_name: Option<&str>,
     session_id_str: &str,
     visited_origins: &HashSet<String>,
+    contexts: &[ContextInfo],
 ) -> Result<String, String> {
     let cookies = cookies::get_all_cookies(client, session_id).await?;
 
@@ -298,13 +399,33 @@ pub async fn save_state(
     if !all_origins.is_empty() {
         let remaining: Vec<String> = all_origins.into_iter().collect();
         if let Ok(temp_origins) =
-            collect_storage_via_temp_target(client, &remaining, origin_js).await
+            collect_storage_via_temp_target(client, &remaining, origin_js, None).await
         {
             origins.extend(temp_origins);
         }
     }
 
-    let state = StorageState { cookies, origins };
+    // 3. Collect per-context state (cookies + localStorage)
+    let mut context_snapshots: Vec<ContextSnapshot> = Vec::new();
+    for ctx in contexts {
+        match collect_context_snapshot(client, ctx, origin_js).await {
+            Ok(snapshot) => context_snapshots.push(snapshot),
+            Err(e) => {
+                eprintln!(
+                    "Warning: failed to collect state for context {} ({}): {}",
+                    ctx.ref_id,
+                    ctx.label.as_deref().unwrap_or("no label"),
+                    e
+                );
+            }
+        }
+    }
+
+    let state = StorageState {
+        cookies,
+        origins,
+        contexts: context_snapshots,
+    };
     let json_str = serde_json::to_string_pretty(&state)
         .map_err(|e| format!("Failed to serialize state: {}", e))?;
 
@@ -334,39 +455,12 @@ pub async fn save_state(
 }
 
 pub async fn load_state(client: &CdpClient, session_id: &str, path: &str) -> Result<(), String> {
-    let json_str = if path.ends_with(".enc") {
-        let key = std::env::var("AGENT_BROWSER_ENCRYPTION_KEY").map_err(|_| {
-            "Encrypted state file requires AGENT_BROWSER_ENCRYPTION_KEY".to_string()
-        })?;
-        let data =
-            fs::read(path).map_err(|e| format!("Failed to read state from {}: {}", path, e))?;
-        let decrypted = decrypt_data(&data, &key)?;
-        String::from_utf8(decrypted)
-            .map_err(|e| format!("Decrypted state is not valid UTF-8: {}", e))?
-    } else {
-        match fs::read_to_string(path) {
-            Ok(s) => s,
-            Err(e) => {
-                if let Ok(key) = std::env::var("AGENT_BROWSER_ENCRYPTION_KEY") {
-                    let enc_path = format!("{}.enc", path);
-                    if let Ok(data) = fs::read(&enc_path) {
-                        let decrypted = decrypt_data(&data, &key)?;
-                        String::from_utf8(decrypted)
-                            .map_err(|de| format!("Decrypted state is not valid UTF-8: {}", de))?
-                    } else {
-                        return Err(format!("Failed to read state from {}: {}", path, e));
-                    }
-                } else {
-                    return Err(format!("Failed to read state from {}: {}", path, e));
-                }
-            }
-        }
-    };
+    let json_str = read_state_file(path)?;
 
     let state: StorageState =
         serde_json::from_str(&json_str).map_err(|e| format!("Invalid state file: {}", e))?;
 
-    // Load cookies
+    // Carregar cookies globais
     if !state.cookies.is_empty() {
         let cookie_values: Vec<Value> = state
             .cookies
@@ -376,23 +470,132 @@ pub async fn load_state(client: &CdpClient, session_id: &str, path: &str) -> Res
         cookies::set_cookies(client, session_id, cookie_values, None).await?;
     }
 
-    // Load storage per origin
-    for origin in &state.origins {
+    // Carregar localStorage/sessionStorage globais
+    restore_origins_into_session(client, session_id, &state.origins).await;
+
+    Ok(())
+}
+
+/// Load state from a file AND restore BrowserContext snapshots into `mgr`.
+///
+/// Global cookies and storage are applied to the current active session (same
+/// as [`load_state`]). For each [`ContextSnapshot`] in the file a new
+/// BrowserContext is created via `Target.createBrowserContext`, its cookies are
+/// set with `Network.setCookies` scoped to the new context, and its
+/// localStorage is written by opening a temporary target inside the context.
+///
+/// If a context snapshot fails (e.g. CDP error), a warning is printed and the
+/// next snapshot is still attempted — one failure does not abort the whole restore.
+pub async fn load_state_into_manager(mgr: &mut BrowserManager, path: &str) -> Result<(), String> {
+    let session_id = mgr.active_session_id()?.to_string();
+    let client = mgr.client.clone();
+
+    // --- Decrypt / read file (same logic as load_state) ---
+    let json_str = read_state_file(path)?;
+
+    let state: StorageState =
+        serde_json::from_str(&json_str).map_err(|e| format!("Invalid state file: {}", e))?;
+
+    // --- Restore global cookies ---
+    if !state.cookies.is_empty() {
+        let cookie_values: Vec<Value> = state
+            .cookies
+            .iter()
+            .map(|c| serde_json::to_value(c).unwrap_or(Value::Null))
+            .collect();
+        cookies::set_cookies(&client, &session_id, cookie_values, None).await?;
+    }
+
+    // --- Restore global localStorage/sessionStorage ---
+    restore_origins_into_session(&client, &session_id, &state.origins).await;
+
+    // --- Restore per-context snapshots ---
+    for snapshot in &state.contexts {
+        match restore_context_snapshot(mgr, snapshot).await {
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!(
+                    "Warning: failed to restore context snapshot {} ({}): {}",
+                    snapshot.ref_id,
+                    snapshot.label.as_deref().unwrap_or("no label"),
+                    e
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Restore a single [`ContextSnapshot`]: create a new BrowserContext, set
+/// cookies scoped to it, then write localStorage via a temp target.
+async fn restore_context_snapshot(
+    mgr: &mut BrowserManager,
+    snapshot: &ContextSnapshot,
+) -> Result<(), String> {
+    // Criar novo context (obtém novo ref_id e cdp_id)
+    let result = mgr.context_new(snapshot.label.as_deref()).await?;
+    let cdp_id = result
+        .get("browserContextId")
+        .and_then(|v| v.as_str())
+        .ok_or("context_new did not return browserContextId")?
+        .to_string();
+
+    let client = mgr.client.clone();
+
+    // Restaurar cookies com browserContextId
+    if !snapshot.cookies.is_empty() {
+        let cookie_values: Vec<Value> = snapshot
+            .cookies
+            .iter()
+            .map(|c| serde_json::to_value(c).unwrap_or(Value::Null))
+            .collect();
+        client
+            .send_command_typed::<_, Value>(
+                "Network.setCookies",
+                &SetCookiesParams {
+                    cookies: cookie_values,
+                    browser_context_id: Some(cdp_id.clone()),
+                },
+                None,
+            )
+            .await
+            .map_err(|e| format!("Network.setCookies failed: {}", e))?;
+    }
+
+    // Restaurar localStorage via temp target dentro do contexto
+    if !snapshot.origins.is_empty() {
+        restore_origins_via_temp_target(&client, &snapshot.origins, &cdp_id).await;
+    }
+
+    Ok(())
+}
+
+/// Restore localStorage/sessionStorage entries by navigating an existing
+/// active session to each origin.
+async fn restore_origins_into_session(
+    client: &CdpClient,
+    session_id: &str,
+    origins: &[OriginStorage],
+) {
+    for origin in origins {
         if origin.local_storage.is_empty() && origin.session_storage.is_empty() {
             continue;
         }
 
-        // Navigate to origin to set storage
         let navigate_url = format!("{}/", origin.origin.trim_end_matches('/'));
-        client
+        if client
             .send_command(
                 "Page.navigate",
                 Some(json!({ "url": navigate_url })),
                 Some(session_id),
             )
-            .await?;
+            .await
+            .is_err()
+        {
+            continue;
+        }
 
-        // Brief wait for navigation
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
         for entry in &origin.local_storage {
@@ -433,8 +636,165 @@ pub async fn load_state(client: &CdpClient, session_id: &str, path: &str) -> Res
                 .await;
         }
     }
+}
 
-    Ok(())
+/// Restore localStorage/sessionStorage for a BrowserContext by opening a
+/// temporary target inside the context, navigating to each origin, and writing
+/// the stored entries via `localStorage.setItem`.
+async fn restore_origins_via_temp_target(
+    client: &CdpClient,
+    origins: &[OriginStorage],
+    browser_context_id: &str,
+) {
+    let create_result = client
+        .send_command_typed::<_, CreateTargetResult>(
+            "Target.createTarget",
+            &CreateTargetParams {
+                url: "about:blank".to_string(),
+                browser_context_id: Some(browser_context_id.to_string()),
+            },
+            None,
+        )
+        .await;
+
+    let target_id = match create_result {
+        Ok(r) => r.target_id,
+        Err(e) => {
+            eprintln!(
+                "Warning: failed to create temp target for context restore: {}",
+                e
+            );
+            return;
+        }
+    };
+
+    let attach_result = client
+        .send_command_typed::<_, AttachToTargetResult>(
+            "Target.attachToTarget",
+            &AttachToTargetParams {
+                target_id: target_id.clone(),
+                flatten: true,
+            },
+            None,
+        )
+        .await;
+
+    let session = match attach_result {
+        Ok(r) => r.session_id,
+        Err(e) => {
+            eprintln!("Warning: failed to attach to temp context target: {}", e);
+            let _ = client
+                .send_command_typed::<_, Value>(
+                    "Target.closeTarget",
+                    &CloseTargetParams { target_id },
+                    None,
+                )
+                .await;
+            return;
+        }
+    };
+
+    let _ = client
+        .send_command_no_params("Page.enable", Some(&session))
+        .await;
+    let _ = client
+        .send_command_no_params("Runtime.enable", Some(&session))
+        .await;
+
+    for origin in origins {
+        if origin.local_storage.is_empty() && origin.session_storage.is_empty() {
+            continue;
+        }
+
+        let navigate_url = format!("{}/", origin.origin.trim_end_matches('/'));
+        let _ = client
+            .send_command(
+                "Page.navigate",
+                Some(json!({ "url": navigate_url })),
+                Some(&session),
+            )
+            .await;
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+
+        for entry in &origin.local_storage {
+            let js = format!(
+                "localStorage.setItem({}, {})",
+                serde_json::to_string(&entry.name).unwrap_or_default(),
+                serde_json::to_string(&entry.value).unwrap_or_default(),
+            );
+            let _ = client
+                .send_command_typed::<_, super::cdp::types::EvaluateResult>(
+                    "Runtime.evaluate",
+                    &EvaluateParams {
+                        expression: js,
+                        return_by_value: Some(true),
+                        await_promise: Some(false),
+                    },
+                    Some(&session),
+                )
+                .await;
+        }
+
+        for entry in &origin.session_storage {
+            let js = format!(
+                "sessionStorage.setItem({}, {})",
+                serde_json::to_string(&entry.name).unwrap_or_default(),
+                serde_json::to_string(&entry.value).unwrap_or_default(),
+            );
+            let _ = client
+                .send_command_typed::<_, super::cdp::types::EvaluateResult>(
+                    "Runtime.evaluate",
+                    &EvaluateParams {
+                        expression: js,
+                        return_by_value: Some(true),
+                        await_promise: Some(false),
+                    },
+                    Some(&session),
+                )
+                .await;
+        }
+    }
+
+    let _ = client
+        .send_command_typed::<_, Value>(
+            "Target.closeTarget",
+            &CloseTargetParams { target_id },
+            None,
+        )
+        .await;
+}
+
+/// Read and decrypt (if needed) a state file, returning the JSON string.
+fn read_state_file(path: &str) -> Result<String, String> {
+    if path.ends_with(".enc") {
+        let key = std::env::var("AGENT_BROWSER_ENCRYPTION_KEY").map_err(|_| {
+            "Encrypted state file requires AGENT_BROWSER_ENCRYPTION_KEY".to_string()
+        })?;
+        let data =
+            fs::read(path).map_err(|e| format!("Failed to read state from {}: {}", path, e))?;
+        let decrypted = decrypt_data(&data, &key)?;
+        String::from_utf8(decrypted)
+            .map_err(|e| format!("Decrypted state is not valid UTF-8: {}", e))
+    } else {
+        match fs::read_to_string(path) {
+            Ok(s) => Ok(s),
+            Err(e) => {
+                if let Ok(key) = std::env::var("AGENT_BROWSER_ENCRYPTION_KEY") {
+                    let enc_path = format!("{}.enc", path);
+                    if let Ok(data) = fs::read(&enc_path) {
+                        let decrypted = decrypt_data(&data, &key)?;
+                        String::from_utf8(decrypted)
+                            .map_err(|de| format!("Decrypted state is not valid UTF-8: {}", de))
+                    } else {
+                        Err(format!("Failed to read state from {}: {}", path, e))
+                    }
+                } else {
+                    Err(format!("Failed to read state from {}: {}", path, e))
+                }
+            }
+        }
+    }
 }
 
 fn is_state_file(path: &std::path::Path) -> bool {
@@ -525,7 +885,12 @@ pub fn state_show(path: &str) -> Result<Value, String> {
             .map(|d| d.as_secs())
             .unwrap_or(0),
         "encrypted": encrypted,
-        "summary": format!("{} cookies, {} origins", state.cookies.len(), state.origins.len()),
+        "summary": format!(
+            "{} cookies, {} origins, {} context(s)",
+            state.cookies.len(),
+            state.origins.len(),
+            state.contexts.len()
+        ),
         "state": state,
     }))
 }
@@ -756,6 +1121,7 @@ mod tests {
                 }],
                 session_storage: vec![],
             }],
+            contexts: vec![],
         };
 
         let json = serde_json::to_string_pretty(&state).unwrap();
@@ -764,6 +1130,63 @@ mod tests {
         assert_eq!(parsed.cookies[0].name, "session");
         assert_eq!(parsed.origins.len(), 1);
         assert_eq!(parsed.origins[0].local_storage.len(), 1);
+        assert!(parsed.contexts.is_empty());
+    }
+
+    #[test]
+    fn test_storage_state_backward_compat() {
+        // State files sem o campo `contexts` (versão antiga) devem carregar OK
+        let old_json = r#"{"cookies":[],"origins":[]}"#;
+        let parsed: StorageState = serde_json::from_str(old_json).unwrap();
+        assert!(
+            parsed.contexts.is_empty(),
+            "contexts deve ser vazio para state files antigos"
+        );
+    }
+
+    #[test]
+    fn test_context_snapshot_serialization() {
+        let snapshot = ContextSnapshot {
+            ref_id: "c1".to_string(),
+            label: Some("staging".to_string()),
+            cookies: vec![],
+            origins: vec![],
+        };
+        let json = serde_json::to_string(&snapshot).unwrap();
+        let parsed: ContextSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.ref_id, "c1");
+        assert_eq!(parsed.label.as_deref(), Some("staging"));
+        assert!(parsed.cookies.is_empty());
+        assert!(parsed.origins.is_empty());
+    }
+
+    #[test]
+    fn test_storage_state_with_contexts() {
+        let state = StorageState {
+            cookies: vec![],
+            origins: vec![],
+            contexts: vec![
+                ContextSnapshot {
+                    ref_id: "c1".to_string(),
+                    label: Some("tenant-a".to_string()),
+                    cookies: vec![],
+                    origins: vec![],
+                },
+                ContextSnapshot {
+                    ref_id: "c2".to_string(),
+                    label: None,
+                    cookies: vec![],
+                    origins: vec![],
+                },
+            ],
+        };
+        let json = serde_json::to_string(&state).unwrap();
+        let parsed: StorageState = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.contexts.len(), 2);
+        assert_eq!(parsed.contexts[0].ref_id, "c1");
+        assert_eq!(parsed.contexts[0].label.as_deref(), Some("tenant-a"));
+        assert_eq!(parsed.contexts[1].ref_id, "c2");
+        assert!(parsed.contexts[1].label.is_none());
     }
 
     #[test]
@@ -771,6 +1194,7 @@ mod tests {
         let state = StorageState {
             cookies: vec![],
             origins: vec![],
+            contexts: vec![],
         };
         let json = serde_json::to_string(&state).unwrap();
         let parsed: StorageState = serde_json::from_str(&json).unwrap();

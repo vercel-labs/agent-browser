@@ -258,6 +258,64 @@ agent-browser frame main              # Return to main frame
 
 The `frame` command accepts element refs (`@e3`), CSS selectors (`"#my-iframe"`), or frame name/URL.
 
+## Browser contexts
+
+Browser contexts isolate cookies, localStorage, and cache between groups of tabs within a single Chrome
+process. Stable context refs have the form `c1`, `c2`, `c3` — parallel to tab refs `t1`, `t2`.
+
+```bash
+agent-browser context list                                        # List active contexts (default)
+agent-browser context new                                         # Create isolated context
+agent-browser context new --label staging                         # Create context with a label
+agent-browser tab new --context <c<N>|label> [url]                # Open tab inside a context
+agent-browser context close <c<N>|label>                          # Close context (closes tabs first)
+```
+
+<table>
+  <thead>
+    <tr><th>Flag</th><th>Description</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>--label &lt;name&gt;</code></td><td>Human-readable label for the context (letters, digits, <code>-</code>, <code>_</code>; unique per session)</td></tr>
+    <tr><td><code>--context &lt;c&lt;N&gt;|label&gt;</code></td><td>(<code>tab new</code> only) Open the new tab inside the specified context</td></tr>
+  </tbody>
+</table>
+
+### How contexts differ from sessions
+
+`--session` starts a separate Chrome daemon (~200 MB each). `context new` creates isolation within one
+running daemon — two contexts share one process (~250 MB total for 2). Use contexts when you need
+per-identity isolation without the overhead of a second daemon.
+
+### Multi-identity example
+
+```bash
+agent-browser context new --label alice
+agent-browser context new --label bob
+
+agent-browser tab new --context alice https://app.example.com/login
+agent-browser tab new --context bob  https://app.example.com/login
+
+# Log into alice (bob's context has no cookies yet)
+agent-browser tab alice
+agent-browser snapshot -i
+agent-browser fill @e3 "alice@example.com"
+agent-browser fill @e4 "password"
+agent-browser click @e5
+
+# Log into bob independently
+agent-browser tab bob
+agent-browser snapshot -i
+agent-browser fill @e3 "bob@example.com"
+agent-browser fill @e4 "password"
+agent-browser click @e5
+
+agent-browser context close alice  # closes alice's tabs, wipes alice's cookies
+```
+
+After switching to a tab inside a different context, re-snapshot before using element refs — refs are
+scoped to the tab that was active at snapshot time.
+
 ## Dialogs
 
 ```bash

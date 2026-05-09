@@ -404,6 +404,62 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
             }
             return;
         }
+        // Browser contexts
+        if action == Some("context_list") {
+            if let Some(contexts) = data.get("contexts").and_then(|v| v.as_array()) {
+                if contexts.is_empty() {
+                    println!("No active contexts (default context only)");
+                } else {
+                    for ctx in contexts {
+                        let ref_id = ctx.get("contextId").and_then(|v| v.as_str()).unwrap_or("?");
+                        let label = ctx.get("label").and_then(|v| v.as_str());
+                        if let Some(lbl) = label {
+                            println!("[{}] {}", ref_id, lbl);
+                        } else {
+                            println!("[{}]", ref_id);
+                        }
+                    }
+                }
+                return;
+            }
+        }
+        if action == Some("context_new") {
+            if let Some(ref_id) = data.get("contextId").and_then(|v| v.as_str()) {
+                let label = data.get("label").and_then(|v| v.as_str());
+                if let Some(lbl) = label {
+                    println!(
+                        "{} Context created [{}] {}",
+                        color::success_indicator(),
+                        ref_id,
+                        lbl
+                    );
+                } else {
+                    println!(
+                        "{} Context created [{}]",
+                        color::success_indicator(),
+                        ref_id
+                    );
+                }
+                return;
+            }
+        }
+        if action == Some("context_close") {
+            if let Some(ref_id) = data.get("contextId").and_then(|v| v.as_str()) {
+                let tabs_closed = data.get("tabsClosed").and_then(|v| v.as_i64()).unwrap_or(0);
+                if tabs_closed > 0 {
+                    println!(
+                        "{} Context closed [{}] ({} tab{} closed)",
+                        color::success_indicator(),
+                        ref_id,
+                        tabs_closed,
+                        if tabs_closed == 1 { "" } else { "s" }
+                    );
+                } else {
+                    println!("{} Context closed [{}]", color::success_indicator(), ref_id);
+                }
+                return;
+            }
+        }
         // Tabs
         if let Some(tabs) = data.get("tabs").and_then(|v| v.as_array()) {
             for tab in tabs {
@@ -2071,6 +2127,41 @@ Examples:
   agent-browser tab close
   agent-browser tab close t1
   agent-browser tab close docs
+"##
+        }
+
+        // === Contexts ===
+        "context" => {
+            r##"
+agent-browser context - Manage isolated browser contexts
+
+Usage: agent-browser context [operation] [args]
+
+Browser contexts isolate cookies, localStorage, and cache between groups of
+tabs within a single Chrome process. Useful for multi-identity workflows,
+A/B comparisons, and sandboxed exploration. Stable context refs look like
+`c1`, `c2`, `c3` — never reused within a session.
+
+Operations:
+  list                       List all active contexts (default)
+  new                        Create a new context
+  new --label <name>         Create context with a label for easy reference
+  close <c<N>|label>         Close a context (closes its tabs first)
+
+Tab integration:
+  agent-browser tab new --context <c<N>|label> [url]
+
+Global Options:
+  --json               Output as JSON
+  --session <name>     Use specific session
+
+Examples:
+  agent-browser context new
+  agent-browser context new --label staging
+  agent-browser context list
+  agent-browser tab new --context staging https://example.com
+  agent-browser context close staging
+  agent-browser context close c1
 "##
         }
 

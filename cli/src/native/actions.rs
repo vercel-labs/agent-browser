@@ -676,6 +676,7 @@ impl DaemonState {
                         url: te.target_info.url.clone(),
                         title: te.target_info.title.clone(),
                         target_type: te.target_info.target_type.clone(),
+                        browser_context_id: te.target_info.browser_context_id.clone(),
                     });
                 }
             }
@@ -1341,6 +1342,10 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         "tab_new" => handle_tab_new(cmd, state).await,
         "tab_switch" => handle_tab_switch(cmd, state).await,
         "tab_close" => handle_tab_close(cmd, state).await,
+        // BrowserContext isolation
+        "context_new" => handle_context_new(cmd, state).await,
+        "context_list" => handle_context_list(state).await,
+        "context_close" => handle_context_close(cmd, state).await,
         "viewport" => handle_viewport(cmd, state).await,
         "useragent" | "user_agent" => handle_user_agent(cmd, state).await,
         "set_media" => handle_set_media(cmd, state).await,
@@ -1733,10 +1738,8 @@ async fn try_auto_restore_state(state: &mut DaemonState) {
         _ => return,
     };
     if let Some(path) = state::find_auto_state_file(&session_name) {
-        if let Some(ref mgr) = state.browser {
-            if let Ok(session_id) = mgr.active_session_id() {
-                let _ = state::load_state(&mgr.client, session_id, &path).await;
-            }
+        if let Some(ref mut mgr) = state.browser {
+            let _ = state::load_state_into_manager(mgr, &path).await;
         }
     }
 }
@@ -2398,6 +2401,7 @@ async fn handle_close(state: &mut DaemonState) -> Result<Value, String> {
                     Some(session_name.as_str()),
                     &state.session_id,
                     mgr.visited_origins(),
+                    &mgr.contexts,
                 )
                 .await;
             }
@@ -3437,21 +3441,22 @@ async fn handle_state_save(cmd: &Value, state: &DaemonState) -> Result<Value, St
         state.session_name.as_deref(),
         &state.session_id,
         mgr.visited_origins(),
+        &mgr.contexts,
     )
     .await?;
 
     Ok(json!({ "saved": true, "path": saved_path }))
 }
 
-async fn handle_state_load(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let session_id = mgr.active_session_id()?.to_string();
+async fn handle_state_load(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let path = cmd
         .get("path")
         .and_then(|v| v.as_str())
-        .ok_or("Missing 'path' parameter")?;
+        .ok_or("Missing 'path' parameter")?
+        .to_string();
 
-    state::load_state(&mgr.client, &session_id, path).await?;
+    let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
+    state::load_state_into_manager(mgr, &path).await?;
     Ok(json!({ "loaded": true, "path": path }))
 }
 
@@ -3710,13 +3715,22 @@ async fn handle_tab_list(state: &DaemonState) -> Result<Value, String> {
 }
 
 async fn handle_tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
     let url = cmd.get("url").and_then(|v| v.as_str());
     let label = cmd.get("label").and_then(|v| v.as_str());
+    // Accept "contextId" (preferred camelCase) or "context_id" for tolerance
+    let context_id = cmd
+        .get("contextId")
+        .or_else(|| cmd.get("context_id"))
+        .and_then(|v| v.as_str());
     state.ref_map.clear();
     state.iframe_sessions.clear();
     state.active_frame_id = None;
-    mgr.tab_new(url, label).await
+    let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
+    if context_id.is_some() {
+        mgr.tab_new_in_context(url, label, context_id).await
+    } else {
+        mgr.tab_new(url, label).await
+    }
 }
 
 async fn handle_tab_switch(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -4153,6 +4167,7 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
             url: nav_url.clone(),
             title: String::new(),
             target_type: "page".to_string(),
+            browser_context_id: None,
         });
 
         if let Some((w, h, scale, mobile)) = viewport {
@@ -6341,6 +6356,7 @@ async fn handle_window_new(cmd: &Value, state: &mut DaemonState) -> Result<Value
         url: "about:blank".to_string(),
         title: String::new(),
         target_type: "page".to_string(),
+        browser_context_id: None,
     });
 
     if let Some(viewport) = cmd.get("viewport") {
@@ -8099,6 +8115,41 @@ fn error_response(id: &str, error: &str) -> Value {
         "success": false,
         "error": error,
     })
+}
+
+// ===== BrowserContext handlers =====
+
+async fn handle_context_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let label = cmd.get("label").and_then(|v| v.as_str());
+    let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
+    mgr.context_new(label).await
+}
+
+async fn handle_context_list(state: &DaemonState) -> Result<Value, String> {
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let contexts: Vec<Value> = mgr
+        .contexts
+        .iter()
+        .map(|c| {
+            json!({
+                "contextId": c.ref_id,
+                "browserContextId": c.browser_context_id,
+                "label": c.label,
+            })
+        })
+        .collect();
+    Ok(json!({ "contexts": contexts }))
+}
+
+async fn handle_context_close(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    // Accept "contextId" (preferred camelCase) or "context_id" for tolerance
+    let id = cmd
+        .get("contextId")
+        .or_else(|| cmd.get("context_id"))
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'contextId' parameter (expected a stable ref like `c1` or a label)")?;
+    let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
+    mgr.context_close(id).await
 }
 
 #[cfg(test)]

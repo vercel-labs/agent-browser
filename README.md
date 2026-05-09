@@ -299,6 +299,7 @@ agent-browser network har stop [output.har]    # Stop and save HAR (temp path if
 agent-browser tab                              # List tabs (shows `tabId` and optional label)
 agent-browser tab new [url]                    # New tab (optionally with URL)
 agent-browser tab new --label docs [url]       # New tab with a user-assigned label
+agent-browser tab new --context <c<N>|label> [url]  # New tab in an isolated context
 agent-browser tab <t<N>|label>                 # Switch to a tab by id or label
 agent-browser tab close [t<N>|label]           # Close a tab (defaults to active)
 agent-browser window new                       # New window
@@ -321,6 +322,33 @@ agent-browser snapshot               # populate refs for docs
 agent-browser click @e3              # click uses docs's refs
 agent-browser tab close docs         # close by label
 ```
+
+### Browser Contexts
+
+```bash
+agent-browser context new                             # Create isolated context (returns c1, c2, ...)
+agent-browser context new --label staging             # Create context with a memorable label
+agent-browser context list                            # List active contexts
+agent-browser tab new --context staging https://example.com  # Open tab inside a context
+agent-browser context close staging                   # Close context (closes its tabs first)
+```
+
+Browser contexts isolate cookies, localStorage, and cache between groups of tabs within a single Chrome
+process. Each context is a clean slate — login state, cookies, and storage set inside it are not visible
+to other contexts or the default context. Stable refs (`c1`, `c2`, …) work the same way as tab refs
+(`t1`, `t2`) and are never reused within a session. After switching active tab to one inside a different
+context, always re-snapshot before using element refs, as refs are scoped to the tab active when the
+snapshot ran.
+
+Use cases:
+
+- **Multi-identity workflows** — run two accounts logged in simultaneously without separate daemons
+- **A/B comparisons** — compare a logged-in view against an anonymous view of the same URL
+- **Sandboxed exploration** — browse untrusted URLs in a throwaway context that leaves other state clean
+- **Sub-agent isolation** — dispatch parallel sub-agents each with their own clean cookie jar
+
+RAM efficiency: two contexts share one Chrome process (~250 MB total) versus two separate daemons
+(~200 MB each, ~400 MB total).
 
 ### Frames
 

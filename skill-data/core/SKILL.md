@@ -250,13 +250,58 @@ agent-browser screenshot --annotate map.png     # numbered labels + legend keyed
 ```bash
 agent-browser tab                      # list open tabs (with stable tabId)
 agent-browser tab new https://docs...  # open a new tab (and switch to it)
-agent-browser tab 2                    # switch to tab 2
-agent-browser tab close 2              # close tab 2
+agent-browser tab t2                   # switch to tab t2
+agent-browser tab close t2             # close tab t2
 ```
 
-Stable `tabId`s mean `tab 2` points at the same tab across commands even
+Stable `tabId`s mean `t2` points at the same tab across commands even
 when other tabs open or close. After switching, refs from a prior snapshot
 on a different tab no longer apply — re-snapshot.
+
+### Manage browser contexts
+
+Browser contexts isolate cookies, localStorage, and cache within a single
+Chrome process. Each context is a clean slate — useful for multi-identity
+workflows, A/B comparisons, sandbox exploration, and parallel sub-agents.
+
+```bash
+# Create contexts with optional labels
+agent-browser context new --label alice
+agent-browser context new --label bob
+
+# Open tabs inside each context
+agent-browser tab new --context alice https://app.example.com
+agent-browser tab new --context bob  https://app.example.com
+
+# Log into each independently — cookies never cross context boundaries
+agent-browser tab alice
+agent-browser snapshot -i
+agent-browser fill @e3 "alice@example.com"
+agent-browser fill @e4 "pass-alice"
+agent-browser click @e5
+
+agent-browser tab bob
+agent-browser snapshot -i
+agent-browser fill @e3 "bob@example.com"
+agent-browser fill @e4 "pass-bob"
+agent-browser click @e5
+
+# List active contexts
+agent-browser context list
+
+# Close a context — its tabs close first
+agent-browser context close alice
+```
+
+Key rules:
+- Refs (`@e1`, ...) are scoped to the tab active at snapshot time. After
+  switching to a tab in a different context, always re-snapshot.
+- Context refs (`c1`, `c2`) are stable within a session and never reused.
+- Labels are unique per session; using a duplicate label errors.
+- State save/load preserves per-context cookies and localStorage.
+
+Full details: `agent-browser skills get core --full` includes
+`references/contexts.md`.
 
 ### Run multiple browsers in parallel
 
@@ -470,6 +515,7 @@ That pulls in:
 - `references/authentication.md` — auth vault, credential handling
 - `references/trust-boundaries.md` — safety rules for driving a real browser
 - `references/session-management.md` — persistence, multi-session workflows
+- `references/contexts.md` — browser contexts: isolation, patterns, caveats
 - `references/profiling.md` — Chrome DevTools tracing and profiling
 - `references/video-recording.md` — video capture options
 - `references/proxy-support.md` — proxy configuration
