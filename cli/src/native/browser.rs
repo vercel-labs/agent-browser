@@ -677,18 +677,8 @@ impl BrowserManager {
                 .await?;
         }
 
-        // Combined fetch: 1 CDP round-trip for both url+title (was 2).
-        let (page_url, title) = match self
-            .evaluate_simple("JSON.stringify([location.href, document.title])")
-            .await
-        {
-            Ok(v) => {
-                let s = v.as_str().unwrap_or("");
-                serde_json::from_str::<(String, String)>(s)
-                    .unwrap_or_else(|_| (url.to_string(), String::new()))
-            }
-            Err(_) => (url.to_string(), String::new()),
-        };
+        let page_url = self.get_url().await.unwrap_or_else(|_| url.to_string());
+        let title = self.get_title().await.unwrap_or_default();
 
         // Track visited origin for cross-origin localStorage collection in save_state
         if let Ok(parsed) = url::Url::parse(&page_url) {
