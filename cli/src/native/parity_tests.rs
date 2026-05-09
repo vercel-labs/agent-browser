@@ -201,6 +201,9 @@ fn minimal_command(action: &str, id: &str) -> Value {
     match action {
         "navigate" | "diff_url" | "waitforurl" => {
             obj.insert("url".to_string(), json!("https://example.com"));
+            if action == "waitforurl" {
+                obj.insert("timeout".to_string(), json!(1));
+            }
         }
         "evaluate" | "expose" => {
             obj.insert("script".to_string(), json!("1"));
@@ -265,10 +268,11 @@ fn minimal_command(action: &str, id: &str) -> Value {
             obj.insert("offline".to_string(), json!(false));
         }
         "wait" => {
-            obj.insert("timeout".to_string(), json!(100));
+            obj.insert("timeout".to_string(), json!(1));
         }
         "waitforloadstate" => {
             obj.insert("state".to_string(), json!("load"));
+            obj.insert("timeout".to_string(), json!(1));
         }
         "waitforfunction" => {
             obj.insert("script".to_string(), json!("() => true"));
@@ -301,7 +305,7 @@ fn minimal_command(action: &str, id: &str) -> Value {
             obj.insert("password".to_string(), json!("p"));
         }
         "auth_login" => {
-            obj.insert("name".to_string(), json!("parity-test-cred"));
+            obj.insert("name".to_string(), json!("parity-test-missing-cred"));
         }
         "route" => {
             obj.insert("url".to_string(), json!("*"));
@@ -331,9 +335,11 @@ fn minimal_command(action: &str, id: &str) -> Value {
         }
         "responsebody" => {
             obj.insert("url".to_string(), json!("https://example.com"));
+            obj.insert("timeout".to_string(), json!(1));
         }
         "waitfordownload" => {
             obj.insert("path".to_string(), json!("/tmp/parity-download"));
+            obj.insert("timeout".to_string(), json!(1));
         }
         "styles" => {
             obj.insert("selector".to_string(), json!("body"));
@@ -397,6 +403,12 @@ async fn test_all_documented_actions_are_handled() {
             action
         );
     }
+
+    let _ = execute_command(
+        &json!({ "action": "close", "id": "parity-cleanup" }),
+        &mut state,
+    )
+    .await;
 }
 
 // ---------------------------------------------------------------------------
