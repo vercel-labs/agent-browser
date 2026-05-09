@@ -3102,7 +3102,9 @@ async fn handle_back(state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     mgr.evaluate("history.back()", None).await?;
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-    let url = mgr.cached_url();
+    // history.back() does not flow through navigate(), so the cached URL on
+    // PageInfo is still the pre-navigation value. Read live to avoid staleness.
+    let url = mgr.get_url().await.unwrap_or_default();
     state.ref_map.clear();
     Ok(json!({ "url": url }))
 }
@@ -3120,7 +3122,9 @@ async fn handle_forward(state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     mgr.evaluate("history.forward()", None).await?;
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-    let url = mgr.cached_url();
+    // history.forward() does not flow through navigate(), so the cached URL is
+    // still the pre-navigation value. Read live to avoid staleness.
+    let url = mgr.get_url().await.unwrap_or_default();
     state.ref_map.clear();
     Ok(json!({ "url": url }))
 }
@@ -3160,7 +3164,11 @@ async fn handle_reload(state: &mut DaemonState) -> Result<Value, String> {
     })
     .await;
 
-    let url = mgr.cached_url();
+    // Page.reload triggers a fresh navigation that does not flow through
+    // BrowserManager::navigate(), so the cached URL is still the pre-reload
+    // value (the URL is the same after a same-page reload, but for SPAs that
+    // reload at a hash anchor this still matters). Read live.
+    let url = mgr.get_url().await.unwrap_or_default();
     state.ref_map.clear();
     Ok(json!({ "url": url }))
 }
@@ -5400,7 +5408,9 @@ async fn handle_waitforurl(cmd: &Value, state: &DaemonState) -> Result<Value, St
     let timeout_ms = state.timeout_ms(cmd);
 
     wait_for_url(&mgr.client, &session_id, url_pattern, timeout_ms).await?;
-    let url = mgr.cached_url();
+    // wait_for_url returned because the URL just changed; the cached URL is
+    // by definition the previous one. Read live.
+    let url = mgr.get_url().await.unwrap_or_default();
     Ok(json!({ "url": url }))
 }
 
