@@ -8,7 +8,9 @@ use crate::connection::get_socket_dir;
 
 use super::chat::{chat_status_json, handle_chat_request, handle_models_request};
 use super::discovery::discover_sessions;
-use super::http::{is_same_origin_http_request, serve_embedded_file, CORS_HEADERS};
+use super::http::{
+    is_same_origin_http_request, request_header_matches_host, serve_embedded_file, CORS_HEADERS,
+};
 
 /// Dashboard same-origin proxy endpoints for session metadata and streams.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,58 +128,10 @@ fn request_header_value<'a>(request: &'a str, name: &str) -> Option<&'a str> {
     })
 }
 
-fn normalize_origin_authority(origin: &str) -> Option<String> {
-    let url = url::Url::parse(origin).ok()?;
-    let host = url.host_str()?.to_ascii_lowercase();
-    let host = if host.contains(':') {
-        format!("[{host}]")
-    } else {
-        host
-    };
-    Some(match url.port() {
-        Some(port) => format!("{host}:{port}"),
-        None => host,
-    })
-}
-
-fn normalize_host_authority(host: &str) -> String {
-    let host = host.trim().to_ascii_lowercase();
-
-    if let Some(bracket_end) = host.rfind(']') {
-        if bracket_end == host.len() - 1 {
-            return host;
-        }
-
-        if host.as_bytes().get(bracket_end + 1) == Some(&b':') {
-            let port = &host[bracket_end + 2..];
-            if port == "80" || port == "443" {
-                return host[..=bracket_end].to_string();
-            }
-        }
-
-        return host;
-    }
-
-    if let Some((name, port)) = host.rsplit_once(':') {
-        if !name.contains(':') && (port == "80" || port == "443") {
-            return name.to_string();
-        }
-    }
-
-    host
-}
-
-fn header_matches_host(request: &str, header_name: &str) -> Option<bool> {
-    let authority =
-        request_header_value(request, header_name).and_then(normalize_origin_authority)?;
-    let host = request_header_value(request, "host").map(normalize_host_authority)?;
-    Some(authority == host)
-}
-
 /// Validates that a proxied WebSocket request either has no Origin header or
-/// presents an Origin whose authority matches the request Host header.
+/// presents a DNS-rebinding-hardened Origin matching the request Host header.
 fn is_same_origin_ws_request(request: &str) -> bool {
-    match header_matches_host(request, "origin") {
+    match request_header_matches_host(request, "origin") {
         Some(matches) => matches,
         None => request_header_value(request, "origin").is_none(),
     }
@@ -830,14 +784,6 @@ mod tests {
     }
 
     #[test]
-    fn test_normalize_origin_authority_https_without_port() {
-        assert_eq!(
-            normalize_origin_authority("https://dashboard.agent-browser.localhost"),
-            Some("dashboard.agent-browser.localhost".to_string())
-        );
-    }
-
-    #[test]
     fn test_same_origin_ws_request_default_https_port() {
         let req = "GET /api/session/9222/stream HTTP/1.1\r\nHost: dashboard.agent-browser.localhost:443\r\nOrigin: https://dashboard.agent-browser.localhost\r\nUpgrade: websocket\r\n\r\n";
         assert!(is_same_origin_ws_request(req));
@@ -876,6 +822,12 @@ mod tests {
     #[test]
     fn test_cross_origin_ws_request_rejected() {
         let req = "GET /api/session/9222/stream HTTP/1.1\r\nHost: localhost:4848\r\nOrigin: https://evil.com\r\nUpgrade: websocket\r\n\r\n";
+        assert!(!is_same_origin_ws_request(req));
+    }
+
+    #[test]
+    fn test_same_origin_ws_request_rejects_http_dns_rebind_origin() {
+        let req = "GET /api/session/9222/stream HTTP/1.1\r\nHost: evil.example:4848\r\nOrigin: http://evil.example:4848\r\nUpgrade: websocket\r\n\r\n";
         assert!(!is_same_origin_ws_request(req));
     }
 

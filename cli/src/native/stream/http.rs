@@ -106,7 +106,7 @@ fn normalize_host_authority(host: &str) -> String {
     host
 }
 
-fn header_matches_host(request: &str, header_name: &str) -> Option<bool> {
+pub(super) fn request_header_matches_host(request: &str, header_name: &str) -> Option<bool> {
     let (authority, is_trusted_local_or_proxy) =
         request_header_value(request, header_name).and_then(normalize_origin_authority)?;
     let host = request_header_value(request, "host").map(normalize_host_authority)?;
@@ -114,8 +114,8 @@ fn header_matches_host(request: &str, header_name: &str) -> Option<bool> {
 }
 
 pub(super) fn is_same_origin_http_request(request: &str) -> bool {
-    matches!(header_matches_host(request, "origin"), Some(true))
-        || matches!(header_matches_host(request, "referer"), Some(true))
+    matches!(request_header_matches_host(request, "origin"), Some(true))
+        || matches!(request_header_matches_host(request, "referer"), Some(true))
 }
 
 async fn write_json_error_response_no_cors(
