@@ -8,7 +8,7 @@ use crate::connection::get_socket_dir;
 
 use super::chat::{chat_status_json, handle_chat_request, handle_models_request};
 use super::discovery::discover_sessions;
-use super::http::{serve_embedded_file, CORS_HEADERS};
+use super::http::{is_same_origin_http_request, serve_embedded_file, CORS_HEADERS};
 
 /// Dashboard same-origin proxy endpoints for session metadata and streams.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,7 +70,7 @@ async fn write_http_response(
     content_type: &str,
     body: &[u8],
 ) {
-    write_http_response_inner(stream, status, content_type, body, true).await;
+    write_http_response_inner(stream, status, content_type, body, false).await;
 }
 
 async fn write_http_response_no_cors(
@@ -181,16 +181,6 @@ fn is_same_origin_ws_request(request: &str) -> bool {
         Some(matches) => matches,
         None => request_header_value(request, "origin").is_none(),
     }
-}
-
-/// Validates that an HTTP session-proxy request came from a same-origin page.
-///
-/// For GET requests we require either a same-origin `Origin` or a same-origin
-/// `Referer` so browsers cannot hit the proxy routes via side-channel tags or
-/// arbitrary cross-origin fetches.
-fn is_same_origin_http_request(request: &str) -> bool {
-    matches!(header_matches_host(request, "origin"), Some(true))
-        || matches!(header_matches_host(request, "referer"), Some(true))
 }
 
 /// Parse a dashboard route of the form `/api/session/<port>/<endpoint>`.
@@ -521,6 +511,17 @@ async fn handle_dashboard_connection(mut stream: tokio::net::TcpStream) {
     let origin = request_header_value(&request, "origin").map(|value| value.to_string());
 
     if method == "OPTIONS" {
+        if (path == "/api/sessions" || path == "/api/exec" || path == "/api/kill")
+            && !is_same_origin_http_request(&request)
+        {
+            write_json_error_response_no_cors(
+                &mut stream,
+                "403 Forbidden",
+                "Origin or Referer does not match Host header.",
+            )
+            .await;
+            return;
+        }
         let response = format!(
             "HTTP/1.1 204 No Content\r\n{CORS_HEADERS}Access-Control-Max-Age: 86400\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
         );
@@ -540,6 +541,15 @@ async fn handle_dashboard_connection(mut stream: tokio::net::TcpStream) {
     }
 
     if method == "POST" && (path == "/api/sessions" || path == "/api/exec" || path == "/api/kill") {
+        if !is_same_origin_http_request(&request) {
+            write_json_error_response_no_cors(
+                &mut stream,
+                "403 Forbidden",
+                "Origin or Referer does not match Host header.",
+            )
+            .await;
+            return;
+        }
         let body_str = read_post_body(&mut stream, &buf, n).await;
         let result = if path == "/api/exec" {
             exec_cli(&body_str).await

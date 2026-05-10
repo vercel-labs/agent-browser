@@ -43,6 +43,98 @@ fn parse_origin(peeked: &[u8]) -> Option<String> {
     None
 }
 
+fn request_header_value<'a>(request: &'a str, name: &str) -> Option<&'a str> {
+    request.lines().find_map(|line| {
+        let (header_name, value) = line.split_once(':')?;
+        if header_name.trim().eq_ignore_ascii_case(name) {
+            Some(value.trim())
+        } else {
+            None
+        }
+    })
+}
+
+fn is_localhost_host(host: &str) -> bool {
+    let host = host.to_ascii_lowercase();
+    host == "localhost"
+        || host == "127.0.0.1"
+        || host == "::1"
+        || host == "[::1]"
+        || host.ends_with(".localhost")
+}
+
+fn normalize_origin_authority(origin: &str) -> Option<(String, bool)> {
+    let url = url::Url::parse(origin).ok()?;
+    let host = url.host_str()?.to_ascii_lowercase();
+    let is_trusted_local_or_proxy = url.scheme() == "https" || is_localhost_host(&host);
+    let host = if host.contains(':') {
+        format!("[{host}]")
+    } else {
+        host
+    };
+    let authority = match url.port() {
+        Some(port) => format!("{host}:{port}"),
+        None => host,
+    };
+    Some((authority, is_trusted_local_or_proxy))
+}
+
+fn normalize_host_authority(host: &str) -> String {
+    let host = host.trim().to_ascii_lowercase();
+
+    if let Some(bracket_end) = host.rfind(']') {
+        if bracket_end == host.len() - 1 {
+            return host;
+        }
+
+        if host.as_bytes().get(bracket_end + 1) == Some(&b':') {
+            let port = &host[bracket_end + 2..];
+            if port == "80" || port == "443" {
+                return host[..=bracket_end].to_string();
+            }
+        }
+
+        return host;
+    }
+
+    if let Some((name, port)) = host.rsplit_once(':') {
+        if !name.contains(':') && (port == "80" || port == "443") {
+            return name.to_string();
+        }
+    }
+
+    host
+}
+
+fn header_matches_host(request: &str, header_name: &str) -> Option<bool> {
+    let (authority, is_trusted_local_or_proxy) =
+        request_header_value(request, header_name).and_then(normalize_origin_authority)?;
+    let host = request_header_value(request, "host").map(normalize_host_authority)?;
+    Some(is_trusted_local_or_proxy && authority == host)
+}
+
+pub(super) fn is_same_origin_http_request(request: &str) -> bool {
+    matches!(header_matches_host(request, "origin"), Some(true))
+        || matches!(header_matches_host(request, "referer"), Some(true))
+}
+
+async fn write_json_error_response_no_cors(
+    stream: &mut tokio::net::TcpStream,
+    status: &'static str,
+    error: &str,
+) {
+    let body = format!(
+        r#"{{"success":false,"error":{}}}"#,
+        serde_json::to_string(error).unwrap_or_else(|_| format!("\"{}\"", error))
+    );
+    let response = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    let _ = stream.write_all(response.as_bytes()).await;
+    let _ = stream.write_all(body.as_bytes()).await;
+}
+
 pub(super) async fn handle_http_request(
     mut stream: tokio::net::TcpStream,
     peeked: &[u8],
@@ -61,6 +153,17 @@ pub(super) async fn handle_http_request(
     let origin = parse_origin(peeked);
 
     if method == "OPTIONS" {
+        if (path == "/api/sessions" || path == "/api/command")
+            && !is_same_origin_http_request(&request)
+        {
+            write_json_error_response_no_cors(
+                &mut stream,
+                "403 Forbidden",
+                "Origin or Referer does not match Host header.",
+            )
+            .await;
+            return;
+        }
         let response = format!(
             "HTTP/1.1 204 No Content\r\n{CORS_HEADERS}Access-Control-Max-Age: 86400\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
         );
@@ -85,6 +188,15 @@ pub(super) async fn handle_http_request(
         let body_str = full_body.as_deref().unwrap_or("");
 
         if path == "/api/sessions" {
+            if !is_same_origin_http_request(&request) {
+                write_json_error_response_no_cors(
+                    &mut stream,
+                    "403 Forbidden",
+                    "Origin or Referer does not match Host header.",
+                )
+                .await;
+                return;
+            }
             let result = spawn_session(body_str).await;
             let (status, resp_body) = match result {
                 Ok(msg) => ("200 OK", msg),
@@ -106,6 +218,15 @@ pub(super) async fn handle_http_request(
         }
 
         if path == "/api/command" {
+            if !is_same_origin_http_request(&request) {
+                write_json_error_response_no_cors(
+                    &mut stream,
+                    "403 Forbidden",
+                    "Origin or Referer does not match Host header.",
+                )
+                .await;
+                return;
+            }
             let result = relay_command_to_daemon(session_name, body_str).await;
             let (status, resp_body) = match result {
                 Ok(resp) => ("200 OK", resp),
@@ -311,5 +432,52 @@ pub(super) fn serve_embedded_file(url_path: &str) -> (&'static str, &'static str
             "text/html; charset=utf-8",
             b"<html><body><p>404 Not Found</p></body></html>".to_vec(),
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn same_origin_http_request_allows_matching_origin() {
+        let req = "POST /api/command HTTP/1.1\r\nHost: localhost:4848\r\nOrigin: http://localhost:4848\r\n\r\n";
+        assert!(is_same_origin_http_request(req));
+    }
+
+    #[test]
+    fn same_origin_http_request_allows_matching_referer() {
+        let req = "GET /api/sessions HTTP/1.1\r\nHost: dashboard.agent-browser.localhost:443\r\nReferer: https://dashboard.agent-browser.localhost/sessions\r\n\r\n";
+        assert!(is_same_origin_http_request(req));
+    }
+
+    #[test]
+    fn same_origin_http_request_allows_https_proxy_origin() {
+        let req = "POST /api/command HTTP/1.1\r\nHost: workspace.coder.example\r\nOrigin: https://workspace.coder.example\r\n\r\n";
+        assert!(is_same_origin_http_request(req));
+    }
+
+    #[test]
+    fn same_origin_http_request_allows_http_localhost_subdomain() {
+        let req = "POST /api/command HTTP/1.1\r\nHost: dashboard.agent-browser.localhost:4848\r\nOrigin: http://dashboard.agent-browser.localhost:4848\r\n\r\n";
+        assert!(is_same_origin_http_request(req));
+    }
+
+    #[test]
+    fn same_origin_http_request_rejects_cross_origin() {
+        let req = "POST /api/command HTTP/1.1\r\nHost: localhost:4848\r\nOrigin: https://evil.example\r\n\r\n";
+        assert!(!is_same_origin_http_request(req));
+    }
+
+    #[test]
+    fn same_origin_http_request_rejects_http_dns_rebind_origin() {
+        let req = "POST /api/command HTTP/1.1\r\nHost: evil.example:4848\r\nOrigin: http://evil.example:4848\r\n\r\n";
+        assert!(!is_same_origin_http_request(req));
+    }
+
+    #[test]
+    fn same_origin_http_request_rejects_missing_origin_and_referer() {
+        let req = "POST /api/command HTTP/1.1\r\nHost: localhost:4848\r\n\r\n";
+        assert!(!is_same_origin_http_request(req));
     }
 }
