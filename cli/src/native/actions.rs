@@ -7119,6 +7119,15 @@ async fn handle_route(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
                 })
             }),
         })
+    }).or_else(|| {
+        cmd.get("body").and_then(|v| v.as_str()).map(|body| {
+            RouteResponse {
+                status: Some(200),
+                body: Some(body.to_string()),
+                content_type: Some("application/json".to_string()),
+                headers: None,
+            }
+        })
     });
 
     {
