@@ -94,6 +94,61 @@ async fn create_storage_state_with_cookie(path: &str, cookie_name: &str, cookie_
     assert_success(&resp);
 }
 
+async fn send_raw_http_request(port: u64, request: &str) -> String {
+    let mut stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{port}"))
+        .await
+        .expect("HTTP client should connect to stream server");
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .expect("HTTP request should be written");
+    stream
+        .shutdown()
+        .await
+        .expect("HTTP client write side should shut down");
+
+    let mut response = Vec::new();
+    stream
+        .read_to_end(&mut response)
+        .await
+        .expect("HTTP response should be read");
+    String::from_utf8(response).expect("HTTP response should be utf-8")
+}
+
+#[cfg(unix)]
+async fn spawn_fake_daemon_socket(
+    socket_dir: &std::path::Path,
+    session_name: &str,
+) -> tokio::sync::oneshot::Receiver<String> {
+    use tokio::io::AsyncBufReadExt;
+
+    let socket_path = socket_dir.join(format!("{session_name}.sock"));
+    let _ = std::fs::remove_file(&socket_path);
+    let listener =
+        tokio::net::UnixListener::bind(&socket_path).expect("fake daemon socket should bind");
+    let (tx, rx) = tokio::sync::oneshot::channel();
+
+    tokio::spawn(async move {
+        let Ok((stream, _)) = listener.accept().await else {
+            return;
+        };
+        let mut reader = tokio::io::BufReader::new(stream);
+        let mut command = String::new();
+        if reader.read_line(&mut command).await.is_err() {
+            return;
+        }
+
+        let mut stream = reader.into_inner();
+        let _ = stream
+            .write_all(br#"{"success":true,"data":{"ok":true}}"#)
+            .await;
+        let _ = stream.write_all(b"\n").await;
+        let _ = tx.send(command);
+    });
+
+    rx
+}
+
 // ---------------------------------------------------------------------------
 // Core: launch, navigate, evaluate, url, title, close
 // ---------------------------------------------------------------------------
@@ -361,6 +416,98 @@ async fn e2e_runtime_stream_enable_before_launch_attaches_and_disables() {
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     assert_success(&resp);
     let _ = std::fs::remove_dir_all(&socket_dir);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[ignore]
+async fn e2e_stream_command_requires_same_origin_before_daemon_relay() {
+    let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "AGENT_BROWSER_SESSION"]);
+    let temp_parent = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("t");
+    std::fs::create_dir_all(&temp_parent).expect("socket temp parent should be created");
+    let socket_dir = tempfile::Builder::new()
+        .prefix("ab-e2e-")
+        .tempdir_in(temp_parent)
+        .expect("socket dir should be created");
+    guard.set(
+        "AGENT_BROWSER_SOCKET_DIR",
+        socket_dir
+            .path()
+            .to_str()
+            .expect("socket dir should be utf-8"),
+    );
+    guard.set("AGENT_BROWSER_SESSION", "x");
+
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "stream_enable", "port": 0 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let port = get_data(&resp)["port"]
+        .as_u64()
+        .expect("stream enable should report the bound port");
+
+    let mut daemon_command = spawn_fake_daemon_socket(socket_dir.path(), "x").await;
+    let body = r#"{"action":"tabs"}"#;
+    let cross_origin_request = format!(
+        "POST /api/command HTTP/1.1\r\nHost: localhost:{port}\r\nOrigin: https://evil.example\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+        body.len(),
+        body
+    );
+
+    let response = send_raw_http_request(port, &cross_origin_request).await;
+    assert!(
+        response.starts_with("HTTP/1.1 403 Forbidden"),
+        "unexpected cross-origin response: {response}"
+    );
+    assert!(
+        !response.contains("Access-Control-Allow-Origin: *"),
+        "forbidden command response exposed wildcard CORS: {response}"
+    );
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), &mut daemon_command)
+            .await
+            .is_err(),
+        "cross-origin command request reached daemon relay"
+    );
+
+    let same_origin_request = format!(
+        "POST /api/command HTTP/1.1\r\nHost: localhost:{port}\r\nOrigin: http://localhost:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    let response = send_raw_http_request(port, &same_origin_request).await;
+    assert!(
+        response.starts_with("HTTP/1.1 200 OK"),
+        "unexpected same-origin response: {response}"
+    );
+    assert!(
+        response.contains(&format!(
+            "Access-Control-Allow-Origin: http://localhost:{port}"
+        )),
+        "same-origin command response did not reflect origin: {response}"
+    );
+    assert!(
+        !response.contains("Access-Control-Allow-Origin: *"),
+        "same-origin command response exposed wildcard CORS: {response}"
+    );
+
+    let relayed = tokio::time::timeout(std::time::Duration::from_secs(1), daemon_command)
+        .await
+        .expect("same-origin request should reach fake daemon")
+        .expect("fake daemon should return relayed command");
+    assert!(relayed.contains(r#""action":"tabs""#), "{relayed}");
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "stream_disable" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
 }
 
 // ---------------------------------------------------------------------------
