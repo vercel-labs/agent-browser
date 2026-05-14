@@ -1,4 +1,5 @@
 use crate::color;
+use crate::paths;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -8,10 +9,7 @@ const LAST_KNOWN_GOOD_URL: &str =
     "https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json";
 
 pub fn get_browsers_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".agent-browser")
-        .join("browsers")
+    paths::browsers_dir()
 }
 
 pub fn find_installed_chrome() -> Option<PathBuf> {
@@ -21,8 +19,8 @@ pub fn find_installed_chrome() -> Option<PathBuf> {
     if debug {
         let _ = writeln!(
             io::stderr(),
-            "[chrome-search] home_dir={:?} browsers_dir={}",
-            dirs::home_dir(),
+            "[chrome-search] data_dir={} browsers_dir={}",
+            paths::data_dir().display(),
             browsers_dir.display()
         );
     }

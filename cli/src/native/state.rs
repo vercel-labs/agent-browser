@@ -1,3 +1,4 @@
+use crate::paths;
 use aes_gcm::{aead::Aead, aead::KeyInit, Aes256Gcm};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
@@ -714,19 +715,14 @@ pub fn dispatch_state_command(cmd: &Value) -> Option<Result<Value, String>> {
     }
 }
 
-/// Return the agent-browser state root (`~/.agent-browser`, falling back to
-/// `<tempdir>/agent-browser` when the home directory can't be resolved).
+/// Return the agent-browser state root.
 /// This is the parent of `sessions/`, auth storage, and the encryption key.
 pub fn get_state_dir() -> PathBuf {
-    if let Some(home) = dirs::home_dir() {
-        home.join(".agent-browser")
-    } else {
-        std::env::temp_dir().join("agent-browser")
-    }
+    paths::state_dir()
 }
 
 pub fn get_sessions_dir() -> PathBuf {
-    get_state_dir().join("sessions")
+    paths::sessions_dir()
 }
 
 #[cfg(test)]
