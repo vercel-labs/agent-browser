@@ -66,10 +66,20 @@ struct ParsedProxy {
     password: Option<String>,
 }
 
+fn normalize_proxy_server(server: &str) -> String {
+    let trimmed = server.trim_end_matches('/');
+
+    if trimmed.is_empty() || trimmed.ends_with(':') {
+        server.to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 fn parse_proxy(proxy_str: &str) -> ParsedProxy {
     let Some(protocol_end) = proxy_str.find("://") else {
         return ParsedProxy {
-            server: proxy_str.to_string(),
+            server: normalize_proxy_server(proxy_str),
             username: None,
             password: None,
         };
@@ -79,7 +89,7 @@ fn parse_proxy(proxy_str: &str) -> ParsedProxy {
 
     let Some(at_pos) = rest.rfind('@') else {
         return ParsedProxy {
-            server: proxy_str.to_string(),
+            server: normalize_proxy_server(proxy_str),
             username: None,
             password: None,
         };
@@ -87,7 +97,7 @@ fn parse_proxy(proxy_str: &str) -> ParsedProxy {
 
     let creds = &rest[..at_pos];
     let server_part = &rest[at_pos + 1..];
-    let server = format!("{}{}", protocol, server_part);
+    let server = normalize_proxy_server(&format!("{}{}", protocol, server_part));
 
     let (username, password) = match creds.find(':') {
         Some(colon_pos) => {
@@ -1430,8 +1440,24 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_proxy_strips_trailing_slash() {
+        let result = parse_proxy("http://proxy.com:8080/");
+        assert_eq!(result.server, "http://proxy.com:8080");
+        assert!(result.username.is_none());
+        assert!(result.password.is_none());
+    }
+
+    #[test]
     fn test_parse_proxy_with_auth() {
         let result = parse_proxy("http://user:pass@proxy.com:8080");
+        assert_eq!(result.server, "http://proxy.com:8080");
+        assert_eq!(result.username.as_deref(), Some("user"));
+        assert_eq!(result.password.as_deref(), Some("pass"));
+    }
+
+    #[test]
+    fn test_parse_proxy_with_auth_strips_trailing_slash() {
+        let result = parse_proxy("http://user:pass@proxy.com:8080/");
         assert_eq!(result.server, "http://proxy.com:8080");
         assert_eq!(result.username.as_deref(), Some("user"));
         assert_eq!(result.password.as_deref(), Some("pass"));
@@ -1448,6 +1474,13 @@ mod tests {
     #[test]
     fn test_parse_proxy_no_protocol() {
         let result = parse_proxy("proxy.com:8080");
+        assert_eq!(result.server, "proxy.com:8080");
+        assert!(result.username.is_none());
+    }
+
+    #[test]
+    fn test_parse_proxy_no_protocol_strips_trailing_slash() {
+        let result = parse_proxy("proxy.com:8080/");
         assert_eq!(result.server, "proxy.com:8080");
         assert!(result.username.is_none());
     }
