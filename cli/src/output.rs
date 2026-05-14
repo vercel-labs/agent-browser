@@ -3250,7 +3250,7 @@ Configuration:
   Extensions from user and project configs are merged (not replaced).
 
   Example agent-browser.json:
-    {{"headed": true, "hideScrollbars": false, "proxy": "http://localhost:8080"}}
+    {{"headed": true, "hideScrollbars": false, "proxy": "http://localhost:8080", "profile": "./browser-data", "viewport": {{"width": 1280, "height": 800}}, "deviceScaleFactor": 1}}
 
 Environment:
   AGENT_BROWSER_CONFIG           Path to config file (or use --config)

@@ -1897,6 +1897,19 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         });
     let storage_state = cmd.get("storageState").and_then(|v| v.as_str());
     let storage_state_owned = storage_state.map(|s| s.to_string());
+    let configured_viewport = cmd.get("viewport").and_then(|viewport| {
+        let width = viewport.get("width").and_then(|v| v.as_i64())? as i32;
+        let height = viewport.get("height").and_then(|v| v.as_i64())? as i32;
+        if width <= 0 || height <= 0 {
+            return None;
+        }
+        let scale = cmd
+            .get("deviceScaleFactor")
+            .and_then(|v| v.as_f64())
+            .filter(|scale| *scale > 0.0)
+            .unwrap_or(1.0);
+        Some((width, height, scale, false))
+    });
 
     let launch_options = LaunchOptions {
         headless,
@@ -1965,7 +1978,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
             .and_then(|v| v.as_str())
             .map(String::from),
         hide_scrollbars: hide_scrollbars_from_launch_cmd(cmd),
-        viewport_size: None,
+        viewport_size: configured_viewport.map(|(w, h, _, _)| (w as u32, h as u32)),
         use_real_keychain: false,
     };
 
@@ -1998,6 +2011,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
             state.update_stream_client().await;
         }
     } else {
+        apply_configured_viewport(state, configured_viewport).await?;
         load_storage_state(state, &storage_state_owned).await?;
         return Ok(json!({ "launched": true, "reused": true }));
     }
@@ -2020,6 +2034,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         state.start_fetch_handler();
         state.start_dialog_handler();
         state.update_stream_client().await;
+        apply_configured_viewport(state, configured_viewport).await?;
         load_storage_state_or_rollback(state, &storage_state_owned).await?;
         apply_launch_init_scripts(state).await;
         return Ok(json!({ "launched": true }));
@@ -2032,6 +2047,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         state.start_fetch_handler();
         state.start_dialog_handler();
         state.update_stream_client().await;
+        apply_configured_viewport(state, configured_viewport).await?;
         load_storage_state_or_rollback(state, &storage_state_owned).await?;
         apply_launch_init_scripts(state).await;
         return Ok(json!({ "launched": true }));
@@ -2044,6 +2060,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         state.start_fetch_handler();
         state.start_dialog_handler();
         state.update_stream_client().await;
+        apply_configured_viewport(state, configured_viewport).await?;
         load_storage_state_or_rollback(state, &storage_state_owned).await?;
         apply_launch_init_scripts(state).await;
         return Ok(json!({ "launched": true }));
@@ -2082,6 +2099,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
                         state.start_dialog_handler();
                         state.update_stream_client().await;
                         write_provider_file(&state.session_id, provider);
+                        apply_configured_viewport(state, configured_viewport).await?;
                         load_storage_state_or_rollback(state, &storage_state_owned).await?;
                         apply_launch_init_scripts(state).await;
 
@@ -2142,6 +2160,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     state.start_fetch_handler();
     state.start_dialog_handler();
     state.update_stream_client().await;
+    apply_configured_viewport(state, configured_viewport).await?;
 
     // Enable Fetch interception (domain filtering and/or proxy auth).
     // Only call Fetch.enable once to avoid overwriting handleAuthRequests.
@@ -3959,6 +3978,25 @@ async fn handle_viewport(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     }
 
     Ok(json!({ "width": width, "height": height, "deviceScaleFactor": scale, "mobile": mobile }))
+}
+
+async fn apply_configured_viewport(
+    state: &mut DaemonState,
+    viewport: Option<(i32, i32, f64, bool)>,
+) -> Result<(), String> {
+    let Some((width, height, scale, mobile)) = viewport else {
+        return Ok(());
+    };
+
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    mgr.set_viewport(width, height, scale, mobile).await?;
+    state.viewport = Some((width, height, scale, mobile));
+
+    if let Some(ref server) = state.stream_server {
+        server.set_viewport(width as u32, height as u32).await;
+    }
+
+    Ok(())
 }
 
 async fn handle_user_agent(cmd: &Value, state: &DaemonState) -> Result<Value, String> {

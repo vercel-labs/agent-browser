@@ -149,6 +149,29 @@
       "enum": ["png", "jpeg"],
       "description": "Screenshot format."
     },
+    "viewport": {
+      "type": "object",
+      "description": "Default browser viewport applied at launch.",
+      "properties": {
+        "width": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Viewport width in CSS pixels."
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Viewport height in CSS pixels."
+        }
+      },
+      "required": ["width", "height"],
+      "additionalProperties": false
+    },
+    "deviceScaleFactor": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "description": "Device scale factor used with the configured viewport."
+    },
     "idleTimeout": {
       "type": "string",
       "description": "Auto-shutdown the daemon after inactivity (e.g., '30s', '5m', '1h', or raw milliseconds like '60000')."

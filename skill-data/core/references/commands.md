@@ -171,6 +171,16 @@ agent-browser set media dark                  # Emulate color scheme
 agent-browser set media light reduced-motion  # Light mode + reduced motion
 ```
 
+Persist a default launch viewport in `agent-browser.json` when every session
+should start with the same screenshot dimensions:
+
+```json
+{
+  "viewport": { "width": 1280, "height": 800 },
+  "deviceScaleFactor": 1
+}
+```
+
 ## Cookies and Storage
 
 ```bash

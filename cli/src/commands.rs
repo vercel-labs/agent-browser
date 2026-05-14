@@ -2796,6 +2796,8 @@ mod tests {
             default_timeout: None,
             no_auto_dialog: false,
             model: None,
+            viewport: None,
+            device_scale_factor: None,
             verbose: false,
             quiet: false,
         }

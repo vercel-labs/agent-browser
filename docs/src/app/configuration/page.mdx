@@ -36,6 +36,8 @@ AGENT_BROWSER_CONFIG=./ci-config.json agent-browser open example.com
   "profile": "./browser-data",
   "userAgent": "my-agent/1.0",
   "hideScrollbars": false,
+  "viewport": { "width": 1920, "height": 1080 },
+  "deviceScaleFactor": 1,
   "ignoreHttpsErrors": true
 }
 ```
@@ -51,7 +53,7 @@ A [JSON Schema](https://agent-browser.dev/schema.json) is available for IDE auto
 
 ## All Options
 
-Global launch, output, provider, and chat options can be set in the config file using their camelCase equivalent. Command-scoped flags such as `screenshot --full` remain command arguments.
+Global launch, output, provider, and chat options can be set in the config file using their camelCase equivalent. Command-scoped flags such as `screenshot --full` remain command arguments. Runtime viewport settings can also be pinned for every launched session.
 
 <table>
   <thead>
@@ -94,6 +96,8 @@ Global launch, output, provider, and chat options can be set in the config file 
     <tr><td><code>screenshotQuality</code></td><td><code>--screenshot-quality</code></td><td>number (0-100)</td></tr>
     <tr><td><code>screenshotFormat</code></td><td><code>--screenshot-format</code></td><td>string (<code>png</code>, <code>jpeg</code>)</td></tr>
     <tr><td><code>idleTimeout</code></td><td><code>--idle-timeout</code></td><td>string (<code>10s</code>, <code>3m</code>, <code>1h</code>, or raw ms)</td></tr>
+    <tr><td><code>viewport</code></td><td><code>set viewport &lt;width&gt; &lt;height&gt;</code></td><td>object with <code>width</code> and <code>height</code></td></tr>
+    <tr><td><code>deviceScaleFactor</code></td><td><code>set viewport &lt;width&gt; &lt;height&gt; &lt;scale&gt;</code></td><td>number</td></tr>
     <tr><td><code>noAutoDialog</code></td><td><code>--no-auto-dialog</code></td><td>boolean</td></tr>
     <tr><td><code>model</code></td><td><code>--model</code></td><td>string</td></tr>
     <tr><td><code>headers</code></td><td><code>--headers</code></td><td>string (JSON)</td></tr>
@@ -126,6 +130,8 @@ Global launch, output, provider, and chat options can be set in the config file 
 ```json
 {
   "args": "--no-sandbox,--disable-gpu",
+  "viewport": { "width": 1280, "height": 800 },
+  "deviceScaleFactor": 1,
   "ignoreHttpsErrors": true
 }
 ```
