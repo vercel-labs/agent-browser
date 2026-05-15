@@ -5,6 +5,8 @@ use std::time::Duration;
 
 use super::discovery::discover_cdp_url;
 
+const AUTO_CONNECT_WS_VERIFY_TIMEOUT: Duration = Duration::from_secs(30);
+
 pub struct ChromeProcess {
     child: Child,
     pub ws_url: String,
@@ -681,7 +683,7 @@ pub async fn auto_connect_cdp() -> Result<String, String> {
 /// permission prompts (#1210, #1206).
 async fn resolve_cdp_from_active_port(port: u16, ws_path: &str) -> Result<String, String> {
     let ws_url = format!("ws://127.0.0.1:{}{}", port, ws_path);
-    if verify_ws_endpoint(&ws_url).await {
+    if verify_ws_endpoint(&ws_url, AUTO_CONNECT_WS_VERIFY_TIMEOUT).await {
         return Ok(ws_url);
     }
 
@@ -698,11 +700,10 @@ async fn resolve_cdp_from_active_port(port: u16, ws_path: &str) -> Result<String
 
 /// Verify that a WebSocket endpoint is a live CDP server by sending
 /// `Browser.getVersion` and checking for a valid response.
-async fn verify_ws_endpoint(ws_url: &str) -> bool {
+async fn verify_ws_endpoint(ws_url: &str, timeout: Duration) -> bool {
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::Message;
 
-    let timeout = Duration::from_secs(2);
     let result = tokio::time::timeout(timeout, async {
         let (mut ws, _) = tokio_tungstenite::connect_async(ws_url).await.ok()?;
         let cmd = r#"{"id":1,"method":"Browser.getVersion"}"#;
@@ -1903,6 +1904,40 @@ mod tests {
             url
         );
         assert_eq!(url, format!("ws://127.0.0.1:{}{}", port, ws_path));
+        server.await.unwrap();
+    }
+
+    /// Chrome may delay the WebSocket handshake while it waits for the user to
+    /// approve the remote-debugging permission prompt.
+    #[tokio::test]
+    async fn test_verify_ws_endpoint_allows_delayed_handshake() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message as WsMsg;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(2_200)).await;
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            if let Some(Ok(WsMsg::Text(text))) = ws.next().await {
+                let req: serde_json::Value = serde_json::from_str(&text).unwrap();
+                let id = req.get("id").unwrap();
+                let reply = format!(
+                    r#"{{"id":{},"result":{{"protocolVersion":"1.3","product":"Chrome/148"}}}}"#,
+                    id
+                );
+                ws.send(WsMsg::Text(reply)).await.unwrap();
+            }
+            let _ = ws.close(None).await;
+        });
+
+        let ws_url = format!("ws://127.0.0.1:{}/devtools/browser/delayed", port);
+        assert!(
+            verify_ws_endpoint(&ws_url, Duration::from_secs(5)).await,
+            "delayed handshake should still verify within the extended window"
+        );
         server.await.unwrap();
     }
 
