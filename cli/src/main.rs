@@ -426,18 +426,7 @@ fn run_close_all(flags: &Flags) {
                 // Daemon is unreachable despite its process existing.
                 // Force-kill the process and clean up stale files so future
                 // sessions are not poisoned.
-                #[cfg(unix)]
-                unsafe {
-                    libc::kill(*pid as i32, libc::SIGKILL);
-                }
-                #[cfg(windows)]
-                unsafe {
-                    let handle = OpenProcess(1, 0, *pid); // PROCESS_TERMINATE = 1
-                    if handle != 0 {
-                        windows_sys::Win32::System::Threading::TerminateProcess(handle, 1);
-                        CloseHandle(handle);
-                    }
-                }
+                force_kill_session_process(*pid);
                 cleanup_stale_files(session);
                 closed.push(session.clone());
             }
@@ -467,6 +456,90 @@ fn run_close_all(flags: &Flags) {
 
     if !failed.is_empty() {
         exit(1);
+    }
+}
+
+fn force_kill_session_process(pid: u32) {
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(pid as i32, libc::SIGKILL);
+    }
+    #[cfg(windows)]
+    unsafe {
+        let handle = OpenProcess(1, 0, pid); // PROCESS_TERMINATE = 1
+        if handle != 0 {
+            windows_sys::Win32::System::Threading::TerminateProcess(handle, 1);
+            CloseHandle(handle);
+        }
+    }
+}
+
+fn run_close_session(flags: &Flags) {
+    let inventory = walk_daemons();
+    let session = flags.session.as_str();
+    let active = inventory.sessions.iter().find(|s| s.name == session);
+
+    let Some(active) = active else {
+        cleanup_stale_files(session);
+        if flags.json {
+            print_json_value(json!({
+                "success": true,
+                "data": { "closed": false, "session": session },
+            }));
+        } else {
+            println!("No active session: {}", session);
+        }
+        return;
+    };
+
+    let cmd = json!({ "id": gen_id(), "action": "close" });
+    match send_command(cmd, session) {
+        Ok(resp) if resp.success => {
+            if flags.json {
+                print_json_value(json!({
+                    "success": true,
+                    "data": { "closed": true, "session": session },
+                }));
+            } else {
+                println!("{} Closed session: {}", color::green("✓"), session);
+            }
+        }
+        Ok(resp) => {
+            let err = resp.error.unwrap_or_else(|| "Unknown error".to_string());
+            if flags.json {
+                print_json_error(err);
+            } else {
+                eprintln!(
+                    "{} Failed to close {}: {}",
+                    color::error_indicator(),
+                    session,
+                    err
+                );
+            }
+            exit(1);
+        }
+        Err(_) => {
+            // The daemon has a live sidecar but is no longer reachable. Remove
+            // it rather than leaving the next command attached to stale state.
+            force_kill_session_process(active.pid);
+            cleanup_stale_files(session);
+            if flags.json {
+                print_json_value(json!({
+                    "success": true,
+                    "data": {
+                        "closed": true,
+                        "session": session,
+                        "recovered": "unreachable_daemon"
+                    },
+                }));
+            } else {
+                println!(
+                    "{} Closed unreachable session: {}",
+                    color::green("✓"),
+                    session
+                );
+            }
+        }
     }
 }
 
@@ -615,6 +688,17 @@ fn main() {
     ) && clean.iter().any(|a| a == "--all")
     {
         run_close_all(&flags);
+        return;
+    }
+
+    // Handle single-session close locally too. A close command should not
+    // start a fresh daemon merely to shut it down, and an unreachable daemon
+    // should be cleaned up so the next open starts from a fresh session.
+    if matches!(
+        clean.first().map(|s| s.as_str()),
+        Some("close") | Some("quit") | Some("exit")
+    ) {
+        run_close_session(&flags);
         return;
     }
 
