@@ -1076,7 +1076,7 @@ impl BrowserManager {
         }))
     }
 
-    pub async fn tab_switch(&mut self, index: usize) -> Result<Value, String> {
+    pub async fn tab_switch(&mut self, index: usize, activate: bool) -> Result<Value, String> {
         if index >= self.pages.len() {
             return Err(format!(
                 "Tab index {} out of range (0-{})",
@@ -1089,11 +1089,13 @@ impl BrowserManager {
         let session_id = self.pages[index].session_id.clone();
         self.enable_domains(&session_id).await?;
 
-        // Bring tab to front
-        let _ = self
-            .client
-            .send_command("Page.bringToFront", None, Some(&session_id))
-            .await;
+        if activate {
+            // Bring tab to front
+            let _ = self
+                .client
+                .send_command("Page.bringToFront", None, Some(&session_id))
+                .await;
+        }
 
         let url = self.get_url().await.unwrap_or_default();
         let title = self.get_title().await.unwrap_or_default();
@@ -1398,13 +1400,17 @@ impl BrowserManager {
         Ok(())
     }
 
-    pub async fn tab_switch_by_id(&mut self, tab_id: u32) -> Result<Value, String> {
+    pub async fn tab_switch_by_id(
+        &mut self,
+        tab_id: u32,
+        activate: bool,
+    ) -> Result<Value, String> {
         let index = self
             .pages
             .iter()
             .position(|p| p.tab_id == tab_id)
             .ok_or_else(|| format!("Tab ID {} not found", tab_id))?;
-        self.tab_switch(index).await
+        self.tab_switch(index, activate).await
     }
 
     pub async fn tab_close_by_id(&mut self, tab_id: Option<u32>) -> Result<Value, String> {

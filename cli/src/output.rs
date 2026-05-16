@@ -2056,6 +2056,12 @@ Operations:
   close [t<N>|label]         Close a tab (current if no ref given)
   <t<N>|label>               Switch to a tab by id or label
 
+Switch options:
+  --no-activate              Make the tab current for subsequent commands
+                             without bringing it to the foreground. Useful
+                             for background syncers that need to address a
+                             tab without disturbing the user's focus.
+
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
@@ -2067,6 +2073,7 @@ Examples:
   agent-browser tab new https://example.com
   agent-browser tab new --label docs https://docs.example.com
   agent-browser tab t2
+  agent-browser tab t2 --no-activate
   agent-browser tab docs
   agent-browser tab close
   agent-browser tab close t1

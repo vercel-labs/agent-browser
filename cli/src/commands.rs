@@ -1261,11 +1261,29 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                     }
                     Ok(cmd)
                 }
-                Some(tab_ref) => Ok(json!({
-                    "id": id,
-                    "action": "tab_switch",
-                    "tabId": tab_ref,
-                })),
+                Some(tab_ref) => {
+                    let mut cmd = json!({
+                        "id": id,
+                        "action": "tab_switch",
+                        "tabId": tab_ref,
+                    });
+                    let mut i = 1;
+                    while i < rest.len() {
+                        match rest[i] {
+                            "--no-activate" => {
+                                cmd["noActivate"] = json!(true);
+                                i += 1;
+                            }
+                            other => {
+                                return Err(ParseError::UnknownSubcommand {
+                                    subcommand: other.to_string(),
+                                    valid_options: &["--no-activate"],
+                                });
+                            }
+                        }
+                    }
+                    Ok(cmd)
+                }
                 None => Ok(json!({ "id": id, "action": "tab_list" })),
             }
         }
@@ -3412,6 +3430,27 @@ mod tests {
         let cmd = parse_command(&args("tab docs"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "tab_switch");
         assert_eq!(cmd["tabId"], "docs");
+    }
+
+    #[test]
+    fn test_tab_switch_no_activate() {
+        let cmd = parse_command(&args("tab t2 --no-activate"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "tab_switch");
+        assert_eq!(cmd["tabId"], "t2");
+        assert_eq!(cmd["noActivate"], true);
+    }
+
+    #[test]
+    fn test_tab_switch_default_activates() {
+        let cmd = parse_command(&args("tab t2"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "tab_switch");
+        assert!(cmd.get("noActivate").is_none() || cmd["noActivate"] == false);
+    }
+
+    #[test]
+    fn test_tab_switch_unknown_flag_errors() {
+        let result = parse_command(&args("tab t2 --bogus"), &default_flags());
+        assert!(result.is_err(), "unknown flag must error, got: {:?}", result);
     }
 
     #[test]

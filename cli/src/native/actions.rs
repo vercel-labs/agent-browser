@@ -3727,10 +3727,14 @@ async fn handle_tab_switch(cmd: &Value, state: &mut DaemonState) -> Result<Value
         .ok_or("Missing 'tabId' parameter (expected `t<N>` or a label)")?;
     let tab_ref = super::browser::TabRef::parse(tab_ref_str)?;
     let tab_id = mgr.resolve_tab_ref(&tab_ref)?;
+    let activate = !cmd
+        .get("noActivate")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     state.ref_map.clear();
     state.iframe_sessions.clear();
     state.active_frame_id = None;
-    let result = mgr.tab_switch_by_id(tab_id).await?;
+    let result = mgr.tab_switch_by_id(tab_id, activate).await?;
 
     if let Some(ref server) = state.stream_server {
         if let Ok(dims) = mgr
