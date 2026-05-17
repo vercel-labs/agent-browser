@@ -18,6 +18,7 @@ When no `--executable-path` is provided, agent-browser searches for Chrome in th
         <code>/Applications/Google Chrome Canary.app</code>,
         <code>/Applications/Chromium.app</code>,
         <code>/Applications/Brave Browser.app</code>,
+        <code>/Applications/Helium.app</code>,
         Puppeteer cache (<code>~/.cache/puppeteer/chrome/</code> or <code>PUPPETEER_CACHE_DIR</code>),
         Chrome for Testing cache
       </td>
@@ -28,7 +29,9 @@ When no `--executable-path` is provided, agent-browser searches for Chrome in th
         <code>google-chrome</code>,
         <code>google-chrome-stable</code>,
         <code>chromium-browser</code>,
-        <code>chromium</code> in PATH,
+        <code>chromium</code>,
+        <code>brave-browser</code>,
+        <code>helium</code> in PATH,
         Puppeteer cache (<code>~/.cache/puppeteer/chrome/</code> or <code>PUPPETEER_CACHE_DIR</code>),
         Chrome for Testing cache
       </td>
@@ -37,6 +40,8 @@ When no `--executable-path` is provided, agent-browser searches for Chrome in th
       <td>Windows</td>
       <td>
         <code>%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe</code>,
+        <code>%LOCALAPPDATA%\BraveSoftware\Brave-Browser\Application\brave.exe</code>,
+        <code>%LOCALAPPDATA%\imput\Helium\Application\chrome.exe</code>,
         <code>C:\Program Files\Google\Chrome\Application\chrome.exe</code>,
         <code>C:\Program Files (x86)\...\chrome.exe</code>
       </td>

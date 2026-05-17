@@ -569,6 +569,7 @@ pub fn find_chrome() -> Option<PathBuf> {
             "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
             "/Applications/Chromium.app/Contents/MacOS/Chromium",
             "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+            "/Applications/Helium.app/Contents/MacOS/Helium",
         ];
         for c in &candidates {
             let p = PathBuf::from(c);
@@ -587,6 +588,7 @@ pub fn find_chrome() -> Option<PathBuf> {
             "chromium",
             "brave-browser",
             "brave-browser-stable",
+            "helium",
         ];
         for name in &candidates {
             if let Ok(output) = Command::new("which").arg(name).output() {
@@ -615,6 +617,10 @@ pub fn find_chrome() -> Option<PathBuf> {
                 PathBuf::from(&local).join(r"BraveSoftware\Brave-Browser\Application\brave.exe");
             if brave.exists() {
                 return Some(brave);
+            }
+            let helium = PathBuf::from(&local).join(r"imput\Helium\Application\chrome.exe");
+            if helium.exists() {
+                return Some(helium);
             }
         }
         for c in &candidates {
@@ -724,7 +730,7 @@ async fn verify_ws_endpoint(ws_url: &str) -> bool {
 }
 
 /// Returns the default Chrome user-data directory paths for the current platform.
-/// Includes Chrome, Chrome Canary, Chromium, and Brave.
+/// Includes Chrome, Chrome Canary, Chromium, Brave, and Helium.
 pub fn get_chrome_user_data_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
 
@@ -737,6 +743,7 @@ pub fn get_chrome_user_data_dirs() -> Vec<PathBuf> {
                 "Google/Chrome Canary",
                 "Chromium",
                 "BraveSoftware/Brave-Browser",
+                "Helium",
             ] {
                 dirs.push(base.join(name));
             }
@@ -752,6 +759,7 @@ pub fn get_chrome_user_data_dirs() -> Vec<PathBuf> {
                 "google-chrome-unstable",
                 "chromium",
                 "BraveSoftware/Brave-Browser",
+                "helium",
             ] {
                 dirs.push(config.join(name));
             }
@@ -767,6 +775,7 @@ pub fn get_chrome_user_data_dirs() -> Vec<PathBuf> {
                 r"Google\Chrome SxS\User Data",
                 r"Chromium\User Data",
                 r"BraveSoftware\Brave-Browser\User Data",
+                r"imput\Helium\User Data",
             ] {
                 dirs.push(base.join(name));
             }
@@ -1272,6 +1281,70 @@ mod tests {
             if let Some(path) = result {
                 assert!(path.exists());
             }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_get_chrome_user_data_dirs_includes_helium_on_macos() {
+        let dirs = get_chrome_user_data_dirs();
+        assert!(dirs.iter().any(|dir| dir.ends_with("Library/Application Support/Helium")));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_get_chrome_user_data_dirs_includes_helium_on_linux() {
+        let guard = EnvGuard::new(&["HOME"]);
+        let home = TempDir::new("helium-home-linux");
+        std::fs::create_dir_all(&*home).unwrap();
+        guard.set("HOME", &home.to_string_lossy());
+
+        let dirs = get_chrome_user_data_dirs();
+        assert!(dirs.iter().any(|dir| dir == &home.join(".config/helium")));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_get_chrome_user_data_dirs_includes_helium_on_windows() {
+        let guard = EnvGuard::new(&["LOCALAPPDATA"]);
+        let local = TempDir::new("helium-localappdata");
+        std::fs::create_dir_all(&*local).unwrap();
+        guard.set("LOCALAPPDATA", &local.to_string_lossy());
+
+        let dirs = get_chrome_user_data_dirs();
+        assert!(dirs
+            .iter()
+            .any(|dir| dir == &local.join(r"imput\Helium\User Data")));
+    }
+
+    #[test]
+    fn test_find_chrome_user_data_dir_can_resolve_helium_style_dir() {
+        let guard = EnvGuard::new(&["HOME", "LOCALAPPDATA"]);
+
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        {
+            let home = TempDir::new("find-helium-profile-home");
+            std::fs::create_dir_all(&*home).unwrap();
+            guard.set("HOME", &home.to_string_lossy());
+
+            #[cfg(target_os = "macos")]
+            let helium_dir = home.join("Library/Application Support/Helium");
+            #[cfg(target_os = "linux")]
+            let helium_dir = home.join(".config/helium");
+
+            create_fake_local_state(&helium_dir, &[("Default", "Person 1")]);
+            assert_eq!(find_chrome_user_data_dir(), Some(helium_dir));
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            let local = TempDir::new("find-helium-profile-local");
+            std::fs::create_dir_all(&*local).unwrap();
+            guard.set("LOCALAPPDATA", &local.to_string_lossy());
+
+            let helium_dir = local.join(r"imput\Helium\User Data");
+            create_fake_local_state(&helium_dir, &[("Default", "Person 1")]);
+            assert_eq!(find_chrome_user_data_dir(), Some(helium_dir));
         }
     }
 
