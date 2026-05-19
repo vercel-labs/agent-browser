@@ -191,7 +191,13 @@ export function Viewport() {
 
   // Live element-annotation toggle: when ON, the daemon injects numbered
   // boxes onto the active page so refs are visible in the streaming viewport.
+  // State is session-scoped — switching sessions resets the toggle to OFF so
+  // the UI doesn't claim "on" for a session whose overlay was never injected.
   const [annotateOn, setAnnotateOn] = useState(false);
+  useEffect(() => {
+    setAnnotateOn(false);
+  }, [sessionName]);
+
   const toggleAnnotate = useCallback(async () => {
     const next = !annotateOn;
     setAnnotateOn(next);
