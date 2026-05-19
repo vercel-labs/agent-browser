@@ -330,6 +330,20 @@ fn run_dashboard_start(port: u16, json_mode: bool) {
     }
 }
 
+fn parse_dashboard_port(args: &[String]) -> Result<u16, String> {
+    let Some(port_index) = args.iter().position(|arg| arg == "--port") else {
+        return Ok(4848);
+    };
+
+    let Some(raw_port) = args.get(port_index + 1) else {
+        return Err("Missing value for --port".to_string());
+    };
+
+    raw_port
+        .parse::<u16>()
+        .map_err(|_| format!("Invalid dashboard port: {}", raw_port))
+}
+
 fn run_dashboard_stop(json_mode: bool) {
     let pid_path = get_dashboard_pid_path();
 
@@ -566,12 +580,17 @@ fn main() {
     if clean.first().map(|s| s.as_str()) == Some("dashboard") {
         match clean.get(1).map(|s| s.as_str()) {
             Some("start") | None => {
-                let port = clean
-                    .iter()
-                    .position(|a| a == "--port")
-                    .and_then(|i| clean.get(i + 1))
-                    .and_then(|s| s.parse::<u16>().ok())
-                    .unwrap_or(4848);
+                let port = match parse_dashboard_port(&clean) {
+                    Ok(port) => port,
+                    Err(error) => {
+                        if flags.json {
+                            print_json_error(error);
+                        } else {
+                            eprintln!("{} {}", color::error_indicator(), error);
+                        }
+                        exit(1);
+                    }
+                };
                 run_dashboard_start(port, flags.json);
                 return;
             }
@@ -1473,6 +1492,54 @@ mod tests {
         assert_eq!(result.server, "http://proxy.com:8080");
         assert_eq!(result.username.as_deref(), Some("user"));
         assert_eq!(result.password.as_deref(), Some("p@ss:w0rd"));
+    }
+
+    #[test]
+    fn test_parse_dashboard_port_defaults_without_flag() {
+        let args = vec!["dashboard".to_string(), "start".to_string()];
+
+        assert_eq!(parse_dashboard_port(&args), Ok(4848));
+    }
+
+    #[test]
+    fn test_parse_dashboard_port_accepts_valid_port() {
+        let args = vec![
+            "dashboard".to_string(),
+            "start".to_string(),
+            "--port".to_string(),
+            "5173".to_string(),
+        ];
+
+        assert_eq!(parse_dashboard_port(&args), Ok(5173));
+    }
+
+    #[test]
+    fn test_parse_dashboard_port_rejects_missing_value() {
+        let args = vec![
+            "dashboard".to_string(),
+            "start".to_string(),
+            "--port".to_string(),
+        ];
+
+        assert_eq!(
+            parse_dashboard_port(&args),
+            Err("Missing value for --port".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_dashboard_port_rejects_invalid_port() {
+        let args = vec![
+            "dashboard".to_string(),
+            "start".to_string(),
+            "--port".to_string(),
+            "70000".to_string(),
+        ];
+
+        assert_eq!(
+            parse_dashboard_port(&args),
+            Err("Invalid dashboard port: 70000".to_string())
+        );
     }
 
     #[test]
