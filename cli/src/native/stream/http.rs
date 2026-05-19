@@ -33,14 +33,141 @@ pub(super) fn cors_headers_for_origin(origin: Option<&str>) -> String {
     )
 }
 
+fn request_headers(request: &str) -> &str {
+    request
+        .find("\r\n\r\n")
+        .or_else(|| request.find("\n\n"))
+        .map(|header_end| &request[..header_end])
+        .unwrap_or(request)
+}
+
+fn request_header_value<'a>(request: &'a str, name: &str) -> Option<&'a str> {
+    request_headers(request).lines().find_map(|line| {
+        let (header_name, value) = line.split_once(':')?;
+        if header_name.trim().eq_ignore_ascii_case(name) {
+            Some(value.trim())
+        } else {
+            None
+        }
+    })
+}
+
 fn parse_origin(peeked: &[u8]) -> Option<String> {
     let header_str = std::str::from_utf8(peeked).ok()?;
-    for line in header_str.lines() {
-        if line.len() > 8 && line[..8].eq_ignore_ascii_case("origin: ") {
-            return Some(line[8..].trim().to_string());
+    request_header_value(header_str, "origin").map(ToString::to_string)
+}
+
+fn normalize_origin_authority(origin: &str) -> Option<String> {
+    let url = url::Url::parse(origin).ok()?;
+    let host = url.host_str()?.to_ascii_lowercase();
+    let host = if host.contains(':') {
+        format!("[{host}]")
+    } else {
+        host
+    };
+    let default_port = (url.scheme() == "http" && url.port() == Some(80))
+        || (url.scheme() == "https" && url.port() == Some(443));
+    Some(match url.port() {
+        Some(port) if !default_port => format!("{host}:{port}"),
+        _ => host,
+    })
+}
+
+fn normalize_host_authority(host: &str) -> String {
+    let host = host.trim().to_ascii_lowercase();
+
+    if let Some(bracket_end) = host.rfind(']') {
+        if bracket_end == host.len() - 1 {
+            return host;
+        }
+
+        if host.as_bytes().get(bracket_end + 1) == Some(&b':') {
+            let port = &host[bracket_end + 2..];
+            if port == "80" || port == "443" {
+                return host[..=bracket_end].to_string();
+            }
+        }
+
+        return host;
+    }
+
+    if let Some((name, port)) = host.rsplit_once(':') {
+        if !name.contains(':') && (port == "80" || port == "443") {
+            return name.to_string();
         }
     }
-    None
+
+    host
+}
+
+fn authority_host(authority: &str) -> &str {
+    if let Some(stripped) = authority.strip_prefix('[') {
+        if let Some(bracket_end) = stripped.find(']') {
+            return &authority[..=bracket_end + 1];
+        }
+    }
+
+    if let Some((host, _port)) = authority.rsplit_once(':') {
+        if !host.contains(':') {
+            return host;
+        }
+    }
+
+    authority
+}
+
+fn is_loopback_authority(authority: &str) -> bool {
+    matches!(
+        authority_host(authority),
+        "localhost" | "127.0.0.1" | "::1" | "[::1]"
+    )
+}
+
+fn header_authority_matches_host(request: &str, header_name: &str) -> bool {
+    let Some(authority) =
+        request_header_value(request, header_name).and_then(normalize_origin_authority)
+    else {
+        return false;
+    };
+    let Some(host) = request_header_value(request, "host").map(normalize_host_authority) else {
+        return false;
+    };
+    authority == host && is_loopback_authority(&authority) && is_loopback_authority(&host)
+}
+
+/// Protects the command relay by requiring same-origin browser metadata.
+fn is_same_origin_command_request(request: &str) -> bool {
+    if request_header_value(request, "origin").is_some() {
+        header_authority_matches_host(request, "origin")
+    } else {
+        header_authority_matches_host(request, "referer")
+    }
+}
+
+fn command_cors_headers(request: &str) -> String {
+    match request_header_value(request, "origin") {
+        Some(origin) if is_same_origin_command_request(request) => format!(
+            "Access-Control-Allow-Origin: {origin}\r\nAccess-Control-Allow-Methods: POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\nVary: Origin\r\n"
+        ),
+        _ => String::new(),
+    }
+}
+
+async fn write_json_error_response_no_cors(
+    stream: &mut tokio::net::TcpStream,
+    status: &str,
+    error: &str,
+) {
+    let body = format!(
+        r#"{{"success":false,"error":{}}}"#,
+        serde_json::to_string(error).unwrap_or_else(|_| format!("\"{}\"", error))
+    );
+    let response = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    let _ = stream.write_all(response.as_bytes()).await;
+    let _ = stream.write_all(body.as_bytes()).await;
 }
 
 pub(super) async fn handle_http_request(
@@ -61,6 +188,25 @@ pub(super) async fn handle_http_request(
     let origin = parse_origin(peeked);
 
     if method == "OPTIONS" {
+        if path == "/api/command" {
+            if !is_same_origin_command_request(&request) {
+                write_json_error_response_no_cors(
+                    &mut stream,
+                    "403 Forbidden",
+                    "Origin or Referer does not match Host header.",
+                )
+                .await;
+                return;
+            }
+
+            let cors_headers = command_cors_headers(&request);
+            let response = format!(
+                "HTTP/1.1 204 No Content\r\n{cors_headers}Access-Control-Max-Age: 86400\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            let _ = stream.write_all(response.as_bytes()).await;
+            return;
+        }
+
         let response = format!(
             "HTTP/1.1 204 No Content\r\n{CORS_HEADERS}Access-Control-Max-Age: 86400\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
         );
@@ -69,13 +215,28 @@ pub(super) async fn handle_http_request(
     }
 
     if method == "POST" {
+        if path == "/api/command" && !is_same_origin_command_request(&request) {
+            write_json_error_response_no_cors(
+                &mut stream,
+                "403 Forbidden",
+                "Origin or Referer does not match Host header.",
+            )
+            .await;
+            return;
+        }
+
         let full_body = read_full_body(&mut stream, peeked).await;
         if full_body.is_none()
             && (path == "/api/chat" || path == "/api/sessions" || path == "/api/command")
         {
             let body = r#"{"error":"Request body too large"}"#;
+            let cors_headers = if path == "/api/command" {
+                command_cors_headers(&request)
+            } else {
+                CORS_HEADERS.to_string()
+            };
             let response = format!(
-                "HTTP/1.1 413 Payload Too Large\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n{CORS_HEADERS}\r\n",
+                "HTTP/1.1 413 Payload Too Large\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n{cors_headers}\r\n",
                 body.len()
             );
             let _ = stream.write_all(response.as_bytes()).await;
@@ -117,8 +278,9 @@ pub(super) async fn handle_http_request(
                     ),
                 ),
             };
+            let cors_headers = command_cors_headers(&request);
             let response = format!(
-                "HTTP/1.1 {status}\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n{CORS_HEADERS}\r\n",
+                "HTTP/1.1 {status}\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n{cors_headers}\r\n",
                 resp_body.len()
             );
             let _ = stream.write_all(response.as_bytes()).await;
@@ -311,5 +473,243 @@ pub(super) fn serve_embedded_file(url_path: &str) -> (&'static str, &'static str
             "text/html; charset=utf-8",
             b"<html><body><p>404 Not Found</p></body></html>".to_vec(),
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::EnvGuard;
+    use std::sync::Arc;
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use tokio::sync::oneshot;
+
+    async fn send_request_to_handler(request: &str, session_name: &str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let peeked = request.as_bytes().to_vec();
+        let last_tabs = Arc::new(RwLock::new(Vec::new()));
+        let last_engine = Arc::new(RwLock::new("chrome".to_string()));
+        let session_name = session_name.to_string();
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            handle_http_request(stream, &peeked, &last_tabs, &last_engine, &session_name).await;
+        });
+
+        let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        client.write_all(request.as_bytes()).await.unwrap();
+        client.shutdown().await.unwrap();
+
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).await.unwrap();
+        server.await.unwrap();
+
+        String::from_utf8(response).unwrap()
+    }
+
+    #[cfg(unix)]
+    async fn spawn_fake_daemon(
+        socket_dir: &std::path::Path,
+        session_name: &str,
+    ) -> oneshot::Receiver<String> {
+        let socket_path = socket_dir.join(format!("{session_name}.sock"));
+        let _ = std::fs::remove_file(&socket_path);
+        let listener = tokio::net::UnixListener::bind(&socket_path).unwrap();
+        let (tx, rx) = oneshot::channel();
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut reader = tokio::io::BufReader::new(stream);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+
+            let mut stream = reader.into_inner();
+            stream
+                .write_all(br#"{"success":true,"data":{"ok":true}}"#)
+                .await
+                .unwrap();
+            stream.write_all(b"\n").await.unwrap();
+            let _ = tx.send(line);
+        });
+
+        rx
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn cross_origin_command_post_is_rejected_without_relaying_to_daemon() {
+        let temp_parent = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("t");
+        std::fs::create_dir_all(&temp_parent).unwrap();
+        let socket_dir = tempfile::Builder::new()
+            .prefix("ab-")
+            .tempdir_in(temp_parent)
+            .unwrap();
+        let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
+        guard.set(
+            "AGENT_BROWSER_SOCKET_DIR",
+            socket_dir.path().to_str().unwrap(),
+        );
+        guard.remove("XDG_RUNTIME_DIR");
+
+        let session_name = "x";
+        let daemon_command = spawn_fake_daemon(socket_dir.path(), session_name).await;
+        let body = r#"{"action":"tabs"}"#;
+        let request = format!(
+            "POST /api/command HTTP/1.1\r\nHost: localhost:7777\r\nOrigin: https://evil.example\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+
+        let response = send_request_to_handler(&request, session_name).await;
+
+        assert!(
+            response.starts_with("HTTP/1.1 403 Forbidden"),
+            "unexpected response: {response}"
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), daemon_command)
+                .await
+                .is_err(),
+            "cross-origin request reached daemon command relay"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cross_origin_command_preflight_is_rejected_without_wildcard_cors() {
+        let request = concat!(
+            "OPTIONS /api/command HTTP/1.1\r\n",
+            "Host: localhost:7777\r\n",
+            "Origin: https://evil.example\r\n",
+            "Access-Control-Request-Method: POST\r\n",
+            "Access-Control-Request-Headers: content-type\r\n",
+            "\r\n"
+        );
+
+        let response = send_request_to_handler(request, "x").await;
+
+        assert!(
+            response.starts_with("HTTP/1.1 403 Forbidden"),
+            "unexpected response: {response}"
+        );
+        assert!(
+            !response.contains("Access-Control-Allow-Origin: *"),
+            "forbidden command preflight exposed wildcard CORS: {response}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn command_post_without_origin_or_referer_is_rejected() {
+        let body = r#"{"action":"tabs"}"#;
+        let request = format!(
+            "POST /api/command HTTP/1.1\r\nHost: localhost:7777\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+
+        let response = send_request_to_handler(&request, "x").await;
+
+        assert!(
+            response.starts_with("HTTP/1.1 403 Forbidden"),
+            "unexpected response: {response}"
+        );
+        assert!(
+            !response.contains("Access-Control-Allow-Origin: *"),
+            "forbidden command response exposed wildcard CORS: {response}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn command_post_with_dns_rebinding_host_is_rejected() {
+        let body = r#"{"action":"tabs"}"#;
+        let request = format!(
+            "POST /api/command HTTP/1.1\r\nHost: attacker.example:7777\r\nOrigin: http://attacker.example:7777\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+
+        let response = send_request_to_handler(&request, "x").await;
+
+        assert!(
+            response.starts_with("HTTP/1.1 403 Forbidden"),
+            "unexpected response: {response}"
+        );
+        assert!(
+            !response.contains("Access-Control-Allow-Origin: *"),
+            "forbidden command response exposed wildcard CORS: {response}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn command_post_ignores_header_like_body_lines() {
+        let body = "Referer: http://localhost:7777\r\n{\"action\":\"tabs\"}";
+        let request = format!(
+            "POST /api/command HTTP/1.1\r\nHost: localhost:7777\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+
+        let response = send_request_to_handler(&request, "x").await;
+
+        assert!(
+            response.starts_with("HTTP/1.1 403 Forbidden"),
+            "unexpected response: {response}"
+        );
+        assert!(
+            !response.contains("Access-Control-Allow-Origin: *"),
+            "forbidden command response exposed wildcard CORS: {response}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn same_origin_command_post_relays_without_wildcard_cors() {
+        let temp_parent = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("t");
+        std::fs::create_dir_all(&temp_parent).unwrap();
+        let socket_dir = tempfile::Builder::new()
+            .prefix("ab-")
+            .tempdir_in(temp_parent)
+            .unwrap();
+        let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
+        guard.set(
+            "AGENT_BROWSER_SOCKET_DIR",
+            socket_dir.path().to_str().unwrap(),
+        );
+        guard.remove("XDG_RUNTIME_DIR");
+
+        let session_name = "x";
+        let daemon_command = spawn_fake_daemon(socket_dir.path(), session_name).await;
+        let body = r#"{"action":"tabs"}"#;
+        let request = format!(
+            "POST /api/command HTTP/1.1\r\nHost: localhost:7777\r\nOrigin: http://localhost:7777\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+
+        let response = send_request_to_handler(&request, session_name).await;
+
+        assert!(
+            response.starts_with("HTTP/1.1 200 OK"),
+            "unexpected response: {response}"
+        );
+        assert!(
+            response.contains("Access-Control-Allow-Origin: http://localhost:7777"),
+            "same-origin command response did not reflect origin: {response}"
+        );
+        assert!(
+            !response.contains("Access-Control-Allow-Origin: *"),
+            "same-origin command response exposed wildcard CORS: {response}"
+        );
+
+        let relayed = tokio::time::timeout(std::time::Duration::from_secs(1), daemon_command)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(relayed.contains(r#""action":"tabs""#), "{relayed}");
     }
 }

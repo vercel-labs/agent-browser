@@ -105,6 +105,10 @@ export async function POST(req: Request) {
   } = await createBashTool({ files: docsFiles });
 
   const result = streamText({
+    headers: {
+      "http-referer": "https://agent-browser.dev",
+      "x-title": "agent-browser",
+    },
     model: DEFAULT_MODEL,
     system: SYSTEM_PROMPT,
     messages: await convertToModelMessages(messages),

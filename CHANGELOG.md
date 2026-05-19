@@ -1,8 +1,36 @@
 # agent-browser
 
-## 0.26.0
+## 0.27.0
 
 <!-- release:start -->
+### New Features
+
+- **React introspection** - First-class React DevTools integration with new `react tree`, `react inspect <fiberId>`, `react renders start|stop`, and `react suspense` commands for full component-tree visibility, per-fiber props/hooks/state inspection, render profiling with mount/re-render counts and change details, and Suspense boundary classification with root-cause grouping and recommendations. React DevTools hook is vendored (MIT) and embedded in the binary with zero runtime dependencies (#1257)
+- **Web Vitals** - New `vitals [url]` command that reports Core Web Vitals (LCP, CLS, TTFB, FCP, INP) plus React hydration phases for any page (#1257)
+- **SPA navigation** - New `pushstate <url>` command for client-side SPA navigations without a full page load (#1257)
+- **Init scripts and feature flags** - New `--init-script <path>` flag (repeatable; env `AGENT_BROWSER_INIT_SCRIPTS`) to register scripts before first navigation, and `--enable <feature>` flag (repeatable; env `AGENT_BROWSER_ENABLE`) for built-in init scripts such as `react-devtools` (#1257)
+- **Network route resource type filter** - `network route` now accepts `--resource-type <csv>` to filter intercepted requests by CDP resource type (#1257)
+- **cURL cookie import** - `cookies set --curl <file>` auto-detects JSON, cURL, and Cookie-header formats for bulk cookie import (#1257)
+- **Dashboard proxy support** - The observability dashboard now works from proxied origins via a same-origin proxy, enabling deployment behind reverse proxies and path-based routing (#1111)
+
+### Bug Fixes
+
+- Fixed **`doctor` command** generating duplicate check ids when called multiple times in the same process (#1330)
+
+### Infrastructure
+
+- Switched npm publishing to **trusted publishing** via GitHub Actions OIDC, removing the need for manually managed npm tokens (#1273)
+
+### Contributors
+
+- @ctate
+- @quuu
+- @shaper
+- @ThomasK33
+<!-- release:end -->
+
+## 0.26.0
+
 ### New Features
 
 - **`doctor` command** - Added `agent-browser doctor` for one-shot diagnosis of an install. Checks environment, Chrome, running daemons, config files, security, providers, and network connectivity; auto-cleans stale daemon sidecar files on every run; and performs a live headless launch test. Supports `--offline` to skip network probes, `--quick` to skip the launch test, `--fix` for opt-in repairs (install missing Chrome, close version-mismatched daemons, prune expired state files), and `--json` for structured output (#1254)
@@ -24,7 +52,6 @@
 - @DJRHails
 - @michael-farah
 - @tomdale
-<!-- release:end -->
 
 ## 0.25.5
 
