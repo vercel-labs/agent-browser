@@ -144,6 +144,7 @@ const CURSOR_KEYWORDS = [
 ] as const;
 
 export type CursorKeyword = (typeof CURSOR_KEYWORDS)[number];
+export type CdpMouseButton = "left" | "middle" | "right" | "none";
 
 export function sanitizeCursorKeyword(cursor: unknown): CursorKeyword {
   if (typeof cursor !== "string") return "default";
@@ -157,7 +158,7 @@ export function sanitizeCursorKeyword(cursor: unknown): CursorKeyword {
   return keyword ?? "default";
 }
 
-export function cdpButton(button: number): string {
+export function cdpButton(button: number): CdpMouseButton {
   switch (button) {
     case 0:
       return "left";

@@ -1,5 +1,8 @@
 use serde_json::{json, Value};
 
+const MAX_MOUSE_BUTTONS: i32 = 31;
+const MAX_MODIFIERS: i64 = 15;
+
 #[derive(Debug, Default)]
 pub(super) struct InputState {
     mouse_buttons: i32,
@@ -7,17 +10,11 @@ pub(super) struct InputState {
 
 impl InputState {
     pub(super) fn mouse_payload(&mut self, parsed: &Value) -> Value {
-        let event_type = parsed
-            .get("eventType")
-            .and_then(|v| v.as_str())
-            .unwrap_or("mouseMoved");
-        let button = parsed
-            .get("button")
-            .and_then(|v| v.as_str())
-            .unwrap_or("none");
+        let event_type = normalized_mouse_event_type(parsed.get("eventType"));
+        let button = normalized_mouse_button(parsed.get("button"));
 
-        if let Some(buttons) = parsed.get("buttons").and_then(|v| v.as_i64()) {
-            self.mouse_buttons = buttons as i32;
+        if let Some(buttons) = mouse_buttons_from_value(parsed.get("buttons")) {
+            self.mouse_buttons = buttons;
         } else {
             match event_type {
                 "mousePressed" => self.mouse_buttons |= mouse_button_mask(button),
@@ -32,11 +29,31 @@ impl InputState {
             "y": finite_or_zero(parsed.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0)),
             "button": button_for_event(event_type, button, self.mouse_buttons),
             "buttons": self.mouse_buttons,
-            "clickCount": parsed.get("clickCount").and_then(|v| v.as_i64()).unwrap_or(default_click_count(event_type)),
+            "clickCount": non_negative_i64(parsed.get("clickCount"), default_click_count(event_type)),
             "deltaX": parsed.get("deltaX").and_then(|v| v.as_f64()).unwrap_or(0.0),
             "deltaY": parsed.get("deltaY").and_then(|v| v.as_f64()).unwrap_or(0.0),
-            "modifiers": parsed.get("modifiers").and_then(|v| v.as_i64()).unwrap_or(0),
+            "modifiers": clamped_i64(parsed.get("modifiers"), 0, MAX_MODIFIERS),
         })
+    }
+}
+
+pub(super) fn normalized_mouse_event_type(value: Option<&Value>) -> &'static str {
+    match value.and_then(|v| v.as_str()) {
+        Some("mousePressed") => "mousePressed",
+        Some("mouseReleased") => "mouseReleased",
+        Some("mouseWheel") => "mouseWheel",
+        _ => "mouseMoved",
+    }
+}
+
+fn normalized_mouse_button(value: Option<&Value>) -> &'static str {
+    match value.and_then(|v| v.as_str()) {
+        Some("left") => "left",
+        Some("right") => "right",
+        Some("middle") => "middle",
+        Some("back") => "back",
+        Some("forward") => "forward",
+        _ => "none",
     }
 }
 
@@ -54,6 +71,26 @@ fn default_click_count(event_type: &str) -> i64 {
     } else {
         0
     }
+}
+
+fn mouse_buttons_from_value(value: Option<&Value>) -> Option<i32> {
+    value
+        .and_then(|v| v.as_i64())
+        .map(|buttons| buttons.clamp(0, MAX_MOUSE_BUTTONS as i64) as i32)
+}
+
+fn non_negative_i64(value: Option<&Value>, fallback: i64) -> i64 {
+    value
+        .and_then(|v| v.as_i64())
+        .map(|value| value.max(0))
+        .unwrap_or(fallback)
+}
+
+fn clamped_i64(value: Option<&Value>, min: i64, max: i64) -> i64 {
+    value
+        .and_then(|v| v.as_i64())
+        .map(|value| value.clamp(min, max))
+        .unwrap_or(min)
 }
 
 fn mouse_button_mask(button: &str) -> i32 {
@@ -156,5 +193,27 @@ mod tests {
             "clickCount": 2,
         }));
         assert_eq!(down["clickCount"], 2);
+    }
+
+    #[test]
+    fn mouse_payload_sanitizes_untrusted_fields() {
+        let mut state = InputState::default();
+        let payload = state.mouse_payload(&json!({
+            "eventType": "not-a-cdp-event",
+            "button": "invalid-button",
+            "buttons": 999,
+            "clickCount": -4,
+            "modifiers": 999,
+            "x": f64::NAN,
+            "y": f64::INFINITY,
+        }));
+
+        assert_eq!(payload["type"], "mouseMoved");
+        assert_eq!(payload["button"], "left");
+        assert_eq!(payload["buttons"], MAX_MOUSE_BUTTONS);
+        assert_eq!(payload["clickCount"], 0);
+        assert_eq!(payload["modifiers"], MAX_MODIFIERS);
+        assert_eq!(payload["x"], 0.0);
+        assert_eq!(payload["y"], 0.0);
     }
 }

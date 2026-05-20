@@ -12,7 +12,7 @@ use crate::native::cdp::client::CdpClient;
 
 use super::cursor::{cursor_at_point, cursor_message, CursorSampler};
 use super::http::handle_http_request;
-use super::input::InputState;
+use super::input::{normalized_mouse_event_type, InputState};
 use super::{is_allowed_origin, timestamp_ms};
 
 #[allow(clippy::too_many_arguments)]
@@ -308,10 +308,7 @@ async fn handle_client_message(
 
     match msg_type {
         "input_mouse" => {
-            let event_type = parsed
-                .get("eventType")
-                .and_then(|v| v.as_str())
-                .unwrap_or("mouseMoved");
+            let event_type = normalized_mouse_event_type(parsed.get("eventType"));
             let x = parsed.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
             let y = parsed.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
             let _ = client
