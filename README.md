@@ -42,7 +42,7 @@ agent-browser install  # Download Chrome from Chrome for Testing (first time onl
 
 ### From Source
 
-Requires Node.js 22+, pnpm 11+, and Rust.
+Requires Node.js 24+, pnpm 11+, and Rust.
 
 ```bash
 git clone https://github.com/vercel-labs/agent-browser
@@ -75,7 +75,7 @@ Detects your installation method (npm, Homebrew, or Cargo) and runs the appropri
 ### Requirements
 
 - **Chrome** - Run `agent-browser install` to download Chrome from [Chrome for Testing](https://developer.chrome.com/blog/chrome-for-testing/) (Google's official automation channel). Existing Chrome, Brave, Playwright, and Puppeteer installations are detected automatically. No Playwright or Node.js required for the daemon.
-- **Node.js 22+ and pnpm 11+** - Only needed when building from source.
+- **Node.js 24+ and pnpm 11+** - Only needed when building from source.
 - **Rust** - Only needed when building from source (see From Source above).
 
 ## Quick Start
