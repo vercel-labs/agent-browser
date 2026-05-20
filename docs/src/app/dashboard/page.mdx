@@ -112,7 +112,7 @@ Sent when the browser logs to the console:
 
 The `args` array contains the raw CDP `Runtime.consoleAPICalled` arguments for programmatic access. Object arguments include preview data (e.g. `{userId: "abc", count: 42}` instead of `"Object"`).
 
-These are in addition to the existing `frame`, `status`, `cursor`, and `error` message types documented on the [Streaming](/streaming) page. The dashboard uses the shared `@agent-browser/client` protocol types so host apps can embed the same live-view stream without copying dashboard internals.
+These are in addition to the existing `frame`, `status`, `cursor`, and `error` message types documented on the [Streaming](/streaming) page. Host apps can consume the same shared protocol from `agent-browser/client` to embed the live-view stream without copying dashboard internals.
 
 ## Architecture
 

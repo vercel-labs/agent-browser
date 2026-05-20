@@ -226,8 +226,8 @@ can omit it for basic clicks.
 For advanced stream clients, import the shared protocol types and helpers:
 
 ```typescript
-import type { StreamMessage } from "@agent-browser/client";
-import { cdpButton, cdpButtonsForEvent, sanitizeCursorKeyword } from "@agent-browser/client";
+import type { StreamMessage } from "agent-browser/client";
+import { cdpButton, cdpButtonsForEvent, sanitizeCursorKeyword } from "agent-browser/client";
 
 const ws = new WebSocket("ws://localhost:9223");
 ws.onmessage = (event) => {

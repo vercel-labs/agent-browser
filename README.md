@@ -764,8 +764,9 @@ The dashboard displays:
 - **AI Chat** -- chat with an AI assistant directly in the dashboard (requires Vercel AI Gateway configuration)
 
 The stream protocol types and input helpers are available from
-`@agent-browser/client` for host apps that want to embed the same live browser
-surface instead of copying dashboard internals.
+`agent-browser/client` for host apps that want to embed the same live browser
+surface instead of copying dashboard internals. The dashboard consumes the same
+client module through the monorepo workspace package.
 
 ### AI Chat
 
