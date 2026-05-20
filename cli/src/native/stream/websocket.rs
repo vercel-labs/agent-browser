@@ -1,6 +1,7 @@
 use serde_json::{json, Value};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Instant;
 
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpListener;
@@ -9,7 +10,9 @@ use tokio_tungstenite::tungstenite::Message;
 
 use crate::native::cdp::client::CdpClient;
 
+use super::cursor::{cursor_at_point, cursor_message, CursorSampler};
 use super::http::handle_http_request;
+use super::input::InputState;
 use super::{is_allowed_origin, timestamp_ms};
 
 #[allow(clippy::too_many_arguments)]
@@ -126,6 +129,7 @@ async fn handle_connection(
         handle_ws_client(
             stream,
             addr,
+            frame_tx,
             frame_rx,
             client_count,
             client_slot,
@@ -150,6 +154,7 @@ async fn handle_connection(
 async fn handle_ws_client(
     stream: tokio::net::TcpStream,
     _addr: SocketAddr,
+    frame_tx: broadcast::Sender<String>,
     mut frame_rx: broadcast::Receiver<String>,
     client_count: Arc<Mutex<usize>>,
     client_slot: Arc<RwLock<Option<Arc<CdpClient>>>>,
@@ -231,6 +236,9 @@ async fn handle_ws_client(
 
     client_notify.notify_one();
 
+    let mut cursor_sampler = CursorSampler::default();
+    let mut input_state = InputState::default();
+
     loop {
         tokio::select! {
             changed = shutdown_rx.changed() => {
@@ -258,7 +266,14 @@ async fn handle_ws_client(
                         let guard = client_slot.read().await;
                         if let Some(ref client) = *guard {
                             let sid = cdp_session_id.read().await;
-                            handle_client_message(&text, client.as_ref(), sid.as_deref()).await;
+                            handle_client_message(
+                                &text,
+                                client.as_ref(),
+                                sid.as_deref(),
+                                &frame_tx,
+                                &mut cursor_sampler,
+                                &mut input_state,
+                            ).await;
                         }
                     }
                     Some(Ok(Message::Close(_))) | None => break,
@@ -276,7 +291,14 @@ async fn handle_ws_client(
     client_notify.notify_one();
 }
 
-async fn handle_client_message(msg: &str, client: &CdpClient, session_id: Option<&str>) {
+async fn handle_client_message(
+    msg: &str,
+    client: &CdpClient,
+    session_id: Option<&str>,
+    frame_tx: &broadcast::Sender<String>,
+    cursor_sampler: &mut CursorSampler,
+    input_state: &mut InputState,
+) {
     let parsed: Value = match serde_json::from_str(msg) {
         Ok(v) => v,
         Err(_) => return,
@@ -286,22 +308,27 @@ async fn handle_client_message(msg: &str, client: &CdpClient, session_id: Option
 
     match msg_type {
         "input_mouse" => {
+            let event_type = parsed
+                .get("eventType")
+                .and_then(|v| v.as_str())
+                .unwrap_or("mouseMoved");
+            let x = parsed.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let y = parsed.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
             let _ = client
                 .send_command(
                     "Input.dispatchMouseEvent",
-                    Some(json!({
-                        "type": parsed.get("eventType").and_then(|v| v.as_str()).unwrap_or("mouseMoved"),
-                        "x": parsed.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0),
-                        "y": parsed.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0),
-                        "button": parsed.get("button").and_then(|v| v.as_str()).unwrap_or("none"),
-                        "clickCount": parsed.get("clickCount").and_then(|v| v.as_i64()).unwrap_or(0),
-                        "deltaX": parsed.get("deltaX").and_then(|v| v.as_f64()).unwrap_or(0.0),
-                        "deltaY": parsed.get("deltaY").and_then(|v| v.as_f64()).unwrap_or(0.0),
-                        "modifiers": parsed.get("modifiers").and_then(|v| v.as_i64()).unwrap_or(0),
-                    })),
+                    Some(input_state.mouse_payload(&parsed)),
                     session_id,
                 )
                 .await;
+
+            if event_type == "mouseMoved" && cursor_sampler.should_sample(Instant::now()) {
+                if let Ok(cursor) = cursor_at_point(client, session_id, x, y).await {
+                    if cursor_sampler.should_broadcast(&cursor) {
+                        let _ = frame_tx.send(cursor_message(&cursor, x, y));
+                    }
+                }
+            }
         }
         "input_keyboard" => {
             let _ = client

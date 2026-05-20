@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useAtomValue, useSetAtom } from "jotai/react";
 import { ArrowLeft, ArrowRight, Camera, Circle, FileCode, Maximize, Moon, RotateCw, Smartphone, Square, Sun, Wifi, WifiOff } from "lucide-react";
+import { cdpButton, cdpButtons, cdpButtonsForEvent } from "@agent-browser/client";
 import { cn } from "@/lib/utils";
 import { execCommand, sessionArgs } from "@/lib/exec";
 import { getSessionStreamUrl } from "@/lib/dashboard-routes";
@@ -40,6 +41,7 @@ import {
   streamEngineAtom,
   activeUrlAtom,
   sendInputAtom,
+  currentCursorAtom,
 } from "@/store/stream";
 import { activeSessionNameAtom, activePortAtom } from "@/store/sessions";
 
@@ -69,15 +71,6 @@ const KEY_INFO: Record<string, { text?: string; keyCode: number }> = {
   PageUp: { keyCode: 33 },
   PageDown: { keyCode: 34 },
 };
-
-function cdpButton(btn: number): string {
-  switch (btn) {
-    case 0: return "left";
-    case 1: return "middle";
-    case 2: return "right";
-    default: return "none";
-  }
-}
 
 const DIMENSION_PRESETS: { label: string; ratio?: [number, number] }[] = [
   { label: "1:1", ratio: [1, 1] },
@@ -130,6 +123,7 @@ export function Viewport() {
   const recording = useAtomValue(recordingAtom);
   const engine = useAtomValue(streamEngineAtom);
   const url = useAtomValue(activeUrlAtom);
+  const currentCursor = useAtomValue(currentCursorAtom);
   const sessionName = useAtomValue(activeSessionNameAtom);
   const streamPort = useAtomValue(activePortAtom);
   const sendInput = useSetAtom(sendInputAtom);
@@ -331,7 +325,8 @@ export function Viewport() {
         x: pos.x,
         y: pos.y,
         button: cdpButton(e.button),
-        clickCount: eventType === "mousePressed" ? 1 : 0,
+        buttons: cdpButtonsForEvent(eventType, e.button, e.buttons),
+        clickCount: eventType === "mouseMoved" ? 0 : Math.max(1, e.detail || 1),
         modifiers: cdpModifiers(e),
       });
     },
@@ -348,6 +343,7 @@ export function Viewport() {
         x: pos.x,
         y: pos.y,
         button: "none",
+        buttons: cdpButtons(e.buttons),
         clickCount: 0,
         deltaX: e.deltaX,
         deltaY: e.deltaY,
@@ -514,6 +510,7 @@ export function Viewport() {
             ref={canvasRef}
             tabIndex={0}
             className="max-h-full max-w-full object-contain outline-none"
+            style={{ cursor: currentCursor }}
             onMouseMove={(e) => handleMouseEvent(e, "mouseMoved")}
             onMouseDown={(e) => {
               canvasRef.current?.focus();

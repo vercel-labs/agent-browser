@@ -756,10 +756,16 @@ The dashboard runs as a standalone background process on port 4848, independent 
 
 The dashboard displays:
 - **Live viewport** -- real-time JPEG frames from the browser
+- **Native cursor feedback** -- computed browser cursor updates for the element under the pointer
+- **Shared control** -- mouse, keyboard, touch, drag, scroll, and double-click input over the stream
 - **Activity feed** -- chronological command/result stream with timing and expandable details
 - **Console output** -- browser console messages (log, warn, error)
 - **Session creation** -- create new sessions from the UI with local engines (Chrome, Lightpanda) or cloud providers (AgentCore, Browserbase, Browserless, Browser Use, Kernel)
 - **AI Chat** -- chat with an AI assistant directly in the dashboard (requires Vercel AI Gateway configuration)
+
+The stream protocol types and input helpers are available from
+`@agent-browser/client` for host apps that want to embed the same live browser
+surface instead of copying dashboard internals.
 
 ### AI Chat
 

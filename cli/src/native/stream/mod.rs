@@ -1,8 +1,10 @@
 mod cdp_loop;
 pub(crate) mod chat;
+mod cursor;
 mod dashboard;
 mod discovery;
 mod http;
+mod input;
 mod websocket;
 
 pub use cdp_loop::{ack_screencast_frame, start_screencast, stop_screencast};

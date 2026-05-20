@@ -81,6 +81,25 @@ Connection and screencast status:
 }
 ```
 
+### Cursor messages
+
+The server samples the browser's actual computed cursor under the pointer and
+broadcasts sanitized cursor updates:
+
+```json
+{
+  "type": "cursor",
+  "cursor": "pointer",
+  "x": 150,
+  "y": 250,
+  "timestamp": 1711367000000
+}
+```
+
+`cursor` is always a standard CSS cursor keyword. Custom `url(...)` cursor
+values are reduced to their fallback keyword, and unknown values become
+`default`.
+
 ## Input injection
 
 Send input events to control the browser remotely.
@@ -112,7 +131,8 @@ Send input events to control the browser remotely.
   "type": "input_mouse",
   "eventType": "mouseMoved",
   "x": 150,
-  "y": 250
+  "y": 250,
+  "buttons": 1
 }
 
 // Scroll
@@ -125,6 +145,10 @@ Send input events to control the browser remotely.
   "deltaY": 100
 }
 ```
+
+Use `buttons` when sending drag gestures. The stream server also tracks the
+active button state from `mousePressed` and `mouseReleased`, so simple clients
+can omit it for basic clicks.
 
 ### Keyboard events
 
@@ -199,7 +223,22 @@ Send input events to control the browser remotely.
 
 ## Programmatic API
 
-For advanced use, control streaming directly via the TypeScript API:
+For advanced stream clients, import the shared protocol types and helpers:
+
+```typescript
+import type { StreamMessage } from "@agent-browser/client";
+import { cdpButton, cdpButtonsForEvent, sanitizeCursorKeyword } from "@agent-browser/client";
+
+const ws = new WebSocket("ws://localhost:9223");
+ws.onmessage = (event) => {
+  const message = JSON.parse(event.data) as StreamMessage;
+  if (message.type === "cursor") {
+    document.body.style.cursor = sanitizeCursorKeyword(message.cursor);
+  }
+};
+```
+
+For lower-level browser control, use the TypeScript API:
 
 ```typescript
 import { BrowserManager } from 'agent-browser';

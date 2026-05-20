@@ -8,6 +8,7 @@
     "start": "next start"
   },
   "dependencies": {
+    "@agent-browser/client": "workspace:*",
     "@ai-sdk/react": "^3.0.148",
     "@radix-ui/react-popover": "^1.1.15",
     "ai": "^6.0.146",

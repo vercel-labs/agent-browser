@@ -111,8 +111,17 @@ importers:
         specifier: ^5
         version: 5.9.3
 
+  packages/client:
+    devDependencies:
+      typescript:
+        specifier: ^5.8.3
+        version: 5.9.3
+
   packages/dashboard:
     dependencies:
+      '@agent-browser/client':
+        specifier: workspace:*
+        version: link:../client
       '@ai-sdk/react':
         specifier: ^3.0.148
         version: 3.0.148(react@19.2.3)(zod@3.25.76)

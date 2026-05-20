@@ -64,7 +64,7 @@ The dashboard is a single-page web app with three areas:
 
 ## WebSocket protocol
 
-The dashboard connects to the same WebSocket endpoint used by [Streaming](/streaming), with additional message types for observability:
+The dashboard connects to the same WebSocket endpoint used by [Streaming](/streaming), including live frames, browser-derived cursor updates, and input injection. It also consumes additional message types for observability:
 
 ### Command events
 
@@ -112,7 +112,7 @@ Sent when the browser logs to the console:
 
 The `args` array contains the raw CDP `Runtime.consoleAPICalled` arguments for programmatic access. Object arguments include preview data (e.g. `{userId: "abc", count: 42}` instead of `"Object"`).
 
-These are in addition to the existing `frame`, `status`, and `error` message types documented on the [Streaming](/streaming) page.
+These are in addition to the existing `frame`, `status`, `cursor`, and `error` message types documented on the [Streaming](/streaming) page. The dashboard uses the shared `@agent-browser/client` protocol types so host apps can embed the same live-view stream without copying dashboard internals.
 
 ## Architecture
 
