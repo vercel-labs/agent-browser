@@ -5,10 +5,17 @@
   "type": "module",
   "files": [
     "bin",
+    "client",
     "scripts",
     "skill-data",
     "skills"
   ],
+  "exports": {
+    "./client": {
+      "types": "./client/index.d.ts",
+      "default": "./client/index.js"
+    }
+  },
   "bin": {
     "agent-browser": "./bin/agent-browser.js"
   },
@@ -23,7 +30,8 @@
     "build:docker": "docker build -t agent-browser-builder -f docker/Dockerfile.build .",
     "release": "npm run version:sync && npm run build:all-platforms && npm publish",
     "postinstall": "node scripts/postinstall.js",
-    "build:dashboard": "cd packages/dashboard && pnpm build"
+    "build:client": "pnpm --dir packages/client build && rm -rf client && cp -R packages/client/dist client",
+    "build:dashboard": "pnpm run build:client && cd packages/dashboard && pnpm build"
   },
   "keywords": [
     "browser",
