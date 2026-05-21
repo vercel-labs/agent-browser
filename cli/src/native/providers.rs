@@ -1,6 +1,6 @@
 //! Browser provider connections for remote CDP sessions.
 //!
-//! Supports AgentCore, Browserbase, Browserless, Browser Use, and Kernel providers.
+//! Supports AgentCore, Browserbase, Browserless, Browser Use, Kernel, and Steel providers.
 //! Each provider returns a CDP WebSocket URL for connecting via BrowserManager.
 
 use serde_json::{json, Value};
@@ -65,8 +65,16 @@ pub async fn connect_provider(provider_name: &str) -> Result<ProviderConnection,
                 direct_page: false,
             })
         }
+        "steel" => {
+            let (url, session) = connect_steel().await?;
+            Ok(ProviderConnection {
+                ws_url: url,
+                session,
+                direct_page: false,
+            })
+        }
         _ => Err(format!(
-            "Unknown provider '{}'. Supported: browserbase, browserless, browser-use, kernel, agentcore",
+            "Unknown provider '{}'. Supported: browserbase, browserless, browser-use, kernel, agentcore, steel",
             provider_name
         )),
     }
@@ -126,6 +134,20 @@ pub async fn close_provider_session(session: &ProviderSession) {
         "agentcore" => {
             // AgentCore session cleanup is handled via signed DELETE request
             let _ = close_agentcore_session(&session.session_id).await;
+        }
+        "steel" => {
+            if let Ok(api_key) = env::var("STEEL_API_KEY") {
+                let _ = client
+                    .post(format!(
+                        "https://api.steel.dev/v1/sessions/{}/release",
+                        session.session_id
+                    ))
+                    .header("steel-api-key", &api_key)
+                    .header("Content-Type", "application/json")
+                    .json(&serde_json::json!({}))
+                    .send()
+                    .await;
+            }
         }
         _ => {}
     }
@@ -747,6 +769,159 @@ async fn close_agentcore_session(session_id: &str) -> Result<(), String> {
     agentcore::close_session(session_id).await
 }
 
+fn parse_steel_bool(name: &str, value: &str) -> Result<bool, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" => Ok(true),
+        "false" | "0" => Ok(false),
+        _ => Err(format!("{} must be one of: true, false, 1, 0", name)),
+    }
+}
+
+fn parse_steel_positive_int(name: &str, value: &str) -> Result<u64, String> {
+    let n: u64 = value
+        .trim()
+        .parse()
+        .map_err(|_| format!("{} must be a positive integer", name))?;
+    if n == 0 {
+        return Err(format!("{} must be a positive integer", name));
+    }
+    Ok(n)
+}
+
+fn parse_steel_device(value: &str) -> Result<String, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "desktop" => Ok("desktop".to_string()),
+        "mobile" => Ok("mobile".to_string()),
+        _ => Err("STEEL_DEVICE must be either \"desktop\" or \"mobile\"".to_string()),
+    }
+}
+
+fn build_steel_cdp_url(ws_url: &str, api_key: &str) -> String {
+    match url::Url::parse(ws_url) {
+        Ok(mut parsed) => {
+            let already_has_key = parsed.query_pairs().any(|(k, _)| k == "apiKey");
+            if !already_has_key {
+                parsed.query_pairs_mut().append_pair("apiKey", api_key);
+            }
+            parsed.to_string()
+        }
+        Err(_) => {
+            if ws_url.contains("apiKey=") {
+                ws_url.to_string()
+            } else {
+                let sep = if ws_url.contains('?') { '&' } else { '?' };
+                format!("{}{}apiKey={}", ws_url, sep, urlencoding::encode(api_key))
+            }
+        }
+    }
+}
+
+async fn connect_steel() -> Result<(String, Option<ProviderSession>), String> {
+    let api_key = env::var("STEEL_API_KEY")
+        .map_err(|_| "STEEL_API_KEY environment variable is not set".to_string())?;
+    if api_key.trim().is_empty() {
+        return Err("STEEL_API_KEY environment variable is not set".to_string());
+    }
+
+    let mut body = serde_json::Map::new();
+    if let Ok(v) = env::var("STEEL_TIMEOUT_MS") {
+        body.insert(
+            "timeout".into(),
+            json!(parse_steel_positive_int("STEEL_TIMEOUT_MS", &v)?),
+        );
+    }
+    if let Ok(v) = env::var("STEEL_HEADLESS") {
+        body.insert(
+            "headless".into(),
+            json!(parse_steel_bool("STEEL_HEADLESS", &v)?),
+        );
+    }
+    if let Ok(v) = env::var("STEEL_SOLVE_CAPTCHA") {
+        body.insert(
+            "solveCaptcha".into(),
+            json!(parse_steel_bool("STEEL_SOLVE_CAPTCHA", &v)?),
+        );
+    }
+    if let Ok(v) = env::var("STEEL_USE_PROXY") {
+        body.insert(
+            "useProxy".into(),
+            json!(parse_steel_bool("STEEL_USE_PROXY", &v)?),
+        );
+    }
+    if let Ok(v) = env::var("STEEL_PROXY_URL") {
+        body.insert("proxyUrl".into(), json!(v));
+    }
+    if let Ok(v) = env::var("STEEL_REGION") {
+        body.insert("region".into(), json!(v));
+    }
+    if let Ok(v) = env::var("STEEL_BLOCK_ADS") {
+        body.insert(
+            "blockAds".into(),
+            json!(parse_steel_bool("STEEL_BLOCK_ADS", &v)?),
+        );
+    }
+    if let Ok(v) = env::var("STEEL_PROFILE_ID") {
+        body.insert("profileId".into(), json!(v));
+    }
+    if let Ok(v) = env::var("STEEL_PERSIST_PROFILE") {
+        body.insert(
+            "persistProfile".into(),
+            json!(parse_steel_bool("STEEL_PERSIST_PROFILE", &v)?),
+        );
+    }
+    if let Ok(v) = env::var("STEEL_DEVICE") {
+        let device = parse_steel_device(&v)?;
+        body.insert("deviceConfig".into(), json!({ "device": device }));
+    }
+
+    let client = reqwest::Client::new();
+    let response = client
+        .post("https://api.steel.dev/v1/sessions")
+        .header("steel-api-key", &api_key)
+        .header("Content-Type", "application/json")
+        .json(&Value::Object(body))
+        .send()
+        .await
+        .map_err(|e| format!("Steel request failed: {}", e))?;
+
+    let status = response.status();
+    let resp_body = response
+        .text()
+        .await
+        .map_err(|e| format!("Failed to read Steel response: {}", e))?;
+    if !status.is_success() {
+        return Err(format!(
+            "Steel API error ({}): {}",
+            status.as_u16(),
+            resp_body
+        ));
+    }
+
+    let parsed: Value =
+        serde_json::from_str(&resp_body).map_err(|e| format!("Invalid Steel response: {}", e))?;
+
+    let session_id = parsed
+        .get("id")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .ok_or_else(|| "Steel response missing 'id'".to_string())?;
+
+    let websocket_url = parsed
+        .get("websocketUrl")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "Steel response missing 'websocketUrl'".to_string())?;
+
+    let connect_url = build_steel_cdp_url(websocket_url, &api_key);
+
+    Ok((
+        connect_url,
+        Some(ProviderSession {
+            provider: "steel".to_string(),
+            session_id,
+        }),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -812,5 +987,95 @@ mod tests {
         // Should be None after take
         let taken_again = take_agentcore_ws_headers();
         assert!(taken_again.is_none());
+    }
+
+    #[test]
+    fn test_steel_missing_api_key() {
+        std::env::remove_var("STEEL_API_KEY");
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(connect_steel());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("STEEL_API_KEY"));
+    }
+
+    #[test]
+    fn test_steel_bool_parser_accepts() {
+        assert!(parse_steel_bool("X", "true").unwrap());
+        assert!(parse_steel_bool("X", "TRUE").unwrap());
+        assert!(parse_steel_bool("X", "1").unwrap());
+        assert!(!parse_steel_bool("X", "false").unwrap());
+        assert!(!parse_steel_bool("X", "FALSE").unwrap());
+        assert!(!parse_steel_bool("X", "0").unwrap());
+        // whitespace tolerated
+        assert!(parse_steel_bool("X", "  true  ").unwrap());
+    }
+
+    #[test]
+    fn test_steel_bool_parser_rejects() {
+        let err = parse_steel_bool("MY_VAR", "yes").unwrap_err();
+        assert!(err.contains("MY_VAR"));
+        assert!(err.contains("true, false, 1, 0"));
+    }
+
+    #[test]
+    fn test_steel_int_parser_accepts() {
+        assert_eq!(parse_steel_positive_int("X", "60000").unwrap(), 60000);
+        assert_eq!(parse_steel_positive_int("X", "1").unwrap(), 1);
+    }
+
+    #[test]
+    fn test_steel_int_parser_rejects() {
+        assert!(parse_steel_positive_int("X", "0").is_err());
+        assert!(parse_steel_positive_int("X", "-1").is_err());
+        assert!(parse_steel_positive_int("X", "abc").is_err());
+        assert!(parse_steel_positive_int("X", "").is_err());
+        let err = parse_steel_positive_int("STEEL_TIMEOUT_MS", "0").unwrap_err();
+        assert!(err.contains("STEEL_TIMEOUT_MS must be a positive integer"));
+    }
+
+    #[test]
+    fn test_steel_device_parser() {
+        assert_eq!(parse_steel_device("desktop").unwrap(), "desktop");
+        assert_eq!(parse_steel_device("Desktop").unwrap(), "desktop");
+        assert_eq!(parse_steel_device("MOBILE").unwrap(), "mobile");
+        let err = parse_steel_device("tablet").unwrap_err();
+        assert!(err.contains("desktop"));
+        assert!(err.contains("mobile"));
+    }
+
+    #[test]
+    fn test_steel_cdp_url_appends_api_key() {
+        let out = build_steel_cdp_url("wss://connect.steel.dev/v1/devtools/browser/abc", "secret");
+        assert!(out.contains("apiKey=secret"));
+    }
+
+    #[test]
+    fn test_steel_cdp_url_preserves_existing_api_key() {
+        let input = "wss://connect.steel.dev/v1/devtools/browser/abc?apiKey=existing";
+        let out = build_steel_cdp_url(input, "different");
+        assert_eq!(out.matches("apiKey=").count(), 1);
+        assert!(out.contains("apiKey=existing"));
+    }
+
+    #[test]
+    fn test_steel_cdp_url_preserves_other_query_params() {
+        let input = "wss://connect.steel.dev/v1/devtools/browser/abc?foo=bar";
+        let out = build_steel_cdp_url(input, "k");
+        assert!(out.contains("foo=bar"));
+        assert!(out.contains("apiKey=k"));
+    }
+
+    #[test]
+    fn test_steel_cdp_url_url_encodes_api_key() {
+        let out = build_steel_cdp_url("wss://x.example/y", "a b+c");
+        // url::Url percent-encodes spaces as %20 and + as %2B in query values
+        assert!(out.contains("apiKey=a%20b%2Bc") || out.contains("apiKey=a+b%2Bc"));
+    }
+
+    #[test]
+    fn test_connect_provider_unknown_lists_steel() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let err = rt.block_on(connect_provider("nope")).unwrap_err();
+        assert!(err.contains("steel"));
     }
 }

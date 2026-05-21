@@ -98,7 +98,7 @@ It checks:
 <tr><td>Daemons</td><td>Running daemons per session, stale <code>.sock</code> / <code>.pid</code> / <code>.version</code> / <code>.stream</code> files (auto-cleaned), version mismatch with the CLI, dashboard process liveness</td></tr>
 <tr><td>Config</td><td><code>~/.agent-browser/config.json</code>, <code>./agent-browser.json</code>, and any file at <code>AGENT_BROWSER_CONFIG</code> parse as valid JSON</td></tr>
 <tr><td>Security</td><td>Encryption key env var or <code>~/.agent-browser/.encryption-key</code> (with 0600 permissions on unix), state file count and age vs <code>AGENT_BROWSER_STATE_EXPIRE_DAYS</code>, action policy file</td></tr>
-<tr><td>Providers</td><td>Env vars for Browserless, Browserbase, Browser Use, Kernel, AgentCore (AWS creds), Appium (for <code>--provider ios</code>), and <code>AI_GATEWAY_API_KEY</code> for chat</td></tr>
+<tr><td>Providers</td><td>Env vars for Browserless, Browserbase, Browser Use, Kernel, Steel, AgentCore (AWS creds), Appium (for <code>--provider ios</code>), and <code>AI_GATEWAY_API_KEY</code> for chat</td></tr>
 <tr><td>Network</td><td>Reachability of the Chrome for Testing CDN, AI Gateway (if configured), and any currently selected provider endpoint (skipped under <code>--offline</code>)</td></tr>
 <tr><td>Launch test</td><td>Spawns a scratch session, launches headless Chrome, navigates to <code>about:blank</code>, then closes. Measures wall time (skipped under <code>--quick</code>)</td></tr>
 </tbody>

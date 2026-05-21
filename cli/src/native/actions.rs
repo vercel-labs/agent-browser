@@ -201,6 +201,7 @@ fn launch_hash(opts: &LaunchOptions) -> u64 {
 
 pub struct DaemonState {
     pub browser: Option<BrowserManager>,
+    pub provider_session: Option<providers::ProviderSession>,
     pub appium: Option<AppiumManager>,
     pub safari_driver: Option<safari::SafariDriverProcess>,
     pub webdriver_backend: Option<super::webdriver::backend::WebDriverBackend>,
@@ -266,6 +267,7 @@ impl DaemonState {
     pub fn new() -> Self {
         Self {
             browser: None,
+            provider_session: None,
             appium: None,
             safari_driver: None,
             webdriver_backend: None,
@@ -1150,6 +1152,20 @@ impl Drop for DaemonState {
     }
 }
 
+async fn close_provider_session_if_present(state: &mut DaemonState) {
+    if let Some(session) = state.provider_session.take() {
+        providers::close_provider_session(&session).await;
+    }
+}
+
+pub async fn close_browser_for_shutdown(state: &mut DaemonState) {
+    if let Some(ref mut mgr) = state.browser {
+        let _ = mgr.close().await;
+    }
+    state.browser = None;
+    close_provider_session_if_present(state).await;
+}
+
 pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
     let action = cmd.get("action").and_then(|v| v.as_str()).unwrap_or("");
     let id = cmd
@@ -1542,6 +1558,7 @@ async fn auto_launch(state: &mut DaemonState) -> Result<(), String> {
     if let Ok(cdp) = env::var("AGENT_BROWSER_CDP") {
         let mgr = BrowserManager::connect_cdp(&cdp).await?;
         state.reset_input_state();
+        state.provider_session = None;
         state.browser = Some(mgr);
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
@@ -1555,6 +1572,7 @@ async fn auto_launch(state: &mut DaemonState) -> Result<(), String> {
 
     if env::var("AGENT_BROWSER_AUTO_CONNECT").is_ok() {
         state.reset_input_state();
+        state.provider_session = None;
         state.browser = Some(connect_auto_with_fresh_tab().await?);
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
@@ -1590,6 +1608,7 @@ async fn auto_launch(state: &mut DaemonState) -> Result<(), String> {
             match connect_result {
                 Ok(mgr) => {
                     state.reset_input_state();
+                    state.provider_session = conn.session;
                     state.browser = Some(mgr);
                     state.subscribe_to_browser_events();
                     state.start_fetch_handler();
@@ -1614,6 +1633,7 @@ async fn auto_launch(state: &mut DaemonState) -> Result<(), String> {
     let hash = launch_hash(&options);
     let mgr = BrowserManager::launch(options, engine.as_deref()).await?;
     state.reset_input_state();
+    state.provider_session = None;
     state.browser = Some(mgr);
     state.launch_hash = Some(hash);
     state.subscribe_to_browser_events();
@@ -1763,6 +1783,7 @@ async fn rollback_failed_launch(state: &mut DaemonState) -> Result<(), String> {
     } else {
         None
     };
+    close_provider_session_if_present(state).await;
 
     state.launch_hash = None;
     state.screencasting = false;
@@ -1915,8 +1936,10 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
 
     if needs_relaunch {
         if let Some(ref mut b) = state.browser {
-            b.close().await?;
+            let close_result = b.close().await;
             state.browser = None;
+            close_provider_session_if_present(state).await;
+            close_result?;
             state.launch_hash = None;
             state.screencasting = false;
             state.reset_input_state();
@@ -1940,6 +1963,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
 
     if let Some(url) = cdp_url {
         state.reset_input_state();
+        state.provider_session = None;
         state.browser = Some(BrowserManager::connect_cdp(url).await?);
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
@@ -1952,6 +1976,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
 
     if let Some(port) = cdp_port {
         state.reset_input_state();
+        state.provider_session = None;
         state.browser = Some(BrowserManager::connect_cdp(&port.to_string()).await?);
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
@@ -1964,6 +1989,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
 
     if auto_connect {
         state.reset_input_state();
+        state.provider_session = None;
         state.browser = Some(connect_auto_with_fresh_tab().await?);
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
@@ -2001,6 +2027,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
                 match connect_result {
                     Ok(mgr) => {
                         state.reset_input_state();
+                        state.provider_session = conn.session;
                         state.browser = Some(mgr);
                         state.subscribe_to_browser_events();
                         state.start_fetch_handler();
@@ -2062,6 +2089,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     write_extensions_file(&state.session_id);
     state.reset_input_state();
     state.browser = Some(BrowserManager::launch(launch_options, engine.as_deref()).await?);
+    state.provider_session = None;
     state.launch_hash = Some(new_hash);
     state.subscribe_to_browser_events();
     state.start_fetch_handler();
@@ -2403,10 +2431,13 @@ async fn handle_close(state: &mut DaemonState) -> Result<Value, String> {
             }
         }
     }
-    if let Some(ref mut mgr) = state.browser {
-        mgr.close().await?;
-    }
+    let close_error = if let Some(ref mut mgr) = state.browser {
+        mgr.close().await.err()
+    } else {
+        None
+    };
     state.browser = None;
+    close_provider_session_if_present(state).await;
     state.launch_hash = None;
     state.screencasting = false;
     state.reset_input_state();
@@ -2441,6 +2472,9 @@ async fn handle_close(state: &mut DaemonState) -> Result<Value, String> {
     }
 
     state.ref_map.clear();
+    if let Some(err) = close_error {
+        return Err(err);
+    }
     Ok(json!({ "closed": true }))
 }
 

@@ -424,6 +424,7 @@ and [references/authentication.md](references/authentication.md).
 - **Exploratory testing / QA / bug hunts**: `agent-browser skills get dogfood`
 - **Vercel Sandbox microVMs**: `agent-browser skills get vercel-sandbox`
 - **AWS Bedrock AgentCore cloud browser**: `agent-browser skills get agentcore`
+- **Steel cloud browser**: use `-p steel` or `AGENT_BROWSER_PROVIDER=steel` with `STEEL_API_KEY`; configure sessions with `STEEL_TIMEOUT_MS`, `STEEL_HEADLESS`, `STEEL_SOLVE_CAPTCHA`, `STEEL_USE_PROXY`, `STEEL_PROXY_URL`, `STEEL_REGION`, `STEEL_BLOCK_ADS`, `STEEL_PROFILE_ID`, `STEEL_PERSIST_PROFILE`, and `STEEL_DEVICE`
 
 ## React / Web Vitals (built-in, any React app)
 
