@@ -1,15 +1,17 @@
+export interface FrameMetadata {
+  offsetTop: number;
+  pageScaleFactor: number;
+  deviceWidth: number;
+  deviceHeight: number;
+  scrollOffsetX: number;
+  scrollOffsetY: number;
+  timestamp: number;
+}
+
 export interface FrameMessage {
   type: "frame";
   data: string;
-  metadata: {
-    offsetTop: number;
-    pageScaleFactor: number;
-    deviceWidth: number;
-    deviceHeight: number;
-    scrollOffsetX: number;
-    scrollOffsetY: number;
-    timestamp: number;
-  };
+  metadata: FrameMetadata;
 }
 
 export interface StatusMessage {
