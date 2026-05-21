@@ -745,7 +745,12 @@ export function ChatPanel() {
               rows={1}
               placeholder="Ask something..."
               onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) {
+                if (
+                  e.key === "Enter" &&
+                  !e.shiftKey &&
+                  !e.nativeEvent.isComposing &&
+                  e.keyCode !== 229
+                ) {
                   e.preventDefault();
                   handleSubmit(e);
                 }
