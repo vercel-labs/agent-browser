@@ -3410,7 +3410,7 @@ async fn e2e_snapshot_continuous_static_text() {
     .await;
     assert_success(&resp);
 
-    // Simple HTML with text content that would generate InlineTextBox nodes and sperate to multiple StaticText nodes
+    // Simple HTML with text content that would generate InlineTextBox nodes and separate to multiple StaticText nodes
     let html =
         "data:text/html,<html><body><div><span>Hello</span> <span>World</span></div></body></html>";
 
