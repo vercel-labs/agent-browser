@@ -181,6 +181,144 @@ fn run_profiles(json_mode: bool) {
     }
 }
 
+/// Match patterns where `*` means any non-slash chars and `**` means any chars.
+fn matches_glob_pattern(pattern: &str, value: &str) -> bool {
+    fn rec(
+        pi: usize,
+        vi: usize,
+        pattern: &[char],
+        value: &[char],
+        memo: &mut [Vec<Option<bool>>],
+    ) -> bool {
+        if let Some(cached) = memo[pi][vi] {
+            return cached;
+        }
+
+        let result = if pi == pattern.len() {
+            vi == value.len()
+        } else if pattern[pi] == '*' {
+            let is_double_star = pi + 1 < pattern.len() && pattern[pi + 1] == '*';
+            if is_double_star {
+                // Skip ** and optional trailing /
+                let skip = if pi + 2 < pattern.len() && pattern[pi + 2] == '/' {
+                    3
+                } else {
+                    2
+                };
+                rec(pi + skip, vi, pattern, value, memo)
+                    || (vi < value.len() && rec(pi, vi + 1, pattern, value, memo))
+            } else {
+                rec(pi + 1, vi, pattern, value, memo)
+                    || (vi < value.len()
+                        && value[vi] != '/'
+                        && rec(pi, vi + 1, pattern, value, memo))
+            }
+        } else {
+            vi < value.len()
+                && pattern[pi] == value[vi]
+                && rec(pi + 1, vi + 1, pattern, value, memo)
+        };
+
+        memo[pi][vi] = Some(result);
+        result
+    }
+
+    let pattern_chars: Vec<char> = pattern.chars().collect();
+    let value_chars: Vec<char> = value.chars().collect();
+    let mut memo = vec![vec![None; value_chars.len() + 1]; pattern_chars.len() + 1];
+    rec(0, 0, &pattern_chars, &value_chars, &mut memo)
+}
+
+fn evaluate_assert(
+    cmd: &serde_json::Value,
+    resp: &connection::Response,
+) -> Option<Result<String, String>> {
+    if cmd.get("assert").and_then(|v| v.as_bool()) != Some(true) || !resp.success {
+        return None;
+    }
+
+    let data = resp.data.as_ref()?;
+    let assert_type = cmd
+        .get("assert_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    let selector = cmd.get("selector").and_then(|v| v.as_str()).unwrap_or("");
+    let target = if selector.is_empty() {
+        assert_type.to_string()
+    } else {
+        format!("{} {}", assert_type, selector)
+    };
+
+    let fail = |expected: String, actual: String| {
+        format!(
+            "FAIL: assert {} (expected: {}, got: {})",
+            target, expected, actual
+        )
+    };
+    let pass = || format!("PASS: assert {}", target);
+
+    match assert_type {
+        "visible" | "hidden" => {
+            let expected = !cmd
+                .get("assert_negate")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            match data.get("visible").and_then(|v| v.as_bool()) {
+                Some(actual) if actual == expected => Some(Ok(pass())),
+                Some(actual) => Some(Err(fail(expected.to_string(), actual.to_string()))),
+                None => Some(Err(fail(expected.to_string(), "<missing>".to_string()))),
+            }
+        }
+        "enabled" => match data.get("enabled").and_then(|v| v.as_bool()) {
+            Some(true) => Some(Ok(pass())),
+            Some(actual) => Some(Err(fail("true".to_string(), actual.to_string()))),
+            None => Some(Err(fail("true".to_string(), "<missing>".to_string()))),
+        },
+        "checked" => match data.get("checked").and_then(|v| v.as_bool()) {
+            Some(true) => Some(Ok(pass())),
+            Some(actual) => Some(Err(fail("true".to_string(), actual.to_string()))),
+            None => Some(Err(fail("true".to_string(), "<missing>".to_string()))),
+        },
+        "text" => {
+            let expected = cmd
+                .get("assert_expected")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            match data.get("text").and_then(|v| v.as_str()) {
+                Some(actual) if actual.contains(expected) => Some(Ok(pass())),
+                Some(actual) => Some(Err(fail(expected.to_string(), actual.to_string()))),
+                None => Some(Err(fail(expected.to_string(), "<missing>".to_string()))),
+            }
+        }
+        "url" => {
+            let expected = cmd
+                .get("assert_expected")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            match data.get("url").and_then(|v| v.as_str()) {
+                Some(actual) if matches_glob_pattern(expected, actual) => Some(Ok(pass())),
+                Some(actual) => Some(Err(fail(expected.to_string(), actual.to_string()))),
+                None => Some(Err(fail(expected.to_string(), "<missing>".to_string()))),
+            }
+        }
+        "title" => {
+            let expected = cmd
+                .get("assert_expected")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            match data.get("title").and_then(|v| v.as_str()) {
+                Some(actual) if actual == expected => Some(Ok(pass())),
+                Some(actual) => Some(Err(fail(expected.to_string(), actual.to_string()))),
+                None => Some(Err(fail(expected.to_string(), "<missing>".to_string()))),
+            }
+        }
+        _ => Some(Err(fail(
+            "known assert type".to_string(),
+            assert_type.to_string(),
+        ))),
+    }
+}
+
 fn run_session(args: &[String], session: &str, json_mode: bool) {
     let subcommand = args.get(1).map(|s| s.as_str());
 
@@ -1257,6 +1395,24 @@ fn main() {
             }
             // Extract action for context-specific output handling
             let action = cmd.get("action").and_then(|v| v.as_str());
+            if let Some(assert_result) = evaluate_assert(&cmd, &resp) {
+                match assert_result {
+                    Ok(msg) => {
+                        if !flags.json {
+                            println!("{}", msg);
+                            return;
+                        }
+                    }
+                    Err(msg) => {
+                        if flags.json {
+                            print_json_error(msg);
+                        } else {
+                            println!("{}", msg);
+                        }
+                        exit(1);
+                    }
+                }
+            }
             print_response_with_opts(&resp, action, &output_opts);
             if !success {
                 exit(1);
@@ -1359,22 +1515,32 @@ fn run_batch(flags: &Flags, bail: bool, arg_commands: Option<Vec<Vec<String>>>) 
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
-        match send_command(parsed, &flags.session) {
+        match send_command(parsed.clone(), &flags.session) {
             Ok(resp) => {
+                let assert_result = evaluate_assert(&parsed, &resp);
+                let assert_failure = assert_result
+                    .as_ref()
+                    .and_then(|r| r.as_ref().err().cloned());
+                let effective_success = resp.success && assert_failure.is_none();
+
                 if flags.json {
                     results.push(json!({
                         "command": cmd_args,
-                        "success": resp.success,
+                        "success": effective_success,
                         "result": resp.data,
-                        "error": resp.error,
+                        "error": assert_failure.clone().or(resp.error),
                     }));
                 } else {
                     if i > 0 {
                         println!();
                     }
-                    print_response_with_opts(&resp, action.as_deref(), &output_opts);
+                    match assert_result {
+                        Some(Ok(msg)) => println!("{}", msg),
+                        Some(Err(msg)) => println!("{}", msg),
+                        None => print_response_with_opts(&resp, action.as_deref(), &output_opts),
+                    }
                 }
-                if !resp.success {
+                if !effective_success {
                     had_error = true;
                     if bail {
                         if !flags.json {
@@ -1488,5 +1654,18 @@ mod tests {
             parsed["error"],
             "Daemon process exited during startup:\nline \"quoted\"\u{001b}[2mansi\u{001b}[22m"
         );
+    }
+
+    #[test]
+    fn test_matches_glob_pattern_single_star() {
+        assert!(matches_glob_pattern("*/dashboard", "app/dashboard"));
+        assert!(!matches_glob_pattern("*/dashboard", "app/admin/dashboard"));
+    }
+
+    #[test]
+    fn test_matches_glob_pattern_double_star() {
+        assert!(matches_glob_pattern("**/dashboard", "app/admin/dashboard"));
+        assert!(matches_glob_pattern("**/dashboard", "dashboard"));
+        assert!(!matches_glob_pattern("**/dashboard", "app/admin/settings"));
     }
 }
