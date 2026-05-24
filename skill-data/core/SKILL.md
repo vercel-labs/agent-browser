@@ -350,6 +350,14 @@ Destructive actions require `--fix`. Exit code is `0` if all checks pass
 
 ## Troubleshooting
 
+**Passing Chrome launch args with comma-delimited values**
+Use `--args` for Chrome flags. Newlines always separate args, and commas
+separate args only before another flag, so list-valued flags stay intact:
+
+```bash
+agent-browser --args "--disable-features=A,B,C, --no-sandbox" open example.com
+```
+
 **"Ref not found" / "Element not found: @eN"**
 Page changed since the snapshot. Run `agent-browser snapshot -i` again,
 then use the new refs.

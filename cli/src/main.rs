@@ -60,6 +60,55 @@ fn print_json_error_with_type(message: impl AsRef<str>, error_type: &str) {
     }));
 }
 
+/// Parse browser launch args while preserving list-valued Chrome flag values.
+fn parse_browser_launch_args(input: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let chars: Vec<char> = input.chars().collect();
+    let mut i = 0;
+
+    while i < chars.len() {
+        let ch = chars[i];
+
+        if ch == '\n' || ch == '\r' {
+            let trimmed = current.trim();
+            if !trimmed.is_empty() {
+                args.push(trimmed.to_string());
+            }
+            current.clear();
+            i += 1;
+            continue;
+        }
+
+        if ch == ',' {
+            let mut j = i + 1;
+            while j < chars.len() && matches!(chars[j], ' ' | '\t') {
+                j += 1;
+            }
+
+            if j < chars.len() && chars[j] == '-' && !current.trim().is_empty() {
+                let trimmed = current.trim();
+                if !trimmed.is_empty() {
+                    args.push(trimmed.to_string());
+                }
+                current.clear();
+                i += 1;
+                continue;
+            }
+        }
+
+        current.push(ch);
+        i += 1;
+    }
+
+    let trimmed = current.trim();
+    if !trimmed.is_empty() {
+        args.push(trimmed.to_string());
+    }
+
+    args
+}
+
 struct ParsedProxy {
     server: String,
     username: Option<String>,
@@ -1116,12 +1165,7 @@ fn main() {
         }
 
         if let Some(ref a) = flags.args {
-            // Parse args (comma or newline separated)
-            let args_vec: Vec<String> = a
-                .split(&[',', '\n'][..])
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
+            let args_vec = parse_browser_launch_args(a);
             cmd_obj.insert("args".to_string(), json!(args_vec));
         }
 
@@ -1420,6 +1464,54 @@ fn run_batch(flags: &Flags, bail: bool, arg_commands: Option<Vec<Vec<String>>>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_parse_browser_launch_args_splits_simple_comma_args() {
+        assert_eq!(
+            parse_browser_launch_args("--no-sandbox,--disable-gpu"),
+            vec!["--no-sandbox", "--disable-gpu"]
+        );
+    }
+
+    #[test]
+    fn test_parse_browser_launch_args_preserves_comma_delimited_flag_value() {
+        assert_eq!(
+            parse_browser_launch_args("--disable-features=HttpsUpgrades,HttpsFirstModeV2"),
+            vec!["--disable-features=HttpsUpgrades,HttpsFirstModeV2"]
+        );
+    }
+
+    #[test]
+    fn test_parse_browser_launch_args_splits_mixed_feature_and_flag_args() {
+        assert_eq!(
+            parse_browser_launch_args("--disable-features=A,B,C, --no-sandbox"),
+            vec!["--disable-features=A,B,C", "--no-sandbox"]
+        );
+    }
+
+    #[test]
+    fn test_parse_browser_launch_args_splits_newline_args() {
+        assert_eq!(
+            parse_browser_launch_args("--disable-features=A,B,C\n--no-sandbox"),
+            vec!["--disable-features=A,B,C", "--no-sandbox"]
+        );
+    }
+
+    #[test]
+    fn test_parse_browser_launch_args_splits_crlf_args() {
+        assert_eq!(
+            parse_browser_launch_args("--disable-features=A,B,C\r\n--no-sandbox"),
+            vec!["--disable-features=A,B,C", "--no-sandbox"]
+        );
+    }
+
+    #[test]
+    fn test_parse_browser_launch_args_ignores_empty_segments() {
+        assert_eq!(
+            parse_browser_launch_args("  --no-sandbox  ,   --disable-gpu  \n\n"),
+            vec!["--no-sandbox", "--disable-gpu"]
+        );
+    }
 
     #[test]
     fn test_parse_proxy_simple() {

@@ -306,6 +306,7 @@ agent-browser -p <provider> ...       # Cloud browser provider (--provider)
 agent-browser --proxy <url> ...       # Use proxy server
 agent-browser --proxy-bypass <hosts>  # Hosts to bypass proxy
 agent-browser --headers <json> ...    # HTTP headers scoped to URL's origin
+agent-browser --args <args> ...       # Browser launch args; commas inside values are preserved
 agent-browser --executable-path <p>   # Custom browser executable
 agent-browser --extension <path> ...  # Load browser extension (repeatable)
 agent-browser --ignore-https-errors   # Ignore SSL certificate errors

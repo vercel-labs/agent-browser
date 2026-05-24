@@ -101,4 +101,12 @@ In Docker, CI runners, or other sandboxed environments, Chrome's user namespace 
 agent-browser --args "--no-sandbox" open example.com
 ```
 
+Use newline-separated args, or separate args with commas before another flag.
+Commas inside a single flag value are preserved, so list-valued Chrome flags
+work as expected:
+
+```bash
+agent-browser --args "--disable-features=A,B,C, --no-sandbox" open example.com
+```
+
 agent-browser automatically adds `--no-sandbox` when it detects a container environment (Docker, Podman, running as root).
