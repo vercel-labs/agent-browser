@@ -363,7 +363,7 @@ export function Viewport() {
       const text = eventType === "keyDown"
         ? (info?.text ?? (e.key.length === 1 ? e.key : undefined))
         : undefined;
-      const keyCode = info?.keyCode ?? (e.key.length === 1 ? e.key.charCodeAt(0) : 0);
+      const keyCode = info?.keyCode ?? e.keyCode ?? 0;
       let m = 0;
       if (e.altKey) m |= 1;
       if (e.ctrlKey) m |= 2;
@@ -375,7 +375,9 @@ export function Viewport() {
         key: e.key,
         code: e.code,
         text,
+        unmodifiedText: text,
         windowsVirtualKeyCode: keyCode,
+        nativeVirtualKeyCode: keyCode,
         modifiers: m,
       });
     },
