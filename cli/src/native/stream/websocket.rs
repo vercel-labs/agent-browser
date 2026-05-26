@@ -321,6 +321,18 @@ async fn handle_client_message(msg: &str, client: &CdpClient, session_id: Option
                 )
                 .await;
         }
+        "input_text" => {
+            let Some(text) = parsed.get("text").and_then(|v| v.as_str()) else {
+                return;
+            };
+            let _ = client
+                .send_command(
+                    "Input.insertText",
+                    Some(json!({ "text": text })),
+                    session_id,
+                )
+                .await;
+        }
         "input_touch" => {
             let _ = client
                 .send_command(
