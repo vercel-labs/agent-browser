@@ -385,5 +385,6 @@ AGENT_BROWSER_INIT_SCRIPTS="/a.js,/b.js"     # Comma-separated init script paths
 AGENT_BROWSER_ENABLE="react-devtools"        # Comma-separated built-in init script features
 AGENT_BROWSER_PROVIDER="browserbase"         # Cloud browser provider
 AGENT_BROWSER_STREAM_PORT="9223"             # Override WebSocket streaming port (default: OS-assigned)
+AGENT_BROWSER_DASHBOARD_VIEWPORT_ONLY="1"    # Dashboard viewport-only layout
 AGENT_BROWSER_HOME="/path/to/agent-browser"  # Custom install location
 ```

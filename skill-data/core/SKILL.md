@@ -54,6 +54,18 @@ agent-browser screenshot result.png
 The browser stays running across commands so these feel like a single
 session. Use `agent-browser close` (or `close --all`) when you're done.
 
+## Observability dashboard
+
+```bash
+agent-browser dashboard start
+agent-browser open https://example.com
+```
+
+Open `http://localhost:4848` to monitor sessions. Set
+`AGENT_BROWSER_DASHBOARD_VIEWPORT_ONLY=1` before starting the dashboard when
+you only want the live viewport and do not want the session tree or side
+panel.
+
 ## Reading a page
 
 ```bash

@@ -8,7 +8,7 @@ use crate::connection::get_socket_dir;
 
 use super::chat::{chat_status_json, handle_chat_request, handle_models_request};
 use super::discovery::discover_sessions;
-use super::http::{serve_embedded_file, CORS_HEADERS};
+use super::http::{dashboard_config_json, serve_embedded_file, CORS_HEADERS};
 
 /// Dashboard same-origin proxy endpoints for session metadata and streams.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -622,6 +622,12 @@ async fn handle_dashboard_connection(mut stream: tokio::net::TcpStream) {
             "200 OK",
             "application/json; charset=utf-8",
             chat_status_json().into_bytes(),
+        )
+    } else if path == "/api/config" {
+        (
+            "200 OK",
+            "application/json; charset=utf-8",
+            dashboard_config_json().into_bytes(),
         )
     } else {
         serve_embedded_file(path)
