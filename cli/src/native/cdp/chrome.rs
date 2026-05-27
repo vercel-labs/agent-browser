@@ -170,14 +170,19 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
         .as_ref()
         .is_some_and(|exts| !exts.is_empty());
 
+    let show_scrollbars = options.args.iter().any(|a| a == "--show-scrollbars");
+
     // Extensions require headed mode in native Chrome (content scripts are not
     // injected in headless mode).  Skip --headless when extensions are loaded.
     if options.headless && !has_extensions {
         args.push("--headless=new".to_string());
         // Linux paints native scrollbars into viewport screenshots unless
-        // Chrome is launched with this flag. Custom args are appended later,
-        // so users can still opt back in with --show-scrollbars.
-        args.push("--hide-scrollbars".to_string());
+        // Chrome is launched with this flag. Chromium does not expose
+        // --show-scrollbars as an inverse switch, so agent-browser treats it
+        // as an escape hatch by suppressing the default hide switch.
+        if !show_scrollbars {
+            args.push("--hide-scrollbars".to_string());
+        }
         // Enable SwiftShader software rendering in headless mode.  This
         // prevents silent crashes in environments where GPU drivers are
         // missing or restricted (VMs, containers, some cloud machines)
@@ -1437,24 +1442,21 @@ mod tests {
     }
 
     #[test]
-    fn test_build_args_show_scrollbars_can_override_default() {
+    fn test_build_args_show_scrollbars_suppresses_default_hide_scrollbars() {
         let opts = LaunchOptions {
             headless: true,
             args: vec!["--show-scrollbars".to_string()],
             ..Default::default()
         };
         let result = build_chrome_args(&opts).unwrap();
-        let hide_index = result
-            .args
-            .iter()
-            .position(|a| a == "--hide-scrollbars")
-            .expect("headless launch should hide scrollbars by default");
-        let show_index = result
-            .args
-            .iter()
-            .position(|a| a == "--show-scrollbars")
-            .expect("custom arg should be preserved");
-        assert!(show_index > hide_index);
+        assert!(
+            !result.args.iter().any(|a| a == "--hide-scrollbars"),
+            "--show-scrollbars should suppress agent-browser's default hide switch"
+        );
+        assert!(
+            result.args.iter().any(|a| a == "--show-scrollbars"),
+            "custom arg should be preserved"
+        );
         if let Some(ref dir) = result.temp_user_data_dir {
             let _ = std::fs::remove_dir_all(dir);
         }

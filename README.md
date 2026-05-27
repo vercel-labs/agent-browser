@@ -91,6 +91,7 @@ agent-browser close
 ```
 
 Headless Chromium screenshots hide native scrollbars for consistent image output.
+Pass `--args "--show-scrollbars"` when launching to keep native scrollbars visible.
 
 ### Traditional Selectors (also supported)
 

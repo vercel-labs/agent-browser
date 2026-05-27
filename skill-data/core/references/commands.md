@@ -104,6 +104,7 @@ agent-browser pdf output.pdf      # Save as PDF
 ```
 
 Headless Chromium screenshots hide native scrollbars for consistent image output.
+Pass `--args "--show-scrollbars"` when launching to keep native scrollbars visible.
 
 ## Video Recording
 
