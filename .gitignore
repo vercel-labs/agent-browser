@@ -67,5 +67,4 @@ docs/package-lock.json
 # next
 .next/
 out/
-agent-browser-0.27.0.tgz
-agent-browser-0.27.1.tgz
+agent-browser-*.tgz
