@@ -1219,6 +1219,51 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
             }
         }
 
+        // === Contexts ===
+        "context" => {
+            const VALID: &[&str] = &["new", "list", "close"];
+            match rest.first().copied() {
+                Some("new") => {
+                    // Accepted forms:
+                    //   context new
+                    //   context new --label <name>
+                    let mut cmd = json!({ "id": id, "action": "context_new" });
+                    let mut i = 1;
+                    while i < rest.len() {
+                        match rest[i] {
+                            "--label" => {
+                                let name = rest.get(i + 1).ok_or(ParseError::MissingArguments {
+                                    context: "context new --label".to_string(),
+                                    usage: "context new --label <name>",
+                                })?;
+                                cmd["label"] = json!(name);
+                                i += 2;
+                            }
+                            other => {
+                                return Err(ParseError::UnknownSubcommand {
+                                    subcommand: other.to_string(),
+                                    valid_options: &["--label"],
+                                });
+                            }
+                        }
+                    }
+                    Ok(cmd)
+                }
+                Some("list") | None => Ok(json!({ "id": id, "action": "context_list" })),
+                Some("close") => {
+                    let context_ref = rest.get(1).ok_or(ParseError::MissingArguments {
+                        context: "context close".to_string(),
+                        usage: "context close <c1|label>",
+                    })?;
+                    Ok(json!({ "id": id, "action": "context_close", "contextId": context_ref }))
+                }
+                Some(sub) => Err(ParseError::UnknownSubcommand {
+                    subcommand: sub.to_string(),
+                    valid_options: VALID,
+                }),
+            }
+        }
+
         // === Tabs ===
         "tab" => {
             match rest.first().copied() {
@@ -1227,6 +1272,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                     //   tab new [url]
                     //   tab new --label <name> [url]
                     //   tab new [url] --label <name>
+                    //   tab new --context <c1|label> [url]
                     let mut cmd = json!({ "id": id, "action": "tab_new" });
                     let mut i = 1;
                     while i < rest.len() {
@@ -1239,6 +1285,15 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                                 cmd["label"] = json!(name);
                                 i += 2;
                             }
+                            "--context" => {
+                                let ctx_ref =
+                                    rest.get(i + 1).ok_or(ParseError::MissingArguments {
+                                        context: "tab new --context".to_string(),
+                                        usage: "tab new --context <c1|label> [url]",
+                                    })?;
+                                cmd["contextId"] = json!(ctx_ref);
+                                i += 2;
+                            }
                             other if !other.starts_with("--") && cmd.get("url").is_none() => {
                                 cmd["url"] = json!(other);
                                 i += 1;
@@ -1246,7 +1301,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                             other => {
                                 return Err(ParseError::UnknownSubcommand {
                                     subcommand: other.to_string(),
-                                    valid_options: &["--label", "<url>"],
+                                    valid_options: &["--label", "--context", "<url>"],
                                 });
                             }
                         }
@@ -3506,6 +3561,44 @@ mod tests {
         let cmd = parse_command(&args("tab select"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "tab_switch");
         assert_eq!(cmd["tabId"], "select");
+    }
+
+    // === Context ===
+
+    #[test]
+    fn test_context_new() {
+        let cmd = parse_command(&args("context new"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "context_new");
+        assert!(
+            cmd.get("label").is_none(),
+            "label should not be present when not provided"
+        );
+    }
+
+    #[test]
+    fn test_context_new_with_label() {
+        let cmd = parse_command(&args("context new --label staging"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "context_new");
+        assert_eq!(cmd["label"], "staging");
+    }
+
+    #[test]
+    fn test_context_close_with_ref() {
+        let cmd = parse_command(&args("context close c1"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "context_close");
+        assert_eq!(cmd["contextId"], "c1");
+    }
+
+    #[test]
+    fn test_tab_new_with_context_flag() {
+        let cmd = parse_command(
+            &args("tab new --context c1 https://example.com"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "tab_new");
+        assert_eq!(cmd["contextId"], "c1");
+        assert_eq!(cmd["url"], "https://example.com");
     }
 
     // === Network ===

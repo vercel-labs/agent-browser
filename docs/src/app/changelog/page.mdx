@@ -13,6 +13,7 @@
 - **Network route resource type filter** - `network route` now accepts `--resource-type <csv>` to filter intercepted requests by CDP resource type (#1257)
 - **cURL cookie import** - `cookies set --curl <file>` auto-detects JSON, cURL, and Cookie-header formats for bulk cookie import (#1257)
 - **Dashboard proxy support** - The observability dashboard now works from proxied origins via a same-origin proxy, enabling deployment behind reverse proxies and path-based routing (#1111)
+- **Browser contexts** - First-class support for Chrome's `BrowserContext` primitive (CDP `Target.createBrowserContext`), enabling isolated cookies, localStorage, and cache between groups of tabs within a single Chrome process. New `agent-browser context new|list|close` commands with stable refs `c1`, `c2`, ... and optional `--label <name>`. New `tab new --context <ref|label> [url]` flag for creating tabs inside a specific context. Closing a context closes its tabs first; state save/load preserves per-context cookies and storage. Use cases: multi-identity workflows, A/B comparison (logged-in vs anonymous), sandboxed exploration, and parallel sub-agent isolation — all sharing one Chrome process (#1340)
 
 ### Bug Fixes
 
