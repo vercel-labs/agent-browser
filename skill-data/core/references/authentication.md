@@ -199,7 +199,20 @@ agent-browser state save ./oauth-state.json
 
 ## Two-Factor Authentication
 
-Handle 2FA with manual intervention:
+For sites that use a standard OTP field, you can keep the username, password, and optional TOTP in a single 1Password Login item and let `auth login` resolve them at runtime. OTP values are resolved after the OTP input is visible so slow MFA pages do not consume most of a TOTP window before the code can be entered:
+
+```bash
+agent-browser auth save myapp \
+   --url https://app.example.com/login \
+   --onepassword-item MyApp \
+   --onepassword-vault Work
+
+agent-browser auth login myapp
+```
+
+If you need field-level control, you can still use `--username-op`, `--password-op`, and `--otp-op` directly.
+
+If the site uses a non-standard flow, passkeys, push approvals, CAPTCHAs, or external MFA challenges, handle 2FA with manual intervention:
 
 ```bash
 # Login with credentials
