@@ -17,17 +17,22 @@ fn parse_idle_timeout(s: &str) -> Result<String, String> {
     }
 
     // If the value ends with a unit suffix, convert it to milliseconds.
-    if s.chars().last().is_some_and(|c| c.is_ascii_alphabetic()) {
-        let (num_str, unit) = s.split_at(s.len() - 1);
-        let num: u64 = num_str.parse().map_err(|_| "Invalid number")?;
+    if let Some((unit_start, unit)) = s.char_indices().next_back() {
+        if unit.is_alphabetic() {
+            let num_str = &s[..unit_start];
+            let num: u64 = num_str.parse().map_err(|_| "Invalid number")?;
 
-        let ms = match unit {
-            "s" => num * 1000,
-            "m" => num * 60 * 1000,
-            "h" => num * 60 * 60 * 1000,
-            _ => return Err("Invalid idle timeout unit (use s, m, h, or raw ms)".to_string()),
-        };
-        return Ok(ms.to_string());
+            let multiplier = match unit {
+                's' => 1000,
+                'm' => 60 * 1000,
+                'h' => 60 * 60 * 1000,
+                _ => return Err("Invalid idle timeout unit (use s, m, h, or raw ms)".to_string()),
+            };
+            let ms = num
+                .checked_mul(multiplier)
+                .ok_or_else(|| "Idle timeout is too large".to_string())?;
+            return Ok(ms.to_string());
+        }
     }
 
     // Pure numbers are already expressed in milliseconds.
@@ -983,6 +988,16 @@ mod tests {
     #[test]
     fn test_parse_idle_timeout_rejects_unknown_unit() {
         assert!(parse_idle_timeout("10x").is_err());
+    }
+
+    #[test]
+    fn test_parse_idle_timeout_rejects_unicode_unit_without_panic() {
+        assert!(parse_idle_timeout("10秒").is_err());
+    }
+
+    #[test]
+    fn test_parse_idle_timeout_rejects_overflow() {
+        assert!(parse_idle_timeout("18446744073709551615h").is_err());
     }
 
     #[test]
