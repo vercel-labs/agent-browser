@@ -5,8 +5,37 @@ use std::time::Duration;
 
 use super::discovery::discover_cdp_url;
 
+/// The spawned Chrome process, abstracted so `ChromeProcess` can hold either
+/// a normally-spawned `std::process::Child` or, on Windows when the daemon is
+/// elevated, the de-elevated process produced by `super::deelevate`. All the
+/// Windows-only elevation handling lives in that module; this trait is the
+/// single seam between it and the otherwise platform-neutral launcher.
+pub trait ChromeChild: Send + Sync {
+    /// OS process id of the Chrome browser process.
+    fn id(&self) -> u32;
+    /// Non-blocking: has the process exited? Reaps it if so.
+    fn has_exited(&mut self) -> bool;
+    /// Force-terminate the process (and reap it).
+    fn kill(&mut self);
+}
+
+impl ChromeChild for Child {
+    fn id(&self) -> u32 {
+        Child::id(self)
+    }
+
+    fn has_exited(&mut self) -> bool {
+        matches!(self.try_wait(), Ok(Some(_)) | Err(_))
+    }
+
+    fn kill(&mut self) {
+        let _ = Child::kill(self);
+        let _ = self.wait();
+    }
+}
+
 pub struct ChromeProcess {
-    child: Child,
+    child: Box<dyn ChromeChild>,
     pub ws_url: String,
     temp_user_data_dir: Option<PathBuf>,
     /// On Unix, the process group ID used to kill the entire Chrome process tree.
@@ -16,7 +45,7 @@ pub struct ChromeProcess {
 
 impl ChromeProcess {
     pub fn kill(&mut self) {
-        let _ = self.child.kill();
+        self.child.kill();
         // On Unix, kill the entire process group to ensure Chrome helper
         // processes (GPU, renderer, utility, crashpad) are also terminated.
         // This prevents orphaned Chrome processes from blocking the user's
@@ -27,10 +56,10 @@ impl ChromeProcess {
                 libc::kill(-pgid, libc::SIGKILL);
             }
         }
-        let _ = self.child.wait();
     }
 
     /// Returns the OS process ID of the Chrome child process.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn id(&self) -> u32 {
         self.child.id()
     }
@@ -38,7 +67,7 @@ impl ChromeProcess {
     /// Non-blocking check whether Chrome has exited.
     /// Returns `true` if the process has exited (and reaps it), `false` if still running.
     pub fn has_exited(&mut self) -> bool {
-        matches!(self.child.try_wait(), Ok(Some(_)) | Err(_))
+        self.child.has_exited()
     }
 
     /// Wait for Chrome to exit on its own (after Browser.close CDP command),
@@ -49,11 +78,10 @@ impl ChromeProcess {
         let poll_interval = Duration::from_millis(50);
 
         while start.elapsed() < timeout {
-            match self.child.try_wait() {
-                Ok(Some(_)) => return,
-                Ok(None) => std::thread::sleep(poll_interval),
-                Err(_) => break,
+            if self.child.has_exited() {
+                return;
             }
+            std::thread::sleep(poll_interval);
         }
 
         self.kill();
@@ -358,6 +386,29 @@ fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<Chro
         }
     };
 
+    // Windows: if the daemon itself is running unnecessarily elevated (UAC
+    // consent), spawn Chrome unelevated through Explorer's token so Chrome
+    // doesn't auto-de-elevate out from under us (M138+) and the renderer
+    // sandbox can still load Chrome for Testing. All of that is contained in
+    // `super::deelevate`; here it is a single delegation.
+    #[cfg(windows)]
+    if super::deelevate::should_de_elevate() {
+        return match super::deelevate::launch_unelevated(chrome_path, &args, &user_data_dir) {
+            Ok((child, ws_url)) => Ok(ChromeProcess {
+                child: Box::new(child),
+                ws_url,
+                temp_user_data_dir,
+            }),
+            Err(e) => {
+                cleanup_temp_dir(&temp_user_data_dir);
+                Err(format!(
+                    "Failed to launch Chrome unelevated at {:?}: {}",
+                    chrome_path, e
+                ))
+            }
+        };
+    }
+
     let mut cmd = Command::new(chrome_path);
     cmd.args(&args)
         .stdin(Stdio::null())
@@ -429,7 +480,7 @@ fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<Chro
     };
 
     Ok(ChromeProcess {
-        child,
+        child: Box::new(child),
         ws_url,
         temp_user_data_dir,
         #[cfg(unix)]
@@ -1582,7 +1633,7 @@ mod tests {
             // logic by creating a small helper process.
             let child = spawn_noop_child();
             let _process = ChromeProcess {
-                child,
+                child: Box::new(child),
                 ws_url: String::new(),
                 temp_user_data_dir: Some(dir.clone()),
                 #[cfg(unix)]
