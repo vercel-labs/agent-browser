@@ -1,5 +1,12 @@
 # agent-browser
 
+## Unreleased
+
+### Security
+
+- **Hardened `--allowed-domains` enforcement.** The allowlist was previously a no-op on every CDP-connect path (`--cdp-url`, `--cdp-port`, `auto_connect`) and on the implicit-launch path used by every shell-form invocation of `agent-browser --allowed-domains X open Y`: click, `tab new`, `window.open`, `window.location`, `fetch()`, iframes, sub-resources, WebSocket, and `sendBeacon` all bypassed the filter on those paths. The gate now installs on every attached session at attach time, and `tab new` prechecks the URL.
+- **Block signal.** Blocked document navigations now redirect to `about:blank#agent-browser:blocked=<host>&via=<navigation|window_open>`. Callers can detect a block by checking whether the current URL starts with `about:blank#agent-browser:blocked=`.
+
 ## 0.27.0
 
 <!-- release:start -->

@@ -2444,8 +2444,267 @@ async fn e2e_domain_filter() {
         result,
     );
 
+    // tab_new precheck: explicit new tab to non-permitted URL must fail.
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "tab_new", "url": "https://blocked.com" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(resp["success"], false);
+    let err = resp["error"].as_str().unwrap_or("");
+    assert!(
+        err.contains("not in the allowed domains list"),
+        "tab_new precheck should reject non-permitted URL, got: {}",
+        err
+    );
+
+    // window.open from page should return null and not open a tab.
+    let resp = execute_command(
+        &json!({
+            "id": "7", "action": "evaluate",
+            "script": "String(window.open('https://blocked.com', '_blank'))",
+            "await": true,
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let result = get_data(&resp)["result"].as_str().unwrap_or("");
+    assert_eq!(
+        result, "null",
+        "window.open to blocked host should return null, got: {}",
+        result
+    );
+
+    // Same-tab JS navigation: setting location.href to a blocked host should
+    // commit the tab to `about:blank#agent-browser:blocked=…` rather than
+    // to real blocked content. The eval that triggers the navigation is
+    // fire-and-forget because the navigation tears down the execution
+    // context; the resulting URL is read by a separate evaluate after the
+    // redirect settles.
+    let _ = execute_command(
+        &json!({
+            "id": "8a", "action": "evaluate",
+            "script": "window.location.href = 'https://blocked.com/x'",
+        }),
+        &mut state,
+    )
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    let resp = execute_command(
+        &json!({
+            "id": "8b", "action": "evaluate",
+            "script": "location.href",
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let href = get_data(&resp)["result"].as_str().unwrap_or("");
+    assert!(
+        href.starts_with("about:blank#agent-browser:blocked="),
+        "location.href to blocked host should redirect to about:blank with block reason, got: {:?}",
+        href
+    );
+    assert!(
+        href.contains("blocked.com"),
+        "blocked host should appear in the redirect hash, got: {:?}",
+        href
+    );
+    assert!(
+        href.contains("via=navigation"),
+        "via=navigation marker should appear in the redirect hash, got: {:?}",
+        href
+    );
+
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     assert_success(&resp);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_domain_filter_via_connect() {
+    // Regression test: before this PR, the cdp_url / cdp_port / auto_connect
+    // branches in handle_launch returned early without installing
+    // install_domain_filter, so `Fetch.enable` was never active when
+    // connecting to an existing Chrome. Only the `open` precheck gated
+    // anything; click, fetch, iframe, etc. all bypassed.
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(&json!({ "id": "2", "action": "cdp_url" }), &mut state).await;
+    assert_success(&resp);
+    let cdp_url = get_data(&resp)["cdpUrl"]
+        .as_str()
+        .expect("cdp_url result must contain cdpUrl")
+        .to_string();
+
+    let mut state2 = DaemonState::new();
+    {
+        let mut df = state2.domain_filter.write().await;
+        *df = Some(super::network::DomainFilter::new("example.com"));
+    }
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "launch", "cdpUrl": cdp_url }),
+        &mut state2,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "navigate", "url": "https://example.com" }),
+        &mut state2,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "5", "action": "evaluate",
+            "script": "fetch('https://blocked.com/data').then(() => 'ok').catch(e => 'blocked:' + e.message)",
+            "await": true,
+        }),
+        &mut state2,
+    )
+    .await;
+    assert_success(&resp);
+    let result = get_data(&resp)["result"].as_str().unwrap_or("");
+    assert!(
+        result.starts_with("blocked:"),
+        "fetch() via connect path should be blocked at network layer, got: {}",
+        result,
+    );
+
+    let _ = execute_command(&json!({ "id": "98", "action": "close" }), &mut state2).await;
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+/// Regression test for the Target.targetCreated race-fix: when a tab is
+/// created with a blocked initial URL by *any* path that bypasses
+/// handle_tab_new's precheck — e.g., a raw CDP `Target.createTarget` call,
+/// or an external CDP client connected to the same browser — the daemon
+/// observes the new target and redirects it to `about:blank#…` with the
+/// block reason in the hash.
+///
+/// Two defense layers race here and either landing on about:blank passes:
+/// 1. The daemon's `Page.navigate({url: "about:blank#…"})` issued from
+///    the Target.targetCreated handler.
+/// 2. Fetch.enable on the new session intercepts the blocked HTTP load
+///    and serves a 200/HTML body that does `location.replace('about:blank#…')`.
+#[tokio::test]
+#[ignore]
+async fn e2e_domain_filter_target_created_redirect() {
+    let mut state = DaemonState::new();
+    {
+        let mut df = state.domain_filter.write().await;
+        *df = Some(super::network::DomainFilter::new("example.com"));
+    }
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Drive Target.createTarget directly via the underlying CdpClient.
+    // This bypasses handle_tab_new's precheck — exactly the way an
+    // external CDP client connected to this browser would create a tab.
+    let client = state.browser.as_ref().expect("browser launched").client.clone();
+    let _ = client
+        .send_command(
+            "Target.createTarget",
+            Some(json!({ "url": "https://blocked.com/x" })),
+            None,
+        )
+        .await
+        .expect("Target.createTarget should succeed");
+
+    // Allow the daemon to process targetCreated, attach the session,
+    // install Fetch.enable, and either issue Page.navigate to about:blank
+    // or have Fetch.fulfillRequest serve the redirect body.
+    tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+
+    // Find the new tab in tab_list. Its URL must be the about:blank
+    // redirect, not the blocked URL.
+    let resp = execute_command(&json!({ "id": "2", "action": "tab_list" }), &mut state).await;
+    assert_success(&resp);
+    let tabs = get_data(&resp)["tabs"]
+        .as_array()
+        .expect("tab_list returned tabs");
+    let new_tab_url = tabs
+        .iter()
+        .filter_map(|t| t.get("url").and_then(|v| v.as_str()))
+        .find(|url| {
+            url.contains("blocked.com") || url.starts_with("about:blank#agent-browser:blocked=")
+        })
+        .map(String::from)
+        .expect("new tab for blocked URL not found in tab list");
+    assert!(
+        new_tab_url.starts_with("about:blank#agent-browser:blocked="),
+        "tab created with blocked URL should be redirected to about:blank, got: {:?}",
+        new_tab_url
+    );
+    assert!(
+        new_tab_url.contains("blocked.com"),
+        "block signal should reference the blocked host, got: {:?}",
+        new_tab_url
+    );
+
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+/// Regression test for the auto_launch bypass: any non-launch command that
+/// arrived before an explicit `launch` action used to take the `auto_launch`
+/// code path, which never called `install_filters_on_existing_sessions`. The
+/// daemon-side prechecks in `handle_navigate` / `handle_tab_new` still fired,
+/// so `open` / `tab new` to a blocked host were rejected — but in-page JS
+/// bypasses (`window.location.href = blocked`, `window.open(blocked)`,
+/// cross-origin `fetch`, `<iframe src=blocked>`) reached the network with
+/// `Fetch.enable` never installed, and loaded real content.
+#[tokio::test]
+#[ignore]
+async fn e2e_domain_filter_auto_launch() {
+    let mut state = DaemonState::new();
+    {
+        let mut df = state.domain_filter.write().await;
+        *df = Some(super::network::DomainFilter::new("example.com"));
+    }
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "navigate", "url": "https://example.com" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let _ = execute_command(
+        &json!({
+            "id": "2", "action": "evaluate",
+            "script": "window.location.href = 'https://blocked.com/x'",
+        }),
+        &mut state,
+    )
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "evaluate", "script": "location.href" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let href = get_data(&resp)["result"].as_str().unwrap_or("");
+    assert!(
+        href.starts_with("about:blank#agent-browser:blocked="),
+        "auto_launch path must install the filter; expected blocked-redirect URL, got: {:?}",
+        href
+    );
+
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
 }
 
 // ---------------------------------------------------------------------------

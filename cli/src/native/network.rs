@@ -158,17 +158,10 @@ pub async fn sanitize_existing_pages(
     }
 }
 
-pub async fn install_domain_filter_script(
-    client: &CdpClient,
-    session_id: &str,
-    allowed_domains: &[String],
-) -> Result<(), String> {
-    if allowed_domains.is_empty() {
-        return Ok(());
-    }
-
-    let domains_json = serde_json::to_string(allowed_domains).unwrap_or("[]".to_string());
-    let script = format!(
+pub fn build_domain_filter_script(allowed_domains: &[String]) -> String {
+    let domains_json =
+        serde_json::to_string(allowed_domains).unwrap_or_else(|_| "[]".to_string());
+    format!(
         r#"(() => {{
             const _allowed = {};
             function _isDomainAllowed(hostname) {{
@@ -180,6 +173,20 @@ pub async fn install_domain_filter_script(
                     }} else if (hostname === p) return true;
                 }}
                 return false;
+            }}
+            const OrigOpen = window.open;
+            if (OrigOpen) {{
+                window.open = function(url, target, features) {{
+                    if (url) {{
+                        try {{
+                            const u = new URL(url, location.href);
+                            if (u.protocol === 'http:' || u.protocol === 'https:') {{
+                                if (!_isDomainAllowed(u.hostname)) return null;
+                            }}
+                        }} catch(_) {{}}
+                    }}
+                    return OrigOpen.call(window, url, target, features);
+                }};
             }}
             const OrigWS = window.WebSocket;
             window.WebSocket = function(url, protocols) {{
@@ -213,7 +220,18 @@ pub async fn install_domain_filter_script(
             }}
         }})()"#,
         domains_json,
-    );
+    )
+}
+
+pub async fn install_domain_filter_script(
+    client: &CdpClient,
+    session_id: &str,
+    allowed_domains: &[String],
+) -> Result<(), String> {
+    if allowed_domains.is_empty() {
+        return Ok(());
+    }
+    let script = build_domain_filter_script(allowed_domains);
 
     client
         .send_command(
@@ -491,6 +509,36 @@ mod tests {
     fn test_parse_domain_list() {
         let domains = parse_domain_list("A.com, B.com , *.C.com");
         assert_eq!(domains, vec!["a.com", "b.com", "*.c.com"]);
+    }
+
+    #[test]
+    fn test_injected_script_wraps_window_open() {
+        let script = build_domain_filter_script(&["example.com".to_string()]);
+        assert!(
+            script.contains("window.open = function"),
+            "script missing window.open wrapper: {script}"
+        );
+        assert!(
+            script.contains("if (!_isDomainAllowed(u.hostname)) return null;"),
+            "window.open wrapper should return null for non-permitted hosts"
+        );
+    }
+
+    #[test]
+    fn test_injected_script_wraps_websocket_eventsource_beacon() {
+        let script = build_domain_filter_script(&["example.com".to_string()]);
+        assert!(
+            script.contains("window.WebSocket = function"),
+            "WebSocket wrapper missing"
+        );
+        assert!(
+            script.contains("window.EventSource = function"),
+            "EventSource wrapper missing"
+        );
+        assert!(
+            script.contains("navigator.sendBeacon = function"),
+            "sendBeacon wrapper missing"
+        );
     }
 
     #[test]

@@ -666,6 +666,34 @@ impl DaemonState {
                             has_proxy_creds,
                         )
                         .await;
+
+                        // The new target may have been created with a URL
+                        // that bypasses Fetch.enable (which we install
+                        // *after* attach, so the initial navigation can
+                        // win the race). Redirect non-permitted initial
+                        // URLs to a synthetic about:blank with the block
+                        // reason in the hash.
+                        if !te.target_info.url.is_empty()
+                            && te.target_info.url != "about:blank"
+                            && !te.target_info.url.starts_with("about:blank#")
+                        {
+                            if let Ok(parsed) = url::Url::parse(&te.target_info.url) {
+                                if let Some(host) = parsed.host_str() {
+                                    if !filter.is_allowed(host) {
+                                        let about_url =
+                                            blocked_about_blank_url(host, "window_open");
+                                        let _ = mgr
+                                            .client
+                                            .send_command(
+                                                "Page.navigate",
+                                                Some(json!({ "url": about_url })),
+                                                Some(&attach.session_id),
+                                            )
+                                            .await;
+                                    }
+                                }
+                            }
+                        }
                     }
 
                     let tab_id = mgr.assign_tab_id();
@@ -1622,8 +1650,12 @@ async fn auto_launch(state: &mut DaemonState) -> Result<(), String> {
     state.start_dialog_handler();
     state.update_stream_client().await;
 
-    // Enable Fetch with handleAuthRequests for proxy authentication
-    if has_proxy_auth {
+    install_filters_on_existing_sessions(state).await;
+
+    // Enable Fetch with handleAuthRequests for proxy authentication when no
+    // domain filter is set (install_filters_on_existing_sessions handles the
+    // domain-filter case and respects has_proxy_auth).
+    if has_proxy_auth && state.domain_filter.read().await.is_none() {
         if let Some(ref mgr) = state.browser {
             if let Ok(session_id) = mgr.active_session_id() {
                 let _ = network::install_domain_filter_fetch(&mgr.client, session_id, true).await;
@@ -1960,6 +1992,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         state.start_fetch_handler();
         state.start_dialog_handler();
         state.update_stream_client().await;
+        install_filters_on_existing_sessions(state).await;
         load_storage_state_or_rollback(state, &storage_state_owned).await?;
         apply_launch_init_scripts(state).await;
         return Ok(json!({ "launched": true }));
@@ -1972,6 +2005,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         state.start_fetch_handler();
         state.start_dialog_handler();
         state.update_stream_client().await;
+        install_filters_on_existing_sessions(state).await;
         load_storage_state_or_rollback(state, &storage_state_owned).await?;
         apply_launch_init_scripts(state).await;
         return Ok(json!({ "launched": true }));
@@ -1984,6 +2018,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         state.start_fetch_handler();
         state.start_dialog_handler();
         state.update_stream_client().await;
+        install_filters_on_existing_sessions(state).await;
         load_storage_state_or_rollback(state, &storage_state_owned).await?;
         apply_launch_init_scripts(state).await;
         return Ok(json!({ "launched": true }));
@@ -2083,38 +2118,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     state.start_dialog_handler();
     state.update_stream_client().await;
 
-    // Enable Fetch interception (domain filtering and/or proxy auth).
-    // Only call Fetch.enable once to avoid overwriting handleAuthRequests.
-    {
-        let df = state.domain_filter.read().await;
-        let has_domain_filter = df.is_some();
-
-        if has_domain_filter || has_proxy_auth {
-            if let Some(ref mgr) = state.browser {
-                if let Ok(session_id) = mgr.active_session_id() {
-                    if let Some(ref filter) = *df {
-                        let _ = network::install_domain_filter(
-                            &mgr.client,
-                            session_id,
-                            &filter.allowed_domains,
-                            has_proxy_auth,
-                        )
-                        .await;
-                        network::sanitize_existing_pages(&mgr.client, &mgr.pages_list(), filter)
-                            .await;
-                    } else {
-                        // No domain filter, but proxy auth needs Fetch.enable
-                        let _ = network::install_domain_filter_fetch(
-                            &mgr.client,
-                            session_id,
-                            has_proxy_auth,
-                        )
-                        .await;
-                    }
-                }
-            }
-        }
-    }
+    install_filters_on_existing_sessions(state).await;
 
     // Load storage state only after Fetch interception is active so replayed
     // origin navigations go through the same domain and proxy handling as
@@ -2124,6 +2128,49 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     apply_launch_init_scripts(state).await;
 
     Ok(json!({ "launched": true }))
+}
+
+async fn install_filters_on_existing_sessions(state: &DaemonState) {
+    let df = state.domain_filter.read().await;
+    let has_proxy_auth = state.proxy_credentials.read().await.is_some();
+    let has_domain_filter = df.is_some();
+    if !has_domain_filter && !has_proxy_auth {
+        return;
+    }
+    let Some(ref mgr) = state.browser else {
+        return;
+    };
+
+    let mut session_ids: Vec<String> = mgr
+        .pages_list()
+        .iter()
+        .map(|p| p.session_id.clone())
+        .collect();
+    if let Ok(active) = mgr.active_session_id() {
+        let active = active.to_string();
+        if !session_ids.contains(&active) {
+            session_ids.push(active);
+        }
+    }
+
+    for session_id in &session_ids {
+        if let Some(ref filter) = *df {
+            let _ = network::install_domain_filter(
+                &mgr.client,
+                session_id,
+                &filter.allowed_domains,
+                has_proxy_auth,
+            )
+            .await;
+        } else {
+            let _ = network::install_domain_filter_fetch(&mgr.client, session_id, has_proxy_auth)
+                .await;
+        }
+    }
+
+    if let Some(ref filter) = *df {
+        network::sanitize_existing_pages(&mgr.client, &mgr.pages_list(), filter).await;
+    }
 }
 
 async fn launch_ios(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -3725,9 +3772,17 @@ async fn handle_tab_list(state: &DaemonState) -> Result<Value, String> {
 }
 
 async fn handle_tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
     let url = cmd.get("url").and_then(|v| v.as_str());
     let label = cmd.get("label").and_then(|v| v.as_str());
+
+    if let Some(u) = url {
+        let df = state.domain_filter.read().await;
+        if let Some(ref filter) = *df {
+            filter.check_url(u)?;
+        }
+    }
+
+    let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
     state.ref_map.clear();
     state.iframe_sessions.clear();
     state.active_frame_id = None;
@@ -6852,6 +6907,17 @@ fn browser_metadata_from_version(version: &Value) -> Option<Value> {
     }))
 }
 
+/// Build the `about:blank#agent-browser:blocked=…` URL used as the
+/// redirect target whenever the domain filter rejects a document
+/// navigation. The `via` field distinguishes top-level navigations from
+/// window.open new-tab opens so callers can disambiguate which trigger
+/// fired. Callers detect a block by prefix-matching
+/// `about:blank#agent-browser:blocked=` on the current URL; additional
+/// fields can be appended later without breaking existing readers.
+pub(crate) fn blocked_about_blank_url(host: &str, via: &str) -> String {
+    format!("about:blank#agent-browser:blocked={}&via={}", host, via)
+}
+
 // ---------------------------------------------------------------------------
 // Fetch interception resolver (domain filter + routes + origin headers)
 // ---------------------------------------------------------------------------
@@ -6896,22 +6962,51 @@ async fn resolve_fetch_paused(
             if let Some(hostname) = parsed.host_str() {
                 if !filter.is_allowed(hostname) {
                     if paused.resource_type.eq_ignore_ascii_case("document") {
-                        let error_body = format!(
-                            "<html><body><h1>Blocked</h1><p>Navigation to {} is not allowed by domain filter.</p></body></html>",
+                        // Redirect blocked document navigations to a
+                        // synthetic about:blank URL whose hash encodes
+                        // the block reason. After the redirect settles,
+                        // the address bar, location.href, `tab list`,
+                        // and screenshots all reflect the about:blank
+                        // URL instead of the blocked host. Callers can
+                        // detect a block by checking whether the current
+                        // URL starts with
+                        // `about:blank#agent-browser:blocked=`.
+                        //
+                        // Implementation: fulfill the request with a
+                        // tiny HTML body that runs
+                        // `location.replace('about:blank#…')`. We cannot
+                        // just fulfill with `Location: about:blank…`
+                        // because browsers refuse HTTP-level redirects
+                        // to non-HTTP schemes — Chrome replaces the
+                        // response with chrome-error://chromewebdata/.
+                        // The client-side `location.replace` is allowed
+                        // because about:blank is reachable from any
+                        // origin via JS.
+                        let location = blocked_about_blank_url(hostname, "navigation");
+                        let reason = format!(
+                            "Navigation to {} is not in the allowed domains list.",
                             hostname
+                        );
+                        let body = format!(
+                            "<!DOCTYPE html><html><head><title>Blocked</title>\
+                             <script>location.replace({});</script></head>\
+                             <body><h1>Blocked</h1><p>{}</p></body></html>",
+                            serde_json::to_string(&location)
+                                .unwrap_or_else(|_| "\"about:blank\"".into()),
+                            reason,
                         );
                         let encoded = base64::Engine::encode(
                             &base64::engine::general_purpose::STANDARD,
-                            error_body.as_bytes(),
+                            body.as_bytes(),
                         );
                         let _ = client
                             .send_command(
                                 "Fetch.fulfillRequest",
                                 Some(json!({
                                     "requestId": paused.request_id,
-                                    "responseCode": 403,
+                                    "responseCode": 200,
                                     "responseHeaders": [
-                                        { "name": "Content-Type", "value": "text/html" },
+                                        { "name": "Content-Type", "value": "text/html; charset=utf-8" },
                                     ],
                                     "body": encoded,
                                 })),
@@ -8801,6 +8896,43 @@ mod tests {
         // Will fail because auto-launch fails, but the domain filter won't block since
         // auto-launch happens first
         assert_eq!(result["success"], false);
+    }
+
+    #[test]
+    fn test_blocked_about_blank_url() {
+        let url = super::blocked_about_blank_url("news.ycombinator.com", "navigation");
+        assert_eq!(
+            url,
+            "about:blank#agent-browser:blocked=news.ycombinator.com&via=navigation"
+        );
+        let url2 = super::blocked_about_blank_url("evil.example", "window_open");
+        assert_eq!(
+            url2,
+            "about:blank#agent-browser:blocked=evil.example&via=window_open"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tab_new_precheck_rejects_url_not_in_allowlist() {
+        let mut state = DaemonState::new();
+        {
+            let mut df = state.domain_filter.write().await;
+            *df = Some(DomainFilter::new("example.com"));
+        }
+        let cmd = json!({ "action": "tab_new", "url": "https://evil.com/" });
+        let err = handle_tab_new(&cmd, &mut state).await.unwrap_err();
+        assert!(
+            err.contains("not in the allowed domains list"),
+            "tab_new should reject non-allowlist URL via the precheck, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tab_new_precheck_passes_when_no_filter() {
+        let mut state = DaemonState::new();
+        let cmd = json!({ "action": "tab_new", "url": "https://anywhere.com/" });
+        let err = handle_tab_new(&cmd, &mut state).await.unwrap_err();
+        assert_eq!(err, "Browser not launched");
     }
 
     #[tokio::test]
