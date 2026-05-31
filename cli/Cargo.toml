@@ -35,6 +35,7 @@ hex = "0.4"
 chrono = "0.4"
 urlencoding = "2"
 rust-embed = "8"
+regex = "1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
