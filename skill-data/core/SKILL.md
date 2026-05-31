@@ -90,7 +90,10 @@ agent-browser get value @e1               # input value
 agent-browser get title                   # page title
 agent-browser get url                     # current URL
 agent-browser get count ".item"           # count matching elements
+agent-browser get styles @e1 --cascade --properties color,font-size
 ```
+
+Use `get styles <selector|@ref> --cascade` when you need to explain where a CSS value came from. Cascade mode returns computed values for the selected properties plus matched rules with selector text, stylesheet identifier, declaration value, `!important`, and active or overridden status. It filters browser user-agent rules by default; add `--include-user-agent` only when browser defaults matter. Add `--ancestors` when ancestor layout styles are part of the question.
 
 ## Interacting
 
