@@ -9,6 +9,7 @@ pub use cdp_loop::{ack_screencast_frame, start_screencast, stop_screencast};
 pub use dashboard::run_dashboard_server;
 
 use serde_json::{json, Value};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
 use tokio::net::TcpListener;
@@ -44,6 +45,7 @@ impl Default for FrameMetadata {
 
 pub struct StreamServer {
     port: u16,
+    bind_addr: IpAddr,
     session_name: String,
     frame_tx: broadcast::Sender<String>,
     client_count: Arc<Mutex<usize>>,
@@ -64,13 +66,24 @@ pub struct StreamServer {
 }
 
 impl StreamServer {
+    fn default_bind_addr() -> IpAddr {
+        IpAddr::from(Ipv4Addr::LOCALHOST)
+    }
+
     pub async fn start(
         preferred_port: u16,
         client: Arc<CdpClient>,
         session_id: String,
     ) -> Result<Self, String> {
         let client_slot = Arc::new(RwLock::new(Some(client)));
-        let (server, _) = Self::start_inner(preferred_port, client_slot, session_id, true).await?;
+        let (server, _) = Self::start_inner(
+            preferred_port,
+            Self::default_bind_addr(),
+            client_slot,
+            session_id,
+            true,
+        )
+        .await?;
         Ok(server)
     }
 
@@ -85,8 +98,31 @@ impl StreamServer {
         session_id: String,
         allow_port_fallback: bool,
     ) -> Result<(Self, Arc<RwLock<Option<Arc<CdpClient>>>>), String> {
+        Self::start_without_client_on_addr(
+            preferred_port,
+            Self::default_bind_addr(),
+            session_id,
+            allow_port_fallback,
+        )
+        .await
+    }
+
+    /// Start the stream server on an explicit bind address.
+    pub async fn start_without_client_on_addr(
+        preferred_port: u16,
+        bind_addr: IpAddr,
+        session_id: String,
+        allow_port_fallback: bool,
+    ) -> Result<(Self, Arc<RwLock<Option<Arc<CdpClient>>>>), String> {
         let client_slot = Arc::new(RwLock::new(None::<Arc<CdpClient>>));
-        Self::start_inner(preferred_port, client_slot, session_id, allow_port_fallback).await
+        Self::start_inner(
+            preferred_port,
+            bind_addr,
+            client_slot,
+            session_id,
+            allow_port_fallback,
+        )
+        .await
     }
 
     /// Notify the background CDP listener that the client has changed (browser launched/closed).
@@ -156,15 +192,16 @@ impl StreamServer {
 
     async fn start_inner(
         preferred_port: u16,
+        bind_addr: IpAddr,
         client_slot: Arc<RwLock<Option<Arc<CdpClient>>>>,
         session_id: String,
         allow_port_fallback: bool,
     ) -> Result<(Self, Arc<RwLock<Option<Arc<CdpClient>>>>), String> {
-        let addr = format!("127.0.0.1:{}", preferred_port);
+        let addr = SocketAddr::new(bind_addr, preferred_port);
         let listener = match TcpListener::bind(&addr).await {
             Ok(l) => l,
             Err(_) if allow_port_fallback && preferred_port != 0 => {
-                TcpListener::bind("127.0.0.1:0")
+                TcpListener::bind(SocketAddr::new(bind_addr, 0))
                     .await
                     .map_err(|e| format!("Failed to bind stream server: {}", e))?
             }
@@ -175,6 +212,7 @@ impl StreamServer {
             .local_addr()
             .map_err(|e| format!("Failed to get stream address: {}", e))?;
         let port = actual_addr.port();
+        let bind_addr = actual_addr.ip();
 
         let (frame_tx, _) = broadcast::channel::<String>(64);
         let client_count = Arc::new(Mutex::new(0usize));
@@ -259,6 +297,7 @@ impl StreamServer {
         Ok((
             Self {
                 port,
+                bind_addr,
                 session_name: session_id,
                 frame_tx,
                 client_count,
@@ -282,6 +321,10 @@ impl StreamServer {
 
     pub fn port(&self) -> u16 {
         self.port
+    }
+
+    pub fn bind_addr(&self) -> IpAddr {
+        self.bind_addr
     }
 
     /// Broadcast a raw frame string (legacy).

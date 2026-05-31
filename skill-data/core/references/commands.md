@@ -86,6 +86,16 @@ agent-browser get box @e1         # Get bounding box
 agent-browser get styles @e1      # Get computed styles (font, color, bg, etc.)
 ```
 
+## Streaming
+
+```bash
+agent-browser stream status                         # Show stream address, port, connection, screencast state
+agent-browser stream enable                         # Re-enable stream on 127.0.0.1 with an OS-assigned port
+agent-browser stream enable --port 9223             # Re-enable stream on a specific localhost port
+agent-browser stream enable --addr 0.0.0.0 --port 9223  # Bind for trusted container access
+agent-browser stream disable                        # Stop runtime streaming for the session
+```
+
 ## Check State
 
 ```bash

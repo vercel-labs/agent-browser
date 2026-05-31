@@ -54,6 +54,10 @@ agent-browser screenshot result.png
 The browser stays running across commands so these feel like a single
 session. Use `agent-browser close` (or `close --all`) when you're done.
 
+`agent-browser stream status` reports the session WebSocket stream endpoint.
+Use `stream enable --addr 0.0.0.0 --port <n>` only when a trusted container or
+network boundary must reach the stream.
+
 ## Reading a page
 
 ```bash
