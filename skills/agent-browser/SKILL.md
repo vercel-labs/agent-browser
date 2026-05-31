@@ -26,6 +26,10 @@ The CLI serves skill content that always matches the installed version,
 so instructions never go stale. The content in this stub cannot change
 between releases, which is why it just points at `skills get core`.
 
+When passing custom Chromium switches with `--args`, separate multiple
+switches with commas or newlines. Commas inside one switch are preserved,
+for example `--window-size=1600,1200`.
+
 ## Specialized skills
 
 Load a specialized skill when the task falls outside browser web pages:
