@@ -60,6 +60,18 @@ impl ChromeProcess {
     }
 }
 
+fn kill_launch_attempt(child: &mut Child) {
+    let _ = child.kill();
+    #[cfg(unix)]
+    unsafe {
+        // Chrome is spawned in its own process group via setpgid(0, 0), so
+        // the child's PID is also the process-group ID. Kill the group before
+        // waiting so helper processes do not outlive a failed launch attempt.
+        libc::kill(-(child.id() as i32), libc::SIGKILL);
+    }
+    let _ = child.wait();
+}
+
 impl Drop for ChromeProcess {
     fn drop(&mut self) {
         self.kill();
@@ -401,7 +413,7 @@ fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<Chro
         Err(primary_err) => {
             // Fallback: scrape stderr (legacy behavior) for better diagnostics.
             let stderr = child.stderr.take().ok_or_else(|| {
-                let _ = child.kill();
+                kill_launch_attempt(&mut child);
                 cleanup_temp_dir(&temp_user_data_dir);
                 "Failed to capture Chrome stderr".to_string()
             })?;
@@ -409,7 +421,7 @@ fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<Chro
             match wait_for_ws_url_until(reader, deadline) {
                 Ok(url) => url,
                 Err(fallback_err) => {
-                    let _ = child.kill();
+                    kill_launch_attempt(&mut child);
                     cleanup_temp_dir(&temp_user_data_dir);
                     return Err(format!(
                         "{}\n(also tried parsing stderr) {}",
@@ -1274,6 +1286,29 @@ mod tests {
             .unwrap()
     }
 
+    #[cfg(target_os = "linux")]
+    fn reap_any_unreaped_children() -> Vec<i32> {
+        let mut reaped = Vec::new();
+        loop {
+            let mut status = 0;
+            let pid = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
+            if pid > 0 {
+                reaped.push(pid);
+                continue;
+            }
+            if pid == 0 {
+                break;
+            }
+
+            let err = std::io::Error::last_os_error().raw_os_error();
+            if err == Some(libc::ECHILD) {
+                break;
+            }
+            panic!("waitpid failed unexpectedly: {:?}", err);
+        }
+        reaped
+    }
+
     #[test]
     fn test_find_chrome_returns_some_on_host() {
         // This test only makes sense on systems with Chrome installed
@@ -1335,6 +1370,32 @@ mod tests {
         let lines = vec!["info line".to_string(), "another info line".to_string()];
         let msg = chrome_launch_error("Chrome exited", &lines);
         assert!(msg.contains("last 2 lines"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_failed_launch_reaps_child_processes() {
+        let preexisting = reap_any_unreaped_children();
+        assert!(
+            preexisting.is_empty(),
+            "test started with unexpected unreaped children: {:?}",
+            preexisting
+        );
+
+        let result = launch_chrome(&LaunchOptions {
+            executable_path: Some("/bin/false".to_string()),
+            ..Default::default()
+        });
+        assert!(result.is_err(), "launch should fail with /bin/false");
+
+        std::thread::sleep(Duration::from_millis(100));
+
+        let reaped = reap_any_unreaped_children();
+        assert!(
+            reaped.is_empty(),
+            "failed launch left unreaped child processes behind: {:?}",
+            reaped
+        );
     }
 
     #[test]
