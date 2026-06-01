@@ -4222,9 +4222,6 @@ async fn handle_recording_restart(cmd: &Value, state: &mut DaemonState) -> Resul
         .filter(|s| !s.is_empty())
         .map(String::from);
 
-    let _ = state.stop_recording_task().await;
-    let result = recording::recording_restart(&mut state.recording_state, path)?;
-
     let recording_target = if let Some(ref mut browser) = state.browser {
         if let Some(url) = recording_url {
             browser.navigate(&url, WaitUntil::Load).await?;
@@ -4234,6 +4231,9 @@ async fn handle_recording_restart(cmd: &Value, state: &mut DaemonState) -> Resul
     } else {
         None
     };
+
+    let _ = state.stop_recording_task().await;
+    let result = recording::recording_restart(&mut state.recording_state, path)?;
 
     if let Some((client, session_id)) = recording_target {
         state.start_recording_task(client, session_id).await?;
