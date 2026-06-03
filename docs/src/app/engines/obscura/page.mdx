@@ -1,0 +1,102 @@
+# Obscura
+
+[Obscura](https://github.com/h4ckf0r0day/obscura) is a headless browser engine written in Rust. It runs real JavaScript through V8, speaks the Chrome DevTools Protocol, and is built as a drop-in replacement for headless Chrome for web scraping and AI agent automation.
+
+agent-browser manages Obscura the same way it manages Chrome. It spawns the `obscura serve` process, connects over CDP, and shuts it down when done. All downstream commands (snapshot, click, fill, screenshot, and so on) run through the same CDP path.
+
+## Installation
+
+Install the Obscura binary before using it with agent-browser:
+
+<table>
+  <thead>
+    <tr><th>Platform</th><th>Command</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Linux (x86_64)</td>
+      <td><code>curl -LO https://github.com/h4ckf0r0day/obscura/releases/latest/download/obscura-x86_64-linux.tar.gz && tar xzf obscura-x86_64-linux.tar.gz</code></td>
+    </tr>
+    <tr>
+      <td>macOS (Apple Silicon)</td>
+      <td><code>curl -LO https://github.com/h4ckf0r0day/obscura/releases/latest/download/obscura-aarch64-macos.tar.gz && tar xzf obscura-aarch64-macos.tar.gz</code></td>
+    </tr>
+  </tbody>
+</table>
+
+Move the binary somewhere in your `PATH` (e.g. `/usr/local/bin/obscura` or `~/.local/bin/obscura`).
+
+See the [Obscura README](https://github.com/h4ckf0r0day/obscura) for more install options, including Docker and building from source.
+
+## Usage
+
+Use the `--engine` flag to select Obscura:
+
+```bash
+agent-browser --engine obscura open example.com
+agent-browser --engine obscura snapshot
+agent-browser --engine obscura screenshot
+```
+
+Or set it as the default via environment variable:
+
+```bash
+export AGENT_BROWSER_ENGINE=obscura
+agent-browser open example.com
+```
+
+Or in your `agent-browser.json` config:
+
+```json
+{
+  "engine": "obscura"
+}
+```
+
+## Custom Binary Path
+
+If the `obscura` binary is not in your `PATH`, use `--executable-path`:
+
+```bash
+agent-browser --engine obscura --executable-path /path/to/obscura open example.com
+```
+
+## Stealth mode
+
+Obscura ships an optional stealth mode that presents a privacy-first, consistent browser fingerprint and blocks known trackers. Enable it for the Obscura engine by setting `AGENT_BROWSER_OBSCURA_STEALTH`:
+
+```bash
+AGENT_BROWSER_OBSCURA_STEALTH=1 agent-browser --engine obscura open example.com
+```
+
+When set, agent-browser launches `obscura serve` with `--stealth`. Accepted values are `1`, `true`, `yes`, and `on`. Stealth is off by default so the engine behaves like a standard browser.
+
+## Differences from Chrome
+
+Obscura is a purpose-built headless engine. Some Chrome-specific features are not available:
+
+<table>
+  <thead>
+    <tr><th>Feature</th><th>Status</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Extensions (<code>--extension</code>)</td><td>Not supported</td></tr>
+    <tr><td>Persistent profiles (<code>--profile</code>)</td><td>Not supported</td></tr>
+    <tr><td>Storage state (<code>--state</code>)</td><td>Not supported</td></tr>
+    <tr><td>File access (<code>--allow-file-access</code>)</td><td>Not supported</td></tr>
+    <tr><td>Headed mode (<code>--headed</code>)</td><td>Not applicable (headless only)</td></tr>
+  </tbody>
+</table>
+
+agent-browser returns a clear error if you combine `--engine obscura` with unsupported flags.
+
+## When to Use Obscura
+
+Obscura is a good fit for:
+
+- Web scraping and data extraction with real JavaScript execution
+- AI agent workflows that want a lightweight CDP target
+- CI/CD environments where you prefer a single self-contained binary
+- Setups that want a privacy-first, consistent browser fingerprint (Obscura ships an optional stealth mode)
+
+Use Chrome when you need full browser fidelity, extensions, or persistent profiles.
