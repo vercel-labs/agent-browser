@@ -599,7 +599,12 @@ pub fn state_rename(old_path: &str, new_name: &str) -> Result<Value, String> {
 
     let fallback = PathBuf::from(".");
     let dir = old.parent().unwrap_or(&fallback);
-    let new_path = dir.join(format!("{}.json", new_name));
+    let extension = if old_path.ends_with(".json.enc") {
+        ".json.enc"
+    } else {
+        ".json"
+    };
+    let new_path = dir.join(format!("{}{}", new_name, extension));
 
     fs::rename(&old, &new_path).map_err(|e| format!("Failed to rename state: {}", e))?;
 
@@ -795,6 +800,20 @@ mod tests {
         let result = state_rename("/tmp/nonexistent-agent-browser-state-file.json", "new-name");
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("not found"));
+    }
+
+    #[test]
+    fn test_state_rename_preserves_encrypted_extension() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let old_path = dir.path().join("old.json.enc");
+        fs::write(&old_path, b"encrypted").unwrap();
+
+        let result = state_rename(old_path.to_str().unwrap(), "new").unwrap();
+        let new_path = result["to"].as_str().unwrap();
+
+        assert!(new_path.ends_with("new.json.enc"));
+        assert!(!old_path.exists());
+        assert!(std::path::Path::new(new_path).exists());
     }
 
     #[test]
