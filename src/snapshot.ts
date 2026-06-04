@@ -26,6 +26,8 @@ export interface RefMap {
     name: string;
     /** Index for disambiguation when multiple elements have same role+name */
     nth?: number;
+    /** CSS selector of the iframe containing this element (absent = main frame) */
+    frameSelector?: string;
   };
 }
 
@@ -45,6 +47,8 @@ export interface SnapshotOptions {
   compact?: boolean;
   /** CSS selector to scope the snapshot */
   selector?: string;
+  /** Also snapshot all iframes and merge results (refs carry frameSelector for transparent clicking) */
+  frames?: boolean;
 }
 
 interface ParsedAriaLine {
@@ -308,13 +312,13 @@ async function findCursorInteractiveElements(
 }
 
 /**
- * Get enhanced snapshot with refs and optional filtering
+ * Snapshot a single frame without resetting the ref counter.
+ * Used internally by getEnhancedSnapshot and getMultiFrameSnapshot.
  */
-export async function getEnhancedSnapshot(
+async function snapshotFrame(
   page: Page | Frame,
-  options: SnapshotOptions = {}
+  options: SnapshotOptions
 ): Promise<EnhancedSnapshot> {
-  resetRefs();
   const refs: RefMap = {};
 
   // Get ARIA snapshot from Playwright
@@ -380,6 +384,83 @@ export async function getEnhancedSnapshot(
   }
 
   return { tree: enhancedTree, refs };
+}
+
+/**
+ * Get enhanced snapshot with refs and optional filtering.
+ * Resets the ref counter — use getMultiFrameSnapshot when you need refs
+ * from multiple frames to share a single counter.
+ */
+export async function getEnhancedSnapshot(
+  page: Page | Frame,
+  options: SnapshotOptions = {}
+): Promise<EnhancedSnapshot> {
+  resetRefs();
+  return snapshotFrame(page, options);
+}
+
+/**
+ * Snapshot the main page plus every top-level iframe in a single pass.
+ * All refs share one counter so e.g. e1-e83 are main-frame elements and
+ * e84+ are from iframes. Each iframe ref stores a frameSelector so
+ * getLocatorFromRef can use frameLocator() instead of the active frame.
+ */
+export async function getMultiFrameSnapshot(
+  page: Page,
+  options: SnapshotOptions = {}
+): Promise<EnhancedSnapshot> {
+  resetRefs();
+  const allRefs: RefMap = {};
+  const parts: string[] = [];
+
+  // Main frame
+  const mainResult = await snapshotFrame(page.mainFrame(), options);
+  Object.assign(allRefs, mainResult.refs);
+  const EMPTY = new Set(['(empty)', '(no interactive elements)']);
+  if (mainResult.tree && !EMPTY.has(mainResult.tree)) {
+    parts.push(mainResult.tree);
+  }
+
+  // Top-level iframes
+  const iframeHandles = await page.$$('iframe');
+  for (const handle of iframeHandles) {
+    const frame = await handle.contentFrame();
+    if (!frame) continue;
+
+    // Build a stable CSS selector for this iframe element.
+    // Uses new Function to keep browser DOM globals out of TS scope.
+    // eslint-disable-next-line @typescript-eslint/no-implied-eval
+    const iframeSelectorFn = new Function(
+      'return (el) => { ' +
+        "if (el.id) return '#' + CSS.escape(el.id); " +
+        'const cls = Array.from(el.classList)[0]; ' +
+        "if (cls) return 'iframe.' + CSS.escape(cls); " +
+        "const all = Array.from(document.querySelectorAll('iframe')); " +
+        "return 'iframe:nth-of-type(' + (all.indexOf(el) + 1) + ')'; " +
+        '}'
+    )() as (el: object) => string;
+    const iframeSelector: string = await handle.evaluate(iframeSelectorFn);
+
+    let frameResult: EnhancedSnapshot;
+    try {
+      frameResult = await snapshotFrame(frame, options);
+    } catch {
+      // iframe may be sandboxed or not yet loaded — skip silently
+      continue;
+    }
+
+    if (!frameResult.tree || EMPTY.has(frameResult.tree)) continue;
+
+    // Tag all refs from this iframe so getLocatorFromRef uses frameLocator()
+    for (const [ref, data] of Object.entries(frameResult.refs)) {
+      allRefs[ref] = { ...data, frameSelector: iframeSelector };
+    }
+
+    parts.push(`# [iframe: ${iframeSelector}]\n${frameResult.tree}`);
+  }
+
+  const tree = parts.join('\n\n') || '(no interactive elements)';
+  return { tree, refs: allRefs };
 }
 
 /**

@@ -919,6 +919,7 @@ async function handleSnapshot(
     maxDepth?: number;
     compact?: boolean;
     selector?: string;
+    frames?: boolean;
   },
   browser: BrowserManager
 ): Promise<Response<SnapshotData>> {
@@ -929,6 +930,7 @@ async function handleSnapshot(
     maxDepth: command.maxDepth,
     compact: command.compact,
     selector: command.selector,
+    frames: command.frames,
   });
 
   // Simplify refs for output (just role and name)

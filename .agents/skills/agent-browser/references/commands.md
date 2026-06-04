@@ -21,11 +21,15 @@ agent-browser connect 9222    # Connect to browser via CDP port
 agent-browser snapshot            # Full accessibility tree
 agent-browser snapshot -i         # Interactive elements only (recommended)
 agent-browser snapshot -C         # Also include cursor:pointer / onclick elements
-agent-browser snapshot -i -C      # Interactive + cursor-interactive (widest net)
+agent-browser snapshot -F         # Include elements from all iframes automatically
+agent-browser snapshot -i -F      # Interactive elements from page + all iframes
+agent-browser snapshot -i -C -F   # Widest net: interactive + cursor + iframes
 agent-browser snapshot -c         # Compact output
 agent-browser snapshot -d 3       # Limit depth to 3
 agent-browser snapshot -s "#main" # Scope to CSS selector
 ```
+
+`-F / --frames` discovers all iframes automatically and merges their elements into the output. Refs from iframes work transparently with `click`, `fill`, `get`, etc. — no manual `frame` switching required. Use the `frame` command when you want to work exclusively inside one iframe.
 
 When inside an iframe (after `agent-browser frame <sel>`), snapshot and all interactions target the iframe's document — use `frame main` to return to the main page.
 

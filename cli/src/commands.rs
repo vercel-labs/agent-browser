@@ -502,6 +502,9 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                     "-C" | "--cursor" => {
                         obj.insert("cursor".to_string(), json!(true));
                     }
+                    "-F" | "--frames" => {
+                        obj.insert("frames".to_string(), json!(true));
+                    }
                     "-d" | "--depth" => {
                         if let Some(d) = rest.get(i + 1) {
                             if let Ok(n) = d.parse::<i32>() {

@@ -2413,6 +2413,7 @@ Setup:
 Snapshot Options:
   -i, --interactive          Only interactive elements
   -C, --cursor               Also include cursor:pointer / onclick elements
+  -F, --frames               Include elements from all iframes (refs work transparently)
   -c, --compact              Remove empty structural elements
   -d, --depth <n>            Limit tree depth
   -s, --selector <sel>       Scope to CSS selector

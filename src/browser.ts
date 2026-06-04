@@ -19,7 +19,13 @@ import os from 'node:os';
 import { existsSync, mkdirSync, rmSync, readFileSync, statSync } from 'node:fs';
 import { writeFile, mkdir } from 'node:fs/promises';
 import type { LaunchCommand, TraceEvent } from './types.js';
-import { type RefMap, type EnhancedSnapshot, getEnhancedSnapshot, parseRef } from './snapshot.js';
+import {
+  type RefMap,
+  type EnhancedSnapshot,
+  getEnhancedSnapshot,
+  getMultiFrameSnapshot,
+  parseRef,
+} from './snapshot.js';
 import { safeHeaderMerge } from './state-utils.js';
 import { isDomainAllowed, installDomainFilter, parseDomainList } from './domain-filter.js';
 import {
@@ -176,8 +182,11 @@ export class BrowserManager {
     maxDepth?: number;
     compact?: boolean;
     selector?: string;
+    frames?: boolean;
   }): Promise<EnhancedSnapshot> {
-    const snapshot = await getEnhancedSnapshot(this.getFrame(), options);
+    const snapshot = options?.frames
+      ? await getMultiFrameSnapshot(this.getPage(), options)
+      : await getEnhancedSnapshot(this.getFrame(), options);
     this.refMap = snapshot.refs;
     this.lastSnapshot = snapshot.tree;
     return snapshot;
@@ -215,12 +224,28 @@ export class BrowserManager {
     const refData = this.refMap[ref];
     if (!refData) return null;
 
+    // Refs from --frames snapshots carry a frameSelector. Use frameLocator() so
+    // the click targets the right iframe without changing the active frame context.
+    if (refData.frameSelector) {
+      const fl = this.getPage().frameLocator(refData.frameSelector);
+      if (refData.role === 'clickable' || refData.role === 'focusable') {
+        return fl.locator(refData.selector);
+      }
+      let locator: Locator = fl.getByRole(refData.role as any, {
+        name: refData.name,
+        exact: true,
+      });
+      if (refData.nth !== undefined) {
+        locator = locator.nth(refData.nth);
+      }
+      return locator;
+    }
+
     const frame = this.getFrame();
 
     // Check if this is a cursor-interactive element (uses CSS selector, not ARIA role)
     // These have pseudo-roles 'clickable' or 'focusable' and a CSS selector
     if (refData.role === 'clickable' || refData.role === 'focusable') {
-      // The selector is a CSS selector, use it directly
       return frame.locator(refData.selector);
     }
 
