@@ -2485,6 +2485,10 @@ async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
             .and_then(|v| v.as_u64())
             .map(|d| d as usize),
         urls: cmd.get("urls").and_then(|v| v.as_bool()).unwrap_or(false),
+        frames: cmd
+            .get("frames")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
     };
 
     state.ref_map.clear();

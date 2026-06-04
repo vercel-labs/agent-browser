@@ -1745,14 +1745,15 @@ Returns an accessibility tree representation of the page with element
 references (like @e1, @e2) that can be used in subsequent commands.
 Designed for AI agents to understand page structure.
 
-Iframes are automatically detected and inlined. When the main-frame
-snapshot runs, each Iframe node is resolved and its child accessibility
-tree is appended beneath it in the output. Element refs inside iframes
-carry frame context, so click/fill/type work without manually switching
-frames. Use 'frame <sel|@ref>' then 'snapshot -i' to scope to one iframe.
+Use -F to include iframe content. When the main-frame snapshot runs with
+-F, each Iframe node is resolved and its child accessibility tree is
+appended beneath it in the output. Element refs inside iframes carry frame
+context, so click/fill/type work without manually switching frames.
+Use 'frame <sel|@ref>' then 'snapshot -i' to scope to one iframe.
 
 Options:
   -i, --interactive    Only include interactive elements
+  -F, --frames         Include elements from all iframes (refs work transparently)
   -u, --urls           Include href URLs for link elements
   -c, --compact        Remove empty structural elements
   -d, --depth <n>      Limit tree depth
@@ -3175,6 +3176,7 @@ Setup:
 
 Snapshot Options:
   -i, --interactive          Only interactive elements
+  -F, --frames               Include elements from all iframes (refs work transparently)
   -c, --compact              Remove empty structural elements
   -d, --depth <n>            Limit tree depth
   -s, --selector <sel>       Scope to CSS selector

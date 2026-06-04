@@ -81,6 +81,10 @@ pub struct SnapshotOptions {
     pub compact: bool,
     pub depth: Option<usize>,
     pub urls: bool,
+    /// When true, recurse into child iframes and inline their content.
+    /// Element refs from iframes carry frame context, so interactions
+    /// (click/fill/type) work without manually switching frames.
+    pub frames: bool,
 }
 
 struct TreeNode {
@@ -491,7 +495,8 @@ pub async fn take_snapshot(
     // resolve the child frame ID and take a snapshot of its content.
     // We only recurse from the main frame (frame_id == None) to avoid
     // unbounded depth; nested iframes within iframes are not expanded.
-    if frame_id.is_none() {
+    // Recursion is opt-in: requires options.frames == true (-F / --frames).
+    if options.frames && frame_id.is_none() {
         let mut iframe_snapshots: Vec<(String, String)> = Vec::new(); // (ref_id, child_snapshot)
         for node in tree_nodes.iter() {
             if node.role != "Iframe" || !node.has_ref {
