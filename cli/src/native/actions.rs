@@ -587,6 +587,8 @@ impl DaemonState {
     }
 
     async fn apply_drained_events(&mut self, drained: DrainedEvents) {
+        let mut target_state_changed = false;
+
         // ACK screencast frames
         if !drained.pending_acks.is_empty() {
             if let Some(ref browser) = self.browser {
@@ -603,6 +605,7 @@ impl DaemonState {
         for target_id in &drained.destroyed_targets {
             if let Some(ref mut mgr) = self.browser {
                 mgr.remove_page_by_target_id(target_id);
+                target_state_changed = true;
             }
         }
 
@@ -678,6 +681,7 @@ impl DaemonState {
                         title: te.target_info.title.clone(),
                         target_type: te.target_info.target_type.clone(),
                     });
+                    target_state_changed = true;
                 }
             }
         }
@@ -685,8 +689,14 @@ impl DaemonState {
         // Update changed targets
         for te in &drained.changed_targets {
             if let Some(ref mut mgr) = self.browser {
-                mgr.update_page_target_info(&te.target_info);
+                if mgr.update_page_target_info(&te.target_info) {
+                    target_state_changed = true;
+                }
             }
+        }
+
+        if target_state_changed && self.stream_server.is_some() {
+            self.update_stream_client().await;
         }
     }
 

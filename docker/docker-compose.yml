@@ -12,10 +12,15 @@ services:
       dockerfile: docker/Dockerfile.build
     volumes:
       - ../cli:/build
+      - ../packages/dashboard/out:/packages/dashboard/out:ro
       - ../bin:/output
     command: |
       -c '
         set -e
+        if [ ! -f /packages/dashboard/out/index.html ] || grep -q "Dashboard not built" /packages/dashboard/out/index.html; then
+          echo "Dashboard output is missing. Run: pnpm run build:dashboard"
+          exit 1
+        fi
         echo "Building for Linux platforms (parallel)..."
         
         # Build both targets in parallel
@@ -40,10 +45,15 @@ services:
       dockerfile: docker/Dockerfile.build
     volumes:
       - ../cli:/build
+      - ../packages/dashboard/out:/packages/dashboard/out:ro
       - ../bin:/output
     command: |
       -c '
         set -e
+        if [ ! -f /packages/dashboard/out/index.html ] || grep -q "Dashboard not built" /packages/dashboard/out/index.html; then
+          echo "Dashboard output is missing. Run: pnpm run build:dashboard"
+          exit 1
+        fi
         echo "Building for Windows x64..."
         
         cargo build --release --target x86_64-pc-windows-gnu
@@ -61,12 +71,17 @@ services:
       dockerfile: docker/Dockerfile.build
     volumes:
       - ../cli:/build
+      - ../packages/dashboard/out:/packages/dashboard/out:ro
       - ../bin:/output
     environment:
       - TARGET=${TARGET:-x86_64-unknown-linux-gnu}
       - OUTPUT_NAME=${OUTPUT_NAME:-agent-browser-linux-x64}
     command: |
       -c '
+        if [ ! -f /packages/dashboard/out/index.html ] || grep -q "Dashboard not built" /packages/dashboard/out/index.html; then
+          echo "Dashboard output is missing. Run: pnpm run build:dashboard"
+          exit 1
+        fi
         cargo zigbuild --release --target $TARGET
         cp /build/target/$TARGET/release/agent-browser* /output/$OUTPUT_NAME
         chmod +x /output/$OUTPUT_NAME 2>/dev/null || true

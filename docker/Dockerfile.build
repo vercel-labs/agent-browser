@@ -1,5 +1,5 @@
 # Multi-platform Rust cross-compilation image
-FROM rust:1.85-bookworm
+FROM rust:1.95.0-bookworm
 
 # Install cross-compilation toolchains
 RUN apt-get update && apt-get install -y \

@@ -393,6 +393,8 @@ AGENT_BROWSER_ENABLE="react-devtools"        # Comma-separated built-in init scr
 AGENT_BROWSER_HIDE_SCROLLBARS="false"        # Keep native scrollbars visible in headless Chromium screenshots
 AGENT_BROWSER_PROVIDER="browserbase"         # Cloud browser provider
 AGENT_BROWSER_STREAM_PORT="9223"             # Override WebSocket streaming port (default: OS-assigned)
+AGENT_BROWSER_DASHBOARD_VIEWPORT_ONLY="1"    # Dashboard viewport-only layout
+AGENT_BROWSER_HOME="/path/to/agent-browser"  # Custom install location
 AGENT_BROWSER_CONFIG="./agent-browser.json"  # Custom config file
 AGENT_BROWSER_CDP="9222"                     # Connect daemon to CDP port or WebSocket URL
 ```
