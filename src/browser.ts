@@ -226,8 +226,11 @@ export class BrowserManager {
 
     // Refs from --frames snapshots carry a frameSelector. Use frameLocator() so
     // the click targets the right iframe without changing the active frame context.
+    // When frameNth is set, use .nth() (document-wide) rather than CSS :nth-of-type
+    // (parent-scoped) to reach the correct iframe.
     if (refData.frameSelector) {
-      const fl = this.getPage().frameLocator(refData.frameSelector);
+      const baseFl = this.getPage().frameLocator(refData.frameSelector);
+      const fl = refData.frameNth !== undefined ? baseFl.nth(refData.frameNth) : baseFl;
       if (refData.role === 'clickable' || refData.role === 'focusable') {
         return fl.locator(refData.selector);
       }
@@ -388,13 +391,17 @@ export class BrowserManager {
   }
 
   /**
-   * Get the current frame (or page's main frame if no frame is selected)
+   * Get the current frame (or page's main frame if no frame is selected).
+   * Clears activeFrame if it has been detached (e.g. after navigation or tab switch)
+   * so callers never receive a stale frame handle.
    */
   getFrame(): Frame {
     if (this.activeFrame) {
-      return this.activeFrame;
+      if (!this.getPage().frames().includes(this.activeFrame)) {
+        this.activeFrame = null;
+      }
     }
-    return this.getPage().mainFrame();
+    return this.activeFrame ?? this.getPage().mainFrame();
   }
 
   /**

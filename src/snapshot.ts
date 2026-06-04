@@ -28,6 +28,8 @@ export interface RefMap {
     nth?: number;
     /** CSS selector of the iframe containing this element (absent = main frame) */
     frameSelector?: string;
+    /** 0-based index for FrameLocator.nth() when frameSelector is a generic tag (e.g. 'iframe') */
+    frameNth?: number;
   };
 }
 
@@ -423,23 +425,37 @@ export async function getMultiFrameSnapshot(
 
   // Top-level iframes
   const iframeHandles = await page.$$('iframe');
-  for (const handle of iframeHandles) {
+  for (let iframeIndex = 0; iframeIndex < iframeHandles.length; iframeIndex++) {
+    const handle = iframeHandles[iframeIndex];
     const frame = await handle.contentFrame();
     if (!frame) continue;
 
-    // Build a stable CSS selector for this iframe element.
-    // Uses new Function to keep browser DOM globals out of TS scope.
-    // eslint-disable-next-line @typescript-eslint/no-implied-eval
-    const iframeSelectorFn = new Function(
-      'return (el) => { ' +
-        "if (el.id) return '#' + CSS.escape(el.id); " +
-        'const cls = Array.from(el.classList)[0]; ' +
-        "if (cls) return 'iframe.' + CSS.escape(cls); " +
-        "const all = Array.from(document.querySelectorAll('iframe')); " +
-        "return 'iframe:nth-of-type(' + (all.indexOf(el) + 1) + ')'; " +
-        '}'
-    )() as (el: object) => string;
-    const iframeSelector: string = await handle.evaluate(iframeSelectorFn);
+    // Build the most specific CSS selector available for this iframe.
+    // Prefer id > src attribute > class.
+    // Fallback: store 'iframe' + iframeIndex so getLocatorFromRef can use
+    // FrameLocator.nth(n), which is document-wide (unlike CSS :nth-of-type
+    // which is parent-scoped and would point at the wrong element).
+    let iframeSelector: string;
+    let iframeNth: number | undefined;
+
+    const iframeId = await handle.getAttribute('id');
+    if (iframeId) {
+      iframeSelector = `#${iframeId}`;
+    } else {
+      const srcAttr = await handle.getAttribute('src');
+      if (srcAttr) {
+        iframeSelector = `iframe[src=${JSON.stringify(srcAttr)}]`;
+      } else {
+        const clsAttr = await handle.getAttribute('class');
+        const firstCls = clsAttr?.trim().split(/\s+/)[0];
+        if (firstCls) {
+          iframeSelector = `iframe.${firstCls}`;
+        } else {
+          iframeSelector = 'iframe';
+          iframeNth = iframeIndex;
+        }
+      }
+    }
 
     let frameResult: EnhancedSnapshot;
     try {
@@ -453,10 +469,15 @@ export async function getMultiFrameSnapshot(
 
     // Tag all refs from this iframe so getLocatorFromRef uses frameLocator()
     for (const [ref, data] of Object.entries(frameResult.refs)) {
-      allRefs[ref] = { ...data, frameSelector: iframeSelector };
+      allRefs[ref] = { ...data, frameSelector: iframeSelector, frameNth: iframeNth };
     }
 
-    parts.push(`# [iframe: ${iframeSelector}]\n${frameResult.tree}`);
+    // Human-readable label for the snapshot output
+    const label =
+      iframeId ??
+      (await handle.getAttribute('class'))?.trim().split(/\s+/)[0] ??
+      `iframe[${iframeIndex + 1}]`;
+    parts.push(`# [iframe: ${label}]\n${frameResult.tree}`);
   }
 
   const tree = parts.join('\n\n') || '(no interactive elements)';
