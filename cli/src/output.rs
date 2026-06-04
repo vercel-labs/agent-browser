@@ -2346,6 +2346,7 @@ Navigation:
   back                       Go back
   forward                    Go forward
   reload                     Reload page
+  frame <sel|main>           Switch into an iframe (or 'main' to return)
 
 Get Info:  agent-browser get <what> [selector]
   text, html, value, attr <name>, title, url, count, box, styles
@@ -2411,6 +2412,7 @@ Setup:
 
 Snapshot Options:
   -i, --interactive          Only interactive elements
+  -C, --cursor               Also include cursor:pointer / onclick elements
   -c, --compact              Remove empty structural elements
   -d, --depth <n>            Limit tree depth
   -s, --selector <sel>       Scope to CSS selector
