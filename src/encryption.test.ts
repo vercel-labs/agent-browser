@@ -1,9 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as crypto from 'crypto';
+import { existsSync, renameSync } from 'node:fs';
 import {
   encryptData,
   decryptData,
   getEncryptionKey,
+  getKeyFilePath,
   isEncryptedPayload,
   ENCRYPTION_KEY_ENV,
   IV_LENGTH,
@@ -250,8 +252,23 @@ describe('encryption', () => {
 
   describe('getEncryptionKey', () => {
     const originalEnv = process.env[ENCRYPTION_KEY_ENV];
+    const keyPath = getKeyFilePath();
+    const keyBackupPath = keyPath + '.test-backup';
+
+    beforeEach(() => {
+      // auth-vault tests running earlier in the suite may auto-generate the key
+      // file, which causes tests expecting null to fail. Temporarily move it out
+      // of the way so getEncryptionKey() falls through to the env-var-only path.
+      if (existsSync(keyPath)) {
+        renameSync(keyPath, keyBackupPath);
+      }
+    });
 
     afterEach(() => {
+      // Restore the key file if we moved it
+      if (existsSync(keyBackupPath)) {
+        renameSync(keyBackupPath, keyPath);
+      }
       // Restore original env
       if (originalEnv !== undefined) {
         process.env[ENCRYPTION_KEY_ENV] = originalEnv;
