@@ -1139,12 +1139,7 @@ fn main() {
         }
 
         if let Some(ref a) = flags.args {
-            // Parse args (comma or newline separated)
-            let args_vec: Vec<String> = a
-                .split(&[',', '\n'][..])
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
+            let args_vec = crate::native::actions::parse_launch_args(a);
             cmd_obj.insert("args".to_string(), json!(args_vec));
         }
 
@@ -1536,5 +1531,39 @@ mod tests {
         let mut cli_true_cmd = json!({ "action": "launch" });
         apply_hide_scrollbars_launch_option(&mut cli_true_cmd, true, true);
         assert_eq!(cli_true_cmd["hideScrollbars"], true);
+    }
+
+    // Verify that the --args / config.json "args" path uses parse_launch_args
+    // and therefore does not split comma-containing switch values like
+    // --window-size=1600,1200 at the comma.
+    #[test]
+    fn test_args_flag_preserves_comma_in_switch_value() {
+        assert_eq!(
+            crate::native::actions::parse_launch_args("--window-size=1600,1200"),
+            vec!["--window-size=1600,1200"]
+        );
+    }
+
+    #[test]
+    fn test_args_flag_splits_adjacent_switches_at_comma() {
+        assert_eq!(
+            crate::native::actions::parse_launch_args(
+                "--window-size=1600,1200,--disable-blink-features=AutomationControlled"
+            ),
+            vec![
+                "--window-size=1600,1200",
+                "--disable-blink-features=AutomationControlled"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_args_flag_splits_on_newline() {
+        assert_eq!(
+            crate::native::actions::parse_launch_args(
+                "--window-size=1600,1200\n--disable-gpu"
+            ),
+            vec!["--window-size=1600,1200", "--disable-gpu"]
+        );
     }
 }

@@ -1689,7 +1689,7 @@ async fn apply_launch_init_scripts(state: &DaemonState) {
 /// Newlines always separate arguments. Commas still separate adjacent launch
 /// switches for backwards compatibility, but commas inside a single argument
 /// value are preserved so flags like `--window-size=1600,1200` survive intact.
-fn parse_launch_args(raw: &str) -> Vec<String> {
+pub(crate) fn parse_launch_args(raw: &str) -> Vec<String> {
     let mut args = Vec::new();
 
     for line in raw.lines() {
