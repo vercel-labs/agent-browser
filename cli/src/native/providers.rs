@@ -65,8 +65,16 @@ pub async fn connect_provider(provider_name: &str) -> Result<ProviderConnection,
                 direct_page: false,
             })
         }
+        "cloudflare" => {
+            let (url, session) = connect_cloudflare().await?;
+            Ok(ProviderConnection {
+                ws_url: url,
+                session,
+                direct_page: false,
+            })
+        }
         _ => Err(format!(
-            "Unknown provider '{}'. Supported: browserbase, browserless, browser-use, kernel, agentcore",
+            "Unknown provider '{}'. Supported: browserbase, browserless, browser-use, kernel, agentcore, cloudflare",
             provider_name
         )),
     }
@@ -126,6 +134,9 @@ pub async fn close_provider_session(session: &ProviderSession) {
         "agentcore" => {
             // AgentCore session cleanup is handled via signed DELETE request
             let _ = close_agentcore_session(&session.session_id).await;
+        }
+        "cloudflare" => {
+            cloudflare::close_session(&session.session_id).await;
         }
         _ => {}
     }
@@ -745,6 +756,123 @@ async fn connect_agentcore() -> Result<(String, Option<ProviderSession>), String
 
 async fn close_agentcore_session(session_id: &str) -> Result<(), String> {
     agentcore::close_session(session_id).await
+}
+
+/// Cloudflare Browser Run. A session is acquired over the REST API
+/// (POST .../devtools/browser) and driven via the returned CDP WebSocket. Unlike the
+/// other providers, Cloudflare authenticates the WebSocket with an `Authorization: Bearer`
+/// header (not a query token), so the token is stashed for `connect_cdp_with_headers`.
+mod cloudflare {
+    use super::ProviderSession;
+    use serde_json::{json, Value};
+    use std::env;
+
+    thread_local! {
+        static CLOUDFLARE_WS_HEADERS: std::cell::RefCell<Option<Vec<(String, String)>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    fn set_ws_headers(headers: Vec<(String, String)>) {
+        CLOUDFLARE_WS_HEADERS.with(|cell| *cell.borrow_mut() = Some(headers));
+    }
+
+    pub fn take_cloudflare_ws_headers() -> Option<Vec<(String, String)>> {
+        CLOUDFLARE_WS_HEADERS.with(|cell| cell.borrow_mut().take())
+    }
+
+    fn api_base(account: &str) -> String {
+        format!(
+            "https://api.cloudflare.com/client/v4/accounts/{}/browser-rendering",
+            account
+        )
+    }
+
+    pub async fn connect() -> Result<(String, Option<ProviderSession>), String> {
+        let account = env::var("CLOUDFLARE_ACCOUNT_ID")
+            .map_err(|_| "CLOUDFLARE_ACCOUNT_ID not set".to_string())?;
+        let token = env::var("CLOUDFLARE_API_TOKEN")
+            .map_err(|_| "CLOUDFLARE_API_TOKEN not set".to_string())?;
+        let keep_alive: u64 = env::var("CLOUDFLARE_KEEP_ALIVE_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(600_000);
+
+        let url = format!("{}/devtools/browser", api_base(&account));
+        let client = reqwest::Client::new();
+        let response = client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Content-Type", "application/json")
+            .json(&json!({ "keep_alive": keep_alive }))
+            .send()
+            .await
+            .map_err(|e| format!("Cloudflare request failed: {}", e))?;
+
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .map_err(|e| format!("Failed to read Cloudflare response: {}", e))?;
+        if !status.is_success() {
+            return Err(format!(
+                "Cloudflare API error ({}): {}",
+                status.as_u16(),
+                body
+            ));
+        }
+
+        let json: Value = serde_json::from_str(&body)
+            .map_err(|e| format!("Invalid Cloudflare response: {}", e))?;
+        let session_id = json
+            .get("sessionId")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "Cloudflare response missing sessionId".to_string())?
+            .to_string();
+        let ws_url = json
+            .get("webSocketDebuggerUrl")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "Cloudflare response missing webSocketDebuggerUrl".to_string())?
+            .to_string();
+
+        set_ws_headers(vec![(
+            "Authorization".to_string(),
+            format!("Bearer {}", token),
+        )]);
+
+        Ok((
+            ws_url,
+            Some(ProviderSession {
+                provider: "cloudflare".to_string(),
+                session_id,
+            }),
+        ))
+    }
+
+    pub async fn close_session(session_id: &str) {
+        let (account, token) = match (
+            env::var("CLOUDFLARE_ACCOUNT_ID"),
+            env::var("CLOUDFLARE_API_TOKEN"),
+        ) {
+            (Ok(a), Ok(t)) => (a, t),
+            _ => return,
+        };
+        let client = reqwest::Client::new();
+        let _ = client
+            .delete(format!(
+                "{}/devtools/browser/{}",
+                api_base(&account),
+                session_id
+            ))
+            .header("Authorization", format!("Bearer {}", token))
+            .send()
+            .await;
+    }
+}
+
+pub use cloudflare::take_cloudflare_ws_headers;
+
+async fn connect_cloudflare() -> Result<(String, Option<ProviderSession>), String> {
+    cloudflare::connect().await
 }
 
 #[cfg(test)]

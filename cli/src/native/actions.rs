@@ -1578,6 +1578,8 @@ async fn auto_launch(state: &mut DaemonState) -> Result<(), String> {
             let conn = providers::connect_provider(&p).await?;
             let ws_headers = if p == "agentcore" {
                 providers::take_agentcore_ws_headers()
+            } else if p == "cloudflare" {
+                providers::take_cloudflare_ws_headers()
             } else {
                 None
             };
@@ -2002,6 +2004,8 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
 
                 let ws_headers = if provider.eq_ignore_ascii_case("agentcore") {
                     providers::take_agentcore_ws_headers()
+                } else if provider.eq_ignore_ascii_case("cloudflare") {
+                    providers::take_cloudflare_ws_headers()
                 } else {
                     None
                 };
