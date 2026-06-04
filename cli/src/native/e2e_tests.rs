@@ -5393,17 +5393,15 @@ async fn e2e_vitals_reports_metrics() {
 
     let resp = execute_command(&json!({ "id": "3", "action": "vitals" }), &mut state).await;
     assert_success(&resp);
-    let report = get_data(&resp)
-        .get("report")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
-    assert!(
-        report.contains("Core Web Vitals"),
-        "Expected vitals report, got: {}",
-        report
-    );
-    assert!(report.contains("TTFB"));
-    assert!(report.contains("CLS"));
+    let data = get_data(&resp);
+    assert!(data.get("url").and_then(|v| v.as_str()).is_some());
+    assert!(data.get("ttfb").is_some());
+    assert!(data.get("cls").and_then(|v| v.get("score")).is_some());
+    assert!(data.get("phases").and_then(|v| v.as_array()).is_some());
+    assert!(data
+        .get("hydratedComponents")
+        .and_then(|v| v.as_array())
+        .is_some());
 
     let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
 }

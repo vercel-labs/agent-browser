@@ -70,6 +70,7 @@ pub struct Config {
     pub user_agent: Option<String>,
     pub provider: Option<String>,
     pub device: Option<String>,
+    pub hide_scrollbars: Option<bool>,
     pub ignore_https_errors: Option<bool>,
     pub allow_file_access: Option<bool>,
     pub cdp: Option<String>,
@@ -131,6 +132,7 @@ impl Config {
             user_agent: other.user_agent.or(self.user_agent),
             provider: other.provider.or(self.provider),
             device: other.device.or(self.device),
+            hide_scrollbars: other.hide_scrollbars.or(self.hide_scrollbars),
             ignore_https_errors: other.ignore_https_errors.or(self.ignore_https_errors),
             allow_file_access: other.allow_file_access.or(self.allow_file_access),
             cdp: other.cdp.or(self.cdp),
@@ -185,6 +187,12 @@ fn env_var_is_truthy(name: &str) -> bool {
         Ok(val) => !matches!(val.to_lowercase().as_str(), "0" | "false" | "no" | ""),
         Err(_) => false,
     }
+}
+
+fn env_var_bool(name: &str) -> Option<bool> {
+    env::var(name)
+        .ok()
+        .map(|val| !matches!(val.to_lowercase().as_str(), "0" | "false" | "no" | ""))
 }
 
 /// Parse an optional boolean value after a flag. Returns (value, consumed_next_arg).
@@ -306,6 +314,7 @@ pub struct Flags {
     pub provider: Option<String>,
     pub ignore_https_errors: bool,
     pub allow_file_access: bool,
+    pub hide_scrollbars: bool,
     pub device: Option<String>,
     pub auto_connect: bool,
     pub session_name: Option<String>,
@@ -342,6 +351,7 @@ pub struct Flags {
     pub cli_proxy: bool,
     pub cli_proxy_bypass: bool,
     pub cli_allow_file_access: bool,
+    pub cli_hide_scrollbars: bool,
     pub cli_annotate: bool,
     pub cli_download_path: bool,
     pub cli_headed: bool,
@@ -442,6 +452,9 @@ pub fn parse_flags(args: &[String]) -> Flags {
             || config.ignore_https_errors.unwrap_or(false),
         allow_file_access: env_var_is_truthy("AGENT_BROWSER_ALLOW_FILE_ACCESS")
             || config.allow_file_access.unwrap_or(false),
+        hide_scrollbars: env_var_bool("AGENT_BROWSER_HIDE_SCROLLBARS")
+            .or(config.hide_scrollbars)
+            .unwrap_or(true),
         device: env::var("AGENT_BROWSER_IOS_DEVICE").ok().or(config.device),
         auto_connect: env_var_is_truthy("AGENT_BROWSER_AUTO_CONNECT")
             || config.auto_connect.unwrap_or(false),
@@ -514,6 +527,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
         cli_proxy: false,
         cli_proxy_bypass: false,
         cli_allow_file_access: false,
+        cli_hide_scrollbars: false,
         cli_annotate: false,
         cli_download_path: false,
         cli_headed: false,
@@ -669,6 +683,14 @@ pub fn parse_flags(args: &[String]) -> Flags {
                 let (val, consumed) = parse_bool_arg(args, i);
                 flags.allow_file_access = val;
                 flags.cli_allow_file_access = true;
+                if consumed {
+                    i += 1;
+                }
+            }
+            "--hide-scrollbars" => {
+                let (val, consumed) = parse_bool_arg(args, i);
+                flags.hide_scrollbars = val;
+                flags.cli_hide_scrollbars = true;
                 if consumed {
                     i += 1;
                 }
@@ -841,6 +863,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--debug",
         "--ignore-https-errors",
         "--allow-file-access",
+        "--hide-scrollbars",
         "--auto-connect",
         "--annotate",
         "--content-boundaries",
@@ -920,6 +943,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::EnvGuard;
 
     fn args(s: &str) -> Vec<String> {
         s.split_whitespace().map(String::from).collect()
@@ -1163,6 +1187,7 @@ mod tests {
             "userAgent": "test-agent",
             "provider": "ios",
             "device": "iPhone 15",
+            "hideScrollbars": false,
             "ignoreHttpsErrors": true,
             "allowFileAccess": true,
             "cdp": "9222",
@@ -1188,6 +1213,7 @@ mod tests {
         assert_eq!(config.user_agent.as_deref(), Some("test-agent"));
         assert_eq!(config.provider.as_deref(), Some("ios"));
         assert_eq!(config.device.as_deref(), Some("iPhone 15"));
+        assert_eq!(config.hide_scrollbars, Some(false));
         assert_eq!(config.ignore_https_errors, Some(true));
         assert_eq!(config.allow_file_access, Some(true));
         assert_eq!(config.cdp.as_deref(), Some("9222"));
@@ -1442,6 +1468,33 @@ mod tests {
     }
 
     #[test]
+    fn test_hide_scrollbars_default_true() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_HIDE_SCROLLBARS"]);
+        guard.remove("AGENT_BROWSER_HIDE_SCROLLBARS");
+        let flags = parse_flags(&args("open example.com"));
+        assert!(flags.hide_scrollbars);
+        assert!(!flags.cli_hide_scrollbars);
+    }
+
+    #[test]
+    fn test_hide_scrollbars_false() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_HIDE_SCROLLBARS"]);
+        guard.remove("AGENT_BROWSER_HIDE_SCROLLBARS");
+        let flags = parse_flags(&args("--hide-scrollbars false open"));
+        assert!(!flags.hide_scrollbars);
+        assert!(flags.cli_hide_scrollbars);
+    }
+
+    #[test]
+    fn test_hide_scrollbars_bare_defaults_true() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_HIDE_SCROLLBARS"]);
+        guard.remove("AGENT_BROWSER_HIDE_SCROLLBARS");
+        let flags = parse_flags(&args("--hide-scrollbars open"));
+        assert!(flags.hide_scrollbars);
+        assert!(flags.cli_hide_scrollbars);
+    }
+
+    #[test]
     fn test_auto_connect_false() {
         let flags = parse_flags(&args("--auto-connect false open"));
         assert!(!flags.auto_connect);
@@ -1449,7 +1502,9 @@ mod tests {
 
     #[test]
     fn test_clean_args_removes_bool_flag_with_value() {
-        let cleaned = clean_args(&args("--headed false --debug true open example.com"));
+        let cleaned = clean_args(&args(
+            "--headed false --debug true --hide-scrollbars false open example.com",
+        ));
         assert_eq!(cleaned, vec!["open", "example.com"]);
     }
 

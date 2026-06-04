@@ -399,6 +399,7 @@ pub struct DaemonOptions<'a> {
     pub proxy_password: Option<&'a str>,
     pub ignore_https_errors: bool,
     pub allow_file_access: bool,
+    pub hide_scrollbars: bool,
     pub profile: Option<&'a str>,
     pub state: Option<&'a str>,
     pub provider: Option<&'a str>,
@@ -462,6 +463,10 @@ fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
     if opts.allow_file_access {
         cmd.env("AGENT_BROWSER_ALLOW_FILE_ACCESS", "1");
     }
+    cmd.env(
+        "AGENT_BROWSER_HIDE_SCROLLBARS",
+        if opts.hide_scrollbars { "1" } else { "0" },
+    );
     if let Some(prof) = opts.profile {
         cmd.env("AGENT_BROWSER_PROFILE", prof);
     }

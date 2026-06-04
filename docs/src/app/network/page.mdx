@@ -1,0 +1,81 @@
+# Network
+
+Use network commands to intercept requests, mock responses, inspect traffic, and export HAR files during browser automation.
+
+## Request routing
+
+Routes apply before matching requests are sent. Set them before navigation when you need the first page load to be affected.
+
+```bash
+agent-browser open
+agent-browser network route "**/analytics/**" --abort
+agent-browser network route "**/api/users" --body '{"users":[]}'
+agent-browser navigate https://app.example.com
+```
+
+<table>
+  <thead>
+    <tr><th>Command</th><th>Description</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>network route &lt;url&gt;</code></td><td>Intercept matching requests</td></tr>
+    <tr><td><code>network route &lt;url&gt; --abort</code></td><td>Block matching requests</td></tr>
+    <tr><td><code>network route &lt;url&gt; --body &lt;json&gt;</code></td><td>Fulfill matching requests with a mock body</td></tr>
+    <tr><td><code>network route "*" --resource-type script --abort</code></td><td>Block only a specific resource type</td></tr>
+    <tr><td><code>network unroute [url]</code></td><td>Remove one route or all routes</td></tr>
+  </tbody>
+</table>
+
+`--resource-type` accepts comma-separated resource types such as `script`, `image`, `font`, `xhr`, and `fetch`.
+
+## Request log
+
+```bash
+agent-browser network requests
+agent-browser network requests --filter api
+agent-browser network requests --type xhr,fetch
+agent-browser network requests --method POST
+agent-browser network requests --status 2xx
+agent-browser network request <requestId>
+agent-browser network requests --clear
+```
+
+<table>
+  <thead>
+    <tr><th>Filter</th><th>Description</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>--filter &lt;pattern&gt;</code></td><td>Filter by URL substring or pattern</td></tr>
+    <tr><td><code>--type &lt;csv&gt;</code></td><td>Filter by resource type</td></tr>
+    <tr><td><code>--method &lt;method&gt;</code></td><td>Filter by HTTP method</td></tr>
+    <tr><td><code>--status &lt;status&gt;</code></td><td>Filter by exact status, status family, or range</td></tr>
+    <tr><td><code>--clear</code></td><td>Clear the tracked request log</td></tr>
+  </tbody>
+</table>
+
+Use `network request <requestId>` to inspect one request and response in detail after finding its ID in `network requests`.
+
+## HAR export
+
+```bash
+agent-browser network har start
+
+agent-browser open https://app.example.com
+agent-browser click @e4
+
+agent-browser network har stop ./trace.har
+```
+
+HAR files can include request headers, response headers, and response bodies. Treat them as sensitive when pages use cookies, bearer tokens, or API keys.
+
+## SSR and no-JavaScript debugging
+
+```bash
+agent-browser batch \
+  '["open"]' \
+  '["network","route","*","--abort","--resource-type","script"]' \
+  '["navigate","http://localhost:3000"]' \
+  '["snapshot","-i"]'
+```
+
+Launching with `open` and no URL leaves the browser on `about:blank`, which gives routes time to register before the first real navigation.

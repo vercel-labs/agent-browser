@@ -67,6 +67,10 @@
       "type": "string",
       "description": "Device name or identifier for emulation or providers (e.g., 'iPhone 16 Pro')."
     },
+    "hideScrollbars": {
+      "type": "boolean",
+      "description": "Hide native scrollbars in headless Chromium screenshots. Defaults to true."
+    },
     "ignoreHttpsErrors": {
       "type": "boolean",
       "description": "Ignore HTTPS errors during navigation."

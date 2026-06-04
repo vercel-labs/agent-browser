@@ -1,0 +1,65 @@
+# Init Scripts & Extensions
+
+Init scripts run before page JavaScript. Use them to install hooks, polyfills, instrumentation, or test helpers before the first navigation.
+
+## Launch-time scripts
+
+```bash
+agent-browser --init-script ./instrumentation.js open https://example.com
+agent-browser --init-script ./a.js --init-script ./b.js open https://example.com
+```
+
+You can also configure scripts with an environment variable:
+
+```bash
+export AGENT_BROWSER_INIT_SCRIPTS="./a.js,./b.js"
+agent-browser open https://example.com
+```
+
+Launch-time scripts are applied when the browser starts. If the daemon is already running, close it before changing launch-time script options.
+
+## Built-in scripts
+
+```bash
+agent-browser --enable react-devtools open http://localhost:3000
+```
+
+`react-devtools` is the built-in feature currently available. It installs the React DevTools hook before application code runs and is required for `react tree`, `react inspect`, `react renders`, and `react suspense`.
+
+## Runtime scripts
+
+```bash
+agent-browser addinitscript "window.__testMode = true"
+# Returns an identifier
+
+agent-browser removeinitscript <identifier>
+```
+
+Runtime init scripts are useful after a session has started. They are still init scripts, so they affect future documents and navigations rather than rewriting already-executed page code.
+
+## Pre-navigation setup
+
+For flows that need routes, cookies, or scripts installed before the first real navigation, start the browser without a URL:
+
+```bash
+agent-browser batch \
+  '["open"]' \
+  '["network","route","*","--abort","--resource-type","script"]' \
+  '["cookies","set","--curl","cookies.curl","--domain","localhost"]' \
+  '["navigate","http://localhost:3000/target"]'
+```
+
+`open` with no URL launches the browser on `about:blank`, leaving room to stage state before the target page loads.
+
+## Extensions
+
+```bash
+agent-browser --extension ./extension open https://example.com
+agent-browser --extension ./a --extension ./b open https://example.com
+```
+
+Extensions are launch-time options. They require a local Chromium-based browser and are not supported with CDP connections, cloud providers, or Lightpanda.
+
+## Safety
+
+Init scripts and extensions run with high privilege in the page context. Only load scripts and extension directories from trusted local paths.

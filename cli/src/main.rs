@@ -60,6 +60,23 @@ fn print_json_error_with_type(message: impl AsRef<str>, error_type: &str) {
     }));
 }
 
+fn should_send_hide_scrollbars_launch_option(
+    cli_hide_scrollbars: bool,
+    hide_scrollbars: bool,
+) -> bool {
+    cli_hide_scrollbars || !hide_scrollbars
+}
+
+fn apply_hide_scrollbars_launch_option(
+    launch_cmd: &mut serde_json::Value,
+    cli_hide_scrollbars: bool,
+    hide_scrollbars: bool,
+) {
+    if should_send_hide_scrollbars_launch_option(cli_hide_scrollbars, hide_scrollbars) {
+        launch_cmd["hideScrollbars"] = json!(hide_scrollbars);
+    }
+}
+
 struct ParsedProxy {
     server: String,
     username: Option<String>,
@@ -741,6 +758,7 @@ fn main() {
         proxy_password: proxy_password.as_deref(),
         ignore_https_errors: flags.ignore_https_errors,
         allow_file_access: flags.allow_file_access,
+        hide_scrollbars: flags.hide_scrollbars,
         profile: flags.profile.as_deref(),
         state: flags.state.as_deref(),
         provider: flags.provider.as_deref(),
@@ -813,6 +831,7 @@ fn main() {
             },
             flags.ignore_https_errors.then_some("--ignore-https-errors"),
             flags.cli_allow_file_access.then_some("--allow-file-access"),
+            flags.cli_hide_scrollbars.then_some("--hide-scrollbars"),
             flags.cli_download_path.then_some("--download-path"),
             flags.cli_headed.then_some("--headed"),
         ]
@@ -1063,6 +1082,10 @@ fn main() {
         || flags.args.is_some()
         || flags.user_agent.is_some()
         || flags.allow_file_access
+        || should_send_hide_scrollbars_launch_option(
+            flags.cli_hide_scrollbars,
+            flags.hide_scrollbars,
+        )
         || flags.color_scheme.is_some()
         || flags.download_path.is_some()
         || flags.engine.is_some()
@@ -1136,6 +1159,12 @@ fn main() {
         if flags.allow_file_access {
             launch_cmd["allowFileAccess"] = json!(true);
         }
+
+        apply_hide_scrollbars_launch_option(
+            &mut launch_cmd,
+            flags.cli_hide_scrollbars,
+            flags.hide_scrollbars,
+        );
 
         if let Some(ref cs) = flags.color_scheme {
             launch_cmd["colorScheme"] = json!(cs);
@@ -1488,5 +1517,24 @@ mod tests {
             parsed["error"],
             "Daemon process exited during startup:\nline \"quoted\"\u{001b}[2mansi\u{001b}[22m"
         );
+    }
+
+    #[test]
+    fn test_hide_scrollbars_launch_option_serialization() {
+        assert!(!should_send_hide_scrollbars_launch_option(false, true));
+        assert!(should_send_hide_scrollbars_launch_option(false, false));
+        assert!(should_send_hide_scrollbars_launch_option(true, true));
+
+        let mut default_cmd = json!({ "action": "launch" });
+        apply_hide_scrollbars_launch_option(&mut default_cmd, false, true);
+        assert!(default_cmd.get("hideScrollbars").is_none());
+
+        let mut config_false_cmd = json!({ "action": "launch" });
+        apply_hide_scrollbars_launch_option(&mut config_false_cmd, false, false);
+        assert_eq!(config_false_cmd["hideScrollbars"], false);
+
+        let mut cli_true_cmd = json!({ "action": "launch" });
+        apply_hide_scrollbars_launch_option(&mut cli_true_cmd, true, true);
+        assert_eq!(cli_true_cmd["hideScrollbars"], true);
     }
 }

@@ -2512,8 +2512,10 @@ fn parse_network(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                 .iter()
                 .position(|&s| s == "--resource-type" || s == "--resource-types");
             let resource_type = rt_idx.and_then(|i| rest.get(i + 1).copied());
-            let mut cmd =
-                json!({ "id": id, "action": "route", "url": url, "abort": abort, "body": body });
+            let mut cmd = json!({ "id": id, "action": "route", "url": url, "abort": abort });
+            if let Some(body) = body {
+                cmd["response"] = json!({ "body": body });
+            }
             if let Some(rt) = resource_type {
                 cmd["resourceType"] = json!(rt);
             }
@@ -2698,6 +2700,7 @@ mod tests {
             provider: None,
             ignore_https_errors: false,
             allow_file_access: false,
+            hide_scrollbars: true,
             device: None,
             auto_connect: false,
             session_name: None,
@@ -2712,6 +2715,7 @@ mod tests {
             cli_proxy: false,
             cli_proxy_bypass: false,
             cli_allow_file_access: false,
+            cli_hide_scrollbars: false,
             cli_annotate: false,
             cli_download_path: false,
             cli_headed: false,
@@ -2959,6 +2963,19 @@ mod tests {
         assert_eq!(cmd["action"], "route");
         assert_eq!(cmd["resourceType"], "script");
         assert_eq!(cmd["abort"], true);
+    }
+
+    #[test]
+    fn test_network_route_body_builds_response() {
+        let cmd = parse_command(
+            &args("network route **/api/users --body {\"users\":[]}"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "route");
+        assert_eq!(cmd["url"], "**/api/users");
+        assert_eq!(cmd["response"]["body"], "{\"users\":[]}");
+        assert!(cmd.get("body").is_none());
     }
 
     #[test]

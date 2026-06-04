@@ -16,12 +16,10 @@ pub mod scripts;
 mod renders;
 mod suspense;
 mod tree;
-mod vitals;
 
 pub use renders::{format_renders_report, RendersData};
 pub use suspense::{format_suspense_report, Boundary};
 pub use tree::{format_tree, TreeNode};
-pub use vitals::{format_vitals_report, VitalsData};
 
 /// React DevTools hook script (MIT, from facebook/react).
 /// Registered via `addScriptToEvaluateOnNewDocument` to install

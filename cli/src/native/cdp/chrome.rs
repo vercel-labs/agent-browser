@@ -103,6 +103,9 @@ pub struct LaunchOptions {
     pub ignore_https_errors: bool,
     pub color_scheme: Option<String>,
     pub download_path: Option<String>,
+    /// Hide native scrollbars in headless Chromium screenshots by launching
+    /// Chrome with `--hide-scrollbars`.
+    pub hide_scrollbars: bool,
     /// Initial viewport dimensions used for `--window-size` so the content
     /// area matches the desired viewport from the start.
     pub viewport_size: Option<(u32, u32)>,
@@ -130,6 +133,7 @@ impl Default for LaunchOptions {
             ignore_https_errors: false,
             color_scheme: None,
             download_path: None,
+            hide_scrollbars: true,
             viewport_size: None,
             use_real_keychain: false,
         }
@@ -174,6 +178,13 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
     // injected in headless mode).  Skip --headless when extensions are loaded.
     if options.headless && !has_extensions {
         args.push("--headless=new".to_string());
+        // Linux paints native scrollbars into viewport screenshots unless
+        // Chrome is launched with this flag. `--hide-scrollbars` is
+        // presence-based, so agent-browser exposes --hide-scrollbars false
+        // as the public opt-out instead of forwarding a fake inverse switch.
+        if options.hide_scrollbars {
+            args.push("--hide-scrollbars".to_string());
+        }
         // Enable SwiftShader software rendering in headless mode.  This
         // prevents silent crashes in environments where GPU drivers are
         // missing or restricted (VMs, containers, some cloud machines)
@@ -1356,6 +1367,7 @@ mod tests {
         };
         let result = build_chrome_args(&opts).unwrap();
         assert!(result.args.iter().any(|a| a == "--headless=new"));
+        assert!(result.args.iter().any(|a| a == "--hide-scrollbars"));
         assert!(result
             .args
             .iter()
@@ -1376,6 +1388,7 @@ mod tests {
         };
         let result = build_chrome_args(&opts).unwrap();
         assert!(!result.args.iter().any(|a| a.contains("--headless")));
+        assert!(!result.args.iter().any(|a| a == "--hide-scrollbars"));
         assert!(!result
             .args
             .iter()
@@ -1431,6 +1444,23 @@ mod tests {
     }
 
     #[test]
+    fn test_build_args_hide_scrollbars_false_suppresses_default_hide_scrollbars() {
+        let opts = LaunchOptions {
+            headless: true,
+            hide_scrollbars: false,
+            ..Default::default()
+        };
+        let result = build_chrome_args(&opts).unwrap();
+        assert!(
+            !result.args.iter().any(|a| a == "--hide-scrollbars"),
+            "--hide-scrollbars false should suppress agent-browser's default hide switch"
+        );
+        if let Some(ref dir) = result.temp_user_data_dir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
     fn test_build_args_start_maximized_suppresses_default_window_size() {
         let opts = LaunchOptions {
             headless: true,
@@ -1469,6 +1499,10 @@ mod tests {
         assert!(
             !result.args.iter().any(|a| a.contains("--headless")),
             "headless flag should be omitted when extensions are present"
+        );
+        assert!(
+            !result.args.iter().any(|a| a == "--hide-scrollbars"),
+            "scrollbars should remain visible when extensions force headed mode"
         );
         assert!(
             !result.args.iter().any(|a| a.contains("--window-size")),

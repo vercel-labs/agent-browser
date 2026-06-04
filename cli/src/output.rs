@@ -130,6 +130,98 @@ fn format_stream_status_text(action: Option<&str>, data: &serde_json::Value) -> 
     }
 }
 
+fn format_metric_ms(value: Option<f64>) -> String {
+    value
+        .map(|v| format!("{}ms", format_compact_number(v)))
+        .unwrap_or_else(|| "-".to_string())
+}
+
+fn format_compact_number(value: f64) -> String {
+    if value.fract() == 0.0 {
+        format!("{}", value as i64)
+    } else {
+        let formatted = format!("{:.2}", value);
+        formatted
+            .trim_end_matches('0')
+            .trim_end_matches('.')
+            .to_string()
+    }
+}
+
+fn truncate_field(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+
+    let mut truncated: String = value.chars().take(max_chars.saturating_sub(3)).collect();
+    truncated.push_str("...");
+    truncated
+}
+
+fn format_vitals_text(data: &serde_json::Value) -> String {
+    let url = data.get("url").and_then(|v| v.as_str()).unwrap_or("-");
+    let ttfb = format_metric_ms(data.get("ttfb").and_then(|v| v.as_f64()));
+    let fcp = format_metric_ms(data.get("fcp").and_then(|v| v.as_f64()));
+    let inp = format_metric_ms(data.get("inp").and_then(|v| v.as_f64()));
+    let lcp = data
+        .get("lcp")
+        .and_then(|v| v.get("startTime"))
+        .and_then(|v| v.as_f64());
+    let lcp = format_metric_ms(lcp);
+    let cls = data
+        .get("cls")
+        .and_then(|v| v.get("score"))
+        .and_then(|v| v.as_f64())
+        .map(format_compact_number)
+        .unwrap_or_else(|| "-".to_string());
+
+    let mut lines = vec![
+        format!("url: {}", url),
+        format!(
+            "ttfb: {}  fcp: {}  lcp: {}  cls: {}  inp: {}",
+            ttfb, fcp, lcp, cls, inp
+        ),
+    ];
+
+    if let Some(lcp_data) = data.get("lcp").and_then(|v| v.as_object()) {
+        let element = lcp_data.get("element").and_then(|v| v.as_str());
+        let lcp_url = lcp_data.get("url").and_then(|v| v.as_str());
+        if element.is_some() || lcp_url.is_some() {
+            let mut parts = Vec::new();
+            if let Some(element) = element {
+                parts.push(format!("element: {}", element));
+            }
+            if let Some(lcp_url) = lcp_url {
+                parts.push(format!("asset: {}", truncate_field(lcp_url, 96)));
+            }
+            lines.push(format!("lcp: {}", parts.join("  ")));
+        }
+    }
+
+    let phase_count = data
+        .get("phases")
+        .and_then(|v| v.as_array())
+        .map(|v| v.len())
+        .unwrap_or(0);
+    let component_count = data
+        .get("hydratedComponents")
+        .and_then(|v| v.as_array())
+        .map(|v| v.len())
+        .unwrap_or(0);
+    let hydration = data
+        .get("hydration")
+        .and_then(|v| v.get("duration"))
+        .and_then(|v| v.as_f64());
+    lines.push(format!(
+        "hydration: {}  phases: {}  hydratedComponents: {}",
+        format_metric_ms(hydration),
+        phase_count,
+        component_count
+    ));
+
+    lines.join("\n")
+}
+
 pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &OutputOptions) {
     if opts.json {
         if opts.content_boundaries {
@@ -203,6 +295,10 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
             println!("{}", output);
             return;
         }
+        if action == Some("vitals") {
+            println!("{}", format_vitals_text(data));
+            return;
+        }
         if action == Some("storage_get") {
             if let Some(output) = format_storage_text(data) {
                 println!("{}", output);
@@ -238,6 +334,11 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
         }
         if let Some(cdp_url) = data.get("cdpUrl").and_then(|v| v.as_str()) {
             println!("{}", cdp_url);
+            return;
+        }
+        // Rich command reports (React renders/suspense and older daemon responses)
+        if let Some(report) = data.get("report").and_then(|v| v.as_str()) {
+            println!("{}", report);
             return;
         }
         // Diff responses -- route by action to avoid fragile shape probing
@@ -1583,6 +1684,8 @@ Usage: agent-browser screenshot [selector] [path]
 
 Captures a screenshot of the current page. If no path is provided,
 saves to a temporary directory with a generated filename.
+Headless Chromium screenshots hide native scrollbars for consistent image output.
+Pass --hide-scrollbars false when launching to keep native scrollbars visible.
 
 Options:
   --full, -f           Capture full page (not just viewport)
@@ -2212,12 +2315,13 @@ Examples:
             r##"
 agent-browser trace - Record execution trace
 
-Usage: agent-browser trace <operation> [path]
+Usage: agent-browser trace start
+       agent-browser trace stop [path]
 
 Record a Chrome DevTools trace for debugging.
 
 Operations:
-  start [path]         Start recording trace
+  start                Start recording trace
   stop [path]          Stop recording and save trace
 
 Global Options:
@@ -2226,9 +2330,8 @@ Global Options:
 
 Examples:
   agent-browser trace start
-  agent-browser trace start ./my-trace
   agent-browser trace stop
-  agent-browser trace stop ./debug-trace.zip
+  agent-browser trace stop ./debug-trace.json
 "##
         }
 
@@ -2995,7 +3098,8 @@ Diff:
   diff url <u1> <u2>         Compare two pages
 
 Debug:
-  trace start|stop [path]    Record Chrome DevTools trace
+  trace start                Start Chrome DevTools trace
+  trace stop [path]          Stop and save Chrome DevTools trace
   profiler start|stop [path] Record Chrome DevTools profile
   record start <path> [url]  Start video recording (WebM)
   record stop                Stop and save video
@@ -3021,7 +3125,7 @@ React (requires `open --enable react-devtools`):
 
 Performance:
   vitals [url] [--json]      Core Web Vitals (LCP/CLS/TTFB/FCP/INP) +
-                             React hydration timing when profiling build detected
+                             React hydration summary; --json returns full data
 
 SPA:
   pushstate <url>            SPA client-side nav. Auto-detects window.next.router.push
@@ -3103,6 +3207,8 @@ Options:
                              e.g., --proxy-bypass "localhost,*.internal.com"
   --ignore-https-errors      Ignore HTTPS certificate errors
   --allow-file-access        Allow file:// URLs to access local files (Chromium only)
+  --hide-scrollbars <bool>   Hide native scrollbars in headless Chromium screenshots (default: true)
+                             Use --hide-scrollbars false to keep scrollbars visible
   -p, --provider <name>      Browser provider: ios, browserbase, kernel, browseruse, browserless, agentcore
   --device <name>            iOS device name (e.g., "iPhone 15 Pro")
   --json                     JSON output
@@ -3142,11 +3248,12 @@ Configuration:
   Boolean flags accept an optional true/false value to override config:
     --headed           (same as --headed true)
     --headed false     (disables "headed": true from config)
+    --hide-scrollbars false (keeps native scrollbars visible in headless Chromium screenshots)
 
   Extensions from user and project configs are merged (not replaced).
 
   Example agent-browser.json:
-    {{"headed": true, "proxy": "http://localhost:8080", "profile": "./browser-data"}}
+    {{"headed": true, "hideScrollbars": false, "proxy": "http://localhost:8080"}}
 
 Environment:
   AGENT_BROWSER_CONFIG           Path to config file (or use --config)
@@ -3166,6 +3273,7 @@ Environment:
   AGENT_BROWSER_PROVIDER         Browser provider (ios, browserbase, kernel, browseruse, browserless, agentcore)
   AGENT_BROWSER_AUTO_CONNECT     Auto-discover and connect to running Chrome
   AGENT_BROWSER_ALLOW_FILE_ACCESS Allow file:// URLs to access local files
+  AGENT_BROWSER_HIDE_SCROLLBARS  Hide scrollbars in headless Chromium screenshots (default: true)
   AGENT_BROWSER_COLOR_SCHEME     Color scheme preference (dark, light, no-preference)
   AGENT_BROWSER_DOWNLOAD_PATH    Default download directory for browser downloads
   AGENT_BROWSER_DEFAULT_TIMEOUT  Default action timeout in ms (default: 25000)
@@ -3323,7 +3431,7 @@ pub fn print_version() {
 
 #[cfg(test)]
 mod tests {
-    use super::format_storage_text;
+    use super::{format_storage_text, format_vitals_text};
     use serde_json::json;
 
     #[test]
@@ -3388,5 +3496,62 @@ mod tests {
         let rendered = format_storage_text(&data).unwrap();
 
         assert_eq!(rendered, "No storage entries");
+    }
+
+    #[test]
+    fn test_format_vitals_text_summary() {
+        let data = json!({
+            "url": "https://example.com/dashboard",
+            "ttfb": 12.34,
+            "fcp": 56.0,
+            "lcp": {
+                "startTime": 123.45,
+                "size": 1200,
+                "element": "img",
+                "url": "https://example.com/assets/hero.png"
+            },
+            "cls": {
+                "score": 0.0123,
+                "entries": []
+            },
+            "inp": null,
+            "hydration": {
+                "startTime": 130.0,
+                "endTime": 180.25,
+                "duration": 50.25
+            },
+            "phases": [{ "label": "Hydrated" }],
+            "hydratedComponents": [{ "name": "App" }, { "name": "Nav" }]
+        });
+
+        let rendered = format_vitals_text(&data);
+
+        assert_eq!(
+            rendered,
+            "url: https://example.com/dashboard\n\
+ttfb: 12.34ms  fcp: 56ms  lcp: 123.45ms  cls: 0.01  inp: -\n\
+lcp: element: img  asset: https://example.com/assets/hero.png\n\
+hydration: 50.25ms  phases: 1  hydratedComponents: 2"
+        );
+    }
+
+    #[test]
+    fn test_format_vitals_text_handles_missing_values() {
+        let data = json!({
+            "url": "https://example.com",
+            "lcp": null,
+            "cls": { "score": 0.0, "entries": [] },
+            "phases": [],
+            "hydratedComponents": []
+        });
+
+        let rendered = format_vitals_text(&data);
+
+        assert_eq!(
+            rendered,
+            "url: https://example.com\n\
+ttfb: -  fcp: -  lcp: -  cls: 0  inp: -\n\
+hydration: -  phases: 0  hydratedComponents: 0"
+        );
     }
 }
