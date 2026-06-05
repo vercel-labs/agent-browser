@@ -2404,7 +2404,7 @@ async fn e2e_domain_filter() {
 
     // Blocked domain
     let resp = execute_command(
-        &json!({ "id": "3", "action": "navigate", "url": "https://blocked.com" }),
+        &json!({ "id": "3", "action": "navigate", "url": "https://blocked.test" }),
         &mut state,
     )
     .await;
@@ -2430,7 +2430,7 @@ async fn e2e_domain_filter() {
     let resp = execute_command(
         &json!({
             "id": "5", "action": "evaluate",
-            "script": "fetch('https://blocked.com/data').then(() => 'ok').catch(e => 'blocked:' + e.message)",
+            "script": "fetch('https://blocked.test/data').then(() => 'ok').catch(e => 'blocked:' + e.message)",
             "await": true,
         }),
         &mut state,
@@ -2442,6 +2442,259 @@ async fn e2e_domain_filter() {
         result.starts_with("blocked:"),
         "Fetch to blocked domain should fail, got: {}",
         result,
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_split_domain_filter_applies_when_browser_is_reused() {
+    let (allowed_origin, _allowed_server) = start_echo_server().await;
+    let (blocked_origin, _blocked_server) = start_echo_server().await;
+    let blocked_localhost_origin = blocked_origin.replace("http://127.0.0.1", "http://localhost");
+
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "2",
+            "action": "navigate",
+            "url": format!("{}/page", allowed_origin),
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "3",
+            "action": "launch",
+            "headless": true,
+            "navigationDomains": ["127.0.0.1"],
+            "resourceDomains": ["127.0.0.1"],
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["reused"],
+        true,
+        "second launch should reuse the existing browser"
+    );
+
+    let resp = execute_command(
+        &json!({
+            "id": "4",
+            "action": "navigate",
+            "url": format!("{}/blocked-navigation", blocked_localhost_origin),
+        }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(resp["success"], false);
+    let error = resp["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("allowed navigation domains"),
+        "reused launch should install navigation filter, got: {}",
+        error
+    );
+
+    let resp = execute_command(
+        &json!({
+            "id": "5",
+            "action": "navigate",
+            "url": format!("{}/after-block", allowed_origin),
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let blocked_fetch_url = format!("{}/blocked-resource", blocked_localhost_origin);
+    let resp = execute_command(
+        &json!({
+            "id": "6",
+            "action": "evaluate",
+            "script": format!(
+                "fetch({:?}).then(() => 'allowed').catch(e => 'blocked:' + e.name)",
+                blocked_fetch_url
+            ),
+            "await": true,
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let result = get_data(&resp)["result"].as_str().unwrap_or_default();
+    assert!(
+        result.starts_with("blocked:"),
+        "reused launch should install resource filter, got: {}",
+        result
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_split_resource_domains_replace_and_clear_on_reused_browser() {
+    let (origin, _server) = start_echo_server().await;
+    let localhost_origin = origin.replace("http://127.0.0.1", "http://localhost");
+    let ws_127 = origin.replace("http://127.0.0.1", "ws://127.0.0.1");
+    let ws_localhost = origin.replace("http://127.0.0.1", "ws://localhost");
+
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({
+            "id": "1",
+            "action": "launch",
+            "headless": true,
+            "resourceDomains": ["127.0.0.1"],
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "2",
+            "action": "navigate",
+            "url": format!("{}/initial", origin),
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "3",
+            "action": "evaluate",
+            "script": format!(
+                "(() => {{ try {{ const ws = new WebSocket({:?}); ws.close(); return 'allowed'; }} catch (e) {{ return 'blocked:' + e.name; }} }})()",
+                ws_localhost
+            ),
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert!(
+        get_data(&resp)["result"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("blocked:"),
+        "localhost WebSocket should be blocked by initial 127.0.0.1 resource filter: {}",
+        resp
+    );
+
+    let resp = execute_command(
+        &json!({
+            "id": "4",
+            "action": "launch",
+            "headless": true,
+            "resourceDomains": ["localhost"],
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["reused"], true);
+
+    let resp = execute_command(
+        &json!({
+            "id": "5",
+            "action": "navigate",
+            "url": format!("{}/replaced", localhost_origin),
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "6",
+            "action": "evaluate",
+            "script": format!(
+                "(() => {{ try {{ const ws = new WebSocket({:?}); ws.close(); return 'allowed'; }} catch (e) {{ return 'blocked:' + e.name; }} }})()",
+                ws_localhost
+            ),
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["result"].as_str().unwrap_or_default(),
+        "allowed",
+        "replaced localhost resource filter should not keep the stale 127.0.0.1 WebSocket patch"
+    );
+
+    let resp = execute_command(
+        &json!({
+            "id": "7",
+            "action": "launch",
+            "headless": true,
+            "resourceDomains": [],
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["reused"], true);
+
+    let resp = execute_command(
+        &json!({
+            "id": "8",
+            "action": "evaluate",
+            "script": format!(
+                "(() => {{ try {{ const ws = new WebSocket({:?}); ws.close(); return 'allowed'; }} catch (e) {{ return 'blocked:' + e.name; }} }})()",
+                ws_127
+            ),
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["result"].as_str().unwrap_or_default(),
+        "allowed",
+        "explicit empty resourceDomains should clear the WebSocket resource filter"
+    );
+
+    let resp = execute_command(
+        &json!({
+            "id": "9",
+            "action": "evaluate",
+            "script": format!(
+                "fetch({:?}).then(() => 'allowed').catch(e => 'blocked:' + e.name)",
+                format!("{}/after-clear", origin)
+            ),
+            "await": true,
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["result"].as_str().unwrap_or_default(),
+        "allowed",
+        "explicit empty resourceDomains should clear Fetch resource filtering"
     );
 
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;

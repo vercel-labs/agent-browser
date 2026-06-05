@@ -638,7 +638,17 @@ agent-browser includes security features for safe AI agent deployments. All feat
 
 - **Authentication Vault**: Store credentials locally (always encrypted), reference by name. The LLM never sees passwords. `auth login` navigates with `load` and then waits for login form selectors to appear (SPA-friendly, timeout follows the default action timeout). A key is auto-generated at `~/.agent-browser/.encryption-key` if `AGENT_BROWSER_ENCRYPTION_KEY` is not set: `echo "pass" | agent-browser auth save github --url https://github.com/login --username user --password-stdin` then `agent-browser auth login github`
 - **Content Boundary Markers**: Wrap page output in delimiters so LLMs can distinguish tool output from untrusted content: `--content-boundaries`
-- **Domain Allowlist**: Restrict navigation to trusted domains (wildcards like `*.example.com` also match the bare domain): `--allowed-domains "example.com,*.example.com"`. Sub-resource requests (scripts, images, fetch) and WebSocket/EventSource connections to non-allowed domains are also blocked. Include any CDN domains your target pages depend on (e.g., `*.cdn.example.com`).
+- **Domain Allowlist**: Restrict where the agent can navigate and what resources pages can load. Three controls are available:
+  - `--allowed-domains` / `allowedDomains`: Restricts both navigation and sub-resources. This legacy option is still supported.
+  - `--navigation-domains` / `navigationDomains`: Restricts only agent-initiated navigation, including open, click, and form submit.
+  - `--resource-domains` / `resourceDomains`: Restricts only page-initiated sub-resources, including fetch, XHR, scripts, WebSocket, EventSource, and beacons.
+
+  When `navigationDomains` or `resourceDomains` is set, it takes priority over `allowedDomains` for that scope. Omitting `resourceDomains` leaves sub-resources unrestricted, so you can lock navigation to your app while allowing pages to load their own dependencies:
+  ```json
+  {
+    "navigationDomains": ["myapp.test", "*.myapp.test"]
+  }
+  ```
 - **Action Policy**: Gate destructive actions with a static policy file: `--action-policy ./policy.json`
 - **Action Confirmation**: Require explicit approval for sensitive action categories: `--confirm-actions eval,download`
 - **Output Length Limits**: Prevent context flooding: `--max-output 50000`
@@ -647,7 +657,9 @@ agent-browser includes security features for safe AI agent deployments. All feat
 | ----------------------------------- | ---------------------------------------- |
 | `AGENT_BROWSER_CONTENT_BOUNDARIES`  | Wrap page output in boundary markers     |
 | `AGENT_BROWSER_MAX_OUTPUT`          | Max characters for page output           |
-| `AGENT_BROWSER_ALLOWED_DOMAINS`     | Comma-separated allowed domain patterns  |
+| `AGENT_BROWSER_ALLOWED_DOMAINS`     | Comma-separated allowed domain patterns for navigation and resources |
+| `AGENT_BROWSER_NAVIGATION_DOMAINS`  | Comma-separated navigation-only domain patterns |
+| `AGENT_BROWSER_RESOURCE_DOMAINS`    | Comma-separated resource-only domain patterns |
 | `AGENT_BROWSER_ACTION_POLICY`       | Path to action policy JSON file          |
 | `AGENT_BROWSER_CONFIRM_ACTIONS`     | Action categories requiring confirmation |
 | `AGENT_BROWSER_CONFIRM_INTERACTIVE` | Enable interactive confirmation prompts  |
@@ -733,7 +745,9 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 | `--download-path <path>` | Default download directory (or `AGENT_BROWSER_DOWNLOAD_PATH` env) |
 | `--content-boundaries` | Wrap page output in boundary markers for LLM safety (or `AGENT_BROWSER_CONTENT_BOUNDARIES` env) |
 | `--max-output <chars>` | Truncate page output to N characters (or `AGENT_BROWSER_MAX_OUTPUT` env) |
-| `--allowed-domains <list>` | Comma-separated allowed domain patterns (or `AGENT_BROWSER_ALLOWED_DOMAINS` env) |
+| `--allowed-domains <list>` | Restrict navigation and resource domains (or `AGENT_BROWSER_ALLOWED_DOMAINS` env) |
+| `--navigation-domains <list>` | Restrict only agent-initiated navigation (or `AGENT_BROWSER_NAVIGATION_DOMAINS` env) |
+| `--resource-domains <list>` | Restrict only page-initiated sub-resources (or `AGENT_BROWSER_RESOURCE_DOMAINS` env) |
 | `--action-policy <path>` | Path to action policy JSON file (or `AGENT_BROWSER_ACTION_POLICY` env) |
 | `--confirm-actions <list>` | Action categories requiring confirmation (or `AGENT_BROWSER_CONFIRM_ACTIONS` env) |
 | `--confirm-interactive` | Interactive confirmation prompts; auto-denies if stdin is not a TTY (or `AGENT_BROWSER_CONFIRM_INTERACTIVE` env) |

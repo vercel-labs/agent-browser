@@ -63,6 +63,26 @@ If the user gave you a dev server URL, stay on that origin. Dev-only
 endpoints on real production hosts will either fail or behave unexpectedly
 and can expose attack surface.
 
+## Domain allowlists
+
+Use domain allowlists when the task needs a hard browser boundary.
+
+- `--allowed-domains` restricts both navigation and page-initiated resources.
+- `--navigation-domains` restricts only agent-initiated navigation such as
+  open, click, and form submit.
+- `--resource-domains` restricts only page-initiated resources such as
+  fetch, XHR, scripts, WebSocket, EventSource, and beacons.
+
+When `navigationDomains` or `resourceDomains` is set, it takes priority over
+`allowedDomains` for that scope. Omitting `resourceDomains` leaves page
+resources unrestricted, which is useful when you need to keep the agent on a
+target app while still letting the page load its own CDN and API
+dependencies.
+
+```bash
+agent-browser --navigation-domains "app.example.com,*.app.example.com" open https://app.example.com
+```
+
 ## Init scripts and `--enable` features inject code
 
 `--init-script <path>` and `--enable <feature>` register scripts that run

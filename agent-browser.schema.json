@@ -114,7 +114,21 @@
       "items": {
         "type": "string"
       },
-      "description": "Allowed domain patterns (e.g., ['example.com', '*.example.com'])."
+      "description": "Legacy allowed domain patterns for both navigation and resources (e.g., ['example.com', '*.example.com'])."
+    },
+    "navigationDomains": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Allowed domain patterns for agent-initiated navigation only."
+    },
+    "resourceDomains": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Allowed domain patterns for page-initiated sub-resources only."
     },
     "actionPolicy": {
       "type": "string",

@@ -853,7 +853,7 @@ mod tests {
 
     #[test]
     fn test_same_origin_http_request_rejects_cross_origin_referer() {
-        let req = "GET /api/session/9222/tabs HTTP/1.1\r\nHost: localhost:4848\r\nReferer: https://evil.com/path\r\n\r\n";
+        let req = "GET /api/session/9222/tabs HTTP/1.1\r\nHost: localhost:4848\r\nReferer: https://blocked.test/path\r\n\r\n";
         assert!(!is_same_origin_http_request(req));
     }
 
@@ -865,7 +865,7 @@ mod tests {
 
     #[test]
     fn test_cross_origin_ws_request_rejected() {
-        let req = "GET /api/session/9222/stream HTTP/1.1\r\nHost: localhost:4848\r\nOrigin: https://evil.com\r\nUpgrade: websocket\r\n\r\n";
+        let req = "GET /api/session/9222/stream HTTP/1.1\r\nHost: localhost:4848\r\nOrigin: https://blocked.test\r\nUpgrade: websocket\r\n\r\n";
         assert!(!is_same_origin_ws_request(req));
     }
 
