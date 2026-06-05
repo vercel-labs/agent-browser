@@ -593,6 +593,16 @@ impl BrowserManager {
         self.client
             .send_command_no_params("Page.enable", Some(session_id))
             .await?;
+        // Intercept file chooser dialogs so Page.fileChooserOpened events are emitted
+        // instead of showing the native OS file picker. Ignored on unsupported engines.
+        let _ = self
+            .client
+            .send_command(
+                "Page.setInterceptFileChooserDialog",
+                Some(json!({ "enabled": true })),
+                Some(session_id),
+            )
+            .await;
         self.client
             .send_command_no_params("Runtime.enable", Some(session_id))
             .await?;
@@ -629,6 +639,14 @@ impl BrowserManager {
         self.client
             .send_command_no_params("Page.enable", None)
             .await?;
+        let _ = self
+            .client
+            .send_command(
+                "Page.setInterceptFileChooserDialog",
+                Some(json!({ "enabled": true })),
+                None,
+            )
+            .await;
         self.client
             .send_command_no_params("Runtime.enable", None)
             .await?;
@@ -1363,6 +1381,29 @@ impl BrowserManager {
                     "backendNodeId": backend_node_id,
                 })),
                 Some(&effective_session_id),
+            )
+            .await?;
+
+        Ok(())
+    }
+
+    /// Upload files to a file input identified by backendNodeId from a fileChooserOpened event.
+    /// Used when no CSS selector is available (dynamic file inputs not in the DOM).
+    pub async fn upload_files_for_chooser(
+        &self,
+        backend_node_id: i64,
+        files: &[String],
+    ) -> Result<(), String> {
+        let session_id = self.active_session_id()?;
+
+        self.client
+            .send_command(
+                "DOM.setFileInputFiles",
+                Some(json!({
+                    "files": files,
+                    "backendNodeId": backend_node_id,
+                })),
+                Some(session_id),
             )
             .await?;
 
