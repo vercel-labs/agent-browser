@@ -2,17 +2,17 @@
 
 agent-browser includes security features to protect against credential exposure, prompt injection via untrusted page content, and unauthorized browser actions.
 
-All security features are opt-in. By default, agent-browser imposes no restrictions on navigation, actions, or output. Enable these features as needed for your deployment -- existing workflows are unaffected until you explicitly activate a feature.
+All security features are opt-in. By default, agent-browser imposes no restrictions on navigation, actions, or output. Enable these features as needed for your deployment; existing workflows are unaffected until you explicitly activate a feature.
 
 ## Threat Model
 
 These features are designed to mitigate the following threats when an LLM-based agent drives a browser:
 
-- **Credential exposure** -- Passwords stored in the auth vault are never included in LLM context. The CLI handles vault operations locally; credentials do not pass through the daemon's IPC channel.
-- **Prompt injection via page content** -- Malicious pages can embed text that looks like tool output or system instructions. Content boundary markers (`--content-boundaries`) let the orchestrator distinguish trusted tool output from untrusted page content.
-- **Unauthorized navigation / data exfiltration** -- A compromised or manipulated agent could navigate to attacker-controlled domains to exfiltrate data. The domain allowlist (`--allowed-domains`) blocks navigations, sub-resource requests, WebSocket connections, EventSource streams, and `sendBeacon` calls to non-allowed domains.
-- **Unauthorized destructive actions** -- Action policy (`--action-policy`) and confirmation gating (`--confirm-actions`) prevent the agent from performing dangerous operations (eval, downloads, uploads) without explicit approval.
-- **Context flooding** -- Large page outputs can overwhelm an LLM's context window. Output truncation (`--max-output`) caps the size of page-sourced content.
+- **Credential exposure**: Passwords stored in the auth vault are never included in LLM context. The CLI handles vault operations locally; credentials do not pass through the daemon's IPC channel.
+- **Prompt injection via page content**: Malicious pages can embed text that looks like tool output or system instructions. Content boundary markers (`--content-boundaries`) let the orchestrator distinguish trusted tool output from untrusted page content.
+- **Unauthorized navigation / data exfiltration**: A compromised or manipulated agent could navigate to untrusted domains to exfiltrate data. Domain allowlists can restrict navigation, sub-resource requests, WebSocket connections, EventSource streams, and `sendBeacon` calls.
+- **Unauthorized destructive actions**: Action policy (`--action-policy`) and confirmation gating (`--confirm-actions`) prevent the agent from performing dangerous operations (eval, downloads, uploads) without explicit approval.
+- **Context flooding**: Large page outputs can overwhelm an LLM's context window. Output truncation (`--max-output`) caps the size of page-sourced content.
 
 ### Known limitations
 
@@ -98,7 +98,7 @@ In `--json` mode, boundary metadata is injected into the JSON response as a `_bo
 
 ## Domain Allowlist
 
-Restrict which domains the browser can interact with, preventing redirect-based attacks and data exfiltration:
+Restrict which domains the browser can navigate to and which domains pages can load resources from.
 
 ```bash
 agent-browser --allowed-domains "example.com,*.example.com,github.com" open https://example.com
@@ -106,27 +106,37 @@ agent-browser --allowed-domains "example.com,*.example.com,github.com" open http
 export AGENT_BROWSER_ALLOWED_DOMAINS="example.com,*.example.com"
 ```
 
-Supports exact match (`github.com`) and wildcard prefix (`*.example.com`, which also matches the bare domain `example.com`). Both page navigations and sub-resource requests (scripts, images, fetch, XHR, etc.) to non-allowed domains are blocked, preventing data exfiltration. WebSocket and EventSource connections are also blocked via constructor-level patching. Non-http(s) sub-resources (data URIs, blobs) are still allowed. When a request is blocked, the command returns an error.
+The legacy `allowedDomains` list restricts both navigation and sub-resource requests. For split control, use `navigationDomains` to restrict agent-initiated navigation and `resourceDomains` to restrict page-initiated resources such as scripts, images, fetch, XHR, WebSocket, EventSource, and beacons:
 
-> **Note:** The WebSocket/EventSource blocking is best-effort -- it works by overriding the browser constructors via an init script. If the `eval` action category is allowed, page scripts could theoretically restore the original constructors. For maximum protection, deny the `eval` category via `--action-policy` when using `--allowed-domains`.
+```bash
+agent-browser --navigation-domains "app.example.com,*.app.example.com" open https://app.example.com
+agent-browser --resource-domains "app.example.com,*.app.example.com,cdn.example.com" open https://app.example.com
+```
+
+When `navigationDomains` or `resourceDomains` is set, it takes priority over `allowedDomains` for that scope. Omitting `resourceDomains` leaves sub-resources unrestricted, so you can lock navigation to your app while allowing pages to load their own dependencies.
+
+Supports exact match (`github.com`) and wildcard prefix (`*.example.com`, which also matches the bare domain `example.com`). Non-http(s) sub-resources such as data URIs and blobs are still allowed. When a request is blocked, the command returns an error.
+
+> **Note:** The WebSocket/EventSource blocking is best-effort because it works by overriding the browser constructors via an init script. If the `eval` action category is allowed, page scripts could theoretically restore the original constructors. For maximum protection, deny the `eval` category via `--action-policy` when using domain allowlists.
 
 Config file:
 
 ```json
 {
-  "allowedDomains": ["example.com", "*.example.com", "github.com"]
+  "navigationDomains": ["app.example.com", "*.app.example.com"],
+  "resourceDomains": ["app.example.com", "*.app.example.com", "cdn.example.com"]
 }
 ```
 
-> **CDN and third-party resources:** The domain filter blocks all sub-resource requests (scripts, stylesheets, images, fonts, fetch/XHR) to non-allowed domains. Most websites load assets from CDN domains. Include these in your allowlist or pages will break. For example:
+> **CDN and third-party resources:** When `allowedDomains` or `resourceDomains` restricts resources, sub-resource requests to non-allowed domains are blocked. Most websites load assets from CDN domains. Include these in your resource allowlist or pages will break. For example:
 >
 > ```bash
-> --allowed-domains "myapp.com,*.myapp.com,cdn.jsdelivr.net,fonts.googleapis.com,fonts.gstatic.com"
+> --resource-domains "app.example.com,*.app.example.com,cdn.jsdelivr.net,fonts.googleapis.com,fonts.gstatic.com"
 > ```
 
 ## Action Policy
 
-Gate actions using a static policy file. The policy is enforced by the daemon -- denied actions fail immediately.
+Gate actions using a static policy file. The policy is enforced by the daemon, and denied actions fail immediately.
 
 ```bash
 agent-browser --action-policy ./policy.json open https://example.com
@@ -220,7 +230,9 @@ Affected output types: `snapshot`, `get text`, `get html`, `eval`, `console`.
   <tbody>
     <tr><td><code>AGENT_BROWSER_CONTENT_BOUNDARIES</code></td><td>Wrap page output in boundary markers</td></tr>
     <tr><td><code>AGENT_BROWSER_MAX_OUTPUT</code></td><td>Max characters for page output</td></tr>
-    <tr><td><code>AGENT_BROWSER_ALLOWED_DOMAINS</code></td><td>Comma-separated allowed domain patterns</td></tr>
+    <tr><td><code>AGENT_BROWSER_ALLOWED_DOMAINS</code></td><td>Comma-separated allowed domain patterns for navigation and resources</td></tr>
+    <tr><td><code>AGENT_BROWSER_NAVIGATION_DOMAINS</code></td><td>Comma-separated navigation-only allowed domain patterns</td></tr>
+    <tr><td><code>AGENT_BROWSER_RESOURCE_DOMAINS</code></td><td>Comma-separated resource-only allowed domain patterns</td></tr>
     <tr><td><code>AGENT_BROWSER_ACTION_POLICY</code></td><td>Path to action policy JSON file</td></tr>
     <tr><td><code>AGENT_BROWSER_CONFIRM_ACTIONS</code></td><td>Comma-separated action categories requiring confirmation</td></tr>
     <tr><td><code>AGENT_BROWSER_CONFIRM_INTERACTIVE</code></td><td>Enable interactive confirmation prompts</td></tr>
@@ -236,7 +248,7 @@ For production AI agent deployments:
 {
   "contentBoundaries": true,
   "maxOutput": 50000,
-  "allowedDomains": ["your-app.com", "*.your-app.com"],
+  "navigationDomains": ["your-app.com", "*.your-app.com"],
   "actionPolicy": "./policy.json"
 }
 ```

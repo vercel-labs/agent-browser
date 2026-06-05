@@ -1,0 +1,96 @@
+# Video Recording
+
+Use `record` to capture browser automation as a WebM video for debugging, CI evidence, product walkthroughs, or repro reports.
+
+## Basic workflow
+
+```bash
+agent-browser open https://example.com
+agent-browser record start ./demo.webm
+agent-browser snapshot -i
+agent-browser click @e1
+
+agent-browser record stop
+```
+
+After launching a session, `record start` can also navigate immediately:
+
+```bash
+agent-browser open
+agent-browser record start ./demo.webm https://example.com
+```
+
+If no URL is provided, recording starts from the current page. The recording context copies cookies from the active session.
+
+## Commands
+
+<table>
+  <thead>
+    <tr><th>Command</th><th>Description</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>record start &lt;path.webm&gt; [url]</code></td><td>Start recording to a WebM file</td></tr>
+    <tr><td><code>record stop</code></td><td>Stop the active recording and save the file</td></tr>
+    <tr><td><code>record restart &lt;path.webm&gt; [url]</code></td><td>Stop the current recording and immediately start another</td></tr>
+  </tbody>
+</table>
+
+## CI evidence
+
+```bash
+#!/bin/bash
+set -e
+
+cleanup() {
+  agent-browser record stop 2>/dev/null || true
+  agent-browser close 2>/dev/null || true
+}
+trap cleanup EXIT
+
+agent-browser open https://app.example.com/login
+agent-browser record start "./artifacts/login-flow.webm"
+agent-browser snapshot -i
+agent-browser fill @e1 "demo@example.com"
+agent-browser fill @e2 "password"
+agent-browser click @e3
+agent-browser wait --url "**/dashboard"
+```
+
+Keep recordings as CI artifacts when browser failures are hard to diagnose from text output alone.
+
+## Human-readable demos
+
+Add small waits when the video is meant for a person to watch:
+
+```bash
+agent-browser open https://shop.example.com
+agent-browser record start ./checkout.webm
+agent-browser wait 500
+agent-browser click @e4
+agent-browser wait 500
+agent-browser screenshot ./screenshots/cart.png
+agent-browser record stop
+```
+
+Screenshots and videos work well together: screenshots capture precise still states, while the video shows timing, transitions, and unexpected overlays.
+
+## Output format
+
+<table>
+  <thead>
+    <tr><th>Property</th><th>Value</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Container</td><td>WebM</td></tr>
+    <tr><td>Common extension</td><td><code>.webm</code></td></tr>
+    <tr><td>Viewport</td><td>Uses the active browser viewport settings</td></tr>
+    <tr><td>State</td><td>Copies cookies from the active session</td></tr>
+  </tbody>
+</table>
+
+## Limitations
+
+- Recording adds overhead to automation.
+- Long recordings can use significant disk space.
+- Use `record stop` before closing a session if you need the file flushed.
+- Some constrained headless environments may have codec or GPU limitations.

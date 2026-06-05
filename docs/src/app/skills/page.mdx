@@ -61,15 +61,15 @@ This design solves the version drift problem: the installed SKILL.md rarely chan
 
 ## Available Skills
 
-- **agent-browser** — Core browser automation: navigation, snapshots, forms, screenshots, data extraction, sessions, authentication, diffing, and the full command reference.
+- **core** — Core browser automation: navigation, snapshots, forms, screenshots, data extraction, sessions, authentication, diffing, and the full command reference. Start here for most browser tasks.
 - **dogfood** — Systematic exploratory testing. Navigates an app like a real user, finds bugs and UX issues, and produces a structured report with screenshots and repro videos.
 - **electron** — Automate any Electron app (VS Code, Slack, Discord, Figma, etc.) by connecting to its built-in Chrome DevTools Protocol port.
 - **slack** — Browser-based Slack automation. Check unreads, navigate channels, search conversations, send messages, and extract data.
 - **vercel-sandbox** — Run agent-browser + headless Chrome inside ephemeral Vercel Sandbox microVMs.
 - **agentcore** — Run agent-browser on AWS Bedrock AgentCore cloud browsers.
 
-Use `agent-browser skills list` to see all available skills, then `agent-browser skills get <name>` to load one.
+Use `agent-browser skills list` to see all available skills, then `agent-browser skills get <name>` to load one. `agent-browser skills get core --full` is the recommended starting point for most browser tasks.
 
 ## Source
 
-All skill files are in the [`skills/`](https://github.com/vercel-labs/agent-browser/tree/main/skills) directory of the repository.
+All skill files are in the [`skills/`](https://github.com/vercel-labs/agent-browser/tree/main/skills) and [`skill-data/`](https://github.com/vercel-labs/agent-browser/tree/main/skill-data) directories of the repository. The `skills/` directory holds the discovery stub that `npx skills add` installs; the `skill-data/` directory holds the runtime skill content served by the CLI.

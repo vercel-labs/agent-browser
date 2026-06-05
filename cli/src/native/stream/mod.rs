@@ -473,7 +473,7 @@ mod tests {
 
     #[test]
     fn test_disallowed_origin() {
-        assert!(!is_allowed_origin(Some("http://evil.com")));
+        assert!(!is_allowed_origin(Some("http://blocked.test")));
     }
 
     #[test]

@@ -1,0 +1,63 @@
+# React & Web Vitals
+
+agent-browser can inspect React component trees, record re-renders, classify Suspense boundaries, measure Core Web Vitals, and perform SPA navigation.
+
+## Enable React inspection
+
+React inspection requires the React DevTools hook to be installed before page JavaScript runs:
+
+```bash
+agent-browser open --enable react-devtools http://localhost:3000
+agent-browser react tree
+```
+
+If the browser is already running, close it before relaunching with `--enable react-devtools`.
+
+## React commands
+
+<table>
+  <thead>
+    <tr><th>Command</th><th>Description</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>react tree</code></td><td>Print the React component tree with fiber IDs</td></tr>
+    <tr><td><code>react inspect &lt;fiberId&gt;</code></td><td>Inspect props, hooks, state, and source for one component</td></tr>
+    <tr><td><code>react renders start</code></td><td>Begin recording component render commits</td></tr>
+    <tr><td><code>react renders stop [--json]</code></td><td>Stop recording and print a render profile</td></tr>
+    <tr><td><code>react suspense [--only-dynamic] [--json]</code></td><td>Walk Suspense boundaries and classify static versus dynamic boundaries</td></tr>
+  </tbody>
+</table>
+
+```bash
+agent-browser react tree
+agent-browser react inspect 42
+
+agent-browser react renders start
+agent-browser click @e3
+agent-browser react renders stop
+
+agent-browser react suspense --only-dynamic
+```
+
+## Web Vitals
+
+`vitals` works on any site. When a React profiling build is detected, it also reports hydration phases.
+
+```bash
+agent-browser vitals
+agent-browser vitals https://example.com --json
+```
+
+By default, `vitals` prints a summary using the same fields as the structured `--json` response. Reported metrics include LCP, CLS, TTFB, FCP, INP, and hydration timing when available.
+
+## SPA navigation
+
+`pushstate` performs client-side navigation without forcing a full browser reload. On Next.js apps, it attempts to use `window.next.router.push` so RSC fetches still run. Other frameworks fall back to `history.pushState` plus navigation events.
+
+```bash
+agent-browser pushstate /dashboard
+agent-browser wait --load networkidle
+agent-browser snapshot -i
+```
+
+Use `open` for full navigation and `pushstate` when the workflow needs SPA behavior.

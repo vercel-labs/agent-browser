@@ -100,20 +100,24 @@ impl DomainFilter {
         }
     }
 
-    pub fn with_split(
-        allowed: &str,
-        navigation: Option<&str>,
-        resource: Option<&str>,
-    ) -> Self {
+    pub fn with_split(allowed: &str, navigation: Option<&str>, resource: Option<&str>) -> Self {
         Self {
             allowed_domains: parse_domain_list(allowed),
-            navigation_domains: navigation
-                .map(|s| parse_domain_list(s))
-                .unwrap_or_default(),
-            resource_domains: resource
-                .map(|s| parse_domain_list(s))
-                .unwrap_or_default(),
+            navigation_domains: navigation.map(parse_domain_list).unwrap_or_default(),
+            resource_domains: resource.map(parse_domain_list).unwrap_or_default(),
         }
+    }
+
+    pub fn from_values(
+        allowed: Option<&Value>,
+        navigation: Option<&Value>,
+        resource: Option<&Value>,
+    ) -> Result<Self, String> {
+        Ok(Self {
+            allowed_domains: parse_domain_value(allowed, "allowedDomains")?,
+            navigation_domains: parse_domain_value(navigation, "navigationDomains")?,
+            resource_domains: parse_domain_value(resource, "resourceDomains")?,
+        })
     }
 
     /// Check whether any filtering is active at all.
@@ -219,6 +223,24 @@ fn parse_domain_list(input: &str) -> Vec<String> {
         .map(|s| s.trim().to_lowercase())
         .filter(|s| !s.is_empty())
         .collect()
+}
+
+fn parse_domain_value(value: Option<&Value>, field: &str) -> Result<Vec<String>, String> {
+    match value {
+        None | Some(Value::Null) => Ok(Vec::new()),
+        Some(Value::String(s)) => Ok(parse_domain_list(s)),
+        Some(Value::Array(items)) => {
+            let mut domains = Vec::new();
+            for item in items {
+                let Some(domain) = item.as_str() else {
+                    return Err(format!("{} must contain only strings", field));
+                };
+                domains.extend(parse_domain_list(domain));
+            }
+            Ok(domains)
+        }
+        Some(_) => Err(format!("{} must be a string or array of strings", field)),
+    }
 }
 
 pub async fn sanitize_existing_pages(
@@ -583,11 +605,48 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_domain_value_accepts_string_or_array() {
+        let string_filter =
+            DomainFilter::from_values(Some(&json!("Example.com, *.CDN.Example.com")), None, None)
+                .unwrap();
+        assert_eq!(
+            string_filter.allowed_domains,
+            vec!["example.com", "*.cdn.example.com"]
+        );
+
+        let array_filter = DomainFilter::from_values(
+            None,
+            Some(&json!(["App.Example.com", "*.App.Example.com"])),
+            Some(&json!(["cdn.example.com, *.assets.example.com"])),
+        )
+        .unwrap();
+        assert_eq!(
+            array_filter.navigation_domains,
+            vec!["app.example.com", "*.app.example.com"]
+        );
+        assert_eq!(
+            array_filter.resource_domains,
+            vec!["cdn.example.com", "*.assets.example.com"]
+        );
+    }
+
+    #[test]
+    fn test_parse_domain_value_rejects_invalid_types() {
+        let err =
+            DomainFilter::from_values(Some(&json!(["example.com", 123])), None, None).unwrap_err();
+        assert!(err.contains("allowedDomains must contain only strings"));
+
+        let err = DomainFilter::from_values(None, Some(&json!({"domain": "example.com"})), None)
+            .unwrap_err();
+        assert!(err.contains("navigationDomains must be a string or array of strings"));
+    }
+
+    #[test]
     fn test_split_filter_navigation_only() {
         let filter = DomainFilter::with_split("", Some("myapp.com"), None);
         // Navigation restricted to myapp.com
         assert!(filter.is_navigation_allowed("myapp.com"));
-        assert!(!filter.is_navigation_allowed("evil.com"));
+        assert!(!filter.is_navigation_allowed("blocked.test"));
         // Resources unrestricted (no resource_domains, no allowed_domains)
         assert!(filter.is_resource_allowed("anything.com"));
         assert!(filter.is_resource_allowed("cdn.example.com"));
@@ -613,11 +672,11 @@ mod tests {
         // Navigation: only myapp.com
         assert!(filter.is_navigation_allowed("myapp.com"));
         assert!(filter.is_navigation_allowed("sub.myapp.com"));
-        assert!(!filter.is_navigation_allowed("evil.com"));
+        assert!(!filter.is_navigation_allowed("blocked.test"));
         // Resources: only cdn.net and api.io
         assert!(filter.is_resource_allowed("img.cdn.net"));
         assert!(filter.is_resource_allowed("v1.api.io"));
-        assert!(!filter.is_resource_allowed("evil.com"));
+        assert!(!filter.is_resource_allowed("blocked.test"));
     }
 
     #[test]
@@ -633,11 +692,7 @@ mod tests {
     #[test]
     fn test_split_filter_navigation_overrides_allowed() {
         // navigation_domains takes priority over allowed_domains for navigation
-        let filter = DomainFilter::with_split(
-            "legacy.com",
-            Some("myapp.com"),
-            None,
-        );
+        let filter = DomainFilter::with_split("legacy.com", Some("myapp.com"), None);
         // Navigation uses navigation_domains, not allowed_domains
         assert!(filter.is_navigation_allowed("myapp.com"));
         assert!(!filter.is_navigation_allowed("legacy.com"));
@@ -649,10 +704,14 @@ mod tests {
     #[test]
     fn test_split_filter_check_navigation_url() {
         let filter = DomainFilter::with_split("", Some("myapp.com"), None);
-        assert!(filter.check_navigation_url("https://myapp.com/page").is_ok());
-        assert!(filter.check_navigation_url("https://evil.com/page").is_err());
+        assert!(filter
+            .check_navigation_url("https://myapp.com/page")
+            .is_ok());
+        assert!(filter
+            .check_navigation_url("https://blocked.test/page")
+            .is_err());
         // Resources still unrestricted
-        assert!(filter.is_resource_allowed("evil.com"));
+        assert!(filter.is_resource_allowed("blocked.test"));
     }
 
     #[test]

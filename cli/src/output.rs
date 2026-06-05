@@ -130,6 +130,98 @@ fn format_stream_status_text(action: Option<&str>, data: &serde_json::Value) -> 
     }
 }
 
+fn format_metric_ms(value: Option<f64>) -> String {
+    value
+        .map(|v| format!("{}ms", format_compact_number(v)))
+        .unwrap_or_else(|| "-".to_string())
+}
+
+fn format_compact_number(value: f64) -> String {
+    if value.fract() == 0.0 {
+        format!("{}", value as i64)
+    } else {
+        let formatted = format!("{:.2}", value);
+        formatted
+            .trim_end_matches('0')
+            .trim_end_matches('.')
+            .to_string()
+    }
+}
+
+fn truncate_field(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+
+    let mut truncated: String = value.chars().take(max_chars.saturating_sub(3)).collect();
+    truncated.push_str("...");
+    truncated
+}
+
+fn format_vitals_text(data: &serde_json::Value) -> String {
+    let url = data.get("url").and_then(|v| v.as_str()).unwrap_or("-");
+    let ttfb = format_metric_ms(data.get("ttfb").and_then(|v| v.as_f64()));
+    let fcp = format_metric_ms(data.get("fcp").and_then(|v| v.as_f64()));
+    let inp = format_metric_ms(data.get("inp").and_then(|v| v.as_f64()));
+    let lcp = data
+        .get("lcp")
+        .and_then(|v| v.get("startTime"))
+        .and_then(|v| v.as_f64());
+    let lcp = format_metric_ms(lcp);
+    let cls = data
+        .get("cls")
+        .and_then(|v| v.get("score"))
+        .and_then(|v| v.as_f64())
+        .map(format_compact_number)
+        .unwrap_or_else(|| "-".to_string());
+
+    let mut lines = vec![
+        format!("url: {}", url),
+        format!(
+            "ttfb: {}  fcp: {}  lcp: {}  cls: {}  inp: {}",
+            ttfb, fcp, lcp, cls, inp
+        ),
+    ];
+
+    if let Some(lcp_data) = data.get("lcp").and_then(|v| v.as_object()) {
+        let element = lcp_data.get("element").and_then(|v| v.as_str());
+        let lcp_url = lcp_data.get("url").and_then(|v| v.as_str());
+        if element.is_some() || lcp_url.is_some() {
+            let mut parts = Vec::new();
+            if let Some(element) = element {
+                parts.push(format!("element: {}", element));
+            }
+            if let Some(lcp_url) = lcp_url {
+                parts.push(format!("asset: {}", truncate_field(lcp_url, 96)));
+            }
+            lines.push(format!("lcp: {}", parts.join("  ")));
+        }
+    }
+
+    let phase_count = data
+        .get("phases")
+        .and_then(|v| v.as_array())
+        .map(|v| v.len())
+        .unwrap_or(0);
+    let component_count = data
+        .get("hydratedComponents")
+        .and_then(|v| v.as_array())
+        .map(|v| v.len())
+        .unwrap_or(0);
+    let hydration = data
+        .get("hydration")
+        .and_then(|v| v.get("duration"))
+        .and_then(|v| v.as_f64());
+    lines.push(format!(
+        "hydration: {}  phases: {}  hydratedComponents: {}",
+        format_metric_ms(hydration),
+        phase_count,
+        component_count
+    ));
+
+    lines.join("\n")
+}
+
 pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &OutputOptions) {
     if opts.json {
         if opts.content_boundaries {
@@ -203,6 +295,10 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
             println!("{}", output);
             return;
         }
+        if action == Some("vitals") {
+            println!("{}", format_vitals_text(data));
+            return;
+        }
         if action == Some("storage_get") {
             if let Some(output) = format_storage_text(data) {
                 println!("{}", output);
@@ -238,6 +334,11 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
         }
         if let Some(cdp_url) = data.get("cdpUrl").and_then(|v| v.as_str()) {
             println!("{}", cdp_url);
+            return;
+        }
+        // Rich command reports (React renders/suspense and older daemon responses)
+        if let Some(report) = data.get("report").and_then(|v| v.as_str()) {
+            println!("{}", report);
             return;
         }
         // Diff responses -- route by action to avoid fragile shape probing
@@ -406,7 +507,9 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
         }
         // Tabs
         if let Some(tabs) = data.get("tabs").and_then(|v| v.as_array()) {
-            for (i, tab) in tabs.iter().enumerate() {
+            for tab in tabs {
+                let tab_id = tab.get("tabId").and_then(|v| v.as_str()).unwrap_or("?");
+                let tab_label = tab.get("label").and_then(|v| v.as_str());
                 let title = tab
                     .get("title")
                     .and_then(|v| v.as_str())
@@ -418,9 +521,62 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
                 } else {
                     " ".to_string()
                 };
-                println!("{} [{}] {} - {}", marker, i, title, url);
+                if let Some(label) = tab_label {
+                    println!("{} [{}] {} {} - {}", marker, tab_id, label, title, url);
+                } else {
+                    println!("{} [{}] {} - {}", marker, tab_id, title, url);
+                }
             }
             return;
+        }
+        // Tab switch
+        if action == Some("tab_switch") {
+            if let Some(tab_id) = data.get("tabId").and_then(|v| v.as_str()) {
+                if let Some(url) = data.get("url").and_then(|v| v.as_str()) {
+                    println!(
+                        "{} Switched to tab [{}] ({})",
+                        color::success_indicator(),
+                        tab_id,
+                        url
+                    );
+                } else {
+                    println!(
+                        "{} Switched to tab [{}]",
+                        color::success_indicator(),
+                        tab_id
+                    );
+                }
+                return;
+            }
+        }
+        // New tab/window
+        if let Some(tab_id) = data.get("tabId").and_then(|v| v.as_str()) {
+            if let Some(total) = data.get("total").and_then(|v| v.as_i64()) {
+                let label_noun = match action {
+                    Some("window_new") => "Window opened",
+                    _ => "Tab opened",
+                };
+                let tab_label = data.get("label").and_then(|v| v.as_str());
+                if let Some(lbl) = tab_label {
+                    println!(
+                        "{} {} [{}] {} ({} total)",
+                        color::success_indicator(),
+                        label_noun,
+                        tab_id,
+                        lbl,
+                        total
+                    );
+                } else {
+                    println!(
+                        "{} {} [{}] ({} total)",
+                        color::success_indicator(),
+                        label_noun,
+                        tab_id,
+                        total
+                    );
+                }
+                return;
+            }
         }
         // Console logs
         if let Some(logs) = data.get("messages").and_then(|v| v.as_array()) {
@@ -562,7 +718,13 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
         // Closed (browser or tab)
         if data.get("closed").is_some() {
             let label = match action {
-                Some("tab_close") => "Tab closed",
+                Some("tab_close") => {
+                    if let Some(closed_id) = data.get("tabId").and_then(|v| v.as_str()) {
+                        println!("{} Tab [{}] closed", color::success_indicator(), closed_id);
+                        return;
+                    }
+                    "Tab closed"
+                }
                 _ => "Browser closed",
             };
             println!("{} {}", color::success_indicator(), label);
@@ -998,27 +1160,41 @@ pub fn print_command_help(command: &str) -> bool {
         // === Navigation ===
         "open" | "goto" | "navigate" => {
             r##"
-agent-browser open - Navigate to a URL
+agent-browser open - Launch the browser, optionally navigate
 
-Usage: agent-browser open <url>
+Usage: agent-browser open [url]
 
-Navigates the browser to the specified URL. If no protocol is provided,
-https:// is automatically prepended.
+Without a URL, launches the browser but stays on about:blank. This lets
+you stage state (network routes, cookies, init scripts) before the first
+real navigation — useful for SSR debug, auth setup, and capturing fresh
+`react suspense` / `vitals` state without noise from a prior page.
 
-Aliases: goto, navigate
+With a URL, launches and navigates. If no protocol is provided, https://
+is automatically prepended.
+
+The `goto` and `navigate` aliases still require a URL.
 
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
   --headers <json>     Set HTTP headers (scoped to this origin)
   --headed             Show browser window
+  --enable react-devtools   Inject the React DevTools hook before any page JS
+  --init-script <path>      Register a page init script (repeatable)
 
 Examples:
+  agent-browser open                     # Launch, no nav
   agent-browser open example.com
   agent-browser open https://github.com
   agent-browser open localhost:3000
   agent-browser open api.example.com --headers '{"Authorization": "Bearer token"}'
     # ^ Headers only sent to api.example.com, not other domains
+
+  # Pre-navigation setup in one turn:
+  agent-browser batch \
+    '["open"]' \
+    '["network","route","*","--abort","--resource-type","script"]' \
+    '["navigate","http://localhost:3000/target"]'
 "##
         }
         "back" => {
@@ -1508,6 +1684,8 @@ Usage: agent-browser screenshot [selector] [path]
 
 Captures a screenshot of the current page. If no path is provided,
 saves to a temporary directory with a generated filename.
+Headless Chromium screenshots hide native scrollbars for consistent image output.
+Pass --hide-scrollbars false when launching to keep native scrollbars visible.
 
 Options:
   --full, -f           Capture full page (not just viewport)
@@ -1968,13 +2146,18 @@ agent-browser tab - Manage browser tabs
 
 Usage: agent-browser tab [operation] [args]
 
-Manage browser tabs in the current window.
+Manage browser tabs in the current window. Stable tab ids look like `t1`,
+`t2`, `t3`. An id is never reused within a session, so scripts can keep
+referring to the same tab across commands. Optional user-assigned labels
+(e.g. `docs`, `app`) are interchangeable with ids everywhere a tab ref is
+accepted.
 
 Operations:
-  list                 List all tabs (default)
-  new [url]            Open new tab
-  close [index]        Close tab (current if no index)
-  <index>              Switch to tab by index
+  list                       List open tabs with their ids and labels (default)
+  new [url]                  Open a new tab
+  new --label <name> [url]   Open a new tab with a label like `docs` or `app`
+  close [t<N>|label]         Close a tab (current if no ref given)
+  <t<N>|label>               Switch to a tab by id or label
 
 Global Options:
   --json               Output as JSON
@@ -1985,9 +2168,12 @@ Examples:
   agent-browser tab list
   agent-browser tab new
   agent-browser tab new https://example.com
-  agent-browser tab 2
+  agent-browser tab new --label docs https://docs.example.com
+  agent-browser tab t2
+  agent-browser tab docs
   agent-browser tab close
-  agent-browser tab close 1
+  agent-browser tab close t1
+  agent-browser tab close docs
 "##
         }
 
@@ -2129,12 +2315,13 @@ Examples:
             r##"
 agent-browser trace - Record execution trace
 
-Usage: agent-browser trace <operation> [path]
+Usage: agent-browser trace start
+       agent-browser trace stop [path]
 
 Record a Chrome DevTools trace for debugging.
 
 Operations:
-  start [path]         Start recording trace
+  start                Start recording trace
   stop [path]          Stop recording and save trace
 
 Global Options:
@@ -2143,9 +2330,8 @@ Global Options:
 
 Examples:
   agent-browser trace start
-  agent-browser trace start ./my-trace
   agent-browser trace stop
-  agent-browser trace stop ./debug-trace.zip
+  agent-browser trace stop ./debug-trace.json
 "##
         }
 
@@ -2419,6 +2605,39 @@ Examples:
 "##
         }
 
+        // === Doctor ===
+        "doctor" => {
+            r##"
+agent-browser doctor - Diagnose and repair your install
+
+Usage: agent-browser doctor [options]
+
+Runs a battery of checks across environment, Chrome install, daemon state,
+config files, encryption key, providers, network reachability, and a live
+headless browser launch test.
+
+Auto-cleans stale daemon socket/pid/version sidecar files. Destructive
+repairs (reinstalling Chrome, purging old state files, generating a missing
+encryption key) are gated behind --fix.
+
+Options:
+  --offline            Skip network probes
+  --quick              Skip the live headless launch test
+  --fix                Also run destructive repairs
+  --json               JSON output
+
+Exit codes:
+  0  All checks pass (warnings OK)
+  1  At least one check failed
+
+Examples:
+  agent-browser doctor
+  agent-browser doctor --offline --quick
+  agent-browser doctor --fix
+  agent-browser doctor --json
+"##
+        }
+
         // === Dashboard ===
         "dashboard" => {
             r##"
@@ -2438,6 +2657,11 @@ Running 'agent-browser dashboard' with no subcommand is equivalent to 'dashboard
 
 The dashboard runs as a standalone background process, independent of
 browser sessions. All sessions automatically stream to the dashboard.
+It works from http://localhost:4848 or a proxied/forwarded URL that
+reaches the dashboard server, such as https://dashboard.agent-browser.localhost
+or a Coder workspace URL. The browser stays on the dashboard origin;
+session tabs, status, and stream traffic are proxied internally, so
+session ports do not need to be exposed.
 
 Options:
   --port <n>           Port for the dashboard server (default: 4848)
@@ -2760,10 +2984,11 @@ rather than relying on cached copies.
 Examples:
   agent-browser skills
   agent-browser skills list
-  agent-browser skills get agent-browser
+  agent-browser skills get core
+  agent-browser skills get core --full
   agent-browser skills get electron --full
   agent-browser skills get --all
-  agent-browser skills path agent-browser
+  agent-browser skills path core
   agent-browser skills list --json
 
 Environment:
@@ -2783,6 +3008,20 @@ pub fn print_help() {
 agent-browser - fast browser automation CLI for AI agents
 
 Usage: agent-browser <command> [args] [options]
+
+Start here (for AI agents):
+  agent-browser skills get core --full
+
+  Skills ship with the CLI (always version-matched) and include workflow
+  patterns, ref/selector usage, and copy-paste examples. Prefer this over
+  guessing commands from flag docs alone. Specialized skills cover Electron
+  apps, Slack, exploratory testing, and cloud browser providers.
+
+  skills [list]                List available skills
+  skills get core              Core usage guide (overview + common patterns)
+  skills get core --full       Include full command reference and templates
+  skills get <name>            Load a specialized skill (electron, slack, ...)
+  skills path [name]           Print skill directory path
 
 Core Commands:
   open <url>                 Navigate to URL
@@ -2834,13 +3073,14 @@ Browser Settings:  agent-browser set <setting> [value]
   media [dark|light] [reduced-motion]
 
 Network:  agent-browser network <action>
-  route <url> [--abort|--body <json>]
+  route <url> [--abort|--body <json>] [--resource-type <csv>]
   unroute [url]
   requests [--clear] [--filter <pattern>]
   har <start|stop> [path]
 
 Storage:
   cookies [get|set|clear]    Manage cookies (set supports --url, --domain, --path, --httpOnly, --secure, --sameSite, --expires)
+                             Or:  cookies set --curl <file> [--domain <host>] (auto-detects JSON/cURL/Cookie-header files)
   storage <local|session>    Manage web storage
 
 Tabs:
@@ -2852,7 +3092,8 @@ Diff:
   diff url <u1> <u2>         Compare two pages
 
 Debug:
-  trace start|stop [path]    Record Chrome DevTools trace
+  trace start                Start Chrome DevTools trace
+  trace stop [path]          Stop and save Chrome DevTools trace
   profiler start|stop [path] Record Chrome DevTools profile
   record start <path> [url]  Start video recording (WebM)
   record stop                Stop and save video
@@ -2866,6 +3107,27 @@ Streaming:
   stream enable [--port <n>] Start runtime WebSocket streaming for this session
   stream disable             Stop runtime WebSocket streaming
   stream status              Show streaming status and active port
+
+React (requires `open --enable react-devtools`):
+  react tree                 Full React component tree (depth id parent name columns)
+  react inspect <id>         Inspect one fiber (props, hooks, state, source)
+  react renders start        Start recording re-renders via onCommitFiberRoot
+  react renders stop [--json] Stop and print render profile
+  react suspense [--only-dynamic] [--json]
+                             Walk Suspense boundaries + classifier report
+                             --only-dynamic hides the "static" list
+
+Performance:
+  vitals [url] [--json]      Core Web Vitals (LCP/CLS/TTFB/FCP/INP) +
+                             React hydration summary; --json returns full data
+
+SPA:
+  pushstate <url>            SPA client-side nav. Auto-detects window.next.router.push
+                             (triggers RSC fetch on Next.js); falls back to
+                             history.pushState + popstate/navigate events for other frameworks
+
+Init scripts:
+  removeinitscript <id>      Remove a script registered via --init-script or addinitscript
 
 Batch:
   batch [--bail] ["cmd" ...]  Execute multiple commands sequentially (args or stdin)
@@ -2900,14 +3162,9 @@ Setup:
   install                    Install browser binaries
   install --with-deps        Also install system dependencies (Linux)
   upgrade                    Upgrade to the latest version
+  doctor [--fix]             Diagnose install; auto-clean stale files
   dashboard start            Start the observability dashboard
   profiles                   List available Chrome profiles
-
-Skills:
-  skills [list]              List available skills
-  skills get <name> [--full] Get skill content (--full includes references)
-  skills get --all           Get all skill content
-  skills path [name]         Print skill directory path
 
 Snapshot Options:
   -i, --interactive          Only interactive elements
@@ -2931,6 +3188,10 @@ Options:
   --session <name>           Isolated session (or AGENT_BROWSER_SESSION env)
   --executable-path <path>   Custom browser executable (or AGENT_BROWSER_EXECUTABLE_PATH)
   --extension <path>         Load browser extensions (repeatable)
+  --init-script <path>       Register a page init script before the first navigation (repeatable)
+                             (or AGENT_BROWSER_INIT_SCRIPTS env, comma-separated)
+  --enable <feature>         Built-in init scripts: react-devtools (repeatable or comma-separated)
+                             (or AGENT_BROWSER_ENABLE env)
   --args <args>              Browser launch args, comma or newline separated (or AGENT_BROWSER_ARGS)
                              e.g., --args "--no-sandbox,--disable-blink-features=AutomationControlled"
   --user-agent <ua>          Custom User-Agent (or AGENT_BROWSER_USER_AGENT)
@@ -2940,6 +3201,8 @@ Options:
                              e.g., --proxy-bypass "localhost,*.internal.com"
   --ignore-https-errors      Ignore HTTPS certificate errors
   --allow-file-access        Allow file:// URLs to access local files (Chromium only)
+  --hide-scrollbars <bool>   Hide native scrollbars in headless Chromium screenshots (default: true)
+                             Use --hide-scrollbars false to keep scrollbars visible
   -p, --provider <name>      Browser provider: ios, browserbase, kernel, browseruse, browserless, agentcore
   --device <name>            iOS device name (e.g., "iPhone 15 Pro")
   --json                     JSON output
@@ -2981,11 +3244,12 @@ Configuration:
   Boolean flags accept an optional true/false value to override config:
     --headed           (same as --headed true)
     --headed false     (disables "headed": true from config)
+    --hide-scrollbars false (keeps native scrollbars visible in headless Chromium screenshots)
 
   Extensions from user and project configs are merged (not replaced).
 
   Example agent-browser.json:
-    {{"headed": true, "proxy": "http://localhost:8080", "profile": "./browser-data"}}
+    {{"headed": true, "hideScrollbars": false, "proxy": "http://localhost:8080"}}
 
 Environment:
   AGENT_BROWSER_CONFIG           Path to config file (or use --config)
@@ -2995,6 +3259,8 @@ Environment:
   AGENT_BROWSER_STATE_EXPIRE_DAYS Auto-delete states older than N days (default: 30)
   AGENT_BROWSER_EXECUTABLE_PATH  Custom browser executable path
   AGENT_BROWSER_EXTENSIONS       Comma-separated browser extension paths
+  AGENT_BROWSER_INIT_SCRIPTS     Comma-separated paths to page init scripts
+  AGENT_BROWSER_ENABLE           Comma-separated built-in init script features (e.g. react-devtools)
   AGENT_BROWSER_HEADED           Show browser window (not headless)
   AGENT_BROWSER_JSON             JSON output
   AGENT_BROWSER_ANNOTATE         Annotated screenshot with numbered labels and legend
@@ -3003,6 +3269,7 @@ Environment:
   AGENT_BROWSER_PROVIDER         Browser provider (ios, browserbase, kernel, browseruse, browserless, agentcore)
   AGENT_BROWSER_AUTO_CONNECT     Auto-discover and connect to running Chrome
   AGENT_BROWSER_ALLOW_FILE_ACCESS Allow file:// URLs to access local files
+  AGENT_BROWSER_HIDE_SCROLLBARS  Hide scrollbars in headless Chromium screenshots (default: true)
   AGENT_BROWSER_COLOR_SCHEME     Color scheme preference (dark, light, no-preference)
   AGENT_BROWSER_DOWNLOAD_PATH    Default download directory for browser downloads
   AGENT_BROWSER_DEFAULT_TIMEOUT  Default action timeout in ms (default: 25000)
@@ -3161,7 +3428,7 @@ pub fn print_version() {
 
 #[cfg(test)]
 mod tests {
-    use super::format_storage_text;
+    use super::{format_storage_text, format_vitals_text};
     use serde_json::json;
 
     #[test]
@@ -3226,5 +3493,62 @@ mod tests {
         let rendered = format_storage_text(&data).unwrap();
 
         assert_eq!(rendered, "No storage entries");
+    }
+
+    #[test]
+    fn test_format_vitals_text_summary() {
+        let data = json!({
+            "url": "https://example.com/dashboard",
+            "ttfb": 12.34,
+            "fcp": 56.0,
+            "lcp": {
+                "startTime": 123.45,
+                "size": 1200,
+                "element": "img",
+                "url": "https://example.com/assets/hero.png"
+            },
+            "cls": {
+                "score": 0.0123,
+                "entries": []
+            },
+            "inp": null,
+            "hydration": {
+                "startTime": 130.0,
+                "endTime": 180.25,
+                "duration": 50.25
+            },
+            "phases": [{ "label": "Hydrated" }],
+            "hydratedComponents": [{ "name": "App" }, { "name": "Nav" }]
+        });
+
+        let rendered = format_vitals_text(&data);
+
+        assert_eq!(
+            rendered,
+            "url: https://example.com/dashboard\n\
+ttfb: 12.34ms  fcp: 56ms  lcp: 123.45ms  cls: 0.01  inp: -\n\
+lcp: element: img  asset: https://example.com/assets/hero.png\n\
+hydration: 50.25ms  phases: 1  hydratedComponents: 2"
+        );
+    }
+
+    #[test]
+    fn test_format_vitals_text_handles_missing_values() {
+        let data = json!({
+            "url": "https://example.com",
+            "lcp": null,
+            "cls": { "score": 0.0, "entries": [] },
+            "phases": [],
+            "hydratedComponents": []
+        });
+
+        let rendered = format_vitals_text(&data);
+
+        assert_eq!(
+            rendered,
+            "url: https://example.com\n\
+ttfb: -  fcp: -  lcp: -  cls: 0  inp: -\n\
+hydration: -  phases: 0  hydratedComponents: 0"
+        );
     }
 }

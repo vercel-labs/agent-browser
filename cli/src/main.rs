@@ -2,6 +2,7 @@ mod chat;
 mod color;
 mod commands;
 mod connection;
+mod doctor;
 mod flags;
 mod install;
 mod native;
@@ -20,10 +21,13 @@ use std::process::exit;
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::CloseHandle;
 #[cfg(windows)]
-use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+use windows_sys::Win32::System::Threading::OpenProcess;
 
 use commands::{gen_id, parse_command, ParseError};
-use connection::{cleanup_stale_files, ensure_daemon, get_socket_dir, send_command, DaemonOptions};
+use connection::{
+    cleanup_stale_files, ensure_daemon, get_socket_dir, is_pid_alive, send_command, walk_daemons,
+    DaemonOptions,
+};
 use flags::{clean_args, parse_flags, Flags};
 use install::run_install;
 use output::{
@@ -54,6 +58,23 @@ fn print_json_error_with_type(message: impl AsRef<str>, error_type: &str) {
         "error": message.as_ref(),
         "type": error_type,
     }));
+}
+
+fn should_send_hide_scrollbars_launch_option(
+    cli_hide_scrollbars: bool,
+    hide_scrollbars: bool,
+) -> bool {
+    cli_hide_scrollbars || !hide_scrollbars
+}
+
+fn apply_hide_scrollbars_launch_option(
+    launch_cmd: &mut serde_json::Value,
+    cli_hide_scrollbars: bool,
+    hide_scrollbars: bool,
+) {
+    if should_send_hide_scrollbars_launch_option(cli_hide_scrollbars, hide_scrollbars) {
+        launch_cmd["hideScrollbars"] = json!(hide_scrollbars);
+    }
 }
 
 struct ParsedProxy {
@@ -182,46 +203,11 @@ fn run_session(args: &[String], session: &str, json_mode: bool) {
 
     match subcommand {
         Some("list") => {
-            let socket_dir = get_socket_dir();
-            let mut sessions: Vec<String> = Vec::new();
-
-            if let Ok(entries) = fs::read_dir(&socket_dir) {
-                for entry in entries.flatten() {
-                    let name = entry.file_name().to_string_lossy().to_string();
-                    // Look for pid files in socket directory
-                    if name.ends_with(".pid") {
-                        let session_name = name.strip_suffix(".pid").unwrap_or("");
-                        if !session_name.is_empty() {
-                            // Check if session is actually running
-                            let pid_path = socket_dir.join(&name);
-                            if let Ok(pid_str) = fs::read_to_string(&pid_path) {
-                                if let Ok(pid) = pid_str.trim().parse::<u32>() {
-                                    #[cfg(unix)]
-                                    let running = unsafe {
-                                        libc::kill(pid as i32, 0) == 0
-                                            || std::io::Error::last_os_error().raw_os_error()
-                                                != Some(libc::ESRCH)
-                                    };
-                                    #[cfg(windows)]
-                                    let running = unsafe {
-                                        let handle =
-                                            OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-                                        if handle != 0 {
-                                            CloseHandle(handle);
-                                            true
-                                        } else {
-                                            false
-                                        }
-                                    };
-                                    if running {
-                                        sessions.push(session_name.to_string());
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            let sessions: Vec<String> = walk_daemons()
+                .sessions
+                .into_iter()
+                .map(|s| s.name)
+                .collect();
 
             if json_mode {
                 println!(
@@ -260,25 +246,6 @@ fn run_session(args: &[String], session: &str, json_mode: bool) {
 
 fn get_dashboard_pid_path() -> std::path::PathBuf {
     get_socket_dir().join("dashboard.pid")
-}
-
-fn is_pid_alive(pid: u32) -> bool {
-    #[cfg(unix)]
-    {
-        unsafe { libc::kill(pid as i32, 0) == 0 }
-    }
-    #[cfg(windows)]
-    {
-        unsafe {
-            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-            if handle != 0 {
-                CloseHandle(handle);
-                true
-            } else {
-                false
-            }
-        }
-    }
 }
 
 fn run_dashboard_start(port: u16, json_mode: bool) {
@@ -439,67 +406,15 @@ fn run_dashboard_stop(json_mode: bool) {
 }
 
 fn run_close_all(flags: &Flags) {
-    let socket_dir = get_socket_dir();
-    let mut sessions: Vec<(String, u32)> = Vec::new();
-
-    if let Ok(entries) = fs::read_dir(&socket_dir) {
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if let Some(session_name) = name.strip_suffix(".pid") {
-                if session_name.is_empty() {
-                    continue;
-                }
-                let pid_path = socket_dir.join(&name);
-                if let Ok(pid_str) = fs::read_to_string(&pid_path) {
-                    if let Ok(pid) = pid_str.trim().parse::<u32>() {
-                        #[cfg(unix)]
-                        let running = unsafe {
-                            libc::kill(pid as i32, 0) == 0
-                                || std::io::Error::last_os_error().raw_os_error()
-                                    != Some(libc::ESRCH)
-                        };
-                        #[cfg(windows)]
-                        let running = unsafe {
-                            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-                            if handle != 0 {
-                                CloseHandle(handle);
-                                true
-                            } else {
-                                false
-                            }
-                        };
-                        if running {
-                            sessions.push((session_name.to_string(), pid));
-                        } else {
-                            // Process is gone but stale files remain; clean them up
-                            cleanup_stale_files(session_name);
-                        }
-                    }
-                } else {
-                    // PID file exists but is unreadable; clean up stale files
-                    cleanup_stale_files(session_name);
-                }
-            }
-        }
-    }
-
-    // Also scan for orphaned .sock files without corresponding .pid files
-    #[cfg(unix)]
-    if let Ok(entries) = fs::read_dir(&socket_dir) {
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if let Some(session_name) = name.strip_suffix(".sock") {
-                if session_name.is_empty() {
-                    continue;
-                }
-                let pid_path = socket_dir.join(format!("{}.pid", session_name));
-                if !pid_path.exists() {
-                    // Orphaned socket file with no PID file; remove it
-                    cleanup_stale_files(session_name);
-                }
-            }
-        }
-    }
+    // walk_daemons auto-cleans stale .pid / .sock / .stream sidecar files and
+    // separates out the standalone dashboard. We only want to send `close` to
+    // real session daemons; the dashboard has its own `dashboard stop`.
+    let inventory = walk_daemons();
+    let sessions: Vec<(String, u32)> = inventory
+        .sessions
+        .iter()
+        .map(|s| (s.name.clone(), s.pid))
+        .collect();
 
     if sessions.is_empty() {
         if flags.json {
@@ -650,6 +565,18 @@ fn main() {
     if clean.first().map(|s| s.as_str()) == Some("upgrade") {
         run_upgrade();
         return;
+    }
+
+    // Handle doctor separately (doesn't need daemon; spawns its own scratch
+    // session for the live launch test).
+    if clean.first().map(|s| s.as_str()) == Some("doctor") {
+        let opts = doctor::DoctorOptions {
+            offline: args.iter().any(|a| a == "--offline"),
+            quick: args.iter().any(|a| a == "--quick"),
+            fix: args.iter().any(|a| a == "--fix"),
+            json: flags.json,
+        };
+        exit(doctor::run_doctor(opts));
     }
 
     // Handle dashboard subcommand
@@ -821,6 +748,8 @@ fn main() {
         debug: flags.debug,
         executable_path: flags.executable_path.as_deref(),
         extensions: &flags.extensions,
+        init_scripts: &flags.init_scripts,
+        enable: &flags.enable,
         args: flags.args.as_deref(),
         user_agent: flags.user_agent.as_deref(),
         proxy: proxy_server.as_deref(),
@@ -829,6 +758,7 @@ fn main() {
         proxy_password: proxy_password.as_deref(),
         ignore_https_errors: flags.ignore_https_errors,
         allow_file_access: flags.allow_file_access,
+        hide_scrollbars: flags.hide_scrollbars,
         profile: flags.profile.as_deref(),
         state: flags.state.as_deref(),
         provider: flags.provider.as_deref(),
@@ -903,6 +833,7 @@ fn main() {
             },
             flags.ignore_https_errors.then_some("--ignore-https-errors"),
             flags.cli_allow_file_access.then_some("--allow-file-access"),
+            flags.cli_hide_scrollbars.then_some("--hide-scrollbars"),
             flags.cli_download_path.then_some("--download-path"),
             flags.cli_headed.then_some("--headed"),
         ]
@@ -1153,6 +1084,10 @@ fn main() {
         || flags.args.is_some()
         || flags.user_agent.is_some()
         || flags.allow_file_access
+        || should_send_hide_scrollbars_launch_option(
+            flags.cli_hide_scrollbars,
+            flags.hide_scrollbars,
+        )
         || flags.color_scheme.is_some()
         || flags.download_path.is_some()
         || flags.engine.is_some()
@@ -1226,6 +1161,12 @@ fn main() {
         if flags.allow_file_access {
             launch_cmd["allowFileAccess"] = json!(true);
         }
+
+        apply_hide_scrollbars_launch_option(
+            &mut launch_cmd,
+            flags.cli_hide_scrollbars,
+            flags.hide_scrollbars,
+        );
 
         if let Some(ref cs) = flags.color_scheme {
             launch_cmd["colorScheme"] = json!(cs);
@@ -1584,5 +1525,24 @@ mod tests {
             parsed["error"],
             "Daemon process exited during startup:\nline \"quoted\"\u{001b}[2mansi\u{001b}[22m"
         );
+    }
+
+    #[test]
+    fn test_hide_scrollbars_launch_option_serialization() {
+        assert!(!should_send_hide_scrollbars_launch_option(false, true));
+        assert!(should_send_hide_scrollbars_launch_option(false, false));
+        assert!(should_send_hide_scrollbars_launch_option(true, true));
+
+        let mut default_cmd = json!({ "action": "launch" });
+        apply_hide_scrollbars_launch_option(&mut default_cmd, false, true);
+        assert!(default_cmd.get("hideScrollbars").is_none());
+
+        let mut config_false_cmd = json!({ "action": "launch" });
+        apply_hide_scrollbars_launch_option(&mut config_false_cmd, false, false);
+        assert_eq!(config_false_cmd["hideScrollbars"], false);
+
+        let mut cli_true_cmd = json!({ "action": "launch" });
+        apply_hide_scrollbars_launch_option(&mut cli_true_cmd, true, true);
+        assert_eq!(cli_true_cmd["hideScrollbars"], true);
     }
 }

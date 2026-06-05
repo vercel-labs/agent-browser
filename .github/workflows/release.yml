@@ -9,12 +9,15 @@ on:
 concurrency: ${{ github.workflow }}-${{ github.ref }}
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   check-release:
     name: Check for new version
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
     outputs:
       should_release: ${{ steps.check.outputs.should_release }}
       needs_github_release: ${{ steps.check.outputs.needs_github_release }}
@@ -22,6 +25,11 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
 
       - name: Compare package.json version to npm and check GitHub release
         id: check
@@ -106,13 +114,11 @@ jobs:
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
-        with:
-          version: 9
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version-file: .node-version
           cache: pnpm
 
       - name: Install npm dependencies
@@ -188,19 +194,22 @@ jobs:
     needs: [check-release, build-binaries]
     if: needs.check-release.outputs.should_release == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: Release
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
-        with:
-          version: 9
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version-file: .node-version
           cache: pnpm
           registry-url: 'https://registry.npmjs.org'
 
@@ -255,15 +264,16 @@ jobs:
           echo "All 7 platform binaries present and valid"
 
       - name: Publish to npm
-        run: pnpm publish --no-git-checks
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_VERCEL_TOKEN_ELEVATED }}
+        run: npm publish --provenance
 
   github-release:
     name: Create GitHub Release
     needs: [check-release, build-binaries, publish]
     if: always() && needs.build-binaries.result == 'success' && needs.check-release.outputs.needs_github_release == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4

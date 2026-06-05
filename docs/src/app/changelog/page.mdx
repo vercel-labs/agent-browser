@@ -1,5 +1,63 @@
 # Changelog
 
+## v0.27.0
+
+<p className="text-[#888] text-sm">May 7, 2026</p>
+
+### New Features
+
+- **React introspection** - First-class React DevTools integration with new `react tree`, `react inspect <fiberId>`, `react renders start|stop`, and `react suspense` commands for full component-tree visibility, per-fiber props/hooks/state inspection, render profiling with mount/re-render counts and change details, and Suspense boundary classification with root-cause grouping and recommendations. React DevTools hook is vendored (MIT) and embedded in the binary with zero runtime dependencies (#1257)
+- **Web Vitals** - New `vitals [url]` command that reports Core Web Vitals (LCP, CLS, TTFB, FCP, INP) plus React hydration phases for any page (#1257)
+- **SPA navigation** - New `pushstate <url>` command for client-side SPA navigations without a full page load (#1257)
+- **Init scripts and feature flags** - New `--init-script <path>` flag (repeatable; env `AGENT_BROWSER_INIT_SCRIPTS`) to register scripts before first navigation, and `--enable <feature>` flag (repeatable; env `AGENT_BROWSER_ENABLE`) for built-in init scripts such as `react-devtools` (#1257)
+- **Network route resource type filter** - `network route` now accepts `--resource-type <csv>` to filter intercepted requests by CDP resource type (#1257)
+- **cURL cookie import** - `cookies set --curl <file>` auto-detects JSON, cURL, and Cookie-header formats for bulk cookie import (#1257)
+- **Dashboard proxy support** - The observability dashboard now works from proxied origins via a same-origin proxy, enabling deployment behind reverse proxies and path-based routing (#1111)
+
+### Bug Fixes
+
+- Fixed **`doctor` command** generating duplicate check ids when called multiple times in the same process (#1330)
+
+### Infrastructure
+
+- Switched npm publishing to **trusted publishing** via GitHub Actions OIDC, removing the need for manually managed npm tokens (#1273)
+
+---
+
+## v0.26.0
+
+<p className="text-[#888] text-sm">April 16, 2026</p>
+
+### New Features
+
+- **`doctor` command** - Added `agent-browser doctor` for one-shot diagnosis of an install. Checks environment, Chrome, running daemons, config files, security, providers, and network connectivity; auto-cleans stale daemon sidecar files on every run; and performs a live headless launch test. Supports `--offline` to skip network probes, `--quick` to skip the launch test, `--fix` for opt-in repairs (install missing Chrome, close version-mismatched daemons, prune expired state files), and `--json` for structured output (#1254)
+- **Stable tab ids and labels** - Tabs now have stable string ids like `t1`, `t2`, `t3` that don't shift when other tabs close or popups appear. Tabs can be created with a memorable label via `tab new --label <name> [<url>]`, and labels are interchangeable with `t<N>` ids everywhere a tab ref is accepted (`tab <id|label>`, `tab close <id|label>`). Bare-integer input is rejected with a teaching error so agents can't mistake stable handles for positional indices (#892, #1249, #1250)
+- **`core` skill** - Renamed the built-in `agent-browser` skill to `core` and replaced its ~40-line discovery stub with a ~420-line usage guide covering the core snapshot-ref-act loop, reading, interacting, waiting, common workflows, troubleshooting, and global flags. `agent-browser skills get core` now returns content agents can use directly; `--full` adds references and templates. Added a `hidden:` frontmatter flag so the original `agent-browser` stub stays reachable for `npx skills add` discovery without polluting `skills list` (#1253)
+- **JSON Schema for config files** - Added `agent-browser.schema.json` describing every config option with types and descriptions, enabling IDE autocomplete and validation when referenced via `$schema` in `agent-browser.json` or `~/.agent-browser/config.json`. The schema is served from the docs site at `https://agent-browser.dev/schema.json` (#1242, #1248)
+
+### Bug Fixes
+
+- Fixed **`--state` / `AGENT_BROWSER_STATE`** not actually loading saved browser state (cookies and localStorage) at launch. The flag had been fully plumbed through parsing, env propagation, and validation since the native Rust rewrite, but the load step was never wired up. Storage state now loads after launch across all four paths: explicit launch, auto-connect, provider, and local Chrome (#1241)
+
+### Documentation
+
+- `--help` output now shows the **skills** section first so agents discover `skills get core` (the canonical usage guide) before the core command list (#1251)
+
+---
+
+## v0.25.5
+
+<p className="text-[#888] text-sm">April 16, 2026</p>
+
+### Bug Fixes
+
+- Fixed **`--auto-connect` CDP discovery** preferring HTTP endpoint discovery over the DevToolsActivePort websocket path, which could fail on some setups. The CLI now reads the websocket path from DevToolsActivePort first and only falls back to HTTP discovery (#1218)
+- Fixed **recording context viewport** not inheriting the active viewport dimensions, causing recordings to use default resolution instead of the configured viewport (#1208)
+- Fixed **`get box` and `get styles`** printing no data in text mode (#1231, #1233)
+- Fixed **active page changing** when closing or removing earlier tabs. The previously focused page is now preserved correctly (#1220)
+
+---
+
 ## v0.25.4
 
 <p className="text-[#888] text-sm">April 12, 2026</p>

@@ -687,9 +687,9 @@ async fn test_domain_filter_sanitize() {
     use super::network::DomainFilter;
     let filter = DomainFilter::new("example.com");
     assert!(filter.is_allowed("example.com"));
-    assert!(!filter.is_allowed("evil.com"));
+    assert!(!filter.is_allowed("blocked.test"));
     filter.check_url("https://example.com/path").unwrap();
-    assert!(filter.check_url("https://evil.com").is_err());
+    assert!(filter.check_url("https://blocked.test").is_err());
 }
 
 #[tokio::test]

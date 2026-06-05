@@ -1,0 +1,81 @@
+# Debugging
+
+Use debugging commands to inspect browser logs, page errors, JavaScript dialogs, Chrome DevTools traces, highlighted elements, and the live DevTools frontend during automation.
+
+## Console and page errors
+
+```bash
+agent-browser console
+agent-browser console --json
+agent-browser console --clear
+
+agent-browser errors
+agent-browser errors --clear
+```
+
+<table>
+  <thead>
+    <tr><th>Command</th><th>Description</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>console</code></td><td>Show browser console messages</td></tr>
+    <tr><td><code>console --json</code></td><td>Show structured console output with raw CDP arguments</td></tr>
+    <tr><td><code>console --clear</code></td><td>Clear the console log captured by agent-browser</td></tr>
+    <tr><td><code>errors</code></td><td>Show captured page errors and uncaught JavaScript exceptions</td></tr>
+    <tr><td><code>errors --clear</code></td><td>Clear the captured page error log</td></tr>
+  </tbody>
+</table>
+
+Use `console --json` when object previews or raw CDP arguments matter for an automated diagnostic script. Use the default text output when an agent only needs to understand what the page logged.
+
+## JavaScript dialogs
+
+```bash
+agent-browser dialog status
+agent-browser dialog accept
+agent-browser dialog accept "prompt text"
+agent-browser dialog dismiss
+```
+
+By default, `alert` and `beforeunload` dialogs are automatically accepted so they do not block the agent. `confirm` and `prompt` dialogs still require explicit handling. Use `--no-auto-dialog` or `AGENT_BROWSER_NO_AUTO_DIALOG=1` to disable automatic handling.
+
+When a dialog is pending, command responses include a `warning` field with the dialog type and message so agents can recover with `dialog accept` or `dialog dismiss`.
+
+## DevTools and visual inspection
+
+```bash
+agent-browser highlight @e4
+agent-browser highlight "#submit"
+agent-browser inspect
+```
+
+`highlight` draws attention to an element in the live page, which is useful when running headed or when viewing the session through streaming or the dashboard. `inspect` opens Chrome DevTools for the active page through a local proxy while the daemon continues to accept agent-browser commands.
+
+## Chrome trace capture
+
+```bash
+agent-browser trace start
+
+agent-browser open https://example.com
+agent-browser click @e3
+
+agent-browser trace stop ./trace.json
+```
+
+`trace start` begins a Chrome DevTools trace. `trace stop [path]` ends tracing and saves a Chrome Trace Event JSON file. If no path is provided, agent-browser writes an auto-generated trace file under its temp directory.
+
+Use [Profiler](/profiler) when you want curated performance categories and event counts. Use raw traces when you need a general Chrome trace for lower-level debugging.
+
+## Related tools
+
+<table>
+  <thead>
+    <tr><th>Need</th><th>Use</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Performance profile</td><td><a href="/profiler">Profiler</a></td></tr>
+    <tr><td>Saved video artifact</td><td><a href="/recording">Video Recording</a></td></tr>
+    <tr><td>Live browser stream</td><td><a href="/streaming">Streaming</a></td></tr>
+    <tr><td>Install and environment diagnosis</td><td><a href="/installation#doctor">Doctor</a></td></tr>
+  </tbody>
+</table>

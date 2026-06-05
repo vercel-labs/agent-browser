@@ -1,7 +1,6 @@
 # Streaming
 
-Stream the browser viewport via WebSocket for live preview or "pair browsing"
-where a human can watch and interact alongside an AI agent.
+Stream the browser viewport via WebSocket for live preview or "pair browsing" where a human can watch and interact alongside an AI agent.
 
 ## Streaming
 
@@ -22,6 +21,8 @@ agent-browser stream disable           # Stop streaming for the session
 ```
 
 `stream status` returns the enabled state, active port, browser connection state, and whether screencasting is active. `stream disable` tears the server down and removes the session's `.stream` metadata file.
+
+Use [Video Recording](/recording) when you need a saved WebM artifact instead of a live WebSocket stream.
 
 ## Runtime status response
 
