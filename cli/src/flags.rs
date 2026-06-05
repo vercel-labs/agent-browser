@@ -970,7 +970,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
                     i += 1;
                 }
             }
-            "--tabname" => {
+            "--tab-name" => {
                 if let Some(s) = args.get(i + 1) {
                     flags.tab_name = Some(s.clone());
                     i += 1;
@@ -1060,7 +1060,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--screenshot-format",
         "--idle-timeout",
         "--model",
-        "--tabname",
+        "--tab-name",
     ];
 
     let mut i = 0;
@@ -1828,6 +1828,23 @@ mod tests {
     fn test_no_auto_dialog_flag() {
         let flags = parse_flags(&args("open example.com --no-auto-dialog"));
         assert!(flags.no_auto_dialog);
+    }
+
+    #[test]
+    fn test_tab_name_flag() {
+        let flags = parse_flags(&args("--tab-name docs snapshot"));
+        assert_eq!(flags.tab_name.as_deref(), Some("docs"));
+    }
+
+    #[test]
+    fn test_clean_args_removes_tab_name() {
+        let input: Vec<String> = vec![
+            "--tab-name".to_string(),
+            "docs".to_string(),
+            "snapshot".to_string(),
+        ];
+        let clean = clean_args(&input);
+        assert_eq!(clean, vec!["snapshot"]);
     }
 
     #[test]

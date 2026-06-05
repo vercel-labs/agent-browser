@@ -255,7 +255,7 @@ fn launch_connection_is_external(
     launch_connection_identity(cdp_url, cdp_port, auto_connect, provider_name).0 != "local"
 }
 
-/// Per-tab state preserved between commands when `--tabname` routing is used.
+/// Per-tab state preserved between commands when `--tab-name` routing is used.
 /// Each named tab has its own element ref map, active frame, and iframe sessions
 /// so that multiple tabs can be driven independently within the same daemon.
 #[derive(Debug)]
@@ -292,7 +292,7 @@ pub struct DaemonState {
     pub restore_save_status: String,
     pub restore_saved_path: Option<String>,
     pub session_id: String,
-    /// Named tab bindings managed by `--tabname`.
+    /// Named tab bindings managed by `--tab-name`.
     pub named_tabs: HashMap<String, NamedTabState>,
     pub tracing_state: TracingState,
     pub recording_state: RecordingState,
@@ -1284,8 +1284,8 @@ fn append_launch_mutator_policy_actions_for(
 
 /// Route the daemon to the named tab before a command executes.
 /// Creates the tab in the browser if it doesn't exist yet, or re-creates it if
-/// the backing page was closed.  Restores the tab's per-tab state (ref_map,
-/// active_frame_id, iframe_sessions) into the daemon's active slots.
+/// the backing page was closed.  Restores the tab's per-tab state into the
+/// daemon's active slots only when the backing page is still alive.
 async fn setup_named_tab(tab_name: &str, state: &mut DaemonState) -> Result<(), String> {
     // Phase 1: Read existing target_id from named_tabs *before* touching browser,
     // to avoid holding simultaneous borrows of state.browser and state.named_tabs.
@@ -1294,29 +1294,33 @@ async fn setup_named_tab(tab_name: &str, state: &mut DaemonState) -> Result<(), 
 
     // Phase 2: Decide which target_id to use.  Check browser liveness without
     // holding a named_tabs borrow.
-    let target_id: String = match existing_target_id {
-        Some(ref tid)
-            if state
-                .browser
-                .as_ref()
-                .map_or(false, |b| b.find_page_index_by_target_id(tid).is_some()) =>
-        {
-            // Existing tab is still alive – reuse it.
-            tid.clone()
-        }
-        _ => {
+    let existing_tab_is_alive = existing_target_id.as_ref().is_some_and(|tid| {
+        state
+            .browser
+            .as_ref()
+            .is_some_and(|b| b.find_page_index_by_target_id(tid).is_some())
+    });
+    let (target_id, restore_saved_state): (String, bool) = if existing_tab_is_alive {
+        // Existing tab is still alive, so its element refs and frame context
+        // still point at the same page target and can be reused.
+        (existing_target_id.unwrap(), true)
+    } else {
+        (
             // No existing entry, or the backing page was closed externally.
             // Create a new browser tab.
-            let browser = state
-                .browser
-                .as_mut()
-                .ok_or("Browser not launched")?;
-            browser.tab_new(None).await?;
-            browser
-                .active_target_id()
-                .ok_or("No active page after tab_new")?
-                .to_string()
-        }
+            {
+                let browser = state
+                    .browser
+                    .as_mut()
+                    .ok_or("Browser not launched")?;
+                browser.tab_new(None).await?;
+                browser
+                    .active_target_id()
+                    .ok_or("No active page after tab_new")?
+                    .to_string()
+            },
+            false,
+        )
     };
 
     // Phase 3: Switch the browser's active page to target_id.
@@ -1326,8 +1330,15 @@ async fn setup_named_tab(tab_name: &str, state: &mut DaemonState) -> Result<(), 
         browser.switch_to_target(&target_id).await?;
     }
 
-    // Phase 4: Restore per-tab isolated state into the daemon's active slots.
-    if let Some(named) = state.named_tabs.get(tab_name) {
+    // Phase 4: Restore per-tab isolated state into the daemon's active slots
+    // only when the original backing page is still alive. If the tab was
+    // closed and recreated, old refs/frame ids belong to the dead target and
+    // must be discarded.
+    if restore_saved_state {
+        let named = state
+            .named_tabs
+            .get(tab_name)
+            .ok_or("Named tab state missing for live tab")?;
         let saved_ref_map = named.ref_map.clone();
         let saved_frame = named.active_frame_id.clone();
         let saved_iframe = named.iframe_sessions.clone();
@@ -1335,7 +1346,8 @@ async fn setup_named_tab(tab_name: &str, state: &mut DaemonState) -> Result<(), 
         state.active_frame_id = saved_frame;
         state.iframe_sessions = saved_iframe;
     } else {
-        // First visit: clear daemon slots and register the new entry.
+        // First visit or recreated page: clear daemon slots and register a
+        // fresh entry for the new target.
         state.ref_map = RefMap::new();
         state.active_frame_id = None;
         state.iframe_sessions = HashMap::new();
@@ -1350,7 +1362,7 @@ async fn setup_named_tab(tab_name: &str, state: &mut DaemonState) -> Result<(), 
         );
     }
 
-    // Phase 5: Always keep stored target_id in sync (handles recreation case).
+    // Phase 5: Always keep stored target_id in sync.
     if let Some(named) = state.named_tabs.get_mut(tab_name) {
         named.target_id = target_id;
     }
