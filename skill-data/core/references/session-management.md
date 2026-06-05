@@ -7,6 +7,7 @@ Multiple isolated browser sessions with state persistence and concurrent browsin
 ## Contents
 
 - [Named Sessions](#named-sessions)
+- [Named Tab Routing](#named-tab-routing)
 - [Session Isolation Properties](#session-isolation-properties)
 - [Session State Persistence](#session-state-persistence)
 - [Common Patterns](#common-patterns)
@@ -29,6 +30,19 @@ agent-browser --session public open https://example.com
 agent-browser --session auth fill @e1 "user@example.com"
 agent-browser --session public get text body
 ```
+
+## Named Tab Routing
+
+Use `--tab-name` to route commands to independent tabs inside the same session and daemon:
+
+```bash
+agent-browser --tab-name docs open https://docs.example.com
+agent-browser --tab-name app open https://app.example.com
+agent-browser --tab-name docs snapshot
+agent-browser --tab-name app snapshot
+```
+
+Named tabs share cookies and storage, but each tab name has its own element refs, active frame, and cross-origin iframe sessions. Use `--session` when you need separate browser identity or authentication state.
 
 ## Session Isolation Properties
 
