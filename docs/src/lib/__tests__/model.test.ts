@@ -50,9 +50,9 @@ describe("resolveModel", () => {
   it("strips the minimax/ prefix before passing to provider", () => {
     process.env.MINIMAX_API_KEY = "test-key";
 
-    resolveModel("minimax/MiniMax-M2.5-highspeed");
+    resolveModel("minimax/MiniMax-M2.7-highspeed");
 
-    expect(mockProviderFn).toHaveBeenCalledWith("MiniMax-M2.5-highspeed");
+    expect(mockProviderFn).toHaveBeenCalledWith("MiniMax-M2.7-highspeed");
   });
 
   it("passes undefined API key when env var is not set", () => {

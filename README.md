@@ -640,15 +640,16 @@ The documentation site includes an AI chat assistant (Ask AI) powered by Anthrop
 | Provider | Model ID | Notes |
 | --- | --- | --- |
 | Anthropic (default) | `anthropic/claude-haiku-4.5` | Supports prompt caching |
-| [MiniMax](https://www.minimaxi.com) | `minimax/MiniMax-M2.7` | 1M context, OpenAI-compatible |
-| MiniMax | `minimax/MiniMax-M2.7-highspeed` | Fast inference variant |
+| [MiniMax](https://www.minimaxi.com) | `minimax/MiniMax-M3` | 512K context, 128K max output, image input |
+| MiniMax | `minimax/MiniMax-M2.7` | Previous-generation model |
+| MiniMax | `minimax/MiniMax-M2.7-highspeed` | Previous-generation low-latency variant |
 | OpenAI | `openai/gpt-4o-mini` | Via AI SDK registry |
 
 **Example:**
 
 ```bash
 # Use MiniMax as the docs chat provider
-export DOCS_CHAT_MODEL="minimax/MiniMax-M2.7"
+export DOCS_CHAT_MODEL="minimax/MiniMax-M3"
 export MINIMAX_API_KEY="your-api-key"
 ```
 

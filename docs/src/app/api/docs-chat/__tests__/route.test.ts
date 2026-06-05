@@ -117,7 +117,7 @@ describe("docs-chat route with MiniMax", () => {
   beforeEach(() => {
     process.env = {
       ...originalEnv,
-      DOCS_CHAT_MODEL: "minimax/MiniMax-M2.7",
+      DOCS_CHAT_MODEL: "minimax/MiniMax-M3",
       MINIMAX_API_KEY: "test-minimax-key",
     };
     vi.clearAllMocks();
@@ -138,7 +138,7 @@ describe("docs-chat route with MiniMax", () => {
     await routeModule.POST(req);
 
     const { resolveModel } = await import("@/lib/model");
-    expect(resolveModel).toHaveBeenCalledWith("minimax/MiniMax-M2.7");
+    expect(resolveModel).toHaveBeenCalledWith("minimax/MiniMax-M3");
   });
 
   it("skips Anthropic cache control for MiniMax models", async () => {

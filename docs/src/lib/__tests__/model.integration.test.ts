@@ -21,7 +21,7 @@ describe("model integration", () => {
 
     // Use real (unmocked) resolveModel
     const { resolveModel } = await import("../model");
-    const model = resolveModel("minimax/MiniMax-M2.7");
+    const model = resolveModel("minimax/MiniMax-M3");
 
     // Should return a LanguageModel object, not a string
     expect(typeof model).toBe("object");
@@ -40,7 +40,7 @@ describe("model integration", () => {
     const { isAnthropicModel } = await import("../model");
 
     expect(isAnthropicModel("anthropic/claude-haiku-4.5")).toBe(true);
-    expect(isAnthropicModel("minimax/MiniMax-M2.7")).toBe(false);
+    expect(isAnthropicModel("minimax/MiniMax-M3")).toBe(false);
     expect(isAnthropicModel("openai/gpt-4o")).toBe(false);
   });
 });
