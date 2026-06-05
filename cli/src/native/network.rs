@@ -272,61 +272,17 @@ pub async fn install_domain_filter_script(
     client: &CdpClient,
     session_id: &str,
     filter: &DomainFilter,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     let resource_domains = filter.effective_resource_domains();
+    let script = resource_domain_script_source(resource_domains);
+
+    apply_domain_filter_script(client, session_id, &script).await?;
+
     if resource_domains.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
 
-    let domains_json = serde_json::to_string(resource_domains).unwrap_or("[]".to_string());
-    let script = format!(
-        r#"(() => {{
-            const _allowed = {};
-            function _isDomainAllowed(hostname) {{
-                hostname = hostname.toLowerCase();
-                for (const p of _allowed) {{
-                    if (p.startsWith('*.')) {{
-                        const suffix = p.slice(2);
-                        if (hostname === suffix || hostname.endsWith('.' + suffix)) return true;
-                    }} else if (hostname === p) return true;
-                }}
-                return false;
-            }}
-            const OrigWS = window.WebSocket;
-            window.WebSocket = function(url, protocols) {{
-                try {{
-                    const u = new URL(url, location.href);
-                    if (!_isDomainAllowed(u.hostname)) throw new DOMException('WebSocket blocked: ' + u.hostname, 'SecurityError');
-                }} catch(e) {{ if (e instanceof DOMException) throw e; }}
-                return new OrigWS(url, protocols);
-            }};
-            window.WebSocket.prototype = OrigWS.prototype;
-            const OrigES = window.EventSource;
-            if (OrigES) {{
-                window.EventSource = function(url, opts) {{
-                    try {{
-                        const u = new URL(url, location.href);
-                        if (!_isDomainAllowed(u.hostname)) throw new DOMException('EventSource blocked: ' + u.hostname, 'SecurityError');
-                    }} catch(e) {{ if (e instanceof DOMException) throw e; }}
-                    return new OrigES(url, opts);
-                }};
-                window.EventSource.prototype = OrigES.prototype;
-            }}
-            const origBeacon = navigator.sendBeacon;
-            if (origBeacon) {{
-                navigator.sendBeacon = function(url, data) {{
-                    try {{
-                        const u = new URL(url, location.href);
-                        if (!_isDomainAllowed(u.hostname)) return false;
-                    }} catch(e) {{ return false; }}
-                    return origBeacon.call(navigator, url, data);
-                }};
-            }}
-        }})()"#,
-        domains_json,
-    );
-
-    client
+    let result = client
         .send_command(
             "Page.addScriptToEvaluateOnNewDocument",
             Some(json!({ "source": script })),
@@ -334,7 +290,135 @@ pub async fn install_domain_filter_script(
         )
         .await?;
 
+    Ok(result
+        .get("identifier")
+        .and_then(|v| v.as_str())
+        .map(String::from))
+}
+
+pub async fn clear_domain_filter_script(
+    client: &CdpClient,
+    session_id: &str,
+) -> Result<(), String> {
+    let script = resource_domain_script_source(&[]);
+    apply_domain_filter_script(client, session_id, &script).await
+}
+
+pub async fn remove_domain_filter_script(
+    client: &CdpClient,
+    session_id: &str,
+    identifier: &str,
+) -> Result<(), String> {
+    client
+        .send_command(
+            "Page.removeScriptToEvaluateOnNewDocument",
+            Some(json!({ "identifier": identifier })),
+            Some(session_id),
+        )
+        .await?;
     Ok(())
+}
+
+async fn apply_domain_filter_script(
+    client: &CdpClient,
+    session_id: &str,
+    script: &str,
+) -> Result<(), String> {
+    client
+        .send_command(
+            "Runtime.evaluate",
+            Some(json!({ "expression": script })),
+            Some(session_id),
+        )
+        .await?;
+    Ok(())
+}
+
+fn resource_domain_script_source(resource_domains: &[String]) -> String {
+    let domains_json = serde_json::to_string(resource_domains).unwrap_or("[]".to_string());
+    format!(
+        r#"(() => {{
+            const key = '__agentBrowserDomainFilter';
+            const domains = {};
+            const existing = Object.prototype.hasOwnProperty.call(window, key) ? window[key] : null;
+            const state = existing || {{}};
+            state.resourceDomains = domains;
+
+            function isDomainAllowed(hostname) {{
+                const allowed = state.resourceDomains || [];
+                if (allowed.length === 0) return true;
+                hostname = String(hostname || '').toLowerCase();
+                for (const p of allowed) {{
+                    if (p.startsWith('*.')) {{
+                        const suffix = p.slice(2);
+                        if (hostname === suffix || hostname.endsWith('.' + suffix)) return true;
+                    }} else if (hostname === p) {{
+                        return true;
+                    }}
+                }}
+                return false;
+            }}
+
+            function blockedError(kind, hostname) {{
+                return new DOMException(kind + ' blocked: ' + hostname, 'SecurityError');
+            }}
+
+            if (!existing) {{
+                Object.defineProperty(window, key, {{
+                    value: state,
+                    configurable: true,
+                }});
+            }}
+
+            if (!state.installed) {{
+                state.installed = true;
+                state.WebSocket = window.WebSocket;
+                state.EventSource = window.EventSource;
+                state.sendBeacon = navigator && navigator.sendBeacon;
+
+                if (state.WebSocket) {{
+                    window.WebSocket = function(url, protocols) {{
+                        try {{
+                            const u = new URL(url, location.href);
+                            if (!isDomainAllowed(u.hostname)) throw blockedError('WebSocket', u.hostname);
+                        }} catch (e) {{
+                            if (e instanceof DOMException) throw e;
+                        }}
+                        if (protocols === undefined) return new state.WebSocket(url);
+                        return new state.WebSocket(url, protocols);
+                    }};
+                    window.WebSocket.prototype = state.WebSocket.prototype;
+                }}
+
+                if (state.EventSource) {{
+                    window.EventSource = function(url, opts) {{
+                        try {{
+                            const u = new URL(url, location.href);
+                            if (!isDomainAllowed(u.hostname)) throw blockedError('EventSource', u.hostname);
+                        }} catch (e) {{
+                            if (e instanceof DOMException) throw e;
+                        }}
+                        if (opts === undefined) return new state.EventSource(url);
+                        return new state.EventSource(url, opts);
+                    }};
+                    window.EventSource.prototype = state.EventSource.prototype;
+                }}
+
+                if (state.sendBeacon) {{
+                    navigator.sendBeacon = function(url, data) {{
+                        try {{
+                            const u = new URL(url, location.href);
+                            if (!isDomainAllowed(u.hostname)) return false;
+                        }} catch (e) {{
+                            return false;
+                        }}
+                        return state.sendBeacon.call(navigator, url, data);
+                    }};
+                }}
+            }}
+        }})()"#,
+        domains_json,
+    )
 }
 
 /// Enable Fetch-based network interception for domain filtering.
@@ -366,10 +450,10 @@ pub async fn install_domain_filter(
     session_id: &str,
     filter: &DomainFilter,
     handle_auth_requests: bool,
-) -> Result<(), String> {
-    install_domain_filter_script(client, session_id, filter).await?;
+) -> Result<Option<String>, String> {
+    let script_id = install_domain_filter_script(client, session_id, filter).await?;
     install_domain_filter_fetch(client, session_id, handle_auth_requests).await?;
-    Ok(())
+    Ok(script_id)
 }
 
 // ---------------------------------------------------------------------------

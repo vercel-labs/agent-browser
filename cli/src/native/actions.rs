@@ -208,6 +208,7 @@ pub struct DaemonState {
     pub backend_type: BackendType,
     pub ref_map: RefMap,
     pub domain_filter: Arc<RwLock<Option<DomainFilter>>>,
+    domain_filter_script_ids: HashMap<String, String>,
     pub event_tracker: EventTracker,
     pub session_name: Option<String>,
     pub session_id: String,
@@ -293,6 +294,7 @@ impl DaemonState {
                     None
                 }
             })),
+            domain_filter_script_ids: HashMap::new(),
             event_tracker: EventTracker::new(),
             session_name: env::var("AGENT_BROWSER_SESSION_NAME").ok(),
             session_id: env::var("AGENT_BROWSER_SESSION").unwrap_or_else(|_| "default".to_string()),
@@ -671,14 +673,25 @@ impl DaemonState {
                     let _ = mgr.enable_domains_pub(&attach.session_id).await;
 
                     // Install domain filter on new pages
-                    let df = self.domain_filter.read().await;
-                    if let Some(ref filter) = *df {
-                        let has_proxy_creds = self.proxy_credentials.read().await.is_some();
-                        let _ = network::install_domain_filter(
+                    let filter = self.domain_filter.read().await.clone();
+                    let has_proxy_creds = self.proxy_credentials.read().await.is_some();
+                    if let Some(ref filter) = filter {
+                        if let Ok(Some(script_id)) = network::install_domain_filter(
                             &mgr.client,
                             &attach.session_id,
                             filter,
                             has_proxy_creds,
+                        )
+                        .await
+                        {
+                            self.domain_filter_script_ids
+                                .insert(attach.session_id.clone(), script_id);
+                        }
+                    } else if has_proxy_creds {
+                        let _ = network::install_domain_filter_fetch(
+                            &mgr.client,
+                            &attach.session_id,
+                            true,
                         )
                         .await;
                     }
@@ -1528,7 +1541,9 @@ async fn connect_auto_with_fresh_tab() -> Result<BrowserManager, String> {
     Ok(mgr)
 }
 
-fn domain_filter_from_launch_cmd(cmd: &Value) -> Result<Option<DomainFilter>, String> {
+fn domain_filter_update_from_launch_cmd(
+    cmd: &Value,
+) -> Result<Option<Option<DomainFilter>>, String> {
     let has_domain_filter_field = cmd.get("allowedDomains").is_some()
         || cmd.get("navigationDomains").is_some()
         || cmd.get("resourceDomains").is_some();
@@ -1541,39 +1556,142 @@ fn domain_filter_from_launch_cmd(cmd: &Value) -> Result<Option<DomainFilter>, St
         cmd.get("navigationDomains"),
         cmd.get("resourceDomains"),
     )?;
-    Ok(filter.is_active().then_some(filter))
+    Ok(Some(filter.is_active().then_some(filter)))
 }
 
-async fn apply_launch_domain_filter(cmd: &Value, state: &mut DaemonState) -> Result<(), String> {
-    if let Some(filter) = domain_filter_from_launch_cmd(cmd)? {
+async fn apply_launch_domain_filter(cmd: &Value, state: &mut DaemonState) -> Result<bool, String> {
+    if let Some(filter) = domain_filter_update_from_launch_cmd(cmd)? {
         let mut df = state.domain_filter.write().await;
-        *df = Some(filter);
+        *df = filter;
+        return Ok(true);
     }
-    Ok(())
+    Ok(false)
 }
 
 async fn install_browser_network_controls(
-    state: &DaemonState,
+    state: &mut DaemonState,
     has_launch_proxy_auth: bool,
 ) -> Result<(), String> {
     let handle_auth_requests =
         has_launch_proxy_auth || state.proxy_credentials.read().await.is_some();
-    let df = state.domain_filter.read().await;
+    let filter = state.domain_filter.read().await.clone();
 
     let Some(ref mgr) = state.browser else {
         return Ok(());
     };
-    let session_id = mgr.active_session_id()?;
 
-    if let Some(ref filter) = *df {
-        network::install_domain_filter(&mgr.client, session_id, filter, handle_auth_requests)
+    let client = mgr.client.clone();
+    let pages = mgr.pages_list();
+    let mut seen = HashSet::new();
+    let mut session_ids: Vec<String> = pages
+        .iter()
+        .filter_map(|p| {
+            if seen.insert(p.session_id.clone()) {
+                Some(p.session_id.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if session_ids.is_empty() {
+        session_ids.push(mgr.active_session_id()?.to_string());
+    }
+
+    let fetch_params_without_filter = if filter.is_none() {
+        build_fetch_params_for_current_state(state).await
+    } else {
+        None
+    };
+
+    for session_id in session_ids {
+        if let Some(ref filter) = filter {
+            install_domain_filter_for_session(
+                &client,
+                &session_id,
+                filter,
+                handle_auth_requests,
+                &mut state.domain_filter_script_ids,
+            )
             .await?;
-        network::sanitize_existing_pages(&mgr.client, &mgr.pages_list(), filter).await;
-    } else if handle_auth_requests {
-        network::install_domain_filter_fetch(&mgr.client, session_id, true).await?;
+        } else {
+            clear_domain_filter_for_session(
+                &client,
+                &session_id,
+                fetch_params_without_filter.as_ref(),
+                &mut state.domain_filter_script_ids,
+            )
+            .await?;
+        }
+    }
+
+    if let Some(ref filter) = filter {
+        network::sanitize_existing_pages(&client, &pages, filter).await;
     }
 
     Ok(())
+}
+
+async fn install_domain_filter_for_session(
+    client: &CdpClient,
+    session_id: &str,
+    filter: &DomainFilter,
+    handle_auth_requests: bool,
+    script_ids: &mut HashMap<String, String>,
+) -> Result<(), String> {
+    remove_tracked_domain_filter_script(client, session_id, script_ids).await?;
+    if let Some(identifier) =
+        network::install_domain_filter(client, session_id, filter, handle_auth_requests).await?
+    {
+        script_ids.insert(session_id.to_string(), identifier);
+    }
+    Ok(())
+}
+
+async fn clear_domain_filter_for_session(
+    client: &CdpClient,
+    session_id: &str,
+    fetch_params: Option<&Value>,
+    script_ids: &mut HashMap<String, String>,
+) -> Result<(), String> {
+    remove_tracked_domain_filter_script(client, session_id, script_ids).await?;
+    network::clear_domain_filter_script(client, session_id).await?;
+
+    if let Some(params) = fetch_params {
+        client
+            .send_command("Fetch.enable", Some(params.clone()), Some(session_id))
+            .await?;
+    } else {
+        let _ = client
+            .send_command("Fetch.disable", None, Some(session_id))
+            .await;
+    }
+
+    Ok(())
+}
+
+async fn remove_tracked_domain_filter_script(
+    client: &CdpClient,
+    session_id: &str,
+    script_ids: &mut HashMap<String, String>,
+) -> Result<(), String> {
+    if let Some(identifier) = script_ids.remove(session_id) {
+        network::remove_domain_filter_script(client, session_id, &identifier).await?;
+    }
+    Ok(())
+}
+
+async fn build_fetch_params_for_current_state(state: &DaemonState) -> Option<Value> {
+    let has_routes = !state.routes.read().await.is_empty();
+    let has_origin_headers = !state.origin_headers.read().await.is_empty();
+    let has_proxy_creds = state.proxy_credentials.read().await.is_some();
+
+    if has_routes || has_origin_headers || has_proxy_creds {
+        let patterns = build_fetch_patterns(state).await;
+        Some(build_fetch_enable_params(state, patterns).await)
+    } else {
+        None
+    }
 }
 
 async fn auto_launch(state: &mut DaemonState) -> Result<(), String> {
@@ -1838,6 +1956,7 @@ async fn rollback_failed_launch(state: &mut DaemonState) -> Result<(), String> {
 
     state.launch_hash = None;
     state.screencasting = false;
+    state.domain_filter_script_ids.clear();
     state.reset_input_state();
     state.ref_map.clear();
     state.update_stream_client().await;
@@ -2004,6 +2123,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
             state.browser = None;
             state.launch_hash = None;
             state.screencasting = false;
+            state.domain_filter_script_ids.clear();
             state.reset_input_state();
             state.update_stream_client().await;
         }
@@ -2448,6 +2568,7 @@ async fn handle_close(state: &mut DaemonState) -> Result<Value, String> {
     state.browser = None;
     state.launch_hash = None;
     state.screencasting = false;
+    state.domain_filter_script_ids.clear();
     state.reset_input_state();
     state.update_stream_client().await;
 
@@ -8445,13 +8566,14 @@ mod tests {
     }
 
     #[test]
-    fn test_domain_filter_from_launch_cmd_accepts_strings_and_arrays() {
-        let filter = domain_filter_from_launch_cmd(&json!({
+    fn test_domain_filter_update_from_launch_cmd_accepts_strings_and_arrays() {
+        let filter = domain_filter_update_from_launch_cmd(&json!({
             "allowedDomains": "legacy.example.com",
             "navigationDomains": ["app.example.com", "*.app.example.com"],
             "resourceDomains": "cdn.example.com, *.assets.example.com"
         }))
         .unwrap()
+        .expect("domain filter should be present")
         .expect("domain filter should be active");
 
         assert_eq!(filter.allowed_domains, vec!["legacy.example.com"]);
@@ -8466,8 +8588,18 @@ mod tests {
     }
 
     #[test]
-    fn test_domain_filter_from_launch_cmd_rejects_invalid_arrays() {
-        let err = domain_filter_from_launch_cmd(&json!({
+    fn test_domain_filter_update_from_launch_cmd_clears_empty_filter() {
+        let update = domain_filter_update_from_launch_cmd(&json!({
+            "resourceDomains": []
+        }))
+        .unwrap();
+
+        assert!(matches!(update, Some(None)));
+    }
+
+    #[test]
+    fn test_domain_filter_update_from_launch_cmd_rejects_invalid_arrays() {
+        let err = domain_filter_update_from_launch_cmd(&json!({
             "navigationDomains": ["app.example.com", 123]
         }))
         .unwrap_err();
@@ -8891,16 +9023,17 @@ mod tests {
     #[test]
     fn test_default_timeout_ms_from_env() {
         // When AGENT_BROWSER_DEFAULT_TIMEOUT is set, DaemonState should use it
-        env::set_var("AGENT_BROWSER_DEFAULT_TIMEOUT", "3000");
+        let guard = EnvGuard::new(&["AGENT_BROWSER_DEFAULT_TIMEOUT"]);
+        guard.set("AGENT_BROWSER_DEFAULT_TIMEOUT", "3000");
         let state = DaemonState::new();
         assert_eq!(state.default_timeout_ms, 3000);
-        env::remove_var("AGENT_BROWSER_DEFAULT_TIMEOUT");
     }
 
     #[test]
     fn test_default_timeout_ms_fallback() {
         // When AGENT_BROWSER_DEFAULT_TIMEOUT is unset, DaemonState uses 30000
-        env::remove_var("AGENT_BROWSER_DEFAULT_TIMEOUT");
+        let guard = EnvGuard::new(&["AGENT_BROWSER_DEFAULT_TIMEOUT"]);
+        guard.remove("AGENT_BROWSER_DEFAULT_TIMEOUT");
         let state = DaemonState::new();
         assert_eq!(state.default_timeout_ms, 30_000);
     }
