@@ -30,6 +30,17 @@ Each session has its own:
 - Navigation history
 - Authentication state
 
+## Named tab routing
+
+Use `--tab-name <name>` when you want multiple independent tabs inside the same session and daemon. Named tabs share browser cookies and storage, but each name keeps its own element refs, active frame, and cross-origin iframe sessions.
+
+```bash
+agent-browser --tab-name docs open https://docs.example.com
+agent-browser --tab-name app open https://app.example.com
+agent-browser --tab-name docs snapshot
+agent-browser --tab-name app snapshot
+```
+
 ## Chrome profile reuse
 
 The simplest way to reuse your existing login state: pass a Chrome profile name to `--profile`. agent-browser copies the profile to a temp directory (read-only snapshot) and launches Chrome with your existing cookies and sessions.

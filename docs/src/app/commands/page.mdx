@@ -236,6 +236,17 @@ agent-browser snapshot          # refs for docs
 agent-browser click @e3         # uses docs's refs
 ```
 
+Use `--tab-name <name>` when an agent needs to bounce between tabs without manually switching each time. Each named tab keeps its own element refs, active frame, and cross-origin iframe sessions inside the current daemon:
+
+```bash
+agent-browser --tab-name docs open https://docs.example.com
+agent-browser --tab-name app open https://app.example.com
+agent-browser --tab-name docs snapshot
+agent-browser --tab-name app snapshot
+```
+
+If a named tab is closed outside the CLI, the next command recreates it with fresh refs and frame state.
+
 ### Iframe support
 
 Iframes are detected automatically during snapshots. `Iframe` nodes are resolved and their content is inlined beneath the iframe element in the snapshot output. Refs assigned to elements inside iframes carry frame context, so `click`, `fill`, and other interactions work without manually switching frames.
@@ -509,6 +520,7 @@ See [Init Scripts & Extensions](/init-scripts) for launch-time scripts, runtime 
 
 ```bash
 --session <name>         # Isolated browser session
+--tab-name <name>        # Route commands to a named tab with isolated refs/frame state
 --session-name <name>    # Auto-save/restore session state (cookies, localStorage)
 --profile <path>         # Persistent browser profile directory
 --state <path>           # Load storage state from JSON file

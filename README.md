@@ -323,6 +323,17 @@ agent-browser click @e3              # click uses docs's refs
 agent-browser tab close docs         # close by label
 ```
 
+Use `--tab-name <name>` when an agent needs to bounce between tabs without manually switching each time. Each named tab keeps its own element refs, active frame, and cross-origin iframe sessions inside the current daemon:
+
+```bash
+agent-browser --tab-name docs open https://docs.example.com
+agent-browser --tab-name app open https://app.example.com
+agent-browser --tab-name docs snapshot
+agent-browser --tab-name app snapshot
+```
+
+If a named tab is closed outside the CLI, the next command recreates it with fresh refs and frame state.
+
 ### Frames
 
 ```bash
@@ -843,6 +854,7 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 | Option | Description |
 |--------|-------------|
 | `--session <name>` | Use isolated session (or `AGENT_BROWSER_SESSION` env) |
+| `--tab-name <name>` | Route commands to a named tab with isolated refs/frame state (or `AGENT_BROWSER_TAB_NAME` env) |
 | `--session-name <name>` | Auto-save/restore session state (or `AGENT_BROWSER_SESSION_NAME` env) |
 | `--profile <name\|path>` | Chrome profile name or persistent directory path (or `AGENT_BROWSER_PROFILE` env) |
 | `--state <path>` | Load storage state from JSON file (or `AGENT_BROWSER_STATE` env) |

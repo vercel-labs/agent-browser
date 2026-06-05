@@ -408,6 +408,7 @@ EOF
 --proxy <url>           # proxy server
 --state <path>          # load saved auth state from JSON
 --session-name <name>   # auto-save/restore session state by name
+--tab-name <name>       # route commands to a named tab with isolated refs/frame state
 ```
 
 ## When to load another skill

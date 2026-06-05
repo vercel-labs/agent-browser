@@ -3254,6 +3254,8 @@ Storage:
 
 Tabs:
   tab [new|list|close|<n>]   Manage tabs
+  Use --tab-name <name> to route repeated commands to a named tab with
+  isolated refs/frame state inside the current daemon.
 
 Diff:
   diff snapshot              Compare current vs last snapshot
@@ -3368,6 +3370,8 @@ Authentication:
 
 Options:
   --session <name>           Isolated session (or AGENT_BROWSER_SESSION env)
+  --tab-name <name>          Route commands to a named tab with isolated refs/frame state
+                             (or AGENT_BROWSER_TAB_NAME env)
   --executable-path <path>   Custom browser executable (or AGENT_BROWSER_EXECUTABLE_PATH)
   --extension <path>         Load browser extensions (repeatable)
   --init-script <path>       Register a page init script before the first navigation (repeatable)

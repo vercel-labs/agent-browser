@@ -357,6 +357,7 @@ Tool calls use the same config files and environment variables as the CLI. Each 
 
 ```bash
 agent-browser --session <name> ...    # Isolated browser session
+agent-browser --tab-name <name> ...   # Route commands to a named tab with isolated refs/frame state
 agent-browser --json ...              # JSON output for parsing
 agent-browser --headed ...            # Show browser window (not headless)
 agent-browser --cdp <port> ...        # Connect via Chrome DevTools Protocol
@@ -437,6 +438,7 @@ agent-browser network route '*' --resource-type image,font --body '' # Stub imag
 
 ```bash
 AGENT_BROWSER_SESSION="mysession"            # Default session name
+AGENT_BROWSER_TAB_NAME="docs"                # Default named tab route
 AGENT_BROWSER_EXECUTABLE_PATH="/path/chrome" # Custom browser path
 AGENT_BROWSER_EXTENSIONS="/ext1,/ext2"       # Comma-separated extension paths
 AGENT_BROWSER_INIT_SCRIPTS="/a.js,/b.js"     # Comma-separated init script paths
