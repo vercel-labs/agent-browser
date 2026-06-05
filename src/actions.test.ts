@@ -36,4 +36,31 @@ describe('toAIFriendlyError', () => {
       expect(result.message).toContain('cookie banners');
     });
   });
+
+  describe('element is not stable (infinite CSS animation)', () => {
+    // Playwright's stability check times out when a button has an infinite CSS
+    // animation (e.g. a pulsing "call to action" effect in a game UI).
+    // handleClick catches this specific error and retries with force:true rather
+    // than surfacing a generic timeout to the user.
+    //
+    // If the force retry itself fails, the error reaches toAIFriendlyError.
+    // Verify it is treated as a generic action timeout (not "not found").
+    it('not-stable timeout falls back to generic timed-out message', () => {
+      const error = new Error(
+        'locator.click: Timeout 25000ms exceeded.\nCall log:\n' +
+          "  - waiting for getByRole('button', { name: 'Gæt', exact: true })\n" +
+          "  - locator resolved to <button class='_enter _q'>Gæt</button>\n" +
+          '  - attempting click action\n' +
+          '    - waiting for element to be visible, enabled and stable\n' +
+          '    - element is not stable\n' +
+          '    - retrying click action'
+      );
+
+      const result = toAIFriendlyError(error, '@e34');
+
+      expect(result.message).toContain('timed out');
+      expect(result.message).not.toContain('not found');
+      expect(result.message).not.toContain('not visible');
+    });
+  });
 });

@@ -669,6 +669,35 @@ async function handleClick(command: ClickCommand, browser: BrowserManager): Prom
       delay: command.delay,
     });
   } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+
+    // Playwright's stability check refuses to click elements that have an active
+    // CSS animation (it waits for the element to be "stable"). Some apps — e.g.
+    // game UIs — apply infinite pulse/glow animations to call-to-action buttons
+    // to draw the user's attention.  When the stability check repeatedly finds
+    // the element "not stable" it eventually times out (25 s default).
+    //
+    // Detection: the Playwright call-log includes "element is not stable" when
+    // this is the actual blocking reason inside a generic Timeout error.
+    //
+    // Fix: retry once with `force: true` which bypasses the stability check
+    // while preserving all other actionability checks (visibility, enabled state,
+    // not covered by another element).  This is safe because we already verified
+    // the element is attached and visible before the first attempt.
+    if (message.includes('element is not stable')) {
+      try {
+        await locator.click({
+          button: command.button,
+          clickCount: command.clickCount,
+          delay: command.delay,
+          force: true,
+        });
+        return successResponse(command.id, { clicked: true });
+      } catch (forceError) {
+        throw toAIFriendlyError(forceError, command.selector);
+      }
+    }
+
     throw toAIFriendlyError(error, command.selector);
   }
 
