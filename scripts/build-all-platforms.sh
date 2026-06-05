@@ -20,6 +20,10 @@ echo ""
 # Ensure output directory exists
 mkdir -p "$OUTPUT_DIR"
 
+echo -e "${YELLOW}Building dashboard assets...${NC}"
+(cd "$PROJECT_ROOT" && pnpm run build:dashboard)
+echo ""
+
 # Build the Docker image if needed
 echo -e "${YELLOW}Building Docker cross-compilation image...${NC}"
 docker build --platform linux/amd64 -t agent-browser-builder -f "$PROJECT_ROOT/docker/Dockerfile.build" "$PROJECT_ROOT"
@@ -37,6 +41,7 @@ build_target() {
     docker run --rm \
         --platform linux/amd64 \
         -v "$PROJECT_ROOT/cli:/build" \
+        -v "$PROJECT_ROOT/packages/dashboard/out:/packages/dashboard/out:ro" \
         -v "$OUTPUT_DIR:/output" \
         agent-browser-builder \
         -c "set -euo pipefail

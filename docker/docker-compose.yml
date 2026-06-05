@@ -13,6 +13,7 @@ services:
       dockerfile: docker/Dockerfile.build
     volumes:
       - ../cli:/build
+      - ../packages/dashboard/out:/packages/dashboard/out:ro
       - ../bin:/output
     command: |
       -c '
@@ -46,6 +47,7 @@ services:
       dockerfile: docker/Dockerfile.build
     volumes:
       - ../cli:/build
+      - ../packages/dashboard/out:/packages/dashboard/out:ro
       - ../bin:/output
     command: |
       -c '
@@ -70,6 +72,7 @@ services:
       dockerfile: docker/Dockerfile.build
     volumes:
       - ../cli:/build
+      - ../packages/dashboard/out:/packages/dashboard/out:ro
       - ../bin:/output
     environment:
       - TARGET=${TARGET:-}

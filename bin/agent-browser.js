@@ -79,7 +79,7 @@ function main() {
     console.error(`Error: No binary found for ${platform()}-${arch()}`);
     console.error(`Expected: ${binaryPath}`);
     console.error('');
-    console.error('Run "npm run build:native" to build for your platform,');
+    console.error('Run "pnpm run build:native" to build for your platform,');
     console.error('or reinstall the package to trigger the postinstall download.');
     process.exit(1);
   }
