@@ -355,25 +355,8 @@ pub async fn take_snapshot(
     promote_hidden_inputs(&mut tree_nodes, &cursor_elements);
 
     for (idx, node) in tree_nodes.iter().enumerate() {
-        let role = node.role.as_str();
-        let mut should_ref = if INTERACTIVE_ROLES.contains(&role) {
-            true
-        } else if CONTENT_ROLES.contains(&role) {
-            !node.name.is_empty()
-        } else {
-            false
-        };
-
-        if node
-            .backend_node_id
-            .is_some_and(|bid| cursor_elements.contains_key(&bid))
-        {
-            // ref elements that are cursor-interactive
-            should_ref = true;
-        }
-
-        if should_ref {
-            let nth = tracker.track(role, &node.name, idx);
+        if should_assign_ref(&node.role, &node.name, node.backend_node_id, &cursor_elements) {
+            let nth = tracker.track(&node.role, &node.name, idx);
             nodes_with_refs.push((idx, nth));
         }
     }
@@ -607,6 +590,33 @@ async fn resolve_iframe_frame_id(
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .ok_or_else(|| "Could not resolve iframe frame ID".to_string())
+}
+
+/// Returns `true` when an AX tree node should be assigned a snapshot ref.
+///
+/// A ref is assigned when:
+/// - The role is a known interactive role (`button`, `link`, `textbox`, …).
+/// - The role is a content role (`heading`, `cell`, …) **and** the node has a
+///   non-empty accessible name.
+/// - The node's `backendNodeId` appears in `cursor_elements`, meaning it was
+///   detected as cursor-interactive by [`find_cursor_interactive_elements`]
+///   (e.g. a `<div onclick>` or an element with `cursor:pointer`).
+///
+/// This function exists as a standalone helper so that it can be unit-tested
+/// independently of the async CDP calls in [`take_snapshot`].
+fn should_assign_ref(
+    role: &str,
+    name: &str,
+    backend_node_id: Option<i64>,
+    cursor_elements: &HashMap<i64, CursorElementInfo>,
+) -> bool {
+    if INTERACTIVE_ROLES.contains(&role) {
+        return true;
+    }
+    if CONTENT_ROLES.contains(&role) && !name.is_empty() {
+        return true;
+    }
+    backend_node_id.is_some_and(|bid| cursor_elements.contains_key(&bid))
 }
 
 async fn find_cursor_interactive_elements(
@@ -1585,5 +1595,156 @@ mod tests {
         promote_hidden_inputs(&mut nodes, &cursor_elements);
 
         assert_eq!(nodes[0].role, "LabelText"); // unchanged
+    }
+
+    // -----------------------------------------------------------------------
+    // should_assign_ref
+    // Guards the logic that turns AX tree nodes into snapshot refs, including
+    // the cursor-interactive path that covers onclick/<div> game buttons inside
+    // cross-origin iframes.
+    // -----------------------------------------------------------------------
+
+    fn clickable_cursor_info(text: &str) -> CursorElementInfo {
+        CursorElementInfo {
+            kind: "clickable".to_string(),
+            hints: vec!["cursor:pointer".to_string()],
+            text: text.to_string(),
+            hidden_input_kind: None,
+            hidden_input_checked: None,
+        }
+    }
+
+    #[test]
+    fn test_should_assign_ref_interactive_roles_always_get_ref() {
+        let cursor_elements: HashMap<i64, CursorElementInfo> = HashMap::new();
+        for role in INTERACTIVE_ROLES {
+            assert!(
+                should_assign_ref(role, "", None, &cursor_elements),
+                "interactive role '{role}' should always get a ref"
+            );
+        }
+    }
+
+    #[test]
+    fn test_should_assign_ref_content_roles_require_non_empty_name() {
+        let cursor_elements: HashMap<i64, CursorElementInfo> = HashMap::new();
+        assert!(should_assign_ref("heading", "Title", None, &cursor_elements));
+        assert!(!should_assign_ref("heading", "", None, &cursor_elements));
+        assert!(should_assign_ref("cell", "Value", None, &cursor_elements));
+        assert!(!should_assign_ref("cell", "", None, &cursor_elements));
+    }
+
+    #[test]
+    fn test_should_assign_ref_generic_without_cursor_info_skipped() {
+        // A plain <div> with no cursor-interactive match must NOT get a ref —
+        // otherwise every structural wrapper would pollute the snapshot.
+        let cursor_elements: HashMap<i64, CursorElementInfo> = HashMap::new();
+        assert!(!should_assign_ref("generic", "", None, &cursor_elements));
+        assert!(!should_assign_ref("generic", "Some text", None, &cursor_elements));
+        assert!(!should_assign_ref("generic", "", Some(42), &cursor_elements));
+    }
+
+    #[test]
+    fn test_should_assign_ref_generic_with_cursor_info_gets_ref() {
+        // A <div> detected as cursor-interactive (onclick / cursor:pointer)
+        // MUST get a ref so agents can interact with it.
+        // This is the exact case for game number-buttons (e.g. Sudoku 1–9) and
+        // action buttons (SLET / HJÆLP) that live inside cross-origin iframes
+        // and carry no ARIA role.
+        let bid: i64 = 42;
+        let mut cursor_elements: HashMap<i64, CursorElementInfo> = HashMap::new();
+        cursor_elements.insert(bid, clickable_cursor_info("SLET"));
+
+        // Node with a different backendNodeId → no ref
+        assert!(!should_assign_ref("generic", "", Some(999), &cursor_elements));
+        // No backendNodeId at all → no ref
+        assert!(!should_assign_ref("generic", "", None, &cursor_elements));
+
+        // Node whose backendNodeId appears in cursor_elements → ref assigned
+        assert!(should_assign_ref("generic", "", Some(bid), &cursor_elements));
+        assert!(should_assign_ref("generic", "SLET", Some(bid), &cursor_elements));
+    }
+
+    #[test]
+    fn test_should_assign_ref_structural_roles_without_cursor_info_skipped() {
+        let cursor_elements: HashMap<i64, CursorElementInfo> = HashMap::new();
+        for role in STRUCTURAL_ROLES {
+            assert!(
+                !should_assign_ref(role, "anything", None, &cursor_elements),
+                "structural role '{role}' without cursor info must not get a ref"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Cross-origin iframe session regression guard
+    //
+    // When take_snapshot recurses into a cross-origin iframe it computes
+    // effective_session_id via resolve_ax_session.  find_cursor_interactive_elements
+    // MUST be called with effective_session_id (not session_id) so that the JS
+    // evaluation runs inside the iframe document.
+    //
+    // If the parent session were used instead, document.body.querySelectorAll('*')
+    // would scan the main frame and find none of the iframe's elements, leaving
+    // every clickable <div> inside the iframe as plain StaticText with no ref.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_cross_origin_iframe_effective_session_differs_from_parent() {
+        let parent_session = "parent-session-id";
+        let cross_origin_frame_id = "cross-origin-frame-id";
+        let iframe_session = "iframe-dedicated-session-id";
+
+        let mut iframe_sessions = HashMap::new();
+        iframe_sessions.insert(cross_origin_frame_id.to_string(), iframe_session.to_string());
+
+        let (_params, effective_session) =
+            resolve_ax_session(Some(cross_origin_frame_id), parent_session, &iframe_sessions);
+
+        assert_ne!(
+            effective_session, parent_session,
+            "cross-origin iframe: effective_session_id must differ from parent session; \
+             passing parent session to find_cursor_interactive_elements scans the wrong document"
+        );
+        assert_eq!(
+            effective_session, iframe_session,
+            "cross-origin iframe: effective_session_id must be the dedicated iframe CDP session"
+        );
+    }
+
+    #[test]
+    fn test_main_frame_effective_session_equals_parent() {
+        // For main-frame snapshots effective_session_id == session_id, so switching
+        // find_cursor_interactive_elements from session_id to effective_session_id
+        // is a no-op and cannot break existing behaviour.
+        let parent_session = "parent-session-id";
+        let iframe_sessions: HashMap<String, String> = HashMap::new();
+
+        let (_params, effective_session) =
+            resolve_ax_session(None, parent_session, &iframe_sessions);
+
+        assert_eq!(
+            effective_session, parent_session,
+            "main frame: effective_session_id must equal parent session"
+        );
+    }
+
+    #[test]
+    fn test_same_origin_iframe_effective_session_equals_parent() {
+        // Same-origin iframes share the parent CDP session (no separate entry in
+        // iframe_sessions), so effective_session_id == session_id.  The cursor
+        // element fix provides no improvement here (same-origin requires
+        // execution-context scoping), but it must not break anything either.
+        let parent_session = "parent-session-id";
+        let same_origin_frame_id = "same-origin-frame-id";
+        let iframe_sessions: HashMap<String, String> = HashMap::new(); // no entry
+
+        let (_params, effective_session) =
+            resolve_ax_session(Some(same_origin_frame_id), parent_session, &iframe_sessions);
+
+        assert_eq!(
+            effective_session, parent_session,
+            "same-origin iframe: effective_session_id falls back to parent session"
+        );
     }
 }
