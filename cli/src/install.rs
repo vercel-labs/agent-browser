@@ -15,13 +15,31 @@ pub fn get_browsers_dir() -> PathBuf {
 }
 
 pub fn find_installed_chrome() -> Option<PathBuf> {
+    find_installed_impl(|dir| chrome_binary_in_dir(dir), "chrome-search")
+}
+
+/// Same search strategy as [`find_installed_chrome`] but looks for the
+/// slim `chrome-headless-shell` distribution that is downloaded alongside
+/// full Chrome by `agent-browser install`.
+pub fn find_installed_headless_shell() -> Option<PathBuf> {
+    find_installed_impl(
+        |dir| chrome_headless_shell_in_dir(dir),
+        "chrome-headless-shell-search",
+    )
+}
+
+fn find_installed_impl<F>(locate: F, debug_tag: &str) -> Option<PathBuf>
+where
+    F: Fn(&Path) -> Option<PathBuf>,
+{
     let browsers_dir = get_browsers_dir();
     let debug = std::env::var("AGENT_BROWSER_DEBUG").is_ok();
 
     if debug {
         let _ = writeln!(
             io::stderr(),
-            "[chrome-search] home_dir={:?} browsers_dir={}",
+            "[{}] home_dir={:?} browsers_dir={}",
+            debug_tag,
             dirs::home_dir(),
             browsers_dir.display()
         );
@@ -29,7 +47,7 @@ pub fn find_installed_chrome() -> Option<PathBuf> {
 
     if !browsers_dir.exists() {
         if debug {
-            let _ = writeln!(io::stderr(), "[chrome-search] browsers_dir does not exist");
+            let _ = writeln!(io::stderr(), "[{}] browsers_dir does not exist", debug_tag);
         }
         return None;
     }
@@ -50,19 +68,9 @@ pub fn find_installed_chrome() -> Option<PathBuf> {
     let mut versions: Vec<_> = entries
         .filter_map(|e| e.ok())
         .filter(|e| {
-            let matches = e
-                .file_name()
+            e.file_name()
                 .to_str()
-                .is_some_and(|n| n.starts_with("chrome-"));
-            if debug {
-                let _ = writeln!(
-                    io::stderr(),
-                    "[chrome-search] entry {:?} matches={}",
-                    e.file_name(),
-                    matches
-                );
-            }
-            matches
+                .is_some_and(|n| n.starts_with("chrome-"))
         })
         .collect();
 
@@ -70,12 +78,13 @@ pub fn find_installed_chrome() -> Option<PathBuf> {
 
     for entry in versions {
         let dir = entry.path();
-        if let Some(bin) = chrome_binary_in_dir(&dir) {
+        if let Some(bin) = locate(&dir) {
             let exists = bin.exists();
             if debug {
                 let _ = writeln!(
                     io::stderr(),
-                    "[chrome-search] candidate {} exists={}",
+                    "[{}] candidate {} exists={}",
+                    debug_tag,
                     bin.display(),
                     exists
                 );
@@ -83,17 +92,11 @@ pub fn find_installed_chrome() -> Option<PathBuf> {
             if exists {
                 return Some(bin);
             }
-        } else if debug {
-            let _ = writeln!(
-                io::stderr(),
-                "[chrome-search] no binary found in {}",
-                dir.display()
-            );
         }
     }
 
     if debug {
-        let _ = writeln!(io::stderr(), "[chrome-search] no installed Chrome found");
+        let _ = writeln!(io::stderr(), "[{}] no binary found", debug_tag);
     }
     None
 }
@@ -151,6 +154,68 @@ fn chrome_binary_in_dir(dir: &Path) -> Option<PathBuf> {
     }
 }
 
+/// Locate the `chrome-headless-shell` binary inside the given directory.
+///
+/// `chrome-headless-shell` is a slim, headless-only Chromium distribution
+/// that Google publishes alongside full Chrome for Testing. Unlike the full
+/// Chrome for Testing builds (which have intermittently shipped a broken
+/// `Page.captureScreenshot` on 147.x — see the screenshot hang reports),
+/// `chrome-headless-shell` is the binary Playwright uses for its headless
+/// path and is reliably captureable. We prefer it whenever it is available
+/// and the user hasn't explicitly asked for headed mode.
+pub fn chrome_headless_shell_in_dir(dir: &Path) -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        let candidates = [
+            "chrome-headless-shell-mac-arm64/chrome-headless-shell",
+            "chrome-headless-shell-mac-x64/chrome-headless-shell",
+            "chrome-headless-shell",
+        ];
+        for c in candidates {
+            let p = dir.join(c);
+            if p.exists() {
+                return Some(p);
+            }
+        }
+        None
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let candidates = [
+            "chrome-headless-shell-linux64/chrome-headless-shell",
+            "chrome-headless-shell",
+        ];
+        for c in candidates {
+            let p = dir.join(c);
+            if p.exists() {
+                return Some(p);
+            }
+        }
+        None
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let candidates = [
+            "chrome-headless-shell-win64\\chrome-headless-shell.exe",
+            "chrome-headless-shell.exe",
+        ];
+        for c in candidates {
+            let p = dir.join(c);
+            if p.exists() {
+                return Some(p);
+            }
+        }
+        None
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        None
+    }
+}
+
 fn platform_key() -> &'static str {
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     {
@@ -182,7 +247,18 @@ fn platform_key() -> &'static str {
     }
 }
 
-async fn fetch_download_url() -> Result<(String, String), String> {
+/// URLs returned by `fetch_download_url`.
+///
+/// `chrome_headless_shell_url` is optional because older entries in the
+/// `last-known-good-versions` manifest don't include the headless-shell
+/// distribution. In that case we fall back to downloading only full Chrome.
+struct DownloadUrls {
+    version: String,
+    chrome_url: String,
+    chrome_headless_shell_url: Option<String>,
+}
+
+async fn fetch_download_url() -> Result<DownloadUrls, String> {
     let client = http_client()?;
     let resp = client
         .get(LAST_KNOWN_GOOD_URL)
@@ -208,22 +284,33 @@ async fn fetch_download_url() -> Result<(String, String), String> {
 
     let platform = platform_key();
 
-    let url = channel
-        .get("downloads")
-        .and_then(|d| d.get("chrome"))
-        .and_then(|c| c.as_array())
-        .and_then(|arr| {
-            arr.iter().find_map(|entry| {
-                if entry.get("platform")?.as_str()? == platform {
-                    Some(entry.get("url")?.as_str()?.to_string())
-                } else {
-                    None
-                }
+    let pick_url = |key: &str| -> Option<String> {
+        channel
+            .get("downloads")
+            .and_then(|d| d.get(key))
+            .and_then(|c| c.as_array())
+            .and_then(|arr| {
+                arr.iter().find_map(|entry| {
+                    if entry.get("platform")?.as_str()? == platform {
+                        Some(entry.get("url")?.as_str()?.to_string())
+                    } else {
+                        None
+                    }
+                })
             })
-        })
+    };
+
+    let chrome_url = pick_url("chrome")
         .ok_or_else(|| format!("No download URL found for platform: {}", platform))?;
 
-    Ok((version, url))
+    // Older manifests don't include `chrome-headless-shell`; that's OK.
+    let chrome_headless_shell_url = pick_url("chrome-headless-shell");
+
+    Ok(DownloadUrls {
+        version,
+        chrome_url,
+        chrome_headless_shell_url,
+    })
 }
 
 fn format_reqwest_error(e: &reqwest::Error) -> String {
@@ -439,61 +526,119 @@ pub fn run_install(with_deps: bool) {
             exit(1);
         });
 
-    let (version, url) = match rt.block_on(fetch_download_url()) {
+    let urls = match rt.block_on(fetch_download_url()) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("{} {}", color::error_indicator(), e);
             exit(1);
         }
     };
+    let DownloadUrls {
+        version,
+        chrome_url,
+        chrome_headless_shell_url,
+    } = urls;
 
     let dest = get_browsers_dir().join(format!("chrome-{}", version));
 
-    if let Some(bin) = chrome_binary_in_dir(&dest) {
-        if bin.exists() {
-            println!(
-                "{} Chrome {} is already installed",
-                color::success_indicator(),
-                version
-            );
-            return;
-        }
+    // Check whether both binaries are already present. If only Chrome is
+    // present but headless-shell is missing and available, we re-run the
+    // headless-shell download step so existing installs self-heal.
+    let chrome_present = chrome_binary_in_dir(&dest).is_some_and(|p| p.exists());
+    let shell_present = chrome_headless_shell_in_dir(&dest).is_some_and(|p| p.exists());
+
+    if chrome_present && (shell_present || chrome_headless_shell_url.is_none()) {
+        println!(
+            "{} Chrome {} is already installed",
+            color::success_indicator(),
+            version
+        );
+        return;
     }
 
-    println!("  Downloading Chrome {} for {}", version, platform_key());
-    println!("  {}", url);
+    if !chrome_present {
+        println!("  Downloading Chrome {} for {}", version, platform_key());
+        println!("  {}", chrome_url);
 
-    let bytes = match rt.block_on(download_bytes(&url)) {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("{} {}", color::error_indicator(), e);
-            exit(1);
-        }
-    };
-
-    match extract_zip(bytes, &dest) {
-        Ok(()) => {
-            println!(
-                "{} Chrome {} installed successfully",
-                color::success_indicator(),
-                version
-            );
-            println!("  Location: {}", dest.display());
-
-            if is_linux && !with_deps {
-                println!();
-                println!(
-                    "{} If you see \"shared library\" errors when running, use:",
-                    color::yellow("Note:")
-                );
-                println!("  agent-browser install --with-deps");
+        let bytes = match rt.block_on(download_bytes(&chrome_url)) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("{} {}", color::error_indicator(), e);
+                exit(1);
             }
-        }
-        Err(e) => {
+        };
+
+        if let Err(e) = extract_zip(bytes, &dest) {
             let _ = fs::remove_dir_all(&dest);
             eprintln!("{} {}", color::error_indicator(), e);
             exit(1);
         }
+
+        println!(
+            "{} Chrome {} installed successfully",
+            color::success_indicator(),
+            version
+        );
+    }
+
+    // Also download `chrome-headless-shell` when available. It's a slim,
+    // headless-only Chromium build that Playwright uses for screenshotting
+    // and that reliably handles `Page.captureScreenshot` on Chrome 147+,
+    // whereas full `Chrome for Testing 147.x` has shipped intermittent
+    // `Page.captureScreenshot` hangs in headless mode. Having both gives
+    // us a correct default for headless runs without forcing users to
+    // downgrade manually.
+    if !shell_present {
+        if let Some(shell_url) = chrome_headless_shell_url {
+            println!(
+                "  Downloading chrome-headless-shell {} for {}",
+                version,
+                platform_key()
+            );
+            println!("  {}", shell_url);
+
+            match rt.block_on(download_bytes(&shell_url)) {
+                Ok(bytes) => match extract_zip(bytes, &dest) {
+                    Ok(()) => {
+                        println!(
+                            "{} chrome-headless-shell {} installed successfully",
+                            color::success_indicator(),
+                            version
+                        );
+                    }
+                    Err(e) => {
+                        // Non-fatal: full Chrome is already installed, so
+                        // agent-browser will still work (headed + some
+                        // headless workloads). Just warn the user.
+                        eprintln!(
+                            "{} Failed to extract chrome-headless-shell: {}. \
+                             Continuing with Chrome only.",
+                            color::warning_indicator(),
+                            e
+                        );
+                    }
+                },
+                Err(e) => {
+                    eprintln!(
+                        "{} Failed to download chrome-headless-shell: {}. \
+                         Continuing with Chrome only.",
+                        color::warning_indicator(),
+                        e
+                    );
+                }
+            }
+        }
+    }
+
+    println!("  Location: {}", dest.display());
+
+    if is_linux && !with_deps {
+        println!();
+        println!(
+            "{} If you see \"shared library\" errors when running, use:",
+            color::yellow("Note:")
+        );
+        println!("  agent-browser install --with-deps");
     }
 }
 
