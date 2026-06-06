@@ -1212,6 +1212,13 @@ fn inject_cursor_orphans(
         });
     }
 
+    // Sort by backend_node_id so injection order is deterministic across runs.
+    // HashMap iteration order is non-deterministic; without sorting, ref numbers
+    // assigned to otherwise-identical snapshots would differ between calls.
+    // backend_node_id values are assigned incrementally by Chrome, so this also
+    // approximates DOM document order.
+    orphans.sort_by_key(|o| o.backend_node_id);
+
     // Append synthetic nodes and wire parent–child links.
     for orphan in orphans {
         let new_idx = tree_nodes.len();
