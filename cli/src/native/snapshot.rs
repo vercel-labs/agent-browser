@@ -343,9 +343,12 @@ pub async fn take_snapshot(
 
     let mut nodes_with_refs: Vec<(usize, usize)> = Vec::new();
 
-    // Pre-collect cursor-interactive elements so we can mark them with refs during tree building
+    // Pre-collect cursor-interactive elements so we can mark them with refs during tree building.
+    // Use effective_session_id (not session_id) so that when processing a cross-origin iframe
+    // the JS runs inside the iframe's own CDP session and can see the iframe's DOM elements.
+    // For the main frame effective_session_id == session_id, so there is no change in behaviour.
     let cursor_elements: HashMap<i64, CursorElementInfo> =
-        find_cursor_interactive_elements(client, session_id)
+        find_cursor_interactive_elements(client, effective_session_id)
             .await
             .unwrap_or_default();
 
