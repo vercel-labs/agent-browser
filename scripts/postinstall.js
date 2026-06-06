@@ -48,6 +48,18 @@ const version = packageJson.version;
 const GITHUB_REPO = 'vercel-labs/agent-browser';
 const DOWNLOAD_URL = `https://github.com/${GITHUB_REPO}/releases/download/v${version}/${binaryName}`;
 
+// Checksums are injected or updated during the release process
+const CHECKSUMS = {
+  'linux-x64': '',
+  'linux-arm64': '',
+  'linux-musl-x64': '',
+  'linux-musl-arm64': '',
+  'darwin-x64': '',
+  'darwin-arm64': '',
+  'win32-x64': '',
+  'win32-arm64': '',
+};
+
 async function downloadFile(url, dest) {
   return new Promise((resolve, reject) => {
     const file = createWriteStream(dest);
@@ -133,6 +145,17 @@ async function main() {
 
   try {
     await downloadFile(DOWNLOAD_URL, binaryPath);
+
+    const { createHash } = await import('crypto');
+    const { readFileSync } = await import('fs');
+    const buffer = readFileSync(binaryPath);
+    const hash = createHash('sha256').update(buffer).digest('hex');
+    const expected = CHECKSUMS[platformKey];
+    
+    if (expected && hash !== expected) {
+      unlinkSync(binaryPath);
+      throw new Error(`Binary checksum mismatch for ${platformKey}.\nExpected: ${expected}\nGot:      ${hash}`);
+    }
 
     // Make executable on Unix
     if (platform() !== 'win32') {
