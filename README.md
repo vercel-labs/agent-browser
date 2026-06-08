@@ -305,9 +305,11 @@ agent-browser network har stop [output.har]    # Stop and save HAR (temp path if
 agent-browser tab                              # List tabs (shows `tabId` and optional label)
 agent-browser tab new [url]                    # New tab (optionally with URL)
 agent-browser tab new --label docs [url]       # New tab with a user-assigned label
+agent-browser tab new --background [url]        # New tab without foregrounding it
 agent-browser tab <t<N>|label>                 # Switch to a tab by id or label
 agent-browser tab close [t<N>|label]           # Close a tab (defaults to active)
 agent-browser window new                       # New window
+agent-browser focus-emulate <on|off>           # Keep a backgrounded tab operable (focus/visibility emulation)
 ```
 
 Tab ids are stable strings of the form `t1`, `t2`, `t3`. They're never reused

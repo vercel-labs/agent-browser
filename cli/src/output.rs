@@ -2169,6 +2169,7 @@ Examples:
   agent-browser tab new
   agent-browser tab new https://example.com
   agent-browser tab new --label docs https://docs.example.com
+  agent-browser tab new --background https://example.com
   agent-browser tab t2
   agent-browser tab docs
   agent-browser tab close
