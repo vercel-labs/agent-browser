@@ -254,6 +254,10 @@ pub struct DaemonState {
     pub stream_server: Option<Arc<StreamServer>>,
     /// Hash of launch options used for the current browser, for relaunch detection.
     launch_hash: Option<u64>,
+    /// Whether the browser should launch in headed (visible) mode.
+    /// Initialized from AGENT_BROWSER_HEADED env var, updated by per-command headless field.
+    /// Fixes #1428: --headed was ignored in auto_launch when daemon was already running.
+    headed: bool,
     /// Browser engine name (e.g. "chrome", "lightpanda") for observability.
     pub engine: String,
     /// Default timeout for wait operations, from AGENT_BROWSER_DEFAULT_TIMEOUT env var.
@@ -309,6 +313,9 @@ impl DaemonState {
             stream_client: None,
             stream_server: None,
             launch_hash: None,
+            headed: env::var("AGENT_BROWSER_HEADED")
+                .map(|v| v == "1" || v == "true")
+                .unwrap_or(false),
             engine: env::var("AGENT_BROWSER_ENGINE").unwrap_or_else(|_| "chrome".to_string()),
             default_timeout_ms: env::var("AGENT_BROWSER_DEFAULT_TIMEOUT")
                 .ok()
@@ -1214,6 +1221,15 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         }
     }
 
+    // Update headed preference from per-command headless field (issue #1428).
+    // When the CLI sends --headed, it includes "headless": false in the command
+    // JSON. We persist this in DaemonState so that auto_launch() (triggered by
+    // non-launch commands like navigate/screenshot) uses the correct preference
+    // even when the daemon was started without AGENT_BROWSER_HEADED.
+    if let Some(headless) = cmd.get("headless").and_then(|v| v.as_bool()) {
+        state.headed = !headless;
+    }
+
     let skip_launch = matches!(
         action,
         "" | "launch"
@@ -1514,7 +1530,7 @@ async fn connect_auto_with_fresh_tab() -> Result<BrowserManager, String> {
 }
 
 async fn auto_launch(state: &mut DaemonState) -> Result<(), String> {
-    let mut options = launch_options_from_env();
+    let mut options = launch_options_from_env_with_headed(state.headed);
 
     // Use the stream server's viewport dimensions for --window-size so the
     // content area matches the desired viewport from the start.
@@ -1727,6 +1743,16 @@ fn launch_options_from_env() -> LaunchOptions {
         viewport_size: None,
         use_real_keychain: false,
     }
+}
+
+/// Like `launch_options_from_env`, but allows overriding the headed preference
+/// from per-command state rather than relying solely on the env var baked in at
+/// daemon spawn time. This fixes the bug where `--headed` is ignored when the
+/// daemon is already running (issue #1428).
+fn launch_options_from_env_with_headed(headed: bool) -> LaunchOptions {
+    let mut opts = launch_options_from_env();
+    opts.headless = !headed;
+    opts
 }
 
 fn hide_scrollbars_from_env() -> bool {
