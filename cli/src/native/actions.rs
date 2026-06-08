@@ -2457,6 +2457,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         "url" => handle_url(state).await,
         "cdp_url" => handle_cdp_url(state),
         "inspect" => handle_inspect(state).await,
+        "focus_emulate" => handle_focus_emulate(cmd, state).await,
         "title" => handle_title(state).await,
         "content" => handle_content(state).await,
         "evaluate" => handle_evaluate(cmd, state).await,
@@ -2828,7 +2829,7 @@ async fn apply_tab_binding_on_attach(state: &mut DaemonState) -> Result<bool, St
                 // A pinned session never implicitly adopts an existing tab:
                 // start it on a fresh one.
                 if let Some(ref mut mgr) = state.browser {
-                    mgr.tab_new(None, None).await?;
+                    mgr.tab_new(None, None, false).await?;
                 }
                 true
             } else {
@@ -2877,7 +2878,7 @@ async fn open_fresh_tab_for_auto_connect(state: &mut DaemonState) -> Result<(), 
     let Some(ref mut mgr) = state.browser else {
         return Ok(());
     };
-    mgr.tab_new(None, None).await?;
+    mgr.tab_new(None, None, false).await?;
     let session_id = mgr.active_session_id()?.to_string();
     let _ = mgr
         .client
@@ -5059,6 +5060,7 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
                     Some(&href)
                 },
                 None,
+                false,
             )
             .await?;
         }
@@ -6254,14 +6256,22 @@ async fn handle_tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
     let has_proxy_creds = state.proxy_credentials.read().await.is_some();
     let defer_url_until_controls =
         should_defer_url_until_network_controls(domain_filter.as_ref(), has_proxy_creds, url)?;
+    let background = cmd
+        .get("background")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     state.ref_map.clear();
     state.active_iframe_sessions.clear();
     state.active_frame_id = None;
     let mut result = {
         let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
-        mgr.tab_new(if defer_url_until_controls { None } else { url }, label)
-            .await?
+        mgr.tab_new(
+            if defer_url_until_controls { None } else { url },
+            label,
+            background,
+        )
+        .await?
     };
 
     install_network_controls_or_close(state, has_proxy_creds).await?;
@@ -6404,6 +6414,13 @@ async fn handle_user_agent(cmd: &Value, state: &DaemonState) -> Result<Value, St
         .ok_or("Missing 'userAgent' parameter")?;
     mgr.set_user_agent(ua).await?;
     Ok(json!({ "userAgent": ua }))
+}
+
+async fn handle_focus_emulate(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let enabled = cmd.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+    mgr.set_focus_emulation(enabled).await?;
+    Ok(json!({ "focusEmulation": enabled }))
 }
 
 async fn handle_set_media(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
