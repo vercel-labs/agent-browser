@@ -117,9 +117,7 @@ async fn collect_storage_via_temp_target(
     let create_result: CreateTargetResult = client
         .send_command_typed(
             "Target.createTarget",
-            &CreateTargetParams {
-                url: "about:blank".to_string(),
-            },
+            &CreateTargetParams::new("about:blank"),
             None,
         )
         .await?;

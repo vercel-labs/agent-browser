@@ -1274,14 +1274,30 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
         "window" => {
             const VALID: &[&str] = &["new"];
             match rest.first().copied() {
-                Some("new") => Ok(json!({ "id": id, "action": "window_new" })),
+                Some("new") => {
+                    // `window new` opens a window in the shared (logged-in)
+                    // context; `--isolated` opts into a fresh isolated context.
+                    let mut cmd = json!({ "id": id, "action": "window_new" });
+                    for arg in rest.iter().skip(1) {
+                        match *arg {
+                            "--isolated" => cmd["isolated"] = json!(true),
+                            other => {
+                                return Err(ParseError::UnknownSubcommand {
+                                    subcommand: other.to_string(),
+                                    valid_options: &["--isolated"],
+                                });
+                            }
+                        }
+                    }
+                    Ok(cmd)
+                }
                 Some(sub) => Err(ParseError::UnknownSubcommand {
                     subcommand: sub.to_string(),
                     valid_options: VALID,
                 }),
                 None => Err(ParseError::MissingArguments {
                     context: "window".to_string(),
-                    usage: "window <new>",
+                    usage: "window <new> [--isolated]",
                 }),
             }
         }
@@ -2743,6 +2759,30 @@ mod tests {
 
     fn args(s: &str) -> Vec<String> {
         s.split_whitespace().map(String::from).collect()
+    }
+
+    // === Window Tests ===
+
+    #[test]
+    fn test_window_new() {
+        let cmd = parse_command(&args("window new"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "window_new");
+        assert!(
+            cmd.get("isolated").is_none(),
+            "window new must default to the shared (logged-in) context"
+        );
+    }
+
+    #[test]
+    fn test_window_new_isolated() {
+        let cmd = parse_command(&args("window new --isolated"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "window_new");
+        assert_eq!(cmd["isolated"], true);
+    }
+
+    #[test]
+    fn test_window_new_rejects_unknown_flag() {
+        assert!(parse_command(&args("window new --bogus"), &default_flags()).is_err());
     }
 
     // === Cookies Tests ===
