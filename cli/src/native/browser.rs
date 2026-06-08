@@ -661,9 +661,7 @@ impl BrowserManager {
                 .client
                 .send_command_typed(
                     "Target.createTarget",
-                    &CreateTargetParams {
-                        url: "about:blank".to_string(),
-                    },
+                    &CreateTargetParams::new("about:blank"),
                     None,
                 )
                 .await?;
@@ -1359,9 +1357,7 @@ impl BrowserManager {
             .client
             .send_command_typed(
                 "Target.createTarget",
-                &CreateTargetParams {
-                    url: "about:blank".to_string(),
-                },
+                &CreateTargetParams::new("about:blank"),
                 None,
             )
             .await?;
@@ -1524,9 +1520,7 @@ impl BrowserManager {
             .client
             .send_command_typed(
                 "Target.createTarget",
-                &CreateTargetParams {
-                    url: target_url.to_string(),
-                },
+                &CreateTargetParams::new(target_url),
                 None,
             )
             .await?;
