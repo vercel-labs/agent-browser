@@ -144,11 +144,19 @@ struct ChromeArgs {
     args: Vec<String>,
     user_data_dir: PathBuf,
     temp_user_data_dir: Option<PathBuf>,
+    /// When set, Chrome was launched with this specific CDP port (instead of
+    /// --remote-debugging-port=0) to work around snap Chromium's AppArmor
+    /// confinement preventing DevToolsActivePort from being written.
+    explicit_cdp_port: Option<u16>,
 }
 
-fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
+fn build_chrome_args(options: &LaunchOptions, snap_port: Option<u16>) -> Result<ChromeArgs, String> {
+    let debug_port_arg = match snap_port {
+        Some(port) => format!("--remote-debugging-port={}", port),
+        None => "--remote-debugging-port=0".to_string(),
+    };
     let mut args = vec![
-        "--remote-debugging-port=0".to_string(),
+        debug_port_arg,
         "--no-first-run".to_string(),
         "--no-default-browser-check".to_string(),
         "--disable-background-networking".to_string(),
@@ -255,6 +263,7 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
         args,
         user_data_dir,
         temp_user_data_dir,
+        explicit_cdp_port: snap_port,
     })
 }
 
@@ -341,12 +350,61 @@ pub fn launch_chrome(options: &LaunchOptions) -> Result<ChromeProcess, String> {
     Err(last_err)
 }
 
+/// Returns true if the Chrome binary is a snap package installation.
+/// Snap Chromium's AppArmor confinement prevents DevToolsActivePort from
+/// being written to arbitrary user-data-dir paths (issue #1428).
+fn is_snap_chrome(chrome_path: &Path) -> bool {
+    chrome_path.starts_with("/snap/")
+}
+
+/// Allocate a free TCP port on localhost by binding to port 0.
+/// Returns the port number and the TcpListener. The caller must hold the
+/// listener alive until after Chrome is spawned to prevent port theft,
+/// then drop it so Chrome can bind.
+fn allocate_free_port() -> Result<(u16, std::net::TcpListener), String> {
+    use std::net::TcpListener;
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .map_err(|e| format!("Failed to allocate free port: {}", e))?;
+    let port = listener.local_addr()
+        .map_err(|e| format!("Failed to get allocated port: {}", e))?
+        .port();
+    Ok((port, listener))
+}
+
 fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<ChromeProcess, String> {
+    // Detect snap Chromium and pre-allocate a free port. Snap's AppArmor
+    // confinement prevents DevToolsActivePort from being written, so we
+    // must know the port upfront and discover CDP via HTTP (issue #1428).
+    // We hold the TcpListener alive until after spawn() to prevent port theft.
+    let (snap_port, _port_guard) = if is_snap_chrome(chrome_path) {
+        match allocate_free_port() {
+            Ok((port, listener)) => {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "[chrome] Snap Chromium detected, using pre-allocated CDP port {}",
+                    port
+                );
+                (Some(port), Some(listener))
+            }
+            Err(e) => {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "[chrome] Warning: failed to allocate port for snap Chrome: {}. Falling back to port 0.",
+                    e
+                );
+                (None, None)
+            }
+        }
+    } else {
+        (None, None)
+    };
+
     let ChromeArgs {
         args,
         user_data_dir,
         temp_user_data_dir,
-    } = build_chrome_args(options)?;
+        explicit_cdp_port,
+    } = build_chrome_args(options, snap_port)?;
 
     // Mitigate stale DevToolsActivePort risk (e.g., previous crash left it behind).
     // Puppeteer does similar cleanup before spawning.
@@ -390,31 +448,52 @@ fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<Chro
         format!("Failed to launch Chrome at {:?}: {}", chrome_path, e)
     })?;
 
+    // Port guard is no longer needed — Chrome has forked and will bind to
+    // the port after exec(). Drop the guard to free the socket, then give
+    // Chrome a brief moment to bind before we start polling.
+    drop(_port_guard);
+    if snap_port.is_some() {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
     // Shared overall deadline so we don't double-wait (poll + stderr fallback).
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
 
-    // Primary path: use DevToolsActivePort written into user-data-dir.
-    // This is more reliable on Windows than scraping stderr for "DevTools listening on ...",
-    // which can be missing/empty depending on how Chrome is launched.
-    let ws_url = match wait_for_devtools_active_port(&mut child, &user_data_dir, deadline) {
-        Ok(url) => url,
-        Err(primary_err) => {
-            // Fallback: scrape stderr (legacy behavior) for better diagnostics.
-            let stderr = child.stderr.take().ok_or_else(|| {
-                let _ = child.kill();
-                cleanup_temp_dir(&temp_user_data_dir);
-                "Failed to capture Chrome stderr".to_string()
-            })?;
-            let reader = BufReader::new(stderr);
-            match wait_for_ws_url_until(reader, deadline) {
-                Ok(url) => url,
-                Err(fallback_err) => {
+    // Choose discovery strategy based on whether we have an explicit port.
+    // Snap Chromium cannot write DevToolsActivePort due to AppArmor confinement,
+    // so when we pre-allocated a port we discover CDP via HTTP directly (issue #1428).
+    let ws_url = if let Some(port) = explicit_cdp_port {
+        // Snap Chromium path: we know the exact port, use HTTP CDP discovery.
+        // Poll until Chrome's CDP HTTP endpoint responds (up to deadline).
+        wait_for_cdp_http(port, deadline).map_err(|e| {
+            let _ = child.kill();
+            cleanup_temp_dir(&temp_user_data_dir);
+            e
+        })?
+    } else {
+        // Standard path: use DevToolsActivePort file (primary) with stderr fallback.
+        // This is more reliable on Windows than scraping stderr for "DevTools listening on ...",
+        // which can be missing/empty depending on how Chrome is launched.
+        match wait_for_devtools_active_port(&mut child, &user_data_dir, deadline) {
+            Ok(url) => url,
+            Err(primary_err) => {
+                // Fallback: scrape stderr (legacy behavior) for better diagnostics.
+                let stderr = child.stderr.take().ok_or_else(|| {
                     let _ = child.kill();
                     cleanup_temp_dir(&temp_user_data_dir);
-                    return Err(format!(
-                        "{}\n(also tried parsing stderr) {}",
-                        primary_err, fallback_err
-                    ));
+                    "Failed to capture Chrome stderr".to_string()
+                })?;
+                let reader = BufReader::new(stderr);
+                match wait_for_ws_url_until(reader, deadline) {
+                    Ok(url) => url,
+                    Err(fallback_err) => {
+                        let _ = child.kill();
+                        cleanup_temp_dir(&temp_user_data_dir);
+                        return Err(format!(
+                            "{}\n(also tried parsing stderr) {}",
+                            primary_err, fallback_err
+                        ));
+                    }
                 }
             }
         }
@@ -435,6 +514,56 @@ fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<Chro
         #[cfg(unix)]
         pgid,
     })
+}
+
+/// Poll Chrome's CDP HTTP endpoint until it responds with a WebSocket URL.
+/// Used when we know the exact port (snap Chromium workaround, issue #1428).
+fn wait_for_cdp_http(port: u16, deadline: std::time::Instant) -> Result<String, String> {
+    let poll_interval = Duration::from_millis(50);
+
+    while std::time::Instant::now() <= deadline {
+        // Try HTTP discovery on the known port
+        if let Ok(ws_url) = discover_cdp_url_sync("127.0.0.1", port) {
+            return Ok(ws_url);
+        }
+        std::thread::sleep(poll_interval);
+    }
+
+    Err(format!(
+        "Timeout waiting for CDP HTTP endpoint on port {} (snap Chromium)",
+        port
+    ))
+}
+
+/// Synchronous CDP URL discovery via HTTP /json/version endpoint.
+fn discover_cdp_url_sync(host: &str, port: u16) -> Result<String, String> {
+    use std::io::{Read, Write};
+    let mut stream = std::net::TcpStream::connect_timeout(
+        &format!("{}:{}", host, port).parse::<std::net::SocketAddr>().map_err(|e| e.to_string())?,
+        Duration::from_secs(2),
+    ).map_err(|_| "TCP connect failed".to_string())?;
+
+    let request = format!(
+        "GET /json/version HTTP/1.1\r\nHost: {}:{}\r\nConnection: close\r\n\r\n",
+        host, port
+    );
+    stream.write_all(request.as_bytes()).map_err(|e| e.to_string())?;
+    stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
+
+    let mut response = String::new();
+    stream.read_to_string(&mut response).map_err(|e| e.to_string())?;
+
+    // Parse the JSON body from HTTP response
+    if let Some(body_start) = response.find("\r\n\r\n") {
+        let body = &response[body_start + 4..];
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(body) {
+            if let Some(ws_url) = json.get("webSocketDebuggerUrl").and_then(|v| v.as_str()) {
+                return Ok(ws_url.to_string());
+            }
+        }
+    }
+
+    Err("CDP HTTP endpoint responded but no webSocketDebuggerUrl found".to_string())
 }
 
 fn wait_for_devtools_active_port(
