@@ -2738,6 +2738,7 @@ mod tests {
             model: None,
             verbose: false,
             quiet: false,
+            background: false,
         }
     }
 

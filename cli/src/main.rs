@@ -774,6 +774,7 @@ fn main() {
         default_timeout: flags.default_timeout,
         cdp: flags.cdp.as_deref(),
         no_auto_dialog: flags.no_auto_dialog,
+        background: flags.background,
     };
 
     let daemon_result = match ensure_daemon(&flags.session, &daemon_opts) {
@@ -1227,6 +1228,10 @@ fn main() {
     }
 
     let output_opts = OutputOptions::from_flags(&flags);
+
+    if flags.background {
+        cmd["background"] = json!(true);
+    }
 
     match send_command(cmd.clone(), &flags.session) {
         Ok(resp) => {

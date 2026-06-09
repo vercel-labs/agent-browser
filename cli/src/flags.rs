@@ -92,6 +92,7 @@ pub struct Config {
     pub idle_timeout: Option<String>,
     pub no_auto_dialog: Option<bool>,
     pub model: Option<String>,
+    pub background: Option<bool>,
 }
 
 impl Config {
@@ -154,6 +155,7 @@ impl Config {
             idle_timeout: other.idle_timeout.or(self.idle_timeout),
             no_auto_dialog: other.no_auto_dialog.or(self.no_auto_dialog),
             model: other.model.or(self.model),
+            background: other.background.or(self.background),
         }
     }
 }
@@ -337,6 +339,7 @@ pub struct Flags {
     pub model: Option<String>,
     pub verbose: bool,
     pub quiet: bool,
+    pub background: bool,
 
     // Track which launch-time options were explicitly passed via CLI
     // (as opposed to being set only via environment variables)
@@ -516,6 +519,8 @@ pub fn parse_flags(args: &[String]) -> Flags {
         model: env::var("AI_GATEWAY_MODEL").ok().or(config.model),
         verbose: false,
         quiet: false,
+        background: env_var_is_truthy("AGENT_BROWSER_BACKGROUND")
+            || config.background.unwrap_or(false),
         cli_executable_path: false,
         cli_extensions: false,
         cli_init_scripts: false,
@@ -829,6 +834,13 @@ pub fn parse_flags(args: &[String]) -> Flags {
                     i += 1;
                 }
             }
+            "--background" => {
+                let (val, consumed) = parse_bool_arg(args, i);
+                flags.background = val;
+                if consumed {
+                    i += 1;
+                }
+            }
             "--model" => {
                 if let Some(s) = args.get(i + 1) {
                     flags.model = Some(s.clone());
@@ -869,6 +881,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--content-boundaries",
         "--confirm-interactive",
         "--no-auto-dialog",
+        "--background",
         "-v",
         "--verbose",
         "-q",
