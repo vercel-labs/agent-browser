@@ -6073,6 +6073,18 @@ async fn e2e_frame_scoped_text_wait_eval_and_function_wait() {
     assert_success(&resp);
     assert_eq!(get_data(&resp)["result"], 42);
 
+    let resp = execute_command(
+        &json!({ "id": "8b", "action": "evaluate", "script": "await Promise.resolve(window.frameFlag + 1)" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["result"],
+        43,
+        "top-level await should work inside a selected same-process iframe"
+    );
+
     // Back on the main frame the flag must not leak.
     let resp = execute_command(&json!({ "id": "9", "action": "mainframe" }), &mut state).await;
     assert_success(&resp);

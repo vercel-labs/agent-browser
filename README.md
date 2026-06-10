@@ -136,7 +136,7 @@ agent-browser screenshot --screenshot-dir ./shots    # Save to custom directory
 agent-browser screenshot --screenshot-format jpeg --screenshot-quality 80
 agent-browser pdf <path>              # Save as PDF
 agent-browser snapshot                # Accessibility tree with refs (best for AI)
-agent-browser eval <js>               # Run JavaScript (-b for base64, --stdin for piped input)
+agent-browser eval <js>               # Run JavaScript; supports top-level return/await
 agent-browser connect <port>          # Connect to browser via CDP
 agent-browser stream enable [--port <port>]  # Start runtime WebSocket streaming
 agent-browser stream status           # Show runtime streaming state and bound port
@@ -204,8 +204,8 @@ agent-browser find nth 2 "a" text
 ```bash
 agent-browser wait <selector>         # Wait for element to be visible
 agent-browser wait <ms>               # Wait for time (milliseconds)
-agent-browser wait --text "Welcome"   # Wait for text to appear (substring match)
-agent-browser wait --url "**/dash"    # Wait for URL pattern
+agent-browser wait --text "Welcome"   # Wait for text, case-insensitive
+agent-browser wait --url "**/dash"    # Wait for URL glob or substring
 agent-browser wait --load networkidle # Wait for load state
 agent-browser wait --fn "window.ready === true"  # Wait for JS condition
 

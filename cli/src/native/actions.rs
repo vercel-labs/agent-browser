@@ -2497,6 +2497,43 @@ async fn evaluate_in_same_process_frame(
             )
             .await
         }
+        Err(e) if e.contains("await is only valid") => {
+            evaluate_in_same_process_frame_with_top_level_await(
+                client, session_id, frame_id, script,
+            )
+            .await
+        }
+        other => other,
+    }
+}
+
+async fn evaluate_in_same_process_frame_with_top_level_await(
+    client: &super::cdp::client::CdpClient,
+    session_id: &str,
+    frame_id: &str,
+    script: &str,
+) -> Result<Value, String> {
+    // Most console-style top-level await snippets are expressions. Preserve
+    // their completion value first; if that parse fails, fall back to body
+    // semantics for statement blocks that perform side effects.
+    let expression_retry = evaluate_in_same_process_frame_once(
+        client,
+        session_id,
+        frame_id,
+        &format!("(async () => {{ return ({script}); }})()"),
+    )
+    .await;
+
+    match expression_retry {
+        Err(e) if e.contains("SyntaxError") => {
+            evaluate_in_same_process_frame_once(
+                client,
+                session_id,
+                frame_id,
+                &format!("(async () => {{ {script} }})()"),
+            )
+            .await
+        }
         other => other,
     }
 }

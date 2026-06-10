@@ -1665,10 +1665,10 @@ Waits for an element to appear, a timeout, or other conditions.
 Modes:
   <selector>           Wait for element to appear
   <ms>                 Wait for specified milliseconds
-  --url <pattern>      Wait for URL to match pattern
+  --url <pattern>      Wait for URL glob or substring
   --load <state>       Wait for load state (load, domcontentloaded, networkidle)
   --fn <expression>    Wait for JavaScript expression to be truthy
-  --text <text>        Wait for text to appear on page (substring match)
+  --text <text>        Wait for text to appear on page (case-insensitive)
   --download [path]    Wait for a download to complete (optionally save to path)
 
 Download Options (with --download):
@@ -1795,6 +1795,9 @@ agent-browser eval - Execute JavaScript
 Usage: agent-browser eval [options] <script>
 
 Executes JavaScript code in the browser context and returns the result.
+Scripts may use top-level return, top-level await, and repeated let/const
+declarations across calls. After `frame <selector>`, eval runs inside the
+selected frame.
 
 Options:
   -b, --base64         Decode script from base64 (avoids shell escaping issues)

@@ -231,8 +231,9 @@ EOF
 ```
 
 Prefer `eval --stdin` (heredoc) or `eval -b <base64>` for any JS with
-quotes or special characters. Inline `agent-browser eval "..."` works
-only for simple expressions.
+quotes or special characters. Scripts may use top-level `return`,
+top-level `await`, and repeated `let`/`const` declarations across calls.
+After `frame <selector>`, eval runs inside the selected frame.
 
 ### Screenshot
 
