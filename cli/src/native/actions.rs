@@ -3162,6 +3162,16 @@ enum WaitRoute {
     SameProcessFrame(String),
 }
 
+fn wait_route(state: &DaemonState) -> WaitRoute {
+    match state.active_frame_id.as_deref() {
+        Some(frame_id) => match state.iframe_sessions.get(frame_id) {
+            Some(frame_session) => WaitRoute::FrameSession(frame_session.clone()),
+            None => WaitRoute::SameProcessFrame(frame_id.to_string()),
+        },
+        None => WaitRoute::Main,
+    }
+}
+
 async fn handle_wait(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
@@ -3170,13 +3180,7 @@ async fn handle_wait(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
     // Honor an active `frame <sel>` selection for content waits, like element
     // resolution does: an OOPIF polls on its dedicated session, a same-process
     // frame polls through the owner element's contentDocument.
-    let frame_route = match state.active_frame_id.as_deref() {
-        Some(frame_id) => match state.iframe_sessions.get(frame_id) {
-            Some(frame_session) => WaitRoute::FrameSession(frame_session.clone()),
-            None => WaitRoute::SameProcessFrame(frame_id.to_string()),
-        },
-        None => WaitRoute::Main,
-    };
+    let frame_route = wait_route(state);
 
     if let Some(text) = cmd.get("text").and_then(|v| v.as_str()) {
         let quoted = serde_json::to_string(text).unwrap_or_default();
@@ -3225,37 +3229,20 @@ async fn handle_wait(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
     }
 
     if let Some(url_pattern) = cmd.get("url").and_then(|v| v.as_str()) {
-        match &frame_route {
-            WaitRoute::Main => {
-                wait_for_url(&mgr.client, &session_id, url_pattern, timeout_ms).await?
-            }
-            WaitRoute::FrameSession(frame_session) => {
-                wait_for_url(&mgr.client, frame_session, url_pattern, timeout_ms).await?
-            }
-            WaitRoute::SameProcessFrame(frame_id) => {
-                let check = url_check_expression("doc.location.href", url_pattern);
-                poll_in_frame_until_true(&mgr.client, &session_id, frame_id, &check, timeout_ms)
-                    .await?
-            }
-        }
+        wait_for_url_on_route(
+            &mgr.client,
+            &session_id,
+            &frame_route,
+            url_pattern,
+            timeout_ms,
+        )
+        .await?;
         return Ok(json!({ "waited": "url", "url": url_pattern }));
     }
 
     if let Some(fn_str) = cmd.get("function").and_then(|v| v.as_str()) {
-        match &frame_route {
-            WaitRoute::Main => {
-                wait_for_function(&mgr.client, &session_id, fn_str, timeout_ms).await?
-            }
-            WaitRoute::FrameSession(frame_session) => {
-                wait_for_function(&mgr.client, frame_session, fn_str, timeout_ms).await?
-            }
-            WaitRoute::SameProcessFrame(frame_id) => {
-                let quoted = serde_json::to_string(fn_str).unwrap_or_default();
-                let check = format!("!!(doc.defaultView.eval({quoted}))");
-                poll_in_frame_until_true(&mgr.client, &session_id, frame_id, &check, timeout_ms)
-                    .await?
-            }
-        }
+        wait_for_function_on_route(&mgr.client, &session_id, &frame_route, fn_str, timeout_ms)
+            .await?;
         return Ok(json!({ "waited": "function" }));
     }
 
@@ -3506,6 +3493,25 @@ async fn wait_for_url(
     poll_until_true(client, session_id, &check_fn, timeout_ms).await
 }
 
+async fn wait_for_url_on_route(
+    client: &super::cdp::client::CdpClient,
+    session_id: &str,
+    route: &WaitRoute,
+    pattern: &str,
+    timeout_ms: u64,
+) -> Result<(), String> {
+    match route {
+        WaitRoute::Main => wait_for_url(client, session_id, pattern, timeout_ms).await,
+        WaitRoute::FrameSession(frame_session) => {
+            wait_for_url(client, frame_session, pattern, timeout_ms).await
+        }
+        WaitRoute::SameProcessFrame(frame_id) => {
+            let check = url_check_expression("doc.location.href", pattern);
+            poll_in_frame_until_true(client, session_id, frame_id, &check, timeout_ms).await
+        }
+    }
+}
+
 /// `wait --url` accepts the glob patterns the docs advertise ("**/dashboard")
 /// as well as plain substrings. A glob used to be matched literally via
 /// includes(), so it could never succeed.
@@ -3575,6 +3581,115 @@ async fn wait_for_function(
 ) -> Result<(), String> {
     let check_fn = format!("!!({})", fn_str);
     poll_until_true(client, session_id, &check_fn, timeout_ms).await
+}
+
+async fn wait_for_function_on_route(
+    client: &super::cdp::client::CdpClient,
+    session_id: &str,
+    route: &WaitRoute,
+    fn_str: &str,
+    timeout_ms: u64,
+) -> Result<(), String> {
+    match route {
+        WaitRoute::Main => wait_for_function(client, session_id, fn_str, timeout_ms).await,
+        WaitRoute::FrameSession(frame_session) => {
+            wait_for_function(client, frame_session, fn_str, timeout_ms).await
+        }
+        WaitRoute::SameProcessFrame(frame_id) => {
+            let quoted = serde_json::to_string(fn_str).unwrap_or_default();
+            let check = format!("!!(doc.defaultView.eval({quoted}))");
+            poll_in_frame_until_true(client, session_id, frame_id, &check, timeout_ms).await
+        }
+    }
+}
+
+async fn evaluate_wait_expression_on_session(
+    client: &super::cdp::client::CdpClient,
+    session_id: &str,
+    expression: &str,
+) -> Result<Value, String> {
+    let result: super::cdp::types::EvaluateResult = client
+        .send_command_typed(
+            "Runtime.evaluate",
+            &super::cdp::types::EvaluateParams {
+                expression: format!("({})", expression),
+                return_by_value: Some(true),
+                await_promise: Some(true),
+            },
+            Some(session_id),
+        )
+        .await?;
+
+    if let Some(details) = result.exception_details {
+        let msg = details
+            .exception
+            .as_ref()
+            .and_then(|e| e.description.as_deref())
+            .unwrap_or(&details.text);
+        return Err(format!("Evaluation error: {}", msg));
+    }
+
+    Ok(result.result.value.unwrap_or(Value::Null))
+}
+
+async fn evaluate_wait_expression_on_route(
+    client: &super::cdp::client::CdpClient,
+    session_id: &str,
+    route: &WaitRoute,
+    expression: &str,
+) -> Result<Value, String> {
+    match route {
+        WaitRoute::Main => {
+            evaluate_wait_expression_on_session(client, session_id, expression).await
+        }
+        WaitRoute::FrameSession(frame_session) => {
+            evaluate_wait_expression_on_session(client, frame_session, expression).await
+        }
+        WaitRoute::SameProcessFrame(frame_id) => {
+            evaluate_in_same_process_frame(client, session_id, frame_id, expression).await
+        }
+    }
+}
+
+async fn current_url_on_route(
+    client: &super::cdp::client::CdpClient,
+    session_id: &str,
+    route: &WaitRoute,
+) -> Result<String, String> {
+    match route {
+        WaitRoute::Main => evaluate_wait_expression_on_session(client, session_id, "location.href")
+            .await
+            .map(|v| v.as_str().unwrap_or("").to_string()),
+        WaitRoute::FrameSession(frame_session) => {
+            evaluate_wait_expression_on_session(client, frame_session, "location.href")
+                .await
+                .map(|v| v.as_str().unwrap_or("").to_string())
+        }
+        WaitRoute::SameProcessFrame(frame_id) => {
+            let owner_object_id =
+                super::element::frame_owner_object_id(client, session_id, frame_id).await?;
+            let result = client
+                .send_command(
+                    "Runtime.callFunctionOn",
+                    Some(json!({
+                        "objectId": owner_object_id,
+                        "functionDeclaration": "function() {
+                            const doc = this.contentDocument;
+                            return doc ? doc.location.href : '';
+                        }",
+                        "returnByValue": true,
+                    })),
+                    Some(session_id),
+                )
+                .await?;
+            Ok(result
+                .get("result")
+                .and_then(|r| r.get("value"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string())
+        }
+    }
 }
 
 /// wait_for_selector inside a same-process iframe selected via `frame <sel>`.
@@ -5836,14 +5951,24 @@ async fn handle_screencast_stop(state: &mut DaemonState) -> Result<Value, String
 async fn handle_waitforurl(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
+    let frame_route = wait_route(state);
     let url_pattern = cmd
         .get("url")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'url' parameter")?;
     let timeout_ms = state.timeout_ms(cmd);
 
-    wait_for_url(&mgr.client, &session_id, url_pattern, timeout_ms).await?;
-    let url = mgr.get_url().await.unwrap_or_default();
+    wait_for_url_on_route(
+        &mgr.client,
+        &session_id,
+        &frame_route,
+        url_pattern,
+        timeout_ms,
+    )
+    .await?;
+    let url = current_url_on_route(&mgr.client, &session_id, &frame_route)
+        .await
+        .unwrap_or_default();
     Ok(json!({ "url": url }))
 }
 
@@ -5867,28 +5992,27 @@ async fn handle_waitforloadstate(cmd: &Value, state: &DaemonState) -> Result<Val
 async fn handle_waitforfunction(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
+    let frame_route = wait_route(state);
     let expression = cmd
         .get("expression")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'expression' parameter")?;
     let timeout_ms = state.timeout_ms(cmd);
 
-    wait_for_function(&mgr.client, &session_id, expression, timeout_ms).await?;
+    wait_for_function_on_route(
+        &mgr.client,
+        &session_id,
+        &frame_route,
+        expression,
+        timeout_ms,
+    )
+    .await?;
 
-    let result: super::cdp::types::EvaluateResult = mgr
-        .client
-        .send_command_typed(
-            "Runtime.evaluate",
-            &super::cdp::types::EvaluateParams {
-                expression: format!("({})", expression),
-                return_by_value: Some(true),
-                await_promise: Some(true),
-            },
-            Some(&session_id),
-        )
-        .await?;
+    let result =
+        evaluate_wait_expression_on_route(&mgr.client, &session_id, &frame_route, expression)
+            .await?;
 
-    Ok(json!({ "result": result.result.value.unwrap_or(Value::Null) }))
+    Ok(json!({ "result": result }))
 }
 
 // ---------------------------------------------------------------------------

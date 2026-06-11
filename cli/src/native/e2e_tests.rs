@@ -6065,6 +6065,24 @@ async fn e2e_frame_scoped_text_wait_eval_and_function_wait() {
     .await;
     assert_success(&resp);
 
+    // The CLI parser maps `wait --url` and `wait --fn` to the waitfor*
+    // daemon actions. Those variants must honor the selected frame too.
+    let resp = execute_command(
+        &json!({ "id": "7b", "action": "waitforfunction", "expression": "window.frameFlag === 42", "timeout": 5000 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], true);
+
+    let resp = execute_command(
+        &json!({ "id": "7c", "action": "waitforurl", "url": "about:srcdoc", "timeout": 5000 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["url"], "about:srcdoc");
+
     let resp = execute_command(
         &json!({ "id": "8", "action": "evaluate", "script": "window.frameFlag" }),
         &mut state,
