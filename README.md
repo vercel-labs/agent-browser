@@ -1320,3 +1320,13 @@ Get your API key from the [Kernel Dashboard](https://dashboard.onkernel.com).
 ## License
 
 Apache-2.0
+
+## 📊 Status
+
+![GitHub last commit](https://img.shields.io/github/last-commit/dextonai/agent-browser)
+![GitHub issues](https://img.shields.io/github/issues/dextonai/agent-browser)
+![GitHub stars](https://img.shields.io/github/stars/dextonai/agent-browser)
+
+## 🤝 Contributing
+
+Contributions are welcome! Please read our [CONTRIBUTING.md](./CONTRIBUTING.md) guide.
