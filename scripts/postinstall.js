@@ -9,12 +9,13 @@
  * - Mac/Linux: Replaces symlink to point to native binary
  */
 
-import { existsSync, mkdirSync, chmodSync, createWriteStream, unlinkSync, writeFileSync, symlinkSync, lstatSync } from 'fs';
+import { existsSync, mkdirSync, chmodSync, createReadStream, createWriteStream, unlinkSync, writeFileSync, symlinkSync, lstatSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { platform, arch } from 'os';
 import { get } from 'https';
 import { execSync } from 'child_process';
+import { createHash } from 'crypto';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = join(__dirname, '..');
@@ -47,6 +48,7 @@ const version = packageJson.version;
 // GitHub release URL
 const GITHUB_REPO = 'vercel-labs/agent-browser';
 const DOWNLOAD_URL = `https://github.com/${GITHUB_REPO}/releases/download/v${version}/${binaryName}`;
+const CHECKSUMS_URL = `https://github.com/${GITHUB_REPO}/releases/download/v${version}/SHA256SUMS`;
 
 async function downloadFile(url, dest) {
   return new Promise((resolve, reject) => {
@@ -78,6 +80,91 @@ async function downloadFile(url, dest) {
     
     request(url);
   });
+}
+
+async function fetchText(url) {
+  return new Promise((resolve, reject) => {
+    const request = (url) => {
+      get(url, (response) => {
+        // Handle redirects
+        if (response.statusCode === 301 || response.statusCode === 302) {
+          response.resume();
+          request(response.headers.location);
+          return;
+        }
+
+        if (response.statusCode === 404) {
+          response.resume();
+          resolve(null);
+          return;
+        }
+
+        if (response.statusCode !== 200) {
+          response.resume();
+          reject(new Error(`Failed to download checksums: HTTP ${response.statusCode}`));
+          return;
+        }
+
+        response.setEncoding('utf8');
+        let body = '';
+        response.on('data', chunk => {
+          body += chunk;
+        });
+        response.on('end', () => resolve(body));
+      }).on('error', reject);
+    };
+
+    request(url);
+  });
+}
+
+function parseChecksums(text) {
+  const checksums = new Map();
+
+  for (const line of text.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+
+    const match = line.match(/^([a-f0-9]{64})  (.+)$/i);
+    if (match) {
+      checksums.set(match[2], match[1].toLowerCase());
+    }
+  }
+
+  return checksums;
+}
+
+async function sha256File(filePath) {
+  return new Promise((resolve, reject) => {
+    const hash = createHash('sha256');
+    const stream = createReadStream(filePath);
+
+    stream.on('data', chunk => hash.update(chunk));
+    stream.on('error', reject);
+    stream.on('end', () => resolve(hash.digest('hex')));
+  });
+}
+
+async function verifyChecksum(filePath, filename) {
+  const checksumsText = await fetchText(CHECKSUMS_URL);
+
+  if (checksumsText === null) {
+    console.log('⚠ SHA256SUMS not found for this release; skipping checksum verification.');
+    return;
+  }
+
+  const checksums = parseChecksums(checksumsText);
+  const expectedHash = checksums.get(filename);
+
+  if (!expectedHash) {
+    throw new Error(`SHA256SUMS does not include ${filename}`);
+  }
+
+  const actualHash = await sha256File(filePath);
+  if (actualHash !== expectedHash) {
+    throw new Error(`Checksum mismatch for ${filename}: expected ${expectedHash}, got ${actualHash}`);
+  }
+
+  console.log(`✓ Verified SHA-256 checksum for ${filename}`);
 }
 
 /**
@@ -133,6 +220,14 @@ async function main() {
 
   try {
     await downloadFile(DOWNLOAD_URL, binaryPath);
+    try {
+      await verifyChecksum(binaryPath, binaryName);
+    } catch (err) {
+      try {
+        unlinkSync(binaryPath);
+      } catch {}
+      throw err;
+    }
 
     // Make executable on Unix
     if (platform() !== 'win32') {
