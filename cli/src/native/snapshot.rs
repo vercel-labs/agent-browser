@@ -377,6 +377,14 @@ pub async fn take_snapshot(
 
     let duplicates = tracker.get_duplicates();
 
+    // Nodes already known to the ref map (from the previous snapshot
+    // generation or the live map) reclaim the ref id they were minted
+    // under, so refs remembered across snapshots keep meaning the same
+    // element instead of being renumbered (#1443). Only genuinely new
+    // nodes consume fresh ref numbers.
+    let node_index = ref_map.node_to_ref_index();
+    let frame_key: Option<String> = frame_id.map(String::from);
+
     for (idx, nth) in &nodes_with_refs {
         let node = &tree_nodes[*idx];
         let key = format!("{}:{}", node.role, node.name);
@@ -386,8 +394,17 @@ pub async fn take_snapshot(
             None
         };
 
-        let ref_id = format!("e{}", next_ref);
-        next_ref += 1;
+        let reclaimed = node
+            .backend_node_id
+            .and_then(|bid| node_index.get(&(frame_key.clone(), bid)).cloned());
+        let ref_id = match reclaimed {
+            Some(existing) => existing,
+            None => {
+                let fresh = format!("e{}", next_ref);
+                next_ref += 1;
+                fresh
+            }
+        };
 
         ref_map.add_with_frame(
             ref_id.clone(),
