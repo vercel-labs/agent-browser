@@ -897,6 +897,13 @@ control first, then run `snapshot` again before reusing refs.
 - **Fast**: No DOM re-query needed
 - **AI-friendly**: Snapshot + ref workflow is optimal for LLMs
 
+Refs are bound to the element they were minted for and survive repeated
+snapshots within a page: elements still in the DOM keep their ref ids, new
+elements get fresh ids, and ref numbers are never reused. Using a ref whose
+element left the DOM after a newer snapshot fails with a stale-ref error
+(`Stale ref: e2 ... Take a new snapshot`) instead of acting on a different
+element. Navigation clears all refs.
+
 ### CSS Selectors
 
 ```bash

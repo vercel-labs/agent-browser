@@ -3073,6 +3073,280 @@ async fn e2e_click_stale_ref_falls_back_to_role_name() {
 }
 
 // ---------------------------------------------------------------------------
+// Regression: stale snapshot refs after DOM-mutation renumbering (#1443)
+//
+// Snapshot refs were positional within the latest snapshot's registry. When
+// the DOM mutated and a new snapshot was taken, every ref shifted, so a ref
+// remembered from the previous snapshot silently actuated whichever element
+// now occupied that number. Refs must instead stay bound to the node they
+// were minted for: surviving nodes keep their ref ids across snapshots and
+// refs whose nodes left the DOM fail loudly instead of rebinding.
+// ---------------------------------------------------------------------------
+
+const RENUMBER_PROBE_URL: &str = "data:text/html,\
+    <button onclick=\"document.title=this.textContent\">Alpha</button>\
+    <button onclick=\"document.title=this.textContent\">Beta</button>\
+    <button onclick=\"document.title=this.textContent\">Gamma</button>";
+
+const INSERT_NEW_BUTTON_JS: &str = "document.body.insertBefore(\
+    Object.assign(document.createElement('button'),{textContent:'NEW'}),\
+    document.body.firstChild); 'ok'";
+
+#[tokio::test]
+#[ignore]
+async fn e2e_remembered_ref_keeps_meaning_after_resnapshot() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({
+            "id": "1",
+            "action": "launch",
+            "headless": true,
+            "args": ["--no-sandbox", "--disable-dev-shm-usage"]
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": RENUMBER_PROBE_URL }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // First snapshot: the agent remembers e2 == Beta.
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "snapshot", "interactive": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let snapshot = get_data(&resp)["snapshot"].as_str().unwrap();
+    assert!(
+        snapshot.contains("button \"Beta\" [ref=e2]"),
+        "Expected Beta to be e2 in the first snapshot, got:\n{}",
+        snapshot
+    );
+
+    // The page inserts a node before the buttons (what cmdk/Radix
+    // multi-selects do on every committed selection).
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "evaluate", "script": INSERT_NEW_BUTTON_JS }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // A second snapshot is taken (renumbering hazard).
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "snapshot", "interactive": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Clicking the remembered ref must actuate Beta, not whichever element
+    // now occupies position 2.
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "click", "selector": "@e2" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
+    let resp = execute_command(&json!({ "id": "7", "action": "title" }), &mut state).await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["title"],
+        "Beta",
+        "Remembered ref e2 must keep meaning Beta after the re-snapshot"
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_resnapshot_preserves_ref_ids_for_surviving_nodes() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({
+            "id": "1",
+            "action": "launch",
+            "headless": true,
+            "args": ["--no-sandbox", "--disable-dev-shm-usage"]
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": RENUMBER_PROBE_URL }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "snapshot", "interactive": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let snapshot = get_data(&resp)["snapshot"].as_str().unwrap();
+    assert!(
+        snapshot.contains("button \"Alpha\" [ref=e1]"),
+        "{}",
+        snapshot
+    );
+    assert!(
+        snapshot.contains("button \"Beta\" [ref=e2]"),
+        "{}",
+        snapshot
+    );
+    assert!(
+        snapshot.contains("button \"Gamma\" [ref=e3]"),
+        "{}",
+        snapshot
+    );
+
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "evaluate", "script": INSERT_NEW_BUTTON_JS }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Surviving nodes keep their ref ids; only the inserted node gets a
+    // fresh ref (numbers are never reused within a page).
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "snapshot", "interactive": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let snapshot = get_data(&resp)["snapshot"].as_str().unwrap();
+    assert!(
+        snapshot.contains("button \"Alpha\" [ref=e1]"),
+        "Alpha must keep e1 across snapshots, got:\n{}",
+        snapshot
+    );
+    assert!(
+        snapshot.contains("button \"Beta\" [ref=e2]"),
+        "Beta must keep e2 across snapshots, got:\n{}",
+        snapshot
+    );
+    assert!(
+        snapshot.contains("button \"Gamma\" [ref=e3]"),
+        "Gamma must keep e3 across snapshots, got:\n{}",
+        snapshot
+    );
+    assert!(
+        snapshot.contains("button \"NEW\" [ref=e4]"),
+        "Inserted node must get a fresh ref, got:\n{}",
+        snapshot
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_ref_for_removed_node_fails_loudly_after_resnapshot() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({
+            "id": "1",
+            "action": "launch",
+            "headless": true,
+            "args": ["--no-sandbox", "--disable-dev-shm-usage"]
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": RENUMBER_PROBE_URL }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "snapshot", "interactive": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let snapshot = get_data(&resp)["snapshot"].as_str().unwrap();
+    assert!(
+        snapshot.contains("button \"Beta\" [ref=e2]"),
+        "{}",
+        snapshot
+    );
+
+    // Remove Beta from the DOM entirely.
+    let resp = execute_command(
+        &json!({
+            "id": "4",
+            "action": "evaluate",
+            "script": "document.querySelectorAll('button')[1].remove(); 'ok'"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "snapshot", "interactive": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Clicking the ref of the removed node must fail with a teaching error,
+    // not silently rebind to another element.
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "click", "selector": "@e2" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(
+        resp.get("success").and_then(|v| v.as_bool()),
+        Some(false),
+        "Clicking a ref whose node left the DOM must fail, got: {}",
+        serde_json::to_string_pretty(&resp).unwrap_or_default()
+    );
+    let error = resp
+        .get("error")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    assert!(
+        error.contains("snapshot"),
+        "Error should teach the agent to take a new snapshot, got: {}",
+        error
+    );
+
+    // No element may have been actuated.
+    let resp = execute_command(&json!({ "id": "7", "action": "title" }), &mut state).await;
+    assert_success(&resp);
+    assert_ne!(get_data(&resp)["title"], "Alpha");
+    assert_ne!(get_data(&resp)["title"], "Gamma");
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+// ---------------------------------------------------------------------------
 // Regression: Material Design checkbox/radio (#832)
 //
 // Material Design controls hide the native <input> off-screen and place

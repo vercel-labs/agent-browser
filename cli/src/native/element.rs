@@ -15,8 +15,18 @@ pub struct RefEntry {
     pub frame_id: Option<String>,
 }
 
+/// Registry of snapshot element refs (e1, e2, ...).
+///
+/// Refs are bound to node identity (backendNodeId), not to their position in
+/// the snapshot output: when a new snapshot is taken, `begin_rebuild` retires
+/// the previous generation and surviving nodes reclaim the ref id they were
+/// originally minted under (see `node_to_ref_index`). Ref numbers are never
+/// reused within a page, so a ref remembered from an earlier snapshot either
+/// still means the same element or fails resolution with a stale-ref error —
+/// it can never silently rebind to a different element (#1443).
 pub struct RefMap {
     map: HashMap<String, RefEntry>,
+    retired: HashMap<String, RefEntry>,
     next_ref: usize,
 }
 
@@ -24,8 +34,46 @@ impl RefMap {
     pub fn new() -> Self {
         Self {
             map: HashMap::new(),
+            retired: HashMap::new(),
             next_ref: 1,
         }
+    }
+
+    /// Start a new snapshot generation: move every live ref to the retired
+    /// set while keeping the ref counter, so the upcoming snapshot can
+    /// reclaim ids for surviving nodes and mint fresh, never-reused numbers
+    /// for new ones. Retired refs fail resolution with a stale-ref error.
+    pub fn begin_rebuild(&mut self) {
+        let map = std::mem::take(&mut self.map);
+        self.retired.extend(map);
+    }
+
+    /// Index of node identity to ref id across the live and retired sets,
+    /// used during snapshot minting to give a node back the ref id it was
+    /// originally minted under. Live entries win on collision.
+    pub fn node_to_ref_index(&self) -> HashMap<(Option<String>, i64), String> {
+        let mut index = HashMap::new();
+        for (ref_id, entry) in self.retired.iter().chain(self.map.iter()) {
+            if let Some(bid) = entry.backend_node_id {
+                index.insert((entry.frame_id.clone(), bid), ref_id.clone());
+            }
+        }
+        index
+    }
+
+    /// Resolve a ref id to its live entry, distinguishing refs that were
+    /// retired by a later snapshot (stale) from refs that never existed.
+    pub fn resolve(&self, ref_id: &str) -> Result<&RefEntry, String> {
+        if let Some(entry) = self.map.get(ref_id) {
+            return Ok(entry);
+        }
+        if self.retired.contains_key(ref_id) {
+            return Err(format!(
+                "Stale ref: {} was minted by an earlier snapshot and its element is no longer in the DOM. Take a new snapshot and use a fresh ref.",
+                ref_id
+            ));
+        }
+        Err(format!("Unknown ref: {}", ref_id))
     }
 
     pub fn add(
@@ -48,6 +96,7 @@ impl RefMap {
         nth: Option<usize>,
         frame_id: Option<&str>,
     ) {
+        self.retired.remove(&ref_id);
         self.map.insert(
             ref_id,
             RefEntry {
@@ -109,6 +158,7 @@ impl RefMap {
 
     pub fn clear(&mut self) {
         self.map.clear();
+        self.retired.clear();
         self.next_ref = 1;
     }
 
@@ -304,9 +354,7 @@ pub async fn resolve_element_center(
     iframe_sessions: &HashMap<String, String>,
 ) -> Result<(f64, f64, String), String> {
     if let Some(ref_id) = parse_ref(selector_or_ref) {
-        let entry = ref_map
-            .get(&ref_id)
-            .ok_or_else(|| format!("Unknown ref: {}", ref_id))?;
+        let entry = ref_map.resolve(&ref_id)?;
 
         let effective_session_id =
             resolve_frame_session(entry.frame_id.as_deref(), session_id, iframe_sessions);
@@ -484,9 +532,7 @@ pub async fn resolve_element_object_id(
     iframe_sessions: &HashMap<String, String>,
 ) -> Result<(String, String), String> {
     if let Some(ref_id) = parse_ref(selector_or_ref) {
-        let entry = ref_map
-            .get(&ref_id)
-            .ok_or_else(|| format!("Unknown ref: {}", ref_id))?;
+        let entry = ref_map.resolve(&ref_id)?;
 
         let effective_session_id =
             resolve_frame_session(entry.frame_id.as_deref(), session_id, iframe_sessions);
@@ -1374,6 +1420,100 @@ mod tests {
         assert!(map.get("e1").is_some());
         assert_eq!(map.get("e1").unwrap().role, "button");
         assert!(map.get("e2").is_none());
+    }
+
+    /// Simulate the snapshot minting loop: reclaim the ref id of an already
+    /// known node, or mint a fresh one.
+    fn mint(map: &mut RefMap, backend_node_id: i64, role: &str, name: &str) -> String {
+        let index = map.node_to_ref_index();
+        let ref_id = match index.get(&(None, backend_node_id)) {
+            Some(existing) => existing.clone(),
+            None => {
+                let n = map.next_ref_num();
+                map.set_next_ref_num(n + 1);
+                format!("e{}", n)
+            }
+        };
+        map.add(ref_id.clone(), Some(backend_node_id), role, name, None);
+        ref_id
+    }
+
+    #[test]
+    fn test_ref_map_rebuild_preserves_ids_for_surviving_nodes() {
+        let mut map = RefMap::new();
+        mint(&mut map, 101, "button", "Alpha");
+        mint(&mut map, 102, "button", "Beta");
+        mint(&mut map, 103, "button", "Gamma");
+
+        // New snapshot after the page inserted a node before the buttons.
+        map.begin_rebuild();
+        assert_eq!(mint(&mut map, 104, "button", "NEW"), "e4");
+        assert_eq!(mint(&mut map, 101, "button", "Alpha"), "e1");
+        assert_eq!(mint(&mut map, 102, "button", "Beta"), "e2");
+        assert_eq!(mint(&mut map, 103, "button", "Gamma"), "e3");
+
+        // e2 still resolves to the node it was minted for.
+        assert_eq!(map.resolve("e2").unwrap().backend_node_id, Some(102));
+    }
+
+    #[test]
+    fn test_ref_map_rebuild_retires_refs_for_missing_nodes() {
+        let mut map = RefMap::new();
+        mint(&mut map, 101, "button", "Alpha");
+        mint(&mut map, 102, "button", "Beta");
+
+        // New snapshot after Beta left the DOM.
+        map.begin_rebuild();
+        mint(&mut map, 101, "button", "Alpha");
+
+        assert!(map.resolve("e1").is_ok());
+        let err = map.resolve("e2").unwrap_err();
+        assert!(
+            err.contains("Stale ref") && err.contains("snapshot"),
+            "stale refs must get a teaching error, got: {}",
+            err
+        );
+        // Refs that never existed keep the original error shape.
+        assert_eq!(map.resolve("e9").unwrap_err(), "Unknown ref: e9");
+    }
+
+    #[test]
+    fn test_ref_map_rebuild_never_reuses_numbers() {
+        let mut map = RefMap::new();
+        mint(&mut map, 101, "button", "Alpha");
+        mint(&mut map, 102, "button", "Beta");
+
+        // Beta is gone; a new node appears. It must not take Beta's number.
+        map.begin_rebuild();
+        mint(&mut map, 101, "button", "Alpha");
+        assert_eq!(mint(&mut map, 103, "button", "Fresh"), "e3");
+    }
+
+    #[test]
+    fn test_ref_map_reappearing_node_reclaims_original_ref() {
+        let mut map = RefMap::new();
+        mint(&mut map, 101, "button", "Alpha");
+        mint(&mut map, 102, "button", "Beta");
+
+        // Beta disappears (e.g. hidden), then reappears one snapshot later.
+        map.begin_rebuild();
+        mint(&mut map, 101, "button", "Alpha");
+        assert!(map.resolve("e2").is_err());
+
+        map.begin_rebuild();
+        assert_eq!(mint(&mut map, 102, "button", "Beta"), "e2");
+        assert_eq!(map.resolve("e2").unwrap().backend_node_id, Some(102));
+    }
+
+    #[test]
+    fn test_ref_map_clear_resets_generations_and_counter() {
+        let mut map = RefMap::new();
+        mint(&mut map, 101, "button", "Alpha");
+        map.begin_rebuild();
+
+        map.clear();
+        assert_eq!(map.next_ref_num(), 1);
+        assert_eq!(map.resolve("e1").unwrap_err(), "Unknown ref: e1");
     }
 
     #[test]

@@ -80,19 +80,38 @@ agent-browser click @e12
 
 ## Ref Lifecycle
 
-**IMPORTANT**: Refs are invalidated when the page changes!
+Refs are bound to the element they were minted for, not to their position in
+the snapshot. Within a page, a ref keeps meaning the same element across
+repeated snapshots:
 
 ```bash
-# Get initial snapshot
 agent-browser snapshot -i
-# @e1 [button] "Next"
+# @e1 [button] "Alpha"
+# @e2 [button] "Beta"
 
-# Click triggers page change
-agent-browser click @e1
-
-# MUST re-snapshot to get new refs!
+# Page inserts a new element, then a new snapshot is taken
 agent-browser snapshot -i
-# @e1 [h1] "Page 2"  ← Different element now!
+# @e3 [button] "NEW"     ← new element gets a fresh ref
+# @e1 [button] "Alpha"   ← surviving elements keep their refs
+# @e2 [button] "Beta"
+
+agent-browser click @e2  # still clicks Beta
+```
+
+If a ref's element left the DOM, using it after a newer snapshot fails with a
+stale-ref error instead of acting on the wrong element:
+
+```
+✗ Stale ref: e2 was minted by an earlier snapshot and its element is no
+  longer in the DOM. Take a new snapshot and use a fresh ref.
+```
+
+**IMPORTANT**: Navigation (open, navigate, back, forward, reload, tab switch)
+clears all refs. Re-snapshot after navigating:
+
+```bash
+agent-browser click @e1            # Navigates to new page
+agent-browser snapshot -i          # Refs from the old page are gone
 ```
 
 ## Best Practices
@@ -189,10 +208,13 @@ agent-browser click @e5
 
 ## Troubleshooting
 
-### "Ref not found" Error
+### "Unknown ref" or "Stale ref" Error
+
+`Unknown ref` means the ref was never minted on this page (or navigation
+cleared it). `Stale ref` means the element left the DOM after a newer
+snapshot. Either way, re-snapshot:
 
 ```bash
-# Ref may have changed - re-snapshot
 agent-browser snapshot -i
 ```
 

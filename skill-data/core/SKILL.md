@@ -24,10 +24,13 @@ agent-browser click @e3         # 3. Act on refs from the snapshot
 agent-browser snapshot -i       # 4. Re-snapshot after any page change
 ```
 
-Refs (`@e1`, `@e2`, ...) are assigned fresh on every snapshot. They become
-**stale the moment the page changes** — after clicks that navigate, form
-submits, dynamic re-renders, dialog opens. Always re-snapshot before your
-next ref interaction.
+Refs (`@e1`, `@e2`, ...) are bound to the element they were minted for and
+keep meaning that element across repeated snapshots within a page: surviving
+elements keep their refs, new elements get fresh numbers. **Navigation clears
+all refs** — re-snapshot after clicks that navigate, form submits, or tab
+switches. If an element left the DOM, its ref fails with a stale-ref error
+telling you to re-snapshot; after dynamic re-renders or dialog opens,
+re-snapshot to discover the new elements.
 
 ## Quickstart
 
