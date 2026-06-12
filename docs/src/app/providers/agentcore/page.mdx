@@ -32,6 +32,9 @@ The `-p` flag takes precedence over `AGENT_BROWSER_PROVIDER`.
     <tr><td><code>AGENTCORE_REGION</code></td><td>AWS region for the AgentCore endpoint</td><td><code>us-east-1</code></td></tr>
     <tr><td><code>AGENTCORE_BROWSER_ID</code></td><td>Browser identifier</td><td><code>aws.browser.v1</code></td></tr>
     <tr><td><code>AGENTCORE_PROFILE_ID</code></td><td>Browser profile for persistent state (cookies, localStorage)</td><td>(none)</td></tr>
+    <tr><td><code>AGENTCORE_PROXY_CONFIG</code></td><td>JSON proxy configuration for the browser session</td><td>(none)</td></tr>
+    <tr><td><code>AGENTCORE_ENTERPRISE_POLICIES</code></td><td>JSON array of enterprise policy configurations</td><td>(none)</td></tr>
+    <tr><td><code>AGENTCORE_EXTENSION_CONFIG</code></td><td>JSON browser extension configuration from S3</td><td>(none)</td></tr>
     <tr><td><code>AGENTCORE_SESSION_TIMEOUT</code></td><td>Session timeout in seconds</td><td><code>3600</code></td></tr>
     <tr><td><code>AWS_PROFILE</code></td><td>AWS CLI profile for credential resolution</td><td><code>default</code></td></tr>
     <tr><td><code>AWS_ACCESS_KEY_ID</code></td><td>AWS access key (checked before AWS CLI fallback)</td><td>(none)</td></tr>
@@ -49,6 +52,92 @@ AGENTCORE_PROFILE_ID=my-profile agent-browser -p agentcore open https://example.
 ```
 
 When a profile is set, AgentCore stores and restores browser state automatically between sessions.
+
+## Proxy Configuration
+
+Use `AGENTCORE_PROXY_CONFIG` to configure proxy settings with authentication for the cloud browser session. The value must be valid JSON matching the AgentCore proxy configuration schema.
+
+<table>
+  <thead>
+    <tr><th>Scope</th><th>Configuration</th><th>Use Case</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Local browser</td><td><code>--proxy</code> flag</td><td>Proxy for Chrome/Lightpanda when launching locally</td></tr>
+    <tr><td>AgentCore browser</td><td><code>AGENTCORE_PROXY_CONFIG</code></td><td>Proxy for the remote AgentCore browser session</td></tr>
+  </tbody>
+</table>
+
+The `--proxy` flag does not apply to AgentCore. Use `AGENTCORE_PROXY_CONFIG` to configure the remote browser's proxy.
+
+```bash
+export AGENTCORE_PROXY_CONFIG='{
+  "proxies": [{
+    "externalProxy": {
+      "server": "your-proxy.com",
+      "port": 8080,
+      "credentials": {
+        "basicAuth": {
+          "secretArn": "arn:aws:secretsmanager:region:account:secret:name"
+        }
+      }
+    }
+  }]
+}'
+agent-browser -p agentcore open https://example.com
+```
+
+The proxy configuration is passed directly to the AgentCore session API. Credentials can reference AWS Secrets Manager ARNs for secure authentication.
+
+## Enterprise Policies
+
+Use `AGENTCORE_ENTERPRISE_POLICIES` to apply enterprise browser policies stored in S3. The value must be a JSON array:
+
+```bash
+export AGENTCORE_ENTERPRISE_POLICIES='[
+  {
+    "type": "RECOMMENDED",
+    "location": {
+      "s3": {
+        "bucket": "my-policy-bucket",
+        "prefix": "policies/recommended-policies.json"
+      }
+    }
+  }
+]'
+agent-browser -p agentcore open https://example.com
+```
+
+Policies are applied at session creation time and control browser behavior, security settings, and feature availability. The browser session must have IAM permissions to read from the specified S3 bucket.
+
+## Browser Extensions
+
+Use `AGENTCORE_EXTENSION_CONFIG` to load browser extensions from S3. The value must be a JSON array:
+
+```bash
+export AGENTCORE_EXTENSION_CONFIG='[
+  {
+    "location": {
+      "s3": {
+        "bucket": "my-extension-bucket",
+        "prefix": "extensions/my-extension.zip"
+      }
+    }
+  }
+]'
+agent-browser -p agentcore open https://example.com
+```
+
+<table>
+  <thead>
+    <tr><th>Scope</th><th>Configuration</th><th>Use Case</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Local browser</td><td><code>--extension</code> flag</td><td>Load extensions from local filesystem</td></tr>
+    <tr><td>AgentCore browser</td><td><code>AGENTCORE_EXTENSION_CONFIG</code></td><td>Load extensions from S3</td></tr>
+  </tbody>
+</table>
+
+Extensions must be packaged as `.zip` files (standard Chrome extension format) and uploaded to S3. The browser session must have IAM permissions to read from the specified S3 bucket.
 
 ## Live View
 
