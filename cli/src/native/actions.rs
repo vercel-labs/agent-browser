@@ -2435,7 +2435,7 @@ async fn handle_content(state: &DaemonState) -> Result<Value, String> {
     }
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let html = mgr.get_content().await?;
-    let url = mgr.get_url().await.unwrap_or_default();
+    let url = mgr.cached_url();
     Ok(json!({ "html": html, "origin": url }))
 }
 
@@ -2458,7 +2458,7 @@ async fn handle_evaluate(cmd: &Value, state: &DaemonState) -> Result<Value, Stri
         .ok_or("Missing 'script' parameter")?;
 
     let result = mgr.evaluate(script, None).await?;
-    let url = mgr.get_url().await.unwrap_or_default();
+    let url = mgr.cached_url();
     Ok(json!({ "result": result, "origin": url }))
 }
 
@@ -2558,7 +2558,7 @@ async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     )
     .await?;
 
-    let url = mgr.get_url().await.unwrap_or_default();
+    let url = mgr.cached_url();
 
     let refs: serde_json::Map<String, Value> = state
         .ref_map
@@ -3105,7 +3105,7 @@ async fn handle_gettext(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
         &state.iframe_sessions,
     )
     .await?;
-    let url = mgr.get_url().await.unwrap_or_default();
+    let url = mgr.cached_url();
     Ok(json!({ "text": text, "origin": url }))
 }
 
@@ -3130,7 +3130,7 @@ async fn handle_getattribute(cmd: &Value, state: &mut DaemonState) -> Result<Val
         &state.iframe_sessions,
     )
     .await?;
-    let url = mgr.get_url().await.unwrap_or_default();
+    let url = mgr.cached_url();
     Ok(json!({ "value": value, "origin": url }))
 }
 
@@ -3150,7 +3150,7 @@ async fn handle_isvisible(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         &state.iframe_sessions,
     )
     .await?;
-    let url = mgr.get_url().await.unwrap_or_default();
+    let url = mgr.cached_url();
     Ok(json!({ "visible": visible, "origin": url }))
 }
 
@@ -3170,7 +3170,7 @@ async fn handle_isenabled(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         &state.iframe_sessions,
     )
     .await?;
-    let url = mgr.get_url().await.unwrap_or_default();
+    let url = mgr.cached_url();
     Ok(json!({ "enabled": enabled, "origin": url }))
 }
 
@@ -3190,7 +3190,7 @@ async fn handle_ischecked(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         &state.iframe_sessions,
     )
     .await?;
-    let url = mgr.get_url().await.unwrap_or_default();
+    let url = mgr.cached_url();
     Ok(json!({ "checked": checked, "origin": url }))
 }
 
@@ -3207,6 +3207,8 @@ async fn handle_back(state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     mgr.evaluate("history.back()", None).await?;
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    // history.back() does not flow through navigate(), so the cached URL on
+    // PageInfo is still the pre-navigation value. Read live to avoid staleness.
     let url = mgr.get_url().await.unwrap_or_default();
     state.ref_map.clear();
     Ok(json!({ "url": url }))
@@ -3225,6 +3227,8 @@ async fn handle_forward(state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     mgr.evaluate("history.forward()", None).await?;
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    // history.forward() does not flow through navigate(), so the cached URL is
+    // still the pre-navigation value. Read live to avoid staleness.
     let url = mgr.get_url().await.unwrap_or_default();
     state.ref_map.clear();
     Ok(json!({ "url": url }))
@@ -3265,6 +3269,10 @@ async fn handle_reload(state: &mut DaemonState) -> Result<Value, String> {
     })
     .await;
 
+    // Page.reload triggers a fresh navigation that does not flow through
+    // BrowserManager::navigate(), so the cached URL is still the pre-reload
+    // value (the URL is the same after a same-page reload, but for SPAs that
+    // reload at a hash anchor this still matters). Read live.
     let url = mgr.get_url().await.unwrap_or_default();
     state.ref_map.clear();
     Ok(json!({ "url": url }))
@@ -5091,7 +5099,7 @@ async fn handle_vitals(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
 
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let url = mgr.get_url().await.unwrap_or_default();
+    let url = mgr.cached_url();
     let result = mgr.evaluate(react::scripts::VITALS_READ, None).await?;
     let raw = parse_json_string(result, "vitals")?;
 
@@ -5604,6 +5612,8 @@ async fn handle_waitforurl(cmd: &Value, state: &DaemonState) -> Result<Value, St
     let timeout_ms = state.timeout_ms(cmd);
 
     wait_for_url(&mgr.client, &session_id, url_pattern, timeout_ms).await?;
+    // wait_for_url returned because the URL just changed; the cached URL is
+    // by definition the previous one. Read live.
     let url = mgr.get_url().await.unwrap_or_default();
     Ok(json!({ "url": url }))
 }
