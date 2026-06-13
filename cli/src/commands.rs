@@ -133,22 +133,22 @@ fn extract_cookie_header_from_curl(curl: &str) -> Option<String> {
         .replace("\\\n", " ")
         .replace("^\r\n", " ")
         .replace("^\n", " ");
-    if let Some(v) = match_quoted_arg(&joined, "-H", Some("cookie")) {
+    if let Some(v) = match_curl_arg(&joined, "-H", Some("cookie")) {
         return Some(v);
     }
-    if let Some(v) = match_quoted_arg(&joined, "-b", None) {
+    if let Some(v) = match_curl_arg(&joined, "-b", None) {
         return Some(v);
     }
-    if let Some(v) = match_quoted_arg(&joined, "--cookie", None) {
+    if let Some(v) = match_curl_arg(&joined, "--cookie", None) {
         return Some(v);
     }
     None
 }
 
-/// Find `flag <quote>[header:]value<quote>` in haystack and return the value.
-/// When `expect_header` is set, the quoted value must start with that header
+/// Find `flag [<quote>][header:]value[<quote>]` in haystack and return the value.
+/// When `expect_header` is set, the value must start with that header
 /// name followed by a colon (case-insensitive) and the prefix is stripped.
-fn match_quoted_arg(haystack: &str, flag: &str, expect_header: Option<&str>) -> Option<String> {
+fn match_curl_arg(haystack: &str, flag: &str, expect_header: Option<&str>) -> Option<String> {
     let bytes = haystack.as_bytes();
     let flag_b = flag.as_bytes();
     let mut i = 0;
@@ -174,19 +174,28 @@ fn match_quoted_arg(haystack: &str, flag: &str, expect_header: Option<&str>) -> 
         if j >= bytes.len() {
             return None;
         }
-        let quote = bytes[j];
-        if quote != b'\'' && quote != b'"' {
-            i = j;
-            continue;
-        }
-        let start = j + 1;
-        let mut k = start;
-        while k < bytes.len() && bytes[k] != quote {
-            k += 1;
-        }
-        if k >= bytes.len() {
-            return None;
-        }
+        let (start, k) = match bytes[j] {
+            b'\'' | b'"' => {
+                let quote = bytes[j];
+                let start = j + 1;
+                let mut k = start;
+                while k < bytes.len() && bytes[k] != quote {
+                    k += 1;
+                }
+                if k >= bytes.len() {
+                    return None;
+                }
+                (start, k)
+            }
+            _ => {
+                let start = j;
+                let mut k = start;
+                while k < bytes.len() && !bytes[k].is_ascii_whitespace() {
+                    k += 1;
+                }
+                (start, k)
+            }
+        };
         let value = String::from_utf8_lossy(&bytes[start..k]).into_owned();
         if let Some(header) = expect_header {
             let lower = value.to_lowercase();
@@ -2876,6 +2885,24 @@ mod tests {
         let out = parse_curl_cookies(input).unwrap();
         assert_eq!(out.len(), 2);
         assert_eq!(out[0]["name"], "sid");
+    }
+
+    #[test]
+    fn test_parse_curl_cookies_from_unquoted_b_flag() {
+        let input = "curl 'https://example.com/api' -b sid=abc";
+        let out = parse_curl_cookies(input).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["name"], "sid");
+        assert_eq!(out[0]["value"], "abc");
+    }
+
+    #[test]
+    fn test_parse_curl_cookies_from_unquoted_cookie_flag() {
+        let input = "curl 'https://example.com/api' --cookie token=xyz";
+        let out = parse_curl_cookies(input).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["name"], "token");
+        assert_eq!(out[0]["value"], "xyz");
     }
 
     #[test]
