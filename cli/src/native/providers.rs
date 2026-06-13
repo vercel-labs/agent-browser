@@ -1,10 +1,26 @@
 //! Browser provider connections for remote CDP sessions.
 //!
-//! Supports AgentCore, Browserbase, Browserless, Browser Use, and Kernel providers.
+//! Supports AgentCore, Browserbase, Browserless, Browser Use, Kernel, and Lightpanda Cloud  providers.
 //! Each provider returns a CDP WebSocket URL for connecting via BrowserManager.
 
 use serde_json::{json, Value};
 use std::env;
+
+/// Browser engine backing the provider connection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProviderEngine {
+    Chrome,
+    Lightpanda,
+}
+
+impl ProviderEngine {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ProviderEngine::Chrome => "chrome",
+            ProviderEngine::Lightpanda => "lightpanda",
+        }
+    }
+}
 
 /// Provider session info for cleanup on failure.
 #[derive(Debug)]
@@ -19,6 +35,8 @@ pub struct ProviderConnection {
     pub session: Option<ProviderSession>,
     /// If true, the WebSocket IS the page session (no Target.* commands).
     pub direct_page: bool,
+    /// Engine for action-level branching between Chrome and Lightpanda behavior.
+    pub engine: ProviderEngine,
 }
 
 /// Connects to the specified browser provider and returns a CDP WebSocket URL
@@ -31,6 +49,7 @@ pub async fn connect_provider(provider_name: &str) -> Result<ProviderConnection,
                 ws_url: url,
                 session,
                 direct_page: false,
+                engine: ProviderEngine::Chrome,
             })
         }
         "browserless" => {
@@ -39,6 +58,7 @@ pub async fn connect_provider(provider_name: &str) -> Result<ProviderConnection,
                 ws_url: url,
                 session,
                 direct_page: false,
+                engine: ProviderEngine::Chrome,
             })
         }
         "browser-use" | "browseruse" => {
@@ -47,6 +67,7 @@ pub async fn connect_provider(provider_name: &str) -> Result<ProviderConnection,
                 ws_url: url,
                 session,
                 direct_page: false,
+                engine: ProviderEngine::Chrome,
             })
         }
         "kernel" => {
@@ -55,6 +76,7 @@ pub async fn connect_provider(provider_name: &str) -> Result<ProviderConnection,
                 ws_url: url,
                 session,
                 direct_page: false,
+                engine: ProviderEngine::Chrome,
             })
         }
         "agentcore" => {
@@ -63,10 +85,20 @@ pub async fn connect_provider(provider_name: &str) -> Result<ProviderConnection,
                 ws_url: url,
                 session,
                 direct_page: false,
+                engine: ProviderEngine::Chrome,
+            })
+        }
+        "lightpanda-cloud" => {
+            let url = connect_lightpanda_cloud().await?;
+            Ok(ProviderConnection {
+                ws_url: url,
+                session: None,
+                direct_page: false,
+                engine: ProviderEngine::Lightpanda,
             })
         }
         _ => Err(format!(
-            "Unknown provider '{}'. Supported: browserbase, browserless, browser-use, kernel, agentcore",
+            "Unknown provider '{}'. Supported: browserbase, browserless, browser-use, kernel, agentcore, lightpanda-cloud",
             provider_name
         )),
     }
@@ -813,4 +845,16 @@ mod tests {
         let taken_again = take_agentcore_ws_headers();
         assert!(taken_again.is_none());
     }
+}
+
+async fn connect_lightpanda_cloud() -> Result<String, String> {
+    let api_key = env::var("LIGHTPANDA_CLOUD_TOKEN")
+        .map_err(|_| "LIGHTPANDA_CLOUD_TOKEN environment variable is not set")?;
+
+    let region = env::var("LIGHTPANDA_CLOUD_REGION").unwrap_or_else(|_| "euwest".to_string());
+
+    Ok(format!(
+        "wss://{}.cloud.lightpanda.io/ws?token={}",
+        region, api_key
+    ))
 }
