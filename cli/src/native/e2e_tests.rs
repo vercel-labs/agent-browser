@@ -5185,10 +5185,8 @@ async fn e2e_session_name_auto_restores_cookies() {
 
     // Session 2: fresh DaemonState with same session_name. Navigate without
     // explicit launch — this triggers auto_launch which calls
-    // try_auto_restore_state.
-    //
-    // NOTE: an explicit `launch` command skips auto_launch entirely, so
-    // session-name auto-restore only fires via the auto_launch path.
+    // try_auto_restore_state. See e2e_session_name_auto_restores_cookies_via_explicit_launch
+    // below for the explicit-launch (handle_launch) variant.
     {
         let mut state = DaemonState::new();
 
@@ -5225,6 +5223,384 @@ async fn e2e_session_name_auto_restores_cookies() {
         .unwrap()
         .join(".agent-browser")
         .join("sessions");
+    if let Ok(entries) = std::fs::read_dir(&sessions_dir) {
+        for entry in entries.flatten() {
+            let fname = entry.file_name().to_string_lossy().to_string();
+            if fname.starts_with(&format!("{}-", session_name)) {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+}
+
+/// Regression test for the `--headed` / `--executable-path` auto-restore gap.
+///
+/// Flags like `--headed` and `--executable-path` cause the CLI to dispatch an
+/// explicit `launch` command before the first action, which routes through
+/// `handle_launch` rather than `auto_launch`. Prior to the fix, only
+/// `auto_launch` invoked `try_auto_restore_state`, so `--session-name` silently
+/// failed to restore for any flag combination that triggered an explicit
+/// launch.
+#[tokio::test]
+#[ignore]
+async fn e2e_session_name_auto_restores_cookies_via_explicit_launch() {
+    let session_name = format!(
+        "e2e-session-name-explicit-{}",
+        &uuid::Uuid::new_v4().to_string()[..8]
+    );
+
+    let env = EnvGuard::new(&["AGENT_BROWSER_SESSION_NAME"]);
+    env.set("AGENT_BROWSER_SESSION_NAME", &session_name);
+
+    // Session 1: launch, set a cookie, close (auto-saves state).
+    {
+        let mut state = DaemonState::new();
+
+        let resp = execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        let resp = execute_command(
+            &json!({ "id": "2", "action": "navigate", "url": "https://example.com" }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        let resp = execute_command(
+            &json!({
+                "id": "3",
+                "action": "cookies_set",
+                "name": "session_name_explicit_test",
+                "value": "auto_restored_via_handle_launch",
+                "domain": ".example.com",
+                "path": "/",
+                "expires": 2000000000
+            }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        let resp = execute_command(&json!({ "id": "5", "action": "close" }), &mut state).await;
+        assert_success(&resp);
+    }
+
+    // Session 2: fresh DaemonState, send an EXPLICIT `launch` command (as the
+    // CLI does whenever --headed, --executable-path, --proxy, etc. is set).
+    // This routes through handle_launch — exactly the path that was broken.
+    {
+        let mut state = DaemonState::new();
+
+        let resp = execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        let resp = execute_command(
+            &json!({ "id": "2", "action": "navigate", "url": "https://example.com" }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        let resp =
+            execute_command(&json!({ "id": "3", "action": "cookies_get" }), &mut state).await;
+        assert_success(&resp);
+        let cookies = get_data(&resp)["cookies"].as_array().unwrap();
+        let found = cookies.iter().any(|c| {
+            c["name"] == "session_name_explicit_test"
+                && c["value"] == "auto_restored_via_handle_launch"
+        });
+        assert!(
+            found,
+            "Cookie should be auto-restored via --session-name through handle_launch. \
+             Cookies found: {:?}",
+            cookies
+                .iter()
+                .map(|c| c["name"].as_str().unwrap_or("?"))
+                .collect::<Vec<_>>()
+        );
+
+        let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+        assert_success(&resp);
+    }
+
+    // Clean up auto-saved state files
+    let sessions_dir = dirs::home_dir()
+        .unwrap()
+        .join(".agent-browser")
+        .join("sessions");
+    if let Ok(entries) = std::fs::read_dir(&sessions_dir) {
+        for entry in entries.flatten() {
+            let fname = entry.file_name().to_string_lossy().to_string();
+            if fname.starts_with(&format!("{}-", session_name)) {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+}
+
+/// Regression test: explicit `--state` must win over `--session-name`
+/// auto-restore. When both are set, auto-restore is skipped so the explicit
+/// file is the sole source of state — no silent merge of stale session data.
+#[tokio::test]
+#[ignore]
+async fn e2e_explicit_state_skips_session_name_auto_restore() {
+    let session_name = format!(
+        "e2e-session-name-vs-state-{}",
+        &uuid::Uuid::new_v4().to_string()[..8]
+    );
+
+    let env = EnvGuard::new(&["AGENT_BROWSER_SESSION_NAME"]);
+    env.set("AGENT_BROWSER_SESSION_NAME", &session_name);
+
+    // Pre-populate the session-name auto-state with a marker cookie.
+    {
+        let mut state = DaemonState::new();
+        let resp = execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+        let resp = execute_command(
+            &json!({ "id": "2", "action": "navigate", "url": "https://example.com" }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+        let resp = execute_command(
+            &json!({
+                "id": "3",
+                "action": "cookies_set",
+                "name": "from_session_name",
+                "value": "stale",
+                "domain": ".example.com",
+                "path": "/",
+                "expires": 2000000000
+            }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+        let resp = execute_command(&json!({ "id": "4", "action": "close" }), &mut state).await;
+        assert_success(&resp);
+    }
+
+    // Build an explicit --state file with a *different* cookie. Write the
+    // JSON directly to avoid the auto-save side effect from close().
+    let explicit_state_path = std::env::temp_dir()
+        .join(format!(
+            "agent-browser-e2e-explicit-state-{}.json",
+            uuid::Uuid::new_v4()
+        ))
+        .to_string_lossy()
+        .to_string();
+    let explicit_state_json = json!({
+        "cookies": [{
+            "name": "from_explicit_state",
+            "value": "winner",
+            "domain": ".example.com",
+            "path": "/",
+            "expires": 2000000000.0_f64,
+            "size": 0,
+            "httpOnly": false,
+            "secure": false,
+            "session": false
+        }],
+        "origins": []
+    });
+    std::fs::write(
+        &explicit_state_path,
+        serde_json::to_string(&explicit_state_json).unwrap(),
+    )
+    .expect("explicit state file should be writable");
+
+    // Launch with both --session-name (env) and explicit --state (command
+    // payload). Auto-restore must be skipped.
+    {
+        let mut state = DaemonState::new();
+        let resp = execute_command(
+            &json!({
+                "id": "1",
+                "action": "launch",
+                "headless": true,
+                "storageState": &explicit_state_path
+            }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+        let resp = execute_command(
+            &json!({ "id": "2", "action": "navigate", "url": "https://example.com" }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+        let resp =
+            execute_command(&json!({ "id": "3", "action": "cookies_get" }), &mut state).await;
+        assert_success(&resp);
+        let cookies = get_data(&resp)["cookies"].as_array().unwrap();
+        let from_explicit = cookies
+            .iter()
+            .any(|c| c["name"] == "from_explicit_state" && c["value"] == "winner");
+        let from_session_name = cookies.iter().any(|c| c["name"] == "from_session_name");
+        assert!(
+            from_explicit,
+            "explicit --state cookie should be loaded. cookies: {:?}",
+            cookies
+                .iter()
+                .map(|c| c["name"].as_str().unwrap_or("?"))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            !from_session_name,
+            "session-name auto-restore must be skipped when --state is explicit; \
+             unexpected stale cookie. cookies: {:?}",
+            cookies
+                .iter()
+                .map(|c| c["name"].as_str().unwrap_or("?"))
+                .collect::<Vec<_>>()
+        );
+        let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+        assert_success(&resp);
+    }
+
+    let _ = std::fs::remove_file(&explicit_state_path);
+    let sessions_dir = dirs::home_dir()
+        .unwrap()
+        .join(".agent-browser")
+        .join("sessions");
+    if let Ok(entries) = std::fs::read_dir(&sessions_dir) {
+        for entry in entries.flatten() {
+            let fname = entry.file_name().to_string_lossy().to_string();
+            if fname.starts_with(&format!("{}-", session_name)) {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+}
+
+/// Regression test: `--init-script` must be registered before any
+/// restore-driven navigation, so the script fires on those navigations.
+/// `state::load_state` navigates to each origin to replay localStorage —
+/// if the init script were registered afterwards, it would miss that page.
+#[tokio::test]
+#[ignore]
+async fn e2e_init_script_applies_to_restore_navigation() {
+    let session_name = format!(
+        "e2e-init-before-restore-{}",
+        &uuid::Uuid::new_v4().to_string()[..8]
+    );
+
+    // Pre-seed the session-name auto-state file with a localStorage origin
+    // for example.com so restore performs a navigation we can observe.
+    let sessions_dir = dirs::home_dir()
+        .unwrap()
+        .join(".agent-browser")
+        .join("sessions");
+    std::fs::create_dir_all(&sessions_dir).expect("sessions dir should exist");
+    let auto_state_path = sessions_dir.join(format!("{}-seed.json", session_name));
+    let auto_state_json = json!({
+        "cookies": [{
+            "name": "restore_probe",
+            "value": "1",
+            "domain": ".example.com",
+            "path": "/",
+            "expires": 2000000000.0_f64,
+            "size": 0,
+            "httpOnly": false,
+            "secure": false,
+            "session": false
+        }],
+        "origins": [{
+            "origin": "https://example.com",
+            "localStorage": [{ "name": "probe_key", "value": "probe_value" }],
+            "sessionStorage": []
+        }]
+    });
+    std::fs::write(
+        &auto_state_path,
+        serde_json::to_string(&auto_state_json).unwrap(),
+    )
+    .expect("seed auto-state file should be writable");
+
+    // Init script that flips a window marker on every new document load.
+    let init_script_path = std::env::temp_dir().join(format!(
+        "agent-browser-e2e-init-script-{}.js",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::write(
+        &init_script_path,
+        "window.__init_marker__ = 'fired';",
+    )
+    .expect("init script file should be writable");
+
+    let env = EnvGuard::new(&[
+        "AGENT_BROWSER_SESSION_NAME",
+        "AGENT_BROWSER_INIT_SCRIPTS",
+    ]);
+    env.set("AGENT_BROWSER_SESSION_NAME", &session_name);
+    env.set(
+        "AGENT_BROWSER_INIT_SCRIPTS",
+        init_script_path.to_str().unwrap(),
+    );
+
+    {
+        let mut state = DaemonState::new();
+
+        // Explicit `launch` (the path that was broken) — auto-restore
+        // navigates to https://example.com to replay localStorage. The init
+        // script must already be registered before that navigation.
+        let resp = execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        // Do NOT navigate explicitly — that would trigger the init script
+        // independently and mask the bug. Evaluate on the page that the
+        // restore navigation left us on.
+        let resp = execute_command(
+            &json!({ "id": "2", "action": "evaluate", "script": "window.__init_marker__" }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+        assert_eq!(
+            get_data(&resp)["result"], "fired",
+            "init script must run on the restore-driven navigation. \
+             If undefined, the script was registered after restore."
+        );
+
+        // Sanity-check that the restore itself actually fired.
+        let resp =
+            execute_command(&json!({ "id": "3", "action": "cookies_get" }), &mut state).await;
+        assert_success(&resp);
+        let cookies = get_data(&resp)["cookies"].as_array().unwrap();
+        assert!(
+            cookies
+                .iter()
+                .any(|c| c["name"] == "restore_probe" && c["value"] == "1"),
+            "seeded cookie should be restored — restore-path precondition. cookies: {:?}",
+            cookies
+                .iter()
+                .map(|c| c["name"].as_str().unwrap_or("?"))
+                .collect::<Vec<_>>()
+        );
+
+        let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+        assert_success(&resp);
+    }
+
+    let _ = std::fs::remove_file(&init_script_path);
     if let Ok(entries) = std::fs::read_dir(&sessions_dir) {
         for entry in entries.flatten() {
             let fname = entry.file_name().to_string_lossy().to_string();
