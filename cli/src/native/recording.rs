@@ -3,6 +3,7 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::oneshot;
 
@@ -11,6 +12,13 @@ use super::cdp::types::{CaptureScreenshotParams, CaptureScreenshotResult};
 
 const CAPTURE_INTERVAL_MS: u64 = 100;
 const CAPTURE_FPS: u32 = 10;
+// Bound each screenshot capture so record stop can always observe cancellation.
+const SCREENSHOT_COMMAND_TIMEOUT_MS: u64 = 1_500;
+// Bound stop latency so a wedged capture task does not hang the CLI forever.
+const RECORDING_STOP_TIMEOUT_MS: u64 = 5_000;
+// Keep only the tail of ffmpeg stderr so diagnostics remain available without
+// allowing the pipe to block the encoder.
+const FFMPEG_STDERR_TAIL_BYTES: usize = 8 * 1024;
 
 pub struct RecordingState {
     pub active: bool,
@@ -143,6 +151,31 @@ pub fn spawn_recording_task(
             .stdin
             .take()
             .ok_or_else(|| "Failed to open ffmpeg stdin".to_string())?;
+        let stderr = ffmpeg
+            .stderr
+            .take()
+            .ok_or_else(|| "Failed to open ffmpeg stderr".to_string())?;
+        let stderr_task = tokio::spawn(async move {
+            let mut stderr = stderr;
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 2048];
+
+            loop {
+                match stderr.read(&mut chunk).await {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        buf.extend_from_slice(&chunk[..n]);
+                        if buf.len() > FFMPEG_STDERR_TAIL_BYTES {
+                            let overflow = buf.len() - FFMPEG_STDERR_TAIL_BYTES;
+                            buf.drain(..overflow);
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+
+            buf
+        });
 
         let mut interval = tokio::time::interval(Duration::from_millis(CAPTURE_INTERVAL_MS));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -161,9 +194,15 @@ pub fn spawn_recording_task(
                 _ = interval.tick() => {}
             }
 
-            let result: Result<CaptureScreenshotResult, _> = client
-                .send_command_typed("Page.captureScreenshot", &params, Some(&session_id))
-                .await;
+            let result: Result<CaptureScreenshotResult, _> = match tokio::time::timeout(
+                Duration::from_millis(SCREENSHOT_COMMAND_TIMEOUT_MS),
+                client.send_command_typed("Page.captureScreenshot", &params, Some(&session_id)),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => continue,
+            };
 
             let screenshot = match result {
                 Ok(s) => s,
@@ -191,17 +230,21 @@ pub fn spawn_recording_task(
 
         drop(stdin);
 
-        let output = ffmpeg
-            .wait_with_output()
+        let status = ffmpeg
+            .wait()
             .await
             .map_err(|e| format!("ffmpeg wait failed: {}", e))?;
+        let stderr = stderr_task
+            .await
+            .map_err(|e| format!("ffmpeg stderr task failed: {}", e))?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!(
-                "ffmpeg failed: {}",
-                stderr.chars().take(300).collect::<String>()
-            ));
+        if !status.success() {
+            let stderr = String::from_utf8_lossy(&stderr);
+            let stderr = stderr.trim();
+            if stderr.is_empty() {
+                return Err(format!("ffmpeg exited with status {}", status));
+            }
+            return Err(format!("ffmpeg exited with status {}: {}", status, stderr));
         }
 
         Ok(())
@@ -216,11 +259,16 @@ pub async fn stop_recording_task(state: &mut RecordingState) -> Result<(), Strin
     let counter = state.shared_frame_count.take();
     let handle = state.capture_task.take();
 
-    let result = if let Some(h) = handle {
-        match h.await {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(e)) => Err(e),
-            Err(e) => Err(format!("Recording task panicked: {}", e)),
+    let result = if let Some(mut h) = handle {
+        match tokio::time::timeout(Duration::from_millis(RECORDING_STOP_TIMEOUT_MS), &mut h).await {
+            Ok(Ok(Ok(()))) => Ok(()),
+            Ok(Ok(Err(e))) => Err(e),
+            Ok(Err(e)) => Err(format!("Recording task panicked: {}", e)),
+            Err(_) => {
+                h.abort();
+                let _ = h.await;
+                Err("Timed out stopping recording task".to_string())
+            }
         }
     } else {
         Ok(())
@@ -236,6 +284,7 @@ pub async fn stop_recording_task(state: &mut RecordingState) -> Result<(), Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::future::pending;
 
     #[test]
     fn test_recording_state_new() {
@@ -319,5 +368,25 @@ mod tests {
         let args_str: Vec<&str> = args.iter().filter_map(|a| a.to_str()).collect();
         assert!(args_str.contains(&"libx264"));
         assert!(args_str.contains(&"/tmp/out.mp4"));
+    }
+
+    #[tokio::test]
+    async fn test_stop_recording_task_times_out_and_aborts_hung_task() {
+        let mut state = RecordingState::new();
+        let (cancel_tx, _cancel_rx) = oneshot::channel();
+        let shared_count = Arc::new(AtomicU64::new(7));
+
+        state.cancel_tx = Some(cancel_tx);
+        state.shared_frame_count = Some(shared_count);
+        state.capture_task = Some(tokio::spawn(async move {
+            pending::<Result<(), String>>().await
+        }));
+
+        let result = stop_recording_task(&mut state).await;
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Timed out"));
+        assert_eq!(state.frame_count, 7);
+        assert!(state.capture_task.is_none());
     }
 }
