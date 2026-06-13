@@ -3234,7 +3234,10 @@ Options:
 
 Configuration:
   agent-browser looks for agent-browser.json in these locations (lowest to highest priority):
-    1. ~/.agent-browser/config.json      User-level defaults
+    1. $AGENT_BROWSER_HOME/config/config.json,
+       else $AGENT_BROWSER_CONFIG_DIR/agent-browser/config.json,
+       else $XDG_CONFIG_HOME/agent-browser/config.json
+                                      User-level defaults
     2. ./agent-browser.json              Project-level overrides
     3. Environment variables             Override config file values
     4. CLI flags                         Override everything
@@ -3253,6 +3256,11 @@ Configuration:
     {{"headed": true, "hideScrollbars": false, "proxy": "http://localhost:8080"}}
 
 Environment:
+  AGENT_BROWSER_HOME             Root for config, state, data, and cache dirs
+  AGENT_BROWSER_CONFIG_DIR       Base dir for user config files
+  AGENT_BROWSER_STATE_DIR        Base dir for sessions, auth, and keys
+  AGENT_BROWSER_DATA_DIR         Base dir for installed browsers
+  AGENT_BROWSER_CACHE_DIR        Base dir for screenshots, traces, HAR, and PDFs
   AGENT_BROWSER_CONFIG           Path to config file (or use --config)
   AGENT_BROWSER_SESSION          Session name (default: "default")
   AGENT_BROWSER_SESSION_NAME     Auto-save/restore state persistence name

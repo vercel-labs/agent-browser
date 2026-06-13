@@ -10,6 +10,7 @@ use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use tokio::sync::{broadcast, oneshot, RwLock};
 
 use crate::connection::get_socket_dir;
+use crate::paths;
 
 use super::auth;
 use super::browser::{should_track_target, BrowserManager, WaitUntil};
@@ -4434,11 +4435,7 @@ async fn handle_pdf(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
     let save_path = match path {
         Some(p) => p.to_string(),
         None => {
-            let dir = dirs::home_dir()
-                .unwrap_or_else(std::env::temp_dir)
-                .join(".agent-browser")
-                .join("tmp")
-                .join("pdfs");
+            let dir = paths::tmp_dir().join("pdfs");
             let _ = std::fs::create_dir_all(&dir);
             let timestamp = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -7029,11 +7026,7 @@ fn har_output_path(explicit_path: Option<&str>) -> String {
 }
 
 fn get_har_dir() -> PathBuf {
-    if let Some(home) = dirs::home_dir() {
-        home.join(".agent-browser").join("tmp").join("har")
-    } else {
-        std::env::temp_dir().join("agent-browser").join("har")
-    }
+    paths::tmp_dir().join("har")
 }
 
 fn unix_timestamp_millis() -> u128 {

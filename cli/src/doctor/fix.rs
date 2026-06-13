@@ -209,10 +209,18 @@ mod tests {
     #[test]
     fn test_run_fixes_generates_missing_encryption_key() {
         // Reaches the Info-status arm in run_fixes that was previously
-        // unreachable due to an early-continue guard. Overrides HOME so
-        // get_state_dir() resolves under a temp dir.
-        let guard = crate::test_utils::EnvGuard::new(&["HOME"]);
+        // unreachable due to an early-continue guard. Overrides HOME so the
+        // XDG-aware state dir resolves under a temp dir.
+        let guard = crate::test_utils::EnvGuard::new(&[
+            "AGENT_BROWSER_HOME",
+            "AGENT_BROWSER_STATE_DIR",
+            "XDG_STATE_HOME",
+            "HOME",
+        ]);
         let tmp = TempDir::new().unwrap();
+        guard.remove("AGENT_BROWSER_HOME");
+        guard.remove("AGENT_BROWSER_STATE_DIR");
+        guard.remove("XDG_STATE_HOME");
         guard.set("HOME", tmp.path().to_str().unwrap());
 
         let mut checks = vec![Check::new(
@@ -240,8 +248,10 @@ mod tests {
             "fixed summary should mention the key generation"
         );
         assert!(
-            tmp.path().join(".agent-browser/.encryption-key").exists(),
-            "key file should exist at ~/.agent-browser/.encryption-key"
+            tmp.path()
+                .join(".local/state/agent-browser/.encryption-key")
+                .exists(),
+            "key file should exist at ~/.local/state/agent-browser/.encryption-key"
         );
     }
 }
