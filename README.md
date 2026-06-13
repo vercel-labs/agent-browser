@@ -820,6 +820,8 @@ Create an `agent-browser.json` file to set persistent defaults instead of repeat
   "profile": "./browser-data",
   "userAgent": "my-agent/1.0",
   "hideScrollbars": false,
+  "viewport": { "width": 1920, "height": 1080 },
+  "deviceScaleFactor": 1,
   "ignoreHttpsErrors": true
 }
 ```
@@ -832,6 +834,8 @@ AGENT_BROWSER_CONFIG=./ci-config.json agent-browser open example.com
 ```
 
 All options from the table above can be set in the config file using camelCase keys (e.g., `--executable-path` becomes `"executablePath"`, `--proxy-bypass` becomes `"proxyBypass"`). Unknown keys are ignored for forward compatibility.
+
+Use `"viewport": { "width": 1280, "height": 800 }` with `"deviceScaleFactor": 1` to persist deterministic screenshot dimensions across daemon restarts. `deviceScaleFactor` is applied only when `viewport` is configured.
 
 A [JSON Schema](agent-browser.schema.json) is available for IDE autocomplete and validation. Add a `$schema` key to your config file to enable it:
 

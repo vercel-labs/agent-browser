@@ -50,6 +50,19 @@ fn parse_idle_timeout_value(value: Option<String>, source: &str) -> Option<Strin
     })
 }
 
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ViewportConfig {
+    pub width: i32,
+    pub height: i32,
+}
+
+impl ViewportConfig {
+    pub fn is_valid(&self) -> bool {
+        self.width > 0 && self.height > 0
+    }
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Config {
@@ -92,6 +105,8 @@ pub struct Config {
     pub idle_timeout: Option<String>,
     pub no_auto_dialog: Option<bool>,
     pub model: Option<String>,
+    pub viewport: Option<ViewportConfig>,
+    pub device_scale_factor: Option<f64>,
 }
 
 impl Config {
@@ -154,6 +169,8 @@ impl Config {
             idle_timeout: other.idle_timeout.or(self.idle_timeout),
             no_auto_dialog: other.no_auto_dialog.or(self.no_auto_dialog),
             model: other.model.or(self.model),
+            viewport: other.viewport.or(self.viewport),
+            device_scale_factor: other.device_scale_factor.or(self.device_scale_factor),
         }
     }
 }
@@ -335,6 +352,8 @@ pub struct Flags {
     pub default_timeout: Option<u64>, // AGENT_BROWSER_DEFAULT_TIMEOUT in ms
     pub no_auto_dialog: bool,
     pub model: Option<String>,
+    pub viewport: Option<ViewportConfig>,
+    pub device_scale_factor: Option<f64>,
     pub verbose: bool,
     pub quiet: bool,
 
@@ -514,6 +533,28 @@ pub fn parse_flags(args: &[String]) -> Flags {
         no_auto_dialog: env_var_is_truthy("AGENT_BROWSER_NO_AUTO_DIALOG")
             || config.no_auto_dialog.unwrap_or(false),
         model: env::var("AI_GATEWAY_MODEL").ok().or(config.model),
+        viewport: config.viewport.filter(|viewport| {
+            if viewport.is_valid() {
+                true
+            } else {
+                eprintln!(
+                    "{} config viewport width and height must be positive",
+                    color::warning_indicator()
+                );
+                false
+            }
+        }),
+        device_scale_factor: config.device_scale_factor.filter(|scale| {
+            if *scale > 0.0 {
+                true
+            } else {
+                eprintln!(
+                    "{} config deviceScaleFactor must be greater than 0",
+                    color::warning_indicator()
+                );
+                false
+            }
+        }),
         verbose: false,
         quiet: false,
         cli_executable_path: false,
@@ -1222,6 +1263,23 @@ mod tests {
     }
 
     #[test]
+    fn test_config_deserialize_viewport() {
+        let json = r#"{
+            "viewport": { "width": 1920, "height": 1080 },
+            "deviceScaleFactor": 1.5
+        }"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            config.viewport,
+            Some(ViewportConfig {
+                width: 1920,
+                height: 1080
+            })
+        );
+        assert_eq!(config.device_scale_factor, Some(1.5));
+    }
+
+    #[test]
     fn test_config_deserialize_partial() {
         let json = r#"{"headed": true, "proxy": "http://localhost:8080"}"#;
         let config: Config = serde_json::from_str(json).unwrap();
@@ -1253,11 +1311,16 @@ mod tests {
             headed: Some(true),
             proxy: Some("http://user-proxy:8080".to_string()),
             profile: Some("/user/profile".to_string()),
+            viewport: Some(ViewportConfig {
+                width: 1280,
+                height: 720,
+            }),
             ..Config::default()
         };
         let project = Config {
             proxy: Some("http://project-proxy:9090".to_string()),
             debug: Some(true),
+            device_scale_factor: Some(2.0),
             ..Config::default()
         };
         let merged = user.merge(project);
@@ -1265,6 +1328,14 @@ mod tests {
         assert_eq!(merged.proxy.as_deref(), Some("http://project-proxy:9090")); // overridden by project
         assert_eq!(merged.profile.as_deref(), Some("/user/profile")); // kept from user
         assert_eq!(merged.debug, Some(true)); // added by project
+        assert_eq!(
+            merged.viewport,
+            Some(ViewportConfig {
+                width: 1280,
+                height: 720
+            })
+        );
+        assert_eq!(merged.device_scale_factor, Some(2.0));
     }
 
     #[test]

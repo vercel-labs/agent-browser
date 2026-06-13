@@ -54,6 +54,16 @@ agent-browser screenshot result.png
 The browser stays running across commands so these feel like a single
 session. Use `agent-browser close` (or `close --all`) when you're done.
 
+For deterministic screenshots across sessions, set a launch viewport in
+`agent-browser.json`:
+
+```json
+{
+  "viewport": { "width": 1280, "height": 800 },
+  "deviceScaleFactor": 1
+}
+```
+
 ## Reading a page
 
 ```bash

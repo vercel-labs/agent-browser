@@ -1089,6 +1089,7 @@ fn main() {
         || flags.color_scheme.is_some()
         || flags.download_path.is_some()
         || flags.engine.is_some()
+        || flags.viewport.is_some()
         || !flags.extensions.is_empty())
         && flags.cdp.is_none()
         && flags.provider.is_none()
@@ -1180,6 +1181,16 @@ fn main() {
 
         if let Some(ref engine) = flags.engine {
             launch_cmd["engine"] = json!(engine);
+        }
+
+        if let Some(viewport) = flags.viewport {
+            launch_cmd["viewport"] = json!({
+                "width": viewport.width,
+                "height": viewport.height
+            });
+            if let Some(scale) = flags.device_scale_factor {
+                launch_cmd["deviceScaleFactor"] = json!(scale);
+            }
         }
 
         match send_command(launch_cmd, &flags.session) {
