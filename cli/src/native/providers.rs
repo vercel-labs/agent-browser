@@ -135,12 +135,68 @@ async fn connect_browserbase() -> Result<(String, Option<ProviderSession>), Stri
     let api_key = env::var("BROWSERBASE_API_KEY")
         .map_err(|_| "BROWSERBASE_API_KEY environment variable is not set")?;
 
+    let stealth = env::var("BROWSERBASE_STEALTH")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let keep_alive = env::var("BROWSERBASE_KEEP_ALIVE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let proxy = env::var("BROWSERBASE_PROXY")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let timeout = env::var("BROWSERBASE_TIMEOUT")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok());
+    let context_id = env::var("BROWSERBASE_CONTEXT_ID")
+        .ok()
+        .filter(|v| !v.is_empty());
+    let context_persist = env::var("BROWSERBASE_CONTEXT_PERSIST")
+        .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+        .unwrap_or(true);
+
+    let mut body = json!({});
+
+    if stealth || context_id.is_some() {
+        let mut settings = json!({});
+        if stealth {
+            settings
+                .as_object_mut()
+                .unwrap()
+                .insert("advancedStealth".to_string(), json!(true));
+        }
+        if let Some(ref id) = context_id {
+            settings.as_object_mut().unwrap().insert(
+                "context".to_string(),
+                json!({ "id": id, "persist": context_persist }),
+            );
+        }
+        body.as_object_mut()
+            .unwrap()
+            .insert("browserSettings".to_string(), settings);
+    }
+
+    if let Some(secs) = timeout {
+        body.as_object_mut()
+            .unwrap()
+            .insert("timeout".to_string(), json!(secs));
+    }
+    if keep_alive {
+        body.as_object_mut()
+            .unwrap()
+            .insert("keepAlive".to_string(), json!(true));
+    }
+    if proxy {
+        body.as_object_mut()
+            .unwrap()
+            .insert("proxies".to_string(), json!([{ "type": "browserbase" }]));
+    }
+
     let client = reqwest::Client::new();
     let response = client
         .post("https://api.browserbase.com/v1/sessions")
         .header("content-type", "application/json")
         .header("x-bb-api-key", &api_key)
-        .body("{}")
+        .json(&body)
         .send()
         .await
         .map_err(|e| format!("Browserbase request failed: {}", e))?;
