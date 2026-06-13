@@ -698,6 +698,19 @@ impl DaemonState {
                 mgr.update_page_target_info(&te.target_info);
             }
         }
+
+        // Broadcast the tab list whenever the tab set changes via implicit
+        // CDP events (popups, target=_blank, window.open, Cmd-click) so stream
+        // clients can react without polling. CLI-driven changes
+        // (tab_new / tab_switch / tab_close / open / navigate) already
+        // broadcast at the end of the action handler below.
+        let tab_set_changed =
+            !drained.new_targets.is_empty() || !drained.destroyed_targets.is_empty();
+        if tab_set_changed {
+            if let (Some(ref server), Some(ref mgr)) = (&self.stream_server, &self.browser) {
+                server.broadcast_tabs(&mgr.tab_list()).await;
+            }
+        }
     }
 
     fn drain_cdp_events(&mut self) -> DrainedEvents {
