@@ -95,6 +95,8 @@ pub struct LaunchOptions {
     pub proxy_username: Option<String>,
     pub proxy_password: Option<String>,
     pub profile: Option<String>,
+    /// Raw Chromium launch switches. Values are forwarded verbatim, including
+    /// commas inside a single switch like `--window-size=1600,1200`.
     pub args: Vec<String>,
     pub allow_file_access: bool,
     pub extensions: Option<Vec<String>>,
@@ -1438,6 +1440,21 @@ mod tests {
         let result = build_chrome_args(&opts).unwrap();
         assert!(!result.args.iter().any(|a| a == "--window-size=1280,720"));
         assert!(result.args.iter().any(|a| a == "--window-size=1920,1080"));
+        if let Some(ref dir) = result.temp_user_data_dir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn test_build_args_headed_custom_window_size_preserved() {
+        let opts = LaunchOptions {
+            headless: false,
+            args: vec!["--window-size=1600,1200".to_string()],
+            ..Default::default()
+        };
+        let result = build_chrome_args(&opts).unwrap();
+        assert!(result.args.iter().any(|a| a == "--window-size=1600,1200"));
+        assert!(!result.args.iter().any(|a| a == "--window-size=1280,720"));
         if let Some(ref dir) = result.temp_user_data_dir {
             let _ = std::fs::remove_dir_all(dir);
         }

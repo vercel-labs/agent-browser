@@ -1744,6 +1744,50 @@ async fn apply_launch_init_scripts(state: &DaemonState) {
     }
 }
 
+/// Parse `AGENT_BROWSER_ARGS` into Chromium launch arguments.
+///
+/// Newlines always separate arguments. Commas still separate adjacent launch
+/// switches for backwards compatibility, but commas inside a single argument
+/// value are preserved so flags like `--window-size=1600,1200` survive intact.
+pub(crate) fn parse_launch_args(raw: &str) -> Vec<String> {
+    let mut args = Vec::new();
+
+    for line in raw.lines() {
+        let mut current = String::new();
+        let mut remainder = line.trim();
+        if remainder.is_empty() {
+            continue;
+        }
+
+        while let Some(idx) = remainder.find(',') {
+            let before = &remainder[..idx];
+            let after = &remainder[idx + 1..];
+
+            if after.trim_start().starts_with('-') {
+                current.push_str(before);
+                let arg = current.trim();
+                if !arg.is_empty() {
+                    args.push(arg.to_string());
+                }
+                current.clear();
+                remainder = after.trim_start();
+            } else {
+                current.push_str(before);
+                current.push(',');
+                remainder = after;
+            }
+        }
+
+        current.push_str(remainder);
+        let arg = current.trim();
+        if !arg.is_empty() {
+            args.push(arg.to_string());
+        }
+    }
+
+    args
+}
+
 fn launch_options_from_env() -> LaunchOptions {
     let headed = env::var("AGENT_BROWSER_HEADED")
         .map(|v| v == "1" || v == "true")
@@ -1768,12 +1812,7 @@ fn launch_options_from_env() -> LaunchOptions {
             .map(|v| v == "1" || v == "true")
             .unwrap_or(false),
         args: env::var("AGENT_BROWSER_ARGS")
-            .map(|v| {
-                v.split([',', '\n'])
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect()
-            })
+            .map(|v| parse_launch_args(&v))
             .unwrap_or_default(),
         extensions,
         storage_state: env::var("AGENT_BROWSER_STATE").ok(),
@@ -8747,6 +8786,72 @@ mod tests {
         guard.set("AGENT_BROWSER_HIDE_SCROLLBARS", "false");
         let opts = launch_options_from_env();
         assert!(!opts.hide_scrollbars);
+    }
+
+    #[test]
+    fn test_parse_launch_args_preserves_window_size_value() {
+        assert_eq!(
+            parse_launch_args("--window-size=1600,1200"),
+            vec!["--window-size=1600,1200"]
+        );
+    }
+
+    #[test]
+    fn test_parse_launch_args_splits_adjacent_switches() {
+        assert_eq!(
+            parse_launch_args("--no-sandbox,--disable-blink-features=AutomationControlled"),
+            vec![
+                "--no-sandbox",
+                "--disable-blink-features=AutomationControlled"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_launch_args_preserves_window_size_and_next_switch() {
+        assert_eq!(
+            parse_launch_args("--window-size=1600,1200,--disable-gpu"),
+            vec!["--window-size=1600,1200", "--disable-gpu"]
+        );
+    }
+
+    #[test]
+    fn test_launch_options_from_env_preserves_window_size_arg_with_comma() {
+        let guard = EnvGuard::new(&[
+            "AGENT_BROWSER_ARGS",
+            "AGENT_BROWSER_HEADED",
+            "AGENT_BROWSER_HIDE_SCROLLBARS",
+        ]);
+        guard.set("AGENT_BROWSER_ARGS", "--window-size=1600,1200");
+        guard.remove("AGENT_BROWSER_HEADED");
+        guard.remove("AGENT_BROWSER_HIDE_SCROLLBARS");
+
+        let opts = launch_options_from_env();
+        assert_eq!(opts.args, vec!["--window-size=1600,1200"]);
+    }
+
+    #[test]
+    fn test_launch_options_from_env_splits_window_size_and_following_arg() {
+        let guard = EnvGuard::new(&[
+            "AGENT_BROWSER_ARGS",
+            "AGENT_BROWSER_HEADED",
+            "AGENT_BROWSER_HIDE_SCROLLBARS",
+        ]);
+        guard.set(
+            "AGENT_BROWSER_ARGS",
+            "--window-size=1600,1200,--disable-blink-features=AutomationControlled",
+        );
+        guard.remove("AGENT_BROWSER_HEADED");
+        guard.remove("AGENT_BROWSER_HIDE_SCROLLBARS");
+
+        let opts = launch_options_from_env();
+        assert_eq!(
+            opts.args,
+            vec![
+                "--window-size=1600,1200",
+                "--disable-blink-features=AutomationControlled"
+            ]
+        );
     }
 
     #[test]

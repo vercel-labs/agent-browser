@@ -103,3 +103,5 @@ agent-browser --args "--no-sandbox" open example.com
 ```
 
 agent-browser automatically adds `--no-sandbox` when it detects a container environment (Docker, Podman, running as root).
+
+When you pass multiple custom switches via <code>--args</code>, separate switches with commas or newlines. Commas inside one switch are preserved, so headed launches like <code>--window-size=1600,1200</code> reach Chrome unchanged.
