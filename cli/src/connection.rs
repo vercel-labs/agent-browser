@@ -576,6 +576,140 @@ fn kill_stale_daemon(session: &str) {
     cleanup_stale_files(session);
 }
 
+#[cfg(windows)]
+struct WindowsDaemonChild {
+    process_handle: windows_sys::Win32::Foundation::HANDLE,
+}
+
+#[cfg(windows)]
+impl WindowsDaemonChild {
+    fn try_wait(&mut self) -> Option<u32> {
+        use windows_sys::Win32::System::Threading::{WaitForSingleObject, GetExitCodeProcess};
+        use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
+
+        let result = unsafe { WaitForSingleObject(self.process_handle, 0) };
+        if result == WAIT_OBJECT_0 {
+            let mut exit_code: u32 = 0;
+            unsafe { GetExitCodeProcess(self.process_handle, &mut exit_code) };
+            Some(exit_code)
+        } else {
+            None
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for WindowsDaemonChild {
+    fn drop(&mut self) {
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(self.process_handle);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn spawn_daemon_no_inherit(mut cmd: Command, creation_flags: u32) -> Result<WindowsDaemonChild, String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::System::Threading::{
+        STARTUPINFOW, PROCESS_INFORMATION, CREATE_UNICODE_ENVIRONMENT,
+    };
+    use windows_sys::Win32::Foundation::{FALSE, CloseHandle};
+
+    extern "system" {
+        fn CreateProcessW(
+            lpApplicationName: *const u16,
+            lpCommandLine: *mut u16,
+            lpProcessAttributes: *mut std::ffi::c_void,
+            lpThreadAttributes: *mut std::ffi::c_void,
+            bInheritHandles: i32,
+            dwCreationFlags: u32,
+            lpEnvironment: *mut std::ffi::c_void,
+            lpCurrentDirectory: *const u16,
+            lpStartupInfo: *const STARTUPINFOW,
+            lpProcessInformation: *mut PROCESS_INFORMATION,
+        ) -> i32;
+    }
+
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    let program = cmd.get_program().to_str().ok_or("Invalid program path")?.to_string();
+    let mut app_name: Vec<u16> = std::ffi::OsStr::new(&program).encode_wide().chain(std::iter::once(0)).collect();
+
+    let mut args_string = String::new();
+    args_string.push('"');
+    args_string.push_str(&program);
+    args_string.push('"');
+    for arg in cmd.get_args() {
+        args_string.push(' ');
+        args_string.push('"');
+        args_string.push_str(&arg.to_string_lossy());
+        args_string.push('"');
+    }
+
+    let mut cmd_line: Vec<u16> = std::ffi::OsStr::new(&args_string).encode_wide().chain(std::iter::once(0)).collect();
+    let mut env_block = build_env_block(&cmd);
+    let mut startup_info: STARTUPINFOW = unsafe { std::mem::zeroed() };
+    startup_info.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+
+    let mut process_info: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
+
+    let result = unsafe {
+        CreateProcessW(
+            app_name.as_ptr(),
+            cmd_line.as_mut_ptr(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            FALSE,
+            creation_flags | CREATE_UNICODE_ENVIRONMENT,
+            env_block.as_mut_ptr() as *mut std::ffi::c_void,
+            std::ptr::null(),
+            &startup_info,
+            &mut process_info,
+        )
+    };
+
+    if result == 0 {
+        let err = std::io::Error::last_os_error();
+        return Err(format!("CreateProcessW failed: {}", err));
+    }
+
+    unsafe {
+        CloseHandle(process_info.hThread);
+    }
+
+    Ok(WindowsDaemonChild {
+        process_handle: process_info.hProcess,
+    })
+}
+
+#[cfg(windows)]
+fn build_env_block(cmd: &Command) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+    let mut block = Vec::new();
+
+    for (key, val) in std::env::vars_os() {
+        let entry = format!("{}={}", key.to_string_lossy(), val.to_string_lossy());
+        block.extend(std::ffi::OsStr::new(&entry).encode_wide());
+        block.push(0);
+    }
+
+    for (key, val) in cmd.get_envs() {
+        if let Some(v) = val {
+            let entry = format!("{}={}", key.to_string_lossy(), v.to_string_lossy());
+            block.extend(std::ffi::OsStr::new(&entry).encode_wide());
+        } else {
+            let key_str = key.to_string_lossy().into_owned();
+            block.extend(std::ffi::OsStr::new(&key_str).encode_wide());
+        }
+        block.push(0);
+    }
+
+    block.push(0);
+    block
+}
+
 pub fn ensure_daemon(session: &str, opts: &DaemonOptions) -> Result<DaemonResult, String> {
     // Socket connectivity is the sole liveness check — no PID check — so
     // callers in a different PID namespace (e.g. unshare) can still reuse
@@ -648,7 +782,11 @@ pub fn ensure_daemon(session: &str, opts: &DaemonOptions) -> Result<DaemonResult
     let exe_path = exe_path.canonicalize().unwrap_or(exe_path);
 
     #[allow(unused_assignments)]
+    #[cfg(unix)]
     let mut daemon_child: Option<std::process::Child> = None;
+    #[allow(unused_assignments)]
+    #[cfg(windows)]
+    let mut daemon_child: Option<WindowsDaemonChild> = None;
 
     #[cfg(unix)]
     {
@@ -676,33 +814,33 @@ pub fn ensure_daemon(session: &str, opts: &DaemonOptions) -> Result<DaemonResult
 
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt;
-
         let mut cmd = Command::new(&exe_path);
         cmd.env("AGENT_BROWSER_DAEMON", "1");
         apply_daemon_env(&mut cmd, session, opts);
 
         const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
         const DETACHED_PROCESS: u32 = 0x00000008;
+        const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x01000000;
 
         daemon_child = Some(
-            cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::piped())
-                .spawn()
-                .map_err(|e| format!("Failed to start daemon: {}", e))?,
+            spawn_daemon_no_inherit(
+                cmd,
+                CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS | CREATE_BREAKAWAY_FROM_JOB,
+            )
+            .map_err(|e| format!("Failed to start daemon: {}", e))?,
         );
     }
 
     for _ in 0..50 {
         if daemon_ready(session) {
+            drop(daemon_child);
             return Ok(DaemonResult {
                 already_running: false,
             });
         }
 
         // Detect early daemon exit and surface the real error from stderr
+        #[cfg(unix)]
         if let Some(ref mut child) = daemon_child {
             if let Ok(Some(_)) = child.try_wait() {
                 let mut stderr_output = String::new();
@@ -711,9 +849,6 @@ pub fn ensure_daemon(session: &str, opts: &DaemonOptions) -> Result<DaemonResult
                 }
                 let stderr_trimmed = stderr_output.trim();
 
-                // If the daemon failed because another instance won the bind
-                // race ("Address already in use"), check whether that winner is
-                // now accepting connections and piggyback on it.
                 if stderr_trimmed.contains("Address already in use")
                     || stderr_trimmed.contains("Failed to bind")
                 {
@@ -741,6 +876,16 @@ pub fn ensure_daemon(session: &str, opts: &DaemonOptions) -> Result<DaemonResult
                     "Daemon process exited during startup with no error output. \
                      Re-run with --debug for more details."
                         .to_string(),
+                );
+            }
+        }
+
+        #[cfg(windows)]
+        if let Some(ref mut child) = daemon_child {
+            if let Some(exit_code) = child.try_wait() {
+                return Err(
+                    format!("Daemon process exited during startup (exit code {}). \
+                     Re-run with --debug for more details.", exit_code),
                 );
             }
         }
