@@ -13,7 +13,7 @@ use super::helpers::new_id;
 use super::{Check, Status};
 use crate::connection::{cleanup_stale_files, ensure_daemon, send_command, DaemonOptions};
 
-pub(super) fn check(checks: &mut Vec<Check>) {
+pub(super) fn check(checks: &mut Vec<Check>, executable_path: Option<&str>) {
     let category = "Launch test";
 
     if env::var("AGENT_BROWSER_PROVIDER").is_ok() {
@@ -53,7 +53,7 @@ pub(super) fn check(checks: &mut Vec<Check>) {
     let opts = DaemonOptions {
         headed: false,
         debug: false,
-        executable_path: None,
+        executable_path,
         extensions: &[],
         init_scripts: &[],
         enable: &[],
