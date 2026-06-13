@@ -130,7 +130,7 @@
     },
     "engine": {
       "type": "string",
-      "enum": ["chrome", "lightpanda"],
+      "enum": ["chrome", "lightpanda", "obscura"],
       "default": "chrome",
       "description": "Browser engine to use."
     },
