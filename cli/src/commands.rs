@@ -232,6 +232,14 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                 result["timeout"] = json!(t);
             }
         }
+
+        // Propagate --headed to all commands (not just "open" without URL).
+        // This ensures the daemon's auto_launch path uses the correct headless
+        // preference even when the daemon was started without AGENT_BROWSER_HEADED.
+        // See issue #1428.
+        if flags.cli_headed && result.get("headless").is_none() && action != "launch" {
+            result["headless"] = json!(!flags.headed);
+        }
     }
 
     Ok(result)
