@@ -126,8 +126,8 @@ agent-browser record restart ./take2.webm # Stop current + start new
 ```bash
 agent-browser wait @e1                     # Wait for element
 agent-browser wait 2000                    # Wait milliseconds
-agent-browser wait --text "Success"        # Wait for text (or -t)
-agent-browser wait --url "**/dashboard"    # Wait for URL pattern (or -u)
+agent-browser wait --text "Success"        # Wait for text, case-insensitive (or -t)
+agent-browser wait --url "**/dashboard"    # Wait for URL glob or substring (or -u)
 agent-browser wait --load networkidle      # Wait for network idle (or -l)
 agent-browser wait --fn "window.ready"     # Wait for JS condition (or -f)
 ```
@@ -283,7 +283,7 @@ agent-browser eval -b "<base64>"             # Any JavaScript (base64 encoded)
 agent-browser eval --stdin                   # Read script from stdin
 ```
 
-Use `-b`/`--base64` or `--stdin` for reliable execution. Shell escaping with nested quotes and special characters is error-prone.
+Use `-b`/`--base64` or `--stdin` for reliable execution. Shell escaping with nested quotes and special characters is error-prone. Scripts may use a top-level `return`, top-level `await`, and re-declare `let`/`const` across calls. After `frame <selector>`, eval runs inside the selected frame.
 
 ```bash
 # Base64 encode your script, then:

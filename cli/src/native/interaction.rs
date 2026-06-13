@@ -441,19 +441,22 @@ pub async fn select_option(
     // Matching nothing must be an error, not a silent success: an agent that
     // selects a misspelled option otherwise sees "Done", and only discovers
     // the page state is wrong after more commands. List what was available.
+    // Decide matches BEFORE mutating: reading opt.selected back from the DOM
+    // is unreliable, because deselecting every option of a single-select
+    // makes the browser instantly re-select option 0, which then counts as a
+    // match and turns a typo into a silent success that also corrupted the
+    // selection.
     let js = r#"function(vals) {
             const options = Array.from(this.options);
-            let matched = 0;
-            for (const opt of options) {
-                opt.selected = vals.includes(opt.value) || vals.includes(opt.textContent.trim());
-                if (opt.selected) matched += 1;
-            }
-            if (matched === 0) {
+            const matches = options.map(opt =>
+                vals.includes(opt.value) || vals.includes(opt.textContent.trim()));
+            if (!matches.some(Boolean)) {
                 const available = options.map(o => o.value + ' ("' + o.textContent.trim() + '")').join(', ');
                 return { error: 'No option matched ' + JSON.stringify(vals) + '. Available options: ' + available };
             }
+            options.forEach((opt, i) => { opt.selected = matches[i]; });
             this.dispatchEvent(new Event('change', { bubbles: true }));
-            return { matched };
+            return { matched: matches.filter(Boolean).length };
         }"#
     .to_string();
 
@@ -473,6 +476,18 @@ pub async fn select_option(
             Some(&effective_session_id),
         )
         .await?;
+
+    // A thrown exception must not pass for success (e.g. the selector
+    // resolved to something without .options).
+    if let Some(details) = result.get("exceptionDetails") {
+        let msg = details
+            .get("exception")
+            .and_then(|e| e.get("description"))
+            .and_then(|d| d.as_str())
+            .or_else(|| details.get("text").and_then(|t| t.as_str()))
+            .unwrap_or("selection script threw");
+        return Err(format!("Select failed: {}", msg));
+    }
 
     if let Some(error) = result
         .get("result")

@@ -149,8 +149,8 @@ right wait for the situation:
 ```bash
 agent-browser wait @e1                     # until an element appears
 agent-browser wait 2000                    # dumb wait, milliseconds (last resort)
-agent-browser wait --text "Success"        # until the text appears on the page
-agent-browser wait --url "**/dashboard"    # until URL matches pattern (glob)
+agent-browser wait --text "Success"        # until the text appears (case-insensitive)
+agent-browser wait --url "**/dashboard"    # until URL matches glob or substring
 agent-browser wait --load networkidle      # until network idle (post-navigation)
 agent-browser wait --load domcontentloaded # until DOMContentLoaded
 agent-browser wait --fn "window.myApp.ready === true"  # until JS condition
@@ -231,8 +231,9 @@ EOF
 ```
 
 Prefer `eval --stdin` (heredoc) or `eval -b <base64>` for any JS with
-quotes or special characters. Inline `agent-browser eval "..."` works
-only for simple expressions.
+quotes or special characters. Scripts may use top-level `return`,
+top-level `await`, and repeated `let`/`const` declarations across calls.
+After `frame <selector>`, eval runs inside the selected frame.
 
 ### Screenshot
 

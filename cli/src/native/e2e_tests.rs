@@ -5572,3 +5572,753 @@ async fn e2e_removeinitscript_roundtrip() {
 
     let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
 }
+
+// ---------------------------------------------------------------------------
+// Agent-facing reliability regressions: scroll-into-view clicks, overlay
+// interception, dialog-opening clicks, select diagnostics, aria-label lookup,
+// frame-scoped selectors, and wait timeouts. Each of these was a silent or
+// hanging failure before v0.27.2; these tests pin the loud, prompt behavior.
+// ---------------------------------------------------------------------------
+
+fn inline_html_url(html: &str) -> String {
+    format!("data:text/html;base64,{}", STANDARD.encode(html))
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_click_scrolls_offscreen_element_into_view() {
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let url = inline_html_url(
+        r#"<title>t</title><div style="height:4000px"></div>
+        <button id="deep" onclick="document.title='clicked-deep'">Deep</button>"#,
+    );
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Off-viewport click used to dispatch outside the viewport and silently no-op.
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "click", "selector": "#deep" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "evaluate", "script": "document.title" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], "clicked-deep");
+
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_click_covered_by_overlay_reports_blocker() {
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let url = inline_html_url(
+        r#"<title>t</title>
+        <button id="target" onclick="document.title='clicked-target'">Buy</button>
+        <div id="overlay" onclick="document.title='clicked-overlay'"
+             style="position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:10"></div>"#,
+    );
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // The covered click must fail loudly and name the covering element,
+    // not report success while the overlay eats the input.
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "click", "selector": "#target" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(resp.get("success").and_then(|v| v.as_bool()), Some(false));
+    let error = resp
+        .get("error")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    assert!(
+        error.contains("covered by") && error.contains("overlay"),
+        "error should name the blocker, got: {}",
+        error
+    );
+
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "evaluate", "script": "document.title" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(
+        get_data(&resp)["result"],
+        "t",
+        "covered click must not land"
+    );
+
+    // Clicking the covering element itself is always allowed.
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "click", "selector": "#overlay" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "evaluate", "script": "document.title" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(get_data(&resp)["result"], "clicked-overlay");
+
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_dialog_click_returns_promptly_then_fast_fails_until_accepted() {
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let url = inline_html_url(
+        r#"<button id="del" onclick="if (confirm('sure?')) document.title='confirmed'">Del</button>"#,
+    );
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // A click that opens confirm() must return promptly with dialogOpened,
+    // not hang until the IPC read timeout.
+    let started = std::time::Instant::now();
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "click", "selector": "#del" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["dialogOpened"], true);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "dialog-opening click should return promptly, took {:?}",
+        started.elapsed()
+    );
+
+    // Page-touching commands fail fast with instructions while the dialog is up.
+    let resp = execute_command(&json!({ "id": "4", "action": "snapshot" }), &mut state).await;
+    assert_eq!(resp.get("success").and_then(|v| v.as_bool()), Some(false));
+    let error = resp
+        .get("error")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    assert!(
+        error.contains("dialog accept"),
+        "fast-fail should give resolution instructions, got: {}",
+        error
+    );
+
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "dialog", "response": "accept" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "evaluate", "script": "document.title" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], "confirmed");
+
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_select_without_match_lists_available_options() {
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let url = inline_html_url(
+        r#"<select id="topic">
+            <option value="support">Support</option>
+            <option value="sales">Sales</option>
+        </select>"#,
+    );
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // No silent success: a value that matches nothing errors with the options.
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "select", "selector": "#topic", "values": ["bogus"] }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(resp.get("success").and_then(|v| v.as_bool()), Some(false));
+    let error = resp
+        .get("error")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    assert!(
+        error.contains("Available options") && error.contains("sales"),
+        "error should list available options, got: {}",
+        error
+    );
+
+    // Selecting by visible label still works.
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "select", "selector": "#topic", "values": ["Sales"] }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "evaluate", "script": "document.getElementById('topic').value" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(get_data(&resp)["result"], "sales");
+
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_find_label_matches_aria_label() {
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let url = inline_html_url(
+        r#"<title>t</title>
+        <button aria-label="Delete item 1" onclick="document.title='aria-clicked'">x</button>"#,
+    );
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Icon buttons are labelled via aria-label; getByLabel-style lookup must find them.
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "getbylabel", "label": "Delete item 1", "subaction": "click" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "evaluate", "script": "document.title" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(get_data(&resp)["result"], "aria-clicked");
+
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_frame_scoped_css_selectors_and_wait() {
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // NOTE: srcdoc entities decode at the PARENT parse, so an inline handler
+    // with &quot;-nested quotes ends up invalid; a <script> avoids that.
+    let url = inline_html_url(
+        r#"<h1>Parent</h1>
+        <iframe id="fr" srcdoc='<input id="inner">
+            <button id="btn">Go</button>
+            <div id="out"></div>
+            <script>document.getElementById("btn").addEventListener("click", () => {
+                document.getElementById("out").textContent =
+                    document.getElementById("inner").value;
+            });</script>'></iframe>"#,
+    );
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "frame", "selector": "#fr" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // CSS selectors and selector waits must resolve inside the selected
+    // frame; they used to silently target the main document.
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "wait", "selector": "#inner", "timeout": 5000 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "fill", "selector": "#inner", "value": "hello frame" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "click", "selector": "#btn" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "7", "action": "gettext", "selector": "#out" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["text"], "hello frame");
+
+    // Back on the main frame, the same selector must not resolve.
+    let resp = execute_command(&json!({ "id": "8", "action": "mainframe" }), &mut state).await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "9", "action": "gettext", "selector": "#out" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(resp.get("success").and_then(|v| v.as_bool()), Some(false));
+
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_wait_selector_honors_timeout_parameter() {
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let url = inline_html_url("<p>empty</p>");
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let started = std::time::Instant::now();
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "wait", "selector": "#never", "timeout": 1200 }),
+        &mut state,
+    )
+    .await;
+    let elapsed = started.elapsed();
+    assert_eq!(resp.get("success").and_then(|v| v.as_bool()), Some(false));
+    let error = resp
+        .get("error")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    assert!(
+        error.contains("timed out after 1200ms"),
+        "wait should report its configured timeout, got: {}",
+        error
+    );
+    assert!(
+        elapsed >= std::time::Duration::from_millis(1100)
+            && elapsed < std::time::Duration::from_secs(6),
+        "wait should respect the 1200ms timeout, took {:?}",
+        elapsed
+    );
+
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_frame_scoped_text_wait_eval_and_function_wait() {
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // The button mutates state inside the frame only, after a delay: text the
+    // parent document never contains, and a global on the frame's window.
+    // (srcdoc entities decode at the PARENT parse, so a <script> is used
+    // instead of an inline handler with nested quotes.)
+    let url = inline_html_url(
+        r#"<h1>parent-only</h1>
+        <iframe id="fr" srcdoc='<button id="go">Go</button>
+            <div id="msg">frame-idle</div>
+            <script>document.getElementById("go").addEventListener("click", () => {
+                setTimeout(() => {
+                    document.getElementById("msg").textContent = "frame-ready";
+                    window.frameFlag = 42;
+                }, 300);
+            });</script>'></iframe>"#,
+    );
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "frame", "selector": "#fr" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // eval must run in the frame's realm: its document, not the parent's.
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "evaluate", "script": "document.body.innerText" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let text = get_data(&resp)["result"].as_str().unwrap_or_default();
+    assert!(
+        text.contains("frame-idle") && !text.contains("parent-only"),
+        "eval should see the frame document, got: {}",
+        text
+    );
+
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "click", "selector": "#go" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Text and function waits must observe the frame, not the main document
+    // (where neither the text nor the global ever appears).
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "wait", "text": "frame-ready", "timeout": 5000 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "7", "action": "wait", "function": "window.frameFlag === 42", "timeout": 5000 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // The CLI parser maps `wait --url` and `wait --fn` to the waitfor*
+    // daemon actions. Those variants must honor the selected frame too.
+    let resp = execute_command(
+        &json!({ "id": "7b", "action": "waitforfunction", "expression": "window.frameFlag === 42", "timeout": 5000 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], true);
+
+    let resp = execute_command(
+        &json!({ "id": "7c", "action": "waitforurl", "url": "about:srcdoc", "timeout": 5000 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["url"], "about:srcdoc");
+
+    let resp = execute_command(
+        &json!({ "id": "8", "action": "evaluate", "script": "window.frameFlag" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], 42);
+
+    let resp = execute_command(
+        &json!({ "id": "8b", "action": "evaluate", "script": "await Promise.resolve(window.frameFlag + 1)" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["result"],
+        43,
+        "top-level await should work inside a selected same-process iframe"
+    );
+
+    // Re-declaring the same const across evals must work in a selected
+    // same-process iframe too, not just the main frame and OOPIF sessions.
+    let resp = execute_command(
+        &json!({ "id": "8c", "action": "evaluate",
+                 "script": "const el = document.getElementById('msg'); el.id" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], "msg");
+    let resp = execute_command(
+        &json!({ "id": "8d", "action": "evaluate",
+                 "script": "const el = document.getElementById('msg'); el.textContent" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], "frame-ready");
+
+    // Back on the main frame the flag must not leak.
+    let resp = execute_command(&json!({ "id": "9", "action": "mainframe" }), &mut state).await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "10", "action": "evaluate", "script": "typeof window.frameFlag" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], "undefined");
+
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_eval_accepts_console_style_scripts() {
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let url = inline_html_url("<div id='x'>42</div>");
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Top-level return (Playwright-style function body) must work.
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "evaluate",
+                 "script": "const el = document.getElementById('x'); return el.textContent;" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], "42");
+
+    // Re-declaring the same const across evals must work (REPL-mode retry);
+    // it used to fail with "Identifier 'el' has already been declared".
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "evaluate",
+                 "script": "const el = document.getElementById('x'); el.tagName" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], "DIV");
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "evaluate",
+                 "script": "const el = document.getElementById('x'); el.textContent" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], "42");
+
+    // Top-level await must work.
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "evaluate",
+                 "script": "await new Promise(r => setTimeout(() => r('done'), 10))" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], "done");
+
+    // An expression that itself returns a Promise must resolve to its value
+    // (classic awaitPromise semantics — the REPL-mode retry must not change
+    // this path).
+    let resp = execute_command(
+        &json!({ "id": "7", "action": "evaluate",
+                 "script": "Promise.resolve(7).then(v => v + 1)" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], 8);
+
+    // Real syntax errors still fail loudly.
+    let resp = execute_command(
+        &json!({ "id": "8", "action": "evaluate", "script": "const = broken" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(resp.get("success").and_then(|v| v.as_bool()), Some(false));
+
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_wait_text_is_case_insensitive_and_url_accepts_globs() {
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let url = inline_html_url(
+        r#"<p id="s">idle</p>
+        <script>setTimeout(() => {
+            document.getElementById('s').textContent = 'Uploaded notes.txt';
+        }, 300)</script>"#,
+    );
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Casing guesses ("upload" vs "Uploaded") must not cost a timeout.
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "wait", "text": "upload", "timeout": 5000 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // The documented glob form must match (it used to be compared literally,
+    // so it could never succeed). The base64 payload may contain '/', which
+    // only `**` crosses.
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "wait", "url": "data:text/html**", "timeout": 2000 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // A glob that matches nothing still times out.
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "wait", "url": "**/never-this-path", "timeout": 800 }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(resp.get("success").and_then(|v| v.as_bool()), Some(false));
+
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_find_text_prefers_exact_match_and_reports_pick() {
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // "$24.99" contains "2" and comes first in document order; the exact
+    // pagination link "2" must win anyway.
+    let url = inline_html_url(
+        r##"<title>t</title>
+        <span>$24.99</span>
+        <a href="#" onclick="document.title='paged'">2</a>"##,
+    );
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "getbytext", "text": "2", "subaction": "click" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let matched = get_data(&resp)["matched"].as_str().unwrap_or_default();
+    assert!(
+        matched.contains("<a>") && matched.contains("\"2\""),
+        "match report should describe the picked element, got: {}",
+        matched
+    );
+    assert_eq!(get_data(&resp)["otherMatches"], 1);
+
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "evaluate", "script": "document.title" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(
+        get_data(&resp)["result"],
+        "paged",
+        "find text must click the exact match, not the first substring hit"
+    );
+
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}

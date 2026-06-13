@@ -1141,8 +1141,27 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
             return;
         }
 
-        // Default success
-        println!("{} Done", color::success_indicator());
+        // Default success. A semantic-locator match report shows what was
+        // picked, so a wrong pick is visible immediately instead of after
+        // the next snapshot.
+        if let Some(matched) = data.get("matched").and_then(|v| v.as_str()) {
+            let others = data
+                .get("otherMatches")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            if others > 0 {
+                println!(
+                    "{} Done — matched {} ({} other matches on the page)",
+                    color::success_indicator(),
+                    matched,
+                    others
+                );
+            } else {
+                println!("{} Done — matched {}", color::success_indicator(), matched);
+            }
+        } else {
+            println!("{} Done", color::success_indicator());
+        }
     }
 
     print_warning(resp);
@@ -1646,10 +1665,10 @@ Waits for an element to appear, a timeout, or other conditions.
 Modes:
   <selector>           Wait for element to appear
   <ms>                 Wait for specified milliseconds
-  --url <pattern>      Wait for URL to match pattern
+  --url <pattern>      Wait for URL glob or substring
   --load <state>       Wait for load state (load, domcontentloaded, networkidle)
   --fn <expression>    Wait for JavaScript expression to be truthy
-  --text <text>        Wait for text to appear on page (substring match)
+  --text <text>        Wait for text to appear on page (case-insensitive)
   --download [path]    Wait for a download to complete (optionally save to path)
 
 Download Options (with --download):
@@ -1776,6 +1795,9 @@ agent-browser eval - Execute JavaScript
 Usage: agent-browser eval [options] <script>
 
 Executes JavaScript code in the browser context and returns the result.
+Scripts may use top-level return, top-level await, and repeated let/const
+declarations across calls. After `frame <selector>`, eval runs inside the
+selected frame.
 
 Options:
   -b, --base64         Decode script from base64 (avoids shell escaping issues)

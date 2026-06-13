@@ -759,17 +759,70 @@ impl BrowserManager {
 
     pub async fn evaluate(&self, script: &str, _args: Option<Value>) -> Result<Value, String> {
         let session_id = self.active_session_id()?.to_string();
+        self.evaluate_on_session(&session_id, script).await
+    }
 
+    /// Evaluate on an explicit session, e.g. an OOPIF's dedicated session
+    /// while a `frame <sel>` selection is active.
+    ///
+    /// The primary attempt has classic semantics (a returned Promise is
+    /// resolved by awaitPromise). Three agent-script footguns are absorbed
+    /// by targeted retries instead of surfacing as syntax lessons:
+    /// - a top-level `return` (Playwright-style function body) reruns as an
+    ///   async-IIFE body;
+    /// - re-declaring a top-level let/const from an earlier eval reruns
+    ///   block-scoped;
+    /// - top-level `await` reruns in REPL mode (DevTools-console semantics).
+    ///
+    /// REPL mode is retry-only because Chrome implements it with an async
+    /// wrapper: awaitPromise then resolves the wrapper, so an expression that
+    /// itself returns a Promise would serialize as an empty object.
+    pub async fn evaluate_on_session(
+        &self,
+        session_id: &str,
+        script: &str,
+    ) -> Result<Value, String> {
+        match self.evaluate_once(session_id, script, false).await {
+            Err(e) if e.contains("Illegal return statement") => {
+                self.evaluate_once(
+                    session_id,
+                    &format!("(async () => {{ {script} }})()"),
+                    false,
+                )
+                .await
+            }
+            Err(e) if e.contains("has already been declared") => {
+                // Block-scope the script: it shadows any same-named global
+                // binding left by an earlier eval (which even REPL mode
+                // cannot re-declare), and a block's completion value is its
+                // last statement's value.
+                self.evaluate_once(session_id, &format!("{{ {script} }}"), false)
+                    .await
+            }
+            Err(e) if e.contains("await is only valid") => {
+                self.evaluate_once(session_id, script, true).await
+            }
+            other => other,
+        }
+    }
+
+    async fn evaluate_once(
+        &self,
+        session_id: &str,
+        script: &str,
+        repl_mode: bool,
+    ) -> Result<Value, String> {
         let result: EvaluateResult = self
             .client
             .send_command_typed(
                 "Runtime.evaluate",
-                &EvaluateParams {
-                    expression: script.to_string(),
-                    return_by_value: Some(true),
-                    await_promise: Some(true),
-                },
-                Some(&session_id),
+                &json!({
+                    "expression": script,
+                    "returnByValue": true,
+                    "awaitPromise": true,
+                    "replMode": repl_mode,
+                }),
+                Some(session_id),
             )
             .await?;
 
