@@ -391,6 +391,7 @@ async fn handle_connection<S>(
                         let mut resp = serde_json::to_string(&err).unwrap_or_default();
                         resp.push('\n');
                         let _ = writer.write_all(resp.as_bytes()).await;
+                        let _ = writer.flush().await;
                         continue;
                     }
                 };
@@ -409,6 +410,9 @@ async fn handle_connection<S>(
                 let mut resp = serde_json::to_string(&response).unwrap_or_default();
                 resp.push('\n');
                 if writer.write_all(resp.as_bytes()).await.is_err() {
+                    break;
+                }
+                if writer.flush().await.is_err() {
                     break;
                 }
 
