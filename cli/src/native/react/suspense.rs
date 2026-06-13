@@ -372,7 +372,32 @@ fn classify_blocker(s: &Suspender, source_frame: Option<&StackFrame>) -> Blocker
             return BlockerKind::Framework;
         }
     }
+    // When a client component calls `use(somePromise)` with an opaque
+    // user-created Promise (e.g. `fetch().then(r => r.json())` stashed in
+    // useState), React reports the suspender name as a generic "Promise".
+    // It doesn't match any of the name-based cases above, so without this
+    // fallback the suspension lands on `Unknown` — even though semantically
+    // it's the prototypical client-hook scenario.
+    //
+    // The discriminator is `env`: React tags server-tracked awaits with
+    // env="Server" (the suspenders named "rsc stream", "_Response.json",
+    // anonymous fetches, etc. that come back from RSC), while client-side
+    // suspensions show up with env unset or "Client". We bail out on
+    // anything that explicitly says it's server-side so this doesn't steal
+    // classifications from server promises that happen to be unnamed.
+    if is_client_promise_suspension(s, &name) {
+        return BlockerKind::ClientHook;
+    }
     BlockerKind::Unknown
+}
+
+fn is_client_promise_suspension(s: &Suspender, lowercase_name: &str) -> bool {
+    if !matches!(lowercase_name, "promise" | "") {
+        return false;
+    }
+    !s.env
+        .as_deref()
+        .is_some_and(|e| e.eq_ignore_ascii_case("server"))
 }
 
 fn suggest_blocker_fix(kind: BlockerKind) -> String {
@@ -630,4 +655,65 @@ fn format_report(report: &AnalysisReport, only_dynamic: bool) -> String {
     }
 
     lines.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn suspender(name: &str, env: Option<&str>, awaiter_stack: Option<Vec<StackFrame>>) -> Suspender {
+        Suspender {
+            name: name.to_string(),
+            description: String::new(),
+            duration: 0,
+            env: env.map(String::from),
+            owner_name: None,
+            owner_stack: None,
+            awaiter_name: None,
+            awaiter_stack,
+        }
+    }
+
+    fn frame(file: &str) -> StackFrame {
+        (String::new(), file.to_string(), 1, 1)
+    }
+
+    // Real shape captured from the demo app: a client component calls
+    // `use(fetch().then(r => r.json()))`. React reports `awaited.name`
+    // as the generic "Promise" with `env` unset (server-tracked awaits
+    // carry env="Server"). The heuristic classifies this as ClientHook.
+    #[test]
+    fn classify_blocker_recognises_client_use_promise() {
+        let s = suspender("Promise", None, None);
+        assert_eq!(classify_blocker(&s, None), BlockerKind::ClientHook);
+    }
+
+    // Explicit `Client` env should classify the same way (and not just by
+    // virtue of being unset).
+    #[test]
+    fn classify_blocker_recognises_client_env_promise() {
+        let s = suspender("Promise", Some("Client"), None);
+        assert_eq!(classify_blocker(&s, None), BlockerKind::ClientHook);
+    }
+
+    // The heuristic must not steal classifications from server-side
+    // awaits: those carry env="Server".
+    #[test]
+    fn classify_blocker_does_not_steal_server_promise() {
+        let s = suspender(
+            "Promise",
+            Some("Server"),
+            Some(vec![frame(
+                "about://React/Server/file:///app/.next/server/chunks/x.js",
+            )]),
+        );
+        assert_eq!(classify_blocker(&s, None), BlockerKind::Unknown);
+    }
+
+    // Regression: existing named-hook classifications must still work.
+    #[test]
+    fn classify_blocker_recognises_use_router() {
+        let s = suspender("useRouter", None, None);
+        assert_eq!(classify_blocker(&s, None), BlockerKind::ClientHook);
+    }
 }

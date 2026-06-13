@@ -1717,12 +1717,16 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
         }
 
         // === React (requires `open --enable react-devtools`) ===
-        "react" => parse_react(&rest, &id),
+        "react" => parse_react(&rest, &id, flags),
 
         // === Core Web Vitals + hydration ===
         "vitals" | "web-vitals" => {
             let mut cmd = json!({ "id": id, "action": "vitals" });
-            let json_out = rest.contains(&"--json");
+            // `--json` is stripped by `clean_args` before we see `rest`;
+            // consult `flags.json` (set by `parse_flags`) so the per-command
+            // JSON output mode still works. The `rest` check is kept for
+            // unit tests that call `parse_command` directly.
+            let json_out = flags.json || rest.contains(&"--json");
             if json_out {
                 cmd["json"] = json!(true);
             }
@@ -1756,13 +1760,16 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
     }
 }
 
-fn parse_react(rest: &[&str], id: &str) -> Result<Value, ParseError> {
+fn parse_react(rest: &[&str], id: &str, flags: &Flags) -> Result<Value, ParseError> {
     const VALID: &[&str] = &["tree", "inspect", "renders", "suspense"];
     let sub = rest.first().copied().ok_or(ParseError::MissingArguments {
         context: "react".to_string(),
         usage: "react <tree|inspect|renders|suspense>",
     })?;
-    let json_out = rest.contains(&"--json");
+    // `--json` is in `clean_args`'s GLOBAL_BOOL_FLAGS list, so it's stripped
+    // from `rest` before we see it. Read the parsed flag too — and keep the
+    // `rest` check as a fallback for unit tests that call this directly.
+    let json_out = flags.json || rest.contains(&"--json");
     let flag = |key: &str| -> Value {
         if json_out {
             json!({ "id": id, "action": key, "json": true })
@@ -2985,6 +2992,31 @@ mod tests {
         assert_eq!(cmd["action"], "react_suspense");
         assert_eq!(cmd["onlyDynamic"], true);
         assert_eq!(cmd["json"], true);
+    }
+
+    // Regression: in the real call path, `clean_args` strips `--json` from
+    // the args before `parse_command` sees them, but `parse_flags` has
+    // already set `flags.json = true`. The react subcommand parser must
+    // honour `flags.json` — otherwise `agent-browser react suspense --json`
+    // silently falls back to the formatted report.
+    #[test]
+    fn test_react_subcommands_honour_global_json_flag() {
+        let mut flags = default_flags();
+        flags.json = true;
+
+        // `--json` is intentionally absent from the args slice here.
+        let tree = parse_command(&args("react tree"), &flags).unwrap();
+        assert_eq!(tree["json"], true);
+
+        let inspect = parse_command(&args("react inspect 7"), &flags).unwrap();
+        assert_eq!(inspect["json"], true);
+
+        let renders = parse_command(&args("react renders stop"), &flags).unwrap();
+        assert_eq!(renders["json"], true);
+
+        let suspense = parse_command(&args("react suspense --only-dynamic"), &flags).unwrap();
+        assert_eq!(suspense["json"], true);
+        assert_eq!(suspense["onlyDynamic"], true);
     }
 
     #[test]
