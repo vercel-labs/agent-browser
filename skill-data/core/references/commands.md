@@ -200,12 +200,14 @@ agent-browser network requests --filter api    # Filter requests
 agent-browser tab                              # List tabs with tabId and label
 agent-browser tab new [url]                    # New tab
 agent-browser tab new --label docs [url]       # New tab with a memorable label
+agent-browser tab new --background [url]        # New tab without foregrounding it
 agent-browser tab t2                           # Switch to tab by id
 agent-browser tab docs                         # Switch to tab by label
 agent-browser tab close                        # Close current tab
 agent-browser tab close t2                     # Close tab by id
 agent-browser tab close docs                   # Close tab by label
 agent-browser window new                       # New window
+agent-browser focus-emulate <on|off>           # Keep a backgrounded tab operable (focus/visibility emulation)
 ```
 
 Tab ids are stable strings of the form `t1`, `t2`, `t3`. They're never reused

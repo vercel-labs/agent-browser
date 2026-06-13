@@ -1008,6 +1008,7 @@ impl BrowserManager {
         &mut self,
         url: Option<&str>,
         label: Option<&str>,
+        background: bool,
     ) -> Result<Value, String> {
         if let Some(label) = label {
             if !is_valid_label(label) {
@@ -1028,15 +1029,17 @@ impl BrowserManager {
 
         let target_url = url.unwrap_or("about:blank");
 
+        // `--background` opens the tab without foregrounding it, so it does not
+        // steal the user's current tab/focus (pair with `focus-emulate on` to
+        // keep the hidden tab operable). The tab still becomes this daemon's
+        // active page, so subsequent commands target it.
+        let mut create_params = json!({ "url": target_url });
+        if background {
+            create_params["background"] = json!(true);
+        }
         let result: CreateTargetResult = self
             .client
-            .send_command_typed(
-                "Target.createTarget",
-                &CreateTargetParams {
-                    url: target_url.to_string(),
-                },
-                None,
-            )
+            .send_command_typed("Target.createTarget", &create_params, None)
             .await?;
 
         let attach: AttachToTargetResult = self
@@ -1239,6 +1242,23 @@ impl BrowserManager {
         }
         self.client
             .send_command("Emulation.setEmulatedMedia", Some(params), Some(session_id))
+            .await?;
+        Ok(())
+    }
+
+    /// Make the active page behave as a focused, active, visible page even when
+    /// its window/tab is backgrounded or occluded (CDP focus emulation). This
+    /// keeps automation working on a background tab — `document.visibilityState`
+    /// stays `visible`, `document.hasFocus()` is true, and rendering/rAF run —
+    /// without raising the window or stealing the user's OS focus. Per-target.
+    pub async fn set_focus_emulation(&self, enabled: bool) -> Result<(), String> {
+        let session_id = self.active_session_id()?;
+        self.client
+            .send_command(
+                "Emulation.setFocusEmulationEnabled",
+                Some(json!({ "enabled": enabled })),
+                Some(session_id),
+            )
             .await?;
         Ok(())
     }

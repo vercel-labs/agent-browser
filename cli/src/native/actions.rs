@@ -1344,6 +1344,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         "url" => handle_url(state).await,
         "cdp_url" => handle_cdp_url(state),
         "inspect" => handle_inspect(state).await,
+        "focus_emulate" => handle_focus_emulate(cmd, state).await,
         "title" => handle_title(state).await,
         "content" => handle_content(state).await,
         "evaluate" => handle_evaluate(cmd, state).await,
@@ -1564,7 +1565,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
 /// subsequent navigations don't hijack the user's existing tabs.
 async fn connect_auto_with_fresh_tab() -> Result<BrowserManager, String> {
     let mut mgr = BrowserManager::connect_auto().await?;
-    mgr.tab_new(None, None).await?;
+    mgr.tab_new(None, None, false).await?;
     let session_id = mgr.active_session_id()?.to_string();
     let _ = mgr
         .client
@@ -2738,7 +2739,7 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
 
         let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
         state.ref_map.clear();
-        mgr.tab_new(Some(&href), None).await?;
+        mgr.tab_new(Some(&href), None, false).await?;
 
         return Ok(json!({ "clicked": selector, "newTab": true, "url": href }));
     }
@@ -3884,10 +3885,14 @@ async fn handle_tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
     let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
     let url = cmd.get("url").and_then(|v| v.as_str());
     let label = cmd.get("label").and_then(|v| v.as_str());
+    let background = cmd
+        .get("background")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     state.ref_map.clear();
     state.iframe_sessions.clear();
     state.active_frame_id = None;
-    mgr.tab_new(url, label).await
+    mgr.tab_new(url, label, background).await
 }
 
 async fn handle_tab_switch(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -3969,6 +3974,13 @@ async fn handle_user_agent(cmd: &Value, state: &DaemonState) -> Result<Value, St
         .ok_or("Missing 'userAgent' parameter")?;
     mgr.set_user_agent(ua).await?;
     Ok(json!({ "userAgent": ua }))
+}
+
+async fn handle_focus_emulate(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let enabled = cmd.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+    mgr.set_focus_emulation(enabled).await?;
+    Ok(json!({ "focusEmulation": enabled }))
 }
 
 async fn handle_set_media(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
