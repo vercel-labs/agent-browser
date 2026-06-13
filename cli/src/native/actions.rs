@@ -5909,78 +5909,88 @@ async fn handle_getbyrole(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     let name = cmd.get("name").and_then(|v| v.as_str());
     let exact = cmd.get("exact").and_then(|v| v.as_bool()).unwrap_or(false);
 
-    let name_match = name
-        .map(|n| {
-            if exact {
-                format!(
-                    "el.getAttribute('aria-label') === {} || el.textContent.trim() === {}",
-                    serde_json::to_string(n).unwrap_or_default(),
-                    serde_json::to_string(n).unwrap_or_default()
-                )
-            } else {
-                format!(
-                    "(el.getAttribute('aria-label') || '').includes({n}) || el.textContent.includes({n})",
-                    n = serde_json::to_string(n).unwrap_or_default()
-                )
-            }
-        })
-        .unwrap_or_else(|| "true".to_string());
-
-    let js = format!(
-        r#"(() => {{
-            const els = document.querySelectorAll('[role="{role}"], {role}');
-            for (const el of els) {{
-                if ({name_match}) {{
-                    el.setAttribute('data-agent-browser-located', 'true');
-                    return true;
-                }}
-            }}
-            return false;
-        }})()"#,
-        role = role,
-        name_match = name_match,
+    let (ax_params, effective_session_id) = super::element::resolve_ax_session(
+        state.active_frame_id.as_deref(),
+        &session_id,
+        &state.iframe_sessions,
     );
 
-    let result: super::cdp::types::EvaluateResult = mgr
+    let ax_tree: super::cdp::types::GetFullAXTreeResult = mgr
         .client
         .send_command_typed(
-            "Runtime.evaluate",
-            &super::cdp::types::EvaluateParams {
-                expression: js,
-                return_by_value: Some(true),
-                await_promise: Some(false),
-            },
-            Some(&session_id),
+            "Accessibility.getFullAXTree",
+            &ax_params,
+            Some(effective_session_id),
         )
         .await?;
 
-    if !result
-        .result
-        .value
-        .as_ref()
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
-    {
-        let desc = build_role_selector(role, name, exact);
-        return Err(format!("No element found: {}", desc));
-    }
+    let (backend_node_id, actual_name) = find_ax_node_by_role(&ax_tree.nodes, role, name, exact)?;
 
-    let selector = "[data-agent-browser-located='true']";
-    let result = execute_subaction(cmd, state, selector).await;
+    let ref_num = state.ref_map.next_ref_num();
+    let temp_ref = format!("e{}", ref_num);
+    state.ref_map.add_with_frame(
+        temp_ref.clone(),
+        Some(backend_node_id),
+        role,
+        &actual_name,
+        None,
+        state.active_frame_id.as_deref(),
+    );
+    state.ref_map.set_next_ref_num(ref_num + 1);
 
-    // Clean up the marker attribute
-    if let Some(ref browser) = state.browser {
-        if browser.active_session_id().is_ok() {
-            let _ = browser
-                .evaluate(
-                    "document.querySelector('[data-agent-browser-located]')?.removeAttribute('data-agent-browser-located')",
-                    None,
-                )
-                .await;
-        }
-    }
-
+    let result = execute_subaction(cmd, state, &format!("@{}", temp_ref)).await;
+    state.ref_map.remove(&temp_ref);
     result
+}
+
+fn find_ax_node_by_role(
+    nodes: &[super::cdp::types::AXNode],
+    role: &str,
+    name: Option<&str>,
+    exact: bool,
+) -> Result<(i64, String), String> {
+    let mut matched_without_backend_id = false;
+
+    for node in nodes {
+        if node.ignored.unwrap_or(false) {
+            continue;
+        }
+
+        let node_role = super::element::extract_ax_string(&node.role);
+        if node_role != role {
+            continue;
+        }
+
+        let node_name = super::element::extract_ax_string(&node.name);
+        let matches = match name {
+            Some(target_name) if exact => node_name == target_name,
+            Some(target_name) => node_name.contains(target_name),
+            None => true,
+        };
+
+        if !matches {
+            continue;
+        }
+
+        if let Some(id) = node.backend_d_o_m_node_id {
+            return Ok((id, node_name));
+        }
+
+        matched_without_backend_id = true;
+    }
+
+    if matched_without_backend_id {
+        return Err(match name {
+            Some(target_name) => format!(
+                "AX node has no backendDOMNodeId for role={} name={}",
+                role, target_name
+            ),
+            None => format!("AX node has no backendDOMNodeId for role={}", role),
+        });
+    }
+
+    let desc = build_role_selector(role, name, exact);
+    Err(format!("No element found: {}", desc))
 }
 
 async fn handle_semantic_locator(
@@ -8399,9 +8409,110 @@ fn error_response(id: &str, error: &str) -> Value {
 
 #[cfg(test)]
 mod tests {
+    use super::super::cdp::types::{AXNode, AXValue};
     use super::*;
     use crate::test_utils::EnvGuard;
     use std::fs;
+
+    fn ax_value(value: &str) -> AXValue {
+        AXValue {
+            value_type: "string".to_string(),
+            value: Some(Value::String(value.to_string())),
+        }
+    }
+
+    fn ax_node(role: &str, name: &str, backend_node_id: Option<i64>, ignored: bool) -> AXNode {
+        AXNode {
+            node_id: format!("node-{}", name),
+            role: Some(ax_value(role)),
+            name: Some(ax_value(name)),
+            value: None,
+            description: None,
+            properties: None,
+            child_ids: None,
+            backend_d_o_m_node_id: backend_node_id,
+            ignored: Some(ignored),
+        }
+    }
+
+    #[test]
+    fn find_ax_node_by_role_matches_browser_computed_link_role() {
+        let nodes = vec![
+            ax_node("RootWebArea", "Fixture", Some(1), false),
+            ax_node("link", "Services", Some(42), false),
+        ];
+
+        let (backend_id, actual_name) =
+            find_ax_node_by_role(&nodes, "link", Some("Services"), true)
+                .expect("computed AX link role should match the anchor");
+
+        assert_eq!(backend_id, 42);
+        assert_eq!(actual_name, "Services");
+    }
+
+    #[test]
+    fn find_ax_node_by_role_supports_substring_and_exact_name_matching() {
+        let nodes = vec![ax_node("button", "Submit form", Some(7), false)];
+
+        let (backend_id, actual_name) =
+            find_ax_node_by_role(&nodes, "button", Some("Submit"), false)
+                .expect("substring matching should be allowed without exact");
+        assert_eq!(backend_id, 7);
+        assert_eq!(actual_name, "Submit form");
+
+        let err = find_ax_node_by_role(&nodes, "button", Some("Submit"), true)
+            .expect_err("exact matching should reject partial names");
+        assert!(err.contains("getByRole('button'"));
+    }
+
+    #[test]
+    fn find_ax_node_by_role_skips_ignored_nodes_and_requires_backend_id() {
+        let nodes = vec![
+            ax_node("link", "Services", Some(1), true),
+            ax_node("link", "Services", None, false),
+        ];
+
+        let err = find_ax_node_by_role(&nodes, "link", Some("Services"), true)
+            .expect_err("matching AX nodes must have a backend DOM node id");
+
+        assert!(err.contains("backendDOMNodeId"));
+    }
+
+    #[test]
+    fn find_ax_node_by_role_uses_later_actionable_match() {
+        let nodes = vec![
+            ax_node("link", "Services", None, false),
+            ax_node("link", "Services", Some(42), false),
+        ];
+
+        let (backend_id, actual_name) =
+            find_ax_node_by_role(&nodes, "link", Some("Services"), true)
+                .expect("lookup should continue past matching virtual AX nodes");
+
+        assert_eq!(backend_id, 42);
+        assert_eq!(actual_name, "Services");
+    }
+
+    #[test]
+    fn find_ax_node_by_role_is_generic_across_roles() {
+        let nodes = vec![
+            ax_node("heading", "Dashboard", Some(11), false),
+            ax_node("textbox", "Search", Some(12), false),
+        ];
+
+        assert_eq!(
+            find_ax_node_by_role(&nodes, "heading", Some("Dashboard"), true)
+                .expect("heading should match")
+                .0,
+            11
+        );
+        assert_eq!(
+            find_ax_node_by_role(&nodes, "textbox", None, false)
+                .expect("role-only lookup should match first textbox")
+                .0,
+            12
+        );
+    }
 
     fn unique_socket_dir(label: &str) -> PathBuf {
         let nanos = std::time::SystemTime::now()
