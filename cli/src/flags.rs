@@ -856,8 +856,8 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
     let mut result = Vec::new();
     let mut skip_next = false;
 
-    // Boolean flags that optionally take true/false
-    const GLOBAL_BOOL_FLAGS: &[&str] = &[
+    // Boolean flags that optionally take true/false.
+    const GLOBAL_BOOL_FLAGS_WITH_OPTIONAL_VALUE: &[&str] = &[
         "--json",
         "--headed",
         "--debug",
@@ -869,6 +869,8 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--content-boundaries",
         "--confirm-interactive",
         "--no-auto-dialog",
+    ];
+    const GLOBAL_BARE_FLAGS: &[&str] = &[
         "-v",
         "--verbose",
         "-q",
@@ -925,12 +927,16 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
             i += 1;
             continue;
         }
-        if GLOBAL_BOOL_FLAGS.contains(&arg.as_str()) {
+        if GLOBAL_BOOL_FLAGS_WITH_OPTIONAL_VALUE.contains(&arg.as_str()) {
             if let Some(v) = args.get(i + 1) {
                 if matches!(v.as_str(), "true" | "false") {
                     i += 1;
                 }
             }
+            i += 1;
+            continue;
+        }
+        if GLOBAL_BARE_FLAGS.contains(&arg.as_str()) {
             i += 1;
             continue;
         }
@@ -1512,6 +1518,18 @@ mod tests {
     fn test_clean_args_removes_bare_bool_flag() {
         let cleaned = clean_args(&args("--headed --debug open example.com"));
         assert_eq!(cleaned, vec!["open", "example.com"]);
+    }
+
+    #[test]
+    fn test_clean_args_keeps_false_after_verbose_as_command_arg() {
+        let cleaned = clean_args(&args("--verbose eval false"));
+        assert_eq!(cleaned, vec!["eval", "false"]);
+    }
+
+    #[test]
+    fn test_clean_args_keeps_true_after_quiet_as_command_arg() {
+        let cleaned = clean_args(&args("--quiet get text true"));
+        assert_eq!(cleaned, vec!["get", "text", "true"]);
     }
 
     // === Extensions merge tests ===
