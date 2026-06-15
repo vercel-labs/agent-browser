@@ -31,21 +31,26 @@ jobs:
         with:
           node-version-file: .node-version
 
-      - name: Compare package.json version to npm and check GitHub release
+      - name: Check package.json version against GitHub releases
         id: check
         run: |
           LOCAL_VERSION=$(node -p "require('./package.json').version")
           echo "Local version: $LOCAL_VERSION"
 
-          NPM_VERSION=$(npm view agent-browser version 2>/dev/null || echo "0.0.0")
-          echo "npm version: $NPM_VERSION"
+          TAG="v$LOCAL_VERSION"
+          if gh release view "$TAG" &>/dev/null; then
+            RELEASE_VERSION="$LOCAL_VERSION"
+          else
+            RELEASE_VERSION="0.0.0"
+          fi
+          echo "release version: $RELEASE_VERSION"
 
-          if [ "$LOCAL_VERSION" != "$NPM_VERSION" ]; then
-            echo "Version changed: $NPM_VERSION -> $LOCAL_VERSION"
+          if [ "$LOCAL_VERSION" != "$RELEASE_VERSION" ]; then
+            echo "Version changed: $RELEASE_VERSION -> $LOCAL_VERSION"
             echo "should_release=true" >> "$GITHUB_OUTPUT"
             echo "needs_github_release=true" >> "$GITHUB_OUTPUT"
           else
-            echo "Version unchanged on npm, skipping build and publish"
+            echo "Version already released on GitHub, skipping build"
             echo "should_release=false" >> "$GITHUB_OUTPUT"
 
             # Check if GitHub release exists; it may be missing if a prior run
@@ -76,43 +81,43 @@ jobs:
             os: ubuntu-latest
             rust_target: x86_64-unknown-linux-gnu
             build_target: x86_64-unknown-linux-gnu.2.28
-            binary: agent-browser-linux-x64
+            binary: agent-browser-priv-linux-x64
             use_zigbuild: true
           - name: Linux ARM64
             os: ubuntu-latest
             rust_target: aarch64-unknown-linux-gnu
             build_target: aarch64-unknown-linux-gnu.2.28
-            binary: agent-browser-linux-arm64
+            binary: agent-browser-priv-linux-arm64
             use_zigbuild: true
           - name: Linux musl x64
             os: ubuntu-latest
             rust_target: x86_64-unknown-linux-musl
             build_target: x86_64-unknown-linux-musl
-            binary: agent-browser-linux-musl-x64
+            binary: agent-browser-priv-linux-musl-x64
             use_zigbuild: true
           - name: Linux musl ARM64
             os: ubuntu-latest
             rust_target: aarch64-unknown-linux-musl
             build_target: aarch64-unknown-linux-musl
-            binary: agent-browser-linux-musl-arm64
+            binary: agent-browser-priv-linux-musl-arm64
             use_zigbuild: true
           - name: Windows x64
             os: ubuntu-latest
             rust_target: x86_64-pc-windows-gnu
             build_target: x86_64-pc-windows-gnu
-            binary: agent-browser-win32-x64.exe
+            binary: agent-browser-priv-win32-x64.exe
             use_zigbuild: false
           - name: macOS x64
             os: macos-latest
             rust_target: x86_64-apple-darwin
             build_target: x86_64-apple-darwin
-            binary: agent-browser-darwin-x64
+            binary: agent-browser-priv-darwin-x64
             use_zigbuild: false
           - name: macOS ARM64
             os: macos-latest
             rust_target: aarch64-apple-darwin
             build_target: aarch64-apple-darwin
-            binary: agent-browser-darwin-arm64
+            binary: agent-browser-priv-darwin-arm64
             use_zigbuild: false
 
     steps:
@@ -190,7 +195,7 @@ jobs:
           fi
 
       - name: Verify Linux GNU glibc floor
-        if: matrix.binary == 'agent-browser-linux-x64' || matrix.binary == 'agent-browser-linux-arm64'
+        if: matrix.binary == 'agent-browser-priv-linux-x64' || matrix.binary == 'agent-browser-priv-linux-arm64'
         run: |
           set -euo pipefail
           if objdump -p artifacts/${{ matrix.binary }} | grep -E 'GLIBC_2\.([3-9][0-9]|29)'; then
@@ -207,7 +212,7 @@ jobs:
           retention-days: 7
 
   publish:
-    name: Publish to npm
+    name: Prepare npm package
     needs: [check-release, build-binaries]
     if: needs.check-release.outputs.should_release == 'true'
     runs-on: ubuntu-latest
@@ -241,22 +246,22 @@ jobs:
       - name: Move binaries to bin directory
         run: |
           mkdir -p bin
-          find artifacts -type f -name 'agent-browser-*' -exec mv {} bin/ \;
+          find artifacts -type f -name 'agent-browser-priv-*' -exec mv {} bin/ \;
           rm -rf artifacts
-          chmod +x bin/agent-browser-* 2>/dev/null || true
+          chmod +x bin/agent-browser-priv-* 2>/dev/null || true
           echo "Binaries in bin/:"
           ls -la bin/
 
       - name: Verify all binaries exist
         run: |
           EXPECTED_BINARIES=(
-            "agent-browser-linux-x64"
-            "agent-browser-linux-arm64"
-            "agent-browser-linux-musl-x64"
-            "agent-browser-linux-musl-arm64"
-            "agent-browser-win32-x64.exe"
-            "agent-browser-darwin-x64"
-            "agent-browser-darwin-arm64"
+            "agent-browser-priv-linux-x64"
+            "agent-browser-priv-linux-arm64"
+            "agent-browser-priv-linux-musl-x64"
+            "agent-browser-priv-linux-musl-arm64"
+            "agent-browser-priv-win32-x64.exe"
+            "agent-browser-priv-darwin-x64"
+            "agent-browser-priv-darwin-arm64"
           )
           MIN_SIZE=100000
           ERRORS=0
@@ -280,12 +285,12 @@ jobs:
           fi
           echo "All 7 platform binaries present and valid"
 
-      - name: Publish to npm
-        run: npm publish --provenance
+      - name: Prepare npm package
+        run: echo "npm publishing is intentionally disabled for agent-browser-priv; Homebrew uses GitHub release assets."
 
   github-release:
     name: Create GitHub Release
-    needs: [check-release, build-binaries, publish]
+    needs: [check-release, build-binaries]
     if: always() && needs.build-binaries.result == 'success' && needs.check-release.outputs.needs_github_release == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -303,14 +308,14 @@ jobs:
       - name: Move binaries to bin directory
         run: |
           mkdir -p bin
-          find artifacts -type f -name 'agent-browser-*' -exec mv {} bin/ \;
+          find artifacts -type f -name 'agent-browser-priv-*' -exec mv {} bin/ \;
           rm -rf artifacts
-          chmod +x bin/agent-browser-* 2>/dev/null || true
+          chmod +x bin/agent-browser-priv-* 2>/dev/null || true
           ls -la bin/
 
       - name: Verify binaries exist
         run: |
-          BINARY_COUNT=$(ls bin/agent-browser-* 2>/dev/null | wc -l)
+          BINARY_COUNT=$(ls bin/agent-browser-priv-* 2>/dev/null | wc -l)
           if [ "$BINARY_COUNT" -lt 7 ]; then
             echo "Error: Expected 7 binaries, found $BINARY_COUNT"
             ls -la bin/
@@ -337,13 +342,13 @@ jobs:
 
           if gh release view "$TAG" &>/dev/null; then
             echo "Release $TAG already exists, uploading assets..."
-            gh release upload "$TAG" bin/agent-browser-* --clobber
+            gh release upload "$TAG" bin/agent-browser-priv-* --clobber
           else
             echo "Creating release $TAG..."
             gh release create "$TAG" \
               --title "$TAG" \
               --notes-file /tmp/release-notes.md \
-              bin/agent-browser-*
+              bin/agent-browser-priv-*
           fi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

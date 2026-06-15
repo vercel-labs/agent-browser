@@ -1,6 +1,7 @@
-# agent-browser
+# agent-browser-priv
 
-Browser automation CLI for AI agents. Fast native Rust CLI.
+Browser automation CLI for AI agents, forked for opt-in local privacy/runtime
+backends. Fast native Rust CLI.
 
 [![skills.sh](https://skills.sh/b/vercel-labs/agent-browser)](https://skills.sh/vercel-labs/agent-browser)
 
@@ -11,8 +12,8 @@ Browser automation CLI for AI agents. Fast native Rust CLI.
 Installs the native Rust binary:
 
 ```bash
-npm install -g agent-browser
-agent-browser install  # Download Chrome from Chrome for Testing (first time only)
+npm install -g agent-browser-priv
+agent-browser-priv install  # Download Chrome from Chrome for Testing (first time only)
 ```
 
 ### Project Installation (local dependency)
@@ -20,8 +21,8 @@ agent-browser install  # Download Chrome from Chrome for Testing (first time onl
 For projects that want to pin the version in `package.json`:
 
 ```bash
-npm install agent-browser
-agent-browser install
+npm install agent-browser-priv
+agent-browser-priv install
 ```
 
 Then use via `package.json` scripts or by invoking `agent-browser` directly.
@@ -29,15 +30,15 @@ Then use via `package.json` scripts or by invoking `agent-browser` directly.
 ### Homebrew (macOS)
 
 ```bash
-brew install agent-browser
-agent-browser install  # Download Chrome from Chrome for Testing (first time only)
+brew install liuwen/agent-browser-priv/agent-browser-priv
+agent-browser-priv install  # Download Chrome from Chrome for Testing (first time only)
 ```
 
 ### Cargo (Rust)
 
 ```bash
-cargo install agent-browser
-agent-browser install  # Download Chrome from Chrome for Testing (first time only)
+cargo install --git https://github.com/liuwen/agent-browser-priv
+agent-browser-priv install  # Download Chrome from Chrome for Testing (first time only)
 ```
 
 ### From Source
@@ -45,13 +46,13 @@ agent-browser install  # Download Chrome from Chrome for Testing (first time onl
 Requires Node.js 24+, pnpm 11+, and Rust.
 
 ```bash
-git clone https://github.com/vercel-labs/agent-browser
-cd agent-browser
+git clone https://github.com/liuwen/agent-browser-priv
+cd agent-browser-priv
 pnpm install
 pnpm build
 pnpm build:native   # Requires Rust (https://rustup.rs)
-pnpm link --global  # Makes agent-browser available globally
-agent-browser install
+pnpm link --global  # Makes agent-browser-priv available globally
+agent-browser-priv install
 ```
 
 ### Linux Dependencies
@@ -59,7 +60,7 @@ agent-browser install
 On Linux, install system dependencies:
 
 ```bash
-agent-browser install --with-deps
+agent-browser-priv install --with-deps
 ```
 
 ### Updating
@@ -67,14 +68,14 @@ agent-browser install --with-deps
 Upgrade to the latest version:
 
 ```bash
-agent-browser upgrade
+agent-browser-priv upgrade
 ```
 
 Detects your installation method (npm, Homebrew, or Cargo) and runs the appropriate update command automatically.
 
 ### Requirements
 
-- **Chrome** - Run `agent-browser install` to download Chrome from [Chrome for Testing](https://developer.chrome.com/blog/chrome-for-testing/) (Google's official automation channel). Existing Chrome, Brave, Playwright, and Puppeteer installations are detected automatically. No Playwright or Node.js required for the daemon.
+- **Chrome** - Run `agent-browser-priv install` to download Chrome from [Chrome for Testing](https://developer.chrome.com/blog/chrome-for-testing/) (Google's official automation channel). Existing Chrome, Brave, Playwright, and Puppeteer installations are detected automatically. No Playwright or Node.js required for the daemon.
 - **Node.js 24+ and pnpm 11+** - Only needed when building from source.
 - **Rust** - Only needed when building from source (see From Source above).
 
@@ -900,12 +901,35 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 | `--confirm-actions <list>` | Action categories requiring confirmation (or `AGENT_BROWSER_CONFIRM_ACTIONS` env) |
 | `--confirm-interactive` | Interactive confirmation prompts; auto-denies if stdin is not a TTY (or `AGENT_BROWSER_CONFIRM_INTERACTIVE` env) |
 | `--engine <name>` | Browser engine: `chrome` (default), `lightpanda` (or `AGENT_BROWSER_ENGINE` env) |
+| `--backend <name>` | Local Chrome backend: `chrome` (default), `patchright` (or `AGENT_BROWSER_BACKEND` env) |
 | `--no-auto-dialog` | Disable automatic dismissal of `alert`/`beforeunload` dialogs (or `AGENT_BROWSER_NO_AUTO_DIALOG` env) |
 | `--model <name>` | AI model for chat command (or `AI_GATEWAY_MODEL` env) |
 | `-v`, `--verbose` | Show tool commands and their raw output (chat) |
 | `-q`, `--quiet` | Show only AI text responses, hide tool calls (chat) |
 | `--config <path>` | Use a custom config file (or `AGENT_BROWSER_CONFIG` env) |
 | `--debug` | Debug output |
+
+## Patchright backend
+
+`agent-browser-priv` keeps the normal Chrome CDP backend by default. For local
+development environments that need Patchright-managed Chromium artifacts or a
+Patchright-launched persistent browser, install the backend once:
+
+```bash
+agent-browser-priv install patchright
+```
+
+Then opt in per session:
+
+```bash
+agent-browser-priv --backend patchright --headed open https://example.com
+agent-browser-priv --backend patchright --profile ~/.agent-browser-priv/profiles/dev open https://example.com
+```
+
+Patchright is used only to launch the local Chrome-compatible browser and expose
+CDP on localhost. The agent-browser command surface remains unchanged. This
+backend does not solve CAPTCHA, Turnstile, or other human verification pages;
+preserve those pages for human handoff.
 
 ## Observability Dashboard
 

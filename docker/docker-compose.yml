@@ -19,23 +19,23 @@ services:
         set -euo pipefail
         echo "Building for Linux platforms..."
 
-        rm -f /output/agent-browser-linux-x64 /output/agent-browser-linux-arm64
+        rm -f /output/agent-browser-priv-linux-x64 /output/agent-browser-priv-linux-arm64
 
         echo "→ Linux x64"
         cargo zigbuild --release --target x86_64-unknown-linux-gnu.2.28
-        cp /build/target/x86_64-unknown-linux-gnu/release/agent-browser /output/agent-browser-linux-x64
-        chmod +x /output/agent-browser-linux-x64
+        cp /build/target/x86_64-unknown-linux-gnu/release/agent-browser /output/agent-browser-priv-linux-x64
+        chmod +x /output/agent-browser-priv-linux-x64
         echo "✓ Linux x64 done"
 
         echo "→ Linux ARM64"
         cargo zigbuild --release --target aarch64-unknown-linux-gnu.2.28
-        cp /build/target/aarch64-unknown-linux-gnu/release/agent-browser /output/agent-browser-linux-arm64
-        chmod +x /output/agent-browser-linux-arm64
+        cp /build/target/aarch64-unknown-linux-gnu/release/agent-browser /output/agent-browser-priv-linux-arm64
+        chmod +x /output/agent-browser-priv-linux-arm64
         echo "✓ Linux ARM64 done"
 
         echo ""
         echo "✓ Linux platforms built successfully!"
-        ls -la /output/agent-browser-linux-*
+        ls -la /output/agent-browser-priv-linux-*
       '
 
   # Build for Windows
@@ -52,14 +52,14 @@ services:
         set -euo pipefail
         echo "Building for Windows x64..."
 
-        rm -f /output/agent-browser-win32-x64.exe
+        rm -f /output/agent-browser-priv-win32-x64.exe
 
         cargo build --release --target x86_64-pc-windows-gnu
-        cp /build/target/x86_64-pc-windows-gnu/release/agent-browser.exe /output/agent-browser-win32-x64.exe
+        cp /build/target/x86_64-pc-windows-gnu/release/agent-browser.exe /output/agent-browser-priv-win32-x64.exe
 
         echo ""
         echo "✓ Windows build completed!"
-        ls -la /output/agent-browser-win32-*
+        ls -la /output/agent-browser-priv-win32-*
       '
 
   # Build for a single target
@@ -75,7 +75,7 @@ services:
       - TARGET=${TARGET:-}
       - RUST_TARGET=${RUST_TARGET:-}
       - BUILD_TARGET=${BUILD_TARGET:-}
-      - OUTPUT_NAME=${OUTPUT_NAME:-agent-browser-linux-x64}
+      - OUTPUT_NAME=${OUTPUT_NAME:-agent-browser-priv-linux-x64}
     command: |
       -c '
         set -euo pipefail

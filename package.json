@@ -1,6 +1,6 @@
 {
-  "name": "agent-browser",
-  "version": "0.28.0",
+  "name": "agent-browser-priv",
+  "version": "0.28.0-priv.1",
   "description": "Browser automation CLI for AI agents",
   "type": "module",
   "packageManager": "pnpm@11.1.3",
@@ -15,18 +15,19 @@
     "skills"
   ],
   "bin": {
-    "agent-browser": "./bin/agent-browser.js"
+    "agent-browser": "./bin/agent-browser.js",
+    "agent-browser-priv": "./bin/agent-browser.js"
   },
   "scripts": {
     "version:sync": "node scripts/sync-version.js",
-    "version": "npm run version:sync && git add cli/Cargo.toml",
-    "build:native": "npm run version:sync && cargo build --release --manifest-path cli/Cargo.toml && node scripts/copy-native.js",
-    "build:linux": "npm run version:sync && docker compose -f docker/docker-compose.yml run --rm build-linux",
-    "build:macos": "npm run version:sync && (cargo build --release --manifest-path cli/Cargo.toml --target aarch64-apple-darwin & cargo build --release --manifest-path cli/Cargo.toml --target x86_64-apple-darwin & wait) && cp cli/target/aarch64-apple-darwin/release/agent-browser bin/agent-browser-darwin-arm64 && cp cli/target/x86_64-apple-darwin/release/agent-browser bin/agent-browser-darwin-x64",
-    "build:windows": "npm run version:sync && docker compose -f docker/docker-compose.yml run --rm build-windows",
-    "build:all-platforms": "npm run version:sync && (npm run build:linux & npm run build:windows & wait) && npm run build:macos",
+    "version": "pnpm run version:sync && git add cli/Cargo.toml",
+    "build:native": "pnpm run version:sync && cargo build --release --manifest-path cli/Cargo.toml && node scripts/copy-native.js",
+    "build:linux": "pnpm run version:sync && docker compose -f docker/docker-compose.yml run --rm build-linux",
+    "build:macos": "pnpm run version:sync && (cargo build --release --manifest-path cli/Cargo.toml --target aarch64-apple-darwin & cargo build --release --manifest-path cli/Cargo.toml --target x86_64-apple-darwin & wait) && cp cli/target/aarch64-apple-darwin/release/agent-browser bin/agent-browser-priv-darwin-arm64 && cp cli/target/x86_64-apple-darwin/release/agent-browser bin/agent-browser-priv-darwin-x64",
+    "build:windows": "pnpm run version:sync && docker compose -f docker/docker-compose.yml run --rm build-windows",
+    "build:all-platforms": "pnpm run version:sync && (pnpm run build:linux & pnpm run build:windows & wait) && pnpm run build:macos",
     "build:docker": "docker build --platform linux/amd64 -t agent-browser-builder -f docker/Dockerfile.build .",
-    "release": "npm run version:sync && npm run build:all-platforms && npm publish",
+    "release": "pnpm run version:sync && pnpm run build:all-platforms",
     "postinstall": "node scripts/postinstall.js",
     "build:dashboard": "cd packages/dashboard && pnpm build"
   },
@@ -42,10 +43,10 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/vercel-labs/agent-browser.git"
+    "url": "git+https://github.com/liuwen/agent-browser-priv.git"
   },
   "bugs": {
-    "url": "https://github.com/vercel-labs/agent-browser/issues"
+    "url": "https://github.com/liuwen/agent-browser-priv/issues"
   },
   "homepage": "https://agent-browser.dev",
   "devDependencies": {}

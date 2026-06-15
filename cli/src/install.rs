@@ -497,6 +497,110 @@ pub fn run_install(with_deps: bool) {
     }
 }
 
+pub fn run_patchright_install(with_deps: bool) {
+    if with_deps && cfg!(target_os = "linux") {
+        install_linux_deps();
+    }
+
+    let dir = crate::native::cdp::patchright::patchright_backend_dir();
+    if let Err(e) = fs::create_dir_all(&dir) {
+        eprintln!(
+            "{} Failed to create Patchright backend directory {}: {}",
+            color::error_indicator(),
+            dir.display(),
+            e
+        );
+        exit(1);
+    }
+
+    let package_json = r#"{
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "patchright": "^1.60.2"
+  }
+}
+"#;
+    if let Err(e) = fs::write(dir.join("package.json"), package_json) {
+        eprintln!(
+            "{} Failed to write Patchright package.json: {}",
+            color::error_indicator(),
+            e
+        );
+        exit(1);
+    }
+
+    println!("{}", color::cyan("Installing Patchright backend..."));
+    println!("  Location: {}", dir.display());
+
+    let install_status = Command::new("npm")
+        .arg("install")
+        .arg("--omit=dev")
+        .current_dir(&dir)
+        .status();
+
+    match install_status {
+        Ok(status) if status.success() => {}
+        Ok(status) => {
+            eprintln!(
+                "{} npm install failed with status {}",
+                color::error_indicator(),
+                status
+            );
+            exit(1);
+        }
+        Err(e) => {
+            eprintln!(
+                "{} Failed to run npm install: {}",
+                color::error_indicator(),
+                e
+            );
+            exit(1);
+        }
+    }
+
+    println!(
+        "{}",
+        color::cyan("Installing Patchright Chromium artifacts...")
+    );
+    let cli = dir
+        .join("node_modules")
+        .join("patchright-core")
+        .join("cli.js");
+    let browser_status = Command::new("node")
+        .arg(&cli)
+        .arg("install")
+        .arg("chromium")
+        .current_dir(&dir)
+        .status();
+
+    match browser_status {
+        Ok(status) if status.success() => {
+            println!("{}", color::success_indicator());
+            println!("Patchright backend installed successfully");
+            println!(
+                "Use: agent-browser-priv --backend patchright --headed open https://example.com"
+            );
+        }
+        Ok(status) => {
+            eprintln!(
+                "{} Patchright browser install failed with status {}",
+                color::error_indicator(),
+                status
+            );
+            exit(1);
+        }
+        Err(e) => {
+            eprintln!(
+                "{} Failed to run Patchright browser installer: {}",
+                color::error_indicator(),
+                e
+            );
+            exit(1);
+        }
+    }
+}
+
 fn report_install_status(status: io::Result<std::process::ExitStatus>) {
     match status {
         Ok(s) if s.success() => {

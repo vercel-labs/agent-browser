@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Cross-platform CLI wrapper for agent-browser
+ * Cross-platform CLI wrapper for agent-browser-priv
  * 
  * This wrapper enables npx support on Windows where shell scripts don't work.
  * For global installs, postinstall.js patches the shims to invoke the native
@@ -62,7 +62,7 @@ function getBinaryName() {
   }
 
   const ext = os === 'win32' ? '.exe' : '';
-  return `agent-browser-${osKey}-${archKey}${ext}`;
+  return `agent-browser-priv-${osKey}-${archKey}${ext}`;
 }
 
 function main() {

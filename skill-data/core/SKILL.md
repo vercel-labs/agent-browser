@@ -1,7 +1,7 @@
 ---
 name: core
 description: Core agent-browser usage guide. Read this before running any agent-browser commands. Covers the snapshot-and-ref workflow, navigating pages, interacting with elements (click, fill, type, select), extracting text and data, taking screenshots, managing tabs, handling forms and auth, waiting for content, running multiple browser sessions in parallel, and troubleshooting common failures. Use when the user asks to interact with a website, fill a form, click something, extract data, take a screenshot, log into a site, test a web app, or automate any browser task.
-allowed-tools: Bash(agent-browser:*), Bash(npx agent-browser:*)
+allowed-tools: Bash(agent-browser:*), Bash(npx agent-browser:*), Bash(agent-browser-priv:*)
 ---
 
 # agent-browser core
@@ -10,6 +10,14 @@ Fast browser automation CLI for AI agents. Chrome/Chromium via CDP, no
 Playwright or Puppeteer dependency. Accessibility-tree snapshots with compact
 `@eN` refs let agents interact with pages in ~200-400 tokens instead of
 parsing raw HTML.
+
+When `agent-browser-priv` is available, use it only for explicitly requested
+privacy/local-runtime work or authorized local development debugging where the
+normal browser lane hits local-only bot/challenge friction. The command surface
+is the same; opt into Patchright with `agent-browser-priv --backend patchright`.
+Do not add CAPTCHA solving, Turnstile solving, proxy rotation policy, or
+production stealth defaults. If a challenge remains, classify it and preserve
+artifacts for human handoff.
 
 Most normal web tasks (navigate, read, click, fill, extract, screenshot) are
 covered here. Load a specialized skill when the task falls outside browser
@@ -455,6 +463,7 @@ and [references/authentication.md](references/authentication.md).
 --headed                # show the window (default is headless)
 --auto-connect          # connect to an already-running Chrome
 --cdp <port>            # connect to a specific CDP port
+--backend <name>        # agent-browser-priv local backend: chrome, patchright
 --profile <name|path>   # use a Chrome profile (login state survives)
 --headers <json>        # HTTP headers scoped to the URL's origin
 --proxy <url>           # proxy server

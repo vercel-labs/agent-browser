@@ -19,7 +19,7 @@ const binDir = join(projectRoot, 'bin');
 // Determine platform suffix
 const platformKey = `${platform()}-${arch()}`;
 const ext = platform() === 'win32' ? '.exe' : '';
-const targetName = `agent-browser-${platformKey}${ext}`;
+const targetName = `agent-browser-priv-${platformKey}${ext}`;
 const targetPath = join(binDir, targetName);
 
 if (!existsSync(sourcePath)) {

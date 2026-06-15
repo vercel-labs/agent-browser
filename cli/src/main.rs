@@ -31,7 +31,7 @@ use connection::{
     send_command, walk_daemons, DaemonOptions, Response,
 };
 use flags::{clean_args, parse_flags, Flags};
-use install::run_install;
+use install::{run_install, run_patchright_install};
 use output::{
     print_command_help, print_help, print_response_with_opts, print_version, OutputOptions,
 };
@@ -667,7 +667,11 @@ fn main() {
     // Handle install separately
     if clean.first().map(|s| s.as_str()) == Some("install") {
         let with_deps = args.iter().any(|a| a == "--with-deps" || a == "-d");
-        run_install(with_deps);
+        if clean.get(1).map(|s| s.as_str()) == Some("patchright") {
+            run_patchright_install(with_deps);
+        } else {
+            run_install(with_deps);
+        }
         return;
     }
 
@@ -905,6 +909,7 @@ fn main() {
         action_policy: flags.action_policy.as_deref(),
         confirm_actions: flags.confirm_actions.as_deref(),
         engine: flags.engine.as_deref(),
+        backend: flags.backend.as_deref(),
         auto_connect: flags.auto_connect,
         idle_timeout: flags.idle_timeout.as_deref(),
         default_timeout: flags.default_timeout,
@@ -1227,6 +1232,7 @@ fn main() {
         || flags.color_scheme.is_some()
         || flags.download_path.is_some()
         || flags.engine.is_some()
+        || flags.backend.is_some()
         || !flags.extensions.is_empty())
         && flags.cdp.is_none()
         && flags.provider.is_none()
@@ -1319,6 +1325,10 @@ fn main() {
 
         if let Some(ref engine) = flags.engine {
             launch_cmd["engine"] = json!(engine);
+        }
+
+        if let Some(ref backend) = flags.backend {
+            launch_cmd["backend"] = json!(backend);
         }
 
         match send_command(launch_cmd, &flags.session) {

@@ -5,17 +5,17 @@
 Installs the native Rust binary for maximum performance:
 
 ```bash
-npm install -g agent-browser
-agent-browser install  # Download Chrome from Chrome for Testing (first time)
+npm install -g agent-browser-priv
+agent-browser-priv install  # Download Chrome from Chrome for Testing (first time)
 ```
 
-This is the fastest option -- commands run through the native Rust CLI directly with sub-millisecond parsing overhead.
+This is the fastest option. Commands run through the native Rust CLI directly with sub-millisecond parsing overhead.
 
 ## Quick start (no install)
 
 ```bash
-npx agent-browser install   # Download Chrome (first time only)
-npx agent-browser open example.com
+npx agent-browser-priv install   # Download Chrome (first time only)
+npx agent-browser-priv open example.com
 ```
 
 ## Project installation (local dependency)
@@ -23,8 +23,8 @@ npx agent-browser open example.com
 For projects that want to pin the version in `package.json`:
 
 ```bash
-npm install agent-browser
-npx agent-browser install  # Download Chrome (first time)
+npm install agent-browser-priv
+npx agent-browser-priv install  # Download Chrome (first time)
 ```
 
 Then use via `npx` or `package.json` scripts.
@@ -32,15 +32,15 @@ Then use via `npx` or `package.json` scripts.
 ## Homebrew (macOS)
 
 ```bash
-brew install agent-browser
-agent-browser install  # Download Chrome (first time)
+brew install liuwen/agent-browser-priv/agent-browser-priv
+agent-browser-priv install  # Download Chrome (first time)
 ```
 
 ## Cargo (Rust)
 
 ```bash
-cargo install agent-browser
-agent-browser install  # Download Chrome (first time)
+cargo install --git https://github.com/liuwen/agent-browser-priv
+agent-browser-priv install  # Download Chrome (first time)
 ```
 
 Compiles from source (~2-3 min). Requires Node.js 24+, pnpm 11+, and the Rust toolchain ([rustup.rs](https://rustup.rs)).
@@ -48,12 +48,12 @@ Compiles from source (~2-3 min). Requires Node.js 24+, pnpm 11+, and the Rust to
 ## From source
 
 ```bash
-git clone https://github.com/vercel-labs/agent-browser
-cd agent-browser
+git clone https://github.com/liuwen/agent-browser-priv
+cd agent-browser-priv
 pnpm install
 pnpm build
 pnpm build:native
-./bin/agent-browser install
+./bin/agent-browser.js install
 pnpm link --global
 ```
 
@@ -62,7 +62,7 @@ pnpm link --global
 On Linux, install system dependencies:
 
 ```bash
-agent-browser install --with-deps
+agent-browser-priv install --with-deps
 ```
 
 ## Updating
@@ -70,7 +70,7 @@ agent-browser install --with-deps
 Upgrade to the latest version:
 
 ```bash
-agent-browser upgrade
+agent-browser-priv upgrade
 ```
 
 Detects your installation method (npm, Homebrew, or Cargo) and runs the appropriate update command automatically. Displays the version change on success, or informs you if you are already on the latest version.
@@ -111,7 +111,7 @@ Stale sidecar files are always cleaned. Destructive actions are opt-in via `--fi
 <tr><th>Check</th><th>What <code>--fix</code> does</th></tr>
 </thead>
 <tbody>
-<tr><td>Chrome missing</td><td>Runs <code>agent-browser install</code></td></tr>
+<tr><td>Chrome missing</td><td>Runs <code>agent-browser-priv install</code></td></tr>
 <tr><td>Version-mismatched daemons</td><td>Sends <code>close</code> to each and cleans files</td></tr>
 <tr><td>Old state files</td><td>Deletes state files older than <code>AGENT_BROWSER_STATE_EXPIRE_DAYS</code> (default 30)</td></tr>
 <tr><td>Missing encryption key</td><td>Generates a new key at <code>~/.agent-browser/.encryption-key</code> (0600, unix); never overwrites an existing key</td></tr>
@@ -154,7 +154,7 @@ npx skills add vercel-labs/agent-browser
 
 This works with Claude Code, Codex, Cursor, Gemini CLI, GitHub Copilot, Goose, OpenCode, and Windsurf. The skill is fetched from the repository and stays up to date automatically.
 
-> **Do not** copy `SKILL.md` from `node_modules` -- it will become stale as new features are added. Always use `npx skills add` or reference the repository version.
+> **Do not** copy `SKILL.md` from `node_modules`; it will become stale as new features are added. Always use `npx skills add` or reference the repository version.
 
 ### AGENTS.md / CLAUDE.md
 

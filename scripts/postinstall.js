@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Postinstall script for agent-browser
+ * Postinstall script for agent-browser-priv
  * 
  * Downloads the platform-specific native binary if not present.
  * On global installs, patches npm's bin entry to use the native binary directly:
@@ -38,7 +38,7 @@ const osKey = platform() === 'linux' && isMusl() ? 'linux-musl' : platform();
 const effectiveArch = platform() === 'win32' && arch() === 'arm64' ? 'x64' : arch();
 const platformKey = `${osKey}-${effectiveArch}`;
 const ext = platform() === 'win32' ? '.exe' : '';
-const binaryName = `agent-browser-${platformKey}${ext}`;
+const binaryName = `agent-browser-priv-${platformKey}${ext}`;
 const binaryPath = join(binDir, binaryName);
 
 // Package info
@@ -48,7 +48,7 @@ const packageJson = JSON.parse(
 const version = packageJson.version;
 
 // GitHub release URL
-const GITHUB_REPO = 'vercel-labs/agent-browser';
+const GITHUB_REPO = 'liuwen/agent-browser-priv';
 const DOWNLOAD_URL = `https://github.com/${GITHUB_REPO}/releases/download/v${version}/${binaryName}`;
 
 async function downloadFile(url, dest) {
@@ -85,7 +85,7 @@ async function downloadFile(url, dest) {
 
 /**
  * Detect which package manager ran this postinstall and write a marker file
- * next to the binary so `agent-browser upgrade` can use the correct one
+ * next to the binary so `agent-browser-priv upgrade` can use the correct one
  * without fragile path heuristics or slow subprocess probing.
  *
  * npm_config_user_agent is set by npm/pnpm/yarn/bun during lifecycle scripts,
@@ -199,7 +199,7 @@ function showInstallReminder() {
   if (systemChrome) {
     console.log('');
     console.log(`  ✓ System Chrome found: ${systemChrome}`);
-    console.log('    agent-browser will use it automatically.');
+    console.log('    agent-browser-priv will use it automatically.');
     console.log('');
     return;
   }
@@ -208,12 +208,12 @@ function showInstallReminder() {
   console.log('  ⚠ No Chrome installation detected.');
   console.log('  If you plan to use a local browser, run:');
   console.log('');
-  console.log('    agent-browser install');
+  console.log('    agent-browser-priv install');
   if (platform() === 'linux') {
     console.log('');
     console.log('  On Linux, include system dependencies with:');
     console.log('');
-    console.log('    agent-browser install --with-deps');
+    console.log('    agent-browser-priv install --with-deps');
   }
   console.log('');
   console.log('  You can skip this if you use --cdp, --provider, --engine, or --executable-path.');
@@ -246,7 +246,7 @@ async function fixUnixSymlink() {
     return; // npm not available
   }
 
-  const symlinkPath = join(npmBinDir, 'agent-browser');
+  const symlinkPath = join(npmBinDir, 'agent-browser-priv');
 
   // Check if symlink exists (indicates global install)
   try {
@@ -283,8 +283,8 @@ async function fixWindowsShims() {
     return;
   }
 
-  const cmdShim = join(npmBinDir, 'agent-browser.cmd');
-  const ps1Shim = join(npmBinDir, 'agent-browser.ps1');
+  const cmdShim = join(npmBinDir, 'agent-browser-priv.cmd');
+  const ps1Shim = join(npmBinDir, 'agent-browser-priv.ps1');
 
   // Shims may not exist yet during postinstall (npm creates them after
   // lifecycle scripts). If missing, fall back: the JS wrapper at
@@ -296,7 +296,7 @@ async function fixWindowsShims() {
   // Detect architecture so ARM64 Windows is handled correctly
   // (falls back to x64 binary — see platform detection above)
   const cpuArch = effectiveArch;
-  const relativeBinaryPath = `node_modules\\agent-browser\\bin\\agent-browser-win32-${cpuArch}.exe`;
+  const relativeBinaryPath = `node_modules\\agent-browser-priv\\bin\\agent-browser-priv-win32-${cpuArch}.exe`;
   const absoluteBinaryPath = join(npmBinDir, relativeBinaryPath);
 
   // Only rewrite shims if the native binary actually exists

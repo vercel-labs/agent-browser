@@ -1,0 +1,25 @@
+# Patchright Backend
+
+`agent-browser-priv` supports a Patchright-backed local Chrome lane for daily
+development and remote or ephemeral environments where Patchright-managed
+browser artifacts are useful.
+
+Install the backend once:
+
+```bash
+agent-browser-priv install patchright
+```
+
+Then opt in per command or session:
+
+```bash
+agent-browser-priv --backend patchright --headed open https://example.com
+agent-browser-priv --backend patchright --profile ~/.agent-browser-priv/profiles/dev open https://example.com
+```
+
+Patchright launches a persistent Chromium-compatible browser and exposes CDP on
+localhost. The normal agent-browser commands still run through the Rust CLI.
+
+This backend is for authorized local development and debugging. It does not
+solve CAPTCHA, Turnstile, or other human verification pages. If a challenge
+remains, preserve the page state and artifacts for human handoff.

@@ -2869,6 +2869,7 @@ mod tests {
             args: None,
             user_agent: None,
             provider: None,
+            backend: None,
             ignore_https_errors: false,
             allow_file_access: false,
             hide_scrollbars: true,

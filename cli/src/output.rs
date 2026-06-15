@@ -2611,7 +2611,7 @@ Examples:
             r##"
 agent-browser install - Install browser binaries
 
-Usage: agent-browser install [--with-deps]
+Usage: agent-browser install [patchright] [--with-deps]
 
 Downloads and installs browser binaries required for automation.
 
@@ -2620,6 +2620,7 @@ Options:
 
 Examples:
   agent-browser install
+  agent-browser install patchright
   agent-browser install --with-deps
 "##
         }
@@ -3403,6 +3404,7 @@ Options:
   --confirm-actions <list>   Categories requiring confirmation (or AGENT_BROWSER_CONFIRM_ACTIONS)
   --confirm-interactive      Interactive confirmation prompts; auto-denies if stdin is not a TTY (or AGENT_BROWSER_CONFIRM_INTERACTIVE)
   --engine <name>            Browser engine: chrome (default), lightpanda (or AGENT_BROWSER_ENGINE)
+  --backend <name>           Local Chrome backend: chrome (default), patchright (or AGENT_BROWSER_BACKEND)
   --no-auto-dialog           Disable automatic dismissal of alert/beforeunload dialogs (or AGENT_BROWSER_NO_AUTO_DIALOG)
   --model <name>             AI model for chat (or AI_GATEWAY_MODEL env)
   -v, --verbose              Show tool commands and their raw output
@@ -3444,6 +3446,7 @@ Environment:
   AGENT_BROWSER_EXTENSIONS       Comma-separated browser extension paths
   AGENT_BROWSER_INIT_SCRIPTS     Comma-separated paths to page init scripts
   AGENT_BROWSER_ENABLE           Comma-separated built-in init script features (e.g. react-devtools)
+  AGENT_BROWSER_BACKEND          Local Chrome backend: chrome or patchright
   AGENT_BROWSER_HEADED           Show browser window (not headless)
   AGENT_BROWSER_JSON             JSON output
   AGENT_BROWSER_ANNOTATE         Annotated screenshot with numbered labels and legend

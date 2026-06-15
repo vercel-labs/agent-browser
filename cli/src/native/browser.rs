@@ -9,6 +9,7 @@ use super::cdp::chrome::{auto_connect_cdp, launch_chrome, ChromeProcess, LaunchO
 use super::cdp::client::CdpClient;
 use super::cdp::discovery::discover_cdp_url;
 use super::cdp::lightpanda::{launch_lightpanda, LightpandaLaunchOptions, LightpandaProcess};
+use super::cdp::patchright::{launch_patchright, PatchrightProcess};
 use super::cdp::types::*;
 use super::element::{resolve_element_object_id, RefMap};
 
@@ -265,6 +266,7 @@ impl WaitUntil {
 pub enum BrowserProcess {
     Chrome(ChromeProcess),
     Lightpanda(LightpandaProcess),
+    Patchright(PatchrightProcess),
 }
 
 impl BrowserProcess {
@@ -272,6 +274,7 @@ impl BrowserProcess {
         match self {
             BrowserProcess::Chrome(p) => p.kill(),
             BrowserProcess::Lightpanda(p) => p.kill(),
+            BrowserProcess::Patchright(p) => p.kill(),
         }
     }
 
@@ -279,6 +282,7 @@ impl BrowserProcess {
         match self {
             BrowserProcess::Chrome(p) => p.wait_or_kill(timeout),
             BrowserProcess::Lightpanda(p) => p.kill(),
+            BrowserProcess::Patchright(p) => p.wait_or_kill(timeout),
         }
     }
 
@@ -287,6 +291,7 @@ impl BrowserProcess {
         match self {
             BrowserProcess::Chrome(p) => p.has_exited(),
             BrowserProcess::Lightpanda(_) => false,
+            BrowserProcess::Patchright(p) => p.has_exited(),
         }
     }
 }
@@ -312,8 +317,13 @@ const LIGHTPANDA_CDP_CONNECT_POLL_INTERVAL: Duration = Duration::from_millis(100
 const LIGHTPANDA_TARGET_INIT_TIMEOUT: Duration = Duration::from_secs(10);
 
 impl BrowserManager {
-    pub async fn launch(options: LaunchOptions, engine: Option<&str>) -> Result<Self, String> {
+    pub async fn launch(
+        options: LaunchOptions,
+        engine: Option<&str>,
+        backend: Option<&str>,
+    ) -> Result<Self, String> {
         let engine = engine.unwrap_or("chrome");
+        let backend = backend.unwrap_or("chrome");
 
         match engine {
             "chrome" => {
@@ -337,6 +347,19 @@ impl BrowserManager {
             }
         }
 
+        match backend {
+            "chrome" | "patchright" => {}
+            _ => {
+                return Err(format!(
+                    "Unknown backend '{}'. Supported backends: chrome, patchright",
+                    backend
+                ));
+            }
+        }
+        if backend == "patchright" && engine != "chrome" {
+            return Err("--backend patchright can only be used with --engine chrome".to_string());
+        }
+
         let ignore_https_errors = options.ignore_https_errors;
         let user_agent = options.user_agent.clone();
         let color_scheme = options.color_scheme.clone();
@@ -352,6 +375,13 @@ impl BrowserManager {
                 let lp = launch_lightpanda(&lp_options).await?;
                 let url = lp.ws_url.clone();
                 (url, BrowserProcess::Lightpanda(lp))
+            }
+            _ if backend == "patchright" => {
+                let patchright = tokio::task::spawn_blocking(move || launch_patchright(&options))
+                    .await
+                    .map_err(|e| format!("Patchright launch task failed: {}", e))??;
+                let url = patchright.ws_url.clone();
+                (url, BrowserProcess::Patchright(patchright))
             }
             _ => {
                 let chrome = tokio::task::spawn_blocking(move || launch_chrome(&options))

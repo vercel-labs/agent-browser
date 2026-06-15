@@ -76,6 +76,7 @@ pub(super) fn check(checks: &mut Vec<Check>) {
         action_policy: None,
         confirm_actions: None,
         engine: None,
+        backend: None,
         auto_connect: false,
         idle_timeout: None,
         default_timeout: None,

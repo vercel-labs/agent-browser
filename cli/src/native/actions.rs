@@ -190,11 +190,16 @@ struct DrainedEvents {
 /// `storage_state` is handled separately in `handle_launch()`: explicit
 /// `storageState` launches always require a clean local browser so the loaded
 /// state replaces the prior session instead of merging into it.
-fn launch_hash(opts: &LaunchOptions, plugin_init_scripts: &[String]) -> u64 {
+fn launch_hash(
+    opts: &LaunchOptions,
+    backend: Option<&str>,
+    plugin_init_scripts: &[String],
+) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
     let mut h = DefaultHasher::new();
+    backend.hash(&mut h);
     opts.headless.hash(&mut h);
     opts.extensions.hash(&mut h);
     opts.profile.hash(&mut h);
@@ -1782,6 +1787,7 @@ async fn auto_launch(
         options.viewport_size = Some(server.viewport().await);
     }
     let engine = env::var("AGENT_BROWSER_ENGINE").ok();
+    let backend = env::var("AGENT_BROWSER_BACKEND").ok();
 
     // Extract storage_state before options is moved into BrowserManager::launch.
     let storage_state_path = options.storage_state.clone();
@@ -1875,8 +1881,8 @@ async fn auto_launch(
 
     apply_launch_mutator_plugins(state, &mut options, plugins).await?;
     write_extensions_file_from_paths(&state.session_id, options.extensions.as_deref());
-    let hash = launch_hash(&options, &state.plugin_init_scripts);
-    let mgr = BrowserManager::launch(options, engine.as_deref()).await?;
+    let hash = launch_hash(&options, backend.as_deref(), &state.plugin_init_scripts);
+    let mgr = BrowserManager::launch(options, engine.as_deref(), backend.as_deref()).await?;
     state.reset_input_state();
     state.browser = Some(mgr);
     state.launch_hash = Some(hash);
@@ -2213,7 +2219,17 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
             .await?;
     }
 
-    let new_hash = launch_hash(&launch_options, &state.plugin_init_scripts);
+    let backend = cmd
+        .get("backend")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .or_else(|| env::var("AGENT_BROWSER_BACKEND").ok());
+
+    let new_hash = launch_hash(
+        &launch_options,
+        backend.as_deref(),
+        &state.plugin_init_scripts,
+    );
 
     // Hash comparison and fast process-exit check are evaluated before the
     // async is_connection_alive to skip the expensive CDP liveness probe
@@ -2396,7 +2412,8 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     write_engine_file(&state.session_id, &state.engine);
     write_extensions_file_from_paths(&state.session_id, launch_options.extensions.as_deref());
     state.reset_input_state();
-    state.browser = Some(BrowserManager::launch(launch_options, engine.as_deref()).await?);
+    state.browser =
+        Some(BrowserManager::launch(launch_options, engine.as_deref(), backend.as_deref()).await?);
     state.launch_hash = Some(new_hash);
     state.subscribe_to_browser_events();
     state.start_fetch_handler();
@@ -9381,8 +9398,8 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         ];
 
         assert_ne!(
-            launch_hash(&opts, &no_scripts),
-            launch_hash(&opts, &plugin_scripts)
+            launch_hash(&opts, None, &no_scripts),
+            launch_hash(&opts, None, &plugin_scripts)
         );
     }
 

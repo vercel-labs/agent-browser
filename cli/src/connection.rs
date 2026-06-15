@@ -410,6 +410,7 @@ pub struct DaemonOptions<'a> {
     pub action_policy: Option<&'a str>,
     pub confirm_actions: Option<&'a str>,
     pub engine: Option<&'a str>,
+    pub backend: Option<&'a str>,
     pub auto_connect: bool,
     pub idle_timeout: Option<&'a str>,
     pub default_timeout: Option<u64>,
@@ -497,6 +498,9 @@ fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
     }
     if let Some(engine) = opts.engine {
         cmd.env("AGENT_BROWSER_ENGINE", engine);
+    }
+    if let Some(backend) = opts.backend {
+        cmd.env("AGENT_BROWSER_BACKEND", backend);
     }
     if opts.auto_connect {
         cmd.env("AGENT_BROWSER_AUTO_CONNECT", "1");
