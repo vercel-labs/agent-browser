@@ -1,13 +1,21 @@
-//! Check the Chrome install: binary path, version, cache dirs, user-data
-//! dir, and the optional lightpanda engine.
+//! Check the selected local browser backend plus optional Chrome installs.
 
 use std::env;
 use std::path::{Path, PathBuf};
 
 use super::helpers::which_exists;
-use super::{Check, Status};
+use super::{Check, DoctorOptions, Status};
 
-pub(super) fn check(checks: &mut Vec<Check>) {
+pub(super) fn check(checks: &mut Vec<Check>, opts: &DoctorOptions) {
+    let engine = opts.engine.as_deref().unwrap_or("chrome");
+    let backend = opts.backend.as_deref().unwrap_or(if engine == "chrome" {
+        "patchright"
+    } else {
+        "chrome"
+    });
+
+    check_selected_backend(checks, engine, backend);
+
     let category = "Chrome";
 
     let chrome = crate::native::cdp::chrome::find_chrome();
@@ -29,15 +37,24 @@ pub(super) fn check(checks: &mut Vec<Check>) {
                 )),
             }
         }
-        None => checks.push(
-            Check::new(
+        None => {
+            let selected = engine == "chrome" && backend == "chrome";
+            let check = Check::new(
                 "chrome.installed",
                 category,
-                Status::Fail,
-                "No Chrome binary found",
-            )
-            .with_fix("agent-browser install"),
-        ),
+                if selected { Status::Fail } else { Status::Info },
+                if selected {
+                    "No Chrome binary found for --backend chrome"
+                } else {
+                    "No Chrome binary found; run `agent-browser install chrome` to use --backend chrome"
+                },
+            );
+            checks.push(if selected {
+                check.with_fix("agent-browser install chrome")
+            } else {
+                check
+            });
+        }
     }
 
     let cache_dir = crate::install::get_browsers_dir();
@@ -88,29 +105,74 @@ pub(super) fn check(checks: &mut Vec<Check>) {
         }
     }
 
-    if let Ok(engine) = env::var("AGENT_BROWSER_ENGINE") {
-        if engine == "lightpanda" {
-            // Best-effort PATH lookup; absence is FAIL only when the user
-            // explicitly opted into the lightpanda engine.
-            if which_exists("lightpanda") {
-                checks.push(Check::new(
+    if engine == "lightpanda" {
+        // Best-effort PATH lookup; absence is FAIL only when the user
+        // explicitly opted into the lightpanda engine.
+        if which_exists("lightpanda") {
+            checks.push(Check::new(
+                "chrome.engine_lightpanda",
+                category,
+                Status::Pass,
+                "Lightpanda binary on PATH",
+            ));
+        } else {
+            checks.push(
+                Check::new(
                     "chrome.engine_lightpanda",
                     category,
+                    Status::Fail,
+                    "AGENT_BROWSER_ENGINE=lightpanda but no lightpanda binary on PATH",
+                )
+                .with_fix("install lightpanda or unset AGENT_BROWSER_ENGINE"),
+            );
+        }
+    }
+}
+
+fn check_selected_backend(checks: &mut Vec<Check>, engine: &str, backend: &str) {
+    if engine != "chrome" {
+        return;
+    }
+
+    let category = "Browser backend";
+    match backend {
+        "patchright" => {
+            let root = crate::native::cdp::patchright::patchright_backend_dir();
+            let package = root.join("node_modules").join("patchright");
+            if package.exists() {
+                checks.push(Check::new(
+                    "backend.patchright",
+                    category,
                     Status::Pass,
-                    "Lightpanda binary on PATH",
+                    format!("Patchright backend installed at {}", root.display()),
                 ));
             } else {
                 checks.push(
                     Check::new(
-                        "chrome.engine_lightpanda",
+                        "backend.patchright",
                         category,
                         Status::Fail,
-                        "AGENT_BROWSER_ENGINE=lightpanda but no lightpanda binary on PATH",
+                        format!("Patchright backend not installed at {}", root.display()),
                     )
-                    .with_fix("install lightpanda or unset AGENT_BROWSER_ENGINE"),
+                    .with_fix("agent-browser install"),
                 );
             }
         }
+        "chrome" => checks.push(Check::new(
+            "backend.chrome",
+            category,
+            Status::Info,
+            "Using built-in Chrome CDP backend",
+        )),
+        other => checks.push(Check::new(
+            "backend.unknown",
+            category,
+            Status::Fail,
+            format!(
+                "Unknown local Chrome backend '{}'; supported backends: patchright, chrome",
+                other
+            ),
+        )),
     }
 }
 

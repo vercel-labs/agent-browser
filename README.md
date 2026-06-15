@@ -1,7 +1,8 @@
-# agent-browser-priv
+# agent-browser
 
-Browser automation CLI for AI agents, forked for opt-in local privacy/runtime
-backends. Fast native Rust CLI.
+Browser automation CLI for AI agents, distributed from the
+`agent-browser-priv` fork with Patchright as the default local backend. Fast
+native Rust CLI.
 
 [![skills.sh](https://skills.sh/b/vercel-labs/agent-browser)](https://skills.sh/vercel-labs/agent-browser)
 
@@ -13,7 +14,7 @@ Installs the native Rust binary:
 
 ```bash
 npm install -g agent-browser-priv
-agent-browser-priv install  # Download Chrome from Chrome for Testing (first time only)
+agent-browser install  # Install Patchright browser artifacts (first time only)
 ```
 
 ### Project Installation (local dependency)
@@ -22,7 +23,7 @@ For projects that want to pin the version in `package.json`:
 
 ```bash
 npm install agent-browser-priv
-agent-browser-priv install
+agent-browser install
 ```
 
 Then use via `package.json` scripts or by invoking `agent-browser` directly.
@@ -30,15 +31,15 @@ Then use via `package.json` scripts or by invoking `agent-browser` directly.
 ### Homebrew (macOS)
 
 ```bash
-brew install liuwen/agent-browser-priv/agent-browser-priv
-agent-browser-priv install  # Download Chrome from Chrome for Testing (first time only)
+brew install liuwen/agent-browser-priv/agent-browser
+agent-browser install  # Install Patchright browser artifacts (first time only)
 ```
 
 ### Cargo (Rust)
 
 ```bash
 cargo install --git https://github.com/liuwen/agent-browser-priv
-agent-browser-priv install  # Download Chrome from Chrome for Testing (first time only)
+agent-browser install  # Install Patchright browser artifacts (first time only)
 ```
 
 ### From Source
@@ -51,8 +52,8 @@ cd agent-browser-priv
 pnpm install
 pnpm build
 pnpm build:native   # Requires Rust (https://rustup.rs)
-pnpm link --global  # Makes agent-browser-priv available globally
-agent-browser-priv install
+pnpm link --global  # Makes agent-browser available globally
+agent-browser install
 ```
 
 ### Linux Dependencies
@@ -60,7 +61,7 @@ agent-browser-priv install
 On Linux, install system dependencies:
 
 ```bash
-agent-browser-priv install --with-deps
+agent-browser install --with-deps
 ```
 
 ### Updating
@@ -68,14 +69,15 @@ agent-browser-priv install --with-deps
 Upgrade to the latest version:
 
 ```bash
-agent-browser-priv upgrade
+agent-browser upgrade
 ```
 
 Detects your installation method (npm, Homebrew, or Cargo) and runs the appropriate update command automatically.
 
 ### Requirements
 
-- **Chrome** - Run `agent-browser-priv install` to download Chrome from [Chrome for Testing](https://developer.chrome.com/blog/chrome-for-testing/) (Google's official automation channel). Existing Chrome, Brave, Playwright, and Puppeteer installations are detected automatically. No Playwright or Node.js required for the daemon.
+- **Patchright backend** - Run `agent-browser install` to install Patchright and its browser artifacts for the default local backend.
+- **Chrome backend** - Use `agent-browser install chrome` to download Chrome from [Chrome for Testing](https://developer.chrome.com/blog/chrome-for-testing/) for `--backend chrome`. Existing Chrome, Brave, Playwright, and Puppeteer installations are detected automatically.
 - **Node.js 24+ and pnpm 11+** - Only needed when building from source.
 - **Rust** - Only needed when building from source (see From Source above).
 
@@ -458,19 +460,20 @@ agent-browser removeinitscript <identifier>       # Remove a previously register
 ### Setup
 
 ```bash
-agent-browser install                 # Download Chrome from Chrome for Testing (Google's official automation channel)
+agent-browser install                 # Install Patchright browser artifacts
+agent-browser install chrome          # Download Chrome from Chrome for Testing
 agent-browser install --with-deps     # Also install system deps (Linux)
 agent-browser upgrade                 # Upgrade agent-browser to the latest version
 agent-browser doctor                  # Diagnose the install and auto-clean stale daemon files
-agent-browser doctor --fix            # Also run destructive repairs (reinstall Chrome, purge old state, ...)
+agent-browser doctor --fix            # Also run destructive repairs
 agent-browser doctor --offline --quick  # Skip network probes and the live launch test
 agent-browser mcp                     # Start an MCP stdio server
 ```
 
-`doctor` checks your environment, Chrome install, daemon state, config files,
-encryption key, providers, network reachability, and runs a live headless
-browser launch test. Stale socket/pid sidecar files are auto-cleaned. Output
-is also available as `--json` for agents.
+`doctor` checks your environment, browser backend install, daemon state,
+config files, encryption key, providers, network reachability, and runs a live
+headless browser launch test. Stale socket/pid sidecar files are auto-cleaned.
+Output is also available as `--json` for agents.
 
 ### Skills
 
@@ -901,7 +904,7 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 | `--confirm-actions <list>` | Action categories requiring confirmation (or `AGENT_BROWSER_CONFIRM_ACTIONS` env) |
 | `--confirm-interactive` | Interactive confirmation prompts; auto-denies if stdin is not a TTY (or `AGENT_BROWSER_CONFIRM_INTERACTIVE` env) |
 | `--engine <name>` | Browser engine: `chrome` (default), `lightpanda` (or `AGENT_BROWSER_ENGINE` env) |
-| `--backend <name>` | Local Chrome backend: `chrome` (default), `patchright` (or `AGENT_BROWSER_BACKEND` env) |
+| `--backend <name>` | Local Chrome backend: `patchright` (default), `chrome` (or `AGENT_BROWSER_BACKEND` env) |
 | `--no-auto-dialog` | Disable automatic dismissal of `alert`/`beforeunload` dialogs (or `AGENT_BROWSER_NO_AUTO_DIALOG` env) |
 | `--model <name>` | AI model for chat command (or `AI_GATEWAY_MODEL` env) |
 | `-v`, `--verbose` | Show tool commands and their raw output (chat) |
@@ -909,27 +912,33 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 | `--config <path>` | Use a custom config file (or `AGENT_BROWSER_CONFIG` env) |
 | `--debug` | Debug output |
 
-## Patchright backend
+## Local backends
 
-`agent-browser-priv` keeps the normal Chrome CDP backend by default. For local
-development environments that need Patchright-managed Chromium artifacts or a
-Patchright-launched persistent browser, install the backend once:
+This fork defaults local Chrome-compatible launches to Patchright. For fresh
+remote hosts, sandboxes, and CI environments, install the default backend once:
 
 ```bash
-agent-browser-priv install patchright
+agent-browser install
 ```
 
-Then opt in per session:
+Then use the normal command surface:
 
 ```bash
-agent-browser-priv --backend patchright --headed open https://example.com
-agent-browser-priv --backend patchright --profile ~/.agent-browser-priv/profiles/dev open https://example.com
+agent-browser --headed open https://example.com
+agent-browser --profile ~/.agent-browser/profiles/dev open https://example.com
+```
+
+Use the built-in Chrome CDP launcher when a site behaves better on that lane:
+
+```bash
+agent-browser install chrome
+agent-browser --backend chrome open https://example.com
+AGENT_BROWSER_BACKEND=chrome agent-browser open https://example.com
 ```
 
 Patchright is used only to launch the local Chrome-compatible browser and expose
-CDP on localhost. The agent-browser command surface remains unchanged. This
-backend does not solve CAPTCHA, Turnstile, or other human verification pages;
-preserve those pages for human handoff.
+CDP on localhost. It does not solve CAPTCHA, Turnstile, or other human
+verification pages; preserve those pages for human handoff.
 
 ## Observability Dashboard
 
@@ -1420,7 +1429,7 @@ agent-browser uses a client-daemon architecture:
 
 The daemon starts automatically on first command and persists between commands for fast subsequent operations. To auto-shutdown the daemon after a period of inactivity, set `AGENT_BROWSER_IDLE_TIMEOUT_MS` (value in milliseconds). When set, the daemon closes the browser and exits after receiving no commands for the specified duration.
 
-**Browser Engine:** Uses Chrome (from Chrome for Testing) by default. The `--engine` flag selects between `chrome` and `lightpanda`. Supported browsers: Chromium/Chrome (via CDP) and Safari (via WebDriver for iOS).
+**Browser Engine:** Uses the Chrome-compatible engine with Patchright by default. The `--engine` flag selects between `chrome` and `lightpanda`; the `--backend` flag selects `patchright` or `chrome` for local Chrome-compatible launches. Supported browsers: Chromium/Chrome (via CDP) and Safari (via WebDriver for iOS).
 
 ## Platforms
 

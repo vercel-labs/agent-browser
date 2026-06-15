@@ -239,34 +239,39 @@ jobs:
         run: |
           npm pack
           npm install -g agent-browser-priv-*.tgz
+          agent-browser --version
           agent-browser-priv --version
         shell: bash
 
       - name: Verify symlink points to native binary (Unix)
         if: runner.os != 'Windows'
         run: |
-          SYMLINK=$(npm prefix -g)/bin/agent-browser-priv
-          TARGET=$(readlink "$SYMLINK")
-          echo "Symlink: $SYMLINK"
-          echo "Target: $TARGET"
-          if [[ "$TARGET" != *"${{ matrix.binary }}"* ]]; then
-            echo "ERROR: Symlink should point to native binary, not JS wrapper"
-            exit 1
-          fi
-          echo "Symlink correctly points to native binary"
+          for COMMAND_NAME in agent-browser agent-browser-priv; do
+            SYMLINK=$(npm prefix -g)/bin/$COMMAND_NAME
+            TARGET=$(readlink "$SYMLINK")
+            echo "Symlink: $SYMLINK"
+            echo "Target: $TARGET"
+            if [[ "$TARGET" != *"${{ matrix.binary }}"* ]]; then
+              echo "ERROR: $COMMAND_NAME symlink should point to native binary, not JS wrapper"
+              exit 1
+            fi
+          done
+          echo "Symlinks correctly point to native binary"
         shell: bash
 
       - name: Verify shim points to native binary (Windows)
         if: runner.os == 'Windows'
         run: |
-          $shimPath = "$(npm prefix -g)\agent-browser-priv.cmd"
-          $content = Get-Content $shimPath -Raw
-          echo "Shim path: $shimPath"
-          echo "Shim content:"
-          echo $content
-          if ($content -notmatch "agent-browser-priv-win32-x64\.exe") {
-            echo "ERROR: Shim should point to native .exe, not JS wrapper"
-            exit 1
+          foreach ($commandName in @("agent-browser", "agent-browser-priv")) {
+            $shimPath = "$(npm prefix -g)\$commandName.cmd"
+            $content = Get-Content $shimPath -Raw
+            echo "Shim path: $shimPath"
+            echo "Shim content:"
+            echo $content
+            if ($content -notmatch "agent-browser-priv-win32-x64\.exe") {
+              echo "ERROR: $commandName shim should point to native .exe, not JS wrapper"
+              exit 1
+            }
           }
-          echo "Shim correctly points to native binary"
+          echo "Shims correctly point to native binary"
         shell: pwsh

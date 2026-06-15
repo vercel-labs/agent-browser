@@ -1,11 +1,11 @@
 //! Diagnose an agent-browser installation.
 //!
-//! Runs a battery of checks across environment, Chrome install, daemon
-//! state, config files, encryption, providers, network reachability, and
-//! a live headless browser launch test.
+//! Runs a battery of checks across environment, browser backend install,
+//! daemon state, config files, encryption, providers, network reachability,
+//! and a live headless browser launch test.
 //!
 //! Auto-cleans stale daemon socket/pid/version sidecar files. Destructive
-//! repairs (reinstalling Chrome, purging old state files, generating a
+//! repairs (installing browser backends, purging old state files, generating a
 //! missing encryption key) are gated behind `--fix`.
 
 mod chrome;
@@ -23,12 +23,14 @@ use serde_json::{json, Value};
 
 use crate::color;
 
-#[derive(Default, Clone, Copy)]
+#[derive(Default, Clone)]
 pub struct DoctorOptions {
     pub offline: bool,
     pub quick: bool,
     pub fix: bool,
     pub json: bool,
+    pub backend: Option<String>,
+    pub engine: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -97,7 +99,7 @@ pub fn run_doctor(opts: DoctorOptions) -> i32 {
     let mut fixed: Vec<String> = Vec::new();
 
     environment::check(&mut checks);
-    chrome::check(&mut checks);
+    chrome::check(&mut checks, &opts);
     daemon::check(&mut checks);
     config::check(&mut checks);
     security::check(&mut checks);

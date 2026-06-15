@@ -37,8 +37,6 @@ const launchOptions = {
 
 if (executablePath && existsSync(executablePath)) {
   launchOptions.executablePath = executablePath;
-} else {
-  launchOptions.channel = "chrome";
 }
 
 if (userAgent) {

@@ -1,6 +1,6 @@
-//! Destructive repair actions behind `--fix`: reinstall Chrome, close
-//! version-mismatched daemons, purge expired state files, and generate a
-//! missing encryption key.
+//! Destructive repair actions behind `--fix`: install browser backends,
+//! close version-mismatched daemons, purge expired state files, and generate
+//! a missing encryption key.
 
 use std::env;
 use std::fs;
@@ -25,10 +25,19 @@ pub(super) fn run(checks: &mut [Check], fixed: &mut Vec<String>) {
 
     for c in checks.iter_mut() {
         match c.id.as_str() {
+            "backend.patchright" if c.status == Status::Fail => {
+                let installed = attempt_patchright_install();
+                if installed {
+                    fixed.push("Installed Patchright backend".to_string());
+                    c.status = Status::Pass;
+                    c.message = format!("{} (fixed by --fix)", c.message);
+                    c.fix = None;
+                }
+            }
             "chrome.installed" if c.status == Status::Fail => {
                 let installed = attempt_chrome_install();
                 if installed {
-                    fixed.push("Reinstalled Chrome".to_string());
+                    fixed.push("Installed Chrome backend".to_string());
                     c.status = Status::Pass;
                     c.message = format!("{} (fixed by --fix)", c.message);
                     c.fix = None;
@@ -74,6 +83,21 @@ pub(super) fn run(checks: &mut [Check], fixed: &mut Vec<String>) {
 fn attempt_chrome_install() -> bool {
     // run_install() uses process::exit on failure, so we shell out to ourselves
     // to avoid taking down the doctor process if the install fails.
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    std::process::Command::new(exe)
+        .arg("install")
+        .arg("chrome")
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+fn attempt_patchright_install() -> bool {
+    // run_patchright_install() uses process::exit on failure, so we shell out
+    // to ourselves to avoid taking down the doctor process if install fails.
     let exe = match std::env::current_exe() {
         Ok(p) => p,
         Err(_) => return false,

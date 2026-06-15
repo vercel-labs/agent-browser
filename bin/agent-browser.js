@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Cross-platform CLI wrapper for agent-browser-priv
+ * Cross-platform CLI wrapper for the agent-browser-priv npm package.
  * 
  * This wrapper enables npx support on Windows where shell scripts don't work.
  * For global installs, postinstall.js patches the shims to invoke the native

@@ -1,8 +1,27 @@
 # agent-browser
 
-## 0.28.0
+## 0.28.0-priv.1
 
 <!-- release:start -->
+### New Features
+
+- Rebased the fork onto upstream `agent-browser` 0.28.0, including the MCP server and plugin system.
+- Kept **agent-browser** as the primary installed command while retaining `agent-browser-priv` as a compatibility alias.
+- Kept **Patchright** as the default local Chrome-compatible backend. Use `--backend chrome` or `AGENT_BROWSER_BACKEND=chrome` to force the built-in Chrome CDP launcher.
+
+### Improvements
+
+- Preserved upstream plugin launch-mutator behavior while keeping backend-specific launch hashing and browser launch selection.
+- Kept the release surface focused on Linux x64, Linux ARM64, and macOS ARM64 artifacts.
+- Kept npm trusted publishing and Homebrew tap update support for ad hoc installs and local daily use.
+
+### Contributors
+
+- @liuwen
+<!-- release:end -->
+
+## 0.28.0
+
 ### New Features
 
 - **MCP server** - Added `agent-browser mcp`, a stdio Model Context Protocol server with typed tools, paginated discovery, protocol negotiation, and startup tool profiles. The default `core` profile keeps context small, while `--tools all` exposes full CLI parity and composed profiles such as `core,network,react` are supported (#1454)

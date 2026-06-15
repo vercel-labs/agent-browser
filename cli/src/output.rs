@@ -2611,9 +2611,10 @@ Examples:
             r##"
 agent-browser install - Install browser binaries
 
-Usage: agent-browser install [patchright] [--with-deps]
+Usage: agent-browser install [patchright|chrome] [--with-deps]
 
 Downloads and installs browser binaries required for automation.
+This fork installs the default Patchright backend when no target is given.
 
 Options:
   -d, --with-deps      Also install system dependencies (Linux only)
@@ -2621,6 +2622,7 @@ Options:
 Examples:
   agent-browser install
   agent-browser install patchright
+  agent-browser install chrome
   agent-browser install --with-deps
 "##
         }
@@ -2648,13 +2650,13 @@ agent-browser doctor - Diagnose and repair your install
 
 Usage: agent-browser doctor [options]
 
-Runs a battery of checks across environment, Chrome install, daemon state,
-config files, encryption key, providers, network reachability, and a live
-headless browser launch test.
+Runs a battery of checks across environment, browser backend install, daemon
+state, config files, encryption key, providers, network reachability, and a
+live headless browser launch test.
 
 Auto-cleans stale daemon socket/pid/version sidecar files. Destructive
-repairs (reinstalling Chrome, purging old state files, generating a missing
-encryption key) are gated behind --fix.
+repairs (installing browser backends, purging old state files, generating a
+missing encryption key) are gated behind --fix.
 
 Options:
   --offline            Skip network probes
@@ -3342,7 +3344,8 @@ Dashboard:
   dashboard stop             Stop the dashboard server
 
 Setup:
-  install                    Install browser binaries
+  install                    Install Patchright browser binaries
+  install chrome             Install Chrome for Testing for --backend chrome
   install --with-deps        Also install system dependencies (Linux)
   upgrade                    Upgrade to the latest version
   doctor [--fix]             Diagnose install; auto-clean stale files
@@ -3404,7 +3407,7 @@ Options:
   --confirm-actions <list>   Categories requiring confirmation (or AGENT_BROWSER_CONFIRM_ACTIONS)
   --confirm-interactive      Interactive confirmation prompts; auto-denies if stdin is not a TTY (or AGENT_BROWSER_CONFIRM_INTERACTIVE)
   --engine <name>            Browser engine: chrome (default), lightpanda (or AGENT_BROWSER_ENGINE)
-  --backend <name>           Local Chrome backend: chrome (default), patchright (or AGENT_BROWSER_BACKEND)
+  --backend <name>           Local Chrome backend: patchright (default), chrome (or AGENT_BROWSER_BACKEND)
   --no-auto-dialog           Disable automatic dismissal of alert/beforeunload dialogs (or AGENT_BROWSER_NO_AUTO_DIALOG)
   --model <name>             AI model for chat (or AI_GATEWAY_MODEL env)
   -v, --verbose              Show tool commands and their raw output
@@ -3446,7 +3449,7 @@ Environment:
   AGENT_BROWSER_EXTENSIONS       Comma-separated browser extension paths
   AGENT_BROWSER_INIT_SCRIPTS     Comma-separated paths to page init scripts
   AGENT_BROWSER_ENABLE           Comma-separated built-in init script features (e.g. react-devtools)
-  AGENT_BROWSER_BACKEND          Local Chrome backend: chrome or patchright
+  AGENT_BROWSER_BACKEND          Local Chrome backend: patchright or chrome
   AGENT_BROWSER_HEADED           Show browser window (not headless)
   AGENT_BROWSER_JSON             JSON output
   AGENT_BROWSER_ANNOTATE         Annotated screenshot with numbered labels and legend
@@ -3486,10 +3489,10 @@ Environment:
   AI_GATEWAY_MODEL               Default AI model (default: anthropic/claude-sonnet-4.6, or --model flag)
 
 Install:
-  npm install -g agent-browser           # npm
-  brew install agent-browser             # Homebrew
-  cargo install agent-browser            # Cargo
-  agent-browser install                  # Download Chrome (first time)
+  npm install -g agent-browser-priv      # npm package
+  brew install liuwen/agent-browser-priv/agent-browser
+  cargo install --git https://github.com/liuwen/agent-browser-priv
+  agent-browser install                  # Install Patchright browser artifacts
 
 Examples:
   agent-browser open example.com

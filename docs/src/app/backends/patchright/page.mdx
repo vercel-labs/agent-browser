@@ -1,20 +1,28 @@
 # Patchright Backend
 
-`agent-browser-priv` supports a Patchright-backed local Chrome lane for daily
-development and remote or ephemeral environments where Patchright-managed
+The `agent-browser-priv` package installs the `agent-browser` command and uses
+Patchright as the default local Chrome-compatible backend. This is intended for
+daily development and remote or ephemeral environments where Patchright-managed
 browser artifacts are useful.
 
 Install the backend once:
 
 ```bash
-agent-browser-priv install patchright
+agent-browser install
 ```
 
-Then opt in per command or session:
+Then run normal browser commands:
 
 ```bash
-agent-browser-priv --backend patchright --headed open https://example.com
-agent-browser-priv --backend patchright --profile ~/.agent-browser-priv/profiles/dev open https://example.com
+agent-browser --headed open https://example.com
+agent-browser --profile ~/.agent-browser/profiles/dev open https://example.com
+```
+
+Use the built-in Chrome CDP launcher when a site behaves better on that lane:
+
+```bash
+agent-browser install chrome
+agent-browser --backend chrome open https://example.com
 ```
 
 Patchright launches a persistent Chromium-compatible browser and exposes CDP on

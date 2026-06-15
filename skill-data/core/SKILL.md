@@ -1,20 +1,19 @@
 ---
 name: core
 description: Core agent-browser usage guide. Read this before running any agent-browser commands. Covers the snapshot-and-ref workflow, navigating pages, interacting with elements (click, fill, type, select), extracting text and data, taking screenshots, managing tabs, handling forms and auth, waiting for content, running multiple browser sessions in parallel, and troubleshooting common failures. Use when the user asks to interact with a website, fill a form, click something, extract data, take a screenshot, log into a site, test a web app, or automate any browser task.
-allowed-tools: Bash(agent-browser:*), Bash(npx agent-browser:*), Bash(agent-browser-priv:*)
+allowed-tools: Bash(agent-browser:*), Bash(agent-browser-priv:*), Bash(npx agent-browser-priv:*)
 ---
 
 # agent-browser core
 
-Fast browser automation CLI for AI agents. Chrome/Chromium via CDP, no
-Playwright or Puppeteer dependency. Accessibility-tree snapshots with compact
-`@eN` refs let agents interact with pages in ~200-400 tokens instead of
-parsing raw HTML.
+Fast browser automation CLI for AI agents. This fork is distributed as the
+`agent-browser-priv` npm package, but it intentionally installs the
+`agent-browser` command for daily use. Local Chrome-compatible launches use
+Patchright by default; use `--backend chrome` for the built-in Chrome CDP
+launcher when that lane behaves better for a target. Accessibility-tree
+snapshots with compact `@eN` refs let agents interact with pages in ~200-400
+tokens instead of parsing raw HTML.
 
-When `agent-browser-priv` is available, use it only for explicitly requested
-privacy/local-runtime work or authorized local development debugging where the
-normal browser lane hits local-only bot/challenge friction. The command surface
-is the same; opt into Patchright with `agent-browser-priv --backend patchright`.
 Do not add CAPTCHA solving, Turnstile solving, proxy rotation policy, or
 production stealth defaults. If a challenge remains, classify it and preserve
 artifacts for human handoff.
@@ -40,8 +39,8 @@ next ref interaction.
 ## Quickstart
 
 ```bash
-# Install once
-npm i -g agent-browser && agent-browser install
+# Install once from this fork
+npm i -g agent-browser-priv && agent-browser install
 
 # Take a screenshot of a page
 agent-browser open https://example.com
@@ -387,13 +386,13 @@ agent-browser dialog dismiss          # cancel
 ## Diagnosing install issues
 
 If a command fails unexpectedly (`Unknown command`, `Failed to connect`,
-stale daemons, version mismatches after `upgrade`, missing Chrome, etc.)
+stale daemons, version mismatches after `upgrade`, missing browser backend, etc.)
 run `doctor` before anything else:
 
 ```bash
-agent-browser doctor                     # full diagnosis (env, Chrome, daemons, config, providers, network, launch test)
+agent-browser doctor                     # full diagnosis (env, browser backend, daemons, config, providers, network, launch test)
 agent-browser doctor --offline --quick   # fast, local-only
-agent-browser doctor --fix               # also run destructive repairs (reinstall Chrome, purge old state, ...)
+agent-browser doctor --fix               # also run destructive repairs (install browser backends, purge old state, ...)
 agent-browser doctor --json              # structured output for programmatic consumption
 ```
 
@@ -463,7 +462,7 @@ and [references/authentication.md](references/authentication.md).
 --headed                # show the window (default is headless)
 --auto-connect          # connect to an already-running Chrome
 --cdp <port>            # connect to a specific CDP port
---backend <name>        # agent-browser-priv local backend: chrome, patchright
+--backend <name>        # local backend: patchright (default), chrome
 --profile <name|path>   # use a Chrome profile (login state survives)
 --headers <json>        # HTTP headers scoped to the URL's origin
 --proxy <url>           # proxy server

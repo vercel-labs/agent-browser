@@ -68,7 +68,7 @@ pub fn launch_patchright(options: &LaunchOptions) -> Result<PatchrightProcess, S
     let node_modules = root.join("node_modules").join("patchright");
     if !node_modules.exists() {
         return Err(format!(
-            "Patchright backend is not installed. Run `agent-browser-priv install patchright` first.\nExpected: {}",
+            "Patchright backend is not installed. Run `agent-browser install` first.\nExpected: {}",
             node_modules.display()
         ));
     }
@@ -83,10 +83,8 @@ pub fn launch_patchright(options: &LaunchOptions) -> Result<PatchrightProcess, S
     let (profile, temp_user_data_dir) = if let Some(ref profile) = options.profile {
         (expand_tilde(profile), None)
     } else {
-        let dir = std::env::temp_dir().join(format!(
-            "agent-browser-priv-patchright-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("agent-browser-patchright-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir)
             .map_err(|e| format!("Failed to create temp Patchright profile dir: {}", e))?;
         (dir.display().to_string(), Some(dir))
@@ -163,7 +161,7 @@ pub fn launch_patchright(options: &LaunchOptions) -> Result<PatchrightProcess, S
 pub fn patchright_backend_dir() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".agent-browser-priv")
+        .join(".agent-browser")
         .join("backends")
         .join("patchright")
 }

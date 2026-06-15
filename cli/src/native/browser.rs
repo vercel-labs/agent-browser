@@ -315,6 +315,7 @@ pub struct BrowserManager {
 const LIGHTPANDA_CDP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const LIGHTPANDA_CDP_CONNECT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const LIGHTPANDA_TARGET_INIT_TIMEOUT: Duration = Duration::from_secs(10);
+const DEFAULT_CHROME_BACKEND: &str = "patchright";
 
 impl BrowserManager {
     pub async fn launch(
@@ -323,7 +324,11 @@ impl BrowserManager {
         backend: Option<&str>,
     ) -> Result<Self, String> {
         let engine = engine.unwrap_or("chrome");
-        let backend = backend.unwrap_or("chrome");
+        let backend = backend.unwrap_or(if engine == "chrome" {
+            DEFAULT_CHROME_BACKEND
+        } else {
+            "chrome"
+        });
 
         match engine {
             "chrome" => {

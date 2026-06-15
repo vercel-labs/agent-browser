@@ -285,8 +285,8 @@ jobs:
           fi
           echo "All 7 platform binaries present and valid"
 
-      - name: Prepare npm package
-        run: echo "npm publishing is intentionally disabled for agent-browser-priv; Homebrew uses GitHub release assets."
+      - name: Publish to npm
+        run: npm publish --tag latest --provenance --access public
 
   github-release:
     name: Create GitHub Release

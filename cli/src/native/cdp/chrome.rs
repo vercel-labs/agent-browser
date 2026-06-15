@@ -269,7 +269,7 @@ pub fn launch_chrome(options: &LaunchOptions) -> Result<ChromeProcess, String> {
                  - System Chrome installations\n  \
                  - Puppeteer browser cache\n  \
                  - Playwright browser cache\n\
-                 Run `agent-browser install` to download Chrome, or use --executable-path.",
+                 Run `agent-browser install chrome` to download Chrome, or use --executable-path.",
                 cache_dir.display()
             )
         })?,
@@ -555,7 +555,7 @@ fn chrome_launch_error(message: &str, stderr_lines: &[String]) -> String {
 }
 
 pub fn find_chrome() -> Option<PathBuf> {
-    // 1. Check Chrome downloaded by `agent-browser install`
+    // 1. Check Chrome downloaded by `agent-browser install chrome`
     if let Some(p) = crate::install::find_installed_chrome() {
         return Some(p);
     }
@@ -567,7 +567,7 @@ pub fn find_chrome() -> Option<PathBuf> {
         let _ = writeln!(
             std::io::stderr(),
             "Warning: Chrome cache directory exists ({}) but no Chrome binary found inside. \
-             Falling back to system Chrome. Run `agent-browser install` to re-download.",
+             Falling back to system Chrome. Run `agent-browser install chrome` to re-download.",
             cache_dir.display()
         );
     }

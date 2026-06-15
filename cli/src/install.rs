@@ -578,9 +578,8 @@ pub fn run_patchright_install(with_deps: bool) {
         Ok(status) if status.success() => {
             println!("{}", color::success_indicator());
             println!("Patchright backend installed successfully");
-            println!(
-                "Use: agent-browser-priv --backend patchright --headed open https://example.com"
-            );
+            println!("Use: agent-browser --headed open https://example.com");
+            println!("Use --backend chrome to launch the built-in Chrome backend instead");
         }
         Ok(status) => {
             eprintln!(

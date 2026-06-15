@@ -79,7 +79,7 @@ pub(super) fn check(checks: &mut Vec<Check>) {
                         Status::Warn,
                         format!("Low disk space at state dir: {} free", human),
                     )
-                    .with_fix("free up disk space; Chrome installs require ~500 MB"),
+                    .with_fix("free up disk space; browser installs require ~500 MB"),
                 );
             } else {
                 checks.push(Check::new(

@@ -664,13 +664,21 @@ fn main() {
         return;
     }
 
-    // Handle install separately
+    // Handle install separately. This fork defaults local Chrome launches to
+    // Patchright, so a bare install prepares the default backend.
     if clean.first().map(|s| s.as_str()) == Some("install") {
         let with_deps = args.iter().any(|a| a == "--with-deps" || a == "-d");
-        if clean.get(1).map(|s| s.as_str()) == Some("patchright") {
-            run_patchright_install(with_deps);
-        } else {
-            run_install(with_deps);
+        match clean.get(1).map(|s| s.as_str()) {
+            Some("chrome") => run_install(with_deps),
+            Some("patchright") | None => run_patchright_install(with_deps),
+            Some(other) => {
+                eprintln!(
+                    "{} Unknown install target '{}'. Supported targets: patchright, chrome",
+                    color::error_indicator(),
+                    other
+                );
+                exit(1);
+            }
         }
         return;
     }
@@ -689,6 +697,8 @@ fn main() {
             quick: args.iter().any(|a| a == "--quick"),
             fix: args.iter().any(|a| a == "--fix"),
             json: flags.json,
+            backend: flags.backend.clone(),
+            engine: flags.engine.clone(),
         };
         exit(doctor::run_doctor(opts));
     }

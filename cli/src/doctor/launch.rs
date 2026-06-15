@@ -1,5 +1,5 @@
-//! Live launch test: spawn a scratch daemon session, launch headless
-//! Chrome, navigate to `about:blank`, then close. Skipped under `--quick`.
+//! Live launch test: spawn a scratch daemon session, launch a headless
+//! browser, navigate to `about:blank`, then close. Skipped under `--quick`.
 //!
 //! A `LaunchGuard` Drop impl ensures the scratch session is closed and its
 //! sidecar files cleaned even on panic or early return.
@@ -94,7 +94,7 @@ pub(super) fn check(checks: &mut Vec<Check>) {
                 Status::Fail,
                 format!("Could not start daemon: {}", e),
             )
-            .with_fix("check Chrome install and re-run with --debug"),
+            .with_fix("check browser backend install and re-run with --debug"),
         );
         return;
     }

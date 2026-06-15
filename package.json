@@ -15,8 +15,8 @@
     "skills"
   ],
   "bin": {
-    "agent-browser": "./bin/agent-browser.js",
-    "agent-browser-priv": "./bin/agent-browser.js"
+    "agent-browser": "bin/agent-browser.js",
+    "agent-browser-priv": "bin/agent-browser.js"
   },
   "scripts": {
     "version:sync": "node scripts/sync-version.js",
