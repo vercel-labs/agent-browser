@@ -130,6 +130,44 @@ fn format_stream_status_text(action: Option<&str>, data: &serde_json::Value) -> 
     }
 }
 
+fn confirmation_data(data: &serde_json::Value) -> Option<&serde_json::Value> {
+    if data
+        .get("confirmation_required")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return Some(data);
+    }
+
+    data.get("result")
+        .and_then(|v| v.get("data"))
+        .and_then(confirmation_data)
+}
+
+fn print_confirmation_required(data: &serde_json::Value) {
+    let action = data.get("action").and_then(|v| v.as_str()).unwrap_or("");
+    let category = data.get("category").and_then(|v| v.as_str()).unwrap_or("");
+    let description = data
+        .get("description")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(action);
+    let cid = data
+        .get("confirmation_id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(action);
+
+    println!("Confirmation required:");
+    if category.is_empty() {
+        println!("  {}", description);
+    } else {
+        println!("  {}: {}", category, description);
+    }
+    println!("  Run: agent-browser confirm {}", cid);
+    println!("  Or:  agent-browser deny {}", cid);
+}
+
 fn format_metric_ms(value: Option<f64>) -> String {
     value
         .map(|v| format!("{}ms", format_compact_number(v)))
@@ -1104,24 +1142,8 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
         }
 
         // Confirmation required (for orchestrator use)
-        if data
-            .get("confirmation_required")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false)
-        {
-            let category = data.get("category").and_then(|v| v.as_str()).unwrap_or("");
-            let description = data
-                .get("description")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let cid = data
-                .get("confirmation_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            println!("Confirmation required:");
-            println!("  {}: {}", category, description);
-            println!("  Run: agent-browser confirm {}", cid);
-            println!("  Or:  agent-browser deny {}", cid);
+        if let Some(pending) = confirmation_data(data) {
+            print_confirmation_required(pending);
             return;
         }
         if data
@@ -2252,6 +2274,9 @@ Plugin Login Options:
   --credential-provider <p> Resolve credentials from configured plugin <p>
   --item <ref>              Provider-specific vault item reference
   --url <url>               Login URL override
+  --username-selector <s>   Username selector override for this login
+  --password-selector <s>   Password selector override for this login
+  --submit-selector <s>     Submit selector override for this login
 
 Login behavior:
   auth login waits for form selectors to appear before filling/clicking.
@@ -3209,8 +3234,10 @@ Batch:
 Auth Vault:
   auth save <name> [opts]    Save auth profile (--url, --username, --password/--password-stdin)
   auth login <name>          Login using saved credentials (waits for form fields)
-  auth login <name> --credential-provider <plugin>
+  auth login <name> --credential-provider <plugin> [--item <ref>] [--url <url>]
                              Resolve credentials from a configured plugin
+  auth login <name> --username-selector <s> --password-selector <s>
+                             Override selectors for one login
   auth list                  List saved auth profiles
   auth show <name>           Show auth profile metadata
   auth delete <name>         Delete auth profile

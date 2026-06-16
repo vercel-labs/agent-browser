@@ -1174,9 +1174,10 @@ fn append_launch_mutator_policy_actions_for(
     actions: &mut Vec<String>,
     plugins: &[crate::plugins::PluginConfig],
 ) {
-    for plugin in plugins.iter().filter(|p| {
-        crate::plugins::plugin_has_capability(p, crate::plugins::CAPABILITY_LAUNCH_MUTATE)
-    }) {
+    for plugin in crate::plugins::resolved_plugins_with_capability(
+        plugins,
+        crate::plugins::CAPABILITY_LAUNCH_MUTATE,
+    ) {
         actions.push(crate::plugins::plugin_policy_action(
             &plugin.name,
             crate::plugins::CAPABILITY_LAUNCH_MUTATE,
@@ -1369,7 +1370,11 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
             return json!({
                 "id": id,
                 "success": true,
-                "data": { "confirmation_required": true, "action": policy_action },
+                "data": {
+                    "confirmation_required": true,
+                    "confirmation_id": id,
+                    "action": policy_action
+                },
             });
         }
     }

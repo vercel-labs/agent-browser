@@ -177,6 +177,23 @@ pub fn plugin_has_capability(plugin: &PluginConfig, capability: &str) -> bool {
     plugin.capabilities.iter().any(|c| c == capability)
 }
 
+pub fn resolved_plugins_with_capability<'a>(
+    plugins: &'a [PluginConfig],
+    capability: &str,
+) -> Vec<&'a PluginConfig> {
+    let mut resolved = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for plugin in plugins.iter().rev() {
+        if seen.insert(plugin.name.as_str()) {
+            if plugin_has_capability(plugin, capability) {
+                resolved.push(plugin);
+            }
+        }
+    }
+    resolved.reverse();
+    resolved
+}
+
 async fn invoke_plugin(
     plugin: &PluginConfig,
     request_type: &str,
@@ -387,10 +404,7 @@ pub async fn launch_mutations_from_plugins(
     request: serde_json::Value,
 ) -> Result<Vec<LaunchMutation>, String> {
     let mut mutations = Vec::new();
-    for plugin in plugins
-        .iter()
-        .filter(|p| plugin_has_capability(p, CAPABILITY_LAUNCH_MUTATE))
-    {
+    for plugin in resolved_plugins_with_capability(plugins, CAPABILITY_LAUNCH_MUTATE) {
         let response = invoke_plugin(
             plugin,
             "launch.mutate",
@@ -968,6 +982,57 @@ mod tests {
         ];
 
         assert_eq!(find_plugin(&plugins, "vault").unwrap().command, "second");
+    }
+
+    #[test]
+    fn resolved_plugins_with_capability_prefers_last_duplicate_name() {
+        let plugins = vec![
+            PluginConfig {
+                name: "stealth".to_string(),
+                command: "user-stealth".to_string(),
+                capabilities: vec![CAPABILITY_LAUNCH_MUTATE.to_string()],
+                ..PluginConfig::default()
+            },
+            PluginConfig {
+                name: "captcha".to_string(),
+                command: "captcha".to_string(),
+                capabilities: vec![CAPABILITY_COMMAND_RUN.to_string()],
+                ..PluginConfig::default()
+            },
+            PluginConfig {
+                name: "stealth".to_string(),
+                command: "project-stealth".to_string(),
+                capabilities: vec![CAPABILITY_LAUNCH_MUTATE.to_string()],
+                ..PluginConfig::default()
+            },
+        ];
+
+        let resolved = resolved_plugins_with_capability(&plugins, CAPABILITY_LAUNCH_MUTATE);
+
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].command, "project-stealth");
+    }
+
+    #[test]
+    fn resolved_plugins_with_capability_later_duplicate_can_disable_capability() {
+        let plugins = vec![
+            PluginConfig {
+                name: "stealth".to_string(),
+                command: "user-stealth".to_string(),
+                capabilities: vec![CAPABILITY_LAUNCH_MUTATE.to_string()],
+                ..PluginConfig::default()
+            },
+            PluginConfig {
+                name: "stealth".to_string(),
+                command: "project-stealth".to_string(),
+                capabilities: vec![CAPABILITY_COMMAND_RUN.to_string()],
+                ..PluginConfig::default()
+            },
+        ];
+
+        let resolved = resolved_plugins_with_capability(&plugins, CAPABILITY_LAUNCH_MUTATE);
+
+        assert!(resolved.is_empty());
     }
 
     #[test]

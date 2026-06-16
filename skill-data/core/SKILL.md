@@ -199,6 +199,7 @@ plugin instead of putting secrets in the command line:
 agent-browser plugin add agent-browser-plugin-vault --name vault
 agent-browser plugin list
 agent-browser auth login my-app --credential-provider vault --item "My App"
+agent-browser auth login my-app --credential-provider vault --item "My App" --url https://app.example.com/login --username-selector "#email" --password-selector "#password"
 ```
 
 Plugins can also provide browser providers, launch mutators such as stealth

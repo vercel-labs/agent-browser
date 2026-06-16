@@ -301,7 +301,8 @@ EOF
 ```bash
 agent-browser auth save <name> --url <url> --username <user> --password-stdin
 agent-browser auth login <name>          # Login using saved credentials
-agent-browser auth login <name> --credential-provider <plugin> [--item <ref>]
+agent-browser auth login <name> --credential-provider <plugin> [--item <ref>] [--url <url>]
+agent-browser auth login <name> --username-selector <s> --password-selector <s> [--submit-selector <s>]
 agent-browser auth list                  # List saved auth profiles
 agent-browser auth show <name>           # Show profile metadata, no passwords
 agent-browser auth delete <name>         # Delete a saved profile

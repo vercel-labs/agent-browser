@@ -714,6 +714,7 @@ Use a credential provider plugin for one login:
 
 ```bash
 agent-browser auth login my-app --credential-provider vault --item "My App"
+agent-browser auth login my-app --credential-provider vault --item "My App" --url https://app.example.com/login --username-selector "#email" --password-selector "#password" --submit-selector "button[type=submit]"
 ```
 
 Use a browser provider plugin:

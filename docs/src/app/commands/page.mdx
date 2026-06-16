@@ -312,8 +312,10 @@ See [Debugging](/debugging) for console, error, dialog, trace, highlight, and De
 ```bash
 agent-browser auth save <name> [opts]    # Save auth profile
 agent-browser auth login <name>          # Login using saved credentials
-agent-browser auth login <name> --credential-provider <plugin> [--item <ref>]
+agent-browser auth login <name> --credential-provider <plugin> [--item <ref>] [--url <url>]
                                           # Resolve credentials from plugin
+agent-browser auth login <name> --username-selector <s> --password-selector <s> [--submit-selector <s>]
+                                          # Override selectors for one login
 agent-browser auth list                  # List saved profiles (names and URLs only)
 agent-browser auth show <name>           # Show profile metadata (no passwords)
 agent-browser auth delete <name>         # Delete a saved profile
