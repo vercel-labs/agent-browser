@@ -1445,7 +1445,8 @@ The daemon starts automatically on first command and persists between commands f
 | macOS x64   | Native Rust |
 | Linux ARM64 | Native Rust |
 | Linux x64   | Native Rust |
-| Windows x64 | Native Rust |
+
+Windows release artifacts are temporarily disabled while the fork stabilizes its Patchright-first CI lane.
 
 ## Usage with AI Agents
 

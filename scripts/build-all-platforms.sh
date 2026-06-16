@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-# Build agent-browser for all platforms using Docker
+# Build agent-browser release platforms using Docker
 # Usage: ./scripts/build-all-platforms.sh
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -14,7 +14,7 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
-echo -e "${YELLOW}Building agent-browser for all platforms...${NC}"
+echo -e "${YELLOW}Building agent-browser release platforms...${NC}"
 echo ""
 
 # Ensure output directory exists
@@ -63,8 +63,9 @@ build_target "x86_64-unknown-linux-gnu" "x86_64-unknown-linux-gnu.2.28" "agent-b
 # Linux ARM64
 build_target "aarch64-unknown-linux-gnu" "aarch64-unknown-linux-gnu.2.28" "agent-browser-priv-linux-arm64"
 
-# Windows x64
-build_target "x86_64-pc-windows-gnu" "x86_64-pc-windows-gnu" "agent-browser-priv-win32-x64.exe"
+# Windows x64 is temporarily disabled. Restore this line when Windows support
+# is re-enabled:
+# build_target "x86_64-pc-windows-gnu" "x86_64-pc-windows-gnu" "agent-browser-priv-win32-x64.exe"
 
 # macOS x64 (via zig for cross-compilation)
 build_target "x86_64-apple-darwin" "x86_64-apple-darwin" "agent-browser-priv-darwin-x64"

@@ -89,30 +89,14 @@ jobs:
             build_target: aarch64-unknown-linux-gnu.2.28
             binary: agent-browser-priv-linux-arm64
             use_zigbuild: true
-          - name: Linux musl x64
-            os: ubuntu-latest
-            rust_target: x86_64-unknown-linux-musl
-            build_target: x86_64-unknown-linux-musl
-            binary: agent-browser-priv-linux-musl-x64
-            use_zigbuild: true
-          - name: Linux musl ARM64
-            os: ubuntu-latest
-            rust_target: aarch64-unknown-linux-musl
-            build_target: aarch64-unknown-linux-musl
-            binary: agent-browser-priv-linux-musl-arm64
-            use_zigbuild: true
-          - name: Windows x64
-            os: ubuntu-latest
-            rust_target: x86_64-pc-windows-gnu
-            build_target: x86_64-pc-windows-gnu
-            binary: agent-browser-priv-win32-x64.exe
-            use_zigbuild: false
-          - name: macOS x64
-            os: macos-latest
-            rust_target: x86_64-apple-darwin
-            build_target: x86_64-apple-darwin
-            binary: agent-browser-priv-darwin-x64
-            use_zigbuild: false
+          # Windows support is temporarily disabled. Keep the release lane
+          # details here so it can be restored later without rework.
+          # - name: Windows x64
+          #   os: ubuntu-latest
+          #   rust_target: x86_64-pc-windows-gnu
+          #   build_target: x86_64-pc-windows-gnu
+          #   binary: agent-browser-priv-win32-x64.exe
+          #   use_zigbuild: false
           - name: macOS ARM64
             os: macos-latest
             rust_target: aarch64-apple-darwin
@@ -151,7 +135,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu gcc-x86-64-linux-gnu mingw-w64
+          sudo apt-get install -y gcc-aarch64-linux-gnu gcc-x86-64-linux-gnu
 
       - name: Install cargo-zigbuild
         if: matrix.use_zigbuild
@@ -166,9 +150,6 @@ jobs:
           cat >> ~/.cargo/config.toml << 'EOF'
           [target.aarch64-unknown-linux-gnu]
           linker = "aarch64-linux-gnu-gcc"
-
-          [target.x86_64-pc-windows-gnu]
-          linker = "x86_64-w64-mingw32-gcc"
           EOF
 
       - name: Cache Rust build artifacts
@@ -257,10 +238,6 @@ jobs:
           EXPECTED_BINARIES=(
             "agent-browser-priv-linux-x64"
             "agent-browser-priv-linux-arm64"
-            "agent-browser-priv-linux-musl-x64"
-            "agent-browser-priv-linux-musl-arm64"
-            "agent-browser-priv-win32-x64.exe"
-            "agent-browser-priv-darwin-x64"
             "agent-browser-priv-darwin-arm64"
           )
           MIN_SIZE=100000
@@ -283,7 +260,7 @@ jobs:
             echo "Error: $ERRORS binary issues found"
             exit 1
           fi
-          echo "All 7 platform binaries present and valid"
+          echo "All 3 platform binaries present and valid"
 
       - name: Publish to npm
         run: npm publish --tag latest --provenance --access public
@@ -316,8 +293,8 @@ jobs:
       - name: Verify binaries exist
         run: |
           BINARY_COUNT=$(ls bin/agent-browser-priv-* 2>/dev/null | wc -l)
-          if [ "$BINARY_COUNT" -lt 7 ]; then
-            echo "Error: Expected 7 binaries, found $BINARY_COUNT"
+          if [ "$BINARY_COUNT" -lt 3 ]; then
+            echo "Error: Expected 3 binaries, found $BINARY_COUNT"
             ls -la bin/
             exit 1
           fi
@@ -352,3 +329,70 @@ jobs:
           fi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  homebrew-tap:
+    name: Update Homebrew Tap
+    needs: [check-release, github-release]
+    if: always() && needs.github-release.result == 'success' && needs.check-release.outputs.needs_github_release == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+    steps:
+      - name: Check tap token
+        id: tap-token
+        run: |
+          if [ -z "$TAP_GITHUB_TOKEN" ]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "HOMEBREW_TAP_TOKEN is not configured; skipping tap update."
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout source repository
+        if: steps.tap-token.outputs.configured == 'true'
+        uses: actions/checkout@v6
+        with:
+          path: source
+
+      - name: Checkout Homebrew tap
+        if: steps.tap-token.outputs.configured == 'true'
+        uses: actions/checkout@v6
+        with:
+          repository: liuwen/homebrew-agent-browser-priv
+          token: ${{ env.TAP_GITHUB_TOKEN }}
+          path: tap
+
+      - name: Setup Node.js
+        if: steps.tap-token.outputs.configured == 'true'
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: source/.node-version
+
+      - name: Update formula from release assets
+        if: steps.tap-token.outputs.configured == 'true'
+        run: |
+          node source/scripts/update-homebrew-formula.mjs \
+            --version "${{ needs.check-release.outputs.version }}" \
+            --formula tap/Formula/agent-browser.rb
+
+      - name: Validate formula syntax
+        if: steps.tap-token.outputs.configured == 'true'
+        run: ruby -c tap/Formula/agent-browser.rb
+
+      - name: Commit and push formula
+        if: steps.tap-token.outputs.configured == 'true'
+        working-directory: tap
+        run: |
+          if git diff --quiet -- Formula/agent-browser.rb; then
+            echo "Homebrew formula already up to date."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/agent-browser.rb
+          git commit -m "agent-browser ${{ needs.check-release.outputs.version }}"
+          git push

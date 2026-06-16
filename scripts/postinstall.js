@@ -5,8 +5,10 @@
  * 
  * Downloads the platform-specific native binary if not present.
  * On global installs, patches npm's bin entry to use the native binary directly:
- * - Windows: Overwrites .cmd/.ps1 shims
  * - Mac/Linux: Replaces symlink to point to native binary
+ *
+ * Windows npm binaries are temporarily disabled. The shim helpers remain below
+ * for a future re-enable.
  */
 
 import { existsSync, mkdirSync, chmodSync, createWriteStream, unlinkSync, writeFileSync, symlinkSync, lstatSync } from 'fs';
@@ -31,11 +33,21 @@ function isMusl() {
   }
 }
 
+if (platform() === 'linux' && isMusl()) {
+  console.log('agent-browser-priv does not publish musl Linux binaries.');
+  console.log('Use a glibc-based Linux environment or build locally with npm run build:native.');
+  process.exit(0);
+}
+
+if (platform() === 'win32') {
+  console.log('agent-browser-priv Windows npm binaries are temporarily disabled.');
+  console.log('Use Linux x64, Linux ARM64, or macOS ARM64 for the published package.');
+  process.exit(0);
+}
+
 // Platform detection
-const osKey = platform() === 'linux' && isMusl() ? 'linux-musl' : platform();
-// Windows ARM64 falls back to x64 binary (no native ARM64 build available).
-// x64 binaries run via Windows' built-in emulation on ARM64.
-const effectiveArch = platform() === 'win32' && arch() === 'arm64' ? 'x64' : arch();
+const osKey = platform();
+const effectiveArch = arch();
 const platformKey = `${osKey}-${effectiveArch}`;
 const ext = platform() === 'win32' ? '.exe' : '';
 const binaryName = `agent-browser-priv-${platformKey}${ext}`;
@@ -132,9 +144,6 @@ async function main() {
   }
 
   console.log(`Downloading native binary for ${platformKey}...`);
-  if (platform() === 'win32' && arch() === 'arm64') {
-    console.log(`  Note: Using x64 binary on ARM64 Windows (runs via emulation)`);
-  }
   console.log(`URL: ${DOWNLOAD_URL}`);
 
   try {
@@ -230,6 +239,7 @@ function showInstallReminder() {
  */
 async function fixGlobalInstallBin() {
   if (platform() === 'win32') {
+    // Unreachable while Windows npm binaries are disabled; kept for future re-enable.
     await fixWindowsShims();
   } else {
     await fixUnixSymlink();

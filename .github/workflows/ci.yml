@@ -84,10 +84,10 @@ jobs:
         include:
           - os: macos-latest
             target: aarch64-apple-darwin
-          - os: macos-latest
-            target: x86_64-apple-darwin
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
+          # Windows support is temporarily disabled. Keep this placeholder so
+          # the lane can be restored without rediscovering the target triple.
+          # - os: windows-latest
+          #   target: x86_64-pc-windows-msvc
 
     steps:
       - name: Checkout repository
@@ -104,12 +104,7 @@ jobs:
           workspaces: cli
 
       - name: Run Rust tests
-        if: runner.os != 'Windows'
         run: cargo test --profile ci --manifest-path cli/Cargo.toml --target ${{ matrix.target }}
-
-      - name: Compile Rust tests
-        if: runner.os == 'Windows'
-        run: cargo test --profile ci --manifest-path cli/Cargo.toml --target ${{ matrix.target }} --no-run
 
   native-e2e:
     name: Native E2E Tests
@@ -141,7 +136,7 @@ jobs:
 
   windows-integration:
     name: Windows Integration Test
-    if: github.event_name != 'pull_request'
+    if: false # Windows support is temporarily disabled; keep the job for future re-enable.
     runs-on: windows-latest
     needs: rust-cross
     timeout-minutes: 20
@@ -212,9 +207,10 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
             binary: agent-browser-priv-darwin-arm64
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            binary: agent-browser-priv-win32-x64.exe
+          # Windows support is temporarily disabled.
+          # - os: windows-latest
+          #   target: x86_64-pc-windows-msvc
+          #   binary: agent-browser-priv-win32-x64.exe
 
     steps:
       - name: Checkout repository

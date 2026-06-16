@@ -16,6 +16,12 @@
 - Kept the release surface focused on Linux x64, Linux ARM64, and macOS ARM64 artifacts.
 - Kept npm trusted publishing and Homebrew tap update support for ad hoc installs and local daily use.
 
+### Infrastructure
+
+- Fixed CI install parsing for `agent-browser install --with-deps`, made timeout-sensitive tests deterministic, and bounded long-running CI jobs.
+- Temporarily disabled Windows CI, release, and npm binary lanes while keeping restore placeholders; active artifacts are Linux x64, Linux ARM64, and macOS ARM64.
+- Added a release-gated Homebrew tap updater that generates formula checksums from published GitHub release assets and skips cleanly when tap credentials are not configured.
+
 ### Bug Fixes
 
 - Fixed Patchright CDP readiness detection so `open --wait-until none` no longer hangs while Chrome keeps `/json/version` connections open.
