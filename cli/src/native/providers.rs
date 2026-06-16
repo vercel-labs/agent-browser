@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use std::env;
 
 /// Provider session info for cleanup on failure.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ProviderSession {
     pub provider: String,
     pub session_id: String,

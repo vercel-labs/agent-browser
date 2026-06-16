@@ -79,9 +79,7 @@ fn apply_hide_scrollbars_launch_option(
 }
 
 fn attach_plugins_to_command(cmd: &mut serde_json::Value, plugins: &[plugins::PluginConfig]) {
-    if !plugins.is_empty() {
-        cmd["plugins"] = json!(plugins);
-    }
+    cmd["plugins"] = json!(plugins);
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -868,11 +866,8 @@ fn main() {
     } else {
         (None, None, None)
     };
-    let plugin_registry_json = if flags.plugins.is_empty() {
-        None
-    } else {
-        Some(serde_json::to_string(&flags.plugins).unwrap_or_else(|_| "[]".to_string()))
-    };
+    let plugin_registry_json =
+        serde_json::to_string(&flags.plugins).unwrap_or_else(|_| "[]".to_string());
     let daemon_opts = DaemonOptions {
         headed: flags.headed,
         debug: flags.debug,
@@ -904,7 +899,7 @@ fn main() {
         default_timeout: flags.default_timeout,
         cdp: flags.cdp.as_deref(),
         no_auto_dialog: flags.no_auto_dialog,
-        plugins: plugin_registry_json.as_deref(),
+        plugins: Some(plugin_registry_json.as_str()),
     };
 
     let daemon_result = match ensure_daemon(&flags.session, &daemon_opts) {
@@ -1178,9 +1173,7 @@ fn main() {
                 "action": "launch",
                 "provider": provider
             });
-            if !flags.plugins.is_empty() {
-                launch_cmd["plugins"] = json!(flags.plugins.clone());
-            }
+            launch_cmd["plugins"] = json!(flags.plugins.clone());
 
             if let Some(ref cs) = flags.color_scheme {
                 launch_cmd["colorScheme"] = json!(cs);
@@ -1233,9 +1226,7 @@ fn main() {
             "action": "launch",
             "headless": !flags.headed
         });
-        if !flags.plugins.is_empty() {
-            launch_cmd["plugins"] = json!(flags.plugins.clone());
-        }
+        launch_cmd["plugins"] = json!(flags.plugins.clone());
 
         let cmd_obj = launch_cmd
             .as_object_mut()
@@ -1668,6 +1659,15 @@ mod tests {
 
         assert_eq!(cmd["plugins"][0]["name"], "stealth");
         assert_eq!(cmd["plugins"][0]["capabilities"][0], "launch.mutate");
+    }
+
+    #[test]
+    fn test_attach_plugins_to_command_adds_empty_registry_payload() {
+        let mut cmd = json!({ "action": "navigate", "url": "https://example.com" });
+
+        attach_plugins_to_command(&mut cmd, &[]);
+
+        assert_eq!(cmd["plugins"], json!([]));
     }
 
     #[test]

@@ -64,6 +64,12 @@ pub struct PendingConfirmation {
     approved_actions: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+struct ActiveProviderSession {
+    session: providers::ProviderSession,
+    plugins: Vec<crate::plugins::PluginConfig>,
+}
+
 /// Captured request/response metadata used to export HAR 1.2 files.
 pub struct HarEntry {
     pub request_id: String,
@@ -271,6 +277,8 @@ pub struct DaemonState {
     pub viewport: Option<(i32, i32, f64, bool)>,
     /// Init script sources returned by launch mutator plugins for this launch.
     pub plugin_init_scripts: Vec<String>,
+    /// Provider cleanup metadata for the active external browser session.
+    active_provider_session: Option<ActiveProviderSession>,
     /// Actions already approved while replaying a confirmed command.
     confirmed_policy_actions: HashSet<String>,
 }
@@ -332,6 +340,7 @@ impl DaemonState {
                 .unwrap_or(25_000),
             viewport: None,
             plugin_init_scripts: Vec::new(),
+            active_provider_session: None,
             confirmed_policy_actions: HashSet::new(),
         }
     }
@@ -1207,6 +1216,42 @@ fn plugins_from_command_or_env(cmd: &Value) -> Vec<crate::plugins::PluginConfig>
         .unwrap_or_else(crate::plugins::plugins_from_env)
 }
 
+fn remember_active_provider_session(
+    state: &mut DaemonState,
+    session: Option<providers::ProviderSession>,
+    plugins: &[crate::plugins::PluginConfig],
+) {
+    state.active_provider_session = session.map(|session| ActiveProviderSession {
+        session,
+        plugins: plugins.to_vec(),
+    });
+}
+
+async fn close_active_provider_session(state: &mut DaemonState) {
+    if let Some(active) = state.active_provider_session.take() {
+        providers::close_provider_session_with_plugins(&active.session, &active.plugins).await;
+    }
+}
+
+pub(crate) async fn close_current_browser(state: &mut DaemonState) -> Result<(), String> {
+    let close_error = if let Some(mut mgr) = state.browser.take() {
+        mgr.close().await.err()
+    } else {
+        None
+    };
+
+    close_active_provider_session(state).await;
+    state.launch_hash = None;
+    state.screencasting = false;
+    state.reset_input_state();
+    state.update_stream_client().await;
+
+    if let Some(err) = close_error {
+        return Err(err);
+    }
+    Ok(())
+}
+
 fn provider_plugin_launch_options_from_command(cmd: &Value) -> Value {
     let mut options = serde_json::Map::new();
     if let Some(headless) = cmd.get("headless").and_then(|v| v.as_bool()) {
@@ -1408,14 +1453,8 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
 
     if !skip_launch {
         if needs_launch {
-            if state.browser.is_some() {
-                if let Some(ref mut mgr) = state.browser {
-                    let _ = mgr.close().await;
-                }
-                state.browser = None;
-                state.screencasting = false;
-                state.reset_input_state();
-                state.update_stream_client().await;
+            if state.browser.is_some() || state.active_provider_session.is_some() {
+                let _ = close_current_browser(state).await;
             }
             if let Err(e) = auto_launch(state, plugins_from_command_or_env(cmd)).await {
                 return error_response(&id, &format!("Auto-launch failed: {}", e));
@@ -1801,6 +1840,7 @@ async fn auto_launch(
                 Ok(mgr) => {
                     state.reset_input_state();
                     state.browser = Some(mgr);
+                    remember_active_provider_session(state, conn.session.clone(), &plugins);
                     state.subscribe_to_browser_events();
                     state.start_fetch_handler();
                     state.start_dialog_handler();
@@ -2028,23 +2068,9 @@ async fn load_storage_state(state: &DaemonState, path: &Option<String>) -> Resul
 }
 
 async fn rollback_failed_launch(state: &mut DaemonState) -> Result<(), String> {
-    let close_error = if let Some(mut mgr) = state.browser.take() {
-        mgr.close().await.err()
-    } else {
-        None
-    };
-
-    state.launch_hash = None;
-    state.screencasting = false;
-    state.reset_input_state();
+    let close_result = close_current_browser(state).await;
     state.ref_map.clear();
-    state.update_stream_client().await;
-
-    if let Some(err) = close_error {
-        return Err(err);
-    }
-
-    Ok(())
+    close_result
 }
 
 async fn load_storage_state_or_rollback(
@@ -2194,13 +2220,8 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     };
 
     if needs_relaunch {
-        if let Some(ref mut b) = state.browser {
-            b.close().await?;
-            state.browser = None;
-            state.launch_hash = None;
-            state.screencasting = false;
-            state.reset_input_state();
-            state.update_stream_client().await;
+        if state.browser.is_some() || state.active_provider_session.is_some() {
+            close_current_browser(state).await?;
         }
     } else {
         load_storage_state(state, &storage_state_owned).await?;
@@ -2289,6 +2310,11 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
                     Ok(mgr) => {
                         state.reset_input_state();
                         state.browser = Some(mgr);
+                        remember_active_provider_session(
+                            state,
+                            conn.session.clone(),
+                            &command_plugins,
+                        );
                         state.subscribe_to_browser_events();
                         state.start_fetch_handler();
                         state.start_dialog_handler();
@@ -2699,14 +2725,7 @@ async fn handle_close(state: &mut DaemonState) -> Result<Value, String> {
             }
         }
     }
-    if let Some(ref mut mgr) = state.browser {
-        mgr.close().await?;
-    }
-    state.browser = None;
-    state.launch_hash = None;
-    state.screencasting = false;
-    state.reset_input_state();
-    state.update_stream_client().await;
+    close_current_browser(state).await?;
 
     // Stop background Fetch handler
     if let Some(task) = state.fetch_handler_task.take() {
@@ -8842,6 +8861,49 @@ mod tests {
         let pending = state.pending_confirmation.as_ref().unwrap();
         assert_eq!(pending.action, "plugin:stealth:launch.mutate");
         assert!(pending.approved_actions.iter().any(|a| a == "navigate"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_close_current_browser_closes_active_provider_plugin_session() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let request_path = dir.path().join("browser-close-request.json");
+        let plugin_path = dir.path().join("mock-provider-plugin");
+        fs::write(
+            &plugin_path,
+            r#"#!/bin/sh
+cat > "$1"
+printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
+"#,
+        )
+        .unwrap();
+        let mut perms = fs::metadata(&plugin_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&plugin_path, perms).unwrap();
+
+        let mut state = DaemonState::new();
+        state.active_provider_session = Some(ActiveProviderSession {
+            session: providers::ProviderSession {
+                provider: "plugin:cloud-browser".to_string(),
+                session_id: r#"{"sessionId":"s1"}"#.to_string(),
+            },
+            plugins: vec![crate::plugins::PluginConfig {
+                name: "cloud-browser".to_string(),
+                command: plugin_path.to_string_lossy().to_string(),
+                args: vec![request_path.to_string_lossy().to_string()],
+                capabilities: vec![crate::plugins::CAPABILITY_BROWSER_PROVIDER.to_string()],
+                ..crate::plugins::PluginConfig::default()
+            }],
+        });
+
+        close_current_browser(&mut state).await.unwrap();
+
+        assert!(state.active_provider_session.is_none());
+        let request = fs::read_to_string(request_path).unwrap();
+        assert!(request.contains(r#""type":"browser.close""#));
+        assert!(request.contains(r#""sessionId":"s1""#));
     }
 
     #[tokio::test]
