@@ -58,6 +58,9 @@ const AUTH_LOGIN_SELECTOR_POLL_INTERVAL_MS: u64 = 100;
 /// fallback selectors are allowed.
 const AUTH_LOGIN_PREFERRED_SELECTOR_WINDOW_MS: u64 = 5_000;
 
+#[cfg(test)]
+static DEFAULT_TIMEOUT_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub struct PendingConfirmation {
     pub action: String,
     pub cmd: Value,
@@ -9779,6 +9782,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
 
     #[test]
     fn test_default_timeout_ms_from_env() {
+        let _guard = DEFAULT_TIMEOUT_ENV_LOCK.lock().unwrap();
         // When AGENT_BROWSER_DEFAULT_TIMEOUT is set, DaemonState should use it
         env::set_var("AGENT_BROWSER_DEFAULT_TIMEOUT", "3000");
         let state = DaemonState::new();
@@ -9788,6 +9792,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
 
     #[test]
     fn test_default_timeout_ms_fallback() {
+        let _guard = DEFAULT_TIMEOUT_ENV_LOCK.lock().unwrap();
         // When AGENT_BROWSER_DEFAULT_TIMEOUT is unset, DaemonState uses the
         // documented 25s default (below the CLI's 30s IPC read timeout).
         env::remove_var("AGENT_BROWSER_DEFAULT_TIMEOUT");

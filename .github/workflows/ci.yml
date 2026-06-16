@@ -120,9 +120,9 @@ jobs:
         with:
           workspaces: cli
 
-      - name: Install Chrome
+      - name: Install Patchright browser backend
         run: |
-          cargo run --manifest-path cli/Cargo.toml -- install --with-deps
+          cargo run --manifest-path cli/Cargo.toml -- install patchright --with-deps
 
       - name: Install ffmpeg
         run: sudo apt-get update && sudo apt-get install -y ffmpeg

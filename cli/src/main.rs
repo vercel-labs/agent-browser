@@ -187,6 +187,14 @@ fn run_interactive_confirmations(
     resp
 }
 
+fn install_target_arg(clean: &[String]) -> Option<&str> {
+    clean
+        .iter()
+        .skip(1)
+        .find(|arg| !matches!(arg.as_str(), "--with-deps" | "-d"))
+        .map(|arg| arg.as_str())
+}
+
 struct ParsedProxy {
     server: String,
     username: Option<String>,
@@ -692,7 +700,7 @@ fn main() {
     // Patchright, so a bare install prepares the default backend.
     if clean.first().map(|s| s.as_str()) == Some("install") {
         let with_deps = args.iter().any(|a| a == "--with-deps" || a == "-d");
-        match clean.get(1).map(|s| s.as_str()) {
+        match install_target_arg(&clean) {
             Some("chrome") => run_install(with_deps),
             Some("patchright") | None => run_patchright_install(with_deps),
             Some(other) => {
@@ -1751,5 +1759,37 @@ mod tests {
         assert_eq!(prompt.action, "plugin:stealth:launch.mutate");
         assert_eq!(prompt.description, "plugin:stealth:launch.mutate");
         assert_eq!(prompt.confirmation_id, "original-command");
+    }
+
+    #[test]
+    fn test_install_target_arg_ignores_dependency_flags() {
+        let bare = vec!["install".to_string()];
+        assert_eq!(install_target_arg(&bare), None);
+
+        let with_deps = vec!["install".to_string(), "--with-deps".to_string()];
+        assert_eq!(install_target_arg(&with_deps), None);
+
+        let short_with_deps = vec!["install".to_string(), "-d".to_string()];
+        assert_eq!(install_target_arg(&short_with_deps), None);
+
+        let chrome_with_deps = vec![
+            "install".to_string(),
+            "chrome".to_string(),
+            "--with-deps".to_string(),
+        ];
+        assert_eq!(install_target_arg(&chrome_with_deps), Some("chrome"));
+
+        let deps_then_patchright = vec![
+            "install".to_string(),
+            "--with-deps".to_string(),
+            "patchright".to_string(),
+        ];
+        assert_eq!(
+            install_target_arg(&deps_then_patchright),
+            Some("patchright")
+        );
+
+        let unknown = vec!["install".to_string(), "firefox".to_string()];
+        assert_eq!(install_target_arg(&unknown), Some("firefox"));
     }
 }
