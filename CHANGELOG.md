@@ -1,8 +1,24 @@
 # agent-browser
 
-## 0.27.3
+## 0.28.0
 
 <!-- release:start -->
+### New Features
+
+- **MCP server** - Added `agent-browser mcp`, a stdio Model Context Protocol server with typed tools, paginated discovery, protocol negotiation, and startup tool profiles. The default `core` profile keeps context small, while `--tools all` exposes full CLI parity and composed profiles such as `core,network,react` are supported (#1454)
+- **Plugin system** - Added out-of-process plugin support over the `agent-browser.plugin.v1` stdio protocol, with `plugin add/list/show/run`, manifest discovery, npm and GitHub refs, credential providers, browser provider plugins, launch mutators, custom command capabilities, config and env registry support, and capability-scoped policy gates (#1452)
+
+### Infrastructure
+
+- Added **context footprint eval coverage** for CLI skills, MCP core, and MCP full-profile surfaces, plus MCP parity tests to keep tool behavior aligned with the CLI (#1454)
+
+### Contributors
+
+- @ctate
+<!-- release:end -->
+
+## 0.27.3
+
 ### Bug Fixes
 
 - Fixed **Windows ARM64 installs** by falling back to the Windows x64 binary during postinstall, avoiding failed downloads for a native ARM64 artifact that is not published (#1269)
@@ -10,7 +26,6 @@
 ### Contributors
 
 - @EternalRights
-<!-- release:end -->
 
 ## 0.27.2
 
