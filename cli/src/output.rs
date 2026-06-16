@@ -3017,8 +3017,8 @@ Tool profiles:
              screenshots, JavaScript eval, close, tab basics, and profile discovery
   network    Network routes, request inspection, HAR, headers, credentials, offline
   state      Cookies, storage, auth, saved state, sessions, profiles, skills
-  debug      Console/errors, tracing, profiling, recording, clipboard, doctor,
-             dashboard, install, upgrade, chat, diff, batch, confirm/deny
+  debug      Console/errors, tracing, profiling, recording, clipboard, plugins,
+             doctor, dashboard, install, upgrade, chat, diff, batch, confirm/deny
   tabs       Back/forward/reload, tabs, windows, frames, dialogs
   react      React tree/inspect/renders/suspense, vitals, pushstate
   mobile     Viewport/device/geolocation/media, touch, swipe, mouse, keyboard

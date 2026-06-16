@@ -70,7 +70,8 @@ versions during initialization. The default tools profile is `core`, which
 keeps MCP context small for everyday browser automation. Use `--tools all` for
 the full typed CLI parity surface, or combine profiles with commas, such as
 `--tools core,network,react`. Profiles are `core`, `network`, `state`, `debug`,
-`tabs`, `react`, `mobile`, and `all`. Each tool accepts typed arguments plus
+`tabs`, `react`, `mobile`, and `all`; the `debug` profile includes plugin
+registry and command.run tools. Each tool accepts typed arguments plus
 `extraArgs` for advanced CLI flags and exact CLI parity. Tool discovery is
 paginated and includes read-only/open-world annotations so modern MCP clients
 can load the large typed surface incrementally. Use the tool `session` argument

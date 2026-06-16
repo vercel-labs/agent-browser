@@ -153,6 +153,10 @@ const TOOL_PROFILES: &str = "agent_browser_profiles";
 const TOOL_SKILLS_LIST: &str = "agent_browser_skills_list";
 const TOOL_SKILLS_GET: &str = "agent_browser_skills_get";
 const TOOL_SKILLS_PATH: &str = "agent_browser_skills_path";
+const TOOL_PLUGIN_ADD: &str = "agent_browser_plugin_add";
+const TOOL_PLUGIN_LIST: &str = "agent_browser_plugin_list";
+const TOOL_PLUGIN_SHOW: &str = "agent_browser_plugin_show";
+const TOOL_PLUGIN_RUN: &str = "agent_browser_plugin_run";
 const TOOL_DOCTOR: &str = "agent_browser_doctor";
 const TOOL_DASHBOARD_START: &str = "agent_browser_dashboard_start";
 const TOOL_DASHBOARD_STOP: &str = "agent_browser_dashboard_stop";
@@ -246,7 +250,7 @@ impl ToolProfile {
             Self::Core => "Everyday browser automation with navigation, snapshots, common interaction, waits, screenshots, basic reads, tab basics, JavaScript eval, close, and profile discovery.",
             Self::Network => "Network interception, request inspection, HAR capture, headers, credentials, and offline mode.",
             Self::State => "Cookies, storage, auth profiles, saved browser state, sessions, Chrome profiles, and bundled skills.",
-            Self::Debug => "Console/errors, highlighting, DevTools, tracing, profiling, PDF, downloads/uploads, recording, clipboard, doctor, dashboard, install, upgrade, and chat.",
+            Self::Debug => "Console/errors, highlighting, DevTools, tracing, profiling, PDF, downloads/uploads, recording, clipboard, plugin registry and plugin command.run, doctor, dashboard, install, upgrade, and chat.",
             Self::Tabs => "Tab, window, frame, and JavaScript dialog management.",
             Self::React => "React tree inspection, render recording, Suspense inspection, Web Vitals, SPA pushstate, and init-script removal.",
             Self::Mobile => "Viewport/device/geolocation/media emulation plus touch, swipe, and lower-level mouse tools.",
@@ -416,6 +420,10 @@ const DEBUG_PROFILE_TOOLS: &[&str] = &[
     TOOL_STREAM_ENABLE,
     TOOL_STREAM_DISABLE,
     TOOL_STREAM_STATUS,
+    TOOL_PLUGIN_ADD,
+    TOOL_PLUGIN_LIST,
+    TOOL_PLUGIN_SHOW,
+    TOOL_PLUGIN_RUN,
     TOOL_DOCTOR,
     TOOL_DASHBOARD_START,
     TOOL_DASHBOARD_STOP,
@@ -1634,6 +1642,44 @@ fn parity_tools() -> Vec<Value> {
             &[],
         ),
         tool(
+            TOOL_PLUGIN_ADD,
+            "Plugin add",
+            "Add a plugin from npm or GitHub to agent-browser config.",
+            json!({
+                "reference": { "type": "string", "description": "npm package, scoped package, or owner/repo GitHub reference." },
+                "name": { "type": "string", "description": "Override the configured plugin name." },
+                "capabilities": string_array_schema("Capabilities to declare when manifest discovery is skipped or unavailable."),
+                "global": { "type": "boolean", "default": false, "description": "Write ~/.agent-browser/config.json instead of ./agent-browser.json." },
+                "noManifest": { "type": "boolean", "default": false, "description": "Skip plugin.manifest discovery." }
+            }),
+            &["reference"],
+        ),
+        tool(
+            TOOL_PLUGIN_LIST,
+            "Plugin list",
+            "List configured plugins.",
+            json!({}),
+            &[],
+        ),
+        tool(
+            TOOL_PLUGIN_SHOW,
+            "Plugin show",
+            "Show one configured plugin.",
+            json!({ "name": { "type": "string" } }),
+            &["name"],
+        ),
+        tool(
+            TOOL_PLUGIN_RUN,
+            "Plugin run",
+            "Run a command.run or custom plugin request.",
+            json!({
+                "name": { "type": "string", "description": "Configured plugin name." },
+                "requestType": { "type": "string", "description": "Namespaced request type to send to the plugin." },
+                "payload": { "type": "object", "additionalProperties": true, "description": "JSON object payload to send as the plugin request." }
+            }),
+            &["name", "requestType"],
+        ),
+        tool(
             TOOL_DOCTOR,
             "Doctor",
             "Diagnose the installation.",
@@ -1832,6 +1878,8 @@ fn is_read_only_tool(name: &str) -> bool {
             | TOOL_SKILLS_LIST
             | TOOL_SKILLS_GET
             | TOOL_SKILLS_PATH
+            | TOOL_PLUGIN_LIST
+            | TOOL_PLUGIN_SHOW
     )
 }
 
@@ -1844,6 +1892,8 @@ fn is_open_world_tool(name: &str) -> bool {
             | TOOL_SKILLS_LIST
             | TOOL_SKILLS_GET
             | TOOL_SKILLS_PATH
+            | TOOL_PLUGIN_LIST
+            | TOOL_PLUGIN_SHOW
             | TOOL_DOCTOR
             | TOOL_DASHBOARD_START
             | TOOL_DASHBOARD_STOP
@@ -2047,6 +2097,10 @@ fn call_tool(params: Option<&Value>, config: &McpConfig) -> Result<Value, Protoc
         TOOL_SKILLS_LIST => call_literal(arguments, &["skills", "list"]),
         TOOL_SKILLS_GET => call_skills_get(arguments),
         TOOL_SKILLS_PATH => call_optional_one(arguments, &["skills", "path"], "name"),
+        TOOL_PLUGIN_ADD => call_plugin_add(arguments),
+        TOOL_PLUGIN_LIST => call_literal(arguments, &["plugin", "list"]),
+        TOOL_PLUGIN_SHOW => call_one_string(arguments, "plugin show", "name"),
+        TOOL_PLUGIN_RUN => call_plugin_run(arguments),
         TOOL_DOCTOR => call_doctor(arguments),
         TOOL_DASHBOARD_START => call_dashboard_start(arguments),
         TOOL_DASHBOARD_STOP => call_literal(arguments, &["dashboard", "stop"]),
@@ -2506,14 +2560,34 @@ fn call_set_credentials(arguments: &Value) -> Result<Value, ProtocolError> {
 }
 
 fn call_set_media(arguments: &Value) -> Result<Value, ProtocolError> {
+    call_cli_tool(arguments, set_media_args(arguments)?, None)
+}
+
+fn set_media_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
     let mut args = vec!["set".to_string(), "media".to_string()];
     if let Some(color_scheme) = optional_string(arguments, "colorScheme")? {
+        match color_scheme.as_str() {
+            "dark" | "light" | "no-preference" => {}
+            _ => {
+                return Err(ProtocolError::invalid_params(
+                    "colorScheme must be dark, light, or no-preference",
+                ));
+            }
+        }
         args.push(color_scheme);
     }
     if let Some(reduced_motion) = optional_string(arguments, "reducedMotion")? {
-        args.push(reduced_motion);
+        match reduced_motion.as_str() {
+            "reduce" => args.push("reduced-motion".to_string()),
+            "no-preference" => args.push("no-preference".to_string()),
+            _ => {
+                return Err(ProtocolError::invalid_params(
+                    "reducedMotion must be reduce or no-preference",
+                ));
+            }
+        }
     }
-    call_cli_tool(arguments, args, None)
+    Ok(args)
 }
 
 fn call_network_route(arguments: &Value) -> Result<Value, ProtocolError> {
@@ -2943,6 +3017,49 @@ fn call_skills_get(arguments: &Value) -> Result<Value, ProtocolError> {
         args.push("--full".to_string());
     }
     call_cli_tool(arguments, args, None)
+}
+
+fn call_plugin_add(arguments: &Value) -> Result<Value, ProtocolError> {
+    call_cli_tool(arguments, plugin_add_args(arguments)?, None)
+}
+
+fn plugin_add_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
+    let reference = required_string(arguments, "reference")?;
+    let mut args = vec!["plugin".to_string(), "add".to_string(), reference];
+    if let Some(name) = optional_string(arguments, "name")? {
+        args.push("--name".to_string());
+        args.push(name);
+    }
+    if let Some(capabilities) = optional_string_array(arguments, "capabilities")? {
+        for capability in capabilities {
+            args.push("--capability".to_string());
+            args.push(capability);
+        }
+    }
+    if optional_bool(arguments, "global")?.unwrap_or(false) {
+        args.push("--global".to_string());
+    }
+    if optional_bool(arguments, "noManifest")?.unwrap_or(false) {
+        args.push("--no-manifest".to_string());
+    }
+    Ok(args)
+}
+
+fn call_plugin_run(arguments: &Value) -> Result<Value, ProtocolError> {
+    call_cli_tool(arguments, plugin_run_args(arguments)?, None)
+}
+
+fn plugin_run_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
+    let name = required_string(arguments, "name")?;
+    let request_type = required_string(arguments, "requestType")?;
+    let mut args = vec!["plugin".to_string(), "run".to_string(), name, request_type];
+    if let Some(payload) = optional_value(arguments, "payload")? {
+        let payload = serde_json::to_string(payload)
+            .map_err(|e| ProtocolError::invalid_params(format!("payload encode error: {}", e)))?;
+        args.push("--payload".to_string());
+        args.push(payload);
+    }
+    Ok(args)
 }
 
 fn call_doctor(arguments: &Value) -> Result<Value, ProtocolError> {
@@ -3401,6 +3518,10 @@ mod tests {
         assert!(names.contains(&TOOL_NETWORK_HAR_START));
         assert!(names.contains(&TOOL_REACT_SUSPENSE));
         assert!(names.contains(&TOOL_SKILLS_GET));
+        assert!(names.contains(&TOOL_PLUGIN_ADD));
+        assert!(names.contains(&TOOL_PLUGIN_LIST));
+        assert!(names.contains(&TOOL_PLUGIN_SHOW));
+        assert!(names.contains(&TOOL_PLUGIN_RUN));
         assert!(!names.contains(&"agent_browser_frame_list"));
     }
 
@@ -3454,6 +3575,7 @@ mod tests {
         assert!(names.contains(&TOOL_CLICK));
         assert!(names.contains(&TOOL_SCREENSHOT));
         assert!(!names.contains(&TOOL_NETWORK_HAR_START));
+        assert!(!names.contains(&TOOL_PLUGIN_LIST));
         assert!(!names.contains(&TOOL_REACT_TREE));
         assert!(result.get("nextCursor").is_none());
     }
@@ -3546,6 +3668,65 @@ mod tests {
         append_react_raw_json_arg(&json!({ "json": true }), &mut args).unwrap();
 
         assert_eq!(args, vec!["react", "tree", RAW_JSON_ARG]);
+    }
+
+    #[test]
+    fn set_media_args_translate_reduced_motion_for_cli_parser() {
+        let args = set_media_args(&json!({
+            "colorScheme": "dark",
+            "reducedMotion": "reduce",
+        }))
+        .unwrap();
+
+        assert_eq!(args, vec!["set", "media", "dark", "reduced-motion"]);
+    }
+
+    #[test]
+    fn plugin_add_args_include_registry_options() {
+        let args = plugin_add_args(&json!({
+            "reference": "@company/agent-browser-plugin-vault",
+            "name": "vault",
+            "capabilities": ["credential.read", "command.run"],
+            "global": true,
+            "noManifest": true,
+        }))
+        .unwrap();
+
+        assert_eq!(
+            args,
+            vec![
+                "plugin",
+                "add",
+                "@company/agent-browser-plugin-vault",
+                "--name",
+                "vault",
+                "--capability",
+                "credential.read",
+                "--capability",
+                "command.run",
+                "--global",
+                "--no-manifest",
+            ]
+        );
+    }
+
+    #[test]
+    fn plugin_run_args_encode_payload() {
+        let args = plugin_run_args(&json!({
+            "name": "captcha",
+            "requestType": "captcha.solve",
+            "payload": {
+                "siteKey": "abc",
+                "url": "https://example.com"
+            },
+        }))
+        .unwrap();
+
+        assert_eq!(args[0..4], ["plugin", "run", "captcha", "captcha.solve"]);
+        assert_eq!(args[4], "--payload");
+        let payload: Value = serde_json::from_str(&args[5]).unwrap();
+        assert_eq!(payload["siteKey"], "abc");
+        assert_eq!(payload["url"], "https://example.com");
     }
 
     #[test]
