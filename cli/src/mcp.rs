@@ -164,6 +164,7 @@ const TOOL_CLOSE: &str = "agent_browser_close";
 const TOOL_TOOLS_PROFILES: &str = "agent_browser_tools_profiles";
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 const MAX_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
+const RAW_JSON_ARG: &str = "--raw-json";
 
 #[derive(Debug)]
 struct ProtocolError {
@@ -1905,7 +1906,7 @@ fn call_tool(params: Option<&Value>, config: &McpConfig) -> Result<Value, Protoc
         TOOL_TOOLS_PROFILES => call_tools_profiles(config),
         TOOL_OPEN => call_open(arguments),
         TOOL_SNAPSHOT => call_snapshot(arguments),
-        TOOL_CLICK => call_simple_selector(arguments, "click"),
+        TOOL_CLICK => call_click(arguments),
         TOOL_BACK => call_literal(arguments, &["back"]),
         TOOL_FORWARD => call_literal(arguments, &["forward"]),
         TOOL_RELOAD => call_literal(arguments, &["reload"]),
@@ -2201,6 +2202,19 @@ fn call_snapshot(arguments: &Value) -> Result<Value, ProtocolError> {
 fn call_simple_selector(arguments: &Value, command: &str) -> Result<Value, ProtocolError> {
     let selector = required_string(arguments, "selector")?;
     call_cli_tool(arguments, vec![command.to_string(), selector], None)
+}
+
+fn click_command_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
+    let selector = required_string(arguments, "selector")?;
+    let mut args = vec!["click".to_string(), selector];
+    if optional_bool(arguments, "newTab")?.unwrap_or(false) {
+        args.push("--new-tab".to_string());
+    }
+    Ok(args)
+}
+
+fn call_click(arguments: &Value) -> Result<Value, ProtocolError> {
+    call_cli_tool(arguments, click_command_args(arguments)?, None)
 }
 
 fn call_fill(arguments: &Value) -> Result<Value, ProtocolError> {
@@ -2847,18 +2861,14 @@ fn call_batch(arguments: &Value) -> Result<Value, ProtocolError> {
 
 fn call_react_tree(arguments: &Value) -> Result<Value, ProtocolError> {
     let mut args = vec!["react".to_string(), "tree".to_string()];
-    if optional_bool(arguments, "json")?.unwrap_or(false) {
-        args.push("--json".to_string());
-    }
+    append_react_raw_json_arg(arguments, &mut args)?;
     call_cli_tool(arguments, args, None)
 }
 
 fn call_react_inspect(arguments: &Value) -> Result<Value, ProtocolError> {
     let id = required_u64(arguments, "id")?;
     let mut args = vec!["react".to_string(), "inspect".to_string(), id.to_string()];
-    if optional_bool(arguments, "json")?.unwrap_or(false) {
-        args.push("--json".to_string());
-    }
+    append_react_raw_json_arg(arguments, &mut args)?;
     call_cli_tool(arguments, args, None)
 }
 
@@ -2868,9 +2878,7 @@ fn call_react_renders_start(arguments: &Value) -> Result<Value, ProtocolError> {
         "renders".to_string(),
         "start".to_string(),
     ];
-    if optional_bool(arguments, "json")?.unwrap_or(false) {
-        args.push("--json".to_string());
-    }
+    append_react_raw_json_arg(arguments, &mut args)?;
     call_cli_tool(arguments, args, None)
 }
 
@@ -2880,9 +2888,7 @@ fn call_react_renders_stop(arguments: &Value) -> Result<Value, ProtocolError> {
         "renders".to_string(),
         "stop".to_string(),
     ];
-    if optional_bool(arguments, "json")?.unwrap_or(false) {
-        args.push("--json".to_string());
-    }
+    append_react_raw_json_arg(arguments, &mut args)?;
     call_cli_tool(arguments, args, None)
 }
 
@@ -2891,10 +2897,18 @@ fn call_react_suspense(arguments: &Value) -> Result<Value, ProtocolError> {
     if optional_bool(arguments, "onlyDynamic")?.unwrap_or(false) {
         args.push("--only-dynamic".to_string());
     }
-    if optional_bool(arguments, "json")?.unwrap_or(false) {
-        args.push("--json".to_string());
-    }
+    append_react_raw_json_arg(arguments, &mut args)?;
     call_cli_tool(arguments, args, None)
+}
+
+fn append_react_raw_json_arg(
+    arguments: &Value,
+    args: &mut Vec<String>,
+) -> Result<(), ProtocolError> {
+    if optional_bool(arguments, "json")?.unwrap_or(false) {
+        args.push(RAW_JSON_ARG.to_string());
+    }
+    Ok(())
 }
 
 fn call_vitals(arguments: &Value) -> Result<Value, ProtocolError> {
@@ -3513,6 +3527,25 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("agent-browser mcp --tools all"));
+    }
+
+    #[test]
+    fn click_command_args_include_new_tab() {
+        let args = click_command_args(&json!({
+            "selector": "@e1",
+            "newTab": true,
+        }))
+        .unwrap();
+
+        assert_eq!(args, vec!["click", "@e1", "--new-tab"]);
+    }
+
+    #[test]
+    fn react_json_uses_command_local_raw_json_flag() {
+        let mut args = vec!["react".to_string(), "tree".to_string()];
+        append_react_raw_json_arg(&json!({ "json": true }), &mut args).unwrap();
+
+        assert_eq!(args, vec!["react", "tree", RAW_JSON_ARG]);
     }
 
     #[test]

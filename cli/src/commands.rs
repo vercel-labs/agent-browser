@@ -1870,7 +1870,10 @@ fn parse_react(rest: &[&str], id: &str) -> Result<Value, ParseError> {
         context: "react".to_string(),
         usage: "react <tree|inspect|renders|suspense>",
     })?;
-    let json_out = rest.contains(&"--json");
+    // MCP runs child commands with global `--json` for transport. That global
+    // flag is stripped before command parsing, so `--raw-json` preserves the
+    // React command's raw payload toggle for MCP without changing public docs.
+    let json_out = rest.contains(&"--json") || rest.contains(&"--raw-json");
     let flag = |key: &str| -> Value {
         if json_out {
             json!({ "id": id, "action": key, "json": true })
@@ -3041,6 +3044,13 @@ mod tests {
     #[test]
     fn test_react_tree_json() {
         let cmd = parse_command(&args("react tree --json"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "react_tree");
+        assert_eq!(cmd["json"], true);
+    }
+
+    #[test]
+    fn test_react_tree_raw_json_internal_flag() {
+        let cmd = parse_command(&args("react tree --raw-json"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "react_tree");
         assert_eq!(cmd["json"], true);
     }
