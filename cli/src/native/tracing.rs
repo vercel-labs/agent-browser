@@ -23,8 +23,18 @@ const DEFAULT_PROFILER_CATEGORIES: &[&str] = &[
     "toplevel",
 ];
 
+/// Identifies which command started the active recording. `trace` and
+/// `profiler` share the same underlying CDP `Tracing` domain, so the daemon
+/// must remember the owner to stop the correct recorder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TracingOwner {
+    Trace,
+    Profiler,
+}
+
 pub struct TracingState {
     pub active: bool,
+    pub owner: Option<TracingOwner>,
     pub events: Vec<Value>,
     pub events_dropped: bool,
 }
@@ -33,8 +43,30 @@ impl TracingState {
     pub fn new() -> Self {
         Self {
             active: false,
+            owner: None,
             events: Vec::new(),
             events_dropped: false,
+        }
+    }
+
+    /// Verify that a stop command may stop the active recording. Only the
+    /// command that started the recording may stop it, so a `profiler stop`
+    /// cannot consume a `trace start` recording and vice versa (#1313).
+    fn ensure_stoppable(&self, requester: TracingOwner) -> Result<(), String> {
+        match self.owner {
+            Some(owner) if owner == requester => Ok(()),
+            Some(TracingOwner::Trace) => Err("Cannot stop profiler: a trace recording is active. \
+                     Use 'trace stop' instead."
+                .to_string()),
+            Some(TracingOwner::Profiler) => {
+                Err("Cannot stop trace: a profiler recording is active. \
+                     Use 'profiler stop' instead."
+                    .to_string())
+            }
+            None => Err(match requester {
+                TracingOwner::Trace => "No tracing in progress".to_string(),
+                TracingOwner::Profiler => "No profiling in progress".to_string(),
+            }),
         }
     }
 }
@@ -62,6 +94,7 @@ pub async fn trace_start(
         .await?;
 
     tracing_state.active = true;
+    tracing_state.owner = Some(TracingOwner::Trace);
     tracing_state.events.clear();
     tracing_state.events_dropped = false;
 
@@ -74,9 +107,7 @@ pub async fn trace_stop(
     tracing_state: &mut TracingState,
     path: Option<&str>,
 ) -> Result<Value, String> {
-    if !tracing_state.active {
-        return Err("No tracing in progress".to_string());
-    }
+    tracing_state.ensure_stoppable(TracingOwner::Trace)?;
 
     // Subscribe to events before stopping
     let mut rx = client.subscribe();
@@ -155,6 +186,7 @@ pub async fn trace_stop(
     }
 
     tracing_state.active = false;
+    tracing_state.owner = None;
 
     let save_path = match path {
         Some(p) => p.to_string(),
@@ -212,6 +244,7 @@ pub async fn profiler_start(
         .await?;
 
     tracing_state.active = true;
+    tracing_state.owner = Some(TracingOwner::Profiler);
     tracing_state.events.clear();
     tracing_state.events_dropped = false;
 
@@ -224,9 +257,7 @@ pub async fn profiler_stop(
     tracing_state: &mut TracingState,
     path: Option<&str>,
 ) -> Result<Value, String> {
-    if !tracing_state.active {
-        return Err("No profiling in progress".to_string());
-    }
+    tracing_state.ensure_stoppable(TracingOwner::Profiler)?;
 
     let mut rx = client.subscribe();
 
@@ -270,6 +301,7 @@ pub async fn profiler_stop(
     }
 
     tracing_state.active = false;
+    tracing_state.owner = None;
 
     let save_path = match path {
         Some(p) => p.to_string(),
@@ -369,5 +401,62 @@ fn get_profiles_dir() -> PathBuf {
         home.join(".agent-browser").join("tmp").join("profiles")
     } else {
         std::env::temp_dir().join("agent-browser").join("profiles")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state_owned_by(owner: TracingOwner) -> TracingState {
+        let mut state = TracingState::new();
+        state.active = true;
+        state.owner = Some(owner);
+        state
+    }
+
+    // Regression for #1313: trace and profiler share the CDP Tracing domain,
+    // so a stop must only stop the recorder its command started.
+    #[test]
+    fn profiler_stop_cannot_consume_active_trace() {
+        let state = state_owned_by(TracingOwner::Trace);
+        let err = state
+            .ensure_stoppable(TracingOwner::Profiler)
+            .expect_err("profiler stop must not stop a trace recording");
+        assert!(err.contains("Cannot stop profiler"));
+        assert!(err.contains("trace recording is active"));
+    }
+
+    #[test]
+    fn trace_stop_cannot_consume_active_profiler() {
+        let state = state_owned_by(TracingOwner::Profiler);
+        let err = state
+            .ensure_stoppable(TracingOwner::Trace)
+            .expect_err("trace stop must not stop a profiler recording");
+        assert!(err.contains("Cannot stop trace"));
+        assert!(err.contains("profiler recording is active"));
+    }
+
+    #[test]
+    fn owner_can_stop_its_own_recording() {
+        assert!(state_owned_by(TracingOwner::Trace)
+            .ensure_stoppable(TracingOwner::Trace)
+            .is_ok());
+        assert!(state_owned_by(TracingOwner::Profiler)
+            .ensure_stoppable(TracingOwner::Profiler)
+            .is_ok());
+    }
+
+    #[test]
+    fn stop_with_nothing_active_reports_idle() {
+        let state = TracingState::new();
+        assert_eq!(
+            state.ensure_stoppable(TracingOwner::Trace).unwrap_err(),
+            "No tracing in progress"
+        );
+        assert_eq!(
+            state.ensure_stoppable(TracingOwner::Profiler).unwrap_err(),
+            "No profiling in progress"
+        );
     }
 }
