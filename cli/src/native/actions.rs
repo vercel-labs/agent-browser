@@ -2800,7 +2800,11 @@ async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         urls: cmd.get("urls").and_then(|v| v.as_bool()).unwrap_or(false),
     };
 
-    state.ref_map.clear();
+    // Retire (rather than clear) the previous generation of refs: surviving
+    // nodes reclaim their ref ids inside take_snapshot, and refs whose nodes
+    // are gone fail with a stale-ref error instead of silently rebinding to
+    // whichever element now holds their number (#1443).
+    state.ref_map.begin_rebuild();
     let tree = snapshot::take_snapshot(
         &mgr.client,
         &session_id,
@@ -2903,7 +2907,7 @@ async fn handle_screenshot(cmd: &Value, state: &mut DaemonState) -> Result<Value
     };
 
     if annotate {
-        state.ref_map.clear();
+        state.ref_map.begin_rebuild();
         let _ = snapshot::take_snapshot(
             &mgr.client,
             &session_id,
@@ -5977,10 +5981,7 @@ async fn handle_frame(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
     // If selector is a ref (@e1), resolve the iframe element from the ref map
     if let Some(sel) = selector {
         if let Some(ref_id) = super::element::parse_ref(sel) {
-            let entry = state
-                .ref_map
-                .get(&ref_id)
-                .ok_or_else(|| format!("Unknown ref: {}", ref_id))?;
+            let entry = state.ref_map.resolve(&ref_id)?;
             let backend_node_id = entry
                 .backend_node_id
                 .ok_or_else(|| format!("Ref {} has no backend node id", ref_id))?;
