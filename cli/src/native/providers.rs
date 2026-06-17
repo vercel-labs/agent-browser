@@ -186,7 +186,7 @@ pub async fn close_provider_session_with_plugins(
                     .unwrap_or_else(|_| "https://api.firecrawl.dev".to_string());
                 let _ = client
                     .delete(format!(
-                        "{}/v2/browser/{}",
+                        "{}/v2/interact/{}",
                         api_url.trim_end_matches('/'),
                         session.session_id
                     ))
@@ -421,7 +421,7 @@ async fn connect_firecrawl() -> Result<(String, Option<ProviderSession>), String
     let api_url =
         env::var("FIRECRAWL_API_URL").unwrap_or_else(|_| "https://api.firecrawl.dev".to_string());
 
-    let url = format!("{}/v2/browser", api_url.trim_end_matches('/'));
+    let url = format!("{}/v2/interact", api_url.trim_end_matches('/'));
 
     // Optional persistent profile (cookies/localStorage/login state) by name.
     let mut body = json!({});

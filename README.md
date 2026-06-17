@@ -1637,7 +1637,7 @@ Optional configuration via environment variables:
 | `FIRECRAWL_API_URL`      | Base API URL (for self-hosted Firecrawl)                           | `https://api.firecrawl.dev` |
 | `FIRECRAWL_PROFILE_NAME` | Persistent profile to load (cookies/localStorage/login state)      | —                           |
 
-When enabled, agent-browser creates a Firecrawl browser session (`POST /v2/browser`), connects to the returned CDP URL instead of launching a local browser, and deletes the session on close. All commands work identically.
+When enabled, agent-browser creates a Firecrawl browser session (`POST /v2/interact`), connects to the returned CDP URL instead of launching a local browser, and deletes the session on close. All commands work identically.
 
 Get your API key from the [Firecrawl Dashboard](https://www.firecrawl.dev/app).
 
