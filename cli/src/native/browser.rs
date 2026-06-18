@@ -861,6 +861,26 @@ impl BrowserManager {
         &self.ws_url
     }
 
+    pub async fn matches_cdp_target(&self, cdp_url: Option<&str>, cdp_port: Option<u64>) -> bool {
+        if let Some(port) = cdp_port {
+            return u16::try_from(port)
+                .ok()
+                .is_some_and(|port| self.matches_local_cdp_port(port));
+        }
+
+        if let Some(url) = cdp_url {
+            return resolve_cdp_url(url)
+                .await
+                .is_ok_and(|ws_url| self.ws_url == ws_url);
+        }
+
+        false
+    }
+
+    fn matches_local_cdp_port(&self, port: u16) -> bool {
+        cdp_ws_url_matches_local_port(&self.ws_url, port)
+    }
+
     /// Returns the Chrome debug server address as "host:port".
     pub fn chrome_host_port(&self) -> &str {
         let stripped = self
@@ -1717,6 +1737,28 @@ async fn resolve_cdp_url(input: &str) -> Result<String, String> {
     ))
 }
 
+fn is_loopback_cdp_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host == "127.0.0.1"
+        || host == "::1"
+        || host == "[::1]"
+}
+
+fn cdp_ws_url_matches_local_port(ws_url: &str, port: u16) -> bool {
+    let Ok(parsed) = url::Url::parse(ws_url) else {
+        return false;
+    };
+    let Some(current_port) = parsed.port_or_known_default() else {
+        return false;
+    };
+    if current_port != port {
+        return false;
+    }
+    parsed
+        .host_str()
+        .is_some_and(|host| is_loopback_cdp_host(host))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1777,6 +1819,35 @@ mod tests {
         assert!(TabRef::parse("-docs").is_err());
         assert!(TabRef::parse("docs!").is_err());
         assert!(TabRef::parse("docs space").is_err());
+    }
+
+    #[test]
+    fn test_cdp_ws_url_matches_local_port_for_loopback_hosts() {
+        assert!(cdp_ws_url_matches_local_port(
+            "ws://127.0.0.1:9223/devtools/browser/abc",
+            9223,
+        ));
+        assert!(cdp_ws_url_matches_local_port(
+            "ws://localhost:9223/devtools/browser/abc",
+            9223,
+        ));
+        assert!(cdp_ws_url_matches_local_port(
+            "ws://[::1]:9223/devtools/browser/abc",
+            9223,
+        ));
+    }
+
+    #[test]
+    fn test_cdp_ws_url_matches_local_port_rejects_different_or_remote_targets() {
+        assert!(!cdp_ws_url_matches_local_port(
+            "ws://127.0.0.1:9222/devtools/browser/abc",
+            9223,
+        ));
+        assert!(!cdp_ws_url_matches_local_port(
+            "ws://192.168.0.5:9223/devtools/browser/abc",
+            9223,
+        ));
+        assert!(!cdp_ws_url_matches_local_port("not-a-url", 9223));
     }
 
     #[test]

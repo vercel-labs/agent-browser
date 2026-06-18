@@ -79,6 +79,10 @@ fn apply_hide_scrollbars_launch_option(
     }
 }
 
+fn should_send_cdp_launch_command(cmd: &serde_json::Value) -> bool {
+    cmd.get("action").and_then(|v| v.as_str()) != Some("launch")
+}
+
 fn attach_plugins_to_command(cmd: &mut serde_json::Value, plugins: &[plugins::PluginConfig]) {
     cmd["plugins"] = json!(plugins);
 }
@@ -1080,7 +1084,6 @@ fn main() {
 
     // Connect via CDP if --cdp flag is set
     // Accepts either a port number (e.g., "9222") or a full URL (e.g., "ws://..." or "wss://...")
-    // Skip when daemon already running — it already holds the CDP connection.
     if let Some(ref cdp_value) = flags.cdp {
         // Validate CDP value eagerly (even when daemon is already running) so
         // the user gets an immediate error for bad input instead of a silent no-op.
@@ -1140,7 +1143,7 @@ fn main() {
             })
         };
 
-        if !daemon_result.already_running {
+        if should_send_cdp_launch_command(&cmd) {
             let mut launch_cmd = launch_cmd;
 
             if flags.ignore_https_errors {
@@ -1654,6 +1657,20 @@ mod tests {
         let mut cli_true_cmd = json!({ "action": "launch" });
         apply_hide_scrollbars_launch_option(&mut cli_true_cmd, true, true);
         assert_eq!(cli_true_cmd["hideScrollbars"], true);
+    }
+
+    #[test]
+    fn test_should_send_cdp_launch_command_for_regular_commands() {
+        let cmd = json!({ "action": "navigate", "url": "https://example.com" });
+
+        assert!(should_send_cdp_launch_command(&cmd));
+    }
+
+    #[test]
+    fn test_should_not_send_cdp_launch_command_for_launch_commands() {
+        let cmd = json!({ "action": "launch", "cdpPort": 9223 });
+
+        assert!(!should_send_cdp_launch_command(&cmd));
     }
 
     #[test]

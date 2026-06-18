@@ -2221,9 +2221,12 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     let needs_relaunch = if let Some(ref mut mgr) = state.browser {
         let is_external = cdp_url.is_some() || cdp_port.is_some() || auto_connect;
         let was_external = mgr.is_cdp_connection();
+        let external_cdp_target_changed = (cdp_url.is_some() || cdp_port.is_some())
+            && !mgr.matches_cdp_target(cdp_url, cdp_port).await;
         let hash_changed = !is_external && state.launch_hash != Some(new_hash);
         let storage_state_requires_clean_launch = storage_state_owned.is_some() && !is_external;
         is_external != was_external
+            || external_cdp_target_changed
             || hash_changed
             || storage_state_requires_clean_launch
             || mgr.has_process_exited()
