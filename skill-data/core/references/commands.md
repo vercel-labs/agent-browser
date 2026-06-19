@@ -2,6 +2,16 @@
 
 Complete reference for all agent-browser commands. For quick start and common patterns, see SKILL.md.
 
+## Setup
+
+```bash
+agent-browser install                 # Download Chrome for Testing
+agent-browser install --with-deps     # Also install Linux system dependencies
+agent-browser install --timeout 600   # Extend Chrome download timeout for slow networks
+agent-browser doctor                  # Diagnose install and stale daemon state
+agent-browser upgrade                 # Upgrade agent-browser
+```
+
 ## Navigation
 
 ```bash
