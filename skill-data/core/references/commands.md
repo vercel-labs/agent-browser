@@ -482,3 +482,11 @@ AGENT_BROWSER_CONFIG="./agent-browser.json"  # Custom config file
 AGENT_BROWSER_CDP="9222"                     # Connect daemon to CDP port or WebSocket URL
 AGENT_BROWSER_PLUGINS='[{"name":"vault","command":"agent-browser-plugin-vault","capabilities":["credential.read"]},{"name":"stealth","command":"agent-browser-plugin-stealth","capabilities":["launch.mutate"]}]'
 ```
+
+## Install
+
+```bash
+agent-browser install                 # Download Chrome for Testing
+agent-browser install --with-deps     # Also install system dependencies on Linux
+agent-browser install --timeout 600   # Extend the browser download timeout in seconds
+```
