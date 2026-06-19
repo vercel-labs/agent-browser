@@ -24,6 +24,19 @@ pub struct Cookie {
     pub same_site: Option<String>,
 }
 
+pub async fn get_all_cookies(client: &CdpClient, session_id: &str) -> Result<Vec<Cookie>, String> {
+    let result = client
+        .send_command_no_params("Network.getAllCookies", Some(session_id))
+        .await?;
+
+    let cookies: Vec<Cookie> = result
+        .get("cookies")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+
+    Ok(cookies)
+}
+
 pub async fn get_cookies(
     client: &CdpClient,
     session_id: &str,

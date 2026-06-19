@@ -35,13 +35,23 @@ AGENT_BROWSER_CONFIG=./ci-config.json agent-browser open example.com
   "proxy": "http://localhost:8080",
   "profile": "./browser-data",
   "userAgent": "my-agent/1.0",
+  "hideScrollbars": false,
   "ignoreHttpsErrors": true
+}
+```
+
+A [JSON Schema](https://agent-browser.dev/schema.json) is available for IDE autocomplete and validation. Add a `$schema` key to your config file to enable it:
+
+```json
+{
+  "$schema": "https://agent-browser.dev/schema.json",
+  "headed": true
 }
 ```
 
 ## All Options
 
-Every CLI flag can be set in the config file using its camelCase equivalent:
+Global launch, output, provider, and chat options can be set in the config file using their camelCase equivalent. Command-scoped flags such as `screenshot --full` remain command arguments.
 
 <table>
   <thead>
@@ -56,6 +66,8 @@ Every CLI flag can be set in the config file using its camelCase equivalent:
     <tr><td><code>sessionName</code></td><td><code>--session-name</code></td><td>string</td><td>Auto-save and restore session state by name (or <code>AGENT_BROWSER_SESSION_NAME</code> env)</td></tr>
     <tr><td><code>executablePath</code></td><td><code>--executable-path</code></td><td>string</td><td>Custom browser executable path (or <code>AGENT_BROWSER_EXECUTABLE_PATH</code> env)</td></tr>
     <tr><td><code>extensions</code></td><td><code>--extension</code></td><td>string[]</td><td>Browser extension paths to load; repeatable (or <code>AGENT_BROWSER_EXTENSIONS</code> env)</td></tr>
+    <tr><td><code>initScripts</code></td><td><code>--init-script</code></td><td>string[]</td></tr>
+    <tr><td><code>enable</code></td><td><code>--enable</code></td><td>string[]</td></tr>
     <tr><td><code>profile</code></td><td><code>--profile</code></td><td>string</td><td>Persistent browser profile directory — preserves cookies, storage, and login sessions across restarts (or <code>AGENT_BROWSER_PROFILE</code> env)</td></tr>
     <tr><td><code>state</code></td><td><code>--state</code></td><td>string</td><td>Load storage state from a JSON file on launch (or <code>AGENT_BROWSER_STATE</code> env)</td></tr>
     <tr><td><code>proxy</code></td><td><code>--proxy</code></td><td>string</td><td>Proxy server URL with optional auth (or <code>AGENT_BROWSER_PROXY</code> env)</td></tr>
@@ -64,10 +76,12 @@ Every CLI flag can be set in the config file using its camelCase equivalent:
     <tr><td><code>userAgent</code></td><td><code>--user-agent</code></td><td>string</td><td>Custom User-Agent string (or <code>AGENT_BROWSER_USER_AGENT</code> env)</td></tr>
     <tr><td><code>provider</code></td><td><code>-p, --provider</code></td><td>string</td><td>Cloud browser provider (or <code>AGENT_BROWSER_PROVIDER</code> env)</td></tr>
     <tr><td><code>device</code></td><td><code>--device</code></td><td>string</td><td>iOS device name to emulate, e.g. <code>iPhone 15 Pro</code> (or <code>AGENT_BROWSER_IOS_DEVICE</code> env)</td></tr>
+    <tr><td><code>hideScrollbars</code></td><td><code>--hide-scrollbars</code></td><td>boolean</td></tr>
     <tr><td><code>ignoreHttpsErrors</code></td><td><code>--ignore-https-errors</code></td><td>boolean</td><td>Ignore HTTPS certificate errors — useful for self-signed certs</td></tr>
     <tr><td><code>allowFileAccess</code></td><td><code>--allow-file-access</code></td><td>boolean</td><td>Allow <code>file://</code> URLs to access local files (Chromium only)</td></tr>
     <tr><td><code>cdp</code></td><td><code>--cdp</code></td><td>string</td><td>Connect to a browser via Chrome DevTools Protocol — accepts a port number or full WebSocket URL</td></tr>
     <tr><td><code>autoConnect</code></td><td><code>--auto-connect</code></td><td>boolean</td><td>Auto-discover and connect to an already-running Chrome instance via CDP (or <code>AGENT_BROWSER_AUTO_CONNECT</code> env)</td></tr>
+    <tr><td><code>annotate</code></td><td><code>--annotate</code></td><td>boolean</td></tr>
     <tr><td><code>colorScheme</code></td><td><code>--color-scheme</code></td><td>string (<code>dark</code>, <code>light</code>, <code>no-preference</code>)</td><td>Emulated color scheme preference (or <code>AGENT_BROWSER_COLOR_SCHEME</code> env)</td></tr>
     <tr><td><code>downloadPath</code></td><td><code>--download-path</code></td><td>string</td><td>Default directory for browser downloads (or <code>AGENT_BROWSER_DOWNLOAD_PATH</code> env)</td></tr>
     <tr><td><code>contentBoundaries</code></td><td><code>--content-boundaries</code></td><td>boolean</td><td>Wrap page output in boundary markers so LLMs can distinguish tool output from untrusted content (or <code>AGENT_BROWSER_CONTENT_BOUNDARIES</code> env)</td></tr>
@@ -77,7 +91,14 @@ Every CLI flag can be set in the config file using its camelCase equivalent:
     <tr><td><code>confirmActions</code></td><td><code>--confirm-actions</code></td><td>string</td><td>Comma-separated action categories that require explicit confirmation, e.g. <code>eval,download</code> (or <code>AGENT_BROWSER_CONFIRM_ACTIONS</code> env)</td></tr>
     <tr><td><code>confirmInteractive</code></td><td><code>--confirm-interactive</code></td><td>boolean</td><td>Enable interactive confirmation prompts; auto-denies if stdin is not a TTY (or <code>AGENT_BROWSER_CONFIRM_INTERACTIVE</code> env)</td></tr>
     <tr><td><code>engine</code></td><td><code>--engine</code></td><td>string (<code>chrome</code>, <code>lightpanda</code>)</td><td>Browser engine to use (or <code>AGENT_BROWSER_ENGINE</code> env)</td></tr>
+    <tr><td><code>screenshotDir</code></td><td><code>--screenshot-dir</code></td><td>string</td></tr>
+    <tr><td><code>screenshotQuality</code></td><td><code>--screenshot-quality</code></td><td>number (0-100)</td></tr>
+    <tr><td><code>screenshotFormat</code></td><td><code>--screenshot-format</code></td><td>string (<code>png</code>, <code>jpeg</code>)</td></tr>
+    <tr><td><code>idleTimeout</code></td><td><code>--idle-timeout</code></td><td>string (<code>10s</code>, <code>3m</code>, <code>1h</code>, or raw ms)</td></tr>
+    <tr><td><code>noAutoDialog</code></td><td><code>--no-auto-dialog</code></td><td>boolean</td></tr>
+    <tr><td><code>model</code></td><td><code>--model</code></td><td>string</td></tr>
     <tr><td><code>headers</code></td><td><code>--headers</code></td><td>string (JSON)</td><td>Extra HTTP headers as a JSON object, scoped to the URL's origin (or <code>AGENT_BROWSER_HEADERS</code> env)</td></tr>
+    <tr><td><code>plugins</code></td><td>(config only)</td><td>plugin config[]</td></tr>
   </tbody>
 </table>
 
@@ -146,13 +167,61 @@ agent-browser --headed open example.com       # same as --headed true
 agent-browser --headed true open example.com  # explicit
 ```
 
-This applies to all boolean flags: `--headed`, `--debug`, `--json`, `--ignore-https-errors`, `--allow-file-access`, `--auto-connect`, `--content-boundaries`, `--confirm-interactive`.
+This applies to boolean flags such as `--headed`, `--debug`, `--json`, `--ignore-https-errors`, `--allow-file-access`, `--hide-scrollbars`, `--auto-connect`, `--annotate`, `--content-boundaries`, `--confirm-interactive`, and `--no-auto-dialog`.
 
 ## Extensions Merging
 
 Extensions from user-level and project-level configs are **concatenated**, not replaced. For example, if `~/.agent-browser/config.json` specifies `["/ext1"]` and `./agent-browser.json` specifies `["/ext2"]`, the result is `["/ext1", "/ext2"]`.
 
 The `AGENT_BROWSER_EXTENSIONS` environment variable and CLI `--extension` flags follow the standard priority rules (env replaces config, CLI appends).
+
+## Plugins
+
+Configure external plugins with the `plugins` array:
+
+See [Plugins](/plugins) for the plugin author protocol and implementation examples.
+Use `agent-browser plugin add <ref>` to create this config automatically.
+
+```json
+{
+  "plugins": [
+    {
+      "name": "vault",
+      "command": "agent-browser-plugin-vault",
+      "args": [],
+      "capabilities": ["credential.read"]
+    },
+    {
+      "name": "cloud-browser",
+      "command": "agent-browser-plugin-cloud-browser",
+      "capabilities": ["browser.provider"]
+    },
+    {
+      "name": "stealth",
+      "command": "agent-browser-plugin-stealth",
+      "capabilities": ["launch.mutate"]
+    },
+    {
+      "name": "captcha",
+      "command": "agent-browser-plugin-captcha",
+      "capabilities": ["command.run", "captcha.solve"]
+    }
+  ]
+}
+```
+
+Project-level plugin entries are appended after user-level entries. If two entries use the same name, agent-browser resolves the later entry, so a project can override a user default. `AGENT_BROWSER_PLUGINS` can replace config discovery with a JSON array using the same shape.
+
+Do not put vault tokens or passwords in plugin command args. Use the vault vendor's own login/session mechanism or environment outside agent-browser config.
+
+```bash
+agent-browser plugin list
+agent-browser auth login my-app --credential-provider vault --item "My App"
+agent-browser --provider cloud-browser open https://example.com
+agent-browser plugin run captcha captcha.solve --payload '{"siteKey":"...","url":"https://example.com"}'
+```
+
+`plugin run` is for `command.run` and custom capabilities. Core capabilities and protocol request types use their dedicated command paths.
 
 ## Environment Variables
 
@@ -163,8 +232,23 @@ These environment variables configure additional daemon and runtime behavior:
     <tr><th>Variable</th><th>Description</th><th>Default</th></tr>
   </thead>
   <tbody>
+    <tr><td><code>AGENT_BROWSER_CONFIG</code></td><td>Path to an explicit config file.</td><td>(default discovery)</td></tr>
+    <tr><td><code>AGENT_BROWSER_SESSION</code></td><td>Isolated browser session name.</td><td><code>default</code></td></tr>
     <tr><td><code>AGENT_BROWSER_AUTO_CONNECT</code></td><td>Auto-discover and connect to a running Chrome instance.</td><td>(disabled)</td></tr>
     <tr><td><code>AGENT_BROWSER_ALLOW_FILE_ACCESS</code></td><td>Allow <code>file://</code> URLs to access local files.</td><td>(disabled)</td></tr>
+    <tr><td><code>AGENT_BROWSER_EXECUTABLE_PATH</code></td><td>Custom browser executable path.</td><td>(auto-discover)</td></tr>
+    <tr><td><code>AGENT_BROWSER_PROFILE</code></td><td>Chrome profile name or persistent profile directory.</td><td>(none)</td></tr>
+    <tr><td><code>AGENT_BROWSER_STATE</code></td><td>Storage state file to load at launch.</td><td>(none)</td></tr>
+    <tr><td><code>AGENT_BROWSER_PROXY</code></td><td>Proxy URL. Takes precedence over standard proxy variables.</td><td>(none)</td></tr>
+    <tr><td><code>AGENT_BROWSER_PROXY_BYPASS</code></td><td>Proxy bypass host list.</td><td>(none)</td></tr>
+    <tr><td><code>AGENT_BROWSER_PROXY_USERNAME</code></td><td>Proxy username when credentials are supplied separately.</td><td>(none)</td></tr>
+    <tr><td><code>AGENT_BROWSER_PROXY_PASSWORD</code></td><td>Proxy password when credentials are supplied separately.</td><td>(none)</td></tr>
+    <tr><td><code>HTTP_PROXY</code> / <code>HTTPS_PROXY</code> / <code>ALL_PROXY</code></td><td>Standard proxy fallback variables.</td><td>(none)</td></tr>
+    <tr><td><code>NO_PROXY</code></td><td>Standard proxy bypass fallback.</td><td>(none)</td></tr>
+    <tr><td><code>AGENT_BROWSER_ARGS</code></td><td>Comma or newline separated browser launch arguments.</td><td>(none)</td></tr>
+    <tr><td><code>AGENT_BROWSER_USER_AGENT</code></td><td>Custom User-Agent string.</td><td>(browser default)</td></tr>
+    <tr><td><code>AGENT_BROWSER_PROVIDER</code></td><td>Browser provider such as <code>ios</code>, <code>browserbase</code>, <code>kernel</code>, <code>browseruse</code>, <code>browserless</code>, <code>agentcore</code>, or a configured <code>browser.provider</code> plugin name.</td><td>(local browser)</td></tr>
+    <tr><td><code>AGENT_BROWSER_HIDE_SCROLLBARS</code></td><td>Hide native scrollbars in headless Chromium screenshots.</td><td><code>true</code></td></tr>
     <tr><td><code>AGENT_BROWSER_COLOR_SCHEME</code></td><td>Color scheme preference (<code>dark</code>, <code>light</code>, <code>no-preference</code>).</td><td>(none)</td></tr>
     <tr><td><code>AGENT_BROWSER_DOWNLOAD_PATH</code></td><td>Default directory for browser downloads.</td><td>(temp directory)</td></tr>
     <tr><td><code>AGENT_BROWSER_DEFAULT_TIMEOUT</code></td><td>Default timeout in ms. Keep below 30000 to avoid IPC timeouts.</td><td><code>25000</code></td></tr>
@@ -172,8 +256,13 @@ These environment variables configure additional daemon and runtime behavior:
     <tr><td><code>AGENT_BROWSER_STATE_EXPIRE_DAYS</code></td><td>Auto-delete saved session states older than N days.</td><td><code>30</code></td></tr>
     <tr><td><code>AGENT_BROWSER_ENCRYPTION_KEY</code></td><td>64-char hex key for AES-256-GCM session encryption.</td><td>(none)</td></tr>
     <tr><td><code>AGENT_BROWSER_EXTENSIONS</code></td><td>Comma-separated browser extension paths. Extensions work in both headed and headless mode.</td><td>(none)</td></tr>
+    <tr><td><code>AGENT_BROWSER_INIT_SCRIPTS</code></td><td>Comma-separated paths to page init scripts.</td><td>(none)</td></tr>
+    <tr><td><code>AGENT_BROWSER_ENABLE</code></td><td>Comma-separated built-in init script features such as <code>react-devtools</code>.</td><td>(none)</td></tr>
     <tr><td><code>AGENT_BROWSER_HEADED</code></td><td>Show browser window instead of running headless (<code>1</code> to enable).</td><td>(disabled)</td></tr>
-    <tr><td><code>AGENT_BROWSER_STREAM_PORT</code></td><td>Enable WebSocket streaming on the specified port (e.g., <code>9223</code>).</td><td>(disabled)</td></tr>
+    <tr><td><code>AGENT_BROWSER_JSON</code></td><td>Use JSON output by default.</td><td>(disabled)</td></tr>
+    <tr><td><code>AGENT_BROWSER_ANNOTATE</code></td><td>Enable annotated screenshots by default.</td><td>(disabled)</td></tr>
+    <tr><td><code>AGENT_BROWSER_CDP</code></td><td>Connect the daemon to a CDP port or WebSocket URL.</td><td>(none)</td></tr>
+    <tr><td><code>AGENT_BROWSER_STREAM_PORT</code></td><td>Override the WebSocket streaming port. By default, an OS-assigned port is used. Set this to bind to a specific port (e.g., <code>9223</code>).</td><td>OS-assigned</td></tr>
     <tr><td><code>AGENT_BROWSER_IDLE_TIMEOUT_MS</code></td><td>Auto-shutdown the daemon after N ms of inactivity (no commands received). Useful for ephemeral environments.</td><td>(disabled)</td></tr>
     <tr><td><code>AGENT_BROWSER_IOS_DEVICE</code></td><td>Default iOS device name for the <code>ios</code> provider.</td><td>(none)</td></tr>
     <tr><td><code>AGENT_BROWSER_IOS_UDID</code></td><td>Default iOS device UDID for the <code>ios</code> provider.</td><td>(none)</td></tr>
@@ -185,6 +274,18 @@ These environment variables configure additional daemon and runtime behavior:
     <tr><td><code>AGENT_BROWSER_CONFIRM_ACTIONS</code></td><td>Comma-separated action categories requiring confirmation.</td><td>(none)</td></tr>
     <tr><td><code>AGENT_BROWSER_CONFIRM_INTERACTIVE</code></td><td>Enable interactive confirmation prompts (auto-denies if stdin is not a TTY).</td><td>(disabled)</td></tr>
     <tr><td><code>AGENT_BROWSER_ENGINE</code></td><td>Browser engine to use: <code>chrome</code> (default), <code>lightpanda</code>.</td><td><code>chrome</code></td></tr>
+    <tr><td><code>AGENT_BROWSER_NO_AUTO_DIALOG</code></td><td>Disable automatic dismissal of <code>alert</code>/<code>beforeunload</code> dialogs.</td><td>(disabled)</td></tr>
+    <tr><td><code>AGENT_BROWSER_PLUGINS</code></td><td>JSON plugin registry override.</td><td>(config discovery)</td></tr>
+    <tr><td><code>AGENT_BROWSER_SCREENSHOT_DIR</code></td><td>Default screenshot output directory.</td><td>(temp directory)</td></tr>
+    <tr><td><code>AGENT_BROWSER_SCREENSHOT_QUALITY</code></td><td>JPEG screenshot quality from 0 to 100.</td><td>(format default)</td></tr>
+    <tr><td><code>AGENT_BROWSER_SCREENSHOT_FORMAT</code></td><td>Screenshot format: <code>png</code> or <code>jpeg</code>.</td><td><code>png</code></td></tr>
+    <tr><td><code>AGENT_BROWSER_SOCKET_DIR</code></td><td>Advanced override for daemon socket files.</td><td>runtime dir or <code>~/.agent-browser</code></td></tr>
+    <tr><td><code>AGENT_BROWSER_SKILLS_DIR</code></td><td>Override the directory used by <code>agent-browser skills</code>.</td><td>bundled skills</td></tr>
+    <tr><td><code>AGENT_BROWSER_COLOR</code></td><td>Enable colored CLI output when truthy.</td><td>(disabled)</td></tr>
+    <tr><td><code>NO_COLOR</code></td><td>Disable colored output when present.</td><td>(not set)</td></tr>
+    <tr><td><code>AI_GATEWAY_URL</code></td><td>Vercel AI Gateway base URL.</td><td><code>https://ai-gateway.vercel.sh</code></td></tr>
+    <tr><td><code>AI_GATEWAY_API_KEY</code></td><td>API key for the Vercel AI Gateway. Required to enable AI chat.</td><td>(none)</td></tr>
+    <tr><td><code>AI_GATEWAY_MODEL</code></td><td>Default AI model for dashboard chat.</td><td><code>anthropic/claude-sonnet-4.6</code></td></tr>
   </tbody>
 </table>
 

@@ -201,6 +201,27 @@ pre:not(.shiki) {
   color: var(--foreground);
 }
 
+.prose .heading-anchor {
+  position: relative;
+}
+
+.prose .heading-anchor > a {
+  opacity: 0;
+  margin-left: 0.375rem;
+  color: var(--muted-foreground);
+  text-decoration: none;
+  font-weight: 400;
+  transition: opacity 0.15s ease;
+}
+
+.prose .heading-anchor:hover > a {
+  opacity: 1;
+}
+
+.prose .heading-anchor > a:hover {
+  color: var(--foreground);
+}
+
 .prose p {
   margin-bottom: 1rem;
   line-height: 1.65;

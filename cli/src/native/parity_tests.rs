@@ -344,7 +344,7 @@ fn minimal_command(action: &str, id: &str) -> Value {
             obj.insert("script".to_string(), json!("h => h"));
         }
         "drag" => {
-            obj.insert("selector".to_string(), json!("body"));
+            obj.insert("source".to_string(), json!("body"));
             obj.insert("target".to_string(), json!("body"));
         }
         "swipe" => {

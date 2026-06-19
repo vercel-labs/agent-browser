@@ -1,5 +1,5 @@
 use serde_json::{json, Value};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -10,6 +10,7 @@ use super::cdp::client::CdpClient;
 use super::cdp::discovery::discover_cdp_url;
 use super::cdp::lightpanda::{launch_lightpanda, LightpandaLaunchOptions, LightpandaProcess};
 use super::cdp::types::*;
+use super::element::{resolve_element_object_id, RefMap};
 
 // ---------------------------------------------------------------------------
 // Launch validation
@@ -110,6 +111,26 @@ fn update_page_target_info_in_pages(pages: &mut [PageInfo], target: &TargetInfo)
     false
 }
 
+fn active_page_index_after_removal(
+    active_page_index: usize,
+    removed_index: usize,
+    remaining_pages: usize,
+) -> usize {
+    if remaining_pages == 0 {
+        return 0;
+    }
+
+    if removed_index < active_page_index {
+        return active_page_index - 1;
+    }
+
+    if active_page_index >= remaining_pages {
+        return remaining_pages - 1;
+    }
+
+    active_page_index
+}
+
 /// Converts common error messages into AI-friendly, actionable descriptions.
 pub fn to_ai_friendly_error(error: &str) -> String {
     let lower = error.to_lowercase();
@@ -137,6 +158,13 @@ pub fn to_ai_friendly_error(error: &str) -> String {
 
 #[derive(Debug, Clone)]
 pub struct PageInfo {
+    pub tab_id: u32,
+    /// Optional user-assigned label (e.g. "docs", "app"). Set via
+    /// `tab new --label <name>`. Labels are agent-assigned and never
+    /// auto-generated, never rewritten on navigation, and unique within a
+    /// session. Agents use labels instead of `t<N>` for readable multi-tab
+    /// workflows.
+    pub label: Option<String>,
     pub target_id: String,
     pub session_id: String,
     pub url: String,
@@ -144,11 +172,83 @@ pub struct PageInfo {
     pub target_type: String, // "page" or "webview"
 }
 
+/// Canonical string form of a stable tab id: `t1`, `t2`, ... The `t` prefix
+/// disambiguates stable ids from positional indices (which the CLI no longer
+/// accepts) and matches the `@e<N>` convention used for element refs.
+pub fn format_tab_id(tab_id: u32) -> String {
+    format!("t{}", tab_id)
+}
+
+/// A tab reference as parsed from CLI/JSON input. Either a stable id like
+/// `t2` or a user-assigned label like `docs`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TabRef {
+    Id(u32),
+    Label(String),
+}
+
+impl TabRef {
+    /// Parse a user-supplied string tab reference. Rejects bare integers
+    /// with a teaching error so agents and scripts don't silently confuse
+    /// stable ids with positional indices.
+    pub fn parse(input: &str) -> Result<Self, String> {
+        let input = input.trim();
+        if input.is_empty() {
+            return Err("Empty tab reference; expected `t<N>` (e.g. `t2`) or a label".to_string());
+        }
+        if let Some(digits) = input.strip_prefix('t').or_else(|| input.strip_prefix('T')) {
+            if !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()) {
+                let id: u32 = digits.parse().map_err(|_| {
+                    format!(
+                        "Tab id `{}` out of range; ids are incrementing positive integers",
+                        input
+                    )
+                })?;
+                if id == 0 {
+                    return Err(format!(
+                        "Tab id `{}` is invalid; tab ids start at t1",
+                        input
+                    ));
+                }
+                return Ok(TabRef::Id(id));
+            }
+        }
+        if input.chars().all(|c| c.is_ascii_digit()) {
+            return Err(format!(
+                "Expected a tab id like `t{}` or a label; positional integers are not accepted \
+                 (run `agent-browser tab` to list stable tab ids)",
+                input
+            ));
+        }
+        if !is_valid_label(input) {
+            return Err(format!(
+                "Invalid tab label `{}`; labels must start with a letter and contain only \
+                 letters, digits, `-`, and `_`",
+                input
+            ));
+        }
+        Ok(TabRef::Label(input.to_string()))
+    }
+}
+
+/// Labels must look like identifiers: start with a letter, contain only
+/// letters/digits/dashes/underscores. This keeps them distinguishable from
+/// `t<N>` ids at a glance and safe to pass through shells without quoting.
+pub fn is_valid_label(s: &str) -> bool {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WaitUntil {
     Load,
     DomContentLoaded,
     NetworkIdle,
+    None,
 }
 
 impl WaitUntil {
@@ -156,6 +256,7 @@ impl WaitUntil {
         match s {
             "domcontentloaded" => Self::DomContentLoaded,
             "networkidle" => Self::NetworkIdle,
+            "none" => Self::None,
             _ => Self::Load,
         }
     }
@@ -180,6 +281,14 @@ impl BrowserProcess {
             BrowserProcess::Lightpanda(p) => p.kill(),
         }
     }
+
+    /// Non-blocking check whether the browser process has exited.
+    pub fn has_exited(&mut self) -> bool {
+        match self {
+            BrowserProcess::Chrome(p) => p.has_exited(),
+            BrowserProcess::Lightpanda(_) => false,
+        }
+    }
 }
 
 pub struct BrowserManager {
@@ -189,6 +298,13 @@ pub struct BrowserManager {
     pages: Vec<PageInfo>,
     active_page_index: usize,
     default_timeout_ms: u64,
+    /// Stored download path from launch options, re-applied to new contexts (e.g., recording)
+    pub download_path: Option<String>,
+    /// Whether to ignore HTTPS certificate errors, re-applied to new contexts (e.g., recording)
+    pub ignore_https_errors: bool,
+    /// Origins visited during this session, used by save_state to collect cross-origin localStorage.
+    visited_origins: HashSet<String>,
+    next_tab_id: u32,
 }
 
 const LIGHTPANDA_CDP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -257,6 +373,10 @@ impl BrowserManager {
                 pages: Vec::new(),
                 active_page_index: 0,
                 default_timeout_ms: 25_000,
+                download_path: download_path.clone(),
+                ignore_https_errors,
+                visited_origins: HashSet::new(),
+                next_tab_id: 1,
             };
             manager.discover_and_attach_targets().await?;
             manager
@@ -312,18 +432,58 @@ impl BrowserManager {
     }
 
     pub async fn connect_cdp(url: &str) -> Result<Self, String> {
+        Self::connect_cdp_inner(url, false, None).await
+    }
+
+    /// Connect to a provider CDP proxy where the WebSocket IS the page session.
+    /// Skips browser-level Target.* commands that most proxies don't support.
+    pub async fn connect_cdp_direct(url: &str) -> Result<Self, String> {
+        Self::connect_cdp_inner(url, true, None).await
+    }
+
+    pub async fn connect_cdp_with_headers(
+        url: &str,
+        headers: Option<Vec<(String, String)>>,
+    ) -> Result<Self, String> {
+        Self::connect_cdp_inner(url, false, headers).await
+    }
+
+    async fn connect_cdp_inner(
+        url: &str,
+        direct_page: bool,
+        headers: Option<Vec<(String, String)>>,
+    ) -> Result<Self, String> {
         let ws_url = resolve_cdp_url(url).await?;
-        let client = Arc::new(CdpClient::connect(&ws_url).await?);
+        let client = Arc::new(CdpClient::connect_with_headers(&ws_url, headers).await?);
         let mut manager = Self {
             client,
             browser_process: None,
             ws_url,
             pages: Vec::new(),
             active_page_index: 0,
-            default_timeout_ms: 10_000,
+            default_timeout_ms: 25_000,
+            download_path: None,
+            ignore_https_errors: false,
+            visited_origins: HashSet::new(),
+            next_tab_id: 1,
         };
 
-        manager.discover_and_attach_targets().await?;
+        if direct_page {
+            let tab_id = manager.assign_tab_id();
+            manager.pages.push(PageInfo {
+                tab_id,
+                label: None,
+                target_id: "provider-page".to_string(),
+                session_id: String::new(),
+                url: String::new(),
+                title: String::new(),
+                target_type: "page".to_string(),
+            });
+            manager.active_page_index = 0;
+            manager.enable_domains_direct().await?;
+        } else {
+            manager.discover_and_attach_targets().await?;
+        }
         Ok(manager)
     }
 
@@ -377,7 +537,11 @@ impl BrowserManager {
                 )
                 .await?;
 
+            let tab_id = self.next_tab_id;
+            self.next_tab_id += 1;
             self.pages.push(PageInfo {
+                tab_id,
+                label: None,
                 target_id: result.target_id,
                 session_id: attach_result.session_id.clone(),
                 url: "about:blank".to_string(),
@@ -400,7 +564,11 @@ impl BrowserManager {
                     )
                     .await?;
 
+                let tab_id = self.next_tab_id;
+                self.next_tab_id += 1;
                 self.pages.push(PageInfo {
+                    tab_id,
+                    label: None,
                     target_id: target.target_id.clone(),
                     session_id: attach_result.session_id.clone(),
                     url: target.url.clone(),
@@ -428,6 +596,13 @@ impl BrowserManager {
         self.client
             .send_command_no_params("Runtime.enable", Some(session_id))
             .await?;
+        // Resume the target if it is paused waiting for the debugger.
+        // This is needed for real browser sessions (Chrome 144+) where targets
+        // are paused after attach until explicitly resumed. No-op otherwise.
+        let _ = self
+            .client
+            .send_command_no_params("Runtime.runIfWaitingForDebugger", Some(session_id))
+            .await;
         self.client
             .send_command_no_params("Network.enable", Some(session_id))
             .await?;
@@ -446,6 +621,24 @@ impl BrowserManager {
                 Some(session_id),
             )
             .await;
+        Ok(())
+    }
+
+    /// Enable domains on a direct page connection (no session_id needed).
+    async fn enable_domains_direct(&self) -> Result<(), String> {
+        self.client
+            .send_command_no_params("Page.enable", None)
+            .await?;
+        self.client
+            .send_command_no_params("Runtime.enable", None)
+            .await?;
+        let _ = self
+            .client
+            .send_command_no_params("Runtime.runIfWaitingForDebugger", None)
+            .await;
+        self.client
+            .send_command_no_params("Network.enable", None)
+            .await?;
         Ok(())
     }
 
@@ -476,11 +669,24 @@ impl BrowserManager {
             return Err(format!("Navigation failed: {}", error_text));
         }
 
-        self.wait_for_lifecycle(wait_until, &session_id, &mut lifecycle_rx)
-            .await?;
+        // Only wait for lifecycle events if Chrome created a new loader (full navigation).
+        // If loader_id is None, it was a same-document navigation (e.g., hash routing)
+        // which does not fire Page.loadEventFired or Page.domContentEventFired.
+        if nav_result.loader_id.is_some() && wait_until != WaitUntil::None {
+            self.wait_for_lifecycle(wait_until, &session_id, &mut lifecycle_rx)
+                .await?;
+        }
 
         let page_url = self.get_url().await.unwrap_or_else(|_| url.to_string());
         let title = self.get_title().await.unwrap_or_default();
+
+        // Track visited origin for cross-origin localStorage collection in save_state
+        if let Ok(parsed) = url::Url::parse(&page_url) {
+            let origin = parsed.origin().ascii_serialization();
+            if origin != "null" {
+                self.visited_origins.insert(origin);
+            }
+        }
 
         if let Some(page) = self.pages.get_mut(self.active_page_index) {
             page.url = page_url.clone();
@@ -500,6 +706,7 @@ impl BrowserManager {
             WaitUntil::Load => "Page.loadEventFired",
             WaitUntil::DomContentLoaded => "Page.domContentEventFired",
             WaitUntil::NetworkIdle => return self.wait_for_network_idle(session_id, rx).await,
+            WaitUntil::None => return Ok(()),
         };
 
         let timeout = tokio::time::Duration::from_millis(self.default_timeout_ms);
@@ -639,6 +846,17 @@ impl BrowserManager {
         }
     }
 
+    /// Non-blocking check whether the locally-launched browser process has exited
+    /// (crashed or terminated). Also reaps the zombie if it has exited.
+    /// Returns false for external CDP connections (no child process to monitor).
+    pub fn has_process_exited(&mut self) -> bool {
+        if let Some(ref mut process) = self.browser_process {
+            process.has_exited()
+        } else {
+            false
+        }
+    }
+
     pub fn get_cdp_url(&self) -> &str {
         &self.ws_url
     }
@@ -695,7 +913,11 @@ impl BrowserManager {
             )
             .await?;
 
+        let tab_id = self.next_tab_id;
+        self.next_tab_id += 1;
         self.pages.push(PageInfo {
+            tab_id,
+            label: None,
             target_id: result.target_id,
             session_id: attach_result.session_id.clone(),
             url: "about:blank".to_string(),
@@ -724,13 +946,22 @@ impl BrowserManager {
         }
     }
 
+    fn update_active_page_after_removal(&mut self, removed_index: usize) {
+        self.active_page_index = active_page_index_after_removal(
+            self.active_page_index,
+            removed_index,
+            self.pages.len(),
+        );
+    }
+
     pub fn tab_list(&self) -> Vec<Value> {
         self.pages
             .iter()
             .enumerate()
             .map(|(i, p)| {
                 json!({
-                    "index": i,
+                    "tabId": format_tab_id(p.tab_id),
+                    "label": p.label,
                     "title": p.title,
                     "url": p.url,
                     "type": p.target_type,
@@ -740,7 +971,61 @@ impl BrowserManager {
             .collect()
     }
 
-    pub async fn tab_new(&mut self, url: Option<&str>) -> Result<Value, String> {
+    /// Resolve a user-supplied `TabRef` (either `t<N>` or a label) to the
+    /// stable numeric `tab_id`. Returns a teaching error for unknown tabs.
+    pub fn resolve_tab_ref(&self, tab_ref: &TabRef) -> Result<u32, String> {
+        match tab_ref {
+            TabRef::Id(id) => {
+                if self.has_tab_id(*id) {
+                    Ok(*id)
+                } else {
+                    Err(format!(
+                        "Tab {} not found; run `agent-browser tab` to list open tabs",
+                        format_tab_id(*id)
+                    ))
+                }
+            }
+            TabRef::Label(name) => self
+                .pages
+                .iter()
+                .find(|p| p.label.as_deref() == Some(name.as_str()))
+                .map(|p| p.tab_id)
+                .ok_or_else(|| {
+                    format!(
+                        "No tab with label `{}`; run `agent-browser tab` to list open tabs",
+                        name
+                    )
+                }),
+        }
+    }
+
+    /// Returns true iff a tab already carries the given label.
+    pub fn has_label(&self, label: &str) -> bool {
+        self.pages.iter().any(|p| p.label.as_deref() == Some(label))
+    }
+
+    pub async fn tab_new(
+        &mut self,
+        url: Option<&str>,
+        label: Option<&str>,
+    ) -> Result<Value, String> {
+        if let Some(label) = label {
+            if !is_valid_label(label) {
+                return Err(format!(
+                    "Invalid tab label `{}`; labels must start with a letter and contain only \
+                     letters, digits, `-`, and `_`",
+                    label
+                ));
+            }
+            if self.has_label(label) {
+                return Err(format!(
+                    "Label `{}` is already used by another tab; labels must be unique within a \
+                     session",
+                    label
+                ));
+            }
+        }
+
         let target_url = url.unwrap_or("about:blank");
 
         let result: CreateTargetResult = self
@@ -768,8 +1053,13 @@ impl BrowserManager {
 
         self.enable_domains(&attach.session_id).await?;
 
+        let tab_id = self.next_tab_id;
+        self.next_tab_id += 1;
         let index = self.pages.len();
+        let label = label.map(|s| s.to_string());
         self.pages.push(PageInfo {
+            tab_id,
+            label: label.clone(),
             target_id: result.target_id,
             session_id: attach.session_id,
             url: target_url.to_string(),
@@ -778,7 +1068,12 @@ impl BrowserManager {
         });
         self.active_page_index = index;
 
-        Ok(json!({ "index": index, "url": target_url }))
+        Ok(json!({
+            "tabId": format_tab_id(tab_id),
+            "label": label,
+            "url": target_url,
+            "total": self.pages.len(),
+        }))
     }
 
     pub async fn tab_switch(&mut self, index: usize) -> Result<Value, String> {
@@ -808,7 +1103,13 @@ impl BrowserManager {
             page.title = title.clone();
         }
 
-        Ok(json!({ "index": index, "url": url, "title": title }))
+        let page = &self.pages[index];
+        Ok(json!({
+            "tabId": format_tab_id(page.tab_id),
+            "label": page.label,
+            "url": url,
+            "title": title,
+        }))
     }
 
     pub async fn tab_close(&mut self, index: Option<usize>) -> Result<Value, String> {
@@ -823,6 +1124,9 @@ impl BrowserManager {
         }
 
         let page = self.pages.remove(target_index);
+        self.update_active_page_after_removal(target_index);
+        let closed_tab_id = page.tab_id;
+        let closed_label = page.label.clone();
         let _ = self
             .client
             .send_command_typed::<_, Value>(
@@ -834,14 +1138,14 @@ impl BrowserManager {
             )
             .await;
 
-        if self.active_page_index >= self.pages.len() {
-            self.active_page_index = self.pages.len() - 1;
-        }
-
         let session_id = self.pages[self.active_page_index].session_id.clone();
         self.enable_domains(&session_id).await?;
 
-        Ok(json!({ "closed": target_index, "activeIndex": self.active_page_index }))
+        Ok(json!({
+            "tabId": format_tab_id(closed_tab_id),
+            "label": closed_label,
+            "closed": true,
+        }))
     }
 
     // -----------------------------------------------------------------------
@@ -868,6 +1172,39 @@ impl BrowserManager {
                 Some(session_id),
             )
             .await?;
+
+        // Screencast captures the actual content area, not the emulated CSS
+        // viewport, so resize the content area to match.
+        if let Ok(target_id) = self.active_target_id() {
+            if let Ok(window_info) = self
+                .client
+                .send_command(
+                    "Browser.getWindowForTarget",
+                    Some(json!({ "targetId": target_id })),
+                    None,
+                )
+                .await
+            {
+                if let Some(window_id) = window_info.get("windowId").and_then(|v| v.as_i64()) {
+                    if let Err(e) = self
+                        .client
+                        .send_command(
+                            "Browser.setContentsSize",
+                            Some(json!({
+                                "windowId": window_id,
+                                "width": width,
+                                "height": height,
+                            })),
+                            None,
+                        )
+                        .await
+                    {
+                        eprintln!("Browser.setContentsSize failed (experimental CDP): {e}");
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -990,50 +1327,25 @@ impl BrowserManager {
         Ok(())
     }
 
-    pub async fn upload_files(&self, selector: &str, files: &[String]) -> Result<(), String> {
+    pub async fn upload_files(
+        &self,
+        selector: &str,
+        files: &[String],
+        ref_map: &RefMap,
+        iframe_sessions: &HashMap<String, String>,
+    ) -> Result<(), String> {
         let session_id = self.active_session_id()?;
 
-        let node_result = self
-            .client
-            .send_command(
-                "DOM.querySelector",
-                Some(json!({
-                    "nodeId": 1,
-                    "selector": selector,
-                })),
-                Some(session_id),
-            )
-            .await;
+        let (object_id, effective_session_id) =
+            resolve_element_object_id(&self.client, session_id, ref_map, selector, iframe_sessions)
+                .await?;
 
-        // Alternative: resolve via JS
-        let result: EvaluateResult = self
-            .client
-            .send_command_typed(
-                "Runtime.evaluate",
-                &EvaluateParams {
-                    expression: format!(
-                        "document.querySelector({})",
-                        serde_json::to_string(selector).unwrap_or_default()
-                    ),
-                    return_by_value: Some(false),
-                    await_promise: Some(false),
-                },
-                Some(session_id),
-            )
-            .await?;
-
-        let object_id = result
-            .result
-            .object_id
-            .ok_or("File input element not found")?;
-
-        // Get the DOM node from the remote object
         let describe: Value = self
             .client
             .send_command(
                 "DOM.describeNode",
                 Some(json!({ "objectId": object_id })),
-                Some(session_id),
+                Some(&effective_session_id),
             )
             .await?;
 
@@ -1043,9 +1355,6 @@ impl BrowserManager {
             .and_then(|v| v.as_i64())
             .ok_or("Could not get backendNodeId for file input")?;
 
-        // Suppress unused variable warning
-        let _ = node_result;
-
         self.client
             .send_command(
                 "DOM.setFileInputFiles",
@@ -1053,7 +1362,7 @@ impl BrowserManager {
                     "files": files,
                     "backendNodeId": backend_node_id,
                 })),
-                Some(session_id),
+                Some(&effective_session_id),
             )
             .await?;
 
@@ -1077,6 +1386,46 @@ impl BrowserManager {
             .to_string())
     }
 
+    pub async fn remove_script_to_evaluate(&self, identifier: &str) -> Result<(), String> {
+        let session_id = self.active_session_id()?;
+        self.client
+            .send_command(
+                "Page.removeScriptToEvaluateOnNewDocument",
+                Some(json!({ "identifier": identifier })),
+                Some(session_id),
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn tab_switch_by_id(&mut self, tab_id: u32) -> Result<Value, String> {
+        let index = self
+            .pages
+            .iter()
+            .position(|p| p.tab_id == tab_id)
+            .ok_or_else(|| format!("Tab ID {} not found", tab_id))?;
+        self.tab_switch(index).await
+    }
+
+    pub async fn tab_close_by_id(&mut self, tab_id: Option<u32>) -> Result<Value, String> {
+        let index = match tab_id {
+            Some(id) => Some(
+                self.pages
+                    .iter()
+                    .position(|p| p.tab_id == id)
+                    .ok_or_else(|| format!("Tab ID {} not found", id))?,
+            ),
+            None => None,
+        };
+        self.tab_close(index).await
+    }
+
+    pub fn assign_tab_id(&mut self) -> u32 {
+        let id = self.next_tab_id;
+        self.next_tab_id += 1;
+        id
+    }
+
     pub fn add_page(&mut self, page: PageInfo) {
         let index = self.pages.len();
         self.pages.push(page);
@@ -1090,7 +1439,7 @@ impl BrowserManager {
     pub fn remove_page_by_target_id(&mut self, target_id: &str) {
         if let Some(pos) = self.pages.iter().position(|p| p.target_id == target_id) {
             self.pages.remove(pos);
-            self.update_active_page_if_needed();
+            self.update_active_page_after_removal(pos);
         }
     }
 
@@ -1102,8 +1451,22 @@ impl BrowserManager {
         self.pages.len()
     }
 
+    /// Returns the stable `tab_id` of the currently active page, if any.
+    pub fn active_tab_id(&self) -> Option<u32> {
+        self.pages.get(self.active_page_index).map(|p| p.tab_id)
+    }
+
+    /// Returns true if a tab with the given stable `tab_id` is still open.
+    pub fn has_tab_id(&self, tab_id: u32) -> bool {
+        self.pages.iter().any(|p| p.tab_id == tab_id)
+    }
+
     pub fn pages_list(&self) -> Vec<PageInfo> {
         self.pages.clone()
+    }
+
+    pub fn visited_origins(&self) -> &HashSet<String> {
+        &self.visited_origins
     }
 
     pub async fn set_download_behavior(&self, download_path: &str) -> Result<(), String> {
@@ -1162,10 +1525,8 @@ async fn poll_network_idle(
                                 }
                             }
                         }
-                        "Page.loadEventFired" => {
-                            if p.is_empty() {
-                                idle_start = Some(tokio::time::Instant::now());
-                            }
+                        "Page.loadEventFired" if p.is_empty() => {
+                            idle_start = Some(tokio::time::Instant::now());
                         }
                         _ => {}
                     }
@@ -1252,6 +1613,10 @@ async fn initialize_lightpanda_manager(
             pages: Vec::new(),
             active_page_index: 0,
             default_timeout_ms: 25_000,
+            download_path: None,
+            ignore_https_errors: false,
+            visited_origins: HashSet::new(),
+            next_tab_id: 1,
         };
 
         match discover_and_attach_lightpanda_targets(&mut manager, deadline).await {
@@ -1320,6 +1685,19 @@ async fn resolve_cdp_url(input: &str) -> Result<String, String> {
 
     if input.starts_with("http://") || input.starts_with("https://") {
         let parsed = url::Url::parse(input).map_err(|e| format!("Invalid CDP URL: {}", e))?;
+        // If no explicit port and path is empty/root, this is likely a provider
+        // WebSocket endpoint (e.g. https://xxx.cdp0.browser-use.com). Convert
+        // the scheme to ws/wss and connect directly instead of probing :9222.
+        if parsed.port().is_none() && (parsed.path().is_empty() || parsed.path() == "/") {
+            let ws_scheme = if input.starts_with("https://") {
+                "wss"
+            } else {
+                "ws"
+            };
+            let mut ws_url = parsed.clone();
+            let _ = ws_url.set_scheme(ws_scheme);
+            return Ok(ws_url.to_string());
+        }
         let host = parsed
             .host_str()
             .ok_or_else(|| format!("No host in CDP URL: {}", input))?;
@@ -1343,6 +1721,75 @@ async fn resolve_cdp_url(input: &str) -> Result<String, String> {
 mod tests {
     use super::*;
     use tokio::time::sleep;
+
+    #[test]
+    fn test_format_tab_id() {
+        assert_eq!(format_tab_id(1), "t1");
+        assert_eq!(format_tab_id(42), "t42");
+    }
+
+    #[test]
+    fn test_parse_tab_ref_id() {
+        assert_eq!(TabRef::parse("t1"), Ok(TabRef::Id(1)));
+        assert_eq!(TabRef::parse("t42"), Ok(TabRef::Id(42)));
+        assert_eq!(TabRef::parse("T7"), Ok(TabRef::Id(7)));
+    }
+
+    #[test]
+    fn test_parse_tab_ref_label() {
+        assert_eq!(TabRef::parse("docs"), Ok(TabRef::Label("docs".to_string())));
+        assert_eq!(
+            TabRef::parse("app-2"),
+            Ok(TabRef::Label("app-2".to_string()))
+        );
+        assert_eq!(
+            TabRef::parse("my_tab"),
+            Ok(TabRef::Label("my_tab".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_parse_tab_ref_rejects_bare_integer() {
+        let err = TabRef::parse("2").unwrap_err();
+        assert!(
+            err.contains("positional integers are not accepted"),
+            "error should teach the user to use `t<N>`: {}",
+            err
+        );
+        assert!(err.contains("t2"));
+    }
+
+    #[test]
+    fn test_parse_tab_ref_rejects_empty() {
+        assert!(TabRef::parse("").is_err());
+        assert!(TabRef::parse("   ").is_err());
+    }
+
+    #[test]
+    fn test_parse_tab_ref_rejects_zero() {
+        let err = TabRef::parse("t0").unwrap_err();
+        assert!(err.contains("start at t1"));
+    }
+
+    #[test]
+    fn test_parse_tab_ref_rejects_invalid_label() {
+        assert!(TabRef::parse("2docs").is_err());
+        assert!(TabRef::parse("-docs").is_err());
+        assert!(TabRef::parse("docs!").is_err());
+        assert!(TabRef::parse("docs space").is_err());
+    }
+
+    #[test]
+    fn test_is_valid_label() {
+        assert!(is_valid_label("docs"));
+        assert!(is_valid_label("Docs"));
+        assert!(is_valid_label("app-2"));
+        assert!(is_valid_label("my_tab"));
+        assert!(!is_valid_label(""));
+        assert!(!is_valid_label("2docs"));
+        assert!(!is_valid_label("-docs"));
+        assert!(!is_valid_label("docs!"));
+    }
 
     #[test]
     fn test_should_track_popup_target_with_empty_url() {
@@ -1375,6 +1822,8 @@ mod tests {
     #[test]
     fn test_update_page_target_info_in_pages_updates_existing_page() {
         let mut pages = vec![PageInfo {
+            tab_id: 1,
+            label: None,
             target_id: "popup-1".to_string(),
             session_id: "session-1".to_string(),
             url: String::new(),
@@ -1393,6 +1842,26 @@ mod tests {
         assert!(update_page_target_info_in_pages(&mut pages, &target));
         assert_eq!(pages[0].url, "https://example.com/popup");
         assert_eq!(pages[0].title, "Popup");
+    }
+
+    #[test]
+    fn test_active_page_index_after_removal_shifts_when_earlier_tab_is_removed() {
+        assert_eq!(active_page_index_after_removal(2, 0, 3), 1);
+    }
+
+    #[test]
+    fn test_active_page_index_after_removal_keeps_same_slot_when_later_tab_is_removed() {
+        assert_eq!(active_page_index_after_removal(1, 2, 3), 1);
+    }
+
+    #[test]
+    fn test_active_page_index_after_removal_clamps_when_active_last_tab_is_removed() {
+        assert_eq!(active_page_index_after_removal(3, 3, 3), 2);
+    }
+
+    #[test]
+    fn test_active_page_index_after_removal_resets_when_last_page_disappears() {
+        assert_eq!(active_page_index_after_removal(0, 0, 0), 0);
     }
 
     #[test]

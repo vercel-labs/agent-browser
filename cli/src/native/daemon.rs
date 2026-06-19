@@ -9,9 +9,9 @@ use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::signal;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, Notify, RwLock};
 
-use super::actions::{execute_command, DaemonState};
+use super::actions::{close_current_browser, execute_command, DaemonState};
 use super::cdp::client::CdpClient;
 use super::state;
 use super::stream::StreamServer;
@@ -22,14 +22,68 @@ pub async fn run_daemon(session: &str) {
         let _ = fs::create_dir_all(&socket_dir);
     }
 
+    // When debug mode is on, redirect stderr to a log file so daemon
+    // output can be inspected (the daemon normally has stderr piped to its
+    // parent which drops the read end after startup).
+    #[cfg(unix)]
+    if env::var("AGENT_BROWSER_DEBUG").is_ok() {
+        let log_path = socket_dir.join(format!("{}.log", session));
+        if let Ok(file) = fs::File::create(&log_path) {
+            use std::os::unix::io::IntoRawFd;
+            let fd = file.into_raw_fd();
+            unsafe {
+                libc::dup2(fd, 2);
+                libc::close(fd);
+            }
+            let _ = writeln!(
+                std::io::stderr(),
+                "[daemon] Debug logging started for session: {}",
+                session
+            );
+        }
+    } else {
+        // Redirect stderr to /dev/null to prevent daemon crash when the
+        // parent CLI drops the piped stderr handle after startup.  Cloud
+        // providers (AgentCore, Browserbase, etc.) may write to stderr
+        // during connection setup; a broken pipe would kill the daemon.
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::IntoRawFd;
+            if let Ok(devnull) = fs::File::create("/dev/null") {
+                let fd = devnull.into_raw_fd();
+                unsafe {
+                    libc::dup2(fd, 2);
+                    libc::close(fd);
+                }
+            }
+        }
+    }
+
     let pid_path = socket_dir.join(format!("{}.pid", session));
     let _ = fs::write(&pid_path, process::id().to_string());
 
+    let version_path = socket_dir.join(format!("{}.version", session));
+    let _ = fs::write(&version_path, env!("CARGO_PKG_VERSION"));
+
+    // On Unix the daemon listens on a Unix domain socket; on Windows it uses
+    // TCP, so there is no .sock file — only a .port file written by the server.
     let socket_path = socket_dir.join(format!("{}.sock", session));
 
+    #[cfg(unix)]
     if socket_path.exists() {
         let _ = fs::remove_file(&socket_path);
     }
+
+    #[cfg(windows)]
+    {
+        let _ = fs::remove_file(socket_dir.join(format!("{}.port", session)));
+    }
+
+    let stream_path = socket_dir.join(format!("{}.stream", session));
+    let _ = fs::remove_file(&stream_path);
+    let _ = fs::remove_file(socket_dir.join(format!("{}.engine", session)));
+    let _ = fs::remove_file(socket_dir.join(format!("{}.provider", session)));
+    let _ = fs::remove_file(socket_dir.join(format!("{}.extensions", session)));
 
     if let Ok(days_str) = env::var("AGENT_BROWSER_STATE_EXPIRE_DAYS") {
         if let Ok(days) = days_str.parse::<u64>() {
@@ -41,24 +95,20 @@ pub async fn run_daemon(session: &str) {
 
     let mut stream_client: Option<Arc<RwLock<Option<Arc<CdpClient>>>>> = None;
     let mut stream_server_instance: Option<Arc<StreamServer>> = None;
-    if let Ok(port_str) = env::var("AGENT_BROWSER_STREAM_PORT") {
-        if let Ok(port) = port_str.parse::<u16>() {
-            if port > 0 {
-                match StreamServer::start_without_client(port, session.to_string()).await {
-                    Ok((stream_server, client_slot)) => {
-                        stream_client = Some(client_slot.clone());
-                        let stream_path = socket_dir.join(format!("{}.stream", session));
-                        if let Err(e) = fs::write(&stream_path, stream_server.port().to_string()) {
-                            let _ =
-                                writeln!(std::io::stderr(), "Failed to write .stream file: {}", e);
-                        }
-                        stream_server_instance = Some(Arc::new(stream_server));
-                    }
-                    Err(e) => {
-                        let _ = writeln!(std::io::stderr(), "Stream server failed to start: {}", e);
-                    }
-                }
+    let preferred_port = env::var("AGENT_BROWSER_STREAM_PORT")
+        .ok()
+        .and_then(|s| s.parse::<u16>().ok())
+        .unwrap_or(0);
+    match StreamServer::start_without_client(preferred_port, session.to_string(), true).await {
+        Ok((stream_server, client_slot)) => {
+            stream_client = Some(client_slot.clone());
+            if let Err(e) = fs::write(&stream_path, stream_server.port().to_string()) {
+                let _ = writeln!(std::io::stderr(), "Failed to write .stream file: {}", e);
             }
+            stream_server_instance = Some(Arc::new(stream_server));
+        }
+        Err(e) => {
+            let _ = writeln!(std::io::stderr(), "Stream server failed to start: {}", e);
         }
     }
 
@@ -78,10 +128,20 @@ pub async fn run_daemon(session: &str) {
     )
     .await;
 
-    let _ = fs::remove_file(&socket_path);
+    #[cfg(unix)]
+    {
+        let _ = fs::remove_file(&socket_path);
+    }
+    #[cfg(windows)]
+    {
+        let _ = fs::remove_file(socket_dir.join(format!("{}.port", session)));
+    }
     let _ = fs::remove_file(&pid_path);
-    let stream_path = socket_dir.join(format!("{}.stream", session));
+    let _ = fs::remove_file(&version_path);
     let _ = fs::remove_file(&stream_path);
+    let _ = fs::remove_file(socket_dir.join(format!("{}.engine", session)));
+    let _ = fs::remove_file(socket_dir.join(format!("{}.provider", session)));
+    let _ = fs::remove_file(socket_dir.join(format!("{}.extensions", session)));
 
     if let Err(e) = result {
         let _ = writeln!(std::io::stderr(), "Daemon error: {}", e);
@@ -92,7 +152,7 @@ pub async fn run_daemon(session: &str) {
 #[cfg(unix)]
 async fn run_socket_server(
     socket_path: &PathBuf,
-    _session: &str,
+    session: &str,
     stream_client: Option<Arc<RwLock<Option<Arc<CdpClient>>>>>,
     stream_server: Option<Arc<StreamServer>>,
     idle_timeout_ms: Option<u64>,
@@ -102,6 +162,13 @@ async fn run_socket_server(
     let listener =
         UnixListener::bind(socket_path).map_err(|e| format!("Failed to bind socket: {}", e))?;
 
+    let stream_file: Option<PathBuf> = if stream_server.is_some() {
+        let dir = socket_path.parent().unwrap_or(std::path::Path::new("."));
+        Some(dir.join(format!("{}.stream", session)))
+    } else {
+        None
+    };
+
     let state: std::sync::Arc<tokio::sync::Mutex<DaemonState>> = std::sync::Arc::new(
         tokio::sync::Mutex::new(DaemonState::new_with_stream(stream_client, stream_server)),
     );
@@ -109,18 +176,28 @@ async fn run_socket_server(
     let (reset_tx, mut reset_rx) = mpsc::channel::<()>(64);
     let reset_tx = idle_timeout_ms.map(|_| Arc::new(reset_tx));
 
-    loop {
-        let sleep_future = idle_timeout_ms.map(|ms| tokio::time::sleep(Duration::from_millis(ms)));
-        let mut sleep_pin = sleep_future.map(Box::pin);
+    // Notifier used by handle_connection to signal the daemon loop to exit
+    // after a "close" command, instead of calling process::exit() which skips
+    // destructors and can leave Chrome processes orphaned (issue #1113).
+    let close_notify = Arc::new(Notify::new());
 
+    let mut drain_interval = tokio::time::interval(Duration::from_millis(100));
+    drain_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    let idle_sleep = idle_timeout_ms.map(|ms| tokio::time::sleep(Duration::from_millis(ms)));
+    let mut idle_sleep_pin = idle_sleep.map(Box::pin);
+
+    loop {
         tokio::select! {
             accept_result = listener.accept() => {
                 match accept_result {
                     Ok((stream, _)) => {
                         let state = state.clone();
                         let reset_tx = reset_tx.clone();
+                        let sf = stream_file.clone();
+                        let cn = close_notify.clone();
                         tokio::spawn(async move {
-                            handle_connection(stream, state, reset_tx).await;
+                            handle_connection(stream, state, reset_tx, sf, cn).await;
                         });
                     }
                     Err(e) => {
@@ -128,27 +205,43 @@ async fn run_socket_server(
                     }
                 }
             }
+            _ = drain_interval.tick() => {
+                let mut s = state.lock().await;
+                let process_exited = s
+                    .browser
+                    .as_mut()
+                    .map(|mgr| mgr.has_process_exited())
+                    .unwrap_or(false);
+                if process_exited {
+                    let _ = close_current_browser(&mut s).await;
+                } else if s.browser.is_some() {
+                    s.drain_cdp_events_background().await;
+                }
+            }
             _ = async {
-                if let Some(ref mut s) = sleep_pin {
-                    s.as_mut().await
-                } else {
-                    std::future::pending::<()>().await
+                match idle_sleep_pin {
+                    Some(ref mut s) => s.as_mut().await,
+                    None => std::future::pending::<()>().await,
                 }
             }, if idle_timeout_ms.is_some() => {
                 let mut s = state.lock().await;
-                if let Some(ref mut mgr) = s.browser {
-                    let _ = mgr.close().await;
-                }
+                let _ = close_current_browser(&mut s).await;
                 break;
             }
             _ = reset_rx.recv(), if idle_timeout_ms.is_some() => {
+                idle_sleep_pin = idle_timeout_ms
+                    .map(|ms| Box::pin(tokio::time::sleep(Duration::from_millis(ms))));
                 continue;
+            }
+            _ = close_notify.notified() => {
+                // "close" command was handled; browser already closed by
+                // handle_close(). Break to run cleanup and exit gracefully
+                // so destructors fire.
+                break;
             }
             _ = shutdown_signal() => {
                 let mut s = state.lock().await;
-                if let Some(ref mut mgr) = s.browser {
-                    let _ = mgr.close().await;
-                }
+                let _ = close_current_browser(&mut s).await;
                 break;
             }
         }
@@ -167,14 +260,29 @@ async fn run_socket_server(
 ) -> Result<(), String> {
     use tokio::net::TcpListener;
 
-    let port = get_port_for_session(session);
-    let listener = TcpListener::bind(format!("127.0.0.1:{}", port))
-        .await
-        .map_err(|e| format!("Failed to bind TCP: {}", e))?;
+    let preferred_port = get_port_for_session(session);
+    // Try the hash-derived port first; if it is blocked (e.g. Windows Hyper-V
+    // excluded port range), fall back to an OS-assigned ephemeral port.
+    let listener = match TcpListener::bind(format!("127.0.0.1:{}", preferred_port)).await {
+        Ok(l) => l,
+        Err(_) => TcpListener::bind("127.0.0.1:0")
+            .await
+            .map_err(|e| format!("Failed to bind TCP: {}", e))?,
+    };
+    let actual_port = listener
+        .local_addr()
+        .map_err(|e| format!("Failed to get local address: {}", e))?
+        .port();
 
     let socket_dir = socket_path.parent().unwrap_or(std::path::Path::new("."));
     let port_path = socket_dir.join(format!("{}.port", session));
-    let _ = fs::write(&port_path, port.to_string());
+    let _ = fs::write(&port_path, actual_port.to_string());
+
+    let stream_file: Option<PathBuf> = if stream_server.is_some() {
+        Some(socket_dir.join(format!("{}.stream", session)))
+    } else {
+        None
+    };
 
     let state: std::sync::Arc<tokio::sync::Mutex<DaemonState>> = std::sync::Arc::new(
         tokio::sync::Mutex::new(DaemonState::new_with_stream(stream_client, stream_server)),
@@ -183,18 +291,22 @@ async fn run_socket_server(
     let (reset_tx, mut reset_rx) = mpsc::channel::<()>(64);
     let reset_tx = idle_timeout_ms.map(|_| Arc::new(reset_tx));
 
-    loop {
-        let sleep_future = idle_timeout_ms.map(|ms| tokio::time::sleep(Duration::from_millis(ms)));
-        let mut sleep_pin = sleep_future.map(Box::pin);
+    let close_notify = Arc::new(Notify::new());
 
+    let idle_sleep = idle_timeout_ms.map(|ms| tokio::time::sleep(Duration::from_millis(ms)));
+    let mut idle_sleep_pin = idle_sleep.map(Box::pin);
+
+    loop {
         tokio::select! {
             accept_result = listener.accept() => {
                 match accept_result {
                     Ok((stream, _)) => {
                         let state = state.clone();
                         let reset_tx = reset_tx.clone();
+                        let sf = stream_file.clone();
+                        let cn = close_notify.clone();
                         tokio::spawn(async move {
-                            handle_connection(stream, state, reset_tx).await;
+                            handle_connection(stream, state, reset_tx, sf, cn).await;
                         });
                     }
                     Err(e) => {
@@ -203,27 +315,28 @@ async fn run_socket_server(
                 }
             }
             _ = async {
-                if let Some(ref mut s) = sleep_pin {
-                    s.as_mut().await
-                } else {
-                    std::future::pending::<()>().await
+                match idle_sleep_pin {
+                    Some(ref mut s) => s.as_mut().await,
+                    None => std::future::pending::<()>().await,
                 }
             }, if idle_timeout_ms.is_some() => {
                 let mut s = state.lock().await;
-                if let Some(ref mut mgr) = s.browser {
-                    let _ = mgr.close().await;
-                }
+                let _ = close_current_browser(&mut s).await;
                 let _ = fs::remove_file(&port_path);
                 break;
             }
             _ = reset_rx.recv(), if idle_timeout_ms.is_some() => {
+                idle_sleep_pin = idle_timeout_ms
+                    .map(|ms| Box::pin(tokio::time::sleep(Duration::from_millis(ms))));
                 continue;
+            }
+            _ = close_notify.notified() => {
+                let _ = fs::remove_file(&port_path);
+                break;
             }
             _ = shutdown_signal() => {
                 let mut s = state.lock().await;
-                if let Some(ref mut mgr) = s.browser {
-                    let _ = mgr.close().await;
-                }
+                let _ = close_current_browser(&mut s).await;
                 let _ = fs::remove_file(&port_path);
                 break;
             }
@@ -237,6 +350,8 @@ async fn handle_connection<S>(
     stream: S,
     state: std::sync::Arc<tokio::sync::Mutex<DaemonState>>,
     idle_reset_tx: Option<Arc<mpsc::Sender<()>>>,
+    stream_file_cleanup: Option<PathBuf>,
+    close_notify: Arc<Notify>,
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
@@ -290,8 +405,15 @@ async fn handle_connection<S>(
                 }
 
                 if is_close {
+                    if let Some(ref path) = stream_file_cleanup {
+                        let _ = fs::remove_file(path);
+                    }
+                    // Signal the daemon loop to exit gracefully instead of
+                    // calling process::exit(), which skips destructors and
+                    // can leave Chrome processes orphaned (issue #1113).
                     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                    process::exit(0);
+                    close_notify.notify_one();
+                    return;
                 }
             }
             Err(_) => break,
@@ -381,18 +503,169 @@ fn get_port_for_session(session: &str) -> u16 {
 }
 
 #[cfg(test)]
-#[cfg(windows)]
 mod tests {
+    #[allow(unused_imports)]
     use super::*;
 
+    #[cfg(windows)]
     #[test]
     fn test_port_matches_client_algorithm() {
-        // These values are computed by the identical djb2 implementation in
-        // connection.rs. Both sides must agree on the port for the daemon to
-        // start successfully.
         assert_eq!(get_port_for_session("default"), 50838);
         assert_eq!(get_port_for_session("my-session"), 63105);
         assert_eq!(get_port_for_session("work"), 51184);
         assert_eq!(get_port_for_session(""), 49152);
+    }
+
+    /// Guard against re-introducing `waitpid(-1)` in daemon code.
+    ///
+    /// Issue #1035: a SIGCHLD handler that called `waitpid(-1, WNOHANG)` was
+    /// added in v0.22.3 to reap zombie Chrome processes. This races with
+    /// Rust's `Child::try_wait()` / `Child::wait()` because `waitpid(-1)`
+    /// reaps *any* child, stealing the exit status before Rust can collect
+    /// it. The result is ECHILD errors in `BrowserManager::has_process_exited()`
+    /// and `ChromeProcess::kill()`, which can leave the daemon in a broken
+    /// state or cause hangs on certain Linux configurations.
+    ///
+    /// The fix uses the existing 500ms drain interval to call
+    /// `has_process_exited()` (which delegates to `Child::try_wait()`)
+    /// for targeted, race-free zombie detection.
+    #[test]
+    fn test_no_waitpid_minus_one_in_daemon() {
+        let source = include_str!("daemon.rs");
+        // Only check production code (everything before `#[cfg(test)]`)
+        let production_code = source.split("#[cfg(test)]").next().unwrap_or(source);
+        assert!(
+            !production_code.contains("waitpid(-1"),
+            "daemon.rs production code must not call waitpid(-1, ...). \
+             Use Child::try_wait() via has_process_exited() instead. \
+             See issue #1035."
+        );
+    }
+
+    /// Verify that `Child::try_wait()` correctly detects a crashed child
+    /// without needing a global SIGCHLD handler or `waitpid(-1)`.
+    /// This is what `has_process_exited()` uses in the fixed code.
+    #[cfg(unix)]
+    #[test]
+    fn test_child_try_wait_detects_exit_without_sigchld_handler() {
+        use std::process::{Command, Stdio};
+
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "exit 42"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("failed to spawn child");
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                assert!(
+                    !status.success(),
+                    "child exited with code 42, should not be success"
+                );
+            }
+            Ok(None) => panic!("try_wait() returned None but child should have exited"),
+            Err(e) => panic!("try_wait() should succeed without waitpid(-1): {}", e),
+        }
+    }
+
+    /// Regression test for #1101: idle timeout must fire even while the
+    /// drain interval ticks every 500 ms.  The bug was that `sleep_future`
+    /// was created **inside** the loop, so each drain tick dropped the
+    /// in-progress sleep and replaced it with a fresh one – the timer
+    /// could never reach its deadline.
+    #[tokio::test]
+    async fn test_idle_timeout_fires_despite_drain_interval() {
+        use tokio::sync::mpsc;
+
+        let idle_timeout_ms: u64 = 1000;
+        let mut drain_interval = tokio::time::interval(Duration::from_millis(500));
+        drain_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        let (_reset_tx, mut reset_rx) = mpsc::channel::<()>(64);
+
+        let start = tokio::time::Instant::now();
+
+        let exited = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut idle_sleep_pin = Some(Box::pin(tokio::time::sleep(Duration::from_millis(
+                idle_timeout_ms,
+            ))));
+
+            loop {
+                tokio::select! {
+                    _ = drain_interval.tick() => {}
+                    _ = async {
+                        match idle_sleep_pin {
+                            Some(ref mut s) => s.as_mut().await,
+                            None => std::future::pending::<()>().await,
+                        }
+                    } => {
+                        break;
+                    }
+                    _ = reset_rx.recv() => {
+                        idle_sleep_pin = Some(Box::pin(
+                            tokio::time::sleep(Duration::from_millis(idle_timeout_ms)),
+                        ));
+                        continue;
+                    }
+                }
+            }
+        })
+        .await;
+
+        let elapsed = start.elapsed();
+
+        assert!(
+            exited.is_ok(),
+            "idle timeout never fired – loop ran for >5 s (bug #1101)"
+        );
+        assert!(
+            elapsed < Duration::from_millis(idle_timeout_ms + 500),
+            "idle timeout took too long: {:?} (expected ~{} ms)",
+            elapsed,
+            idle_timeout_ms,
+        );
+    }
+
+    /// Verify that `ChromeProcess::has_exited()` (which uses `Child::try_wait()`)
+    /// correctly detects a killed child, the same way the drain interval does
+    /// in the fixed daemon code. This ensures crash detection works without
+    /// a SIGCHLD handler.
+    #[cfg(unix)]
+    #[test]
+    fn test_has_exited_detects_killed_process() {
+        use std::process::{Command, Stdio};
+
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "sleep 60"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("failed to spawn child");
+
+        // Process should be running
+        match child.try_wait() {
+            Ok(None) => {} // expected
+            other => panic!("expected Ok(None) for running process, got {:?}", other),
+        }
+
+        // Kill it (simulates Chrome crash)
+        child.kill().expect("failed to kill child");
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // try_wait should detect the exit
+        match child.try_wait() {
+            Ok(Some(_)) => {} // expected: detected the crash
+            other => panic!(
+                "expected Ok(Some(_)) after kill, got {:?}. \
+                 Crash detection via try_wait() must work for the drain \
+                 interval fix (issue #1035) to function correctly.",
+                other
+            ),
+        }
     }
 }
