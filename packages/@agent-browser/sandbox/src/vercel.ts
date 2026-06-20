@@ -1,6 +1,7 @@
 import {
   buildAgentBrowserArgv,
   createAgentBrowserCommandResult,
+  quoteShellArg,
   resolveAgentBrowserInstallSpec,
   throwIfCommandFailed,
   type AgentBrowserArgs,
@@ -45,6 +46,8 @@ export const CHROMIUM_SYSTEM_DEPS = [
   "gtk3",
   "dbus-libs",
 ] as const;
+
+const SAFE_DNF_PACKAGE_NAME = /^[A-Za-z0-9._+][A-Za-z0-9._+-]*$/;
 
 export interface VercelSandboxCommand {
   readonly exitCode?: number;
@@ -123,12 +126,11 @@ export async function installAgentBrowserInVercelSandbox(
   const systemDependencies = options.systemDependencies ?? CHROMIUM_SYSTEM_DEPS;
 
   if (options.installSystemDependencies !== false && systemDependencies.length > 0) {
+    const dnfPackages = systemDependencies.map(formatDnfPackageName).join(" ");
     results.push(
       await runVercelCommand(sandbox, "sh", [
         "-c",
-        `sudo dnf clean all 2>&1 && sudo dnf install -y --skip-broken ${systemDependencies.join(
-          " ",
-        )} 2>&1 && sudo ldconfig 2>&1`,
+        `sudo dnf clean all 2>&1 && sudo dnf install -y --skip-broken -- ${dnfPackages} 2>&1 && sudo ldconfig 2>&1`,
       ], options.onStep, "Installing system dependencies"),
     );
   }
@@ -224,11 +226,21 @@ export async function withAgentBrowserSandbox<T>(
   options: WithAgentBrowserSandboxOptions = {},
 ): Promise<T> {
   const sandbox = await createAgentBrowserSandbox(options);
+  let callbackFailed = false;
   try {
     return await fn(sandbox);
+  } catch (error) {
+    callbackFailed = true;
+    throw error;
   } finally {
     if (options.stop !== false) {
-      await runStep("Stopping sandbox", () => sandbox.stop(), options.onStep);
+      try {
+        await runStep("Stopping sandbox", () => sandbox.stop(), options.onStep);
+      } catch (error) {
+        if (!callbackFailed) {
+          throw error;
+        }
+      }
     }
   }
 }
@@ -250,6 +262,7 @@ export async function createAgentBrowserSnapshot(
     options.onStep,
   );
 
+  let snapshotFailed = false;
   try {
     await installAgentBrowserInVercelSandbox(sandbox, {
       ...options.install,
@@ -257,8 +270,17 @@ export async function createAgentBrowserSnapshot(
     });
     const snapshot = await runStep("Creating snapshot", () => sandbox.snapshot(), options.onStep);
     return snapshot.snapshotId;
+  } catch (error) {
+    snapshotFailed = true;
+    throw error;
   } finally {
-    await runStep("Stopping sandbox", () => sandbox.stop(), options.onStep);
+    try {
+      await runStep("Stopping sandbox", () => sandbox.stop(), options.onStep);
+    } catch (error) {
+      if (!snapshotFailed) {
+        throw error;
+      }
+    }
   }
 }
 
@@ -324,4 +346,11 @@ function defaultEnv(): Readonly<Record<string, string | undefined>> {
     readonly process?: { readonly env?: Readonly<Record<string, string | undefined>> };
   };
   return globalWithProcess.process?.env ?? {};
+}
+
+function formatDnfPackageName(name: string): string {
+  if (!SAFE_DNF_PACKAGE_NAME.test(name)) {
+    throw new Error(`Invalid system dependency name: ${JSON.stringify(name)}`);
+  }
+  return quoteShellArg(name);
 }

@@ -5,6 +5,7 @@ import {
   createAgentBrowserSandbox,
   createAgentBrowserSnapshot,
   getSandboxCredentials,
+  installAgentBrowserInVercelSandbox,
   runAgentBrowserCommand,
   withAgentBrowserSandbox,
 } from "../dist/vercel.js";
@@ -86,11 +87,30 @@ test("creates and bootstraps a fresh Vercel sandbox", async () => {
     "sh",
     [
       "-c",
-      "sudo dnf clean all 2>&1 && sudo dnf install -y --skip-broken nss 2>&1 && sudo ldconfig 2>&1",
+      "sudo dnf clean all 2>&1 && sudo dnf install -y --skip-broken -- nss 2>&1 && sudo ldconfig 2>&1",
     ],
   ]);
   assert.deepEqual(calls[2], ["npm", ["install", "-g", "agent-browser@1.2.3"]]);
   assert.deepEqual(calls[3], ["agent-browser", ["install"]]);
+});
+
+test("rejects invalid Vercel system dependency names", async () => {
+  const calls = [];
+  const sandbox = {
+    async runCommand(command, args) {
+      calls.push([command, args]);
+      return commandResult();
+    },
+  };
+
+  await assert.rejects(
+    () =>
+      installAgentBrowserInVercelSandbox(sandbox, {
+        systemDependencies: ["nss; touch /tmp/pwned"],
+      }),
+    /Invalid system dependency name/,
+  );
+  assert.deepEqual(calls, []);
 });
 
 test("stops a fresh Vercel sandbox when bootstrap fails", async () => {
@@ -143,6 +163,59 @@ test("withAgentBrowserSandbox stops the sandbox", async () => {
   assert.equal(stopped, true);
 });
 
+test("withAgentBrowserSandbox preserves callback failure when stop fails", async () => {
+  const sandbox = {
+    async runCommand() {
+      return commandResult();
+    },
+    async snapshot() {
+      return { snapshotId: "snap" };
+    },
+    async stop() {
+      throw new Error("stop failed");
+    },
+  };
+
+  await assert.rejects(
+    () =>
+      withAgentBrowserSandbox(
+        async () => {
+          throw new Error("work failed");
+        },
+        {
+          Sandbox: { async create() { return sandbox; } },
+          bootstrap: false,
+          env: {},
+        },
+      ),
+    /work failed/,
+  );
+});
+
+test("withAgentBrowserSandbox surfaces stop failure after success", async () => {
+  const sandbox = {
+    async runCommand() {
+      return commandResult();
+    },
+    async snapshot() {
+      return { snapshotId: "snap" };
+    },
+    async stop() {
+      throw new Error("stop failed");
+    },
+  };
+
+  await assert.rejects(
+    () =>
+      withAgentBrowserSandbox(async () => 42, {
+        Sandbox: { async create() { return sandbox; } },
+        bootstrap: false,
+        env: {},
+      }),
+    /stop failed/,
+  );
+});
+
 test("creates a Vercel sandbox snapshot", async () => {
   const sandbox = {
     async runCommand() {
@@ -161,4 +234,28 @@ test("creates a Vercel sandbox snapshot", async () => {
   });
 
   assert.equal(snapshotId, "snap_123");
+});
+
+test("createAgentBrowserSnapshot preserves snapshot failure when stop fails", async () => {
+  const sandbox = {
+    async runCommand() {
+      return commandResult();
+    },
+    async snapshot() {
+      throw new Error("snapshot failed");
+    },
+    async stop() {
+      throw new Error("stop failed");
+    },
+  };
+
+  await assert.rejects(
+    () =>
+      createAgentBrowserSnapshot({
+        Sandbox: { async create() { return sandbox; } },
+        env: {},
+        install: { systemDependencies: [] },
+      }),
+    /snapshot failed/,
+  );
 });
