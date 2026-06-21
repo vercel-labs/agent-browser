@@ -669,9 +669,9 @@ impl BrowserManager {
             return Err(format!("Navigation failed: {}", error_text));
         }
 
-        // Only wait for lifecycle events if Chrome created a new loader (full navigation).
-        // If loader_id is None, it was a same-document navigation (e.g., hash routing)
-        // which does not fire Page.loadEventFired or Page.domContentEventFired.
+        // Only wait for lifecycle events if Chrome created a new loader (full
+        // navigation). loader_id None = same-document nav (e.g. hash routing)
+        // which doesn't fire Page.loadEventFired or Page.domContentEventFired.
         if nav_result.loader_id.is_some() && wait_until != WaitUntil::None {
             self.wait_for_lifecycle(wait_until, &session_id, &mut lifecycle_rx)
                 .await?;
@@ -748,6 +748,24 @@ impl BrowserManager {
     pub async fn get_title(&self) -> Result<String, String> {
         let result = self.evaluate_simple("document.title").await?;
         Ok(result.as_str().unwrap_or("").to_string())
+    }
+
+    /// Cached URL for the active page. Updated by `navigate()` and tab events.
+    /// Use this for response decoration (e.g. `origin` field) to avoid an
+    /// extra CDP round-trip per call. Returns empty string if no active page.
+    pub fn cached_url(&self) -> String {
+        self.pages
+            .get(self.active_page_index)
+            .map(|p| p.url.clone())
+            .unwrap_or_default()
+    }
+
+    /// Cached title for the active page. Updated by `navigate()` and tab events.
+    pub fn cached_title(&self) -> String {
+        self.pages
+            .get(self.active_page_index)
+            .map(|p| p.title.clone())
+            .unwrap_or_default()
     }
 
     pub async fn get_content(&self) -> Result<String, String> {
