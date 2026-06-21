@@ -123,7 +123,7 @@ export function agentBrowserRevalidationKey(options: AgentBrowserInstallOptions 
     `bootstrap-${EVE_BOOTSTRAP_REVISION}`,
     resolveAgentBrowserInstallSpec(options),
     options.installBrowser === false ? "no-browser" : "browser",
-    options.installSystemDependencies === true ? "system-deps" : "no-system-deps",
+    options.installSystemDependencies === false ? "no-system-deps" : "system-deps",
   ].join(":");
 }
 
@@ -135,7 +135,7 @@ export async function installAgentBrowser(
   const installSpec = resolveAgentBrowserInstallSpec(options);
   const commands = [];
 
-  if (options.installSystemDependencies === true) {
+  if (options.installSystemDependencies !== false) {
     commands.push(buildLinuxSystemDependenciesCommand());
   }
 

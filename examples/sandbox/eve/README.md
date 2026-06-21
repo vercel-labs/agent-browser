@@ -17,4 +17,4 @@ Open the local Next.js URL and ask the agent to inspect a page, for example:
 Inspect https://example.com and summarize what is visible.
 ```
 
-The sandbox bootstrap installs `agent-browser` and Chrome into the Vercel Sandbox template. The tool runs `agent-browser open` and `agent-browser snapshot` inside that sandbox, not in the Next.js runtime.
+The sandbox bootstrap installs Chromium system dependencies, `agent-browser`, and Chrome into the Vercel Sandbox template. The tool runs `agent-browser open` and `agent-browser snapshot` inside that sandbox, not in the Next.js runtime.

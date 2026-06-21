@@ -10,8 +10,12 @@ import {
 
 test("builds Eve revalidation key from install options", () => {
   assert.equal(
-    agentBrowserRevalidationKey({ installSpec: "agent-browser@1.2.3", installSystemDependencies: true }),
+    agentBrowserRevalidationKey({ installSpec: "agent-browser@1.2.3" }),
     "agent-browser:bootstrap-3:agent-browser@1.2.3:browser:system-deps",
+  );
+  assert.equal(
+    agentBrowserRevalidationKey({ installSpec: "agent-browser@1.2.3", installSystemDependencies: false }),
+    "agent-browser:bootstrap-3:agent-browser@1.2.3:browser:no-system-deps",
   );
 });
 
@@ -32,7 +36,7 @@ test("installs agent-browser in an Eve sandbox", async () => {
     },
   };
 
-  await installAgentBrowser(sandbox, { installSpec: "agent-browser@1.2.3", installSystemDependencies: true });
+  await installAgentBrowser(sandbox, { installSpec: "agent-browser@1.2.3" });
 
   assert.equal(commands.length, 3);
   assert.match(commands[0], /^if command -v apt-get/);
@@ -43,6 +47,24 @@ test("installs agent-browser in an Eve sandbox", async () => {
   assert.match(commands[0], /sudo dnf install -y --skip-broken -- glib2 nss/);
   assert.equal(commands[1], "npm install -g agent-browser@1.2.3");
   assert.equal(commands[2], "agent-browser install");
+});
+
+test("skips Eve system dependencies when explicitly disabled", async () => {
+  const commands = [];
+  const sandbox = {
+    id: "sandbox-1",
+    async run({ command }) {
+      commands.push(command);
+      return { exitCode: 0, stdout: "", stderr: "" };
+    },
+  };
+
+  await installAgentBrowser(sandbox, {
+    installSpec: "agent-browser@1.2.3",
+    installSystemDependencies: false,
+  });
+
+  assert.deepEqual(commands, ["npm install -g agent-browser@1.2.3", "agent-browser install"]);
 });
 
 test("runs agent-browser through ctx.getSandbox", async () => {

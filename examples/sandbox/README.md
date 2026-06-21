@@ -19,7 +19,7 @@ vercel env pull .env.local --yes
 pnpm run dev
 ```
 
-The app follows the project shape created by `eve init --channel-web-nextjs`. Its `agent/sandbox.ts` bootstrap installs `agent-browser` and Chrome once into the sandbox template. The `browser_snapshot` tool opens a URL and returns an accessibility snapshot to the agent.
+The app follows the project shape created by `eve init --channel-web-nextjs`. Its `agent/sandbox.ts` bootstrap installs Chromium system dependencies, `agent-browser`, and Chrome once into the sandbox template. The `browser_snapshot` tool opens a URL and returns an accessibility snapshot to the agent.
 
 ## Vercel Sandbox
 

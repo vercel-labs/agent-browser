@@ -10,7 +10,7 @@ pnpm add @agent-browser/sandbox @vercel/sandbox
 
 ## Server action
 
-The Vercel Sandbox runs Amazon Linux. Chromium requires system libraries that are not installed by default, so fresh sandboxes need a `dnf install` step before agent-browser can launch Chrome. Use a sandbox snapshot (below) to skip this entirely in production. The `@agent-browser/sandbox` helper handles the bootstrap and command execution.
+The Vercel Sandbox runs Amazon Linux. Chromium requires system libraries that are not installed by default, so fresh sandboxes need a `dnf install` step before agent-browser can launch Chrome. Use a sandbox snapshot (below) to skip this entirely in production. The `@agent-browser/sandbox` helper installs those system dependencies by default and handles command execution.
 
 ```ts
 "use server";

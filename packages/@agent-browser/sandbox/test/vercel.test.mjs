@@ -94,6 +94,26 @@ test("creates and bootstraps a fresh Vercel sandbox", async () => {
   assert.deepEqual(calls[3], ["agent-browser", ["install"]]);
 });
 
+test("skips Vercel system dependencies when explicitly disabled", async () => {
+  const calls = [];
+  const sandbox = {
+    async runCommand(command, args) {
+      calls.push([command, args]);
+      return commandResult();
+    },
+  };
+
+  await installAgentBrowserInVercelSandbox(sandbox, {
+    installSpec: "agent-browser@1.2.3",
+    installSystemDependencies: false,
+  });
+
+  assert.deepEqual(calls, [
+    ["npm", ["install", "-g", "agent-browser@1.2.3"]],
+    ["agent-browser", ["install"]],
+  ]);
+});
+
 test("rejects invalid Vercel system dependency names", async () => {
   const calls = [];
   const sandbox = {

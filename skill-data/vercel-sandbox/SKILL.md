@@ -13,7 +13,7 @@ Run agent-browser + headless Chrome inside ephemeral Vercel Sandbox microVMs. A 
 pnpm add @agent-browser/sandbox @vercel/sandbox
 ```
 
-The sandbox VM needs system dependencies for Chromium plus agent-browser itself. The `@agent-browser/sandbox` helpers install them for fresh sandboxes and use sandbox snapshots (below) for sub-second startup.
+The sandbox VM needs system dependencies for Chromium plus agent-browser itself. The `@agent-browser/sandbox` helpers install them by default for fresh sandboxes and use sandbox snapshots (below) for sub-second startup. Pass `installSystemDependencies: false` only when the sandbox image already provides Chromium's required libraries.
 
 ## Core Pattern
 

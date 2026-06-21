@@ -7,6 +7,7 @@ export type AgentBrowserArgs = readonly string[];
 export interface AgentBrowserInstallOptions {
   readonly installBrowser?: boolean;
   readonly installSpec?: string;
+  /** Install Chromium system libraries before installing agent-browser. Defaults to true. */
   readonly installSystemDependencies?: boolean;
 }
 

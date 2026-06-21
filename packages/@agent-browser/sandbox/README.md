@@ -13,10 +13,10 @@ import { agentBrowserRevalidationKey, installAgentBrowser } from "@agent-browser
 
 export default defineSandbox({
   backend: vercel({ runtime: "node24", resources: { vcpus: 2 } }),
-  revalidationKey: () => agentBrowserRevalidationKey({ installSystemDependencies: true }),
+  revalidationKey: () => agentBrowserRevalidationKey(),
   async bootstrap({ use }) {
     const sandbox = await use();
-    await installAgentBrowser(sandbox, { installSystemDependencies: true });
+    await installAgentBrowser(sandbox);
   },
 });
 ```
@@ -52,6 +52,8 @@ const snapshot = await withAgentBrowserSandbox(async (sandbox) => {
   return result.stdout;
 });
 ```
+
+The Eve and Vercel helpers install browser system dependencies by default. Pass `installSystemDependencies: false` only when the sandbox image already provides Chromium's required libraries.
 
 Set `AGENT_BROWSER_SNAPSHOT_ID` to boot from a prebuilt Vercel Sandbox snapshot. Without a snapshot, the helper installs system dependencies, `agent-browser`, and Chrome on first boot.
 

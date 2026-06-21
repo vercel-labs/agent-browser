@@ -1185,6 +1185,8 @@ const result = await withAgentBrowserSandbox(async (sandbox) => {
 
 Install `@agent-browser/sandbox` and `@vercel/sandbox` in the consuming app. See the [sandbox helper example](examples/sandbox/) for minimal Eve and Vercel Sandbox usage, or the [environments example](examples/environments/) for a full UI demo with a deploy-to-Vercel button.
 
+Fresh Vercel and Eve sandboxes install Chromium system dependencies by default. Pass `installSystemDependencies: false` only when your sandbox image already includes those libraries.
+
 ### Serverless (AWS Lambda)
 
 ```typescript
