@@ -3528,6 +3528,32 @@ iOS Simulator (requires Xcode and Appium):
     );
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum DiffLineStyle {
+    Addition,
+    Removal,
+    Meta,
+    Context,
+}
+
+/// Classify a unified-diff line for coloring.
+///
+/// `similar::TextDiff::unified_diff()` emits change lines as `+line` / `-line`
+/// with no space after the sign, file headers as `+++`/`---`, and hunk headers
+/// as `@@`. Matching on `"+ "` / `"- "` (sign plus a space) therefore never
+/// matched a change line, so additions and removals rendered dim like context.
+fn classify_diff_line(line: &str) -> DiffLineStyle {
+    if line.starts_with("+++") || line.starts_with("---") || line.starts_with("@@") {
+        DiffLineStyle::Meta
+    } else if line.starts_with('+') {
+        DiffLineStyle::Addition
+    } else if line.starts_with('-') {
+        DiffLineStyle::Removal
+    } else {
+        DiffLineStyle::Context
+    }
+}
+
 fn print_snapshot_diff(data: &serde_json::Map<String, serde_json::Value>) {
     let changed = data
         .get("changed")
@@ -3539,12 +3565,12 @@ fn print_snapshot_diff(data: &serde_json::Map<String, serde_json::Value>) {
     }
     if let Some(diff) = data.get("diff").and_then(|v| v.as_str()) {
         for line in diff.lines() {
-            if line.starts_with("+ ") {
-                println!("{}", color::green(line));
-            } else if line.starts_with("- ") {
-                println!("{}", color::red(line));
-            } else {
-                println!("{}", color::dim(line));
+            match classify_diff_line(line) {
+                DiffLineStyle::Addition => println!("{}", color::green(line)),
+                DiffLineStyle::Removal => println!("{}", color::red(line)),
+                DiffLineStyle::Meta | DiffLineStyle::Context => {
+                    println!("{}", color::dim(line))
+                }
             }
         }
         let additions = data.get("additions").and_then(|v| v.as_i64()).unwrap_or(0);
@@ -3610,8 +3636,20 @@ pub fn print_version() {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_storage_text, format_vitals_text};
+    use super::{classify_diff_line, format_storage_text, format_vitals_text, DiffLineStyle};
     use serde_json::json;
+
+    #[test]
+    fn classify_diff_line_handles_similar_unified_prefixes() {
+        // Prefixes as emitted by similar::TextDiff::unified_diff(): change lines
+        // carry the sign with no trailing space, headers use +++/---/@@.
+        assert_eq!(classify_diff_line("+DELTA"), DiffLineStyle::Addition);
+        assert_eq!(classify_diff_line("-beta"), DiffLineStyle::Removal);
+        assert_eq!(classify_diff_line(" alpha"), DiffLineStyle::Context);
+        assert_eq!(classify_diff_line("+++ after"), DiffLineStyle::Meta);
+        assert_eq!(classify_diff_line("--- before"), DiffLineStyle::Meta);
+        assert_eq!(classify_diff_line("@@ -1,3 +1,3 @@"), DiffLineStyle::Meta);
+    }
 
     #[test]
     fn test_format_stream_status_text_for_enabled_stream() {
