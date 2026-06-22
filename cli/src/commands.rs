@@ -333,6 +333,13 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 Ok(json!({ "id": id, "action": "click", "selector": sel }))
             }
         }
+        "clickjs" => {
+            let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
+                context: "clickjs".to_string(),
+                usage: "clickjs <selector>",
+            })?;
+            Ok(json!({ "id": id, "action": "clickjs", "selector": sel }))
+        }
         "dblclick" => {
             let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
                 context: "dblclick".to_string(),
