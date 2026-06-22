@@ -1210,24 +1210,41 @@ fn main() {
         }
     }
 
-    // Launch headed browser or configure browser options (without CDP or provider)
-    if (flags.headed
-        || flags.cli_headed  // User explicitly set --headed (even if false)
-        || flags.executable_path.is_some()
-        || flags.profile.is_some()
-        || flags.state.is_some()
-        || flags.proxy.is_some()
-        || flags.args.is_some()
-        || flags.user_agent.is_some()
-        || flags.allow_file_access
-        || should_send_hide_scrollbars_launch_option(
-            flags.cli_hide_scrollbars,
-            flags.hide_scrollbars,
-        )
-        || flags.color_scheme.is_some()
-        || flags.download_path.is_some()
-        || flags.engine.is_some()
-        || !flags.extensions.is_empty())
+    // Launch headed browser or configure browser options (without CDP or provider).
+    // When the daemon is already running, only re-send a launch command if the user
+    // explicitly passed launch-relevant CLI flags (indicating intent to change options).
+    // Environment-variable or config-file derived values alone must NOT trigger a
+    // re-launch — doing so causes hash mismatches that kill the running browser (#1299).
+    let has_explicit_launch_flags = flags.cli_headed
+        || flags.cli_executable_path
+        || flags.cli_profile
+        || flags.cli_state
+        || flags.cli_proxy
+        || flags.cli_args
+        || flags.cli_user_agent
+        || flags.cli_allow_file_access
+        || flags.cli_extensions
+        || flags.cli_download_path
+        || flags.cli_hide_scrollbars;
+
+    if (!daemon_result.already_running || has_explicit_launch_flags)
+        && (flags.headed
+            || flags.cli_headed // User explicitly set --headed (even if false)
+            || flags.executable_path.is_some()
+            || flags.profile.is_some()
+            || flags.state.is_some()
+            || flags.proxy.is_some()
+            || flags.args.is_some()
+            || flags.user_agent.is_some()
+            || flags.allow_file_access
+            || should_send_hide_scrollbars_launch_option(
+                flags.cli_hide_scrollbars,
+                flags.hide_scrollbars,
+            )
+            || flags.color_scheme.is_some()
+            || flags.download_path.is_some()
+            || flags.engine.is_some()
+            || !flags.extensions.is_empty())
         && flags.cdp.is_none()
         && flags.provider.is_none()
         && !flags.auto_connect
