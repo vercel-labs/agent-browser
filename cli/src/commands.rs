@@ -801,6 +801,13 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
             Ok(cmd)
         }
 
+        // === Annotate overlay (dashboard live-view toggle) ===
+        "annotate-overlay" => {
+            let arg = rest.first().copied().unwrap_or("on");
+            let on = matches!(arg, "on" | "true" | "1" | "show" | "enable");
+            Ok(json!({ "id": id, "action": "annotate_overlay", "on": on }))
+        }
+
         // === Eval ===
         "eval" => {
             // Check for flags: -b/--base64 or --stdin
