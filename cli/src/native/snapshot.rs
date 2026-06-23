@@ -81,6 +81,10 @@ pub struct SnapshotOptions {
     pub compact: bool,
     pub depth: Option<usize>,
     pub urls: bool,
+    /// When true, recurse into child iframes and inline their content.
+    /// Element refs from iframes carry frame context, so interactions
+    /// (click/fill/type) work without manually switching frames.
+    pub frames: bool,
 }
 
 struct TreeNode {
@@ -491,7 +495,8 @@ pub async fn take_snapshot(
     // resolve the child frame ID and take a snapshot of its content.
     // We only recurse from the main frame (frame_id == None) to avoid
     // unbounded depth; nested iframes within iframes are not expanded.
-    if frame_id.is_none() {
+    // Recursion is opt-in: requires options.frames == true (-F / --frames).
+    if options.frames && frame_id.is_none() {
         let mut iframe_snapshots: Vec<(String, String)> = Vec::new(); // (ref_id, child_snapshot)
         for node in tree_nodes.iter() {
             if node.role != "Iframe" || !node.has_ref {
@@ -1582,5 +1587,47 @@ mod tests {
         promote_hidden_inputs(&mut nodes, &cursor_elements);
 
         assert_eq!(nodes[0].role, "LabelText"); // unchanged
+    }
+
+    // -----------------------------------------------------------------------
+    // render_tree: value_text handling
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_render_tree_keeps_button_value_text_in_interactive_mode() {
+        // A button whose value_text differs from its name should render
+        // "role \"name\" [ref=eN]: value_text" — the value suffix must not be
+        // dropped when interactive mode is on.
+        let nodes = vec![TreeNode {
+            role: "button".to_string(),
+            name: "Agree and close: Agree to our data processing and close".to_string(),
+            level: None,
+            checked: None,
+            expanded: None,
+            selected: None,
+            disabled: None,
+            required: None,
+            value_text: Some("Agree and close".to_string()),
+            backend_node_id: None,
+            children: Vec::new(),
+            parent_idx: None,
+            has_ref: true,
+            ref_id: Some("e1".to_string()),
+            depth: 0,
+            cursor_info: None,
+            url: None,
+        }];
+        let options = SnapshotOptions {
+            interactive: true,
+            ..SnapshotOptions::default()
+        };
+        let mut output = String::new();
+
+        render_tree(&nodes, 0, 0, &mut output, &options);
+
+        assert_eq!(
+            output.trim(),
+            "- button \"Agree and close: Agree to our data processing and close\" [ref=e1]: Agree and close"
+        );
     }
 }

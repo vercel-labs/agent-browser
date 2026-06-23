@@ -777,6 +777,9 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                     "-C" | "--cursor" => {
                         obj.insert("cursor".to_string(), json!(true));
                     }
+                    "-F" | "--frames" => {
+                        obj.insert("frames".to_string(), json!(true));
+                    }
                     "-u" | "--urls" => {
                         obj.insert("urls".to_string(), json!(true));
                     }
