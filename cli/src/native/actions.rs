@@ -2259,6 +2259,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         state.start_fetch_handler();
         state.start_dialog_handler();
         state.update_stream_client().await;
+        try_auto_restore_state(state).await;
         load_storage_state_or_rollback(state, &storage_state_owned).await?;
         apply_launch_init_scripts(state).await;
         return Ok(json!({ "launched": true }));
@@ -2271,6 +2272,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         state.start_fetch_handler();
         state.start_dialog_handler();
         state.update_stream_client().await;
+        try_auto_restore_state(state).await;
         load_storage_state_or_rollback(state, &storage_state_owned).await?;
         apply_launch_init_scripts(state).await;
         return Ok(json!({ "launched": true }));
@@ -2283,6 +2285,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         state.start_fetch_handler();
         state.start_dialog_handler();
         state.update_stream_client().await;
+        try_auto_restore_state(state).await;
         load_storage_state_or_rollback(state, &storage_state_owned).await?;
         apply_launch_init_scripts(state).await;
         return Ok(json!({ "launched": true }));
@@ -2333,6 +2336,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
                         state.start_dialog_handler();
                         state.update_stream_client().await;
                         write_provider_file(&state.session_id, provider);
+                        try_auto_restore_state(state).await;
                         load_storage_state_or_rollback(state, &storage_state_owned).await?;
                         apply_launch_init_scripts(state).await;
 
@@ -2436,9 +2440,12 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         }
     }
 
-    // Load storage state only after Fetch interception is active so replayed
-    // origin navigations go through the same domain and proxy handling as
-    // normal browser traffic.
+    // Auto-restore session-name state, then load storage state, only after
+    // Fetch interception is active so replayed origin navigations go through
+    // the same domain and proxy handling as normal browser traffic. An
+    // explicit --state file loads last so it wins over the auto-restored
+    // state, mirroring auto_launch().
+    try_auto_restore_state(state).await;
     load_storage_state_or_rollback(state, &storage_state_owned).await?;
 
     apply_launch_init_scripts(state).await;
