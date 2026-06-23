@@ -1497,6 +1497,77 @@ async fn e2e_element_queries() {
     assert_success(&resp);
 }
 
+#[tokio::test]
+#[ignore]
+async fn e2e_getbyrole_uses_accessibility_tree_for_implicit_roles() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = concat!(
+        "<html><head>",
+        "<link rel='stylesheet' href='data:text/css,body{}'>",
+        "</head><body>",
+        "<h1>Welcome</h1>",
+        "<a id='services' href='#services' onclick='window.__clicked = \"services\"'>Services</a>",
+        "<button id='submit'>Submit</button>",
+        "</body></html>"
+    );
+    let url = format!("data:text/html;base64,{}", STANDARD.encode(html));
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "3",
+            "action": "getbyrole",
+            "role": "heading",
+            "name": "Welcome",
+            "exact": true,
+            "subaction": "text"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["text"], "Welcome");
+
+    let resp = execute_command(
+        &json!({
+            "id": "4",
+            "action": "getbyrole",
+            "role": "link",
+            "name": "Services",
+            "exact": true,
+            "subaction": "click"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "evaluate", "script": "window.__clicked" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], "services");
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 // ---------------------------------------------------------------------------
 // Wait command
 // ---------------------------------------------------------------------------
