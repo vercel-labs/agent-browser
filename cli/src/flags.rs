@@ -365,6 +365,7 @@ pub struct Flags {
     pub cli_annotate: bool,
     pub cli_download_path: bool,
     pub cli_headed: bool,
+    pub cli_cdp: bool,
 }
 
 pub fn parse_flags(args: &[String]) -> Flags {
@@ -559,6 +560,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
         cli_annotate: false,
         cli_download_path: false,
         cli_headed: false,
+        cli_cdp: false,
     };
 
     let mut i = 0;
@@ -649,6 +651,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
             "--cdp" => {
                 if let Some(s) = args.get(i + 1) {
                     flags.cdp = Some(s.clone());
+                    flags.cli_cdp = true;
                     i += 1;
                 }
             }
