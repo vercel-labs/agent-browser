@@ -345,6 +345,7 @@ pub struct Flags {
     pub no_auto_dialog: bool,
     pub model: Option<String>,
     pub plugins: Vec<PluginConfig>,
+    pub tab_name: Option<String>,
     pub verbose: bool,
     pub quiet: bool,
 
@@ -542,6 +543,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
             || config.no_auto_dialog.unwrap_or(false),
         model: env::var("AI_GATEWAY_MODEL").ok().or(config.model),
         plugins,
+        tab_name: env::var("AGENT_BROWSER_TAB_NAME").ok(),
         verbose: false,
         quiet: false,
         cli_executable_path: false,
@@ -863,6 +865,12 @@ pub fn parse_flags(args: &[String]) -> Flags {
                     i += 1;
                 }
             }
+            "--tab-name" => {
+                if let Some(s) = args.get(i + 1) {
+                    flags.tab_name = Some(s.clone());
+                    i += 1;
+                }
+            }
             "-v" | "--verbose" => {
                 flags.verbose = true;
             }
@@ -938,6 +946,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--screenshot-format",
         "--idle-timeout",
         "--model",
+        "--tab-name",
     ];
 
     let mut i = 0;
@@ -1607,6 +1616,23 @@ mod tests {
     fn test_no_auto_dialog_flag() {
         let flags = parse_flags(&args("open example.com --no-auto-dialog"));
         assert!(flags.no_auto_dialog);
+    }
+
+    #[test]
+    fn test_tab_name_flag() {
+        let flags = parse_flags(&args("--tab-name docs snapshot"));
+        assert_eq!(flags.tab_name.as_deref(), Some("docs"));
+    }
+
+    #[test]
+    fn test_clean_args_removes_tab_name() {
+        let input: Vec<String> = vec![
+            "--tab-name".to_string(),
+            "docs".to_string(),
+            "snapshot".to_string(),
+        ];
+        let clean = clean_args(&input);
+        assert_eq!(clean, vec!["snapshot"]);
     }
 
     #[test]

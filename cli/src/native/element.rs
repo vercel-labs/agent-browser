@@ -15,6 +15,7 @@ pub struct RefEntry {
     pub frame_id: Option<String>,
 }
 
+#[derive(Clone)]
 pub struct RefMap {
     map: HashMap<String, RefEntry>,
     next_ref: usize,
