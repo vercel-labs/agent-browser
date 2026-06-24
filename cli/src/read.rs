@@ -47,6 +47,8 @@ pub struct ReadOptions {
     pub headers: HashMap<String, String>,
     /// Allowed domain patterns, using the same exact and wildcard semantics as --allowed-domains.
     pub allowed_domains: Vec<String>,
+    /// Additional allowlists inherited from daemon state. URLs must match every non-empty allowlist.
+    pub enforced_allowed_domains: Vec<Vec<String>>,
 }
 
 impl Default for ReadOptions {
@@ -60,6 +62,7 @@ impl Default for ReadOptions {
             timeout_ms: DEFAULT_TIMEOUT_MS,
             headers: HashMap::new(),
             allowed_domains: Vec::new(),
+            enforced_allowed_domains: Vec::new(),
         }
     }
 }
@@ -132,6 +135,7 @@ pub fn options_from_command(cmd: &Value) -> Result<ReadOptions, String> {
         timeout_ms,
         headers,
         allowed_domains,
+        enforced_allowed_domains: Vec::new(),
     })
 }
 
@@ -184,12 +188,13 @@ struct LlmsLink {
 
 pub async fn run_read(raw_url: &str, options: ReadOptions) -> Result<Value, String> {
     let target = normalize_url(raw_url)?;
-    check_allowed_url(&target, &options.allowed_domains)?;
-    let redirect_allowed_domains = options.allowed_domains.clone();
+    check_allowed_url_for_options(&target, &options)?;
+    let redirect_allowed_domain_sets = allowed_domain_sets_for_options(&options);
     let redirect_policy = reqwest::redirect::Policy::custom(move |attempt| {
         if attempt.previous().len() > 10 {
             attempt.error("too many redirects")
-        } else if let Err(e) = check_allowed_url(attempt.url(), &redirect_allowed_domains) {
+        } else if let Err(e) = check_allowed_url_sets(attempt.url(), &redirect_allowed_domain_sets)
+        {
             attempt.error(e)
         } else {
             attempt.follow()
@@ -211,10 +216,20 @@ pub async fn run_read(raw_url: &str, options: ReadOptions) -> Result<Value, Stri
         .await
         .map_err(|e| format!("Read request failed: {}", e))?;
 
+    if primary.success && direct_primary_response_is_usable(&primary, &options) {
+        let (source, content) = content_from_fetch(&primary, &options)?;
+        return Ok(read_json_from_content(
+            &target, &primary, source, content, &options,
+        ));
+    }
+
     if !options.raw && !is_markdown_content_type(&primary.content_type) && should_try_md(&options) {
         if let Some(md_url) = markdown_fallback_url(&target) {
             match fetch_read_url(&client, md_url.clone(), &options).await {
-                Ok(md) if md.success && is_markdown_content_type(&md.content_type) => {
+                Ok(md)
+                    if md.success
+                        && markdown_fallback_content_type_is_usable(&md.content_type, &options) =>
+                {
                     return Ok(read_json_from_content(
                         &target,
                         &md,
@@ -226,6 +241,13 @@ pub async fn run_read(raw_url: &str, options: ReadOptions) -> Result<Value, Stri
                 Ok(_) | Err(_) => {}
             }
         }
+    }
+
+    if primary.success && !options.require_md && is_plain_text_content_type(&primary.content_type) {
+        let (source, content) = content_from_fetch(&primary, &options)?;
+        return Ok(read_json_from_content(
+            &target, &primary, source, content, &options,
+        ));
     }
 
     if !options.raw && should_try_md(&options) {
@@ -303,7 +325,7 @@ async fn fetch_read_url(
     target: Url,
     options: &ReadOptions,
 ) -> Result<ReadFetch, String> {
-    check_allowed_url(&target, &options.allowed_domains)?;
+    check_allowed_url_for_options(&target, options)?;
     let mut request = client
         .get(target.clone())
         .header(USER_AGENT, USER_AGENT_VALUE);
@@ -350,9 +372,9 @@ fn content_from_fetch(
         Err(expected_markdown_error(&fetch.content_type))
     } else if options.raw {
         Ok(("raw", fetch.body.clone()))
-    } else if content_type_lower == "text/markdown" {
+    } else if is_markdown_like_content_type(&fetch.content_type) {
         Ok(("accept-markdown", fetch.body.clone()))
-    } else if content_type_lower.starts_with("text/plain") {
+    } else if content_type_lower == "text/plain" {
         Ok(("text", fetch.body.clone()))
     } else if content_type_lower == "text/html" || content_type_lower == "application/xhtml+xml" {
         Ok(("html-fallback", html_to_markdownish(&fetch.body)))
@@ -436,12 +458,41 @@ pub fn read_json_from_active_html(active_url: &str, html: String, options: &Read
 }
 
 fn is_markdown_content_type(content_type: &str) -> bool {
+    content_type_base(content_type).eq_ignore_ascii_case("text/markdown")
+}
+
+fn is_markdown_like_content_type(content_type: &str) -> bool {
+    matches!(
+        content_type_base(content_type).as_str(),
+        "text/markdown" | "text/x-markdown" | "application/markdown"
+    )
+}
+
+fn is_plain_text_content_type(content_type: &str) -> bool {
+    content_type_base(content_type) == "text/plain"
+}
+
+fn content_type_base(content_type: &str) -> String {
     content_type
         .split(';')
         .next()
         .unwrap_or("")
         .trim()
-        .eq_ignore_ascii_case("text/markdown")
+        .to_ascii_lowercase()
+}
+
+fn direct_primary_response_is_usable(fetch: &ReadFetch, options: &ReadOptions) -> bool {
+    options.raw
+        || is_markdown_content_type(&fetch.content_type)
+        || (!options.require_md && is_markdown_like_content_type(&fetch.content_type))
+}
+
+fn markdown_fallback_content_type_is_usable(content_type: &str, options: &ReadOptions) -> bool {
+    if options.require_md {
+        is_markdown_content_type(content_type)
+    } else {
+        is_markdown_like_content_type(content_type) || is_plain_text_content_type(content_type)
+    }
 }
 
 fn expected_markdown_error(content_type: &str) -> String {
@@ -457,8 +508,8 @@ fn expected_markdown_error(content_type: &str) -> String {
 }
 
 fn is_html_content_type(content_type: &str) -> bool {
-    let base = content_type.split(';').next().unwrap_or("").trim();
-    base.eq_ignore_ascii_case("text/html") || base.eq_ignore_ascii_case("application/xhtml+xml")
+    let base = content_type_base(content_type);
+    base == "text/html" || base == "application/xhtml+xml"
 }
 
 fn should_try_md(options: &ReadOptions) -> bool {
@@ -495,14 +546,52 @@ fn check_allowed_url(url: &Url, allowed_domains: &[String]) -> Result<(), String
     ))
 }
 
-pub fn check_allowed_active_url(raw_url: &str, allowed_domains: &[String]) -> Result<(), String> {
-    if allowed_domains.is_empty() {
+fn allowed_domain_sets_for_options(options: &ReadOptions) -> Vec<Vec<String>> {
+    let mut sets = Vec::new();
+    if !options.allowed_domains.is_empty() {
+        sets.push(options.allowed_domains.clone());
+    }
+    sets.extend(
+        options
+            .enforced_allowed_domains
+            .iter()
+            .filter(|domains| !domains.is_empty())
+            .cloned(),
+    );
+    sets
+}
+
+fn check_allowed_url_for_options(url: &Url, options: &ReadOptions) -> Result<(), String> {
+    check_allowed_url(url, &options.allowed_domains)?;
+    for domains in &options.enforced_allowed_domains {
+        check_allowed_url(url, domains)?;
+    }
+    Ok(())
+}
+
+fn check_allowed_url_sets(url: &Url, allowed_domain_sets: &[Vec<String>]) -> Result<(), String> {
+    for domains in allowed_domain_sets {
+        check_allowed_url(url, domains)?;
+    }
+    Ok(())
+}
+
+pub fn check_allowed_active_url_for_options(
+    raw_url: &str,
+    options: &ReadOptions,
+) -> Result<(), String> {
+    if options.allowed_domains.is_empty()
+        && options
+            .enforced_allowed_domains
+            .iter()
+            .all(|domains| domains.is_empty())
+    {
         return Ok(());
     }
 
     let url = Url::parse(raw_url).map_err(|e| format!("Invalid active tab URL: {}", e))?;
     match url.scheme() {
-        "http" | "https" => check_allowed_url(&url, allowed_domains),
+        "http" | "https" => check_allowed_url_for_options(&url, options),
         scheme => Err(format!(
             "Active tab URL scheme '{}' is not allowed by domain filter",
             scheme
@@ -1348,6 +1437,46 @@ Inline [Authentication](/inline-auth) should not become a TOC item.
         assert!(err.contains("allowed domains"));
     }
 
+    #[tokio::test]
+    async fn run_read_blocks_enforced_disallowed_initial_url() {
+        let options = ReadOptions {
+            enforced_allowed_domains: vec![vec!["example.com".to_string()]],
+            ..ReadOptions::default()
+        };
+
+        let err = run_read("https://not-example.com/docs", options)
+            .await
+            .unwrap_err();
+
+        assert!(err.contains("not-example.com"));
+        assert!(err.contains("allowed domains"));
+    }
+
+    #[tokio::test]
+    async fn run_read_blocks_enforced_disallowed_redirect() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let base = format!("http://{}", addr);
+
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = [0_u8; 2048];
+            let _ = stream.read(&mut buf).await.unwrap_or(0);
+            let response = "HTTP/1.1 302 Found\r\nLocation: https://example.com/docs\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            let _ = stream.write_all(response.as_bytes()).await;
+        });
+
+        let options = ReadOptions {
+            allowed_domains: vec!["127.0.0.1".to_string(), "example.com".to_string()],
+            enforced_allowed_domains: vec![vec!["127.0.0.1".to_string()]],
+            ..ReadOptions::default()
+        };
+        let err = run_read(&base, options).await.unwrap_err();
+
+        assert!(err.contains("example.com"));
+        assert!(err.contains("allowed domains"));
+    }
+
     #[test]
     fn check_allowed_url_matches_wildcard_like_domain_filter() {
         let root = normalize_url("https://example.com/docs").unwrap();
@@ -1362,9 +1491,13 @@ Inline [Authentication](/inline-auth) should not become a TOC item.
 
     #[test]
     fn check_allowed_active_url_blocks_disallowed_active_tab() {
-        let allowed = vec!["example.com".to_string()];
+        let options = ReadOptions {
+            allowed_domains: vec!["example.com".to_string()],
+            ..ReadOptions::default()
+        };
 
-        let err = check_allowed_active_url("https://evil.example/docs", &allowed).unwrap_err();
+        let err = check_allowed_active_url_for_options("https://evil.example/docs", &options)
+            .unwrap_err();
 
         assert!(err.contains("evil.example"));
         assert!(err.contains("allowed domains"));
@@ -1372,12 +1505,29 @@ Inline [Authentication](/inline-auth) should not become a TOC item.
 
     #[test]
     fn check_allowed_active_url_blocks_non_http_active_tab_when_filter_enabled() {
-        let allowed = vec!["example.com".to_string()];
+        let options = ReadOptions {
+            allowed_domains: vec!["example.com".to_string()],
+            ..ReadOptions::default()
+        };
 
-        let err = check_allowed_active_url("about:blank", &allowed).unwrap_err();
+        let err = check_allowed_active_url_for_options("about:blank", &options).unwrap_err();
 
         assert!(err.contains("about"));
         assert!(err.contains("domain filter"));
+    }
+
+    #[test]
+    fn check_allowed_active_url_for_options_uses_enforced_domains() {
+        let options = ReadOptions {
+            enforced_allowed_domains: vec![vec!["example.com".to_string()]],
+            ..ReadOptions::default()
+        };
+
+        let err = check_allowed_active_url_for_options("https://evil.example/docs", &options)
+            .unwrap_err();
+
+        assert!(err.contains("evil.example"));
+        assert!(err.contains("allowed domains"));
     }
 
     #[tokio::test]
@@ -1423,7 +1573,7 @@ Inline [Authentication](/inline-auth) should not become a TOC item.
                 assert!(request.starts_with(&format!("get {} ", expected_path)));
                 assert!(request.contains("accept: text/markdown"));
                 let (content_type, body) = if expected_path.ends_with(".md") {
-                    ("text/markdown", "# Markdown fallback\n")
+                    ("text/plain", "# Markdown fallback\n")
                 } else {
                     ("text/html", "<h1>HTML</h1>")
                 };
@@ -1442,6 +1592,51 @@ Inline [Authentication](/inline-auth) should not become a TOC item.
         assert_eq!(data["finalUrl"], format!("{}.md", base));
         assert_eq!(data["source"], "path-markdown");
         assert_eq!(data["content"], "# Markdown fallback\n");
+    }
+
+    #[tokio::test]
+    async fn run_read_returns_primary_markdown_without_llms_override() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let base = format!("http://{}/docs/intro", addr);
+
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut buf = [0_u8; 2048];
+                let n = stream.read(&mut buf).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..n]).to_ascii_lowercase();
+                let path = request
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap_or_default()
+                    .to_string();
+                let (status, content_type, body) = match path.as_str() {
+                    "/docs/intro" => ("200 OK", "text/markdown", "# Primary markdown\n"),
+                    "/docs/intro/llms.txt" => ("404 Not Found", "text/plain", "missing"),
+                    "/docs/llms.txt" => {
+                        ("200 OK", "text/markdown", "- [Intro](/markdown/intro.md)\n")
+                    }
+                    "/markdown/intro.md" => ("200 OK", "text/markdown", "# From llms\n"),
+                    _ => ("404 Not Found", "text/plain", "missing"),
+                };
+                let response = format!(
+                    "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    status,
+                    content_type,
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            }
+        });
+
+        let data = run_read(&base, ReadOptions::default()).await.unwrap();
+
+        assert_eq!(data["source"], "accept-markdown");
+        assert_eq!(data["content"], "# Primary markdown\n");
     }
 
     #[tokio::test]

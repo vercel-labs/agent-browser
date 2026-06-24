@@ -2639,7 +2639,16 @@ async fn handle_url(state: &DaemonState) -> Result<Value, String> {
 }
 
 async fn handle_read(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
-    let options = crate::read::options_from_command(cmd)?;
+    let mut options = crate::read::options_from_command(cmd)?;
+    if let Some(allowed_domains) = {
+        let df = state.domain_filter.read().await;
+        df.as_ref().map(|filter| filter.allowed_domains.clone())
+    } {
+        if !allowed_domains.is_empty() {
+            options.enforced_allowed_domains.push(allowed_domains);
+        }
+    }
+
     if let Some(url) = cmd.get("url").and_then(|v| v.as_str()) {
         return crate::read::run_read(url, options).await;
     }
@@ -2650,7 +2659,7 @@ async fn handle_read(cmd: &Value, state: &DaemonState) -> Result<Value, String> 
         .and_then(|v| v.as_str())
         .filter(|url| !url.is_empty())
         .ok_or_else(|| "Active tab has no URL".to_string())?;
-    crate::read::check_allowed_active_url(active_url, &options.allowed_domains)?;
+    crate::read::check_allowed_active_url_for_options(active_url, &options)?;
 
     if options.llms.is_some() || options.require_md {
         return crate::read::run_read(active_url, options).await;
@@ -8999,6 +9008,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_read_with_url_uses_session_domain_filter_before_fetch() {
+        let mut state = DaemonState::new();
+        {
+            let mut df = state.domain_filter.write().await;
+            *df = Some(DomainFilter::new("example.com"));
+        }
+        let cmd = json!({
+            "action": "read",
+            "id": "read-url-denied",
+            "url": "https://evil.example/private"
+        });
+
+        let resp = execute_command(&cmd, &mut state).await;
+
+        assert_eq!(resp["success"], false);
+        let error = resp["error"].as_str().unwrap();
+        assert!(error.contains("evil.example"));
+        assert!(error.contains("allowed domains"));
+        assert!(state.browser.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_read_with_url_cannot_broaden_session_domain_filter() {
+        let mut state = DaemonState::new();
+        {
+            let mut df = state.domain_filter.write().await;
+            *df = Some(DomainFilter::new("example.com"));
+        }
+        let cmd = json!({
+            "action": "read",
+            "id": "read-url-denied",
+            "url": "https://evil.example/private",
+            "allowedDomains": ["evil.example"]
+        });
+
+        let resp = execute_command(&cmd, &mut state).await;
+
+        assert_eq!(resp["success"], false);
+        let error = resp["error"].as_str().unwrap();
+        assert!(error.contains("evil.example"));
+        assert!(error.contains("allowed domains"));
+        assert!(state.browser.is_none());
+    }
+
+    #[tokio::test]
     async fn test_read_without_url_does_not_auto_launch() {
         let mut state = DaemonState::new();
         let cmd = json!({ "action": "read", "id": "read-active-tab" });
@@ -9032,6 +9086,39 @@ mod tests {
             "action": "read",
             "id": "read-active-tab-denied",
             "allowedDomains": ["example.com"]
+        });
+
+        let resp = execute_command(&cmd, &mut state).await;
+
+        assert_eq!(resp["success"], false);
+        let error = resp["error"].as_str().unwrap();
+        assert!(error.contains("evil.example"));
+        assert!(error.contains("allowed domains"));
+        assert_eq!(server.await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_read_without_url_uses_session_domain_filter_before_content() {
+        let (port, server) = start_webdriver_response_server(vec![(
+            "/session/test-session/url",
+            json!({ "value": "https://evil.example/private" }),
+        )])
+        .await;
+        let mut state = DaemonState::new();
+        {
+            let mut df = state.domain_filter.write().await;
+            *df = Some(DomainFilter::new("example.com"));
+        }
+        state.backend_type = BackendType::WebDriver;
+        state.webdriver_backend = Some(WebDriverBackend::new(
+            crate::native::webdriver::client::WebDriverClient::new_with_session(
+                port,
+                "test-session".to_string(),
+            ),
+        ));
+        let cmd = json!({
+            "action": "read",
+            "id": "read-active-tab-denied"
         });
 
         let resp = execute_command(&cmd, &mut state).await;
