@@ -273,19 +273,12 @@ fn content_from_fetch(
 ) -> Result<(&'static str, String), String> {
     let content_type_base = fetch.content_type.split(';').next().unwrap_or("").trim();
     let content_type_lower = content_type_base.to_ascii_lowercase();
-    if options.raw {
+    if options.require_md && !is_markdown_content_type(&fetch.content_type) {
+        Err(expected_markdown_error(&fetch.content_type))
+    } else if options.raw {
         Ok(("raw", fetch.body.clone()))
     } else if content_type_lower == "text/markdown" {
         Ok(("accept-markdown", fetch.body.clone()))
-    } else if options.require_md {
-        Err(format!(
-            "Expected text/markdown, got {}",
-            if content_type_base.is_empty() {
-                "unknown content type"
-            } else {
-                content_type_base
-            }
-        ))
     } else if content_type_lower.starts_with("text/plain") {
         Ok(("text", fetch.body.clone()))
     } else if content_type_lower == "text/html" || content_type_lower == "application/xhtml+xml" {
@@ -334,6 +327,18 @@ fn is_markdown_content_type(content_type: &str) -> bool {
         .eq_ignore_ascii_case("text/markdown")
 }
 
+fn expected_markdown_error(content_type: &str) -> String {
+    let base = content_type.split(';').next().unwrap_or("").trim();
+    format!(
+        "Expected text/markdown, got {}",
+        if base.is_empty() {
+            "unknown content type"
+        } else {
+            base
+        }
+    )
+}
+
 fn is_html_content_type(content_type: &str) -> bool {
     let base = content_type.split(';').next().unwrap_or("").trim();
     base.eq_ignore_ascii_case("text/html") || base.eq_ignore_ascii_case("application/xhtml+xml")
@@ -372,7 +377,14 @@ async fn fetch_first_llms_file(
         let fetch = fetch_read_url(client, url, options)
             .await
             .map_err(|e| format!("Read request failed: {}", e))?;
-        if fetch.success && !is_html_content_type(&fetch.content_type) {
+        if fetch.success {
+            if is_html_content_type(&fetch.content_type) {
+                last_status = Some(fetch.status);
+                continue;
+            }
+            if options.require_md && !is_markdown_content_type(&fetch.content_type) {
+                return Err(expected_markdown_error(&fetch.content_type));
+            }
             return Ok(fetch);
         }
         last_status = Some(fetch.status);
@@ -1070,6 +1082,26 @@ Inline [Authentication](/inline-auth) should not become a TOC item.
         assert!(!filtered.contains("## Further reading"));
     }
 
+    #[test]
+    fn content_from_fetch_require_md_checks_raw_response() {
+        let fetch = ReadFetch {
+            final_url: "https://example.com".to_string(),
+            status: 200,
+            content_type: "text/html; charset=utf-8".to_string(),
+            success: true,
+            body: "<h1>HTML</h1>".to_string(),
+            truncated: false,
+        };
+        let options = ReadOptions {
+            raw: true,
+            require_md: true,
+            ..ReadOptions::default()
+        };
+
+        let err = content_from_fetch(&fetch, &options).unwrap_err();
+        assert_eq!(err, "Expected text/markdown, got text/html");
+    }
+
     #[tokio::test]
     async fn run_read_prefers_markdown_accept() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1277,6 +1309,36 @@ Inline [Authentication](/inline-auth) should not become a TOC item.
         assert!(content.contains("## Auth"));
         assert!(!content.contains("# Intro"));
         assert!(!content.contains("## Other"));
+    }
+
+    #[tokio::test]
+    async fn run_read_llms_full_require_md_rejects_text_plain() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let base = format!("http://{}/docs/intro", addr);
+
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = [0_u8; 2048];
+            let n = stream.read(&mut buf).await.unwrap_or(0);
+            let request = String::from_utf8_lossy(&buf[..n]).to_ascii_lowercase();
+            assert!(request.starts_with("get /docs/intro/llms-full.txt "));
+            let body = "# Full docs\n";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(response.as_bytes()).await;
+        });
+
+        let options = ReadOptions {
+            llms: Some(LlmsMode::Full),
+            require_md: true,
+            ..ReadOptions::default()
+        };
+        let err = run_read(&base, options).await.unwrap_err();
+        assert_eq!(err, "Expected text/markdown, got text/plain");
     }
 
     #[tokio::test]

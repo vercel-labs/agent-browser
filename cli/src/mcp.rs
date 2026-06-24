@@ -3485,7 +3485,7 @@ fn response_text(value: &Value) -> Option<String> {
 
         if let Some(data) = obj.get("data") {
             for key in [
-                "snapshot", "text", "html", "report", "value", "title", "url", "path",
+                "snapshot", "text", "html", "report", "value", "content", "title", "url", "path",
             ] {
                 if let Some(s) = data.get(key).and_then(|v| v.as_str()) {
                     return Some(s.to_string());
@@ -3698,6 +3698,20 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("agent-browser mcp --tools all"));
+    }
+
+    #[test]
+    fn response_text_uses_read_content_before_url_metadata() {
+        let text = response_text(&json!({
+            "success": true,
+            "data": {
+                "url": "https://example.com/docs",
+                "content": "# Docs\n\nReadable content."
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(text, "# Docs\n\nReadable content.");
     }
 
     #[test]
