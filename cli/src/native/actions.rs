@@ -3374,7 +3374,7 @@ async fn handle_wait(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
     }
 
     if let Some(url_pattern) = cmd.get("url").and_then(|v| v.as_str()) {
-        wait_for_url(&mgr.client, &session_id, url_pattern, timeout_ms).await?;
+        wait_for_url(mgr, url_pattern, timeout_ms).await?;
         return Ok(json!({ "waited": "url", "url": url_pattern }));
     }
 
@@ -3620,17 +3620,21 @@ async fn wait_for_selector(
     poll_until_true(client, session_id, &check_fn, timeout_ms).await
 }
 
-async fn wait_for_url(
-    client: &super::cdp::client::CdpClient,
-    session_id: &str,
-    pattern: &str,
-    timeout_ms: u64,
-) -> Result<(), String> {
-    let check_fn = format!(
-        "location.href.includes({})",
-        serde_json::to_string(pattern).unwrap_or_default()
-    );
-    poll_until_true(client, session_id, &check_fn, timeout_ms).await
+async fn wait_for_url(mgr: &BrowserManager, pattern: &str, timeout_ms: u64) -> Result<(), String> {
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
+
+    loop {
+        let url = mgr.get_url().await?;
+        if route_url_matches(pattern, &url) {
+            return Ok(());
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            return Err(format!("Wait timed out after {}ms", timeout_ms));
+        }
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    }
 }
 
 async fn wait_for_text(
@@ -5921,14 +5925,13 @@ async fn handle_screencast_stop(state: &mut DaemonState) -> Result<Value, String
 
 async fn handle_waitforurl(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let session_id = mgr.active_session_id()?.to_string();
     let url_pattern = cmd
         .get("url")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'url' parameter")?;
     let timeout_ms = state.timeout_ms(cmd);
 
-    wait_for_url(&mgr.client, &session_id, url_pattern, timeout_ms).await?;
+    wait_for_url(mgr, url_pattern, timeout_ms).await?;
     let url = mgr.get_url().await.unwrap_or_default();
     Ok(json!({ "url": url }))
 }
@@ -10126,6 +10129,27 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         assert!(!route_url_matches(
             "**/analytics/**",
             "https://cdn.example.com/static/event.js"
+        ));
+    }
+
+    // wait --url delegates to route_url_matches against the full location.href.
+    #[test]
+    fn test_wait_url_matches_full_dev_server_urls() {
+        assert!(route_url_matches(
+            "**/the-edge-of-the-page",
+            "http://localhost:3001/the-edge-of-the-page"
+        ));
+        assert!(route_url_matches(
+            "**/dashboard",
+            "http://localhost:3000/dashboard"
+        ));
+        assert!(route_url_matches(
+            "/dashboard",
+            "http://localhost:3000/dashboard"
+        ));
+        assert!(!route_url_matches(
+            "**/dashboard",
+            "http://localhost:3000/settings"
         ));
     }
 
