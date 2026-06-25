@@ -3435,8 +3435,7 @@ fn append_common_global_args(
                 args.push("--restore".to_string());
             }
         } else if let Some(key) = restore.as_str() {
-            args.push("--restore".to_string());
-            args.push(key.to_string());
+            args.push(format!("--restore={}", key));
         } else {
             return Err(ProtocolError::invalid_params(
                 "restore must be a boolean or string",
@@ -3929,6 +3928,23 @@ mod tests {
         let payload: Value = serde_json::from_str(&args[5]).unwrap();
         assert_eq!(payload["siteKey"], "abc");
         assert_eq!(payload["url"], "https://example.com");
+    }
+
+    #[test]
+    fn common_global_args_use_equals_form_for_string_restore_key() {
+        let mut args = Vec::new();
+
+        append_common_global_args(
+            &mut args,
+            &json!({
+                "session": "work",
+                "restore": "open"
+            }),
+            Some("work"),
+        )
+        .unwrap();
+
+        assert_eq!(args, vec!["--session", "work", "--restore=open"]);
     }
 
     #[test]

@@ -415,12 +415,15 @@ pub async fn save_auto_state_transactional(
             err
         ));
     }
+    if previous_path.exists() {
+        let _ = fs::remove_file(&previous_path);
+    }
 
     Ok(final_path.to_string_lossy().to_string())
 }
 
 fn read_state_json(path: &str) -> Result<String, String> {
-    if path.ends_with(".enc") {
+    if is_encrypted_state(std::path::Path::new(path)) {
         let key = std::env::var("AGENT_BROWSER_ENCRYPTION_KEY").map_err(|_| {
             "Encrypted state file requires AGENT_BROWSER_ENCRYPTION_KEY".to_string()
         })?;
@@ -540,11 +543,15 @@ fn is_state_file(path: &std::path::Path) -> bool {
         .unwrap_or_default()
         .to_string_lossy()
         .to_string();
-    fname.ends_with(".json") || fname.ends_with(".json.enc")
+    fname.ends_with(".json")
+        || fname.ends_with(".json.enc")
+        || fname.ends_with(".json.previous")
+        || fname.ends_with(".json.enc.previous")
 }
 
 fn is_encrypted_state(path: &std::path::Path) -> bool {
-    path.to_string_lossy().ends_with(".json.enc")
+    let path = path.to_string_lossy();
+    path.ends_with(".json.enc") || path.ends_with(".json.enc.previous")
 }
 
 pub fn state_list() -> Result<Value, String> {
@@ -589,7 +596,7 @@ pub fn state_list() -> Result<Value, String> {
 }
 
 pub fn state_show(path: &str) -> Result<Value, String> {
-    let encrypted = path.ends_with(".enc");
+    let encrypted = is_encrypted_state(std::path::Path::new(path));
     let json_str = if encrypted {
         let key = std::env::var("AGENT_BROWSER_ENCRYPTION_KEY").map_err(|_| {
             "Encrypted state file requires AGENT_BROWSER_ENCRYPTION_KEY".to_string()
@@ -898,6 +905,40 @@ mod tests {
     fn test_state_clear_nonexistent_file() {
         let result = state_clear(Some("/tmp/nonexistent-agent-browser-state-file.json"));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_state_file_matcher_includes_transactional_backups() {
+        assert!(is_state_file(std::path::Path::new("auth.json")));
+        assert!(is_state_file(std::path::Path::new("auth.json.enc")));
+        assert!(is_state_file(std::path::Path::new("auth.json.previous")));
+        assert!(is_state_file(std::path::Path::new(
+            "auth.json.enc.previous"
+        )));
+        assert!(is_encrypted_state(std::path::Path::new(
+            "auth.json.enc.previous"
+        )));
+    }
+
+    #[test]
+    fn test_state_clear_removes_transactional_backups() {
+        let guard = crate::test_utils::EnvGuard::new(&["HOME", "AGENT_BROWSER_NAMESPACE"]);
+        let dir = tempfile::tempdir().unwrap();
+        guard.set("HOME", dir.path().to_str().unwrap());
+        guard.remove("AGENT_BROWSER_NAMESPACE");
+
+        let sessions = get_sessions_dir();
+        fs::create_dir_all(&sessions).unwrap();
+        fs::write(sessions.join("auth-test.json"), "{}").unwrap();
+        fs::write(sessions.join("auth-test.json.previous"), "{}").unwrap();
+        fs::write(sessions.join("auth-test.json.enc.previous"), "encrypted").unwrap();
+
+        let result = state_clear(None).unwrap();
+
+        assert_eq!(result["deleted"], 3);
+        assert!(!sessions.join("auth-test.json").exists());
+        assert!(!sessions.join("auth-test.json.previous").exists());
+        assert!(!sessions.join("auth-test.json.enc.previous").exists());
     }
 
     #[test]
