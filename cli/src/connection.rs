@@ -568,6 +568,7 @@ fn daemon_config_fingerprint(opts: &DaemonOptions) -> String {
     opts.debug.hash(&mut hasher);
     opts.action_policy.hash(&mut hasher);
     opts.confirm_actions.hash(&mut hasher);
+    opts.allowed_domains.hash(&mut hasher);
     opts.idle_timeout.hash(&mut hasher);
     opts.default_timeout.hash(&mut hasher);
     opts.no_auto_dialog.hash(&mut hasher);
@@ -1090,6 +1091,7 @@ mod tests {
     fn test_daemon_options<'a>(
         idle_timeout: Option<&'a str>,
         no_auto_dialog: bool,
+        allowed_domains: Option<&'a [String]>,
     ) -> DaemonOptions<'a> {
         DaemonOptions {
             headed: false,
@@ -1117,7 +1119,7 @@ mod tests {
             restore_check_text: None,
             restore_check_fn: None,
             download_path: None,
-            allowed_domains: None,
+            allowed_domains,
             action_policy: None,
             confirm_actions: None,
             engine: None,
@@ -1132,9 +1134,11 @@ mod tests {
 
     #[test]
     fn test_daemon_config_fingerprint_tracks_daemon_owned_options() {
-        let base = test_daemon_options(None, false);
-        let idle_changed = test_daemon_options(Some("1000"), false);
-        let dialog_changed = test_daemon_options(None, true);
+        let domains = vec!["example.com".to_string()];
+        let base = test_daemon_options(None, false, None);
+        let idle_changed = test_daemon_options(Some("1000"), false, None);
+        let dialog_changed = test_daemon_options(None, true, None);
+        let domains_changed = test_daemon_options(None, false, Some(&domains));
 
         assert_ne!(
             daemon_config_fingerprint(&base),
@@ -1143,6 +1147,10 @@ mod tests {
         assert_ne!(
             daemon_config_fingerprint(&base),
             daemon_config_fingerprint(&dialog_changed)
+        );
+        assert_ne!(
+            daemon_config_fingerprint(&base),
+            daemon_config_fingerprint(&domains_changed)
         );
     }
 

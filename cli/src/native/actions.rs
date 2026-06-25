@@ -1288,9 +1288,22 @@ fn plugins_from_command_or_env(cmd: &Value) -> Vec<crate::plugins::PluginConfig>
         .unwrap_or_else(crate::plugins::plugins_from_env)
 }
 
+fn reset_restore_runtime_state(state: &mut DaemonState) {
+    state.restore_status = "pending".to_string();
+    state.restore_status_detail = None;
+    state.restore_loaded_path = None;
+    state.restore_load_failed = false;
+    state.restore_validation_pending = false;
+    state.restore_save_status = "not_attempted".to_string();
+    state.restore_saved_path = None;
+}
+
 fn apply_restore_config_from_command(cmd: &Value, state: &mut DaemonState) {
     if let Some(restore_key) = cmd.get("restoreKey").and_then(|v| v.as_str()) {
         if !restore_key.is_empty() {
+            if state.session_name.as_deref() != Some(restore_key) {
+                reset_restore_runtime_state(state);
+            }
             state.session_name = Some(restore_key.to_string());
             if state.restore_status == "not_configured" {
                 state.restore_status = "pending".to_string();
@@ -9273,6 +9286,46 @@ mod tests {
         assert!(!should_validate_restore_after_action("launch"));
         assert!(should_validate_restore_after_action("navigate"));
         assert!(should_validate_restore_after_action("click"));
+    }
+
+    #[test]
+    fn test_restore_key_change_resets_runtime_restore_state() {
+        let mut state = DaemonState::new();
+        state.session_name = Some("old-key".to_string());
+        state.restore_status = "loaded_but_invalid".to_string();
+        state.restore_status_detail = Some("missing text".to_string());
+        state.restore_loaded_path = Some("/tmp/old-key.json".to_string());
+        state.restore_load_failed = true;
+        state.restore_validation_pending = true;
+        state.restore_save_status = "skipped_restore_failed".to_string();
+        state.restore_saved_path = Some("/tmp/old-key.json".to_string());
+
+        apply_restore_config_from_command(&json!({ "restoreKey": "new-key" }), &mut state);
+
+        assert_eq!(state.session_name.as_deref(), Some("new-key"));
+        assert_eq!(state.restore_status, "pending");
+        assert!(state.restore_status_detail.is_none());
+        assert!(state.restore_loaded_path.is_none());
+        assert!(!state.restore_load_failed);
+        assert!(!state.restore_validation_pending);
+        assert_eq!(state.restore_save_status, "not_attempted");
+        assert!(state.restore_saved_path.is_none());
+    }
+
+    #[test]
+    fn test_restore_key_same_value_preserves_failure_state() {
+        let mut state = DaemonState::new();
+        state.session_name = Some("same-key".to_string());
+        state.restore_status = "loaded_but_invalid".to_string();
+        state.restore_load_failed = true;
+        state.restore_save_status = "skipped_restore_failed".to_string();
+
+        apply_restore_config_from_command(&json!({ "restoreKey": "same-key" }), &mut state);
+
+        assert_eq!(state.session_name.as_deref(), Some("same-key"));
+        assert_eq!(state.restore_status, "loaded_but_invalid");
+        assert!(state.restore_load_failed);
+        assert_eq!(state.restore_save_status, "skipped_restore_failed");
     }
 
     #[test]
