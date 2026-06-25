@@ -131,6 +131,26 @@ fn active_page_index_after_removal(
     active_page_index
 }
 
+/// Decides the active page index after a page is appended.
+///
+/// A freshly appended page becomes active only when the caller explicitly
+/// activates it (an explicit user command such as `tab new` / `window new`) or
+/// when it is the first page (so a non-empty manager always has a valid active
+/// index). Event-discovered / human-opened tabs are appended with
+/// `activate = false` and must not steal the active pointer.
+fn active_page_index_after_add(
+    active_page_index: usize,
+    new_index: usize,
+    was_empty: bool,
+    activate: bool,
+) -> usize {
+    if was_empty || activate {
+        new_index
+    } else {
+        active_page_index
+    }
+}
+
 /// Converts common error messages into AI-friendly, actionable descriptions.
 pub fn to_ai_friendly_error(error: &str) -> String {
     let lower = error.to_lowercase();
@@ -1426,10 +1446,25 @@ impl BrowserManager {
         id
     }
 
+    /// Append a page and make it active. Use for explicit user commands
+    /// (`window new`, recording setup) where the new page should become active.
     pub fn add_page(&mut self, page: PageInfo) {
-        let index = self.pages.len();
+        self.add_page_with_activation(page, true);
+    }
+
+    /// Append a page WITHOUT activating it. Use for event-discovered targets
+    /// (`Target.targetCreated` drained from the shared Chrome) so a tab the
+    /// human opens never steals the agent's active tab.
+    pub fn add_page_without_activation(&mut self, page: PageInfo) {
+        self.add_page_with_activation(page, false);
+    }
+
+    fn add_page_with_activation(&mut self, page: PageInfo, activate: bool) {
+        let was_empty = self.pages.is_empty();
+        let new_index = self.pages.len();
         self.pages.push(page);
-        self.active_page_index = index;
+        self.active_page_index =
+            active_page_index_after_add(self.active_page_index, new_index, was_empty, activate);
     }
 
     pub fn update_page_target_info(&mut self, target: &TargetInfo) -> bool {
@@ -1862,6 +1897,27 @@ mod tests {
     #[test]
     fn test_active_page_index_after_removal_resets_when_last_page_disappears() {
         assert_eq!(active_page_index_after_removal(0, 0, 0), 0);
+    }
+
+    #[test]
+    fn test_active_page_index_after_add_first_page_always_activates() {
+        // The first page must become active even without explicit activation,
+        // so a manager that has pages always has a valid active index.
+        assert_eq!(active_page_index_after_add(0, 0, true, false), 0);
+        assert_eq!(active_page_index_after_add(0, 0, true, true), 0);
+    }
+
+    #[test]
+    fn test_active_page_index_after_add_discovered_tab_does_not_steal_active() {
+        // Event-discovered / human-opened tabs are appended without activation and
+        // must NOT move the active pointer (the active-tab steal fix).
+        assert_eq!(active_page_index_after_add(2, 5, false, false), 2);
+    }
+
+    #[test]
+    fn test_active_page_index_after_add_explicit_activation_moves_active() {
+        // Explicit user commands (`tab new`, `window new`) activate the new page.
+        assert_eq!(active_page_index_after_add(2, 5, false, true), 5);
     }
 
     #[test]
