@@ -2099,6 +2099,10 @@ async fn load_storage_state_or_rollback(
     state: &mut DaemonState,
     path: &Option<String>,
 ) -> Result<(), String> {
+    // The explicit `launch` path reaches here but never goes through
+    // auto_launch, so mirror it: auto-restore --session-name state before
+    // applying any explicit --state on top.
+    try_auto_restore_state(state).await;
     if let Err(err) = load_storage_state(state, path).await {
         if let Err(close_err) = rollback_failed_launch(state).await {
             return Err(format!(

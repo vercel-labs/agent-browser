@@ -5183,16 +5183,12 @@ async fn e2e_session_name_auto_restores_cookies() {
         assert_success(&resp);
     }
 
-    // Session 2: fresh DaemonState with same session_name. Navigate without
-    // explicit launch — this triggers auto_launch which calls
-    // try_auto_restore_state.
-    //
-    // NOTE: an explicit `launch` command skips auto_launch entirely, so
-    // session-name auto-restore only fires via the auto_launch path.
+    // Session 2: fresh DaemonState, same session_name. A navigate (no explicit
+    // launch) goes through auto_launch -> try_auto_restore_state. The explicit
+    // `launch` path is covered by e2e_session_name_auto_restores_on_explicit_launch.
     {
         let mut state = DaemonState::new();
 
-        // Navigate without explicit launch — triggers auto_launch → try_auto_restore_state
         let resp = execute_command(
             &json!({ "id": "10", "action": "navigate", "url": "https://example.com" }),
             &mut state,
@@ -5218,6 +5214,109 @@ async fn e2e_session_name_auto_restores_cookies() {
 
         let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
         assert_success(&resp);
+    }
+
+    // Clean up auto-saved state files
+    let sessions_dir = dirs::home_dir()
+        .unwrap()
+        .join(".agent-browser")
+        .join("sessions");
+    if let Ok(entries) = std::fs::read_dir(&sessions_dir) {
+        for entry in entries.flatten() {
+            let fname = entry.file_name().to_string_lossy().to_string();
+            if fname.starts_with(&format!("{}-", session_name)) {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+}
+
+/// An explicit `launch` (the path `open --headed`/`--state`/`--profile` take)
+/// must auto-restore --session-name state too, not only the auto_launch path.
+#[tokio::test]
+#[ignore]
+async fn e2e_session_name_auto_restores_on_explicit_launch() {
+    let session_name = format!(
+        "e2e-explicit-launch-{}",
+        &uuid::Uuid::new_v4().to_string()[..8]
+    );
+
+    let env = EnvGuard::new(&["AGENT_BROWSER_SESSION_NAME"]);
+    env.set("AGENT_BROWSER_SESSION_NAME", &session_name);
+
+    // Session 1: set a cookie, close (auto-saves state for session_name)
+    {
+        let mut state = DaemonState::new();
+        assert_success(
+            &execute_command(
+                &json!({ "id": "1", "action": "launch", "headless": true }),
+                &mut state,
+            )
+            .await,
+        );
+        assert_success(
+            &execute_command(
+                &json!({ "id": "2", "action": "navigate", "url": "https://example.com" }),
+                &mut state,
+            )
+            .await,
+        );
+        assert_success(
+            &execute_command(
+                &json!({
+                    "id": "3",
+                    "action": "cookies_set",
+                    "name": "explicit_launch_test",
+                    "value": "restored",
+                    "domain": ".example.com",
+                    "path": "/",
+                    "expires": 2000000000
+                }),
+                &mut state,
+            )
+            .await,
+        );
+        assert_success(&execute_command(&json!({ "id": "5", "action": "close" }), &mut state).await);
+    }
+
+    // Session 2: restore must happen at the explicit `launch`. The follow-up
+    // navigate is on an already-up browser (so it can't auto_launch) and only
+    // exists so the page-scoped cookies_get can see the restored cookie.
+    {
+        let mut state = DaemonState::new();
+        assert_success(
+            &execute_command(
+                &json!({ "id": "10", "action": "launch", "headless": true }),
+                &mut state,
+            )
+            .await,
+        );
+
+        let resp = execute_command(
+            &json!({ "id": "11", "action": "navigate", "url": "https://example.com" }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        let resp =
+            execute_command(&json!({ "id": "12", "action": "cookies_get" }), &mut state).await;
+        assert_success(&resp);
+        let cookies = get_data(&resp)["cookies"].as_array().unwrap();
+        let found = cookies
+            .iter()
+            .any(|c| c["name"] == "explicit_launch_test" && c["value"] == "restored");
+        assert!(
+            found,
+            "Cookie should be auto-restored on explicit `launch` via --session-name. \
+             Cookies found: {:?}",
+            cookies
+                .iter()
+                .map(|c| c["name"].as_str().unwrap_or("?"))
+                .collect::<Vec<_>>()
+        );
+
+        assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
     }
 
     // Clean up auto-saved state files
