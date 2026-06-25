@@ -1,6 +1,6 @@
 use crate::validation::sanitize_session_component;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::env;
 use std::fs;
 use std::hash::{Hash, Hasher};
@@ -9,7 +9,7 @@ use std::net::TcpStream;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
@@ -361,9 +361,20 @@ fn get_port_path(session: &str) -> PathBuf {
 }
 
 #[cfg(windows)]
+fn port_identity_for_session(session: &str) -> String {
+    if let Ok(namespace) = env::var("AGENT_BROWSER_NAMESPACE") {
+        let namespace = sanitize_session_component(&namespace);
+        if !namespace.is_empty() {
+            return format!("{}:{}", namespace, session);
+        }
+    }
+    session.to_string()
+}
+
+#[cfg(windows)]
 pub fn get_port_for_session(session: &str) -> u16 {
     let mut hash: i32 = 0;
-    for c in session.chars() {
+    for c in port_identity_for_session(session).chars() {
         hash = ((hash << 5).wrapping_sub(hash)).wrapping_add(c as i32);
     }
     // Correct logic: first take absolute modulo, then cast to u16
@@ -649,6 +660,35 @@ fn kill_stale_daemon(session: &str) {
     cleanup_stale_files(session);
 }
 
+fn wait_for_daemon_exit(session: &str, timeout: Duration) -> bool {
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        if !daemon_ready(session) {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    !daemon_ready(session)
+}
+
+fn request_graceful_daemon_shutdown(session: &str) -> bool {
+    let close_cmd = json!({
+        "id": "restart-close",
+        "action": "close"
+    });
+
+    match send_command(close_cmd, session) {
+        Ok(resp) if resp.success => wait_for_daemon_exit(session, Duration::from_secs(5)),
+        _ => false,
+    }
+}
+
+fn stop_existing_daemon_for_restart(session: &str) {
+    if !request_graceful_daemon_shutdown(session) {
+        kill_stale_daemon(session);
+    }
+}
+
 pub fn ensure_daemon(session: &str, opts: &DaemonOptions) -> Result<DaemonResult, String> {
     let mut restarted = false;
 
@@ -669,11 +709,11 @@ pub fn ensure_daemon(session: &str, opts: &DaemonOptions) -> Result<DaemonResult
                 "{} Daemon version mismatch detected, restarting...",
                 crate::color::warning_indicator()
             );
-            kill_stale_daemon(session);
+            stop_existing_daemon_for_restart(session);
             restarted = true;
             // Fall through to spawn a new daemon below
         } else if !daemon_config_matches(session, opts) {
-            kill_stale_daemon(session);
+            stop_existing_daemon_for_restart(session);
             restarted = true;
         } else {
             return Ok(DaemonResult {
@@ -1268,10 +1308,31 @@ mod tests {
     #[test]
     #[cfg(windows)]
     fn test_get_port_for_session() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_NAMESPACE"]);
+        guard.remove("AGENT_BROWSER_NAMESPACE");
+
         assert_eq!(get_port_for_session("default"), 50838);
         assert_eq!(get_port_for_session("my-session"), 63105);
         assert_eq!(get_port_for_session("work"), 51184);
         assert_eq!(get_port_for_session(""), 49152);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_get_port_for_session_includes_namespace() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_NAMESPACE"]);
+        guard.remove("AGENT_BROWSER_NAMESPACE");
+        let unnamespaced = get_port_for_session("work");
+
+        guard.set("AGENT_BROWSER_NAMESPACE", "Worktree: One");
+        let namespaced_one = get_port_for_session("work");
+
+        guard.set("AGENT_BROWSER_NAMESPACE", "Worktree: Two");
+        let namespaced_two = get_port_for_session("work");
+
+        assert_ne!(namespaced_one, unnamespaced);
+        assert_ne!(namespaced_two, unnamespaced);
+        assert_ne!(namespaced_one, namespaced_two);
     }
 
     // === Daemon Version Mismatch Detection Tests ===

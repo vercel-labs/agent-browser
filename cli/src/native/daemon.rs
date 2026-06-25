@@ -485,11 +485,7 @@ fn get_daemon_socket_dir() -> PathBuf {
 
 #[cfg(windows)]
 fn get_port_for_session(session: &str) -> u16 {
-    let mut hash: i32 = 0;
-    for c in session.chars() {
-        hash = ((hash << 5).wrapping_sub(hash)).wrapping_add(c as i32);
-    }
-    49152 + ((hash.unsigned_abs() as u32 % 16383) as u16)
+    crate::connection::get_port_for_session(session)
 }
 
 #[cfg(test)]
@@ -522,6 +518,9 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn test_port_matches_client_algorithm() {
+        let guard = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_NAMESPACE"]);
+        guard.remove("AGENT_BROWSER_NAMESPACE");
+
         assert_eq!(get_port_for_session("default"), 50838);
         assert_eq!(get_port_for_session("my-session"), 63105);
         assert_eq!(get_port_for_session("work"), 51184);

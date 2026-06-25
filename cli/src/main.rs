@@ -106,18 +106,22 @@ fn is_valid_restore_save_policy(policy: &str) -> bool {
 fn attach_restore_config_to_command(cmd: &mut serde_json::Value, flags: &Flags) {
     if let Some(restore_key) = restore_key_from_flags(flags) {
         cmd["restoreKey"] = json!(restore_key);
-    }
-    if let Some(ref policy) = flags.restore_save {
-        cmd["restoreSave"] = json!(policy);
-    }
-    if let Some(ref check) = flags.restore_check_url {
-        cmd["restoreCheckUrl"] = json!(check);
-    }
-    if let Some(ref check) = flags.restore_check_text {
-        cmd["restoreCheckText"] = json!(check);
-    }
-    if let Some(ref check) = flags.restore_check_fn {
-        cmd["restoreCheckFn"] = json!(check);
+        cmd["restoreSave"] = json!(flags.restore_save.as_deref().unwrap_or("auto"));
+        cmd["restoreCheckUrl"] = flags
+            .restore_check_url
+            .as_ref()
+            .map(|check| json!(check))
+            .unwrap_or(serde_json::Value::Null);
+        cmd["restoreCheckText"] = flags
+            .restore_check_text
+            .as_ref()
+            .map(|check| json!(check))
+            .unwrap_or(serde_json::Value::Null);
+        cmd["restoreCheckFn"] = flags
+            .restore_check_fn
+            .as_ref()
+            .map(|check| json!(check))
+            .unwrap_or(serde_json::Value::Null);
     }
 }
 
@@ -1939,6 +1943,30 @@ mod tests {
         assert_eq!(cmd["restoreCheckUrl"], "**/dashboard");
         assert_eq!(cmd["restoreCheckText"], "Dashboard");
         assert_eq!(cmd["restoreCheckFn"], "!!localStorage.getItem('session')");
+    }
+
+    #[test]
+    fn test_attach_restore_config_to_command_sends_defaults_and_clears_checks() {
+        let args = vec![
+            "--session".to_string(),
+            "next-loop".to_string(),
+            "--restore".to_string(),
+            "open".to_string(),
+            "http://localhost:3000".to_string(),
+        ];
+        let mut flags = parse_flags(&args);
+        if flags.restore_uses_session {
+            flags.restore = Some(flags.session.clone());
+        }
+        let mut cmd = json!({ "action": "navigate" });
+
+        attach_restore_config_to_command(&mut cmd, &flags);
+
+        assert_eq!(cmd["restoreKey"], "next-loop");
+        assert_eq!(cmd["restoreSave"], "auto");
+        assert!(cmd["restoreCheckUrl"].is_null());
+        assert!(cmd["restoreCheckText"].is_null());
+        assert!(cmd["restoreCheckFn"].is_null());
     }
 
     #[test]

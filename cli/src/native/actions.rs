@@ -1298,7 +1298,66 @@ fn reset_restore_runtime_state(state: &mut DaemonState) {
     state.restore_saved_path = None;
 }
 
+fn command_restore_check_fields(
+    cmd: &Value,
+) -> Option<(Option<String>, Option<String>, Option<String>)> {
+    let has_check_field = cmd.get("restoreCheckUrl").is_some()
+        || cmd.get("restoreCheckText").is_some()
+        || cmd.get("restoreCheckFn").is_some();
+    if !has_check_field {
+        return None;
+    }
+
+    Some((
+        cmd.get("restoreCheckUrl")
+            .and_then(|v| v.as_str())
+            .map(ToString::to_string),
+        cmd.get("restoreCheckText")
+            .and_then(|v| v.as_str())
+            .map(ToString::to_string),
+        cmd.get("restoreCheckFn")
+            .and_then(|v| v.as_str())
+            .map(ToString::to_string),
+    ))
+}
+
+fn restore_checks_are_configured(
+    checks: &(Option<String>, Option<String>, Option<String>),
+) -> bool {
+    checks.0.is_some() || checks.1.is_some() || checks.2.is_some()
+}
+
+fn reconcile_restore_check_change(
+    state: &mut DaemonState,
+    checks: &(Option<String>, Option<String>, Option<String>),
+) {
+    if restore_checks_are_configured(checks) {
+        if matches!(
+            state.restore_status.as_str(),
+            "loaded" | "loaded_but_invalid"
+        ) {
+            state.restore_status = "loaded".to_string();
+            state.restore_status_detail = None;
+            state.restore_load_failed = false;
+            state.restore_validation_pending = true;
+        }
+    } else {
+        state.restore_validation_pending = false;
+        if state.restore_status == "loaded_but_invalid" {
+            state.restore_status = "loaded".to_string();
+            state.restore_status_detail = None;
+            state.restore_load_failed = false;
+        }
+    }
+}
+
 fn apply_restore_config_from_command(cmd: &Value, state: &mut DaemonState) {
+    let old_checks = (
+        state.restore_check_url.clone(),
+        state.restore_check_text.clone(),
+        state.restore_check_fn.clone(),
+    );
+
     if let Some(restore_key) = cmd.get("restoreKey").and_then(|v| v.as_str()) {
         if !restore_key.is_empty() {
             if state.session_name.as_deref() != Some(restore_key) {
@@ -1310,17 +1369,16 @@ fn apply_restore_config_from_command(cmd: &Value, state: &mut DaemonState) {
             }
         }
     }
-    if let Some(save_policy) = cmd.get("restoreSave").and_then(|v| v.as_str()) {
-        state.restore_save = save_policy.to_string();
+    if let Some(save_policy) = cmd.get("restoreSave") {
+        state.restore_save = save_policy.as_str().unwrap_or("auto").to_string();
     }
-    if let Some(check) = cmd.get("restoreCheckUrl").and_then(|v| v.as_str()) {
-        state.restore_check_url = Some(check.to_string());
-    }
-    if let Some(check) = cmd.get("restoreCheckText").and_then(|v| v.as_str()) {
-        state.restore_check_text = Some(check.to_string());
-    }
-    if let Some(check) = cmd.get("restoreCheckFn").and_then(|v| v.as_str()) {
-        state.restore_check_fn = Some(check.to_string());
+    if let Some(new_checks) = command_restore_check_fields(cmd) {
+        state.restore_check_url = new_checks.0.clone();
+        state.restore_check_text = new_checks.1.clone();
+        state.restore_check_fn = new_checks.2.clone();
+        if old_checks != new_checks {
+            reconcile_restore_check_change(state, &new_checks);
+        }
     }
 }
 
@@ -9326,6 +9384,59 @@ mod tests {
         assert_eq!(state.restore_status, "loaded_but_invalid");
         assert!(state.restore_load_failed);
         assert_eq!(state.restore_save_status, "skipped_restore_failed");
+    }
+
+    #[test]
+    fn test_restore_config_command_clears_sticky_checks_and_policy() {
+        let mut state = DaemonState::new();
+        state.session_name = Some("same-key".to_string());
+        state.restore_save = "never".to_string();
+        state.restore_check_text = Some("Dashboard".to_string());
+        state.restore_status = "loaded_but_invalid".to_string();
+        state.restore_status_detail = Some("missing text".to_string());
+        state.restore_load_failed = true;
+
+        apply_restore_config_from_command(
+            &json!({
+                "restoreKey": "same-key",
+                "restoreSave": "auto",
+                "restoreCheckUrl": null,
+                "restoreCheckText": null,
+                "restoreCheckFn": null
+            }),
+            &mut state,
+        );
+
+        assert_eq!(state.restore_save, "auto");
+        assert!(state.restore_check_url.is_none());
+        assert!(state.restore_check_text.is_none());
+        assert!(state.restore_check_fn.is_none());
+        assert_eq!(state.restore_status, "loaded");
+        assert!(state.restore_status_detail.is_none());
+        assert!(!state.restore_load_failed);
+        assert!(!state.restore_validation_pending);
+    }
+
+    #[test]
+    fn test_restore_config_check_change_marks_loaded_state_for_validation() {
+        let mut state = DaemonState::new();
+        state.session_name = Some("same-key".to_string());
+        state.restore_status = "loaded".to_string();
+        state.restore_load_failed = false;
+        state.restore_validation_pending = false;
+
+        apply_restore_config_from_command(
+            &json!({
+                "restoreKey": "same-key",
+                "restoreCheckText": "Dashboard"
+            }),
+            &mut state,
+        );
+
+        assert_eq!(state.restore_check_text.as_deref(), Some("Dashboard"));
+        assert_eq!(state.restore_status, "loaded");
+        assert!(!state.restore_load_failed);
+        assert!(state.restore_validation_pending);
     }
 
     #[test]
