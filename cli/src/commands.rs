@@ -3013,6 +3013,7 @@ mod tests {
             cli_user_agent: false,
             cli_proxy: false,
             cli_proxy_bypass: false,
+            cli_ignore_https_errors: false,
             cli_allow_file_access: false,
             cli_hide_scrollbars: false,
             cli_annotate: false,
