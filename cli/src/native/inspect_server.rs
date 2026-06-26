@@ -6,6 +6,8 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
+use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
+use tokio_tungstenite::tungstenite::http::StatusCode;
 use tokio_tungstenite::tungstenite::Message;
 
 use super::cdp::client::InspectProxyHandle;
@@ -45,6 +47,7 @@ impl InspectServer {
             .port();
 
         let proxy = Arc::new(proxy_handle);
+        let ws_token = uuid::Uuid::new_v4().to_string();
 
         let handle = tokio::spawn(accept_loop(
             listener,
@@ -52,6 +55,7 @@ impl InspectServer {
             target_id,
             chrome_host_port,
             port,
+            ws_token,
         ));
 
         Ok(Self {
@@ -75,6 +79,7 @@ async fn accept_loop(
     target_id: String,
     chrome_host_port: String,
     proxy_port: u16,
+    ws_token: String,
 ) {
     loop {
         let (stream, _) = match listener.accept().await {
@@ -85,9 +90,10 @@ async fn accept_loop(
         let proxy = proxy.clone();
         let tid = target_id.clone();
         let chp = chrome_host_port.clone();
+        let token = ws_token.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(stream, proxy, tid, chp, proxy_port).await {
+            if let Err(e) = handle_connection(stream, proxy, tid, chp, proxy_port, token).await {
                 let _ = writeln!(std::io::stderr(), "[inspect] connection error: {}", e);
             }
         });
@@ -100,9 +106,10 @@ async fn handle_connection(
     target_id: String,
     chrome_host_port: String,
     proxy_port: u16,
+    ws_token: String,
 ) -> Result<(), String> {
     // Peek at the request line to determine routing WITHOUT consuming bytes.
-    // This is critical: tokio_tungstenite::accept_async needs to read the full
+    // This is critical: tokio_tungstenite::accept_hdr_async needs to read the full
     // HTTP upgrade request itself, so we must not consume anything for WS paths.
     let mut peek_buf = [0u8; 32];
     let n = stream
@@ -112,12 +119,12 @@ async fn handle_connection(
     let peek = String::from_utf8_lossy(&peek_buf[..n]);
 
     if peek.starts_with("GET /ws") {
-        return handle_ws_proxy(stream, proxy, target_id).await;
+        return handle_ws_proxy(stream, proxy, target_id, ws_token).await;
     }
 
     if peek.starts_with("GET / ") {
         let buf_reader = BufReader::new(stream);
-        return handle_http_redirect(buf_reader, chrome_host_port, proxy_port).await;
+        return handle_http_redirect(buf_reader, chrome_host_port, proxy_port, ws_token).await;
     }
 
     // Unknown request -- consume and respond 404
@@ -138,6 +145,7 @@ async fn handle_http_redirect(
     buf_reader: BufReader<tokio::net::TcpStream>,
     chrome_host_port: String,
     proxy_port: u16,
+    ws_token: String,
 ) -> Result<(), String> {
     let mut br = buf_reader;
     let mut total_bytes = 0usize;
@@ -150,10 +158,7 @@ async fn handle_http_redirect(
         }
     }
 
-    let location = format!(
-        "http://{}/devtools/devtools_app.html?ws=127.0.0.1:{}/ws",
-        chrome_host_port, proxy_port
-    );
+    let location = inspect_devtools_location(&chrome_host_port, proxy_port, &ws_token);
     let body = format!(
         "<html><body>Redirecting to <a href=\"{url}\">{url}</a></body></html>",
         url = location
@@ -172,12 +177,19 @@ async fn handle_http_redirect(
     Ok(())
 }
 
+#[allow(clippy::result_large_err)]
 async fn handle_ws_proxy(
     stream: tokio::net::TcpStream,
     proxy: Arc<InspectProxyHandle>,
     target_id: String,
+    ws_token: String,
 ) -> Result<(), String> {
-    let ws_stream = tokio_tungstenite::accept_async(stream)
+    let expected_token = ws_token;
+    let callback = move |req: &Request, resp: Response| {
+        inspect_ws_handshake_response(req, resp, &expected_token)
+    };
+
+    let ws_stream = tokio_tungstenite::accept_hdr_async(stream, callback)
         .await
         .map_err(|e| format!("WebSocket handshake failed: {}", e))?;
 
@@ -295,6 +307,54 @@ async fn handle_ws_proxy(
     Ok(())
 }
 
+#[allow(clippy::result_large_err)]
+fn inspect_ws_handshake_response(
+    req: &Request,
+    resp: Response,
+    expected_token: &str,
+) -> Result<Response, ErrorResponse> {
+    if inspect_ws_request_authorized(req, expected_token) {
+        Ok(resp)
+    } else {
+        Err(forbidden_ws_response(
+            "Inspect WebSocket request not authorized",
+        ))
+    }
+}
+
+fn inspect_ws_request_authorized(req: &Request, expected_token: &str) -> bool {
+    if !inspect_ws_path_matches_token(req.uri().path(), expected_token) {
+        return false;
+    }
+
+    let origin = req.headers().get("origin").and_then(|v| v.to_str().ok());
+    super::stream::is_allowed_origin(origin)
+}
+
+fn inspect_ws_path_matches_token(path: &str, expected_token: &str) -> bool {
+    if expected_token.is_empty() {
+        return false;
+    }
+
+    match path.strip_prefix("/ws/") {
+        Some(provided_token) => provided_token == expected_token,
+        None => false,
+    }
+}
+
+fn forbidden_ws_response(reason: &str) -> ErrorResponse {
+    let mut reject = ErrorResponse::new(Some(reason.to_string()));
+    *reject.status_mut() = StatusCode::FORBIDDEN;
+    reject
+}
+
+fn inspect_devtools_location(chrome_host_port: &str, proxy_port: u16, ws_token: &str) -> String {
+    format!(
+        "http://{}/devtools/devtools_app.html?ws=127.0.0.1:{}/ws/{}",
+        chrome_host_port, proxy_port, ws_token
+    )
+}
+
 fn inject_session_id(json: &str, session_id: &str) -> String {
     if let Ok(mut val) = serde_json::from_str::<serde_json::Value>(json) {
         if let Some(obj) = val.as_object_mut() {
@@ -323,6 +383,53 @@ fn strip_session_id(json: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ws_request(path: &str, origin: Option<&str>) -> Request {
+        let mut builder = Request::builder().uri(path);
+        if let Some(origin) = origin {
+            builder = builder.header("origin", origin);
+        }
+        builder.body(()).expect("valid websocket request")
+    }
+
+    #[test]
+    fn test_inspect_ws_request_allows_tokenized_local_origin() {
+        let req = ws_request("/ws/secret-token", Some("http://127.0.0.1:9222"));
+        assert!(inspect_ws_request_authorized(&req, "secret-token"));
+    }
+
+    #[test]
+    fn test_inspect_ws_request_allows_tokenized_missing_origin() {
+        let req = ws_request("/ws/secret-token", None);
+        assert!(inspect_ws_request_authorized(&req, "secret-token"));
+    }
+
+    #[test]
+    fn test_inspect_ws_request_rejects_missing_token_path() {
+        let req = ws_request("/ws", Some("http://127.0.0.1:9222"));
+        assert!(!inspect_ws_request_authorized(&req, "secret-token"));
+    }
+
+    #[test]
+    fn test_inspect_ws_request_rejects_wrong_token() {
+        let req = ws_request("/ws/other-token", Some("http://127.0.0.1:9222"));
+        assert!(!inspect_ws_request_authorized(&req, "secret-token"));
+    }
+
+    #[test]
+    fn test_inspect_ws_request_rejects_non_local_origin() {
+        let req = ws_request("/ws/secret-token", Some("https://evil.example"));
+        assert!(!inspect_ws_request_authorized(&req, "secret-token"));
+    }
+
+    #[test]
+    fn test_inspect_redirect_uses_tokenized_websocket_path() {
+        let location = inspect_devtools_location("127.0.0.1:9222", 12345, "secret-token");
+        assert_eq!(
+            location,
+            "http://127.0.0.1:9222/devtools/devtools_app.html?ws=127.0.0.1:12345/ws/secret-token"
+        );
+    }
 
     #[test]
     fn test_inject_session_id() {
