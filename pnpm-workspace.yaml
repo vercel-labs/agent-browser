@@ -1,6 +1,7 @@
 packages:
   - '.'
   - 'packages/*'
+  - 'packages/@agent-browser/*'
   - 'docs'
 minimumReleaseAge: 2880
 allowBuilds:

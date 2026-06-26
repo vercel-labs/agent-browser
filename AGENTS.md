@@ -15,6 +15,8 @@ This project uses **pnpm**. Always use `pnpm` instead of `npm` or `yarn` for ins
 
 ## Documentation
 
+Do not hard-wrap prose in documentation files such as Markdown, MDX, and READMEs; let the editor or renderer wrap text naturally.
+
 When adding or changing user-facing features (new flags, commands, behaviors, environment variables, etc.), update **all** of the following:
 
 1. `cli/src/output.rs` — `--help` output (flags list, examples, environment variables)
@@ -24,6 +26,10 @@ When adding or changing user-facing features (new flags, commands, behaviors, en
 5. Inline doc comments in the relevant source files
 
 This applies to changes that either human users or AI agents would need to know about. Do not skip any of these locations.
+
+## CLI/MCP Parity
+
+When adding or changing any CLI command, flag, behavior, output, environment variable, or parser semantics, update the MCP server in `cli/src/mcp.rs` in the same change. MCP tools should stay in sync with canonical CLI behavior by delegating through the normal CLI parser where possible. If a CLI command has no dedicated MCP tool, add one or document why it is intentionally omitted. Add or update tests that prove the CLI and MCP surfaces remain aligned.
 
 In the `docs/src/app/` MDX files, always use HTML `<table>` syntax for tables (not markdown pipe tables). This matches the existing convention across the docs site.
 

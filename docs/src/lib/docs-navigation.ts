@@ -23,6 +23,7 @@ export const navigation: NavSection[] = [
     items: [
       { name: "Commands", href: "/commands" },
       { name: "Configuration", href: "/configuration" },
+      { name: "Plugins", href: "/plugins" },
       { name: "Selectors", href: "/selectors" },
       { name: "Snapshots", href: "/snapshots" },
     ],

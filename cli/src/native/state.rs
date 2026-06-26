@@ -13,6 +13,7 @@ use super::cdp::types::{
     CreateTargetResult, EvaluateParams,
 };
 use super::cookies::{self, Cookie};
+use crate::validation::{is_valid_session_name, sanitize_session_component, session_name_error};
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -314,6 +315,9 @@ pub async fn save_state(
             let dir = get_sessions_dir();
             let _ = fs::create_dir_all(&dir);
             let name = session_name.unwrap_or("default");
+            if !is_valid_session_name(name) {
+                return Err(session_name_error(name));
+            }
             dir.join(format!("{}-{}.json", name, session_id_str))
                 .to_string_lossy()
                 .to_string()
@@ -333,35 +337,131 @@ pub async fn save_state(
     Ok(save_path)
 }
 
-pub async fn load_state(client: &CdpClient, session_id: &str, path: &str) -> Result<(), String> {
-    let json_str = if path.ends_with(".enc") {
+pub async fn save_auto_state_transactional(
+    client: &CdpClient,
+    session_id: &str,
+    session_name: &str,
+    session_id_str: &str,
+    visited_origins: &HashSet<String>,
+) -> Result<String, String> {
+    if !is_valid_session_name(session_name) {
+        return Err(session_name_error(session_name));
+    }
+
+    let dir = get_sessions_dir();
+    fs::create_dir_all(&dir)
+        .map_err(|e| format!("Failed to create state directory {}: {}", dir.display(), e))?;
+
+    let tmp_dir = dir.join(".tmp");
+    fs::create_dir_all(&tmp_dir).map_err(|e| {
+        format!(
+            "Failed to create temporary state directory {}: {}",
+            tmp_dir.display(),
+            e
+        )
+    })?;
+
+    let base_name = format!("{}-{}", session_name, session_id_str);
+    let final_json_path = dir.join(format!("{}.json", base_name));
+    let final_path = if std::env::var("AGENT_BROWSER_ENCRYPTION_KEY").is_ok() {
+        PathBuf::from(format!("{}.enc", final_json_path.to_string_lossy()))
+    } else {
+        final_json_path
+    };
+    let candidate_json_path = tmp_dir.join(format!(
+        "{}-candidate-{}.json",
+        base_name,
+        std::process::id()
+    ));
+    let candidate_arg = candidate_json_path.to_string_lossy().to_string();
+
+    let candidate_path = save_state(
+        client,
+        session_id,
+        Some(&candidate_arg),
+        Some(session_name),
+        session_id_str,
+        visited_origins,
+    )
+    .await?;
+
+    if let Err(err) = validate_state_file(&candidate_path) {
+        let _ = fs::remove_file(&candidate_path);
+        return Err(err);
+    }
+
+    let previous_path = PathBuf::from(format!("{}.previous", final_path.to_string_lossy()));
+    if final_path.exists() {
+        let _ = fs::remove_file(&previous_path);
+        fs::rename(&final_path, &previous_path).map_err(|e| {
+            format!(
+                "Failed to rotate previous state {} to {}: {}",
+                final_path.display(),
+                previous_path.display(),
+                e
+            )
+        })?;
+    }
+
+    let candidate = PathBuf::from(&candidate_path);
+    if let Err(err) = fs::rename(&candidate, &final_path) {
+        if previous_path.exists() && !final_path.exists() {
+            let _ = fs::rename(&previous_path, &final_path);
+        }
+        return Err(format!(
+            "Failed to promote state {} to {}: {}",
+            candidate.display(),
+            final_path.display(),
+            err
+        ));
+    }
+    if previous_path.exists() {
+        let _ = fs::remove_file(&previous_path);
+    }
+
+    Ok(final_path.to_string_lossy().to_string())
+}
+
+fn read_state_json(path: &str) -> Result<String, String> {
+    if is_encrypted_state(std::path::Path::new(path)) {
         let key = std::env::var("AGENT_BROWSER_ENCRYPTION_KEY").map_err(|_| {
             "Encrypted state file requires AGENT_BROWSER_ENCRYPTION_KEY".to_string()
         })?;
         let data =
             fs::read(path).map_err(|e| format!("Failed to read state from {}: {}", path, e))?;
         let decrypted = decrypt_data(&data, &key)?;
-        String::from_utf8(decrypted)
-            .map_err(|e| format!("Decrypted state is not valid UTF-8: {}", e))?
+        Ok(String::from_utf8(decrypted)
+            .map_err(|e| format!("Decrypted state is not valid UTF-8: {}", e))?)
     } else {
         match fs::read_to_string(path) {
-            Ok(s) => s,
+            Ok(s) => Ok(s),
             Err(e) => {
                 if let Ok(key) = std::env::var("AGENT_BROWSER_ENCRYPTION_KEY") {
                     let enc_path = format!("{}.enc", path);
                     if let Ok(data) = fs::read(&enc_path) {
                         let decrypted = decrypt_data(&data, &key)?;
-                        String::from_utf8(decrypted)
-                            .map_err(|de| format!("Decrypted state is not valid UTF-8: {}", de))?
+                        Ok(String::from_utf8(decrypted)
+                            .map_err(|de| format!("Decrypted state is not valid UTF-8: {}", de))?)
                     } else {
-                        return Err(format!("Failed to read state from {}: {}", path, e));
+                        Err(format!("Failed to read state from {}: {}", path, e))
                     }
                 } else {
-                    return Err(format!("Failed to read state from {}: {}", path, e));
+                    Err(format!("Failed to read state from {}: {}", path, e))
                 }
             }
         }
-    };
+    }
+}
+
+pub fn validate_state_file(path: &str) -> Result<(), String> {
+    let json_str = read_state_json(path)?;
+    let _: StorageState =
+        serde_json::from_str(&json_str).map_err(|e| format!("Invalid state file: {}", e))?;
+    Ok(())
+}
+
+pub async fn load_state(client: &CdpClient, session_id: &str, path: &str) -> Result<(), String> {
+    let json_str = read_state_json(path)?;
 
     let state: StorageState =
         serde_json::from_str(&json_str).map_err(|e| format!("Invalid state file: {}", e))?;
@@ -443,11 +543,15 @@ fn is_state_file(path: &std::path::Path) -> bool {
         .unwrap_or_default()
         .to_string_lossy()
         .to_string();
-    fname.ends_with(".json") || fname.ends_with(".json.enc")
+    fname.ends_with(".json")
+        || fname.ends_with(".json.enc")
+        || fname.ends_with(".json.previous")
+        || fname.ends_with(".json.enc.previous")
 }
 
 fn is_encrypted_state(path: &std::path::Path) -> bool {
-    path.to_string_lossy().ends_with(".json.enc")
+    let path = path.to_string_lossy();
+    path.ends_with(".json.enc") || path.ends_with(".json.enc.previous")
 }
 
 pub fn state_list() -> Result<Value, String> {
@@ -492,7 +596,7 @@ pub fn state_list() -> Result<Value, String> {
 }
 
 pub fn state_show(path: &str) -> Result<Value, String> {
-    let encrypted = path.ends_with(".enc");
+    let encrypted = is_encrypted_state(std::path::Path::new(path));
     let json_str = if encrypted {
         let key = std::env::var("AGENT_BROWSER_ENCRYPTION_KEY").map_err(|_| {
             "Encrypted state file requires AGENT_BROWSER_ENCRYPTION_KEY".to_string()
@@ -647,6 +751,10 @@ fn decrypt_data(data: &[u8], key_str: &str) -> Result<Vec<u8>, String> {
 }
 
 pub fn find_auto_state_file(session_name: &str) -> Option<String> {
+    if !is_valid_session_name(session_name) {
+        return None;
+    }
+
     let dir = get_sessions_dir();
     if !dir.exists() {
         return None;
@@ -718,11 +826,20 @@ pub fn dispatch_state_command(cmd: &Value) -> Option<Result<Value, String>> {
 /// `<tempdir>/agent-browser` when the home directory can't be resolved).
 /// This is the parent of `sessions/`, auth storage, and the encryption key.
 pub fn get_state_dir() -> PathBuf {
-    if let Some(home) = dirs::home_dir() {
+    let base = if let Some(home) = dirs::home_dir() {
         home.join(".agent-browser")
     } else {
         std::env::temp_dir().join("agent-browser")
+    };
+
+    if let Ok(namespace) = std::env::var("AGENT_BROWSER_NAMESPACE") {
+        let namespace = sanitize_session_component(&namespace);
+        if !namespace.is_empty() {
+            return base.join("namespaces").join(namespace).join("state");
+        }
     }
+
+    base
 }
 
 pub fn get_sessions_dir() -> PathBuf {
@@ -791,6 +908,40 @@ mod tests {
     }
 
     #[test]
+    fn test_state_file_matcher_includes_transactional_backups() {
+        assert!(is_state_file(std::path::Path::new("auth.json")));
+        assert!(is_state_file(std::path::Path::new("auth.json.enc")));
+        assert!(is_state_file(std::path::Path::new("auth.json.previous")));
+        assert!(is_state_file(std::path::Path::new(
+            "auth.json.enc.previous"
+        )));
+        assert!(is_encrypted_state(std::path::Path::new(
+            "auth.json.enc.previous"
+        )));
+    }
+
+    #[test]
+    fn test_state_clear_removes_transactional_backups() {
+        let guard = crate::test_utils::EnvGuard::new(&["HOME", "AGENT_BROWSER_NAMESPACE"]);
+        let dir = tempfile::tempdir().unwrap();
+        guard.set("HOME", dir.path().to_str().unwrap());
+        guard.remove("AGENT_BROWSER_NAMESPACE");
+
+        let sessions = get_sessions_dir();
+        fs::create_dir_all(&sessions).unwrap();
+        fs::write(sessions.join("auth-test.json"), "{}").unwrap();
+        fs::write(sessions.join("auth-test.json.previous"), "{}").unwrap();
+        fs::write(sessions.join("auth-test.json.enc.previous"), "encrypted").unwrap();
+
+        let result = state_clear(None).unwrap();
+
+        assert_eq!(result["deleted"], 3);
+        assert!(!sessions.join("auth-test.json").exists());
+        assert!(!sessions.join("auth-test.json.previous").exists());
+        assert!(!sessions.join("auth-test.json.enc.previous").exists());
+    }
+
+    #[test]
     fn test_state_rename_nonexistent() {
         let result = state_rename("/tmp/nonexistent-agent-browser-state-file.json", "new-name");
         assert!(result.is_err());
@@ -808,6 +959,22 @@ mod tests {
     fn test_sessions_dir_path() {
         let dir = get_sessions_dir();
         assert!(dir.to_string_lossy().contains("sessions"));
+    }
+
+    #[test]
+    fn test_get_state_dir_namespace_scopes_sessions() {
+        let _guard = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_NAMESPACE"]);
+        _guard.set("AGENT_BROWSER_NAMESPACE", "Worktree: One");
+
+        let dir = get_state_dir();
+        let expected_state_suffix = PathBuf::from(".agent-browser")
+            .join("namespaces")
+            .join("worktree-one")
+            .join("state");
+        let expected_sessions_suffix = expected_state_suffix.join("sessions");
+
+        assert!(dir.ends_with(expected_state_suffix));
+        assert!(get_sessions_dir().ends_with(expected_sessions_suffix));
     }
 
     #[test]

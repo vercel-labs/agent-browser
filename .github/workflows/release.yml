@@ -20,6 +20,7 @@ jobs:
       contents: read
     outputs:
       should_release: ${{ steps.check.outputs.should_release }}
+      should_publish_sandbox: ${{ steps.check.outputs.should_publish_sandbox }}
       needs_github_release: ${{ steps.check.outputs.needs_github_release }}
       version: ${{ steps.check.outputs.version }}
     steps:
@@ -35,10 +36,14 @@ jobs:
         id: check
         run: |
           LOCAL_VERSION=$(node -p "require('./package.json').version")
+          SANDBOX_VERSION=$(node -p "require('./packages/@agent-browser/sandbox/package.json').version")
           echo "Local version: $LOCAL_VERSION"
+          echo "Sandbox package version: $SANDBOX_VERSION"
 
           NPM_VERSION=$(npm view agent-browser version 2>/dev/null || echo "0.0.0")
+          SANDBOX_NPM_VERSION=$(npm view @agent-browser/sandbox version 2>/dev/null || echo "0.0.0")
           echo "npm version: $NPM_VERSION"
+          echo "@agent-browser/sandbox npm version: $SANDBOX_NPM_VERSION"
 
           if [ "$LOCAL_VERSION" != "$NPM_VERSION" ]; then
             echo "Version changed: $NPM_VERSION -> $LOCAL_VERSION"
@@ -58,6 +63,13 @@ jobs:
               echo "GitHub release $TAG is missing, will rebuild and create it"
               echo "needs_github_release=true" >> "$GITHUB_OUTPUT"
             fi
+          fi
+          if [ "$SANDBOX_VERSION" != "$SANDBOX_NPM_VERSION" ]; then
+            echo "Sandbox package version changed: $SANDBOX_NPM_VERSION -> $SANDBOX_VERSION"
+            echo "should_publish_sandbox=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Sandbox package version unchanged on npm, skipping publish"
+            echo "should_publish_sandbox=false" >> "$GITHUB_OUTPUT"
           fi
           echo "version=$LOCAL_VERSION" >> "$GITHUB_OUTPUT"
         env:
@@ -281,12 +293,57 @@ jobs:
           echo "All 7 platform binaries present and valid"
 
       - name: Publish to npm
-        run: npm publish --provenance
+        run: pnpm publish --provenance --no-git-checks
+
+  publish-sandbox:
+    name: Publish sandbox package to npm
+    needs: [check-release, publish]
+    if: >-
+      always() &&
+      needs.check-release.outputs.should_publish_sandbox == 'true' &&
+      (
+        needs.check-release.outputs.should_release != 'true' ||
+        needs.publish.result == 'success'
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: Release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Sync version
+        run: pnpm run version:sync
+
+      - name: Publish sandbox package to npm
+        working-directory: packages/@agent-browser/sandbox
+        run: pnpm publish --provenance --access public --no-git-checks
 
   github-release:
     name: Create GitHub Release
-    needs: [check-release, build-binaries, publish]
-    if: always() && needs.build-binaries.result == 'success' && needs.check-release.outputs.needs_github_release == 'true'
+    needs: [check-release, build-binaries, publish, publish-sandbox]
+    if: >-
+      always() &&
+      needs.build-binaries.result == 'success' &&
+      needs.check-release.outputs.needs_github_release == 'true' &&
+      (needs.publish.result == 'success' || needs.publish.result == 'skipped') &&
+      (needs.publish-sandbox.result == 'success' || needs.publish-sandbox.result == 'skipped')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

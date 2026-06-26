@@ -1,8 +1,6 @@
 # Profiler
 
-Capture Chrome DevTools performance profiles during browser automation.
-Use profiles to diagnose slow page loads, expensive JavaScript, layout thrashing,
-and other performance bottlenecks in agentic workflows.
+Capture Chrome DevTools performance profiles during browser automation. Use profiles to diagnose slow page loads, expensive JavaScript, layout thrashing, and other performance bottlenecks in agentic workflows.
 
 ## Basic usage
 
@@ -18,8 +16,7 @@ agent-browser click "#button"
 agent-browser profiler stop ./trace.json
 ```
 
-The output JSON file can be loaded into Chrome DevTools, Perfetto UI, or any
-tool that accepts Chrome Trace Event format.
+The output JSON file can be loaded into Chrome DevTools, Perfetto UI, or any tool that accepts Chrome Trace Event format.
 
 ## Commands
 
@@ -42,10 +39,7 @@ The `--categories` flag accepts a comma-separated list of Chrome trace categorie
 agent-browser profiler start --categories "devtools.timeline,v8.execute,blink.user_timing"
 ```
 
-Default categories include `devtools.timeline`, `v8.execute`, `blink`,
-`blink.user_timing`, `latencyInfo`, `renderer.scheduler`, `toplevel`, and
-several `disabled-by-default-*` categories for detailed CPU profiling and
-call stack analysis.
+Default categories include `devtools.timeline`, `v8.execute`, `blink`, `blink.user_timing`, `latencyInfo`, `renderer.scheduler`, `toplevel`, and several `disabled-by-default-*` categories for detailed CPU profiling and call stack analysis.
 
 ### Common categories
 
@@ -86,8 +80,7 @@ The output is a JSON file in Chrome Trace Event format:
 }
 ```
 
-The `metadata.clock-domain` field reflects the host platform (Linux or macOS).
-On Windows it is omitted.
+The `metadata.clock-domain` field reflects the host platform (Linux or macOS). On Windows it is omitted.
 
 ## Viewing profiles
 

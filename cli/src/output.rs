@@ -58,20 +58,38 @@ fn truncate_if_needed(content: &str, max: Option<usize>) -> String {
     }
 }
 
-fn print_with_boundaries(content: &str, origin: Option<&str>, opts: &OutputOptions) {
+fn format_with_boundaries(content: &str, origin: Option<&str>, opts: &OutputOptions) -> String {
     let content = truncate_if_needed(content, opts.max_output);
     if opts.content_boundaries {
         let origin_str = origin.unwrap_or("unknown");
         let nonce = get_boundary_nonce();
-        println!(
+        format!(
             "--- AGENT_BROWSER_PAGE_CONTENT nonce={} origin={} ---",
             nonce, origin_str
-        );
-        println!("{}", content);
-        println!("--- END_AGENT_BROWSER_PAGE_CONTENT nonce={} ---", nonce);
+        ) + "\n"
+            + &content
+            + "\n"
+            + &format!("--- END_AGENT_BROWSER_PAGE_CONTENT nonce={} ---", nonce)
     } else {
-        println!("{}", content);
+        content
     }
+}
+
+fn print_with_boundaries(content: &str, origin: Option<&str>, opts: &OutputOptions) {
+    let content = format_with_boundaries(content, origin, opts);
+    print!("{}", content);
+    if !content.ends_with('\n') {
+        println!();
+    }
+}
+
+fn boundary_origin(data: &serde_json::Value) -> Option<&str> {
+    for key in ["origin", "finalUrl", "url"] {
+        if let Some(value) = data.get(key).and_then(|v| v.as_str()) {
+            return Some(value);
+        }
+    }
+    None
 }
 
 fn format_storage_value(value: &serde_json::Value) -> String {
@@ -128,6 +146,44 @@ fn format_stream_status_text(action: Option<&str>, data: &serde_json::Value) -> 
         }
         _ => None,
     }
+}
+
+fn confirmation_data(data: &serde_json::Value) -> Option<&serde_json::Value> {
+    if data
+        .get("confirmation_required")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return Some(data);
+    }
+
+    data.get("result")
+        .and_then(|v| v.get("data"))
+        .and_then(confirmation_data)
+}
+
+fn print_confirmation_required(data: &serde_json::Value) {
+    let action = data.get("action").and_then(|v| v.as_str()).unwrap_or("");
+    let category = data.get("category").and_then(|v| v.as_str()).unwrap_or("");
+    let description = data
+        .get("description")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(action);
+    let cid = data
+        .get("confirmation_id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(action);
+
+    println!("Confirmation required:");
+    if category.is_empty() {
+        println!("  {}", description);
+    } else {
+        println!("  {}: {}", category, description);
+    }
+    println!("  Run: agent-browser confirm {}", cid);
+    println!("  Or:  agent-browser deny {}", cid);
 }
 
 fn format_metric_ms(value: Option<f64>) -> String {
@@ -230,8 +286,7 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
                 let nonce = get_boundary_nonce();
                 let origin = obj
                     .get("data")
-                    .and_then(|d| d.get("origin"))
-                    .and_then(|v| v.as_str())
+                    .and_then(boundary_origin)
                     .unwrap_or("unknown");
                 obj.insert(
                     "_boundary".to_string(),
@@ -264,6 +319,8 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
     }
 
     if let Some(data) = &resp.data {
+        print_lifecycle_note(data);
+
         // Dialog status response
         if action == Some("dialog") {
             if let Some(has_dialog) = data.get("hasDialog").and_then(|v| v.as_bool()) {
@@ -319,6 +376,16 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
                 }
             } else if let Some(err) = data.get("error").and_then(|v| v.as_str()) {
                 eprintln!("Could not open DevTools: {}", err);
+            }
+            return;
+        }
+        if action == Some("read") {
+            if let Some(content) = data.get("content").and_then(|v| v.as_str()) {
+                let origin = data
+                    .get("finalUrl")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| data.get("url").and_then(|v| v.as_str()));
+                print_with_boundaries(content, origin, opts);
             }
             return;
         }
@@ -1104,24 +1171,8 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
         }
 
         // Confirmation required (for orchestrator use)
-        if data
-            .get("confirmation_required")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false)
-        {
-            let category = data.get("category").and_then(|v| v.as_str()).unwrap_or("");
-            let description = data
-                .get("description")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let cid = data
-                .get("confirmation_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            println!("Confirmation required:");
-            println!("  {}: {}", category, description);
-            println!("  Run: agent-browser confirm {}", cid);
-            println!("  Or:  agent-browser deny {}", cid);
+        if let Some(pending) = confirmation_data(data) {
+            print_confirmation_required(pending);
             return;
         }
         if data
@@ -1146,6 +1197,48 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
     }
 
     print_warning(resp);
+}
+
+fn print_lifecycle_note(data: &serde_json::Value) {
+    let Some(lifecycle) = data.get("lifecycle") else {
+        return;
+    };
+
+    let mut parts: Vec<String> = Vec::new();
+    let relaunched = lifecycle
+        .get("relaunchedBrowser")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let launched = lifecycle
+        .get("launched")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let reused = lifecycle
+        .get("reused")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    if relaunched {
+        parts.push("relaunched browser".to_string());
+    } else if launched && !reused {
+        parts.push("launched browser".to_string());
+    }
+
+    if let Some(status) = lifecycle.get("restoreStatus").and_then(|v| v.as_str()) {
+        if !matches!(status, "not_configured" | "pending") {
+            parts.push(format!("restore: {}", status));
+        }
+    }
+
+    if let Some(status) = lifecycle.get("saveStatus").and_then(|v| v.as_str()) {
+        if !matches!(status, "not_attempted" | "not_configured") {
+            parts.push(format!("save: {}", status));
+        }
+    }
+
+    if !parts.is_empty() {
+        eprintln!("{} {}", color::dim("[agent-browser]"), parts.join("; "));
+    }
 }
 
 fn print_warning(resp: &Response) {
@@ -1246,6 +1339,49 @@ Global Options:
 
 Examples:
   agent-browser reload
+"##
+        }
+
+        "read" => {
+            r##"
+agent-browser read - Fetch a URL as agent-readable text
+
+Usage: agent-browser read [url] [--raw] [--require-md] [--llms <index|full>] [--outline] [--filter <text>] [--timeout <ms>]
+
+Fetches a URL as agent-readable text. Omit the URL to read the rendered DOM of
+the active tab in the current browser session. Explicit URL reads prefer
+markdown with Accept: text/markdown, try the same URL with .md appended when
+the first response is not markdown, walk ancestor paths toward / to find the
+nearest llms.txt for a matching docs link, fall back to plain text or readable
+text extracted from HTML, and print only the document content by default.
+Use --outline for a compact heading outline of a single page. Use --llms index
+or --llms full for nearest-ancestor llms files; with no URL, --llms and
+--require-md use the active tab URL because they depend on HTTP resources.
+
+Options:
+  --raw                Print the response body without HTML extraction
+  --require-md         Fail unless the response is Content-Type: text/markdown
+  --llms <index|full>  Print nearest llms.txt links or llms-full.txt
+  --outline            Print a heading outline for the selected page
+  --filter <text>      Filter page sections, --llms links/sections, or --outline headings
+  --timeout <ms>       Request timeout in milliseconds (default: 10000)
+
+Global Options:
+  --json               Output metadata and content as JSON
+  --headers <json>     Additional HTTP headers, such as Authorization
+  --allowed-domains <list>  Restrict read fetches and redirects to allowed domains
+  --content-boundaries Wrap read output in boundary markers
+  --max-output <chars> Truncate read output to N chars
+
+Examples:
+  agent-browser read
+  agent-browser read https://docs.example.com/guide
+  agent-browser read https://docs.example.com/guide --filter auth
+  agent-browser read https://docs.example.com/guide --outline
+  agent-browser read https://docs.example.com --llms index --filter auth
+  agent-browser read https://docs.example.com --llms full --filter auth
+  agent-browser read docs.example.com/guide --require-md
+  agent-browser read https://api.example.com/docs --headers '{"Authorization":"Bearer token"}'
 "##
         }
 
@@ -2248,9 +2384,18 @@ Save Options:
   --password-selector <s>  Custom CSS selector for password field
   --submit-selector <s>    Custom CSS selector for submit button
 
+Plugin Login Options:
+  --credential-provider <p> Resolve credentials from configured plugin <p>
+  --item <ref>              Provider-specific vault item reference
+  --url <url>               Login URL override
+  --username-selector <s>   Username selector override for this login
+  --password-selector <s>   Password selector override for this login
+  --submit-selector <s>     Submit selector override for this login
+
 Login behavior:
   auth login waits for form selectors to appear before filling/clicking.
   Selector wait timeout follows the default action timeout.
+  Plugin credentials are resolved just-in-time and are not saved locally.
 
 Global Options:
   --json                   Output as JSON
@@ -2260,6 +2405,7 @@ Examples:
   echo "pass" | agent-browser auth save github --url https://github.com/login --username user --password-stdin
   agent-browser auth save github --url https://github.com/login --username user --password pass
   agent-browser auth login github
+  agent-browser auth login my-app --credential-provider vault --item "My App"
   agent-browser auth list
   agent-browser auth show github
   agent-browser auth delete github
@@ -2523,9 +2669,9 @@ Operations:
   clean --older-than <days>          Delete expired state files
 
 Automatic State Persistence:
-  Use --session-name to auto-save/restore state across restarts:
-  agent-browser --session-name myapp open https://example.com
-  Or set AGENT_BROWSER_SESSION_NAME environment variable.
+  Use --restore to auto-save/restore state across restarts:
+  agent-browser --session myapp --restore open https://example.com
+  Or set AGENT_BROWSER_RESTORE environment variable.
 
 State Encryption:
   Set AGENT_BROWSER_ENCRYPTION_KEY (64-char hex) for AES-256-GCM encryption.
@@ -2558,17 +2704,23 @@ instance with separate cookies, storage, and state.
 
 Operations:
   (none)               Show current session name
+  id                   Generate stable session id (--scope worktree|cwd|git-root, --prefix)
+  info                 Show daemon, launch, and restore diagnostics
   list                 List all active sessions
 
 Environment:
   AGENT_BROWSER_SESSION    Default session name
+  AGENT_BROWSER_NAMESPACE  Namespace for daemon sockets and restore state
 
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
+  --namespace <name>   Use specific namespace
 
 Examples:
   agent-browser session
+  agent-browser session id --scope worktree --prefix next-dev-loop
+  agent-browser session info --json
   agent-browser session list
   agent-browser --session test open example.com
 "##
@@ -2584,7 +2736,7 @@ Usage: agent-browser install [--with-deps]
 Downloads and installs browser binaries required for automation.
 
 Options:
-  -d, --with-deps      Also install system dependencies (Linux only)
+  -d, --with-deps      Also install system dependencies (Linux only; fails if deps fail)
 
 Examples:
   agent-browser install
@@ -2964,6 +3116,77 @@ Examples:
 "##
         }
 
+        "mcp" => {
+            r##"
+agent-browser mcp - Start an MCP stdio server
+
+Usage: agent-browser mcp [--tools <profiles>]
+
+Starts a Model Context Protocol server over stdio. MCP clients launch this
+command as a subprocess and communicate with newline-delimited JSON-RPC.
+stdout is reserved for MCP protocol messages; logs and diagnostics use stderr.
+The server defaults to MCP protocol 2025-11-25 and accepts older supported
+client protocol versions during initialization.
+
+The default tools profile is core, which keeps MCP context small for everyday
+browser automation. Use --tools all for the full typed CLI parity surface, or
+combine profiles with commas, such as --tools core,network,react.
+
+Tool profiles:
+  core       Default. Navigation, snapshots, interaction, waits, reads,
+             screenshots, JavaScript eval, close, tab basics, and profile discovery
+  network    Network routes, request inspection, HAR, headers, credentials, offline
+  state      Cookies, storage, auth, saved state, sessions, profiles, skills
+  debug      Console/errors, tracing, profiling, recording, clipboard, plugins,
+             doctor, dashboard, install, upgrade, chat, diff, batch, confirm/deny
+  tabs       Back/forward/reload, tabs, windows, frames, dialogs
+  react      React tree/inspect/renders/suspense, vitals, pushstate
+  mobile     Viewport/device/geolocation/media, touch, swipe, mouse, keyboard
+  all        Every MCP tool, including the full typed CLI parity surface
+
+Common tools include:
+  agent_browser_tools_profiles  List MCP startup tool profiles
+  agent_browser_open       Open a URL or launch about:blank
+  agent_browser_snapshot   Get an accessibility snapshot with refs
+  agent_browser_click      Click an element by @ref or selector
+  agent_browser_fill       Fill an input
+  agent_browser_screenshot Take a screenshot
+  agent_browser_get_url    Read the current URL
+  agent_browser_close      Close the browser session
+
+Each tool has typed fields such as url, selector, text, key, and session.
+Each tool also accepts extraArgs for advanced CLI flags and exact CLI parity.
+Tool discovery is paginated and includes read-only/open-world annotations so
+modern MCP clients can load the large typed surface incrementally.
+Use agent_browser_snapshot after navigation to get fresh refs before clicking.
+
+MCP client config example:
+  {
+    "mcpServers": {
+      "agent-browser": {
+        "command": "agent-browser",
+        "args": ["mcp"]
+      }
+    }
+  }
+
+Full parity config example:
+  {
+    "mcpServers": {
+      "agent-browser": {
+        "command": "agent-browser",
+        "args": ["mcp", "--tools", "all"]
+      }
+    }
+  }
+
+Environment:
+  AGENT_BROWSER_SESSION          Default browser session
+  AGENT_BROWSER_SOCKET_DIR       Daemon socket directory
+  AGENT_BROWSER_CONFIG           Config file loaded by tool invocations
+"##
+        }
+
         "skills" => {
             r##"
 agent-browser skills - List and retrieve bundled skill content
@@ -2999,6 +3222,69 @@ Environment:
 "##
         }
 
+        "plugin" | "plugins" => {
+            r##"
+agent-browser plugin - Manage configured plugins
+
+Usage: agent-browser plugin [subcommand]
+
+Subcommands:
+  add <ref>                Add a plugin from npm or GitHub
+  list                     List configured plugins (default)
+  show <name>              Show one configured plugin
+  run <name> <type>        Run a command.run or custom plugin request
+
+Plugins are configured in agent-browser.json. A plugin entry declares a name,
+an executable command, optional args, and capabilities. Plugins run as
+external processes over the agent-browser.plugin.v1 stdio JSON protocol.
+
+Add sources:
+  <name>                   npm package, e.g. agent-browser-plugin-captcha
+  @<scope>/<name>          scoped npm package
+  <owner>/<repo>           GitHub repository
+
+Add options:
+  --name <name>            Override the configured plugin name
+  --capability <name>      Declare a capability if the plugin has no manifest
+  --global                 Write ~/.agent-browser/config.json instead of ./agent-browser.json
+  --no-manifest            Skip plugin.manifest discovery
+
+plugin add asks the package for plugin.manifest to discover name and
+capabilities. Use --capability when adding older plugins without a manifest.
+
+Capabilities:
+  credential.read          Resolve credentials for auth login
+  browser.provider         Launch/connect an external browser provider
+  launch.mutate            Append local launch args, extensions, or init scripts
+  command.run              Accept arbitrary namespaced plugin requests
+
+Core capabilities and protocol request types use dedicated command paths.
+Use auth login for credential.read, --provider for browser.provider, and
+a local launch for launch.mutate.
+
+Example config:
+  {{
+    "plugins": [
+      {{
+        "name": "vault",
+        "command": "agent-browser-plugin-vault",
+        "capabilities": ["credential.read"]
+      }}
+    ]
+  }}
+
+Examples:
+  agent-browser plugin add agent-browser-plugin-captcha
+  agent-browser plugin add org/agent-browser-plugin-cloud-browser
+  agent-browser plugin add @company/agent-browser-plugin-vault --name vault
+  agent-browser plugin list
+  agent-browser plugin show vault
+  agent-browser plugin run captcha captcha.solve --payload '{{"siteKey":"...","url":"https://example.com"}}'
+  agent-browser auth login my-app --credential-provider vault --item "My App"
+  agent-browser --provider cloud-browser open https://example.com
+"##
+        }
+
         _ => return false,
     };
     println!("{}", help.trim());
@@ -3028,6 +3314,7 @@ Start here (for AI agents):
 
 Core Commands:
   open <url>                 Navigate to URL
+  read [url]                 Fetch agent-readable text
   click <sel>                Click element (or @ref)
   dblclick <sel>             Double-click element
   type <sel> <text>          Type into element
@@ -3139,9 +3426,19 @@ Batch:
 Auth Vault:
   auth save <name> [opts]    Save auth profile (--url, --username, --password/--password-stdin)
   auth login <name>          Login using saved credentials (waits for form fields)
+  auth login <name> --credential-provider <plugin> [--item <ref>] [--url <url>]
+                             Resolve credentials from a configured plugin
+  auth login <name> --username-selector <s> --password-selector <s>
+                             Override selectors for one login
   auth list                  List saved auth profiles
   auth show <name>           Show auth profile metadata
   auth delete <name>         Delete auth profile
+
+Plugins:
+  plugin add <ref>           Add a plugin from npm or GitHub
+  plugin [list]              List configured plugins
+  plugin show <name>         Show one configured plugin
+  plugin run <name> <type>   Run a command.run or custom plugin request
 
 Confirmation:
   confirm <id>               Approve a pending action
@@ -3150,6 +3447,9 @@ Confirmation:
 Sessions:
   session                    Show current session name
   session list               List active sessions
+
+MCP:
+  mcp                        Start an MCP stdio server exposing agent-browser tools
 
 Chat (AI):
   chat <message>             Send a natural language instruction (single-shot)
@@ -3179,7 +3479,14 @@ Authentication:
   --profile <name|path>      Chrome profile name (e.g., Default) to reuse login state,
                              or a directory path for a persistent custom profile
                              (or AGENT_BROWSER_PROFILE env)
-  --session-name <name>      Auto-save/restore cookies and localStorage by name
+  --restore [name]           Auto-save/restore cookies and localStorage.
+                             Without a name, uses --session as the restore key
+                             (or AGENT_BROWSER_RESTORE env)
+  --restore-save <policy>    Restore auto-save policy: auto, always, never (default: auto)
+  --restore-check-url <glob> Validate restored state against current URL pattern
+  --restore-check-text <txt> Validate restored state against visible page text
+  --restore-check-fn <js>    Validate restored state against a truthy JS expression
+  --session-name <name>      Legacy alias for restore persistence key
                              (or AGENT_BROWSER_SESSION_NAME env)
   --state <path>             Load saved auth state (cookies + storage) from JSON file
                              (or AGENT_BROWSER_STATE env)
@@ -3189,6 +3496,8 @@ Authentication:
 
 Options:
   --session <name>           Isolated session (or AGENT_BROWSER_SESSION env)
+  --namespace <name>         Isolate daemon sockets and restore-state directories
+                             (or AGENT_BROWSER_NAMESPACE env)
   --executable-path <path>   Custom browser executable (or AGENT_BROWSER_EXECUTABLE_PATH)
   --extension <path>         Load browser extensions (repeatable)
   --init-script <path>       Register a page init script before the first navigation (repeatable)
@@ -3206,7 +3515,7 @@ Options:
   --allow-file-access        Allow file:// URLs to access local files (Chromium only)
   --hide-scrollbars <bool>   Hide native scrollbars in headless Chromium screenshots (default: true)
                              Use --hide-scrollbars false to keep scrollbars visible
-  -p, --provider <name>      Browser provider: ios, browserbase, kernel, browseruse, browserless, agentcore
+  -p, --provider <name>      Browser provider: ios, browserbase, kernel, browseruse, browserless, agentcore, or plugin name
   --device <name>            iOS device name (e.g., "iPhone 15 Pro")
   --json                     JSON output
   --annotate                 Annotated screenshot with numbered labels and legend
@@ -3252,10 +3561,19 @@ Configuration:
   Example agent-browser.json:
     {{"headed": true, "hideScrollbars": false, "proxy": "http://localhost:8080"}}
 
+  Plugin example:
+    {{"plugins":[{{"name":"vault","command":"agent-browser-plugin-vault","capabilities":["credential.read"]}},{{"name":"stealth","command":"agent-browser-plugin-stealth","capabilities":["launch.mutate"]}}]}}
+
 Environment:
   AGENT_BROWSER_CONFIG           Path to config file (or use --config)
   AGENT_BROWSER_SESSION          Session name (default: "default")
-  AGENT_BROWSER_SESSION_NAME     Auto-save/restore state persistence name
+  AGENT_BROWSER_NAMESPACE        Namespace for daemon sockets and restore state
+  AGENT_BROWSER_RESTORE          Auto-save/restore persistence key
+  AGENT_BROWSER_RESTORE_SAVE     Restore save policy: auto, always, never
+  AGENT_BROWSER_RESTORE_CHECK_URL URL pattern restored state must match
+  AGENT_BROWSER_RESTORE_CHECK_TEXT Page text restored state must contain
+  AGENT_BROWSER_RESTORE_CHECK_FN JS expression restored state must satisfy
+  AGENT_BROWSER_SESSION_NAME     Legacy auto-save/restore state persistence name
   AGENT_BROWSER_ENCRYPTION_KEY   64-char hex key for AES-256-GCM state encryption
   AGENT_BROWSER_STATE_EXPIRE_DAYS Auto-delete states older than N days (default: 30)
   AGENT_BROWSER_EXECUTABLE_PATH  Custom browser executable path
@@ -3267,14 +3585,14 @@ Environment:
   AGENT_BROWSER_ANNOTATE         Annotated screenshot with numbered labels and legend
   AGENT_BROWSER_DEBUG            Debug output
   AGENT_BROWSER_IGNORE_HTTPS_ERRORS Ignore HTTPS certificate errors
-  AGENT_BROWSER_PROVIDER         Browser provider (ios, browserbase, kernel, browseruse, browserless, agentcore)
+  AGENT_BROWSER_PROVIDER         Browser provider (ios, browserbase, kernel, browseruse, browserless, agentcore, or plugin name)
   AGENT_BROWSER_AUTO_CONNECT     Auto-discover and connect to running Chrome
   AGENT_BROWSER_ALLOW_FILE_ACCESS Allow file:// URLs to access local files
   AGENT_BROWSER_HIDE_SCROLLBARS  Hide scrollbars in headless Chromium screenshots (default: true)
   AGENT_BROWSER_COLOR_SCHEME     Color scheme preference (dark, light, no-preference)
   AGENT_BROWSER_DOWNLOAD_PATH    Default download directory for browser downloads
   AGENT_BROWSER_DEFAULT_TIMEOUT  Default action timeout in ms (default: 25000)
-  AGENT_BROWSER_SESSION_NAME     Auto-save/load state persistence name
+  AGENT_BROWSER_SESSION_NAME     Legacy auto-save/load state persistence name
   AGENT_BROWSER_STATE_EXPIRE_DAYS Auto-delete saved states older than N days (default: 30)
   AGENT_BROWSER_ENCRYPTION_KEY   64-char hex key for AES-256-GCM session encryption
   AGENT_BROWSER_STREAM_PORT      Override WebSocket streaming port (default: OS-assigned)
@@ -3289,6 +3607,7 @@ Environment:
   AGENT_BROWSER_CONFIRM_INTERACTIVE Enable interactive confirmation prompts
   AGENT_BROWSER_NO_AUTO_DIALOG   Disable automatic dismissal of alert/beforeunload dialogs
   AGENT_BROWSER_ENGINE           Browser engine: chrome (default), lightpanda
+  AGENT_BROWSER_PLUGINS          JSON plugin registry override
   HTTP_PROXY / HTTPS_PROXY       Standard proxy env vars (fallback if AGENT_BROWSER_PROXY not set)
   ALL_PROXY                      SOCKS proxy (fallback for proxy)
   NO_PROXY                       Bypass proxy for hosts (fallback for proxy-bypass)
@@ -3323,7 +3642,9 @@ Examples:
   agent-browser --profile Default open gmail.com        # Reuse Chrome login state
   agent-browser --profile ~/.myapp open example.com    # Persistent custom profile
   agent-browser profiles                               # List available Chrome profiles
-  agent-browser --session-name myapp open example.com  # Auto-save/restore state
+  SESSION="$(agent-browser session id --scope worktree --prefix myapp)"
+  agent-browser --session "$SESSION" --restore open example.com  # Auto-save/restore state
+  agent-browser session info --json                    # Inspect daemon and restore status
   agent-browser chat "open google.com and search for cats"  # AI chat (single-shot)
   agent-browser chat                                        # AI chat (interactive REPL)
   agent-browser -q chat "summarize this page"               # Quiet mode (text only)
@@ -3427,7 +3748,10 @@ pub fn print_version() {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_storage_text, format_vitals_text};
+    use super::{
+        boundary_origin, format_storage_text, format_vitals_text, format_with_boundaries,
+        OutputOptions,
+    };
     use serde_json::json;
 
     #[test]
@@ -3548,6 +3872,55 @@ hydration: 50.25ms  phases: 1  hydratedComponents: 2"
             "url: https://example.com\n\
 ttfb: -  fcp: -  lcp: -  cls: 0  inp: -\n\
 hydration: -  phases: 0  hydratedComponents: 0"
+        );
+    }
+
+    #[test]
+    fn test_format_with_boundaries_applies_max_output() {
+        let opts = OutputOptions {
+            max_output: Some(5),
+            ..OutputOptions::default()
+        };
+
+        let rendered = format_with_boundaries("abcdef", Some("https://example.com"), &opts);
+
+        assert!(rendered.starts_with("abcde\n[truncated: showing 5 of 6 chars."));
+    }
+
+    #[test]
+    fn test_format_with_boundaries_wraps_content() {
+        let opts = OutputOptions {
+            content_boundaries: true,
+            ..OutputOptions::default()
+        };
+
+        let rendered = format_with_boundaries("content", Some("https://example.com"), &opts);
+
+        assert!(rendered.contains("AGENT_BROWSER_PAGE_CONTENT"));
+        assert!(rendered.contains("origin=https://example.com"));
+        assert!(rendered.contains("\ncontent\n"));
+        assert!(rendered.contains("END_AGENT_BROWSER_PAGE_CONTENT"));
+    }
+
+    #[test]
+    fn test_boundary_origin_supports_read_metadata() {
+        assert_eq!(
+            boundary_origin(&json!({
+                "finalUrl": "https://example.com/read",
+                "url": "https://example.com/source"
+            })),
+            Some("https://example.com/read")
+        );
+        assert_eq!(
+            boundary_origin(&json!({
+                "origin": "https://example.com/dom",
+                "finalUrl": "https://example.com/read"
+            })),
+            Some("https://example.com/dom")
+        );
+        assert_eq!(
+            boundary_origin(&json!({ "url": "https://example.com/source" })),
+            Some("https://example.com/source")
         );
     }
 }

@@ -71,6 +71,10 @@ pub(super) fn check(checks: &mut Vec<Check>) {
         provider: None,
         device: None,
         session_name: None,
+        restore_save: None,
+        restore_check_url: None,
+        restore_check_text: None,
+        restore_check_fn: None,
         download_path: None,
         allowed_domains: None,
         action_policy: None,
@@ -81,6 +85,7 @@ pub(super) fn check(checks: &mut Vec<Check>) {
         default_timeout: None,
         cdp: None,
         no_auto_dialog: false,
+        plugins: None,
     };
 
     let started = Instant::now();

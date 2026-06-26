@@ -72,6 +72,28 @@ jobs:
         run: pnpm build
         working-directory: packages/dashboard
 
+  sandbox-package:
+    name: Sandbox Package
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Test sandbox package
+        run: pnpm --filter @agent-browser/sandbox test
+
   rust-cross:
     name: Rust (${{ matrix.os }} - ${{ matrix.target }})
     if: github.event_name != 'pull_request'

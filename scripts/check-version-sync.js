@@ -31,12 +31,31 @@ const cargoVersion = cargoVersionMatch[1];
 const dashboardPkg = JSON.parse(readFileSync(join(rootDir, 'packages/dashboard/package.json'), 'utf-8'));
 const dashboardVersion = dashboardPkg.version;
 
+// Read sandbox package versions
+const sandboxPkg = JSON.parse(readFileSync(join(rootDir, 'packages/@agent-browser/sandbox/package.json'), 'utf-8'));
+const sandboxVersion = sandboxPkg.version;
+const sandboxVersionSource = readFileSync(join(rootDir, 'packages/@agent-browser/sandbox/src/version.ts'), 'utf-8');
+const sandboxVersionMatch = sandboxVersionSource.match(/AGENT_BROWSER_SANDBOX_VERSION\s*=\s*"([^"]*)"/);
+
+if (!sandboxVersionMatch) {
+  console.error('Could not find AGENT_BROWSER_SANDBOX_VERSION in packages/@agent-browser/sandbox/src/version.ts');
+  process.exit(1);
+}
+
+const sandboxRuntimeVersion = sandboxVersionMatch[1];
+
 const mismatches = [];
 if (packageVersion !== cargoVersion) {
   mismatches.push(`  cli/Cargo.toml:              ${cargoVersion}`);
 }
 if (packageVersion !== dashboardVersion) {
   mismatches.push(`  packages/dashboard:          ${dashboardVersion}`);
+}
+if (packageVersion !== sandboxVersion) {
+  mismatches.push(`  packages/@agent-browser/sandbox/package.json: ${sandboxVersion}`);
+}
+if (packageVersion !== sandboxRuntimeVersion) {
+  mismatches.push(`  packages/@agent-browser/sandbox/src/version.ts: ${sandboxRuntimeVersion}`);
 }
 
 if (mismatches.length > 0) {

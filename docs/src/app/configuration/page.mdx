@@ -62,7 +62,13 @@ Global launch, output, provider, and chat options can be set in the config file 
     <tr><td><code>json</code></td><td><code>--json</code></td><td>boolean</td></tr>
     <tr><td><code>debug</code></td><td><code>--debug</code></td><td>boolean</td></tr>
     <tr><td><code>session</code></td><td><code>--session</code></td><td>string</td></tr>
-    <tr><td><code>sessionName</code></td><td><code>--session-name</code></td><td>string</td></tr>
+    <tr><td><code>restore</code></td><td><code>--restore</code></td><td>string</td></tr>
+    <tr><td><code>restoreSave</code></td><td><code>--restore-save</code></td><td>string</td></tr>
+    <tr><td><code>restoreCheckUrl</code></td><td><code>--restore-check-url</code></td><td>string</td></tr>
+    <tr><td><code>restoreCheckText</code></td><td><code>--restore-check-text</code></td><td>string</td></tr>
+    <tr><td><code>restoreCheckFn</code></td><td><code>--restore-check-fn</code></td><td>string</td></tr>
+    <tr><td><code>namespace</code></td><td><code>--namespace</code></td><td>string</td></tr>
+    <tr><td><code>sessionName</code></td><td><code>--session-name</code></td><td>string, legacy restore key</td></tr>
     <tr><td><code>executablePath</code></td><td><code>--executable-path</code></td><td>string</td></tr>
     <tr><td><code>extensions</code></td><td><code>--extension</code></td><td>string[]</td></tr>
     <tr><td><code>initScripts</code></td><td><code>--init-script</code></td><td>string[]</td></tr>
@@ -97,6 +103,7 @@ Global launch, output, provider, and chat options can be set in the config file 
     <tr><td><code>noAutoDialog</code></td><td><code>--no-auto-dialog</code></td><td>boolean</td></tr>
     <tr><td><code>model</code></td><td><code>--model</code></td><td>string</td></tr>
     <tr><td><code>headers</code></td><td><code>--headers</code></td><td>string (JSON)</td></tr>
+    <tr><td><code>plugins</code></td><td>(config only)</td><td>plugin config[]</td></tr>
   </tbody>
 </table>
 
@@ -173,6 +180,53 @@ Extensions from user-level and project-level configs are **concatenated**, not r
 
 The `AGENT_BROWSER_EXTENSIONS` environment variable and CLI `--extension` flags follow the standard priority rules (env replaces config, CLI appends).
 
+## Plugins
+
+Configure external plugins with the `plugins` array:
+
+See [Plugins](/plugins) for the plugin author protocol and implementation examples. Use `agent-browser plugin add <ref>` to create this config automatically.
+
+```json
+{
+  "plugins": [
+    {
+      "name": "vault",
+      "command": "agent-browser-plugin-vault",
+      "args": [],
+      "capabilities": ["credential.read"]
+    },
+    {
+      "name": "cloud-browser",
+      "command": "agent-browser-plugin-cloud-browser",
+      "capabilities": ["browser.provider"]
+    },
+    {
+      "name": "stealth",
+      "command": "agent-browser-plugin-stealth",
+      "capabilities": ["launch.mutate"]
+    },
+    {
+      "name": "captcha",
+      "command": "agent-browser-plugin-captcha",
+      "capabilities": ["command.run", "captcha.solve"]
+    }
+  ]
+}
+```
+
+Project-level plugin entries are appended after user-level entries. If two entries use the same name, agent-browser resolves the later entry, so a project can override a user default. `AGENT_BROWSER_PLUGINS` can replace config discovery with a JSON array using the same shape.
+
+Do not put vault tokens or passwords in plugin command args. Use the vault vendor's own login/session mechanism or environment outside agent-browser config.
+
+```bash
+agent-browser plugin list
+agent-browser auth login my-app --credential-provider vault --item "My App"
+agent-browser --provider cloud-browser open https://example.com
+agent-browser plugin run captcha captcha.solve --payload '{"siteKey":"...","url":"https://example.com"}'
+```
+
+`plugin run` is for `command.run` and custom capabilities. Core capabilities and protocol request types use their dedicated command paths.
+
 ## Environment Variables
 
 These environment variables configure additional daemon and runtime behavior:
@@ -197,12 +251,18 @@ These environment variables configure additional daemon and runtime behavior:
     <tr><td><code>NO_PROXY</code></td><td>Standard proxy bypass fallback.</td><td>(none)</td></tr>
     <tr><td><code>AGENT_BROWSER_ARGS</code></td><td>Comma or newline separated browser launch arguments.</td><td>(none)</td></tr>
     <tr><td><code>AGENT_BROWSER_USER_AGENT</code></td><td>Custom User-Agent string.</td><td>(browser default)</td></tr>
-    <tr><td><code>AGENT_BROWSER_PROVIDER</code></td><td>Browser provider such as <code>ios</code>, <code>browserbase</code>, <code>kernel</code>, <code>browseruse</code>, <code>browserless</code>, or <code>agentcore</code>.</td><td>(local browser)</td></tr>
+    <tr><td><code>AGENT_BROWSER_PROVIDER</code></td><td>Browser provider such as <code>ios</code>, <code>browserbase</code>, <code>kernel</code>, <code>browseruse</code>, <code>browserless</code>, <code>agentcore</code>, or a configured <code>browser.provider</code> plugin name.</td><td>(local browser)</td></tr>
     <tr><td><code>AGENT_BROWSER_HIDE_SCROLLBARS</code></td><td>Hide native scrollbars in headless Chromium screenshots.</td><td><code>true</code></td></tr>
     <tr><td><code>AGENT_BROWSER_COLOR_SCHEME</code></td><td>Color scheme preference (<code>dark</code>, <code>light</code>, <code>no-preference</code>).</td><td>(none)</td></tr>
     <tr><td><code>AGENT_BROWSER_DOWNLOAD_PATH</code></td><td>Default directory for browser downloads.</td><td>(temp directory)</td></tr>
     <tr><td><code>AGENT_BROWSER_DEFAULT_TIMEOUT</code></td><td>Default timeout in ms. Keep below 30000 to avoid IPC timeouts.</td><td><code>25000</code></td></tr>
-    <tr><td><code>AGENT_BROWSER_SESSION_NAME</code></td><td>Auto-save/load state persistence name.</td><td>(none)</td></tr>
+    <tr><td><code>AGENT_BROWSER_NAMESPACE</code></td><td>Namespace for daemon sockets and restore-state directories.</td><td>(none)</td></tr>
+    <tr><td><code>AGENT_BROWSER_RESTORE</code></td><td>Auto-save/load state persistence key.</td><td>(none)</td></tr>
+    <tr><td><code>AGENT_BROWSER_RESTORE_SAVE</code></td><td>Restore save policy: <code>auto</code>, <code>always</code>, or <code>never</code>.</td><td><code>auto</code></td></tr>
+    <tr><td><code>AGENT_BROWSER_RESTORE_CHECK_URL</code></td><td>URL pattern restored state must match.</td><td>(none)</td></tr>
+    <tr><td><code>AGENT_BROWSER_RESTORE_CHECK_TEXT</code></td><td>Page text restored state must contain.</td><td>(none)</td></tr>
+    <tr><td><code>AGENT_BROWSER_RESTORE_CHECK_FN</code></td><td>JavaScript expression restored state must satisfy.</td><td>(none)</td></tr>
+    <tr><td><code>AGENT_BROWSER_SESSION_NAME</code></td><td>Legacy auto-save/load state persistence name.</td><td>(none)</td></tr>
     <tr><td><code>AGENT_BROWSER_STATE_EXPIRE_DAYS</code></td><td>Auto-delete saved session states older than N days.</td><td><code>30</code></td></tr>
     <tr><td><code>AGENT_BROWSER_ENCRYPTION_KEY</code></td><td>64-char hex key for AES-256-GCM session encryption.</td><td>(none)</td></tr>
     <tr><td><code>AGENT_BROWSER_EXTENSIONS</code></td><td>Comma-separated browser extension paths. Extensions work in both headed and headless mode.</td><td>(none)</td></tr>
@@ -225,6 +285,7 @@ These environment variables configure additional daemon and runtime behavior:
     <tr><td><code>AGENT_BROWSER_CONFIRM_INTERACTIVE</code></td><td>Enable interactive confirmation prompts (auto-denies if stdin is not a TTY).</td><td>(disabled)</td></tr>
     <tr><td><code>AGENT_BROWSER_ENGINE</code></td><td>Browser engine to use: <code>chrome</code> (default), <code>lightpanda</code>.</td><td><code>chrome</code></td></tr>
     <tr><td><code>AGENT_BROWSER_NO_AUTO_DIALOG</code></td><td>Disable automatic dismissal of <code>alert</code>/<code>beforeunload</code> dialogs.</td><td>(disabled)</td></tr>
+    <tr><td><code>AGENT_BROWSER_PLUGINS</code></td><td>JSON plugin registry override.</td><td>(config discovery)</td></tr>
     <tr><td><code>AGENT_BROWSER_SCREENSHOT_DIR</code></td><td>Default screenshot output directory.</td><td>(temp directory)</td></tr>
     <tr><td><code>AGENT_BROWSER_SCREENSHOT_QUALITY</code></td><td>JPEG screenshot quality from 0 to 100.</td><td>(format default)</td></tr>
     <tr><td><code>AGENT_BROWSER_SCREENSHOT_FORMAT</code></td><td>Screenshot format: <code>png</code> or <code>jpeg</code>.</td><td><code>png</code></td></tr>

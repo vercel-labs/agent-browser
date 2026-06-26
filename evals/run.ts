@@ -17,11 +17,13 @@ import {
 import { cases as skillLoadingCases } from "./cases/skill-loading.ts";
 import { cases as skillSelectionCases } from "./cases/skill-selection.ts";
 import { cases as commandUsageCases } from "./cases/command-usage.ts";
+import { cases as contextFootprintCases } from "./cases/context-footprint.ts";
 
 const ALL_CASES: EvalCase[] = [
   ...skillLoadingCases,
   ...skillSelectionCases,
   ...commandUsageCases,
+  ...contextFootprintCases,
 ];
 
 function parseArgs(args: string[]): RunOptions {
@@ -75,7 +77,7 @@ Usage: bun run evals/run.ts [options]
 Options:
   --provider <name>    Provider to use: claude, codex (default: claude)
   --model <name>       Model override (default: provider's default model)
-  --category <cat>     Filter by category: skill-loading, skill-selection, command-usage
+  --category <cat>     Filter by category: skill-loading, skill-selection, command-usage, context-footprint
   --judge              Enable LLM judge for quality scoring (costs extra API calls)
   --json               Output results as JSON
   --timeout <ms>       Timeout per eval case in milliseconds (default: 60000)

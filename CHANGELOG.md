@@ -1,8 +1,87 @@
 # agent-browser
 
-## 0.27.3
+## 0.31.0
 
 <!-- release:start -->
+### New Features
+
+- **Restore workflow** - Added `--restore`, `--restore-save`, restore validation flags, worktree-scoped `session id`, `session info`, and `--namespace` so agent runs can use stable, isolated, automatically restored browser state without managing state files by hand (#1486)
+
+### Improvements
+
+- Hardened **session lifecycle handling** with explicit daemon and browser compatibility checks, lifecycle status output, MCP support for restore options, and safer auto-save behavior that avoids overwriting good state after a failed restore or failed validation (#1486)
+
+### Bug Fixes
+
+- Fixed **restore lifecycle edge cases** around switching restore keys with a live browser, daemon configuration startup races, launch mode validation, and clearing restore failures after an explicit state load (#1486)
+
+### Contributors
+
+- @ctate
+<!-- release:end -->
+
+## 0.30.1
+
+### Bug Fixes
+
+- Fixed **URL waits** so `wait --url` and `waitforurl` honor glob patterns such as `**/dashboard` against the full active URL (#1483)
+
+### Contributors
+
+- @gaearon
+
+## 0.30.0
+
+### New Features
+
+- **Read command** - Added `agent-browser read [url]` and the matching MCP tool for agent-readable text extraction. URL reads prefer Markdown, try `.md` and nearby `llms.txt` docs, support outlines, filters, raw and JSON output, headers, and domain/output safeguards; omitting the URL reads the rendered active tab DOM with current browser state (#1480)
+
+### Contributors
+
+- @ctate
+
+## 0.29.1
+
+### Improvements
+
+- Defaulted **sandbox system dependency installs** so the Eve and Vercel sandbox helpers install Chromium's required libraries unless explicitly disabled, making first-run sandbox setup simpler (#1469)
+
+### Contributors
+
+- @ctate
+
+## 0.29.0
+
+### New Features
+
+- **Sandbox package** - Added `@agent-browser/sandbox` with shared, Eve, and Vercel Sandbox helpers, example projects, and docs for running agent-browser in hosted sandbox environments (#1465)
+
+### Improvements
+
+- Updated **sandbox release flow** so the new package stays version-synced with the CLI release and publishes from the correct workspace path (#1465)
+- Reflowed **documentation prose** across the README, docs site, examples, and skills so Markdown and MDX wrap naturally in editors and renderers (#1466)
+
+### Contributors
+
+- @ctate
+
+## 0.28.0
+
+### New Features
+
+- **MCP server** - Added `agent-browser mcp`, a stdio Model Context Protocol server with typed tools, paginated discovery, protocol negotiation, and startup tool profiles. The default `core` profile keeps context small, while `--tools all` exposes full CLI parity and composed profiles such as `core,network,react` are supported (#1454)
+- **Plugin system** - Added out-of-process plugin support over the `agent-browser.plugin.v1` stdio protocol, with `plugin add/list/show/run`, manifest discovery, npm and GitHub refs, credential providers, browser provider plugins, launch mutators, custom command capabilities, config and env registry support, and capability-scoped policy gates (#1452)
+
+### Infrastructure
+
+- Added **context footprint eval coverage** for CLI skills, MCP core, and MCP full-profile surfaces, plus MCP parity tests to keep tool behavior aligned with the CLI (#1454)
+
+### Contributors
+
+- @ctate
+
+## 0.27.3
+
 ### Bug Fixes
 
 - Fixed **Windows ARM64 installs** by falling back to the Windows x64 binary during postinstall, avoiding failed downloads for a native ARM64 artifact that is not published (#1269)
@@ -10,7 +89,6 @@
 ### Contributors
 
 - @EternalRights
-<!-- release:end -->
 
 ## 0.27.2
 

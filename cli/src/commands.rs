@@ -71,6 +71,94 @@ pub fn gen_id() -> String {
     )
 }
 
+pub fn is_top_level_command(value: &str) -> bool {
+    matches!(
+        value,
+        "open"
+            | "goto"
+            | "navigate"
+            | "back"
+            | "forward"
+            | "reload"
+            | "read"
+            | "click"
+            | "dblclick"
+            | "fill"
+            | "type"
+            | "hover"
+            | "focus"
+            | "check"
+            | "uncheck"
+            | "select"
+            | "drag"
+            | "upload"
+            | "download"
+            | "press"
+            | "key"
+            | "keydown"
+            | "keyup"
+            | "keyboard"
+            | "scroll"
+            | "scrollintoview"
+            | "scrollinto"
+            | "wait"
+            | "screenshot"
+            | "pdf"
+            | "snapshot"
+            | "eval"
+            | "close"
+            | "quit"
+            | "exit"
+            | "inspect"
+            | "auth"
+            | "confirm"
+            | "deny"
+            | "connect"
+            | "stream"
+            | "get"
+            | "is"
+            | "find"
+            | "mouse"
+            | "set"
+            | "network"
+            | "storage"
+            | "cookies"
+            | "tab"
+            | "window"
+            | "frame"
+            | "dialog"
+            | "trace"
+            | "profiler"
+            | "record"
+            | "console"
+            | "errors"
+            | "highlight"
+            | "clipboard"
+            | "state"
+            | "tap"
+            | "swipe"
+            | "device"
+            | "diff"
+            | "batch"
+            | "react"
+            | "vitals"
+            | "web-vitals"
+            | "pushstate"
+            | "removeinitscript"
+            | "session"
+            | "mcp"
+            | "doctor"
+            | "install"
+            | "upgrade"
+            | "profiles"
+            | "skills"
+            | "dashboard"
+            | "plugin"
+            | "plugins"
+            | "chat"
+    )
+}
+
 /// Parse a cookies file in one of three auto-detected formats:
 ///
 /// 1. JSON array — `[{"name":"x","value":"y"}, ...]`
@@ -316,6 +404,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
         "back" => Ok(json!({ "id": id, "action": "back" })),
         "forward" => Ok(json!({ "id": id, "action": "forward" })),
         "reload" => Ok(json!({ "id": id, "action": "reload" })),
+        "read" => parse_read(&rest, &id, flags),
 
         // === Core Actions ===
         "click" => {
@@ -950,11 +1039,119 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                     Ok(cmd)
                 }
                 Some("login") => {
+                    const AUTH_LOGIN_USAGE: &str = "agent-browser auth login <name> [--credential-provider <plugin>] [--item <ref>] [--url <url>] [--username-selector <s>] [--password-selector <s>] [--submit-selector <s>]";
                     let name = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
                         context: "auth login".to_string(),
-                        usage: "agent-browser auth login <name>",
+                        usage: AUTH_LOGIN_USAGE,
                     })?;
-                    Ok(json!({ "id": id, "action": "auth_login", "name": name }))
+                    let mut credential_provider: Option<String> = None;
+                    let mut credential_item: Option<String> = None;
+                    let mut url: Option<String> = None;
+                    let mut username_selector: Option<String> = None;
+                    let mut password_selector: Option<String> = None;
+                    let mut submit_selector: Option<String> = None;
+
+                    let mut j = 2;
+                    while j < rest.len() {
+                        match rest[j] {
+                            "--credential-provider" => {
+                                let Some(value) = rest.get(j + 1).filter(|v| !v.starts_with("--"))
+                                else {
+                                    return Err(ParseError::MissingArguments {
+                                        context: "auth login --credential-provider".to_string(),
+                                        usage: AUTH_LOGIN_USAGE,
+                                    });
+                                };
+                                credential_provider = Some((*value).to_string());
+                                j += 1;
+                            }
+                            "--item" => {
+                                let Some(value) = rest.get(j + 1).filter(|v| !v.starts_with("--"))
+                                else {
+                                    return Err(ParseError::MissingArguments {
+                                        context: "auth login --item".to_string(),
+                                        usage: AUTH_LOGIN_USAGE,
+                                    });
+                                };
+                                credential_item = Some((*value).to_string());
+                                j += 1;
+                            }
+                            "--url" => {
+                                let Some(value) = rest.get(j + 1).filter(|v| !v.starts_with("--"))
+                                else {
+                                    return Err(ParseError::MissingArguments {
+                                        context: "auth login --url".to_string(),
+                                        usage: AUTH_LOGIN_USAGE,
+                                    });
+                                };
+                                url = Some((*value).to_string());
+                                j += 1;
+                            }
+                            "--username-selector" => {
+                                let Some(value) = rest.get(j + 1).filter(|v| !v.starts_with("--"))
+                                else {
+                                    return Err(ParseError::MissingArguments {
+                                        context: "auth login --username-selector".to_string(),
+                                        usage: AUTH_LOGIN_USAGE,
+                                    });
+                                };
+                                username_selector = Some((*value).to_string());
+                                j += 1;
+                            }
+                            "--password-selector" => {
+                                let Some(value) = rest.get(j + 1).filter(|v| !v.starts_with("--"))
+                                else {
+                                    return Err(ParseError::MissingArguments {
+                                        context: "auth login --password-selector".to_string(),
+                                        usage: AUTH_LOGIN_USAGE,
+                                    });
+                                };
+                                password_selector = Some((*value).to_string());
+                                j += 1;
+                            }
+                            "--submit-selector" => {
+                                let Some(value) = rest.get(j + 1).filter(|v| !v.starts_with("--"))
+                                else {
+                                    return Err(ParseError::MissingArguments {
+                                        context: "auth login --submit-selector".to_string(),
+                                        usage: AUTH_LOGIN_USAGE,
+                                    });
+                                };
+                                submit_selector = Some((*value).to_string());
+                                j += 1;
+                            }
+                            other => {
+                                if other.starts_with("--") {
+                                    return Err(ParseError::InvalidValue {
+                                        message: format!("unknown flag '{}' for auth login", other),
+                                        usage: AUTH_LOGIN_USAGE,
+                                    });
+                                }
+                            }
+                        }
+                        j += 1;
+                    }
+
+                    let mut cmd = json!({ "id": id, "action": "auth_login", "name": name });
+                    if let Some(provider) = credential_provider {
+                        cmd["credentialProvider"] = json!(provider);
+                    }
+                    if let Some(item) = credential_item {
+                        cmd["credentialItem"] = json!(item);
+                    }
+                    if let Some(url) = url {
+                        cmd["url"] = json!(url);
+                    }
+                    if let Some(us) = username_selector {
+                        cmd["usernameSelector"] = json!(us);
+                    }
+                    if let Some(ps) = password_selector {
+                        cmd["passwordSelector"] = json!(ps);
+                    }
+                    if let Some(ss) = submit_selector {
+                        cmd["submitSelector"] = json!(ss);
+                    }
+                    Ok(cmd)
                 }
                 Some("list") => Ok(json!({ "id": id, "action": "auth_list" })),
                 Some("delete") | Some("remove") => {
@@ -1756,13 +1953,143 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
     }
 }
 
+fn parse_read(rest: &[&str], id: &str, flags: &Flags) -> Result<Value, ParseError> {
+    const READ_USAGE: &str =
+        "read [url] [--raw] [--require-md] [--llms <index|full>] [--outline] [--filter <text>] [--timeout <ms>]";
+    let mut cmd = json!({
+        "id": id,
+        "action": "read",
+        "timeout": crate::read::default_timeout_ms(),
+    });
+    let mut url: Option<&str> = None;
+    let mut i = 0;
+    while i < rest.len() {
+        match rest[i] {
+            "--raw" => {
+                cmd["raw"] = json!(true);
+            }
+            "--require-md" => {
+                cmd["requireMd"] = json!(true);
+            }
+            "--llms" => {
+                let value = rest
+                    .get(i + 1)
+                    .ok_or_else(|| ParseError::MissingArguments {
+                        context: "read --llms".to_string(),
+                        usage: READ_USAGE,
+                    })?;
+                crate::read::parse_llms_mode(value).map_err(|message| {
+                    ParseError::InvalidValue {
+                        message,
+                        usage: READ_USAGE,
+                    }
+                })?;
+                cmd["llms"] = json!(value);
+                i += 1;
+            }
+            "--outline" => {
+                cmd["outline"] = json!(true);
+            }
+            "--filter" => {
+                let value = rest
+                    .get(i + 1)
+                    .ok_or_else(|| ParseError::MissingArguments {
+                        context: "read --filter".to_string(),
+                        usage: READ_USAGE,
+                    })?;
+                cmd["filter"] = json!(value);
+                i += 1;
+            }
+            "--timeout" => {
+                let value = rest
+                    .get(i + 1)
+                    .ok_or_else(|| ParseError::MissingArguments {
+                        context: "read --timeout".to_string(),
+                        usage: READ_USAGE,
+                    })?;
+                let timeout = crate::read::parse_timeout_ms(value).map_err(|message| {
+                    ParseError::InvalidValue {
+                        message,
+                        usage: READ_USAGE,
+                    }
+                })?;
+                cmd["timeout"] = json!(timeout);
+                i += 1;
+            }
+            "--json" => {
+                cmd["json"] = json!(true);
+            }
+            arg if arg.starts_with("--") => {
+                return Err(ParseError::UnknownSubcommand {
+                    subcommand: arg.to_string(),
+                    valid_options: &[
+                        "--raw",
+                        "--require-md",
+                        "--llms",
+                        "--outline",
+                        "--filter",
+                        "--timeout",
+                        "--json",
+                    ],
+                });
+            }
+            arg => {
+                if url.is_some() {
+                    return Err(ParseError::InvalidValue {
+                        message: format!("Unexpected read argument: {}", arg),
+                        usage: READ_USAGE,
+                    });
+                }
+                url = Some(arg);
+            }
+        }
+        i += 1;
+    }
+    if cmd.get("llms").is_some()
+        && cmd
+            .get("outline")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    {
+        return Err(ParseError::InvalidValue {
+            message: "read --llms and --outline cannot be used together".to_string(),
+            usage: READ_USAGE,
+        });
+    }
+    if let Some(url) = url {
+        cmd["url"] = json!(url);
+    }
+    if let Some(ref headers_json) = flags.headers {
+        let headers = serde_json::from_str::<serde_json::Value>(headers_json).map_err(|_| {
+            ParseError::InvalidValue {
+                message: format!("Invalid JSON for --headers: {}", headers_json),
+                usage: READ_USAGE,
+            }
+        })?;
+        if !headers.is_object() {
+            return Err(ParseError::InvalidValue {
+                message: format!("Invalid JSON object for --headers: {}", headers_json),
+                usage: READ_USAGE,
+            });
+        }
+        cmd["headers"] = headers;
+    }
+    if let Some(ref allowed_domains) = flags.allowed_domains {
+        cmd["allowedDomains"] = json!(allowed_domains);
+    }
+    Ok(cmd)
+}
+
 fn parse_react(rest: &[&str], id: &str) -> Result<Value, ParseError> {
     const VALID: &[&str] = &["tree", "inspect", "renders", "suspense"];
     let sub = rest.first().copied().ok_or(ParseError::MissingArguments {
         context: "react".to_string(),
         usage: "react <tree|inspect|renders|suspense>",
     })?;
-    let json_out = rest.contains(&"--json");
+    // MCP runs child commands with global `--json` for transport. That global
+    // flag is stripped before command parsing, so `--raw-json` preserves the
+    // React command's raw payload toggle for MCP without changing public docs.
+    let json_out = rest.contains(&"--json") || rest.contains(&"--raw-json");
     let flag = |key: &str| -> Value {
         if json_out {
             json!({ "id": id, "action": key, "json": true })
@@ -2764,6 +3091,13 @@ mod tests {
             device: None,
             auto_connect: false,
             session_name: None,
+            restore: None,
+            restore_save: None,
+            restore_check_url: None,
+            restore_check_text: None,
+            restore_check_fn: None,
+            namespace: None,
+            restore_uses_session: false,
             cli_executable_path: false,
             cli_extensions: false,
             cli_init_scripts: false,
@@ -2779,6 +3113,7 @@ mod tests {
             cli_annotate: false,
             cli_download_path: false,
             cli_headed: false,
+            cli_restore: false,
             annotate: false,
             color_scheme: None,
             download_path: None,
@@ -2796,6 +3131,7 @@ mod tests {
             default_timeout: None,
             no_auto_dialog: false,
             model: None,
+            plugins: Vec::new(),
             verbose: false,
             quiet: false,
         }
@@ -2932,6 +3268,13 @@ mod tests {
     #[test]
     fn test_react_tree_json() {
         let cmd = parse_command(&args("react tree --json"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "react_tree");
+        assert_eq!(cmd["json"], true);
+    }
+
+    #[test]
+    fn test_react_tree_raw_json_internal_flag() {
+        let cmd = parse_command(&args("react tree --raw-json"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "react_tree");
         assert_eq!(cmd["json"], true);
     }
@@ -3288,6 +3631,137 @@ mod tests {
         let cmd = parse_command(&args("open example.com"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "navigate");
         assert_eq!(cmd["url"], "https://example.com");
+    }
+
+    #[test]
+    fn test_read_command() {
+        let cmd = parse_command(&args("read example.com/docs"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "read");
+        assert_eq!(cmd["url"], "example.com/docs");
+        assert_eq!(cmd["timeout"], crate::read::default_timeout_ms());
+    }
+
+    #[test]
+    fn test_read_without_url_uses_active_tab() {
+        let cmd = parse_command(&args("read"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "read");
+        assert!(cmd.get("url").is_none());
+    }
+
+    #[test]
+    fn test_read_flags() {
+        let cmd = parse_command(
+            &args("read https://example.com --raw --require-md --timeout 2500"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "read");
+        assert_eq!(cmd["url"], "https://example.com");
+        assert_eq!(cmd["raw"], true);
+        assert_eq!(cmd["requireMd"], true);
+        assert_eq!(cmd["timeout"], 2500);
+    }
+
+    #[test]
+    fn test_read_includes_global_headers_and_allowed_domains() {
+        let mut flags = default_flags();
+        flags.headers = Some(r#"{"Authorization":"Bearer token","X-Trace":"abc"}"#.to_string());
+        flags.allowed_domains = Some(vec!["example.com".to_string(), "*.example.org".to_string()]);
+
+        let cmd = parse_command(&args("read https://example.com/docs"), &flags).unwrap();
+
+        assert_eq!(cmd["action"], "read");
+        assert_eq!(cmd["headers"]["Authorization"], "Bearer token");
+        assert_eq!(cmd["headers"]["X-Trace"], "abc");
+        assert_eq!(
+            cmd["allowedDomains"],
+            json!(["example.com", "*.example.org"])
+        );
+    }
+
+    #[test]
+    fn test_read_rejects_invalid_headers_json() {
+        let mut flags = default_flags();
+        flags.headers = Some("not json".to_string());
+
+        let result = parse_command(&args("read https://example.com/docs"), &flags);
+
+        assert!(matches!(result, Err(ParseError::InvalidValue { .. })));
+    }
+
+    #[test]
+    fn test_read_llms_index_filter_flags() {
+        let cmd = parse_command(
+            &args("read https://example.com/docs --llms index --filter auth"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "read");
+        assert_eq!(cmd["url"], "https://example.com/docs");
+        assert_eq!(cmd["llms"], "index");
+        assert_eq!(cmd["filter"], "auth");
+    }
+
+    #[test]
+    fn test_read_llms_full_filter_flags() {
+        let cmd = parse_command(
+            &args("read https://example.com/docs --llms full --filter auth"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "read");
+        assert_eq!(cmd["url"], "https://example.com/docs");
+        assert_eq!(cmd["llms"], "full");
+        assert_eq!(cmd["filter"], "auth");
+    }
+
+    #[test]
+    fn test_read_outline_filter_flags() {
+        let cmd = parse_command(
+            &args("read https://example.com/docs --outline --filter auth"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "read");
+        assert_eq!(cmd["url"], "https://example.com/docs");
+        assert_eq!(cmd["outline"], true);
+        assert_eq!(cmd["filter"], "auth");
+    }
+
+    #[test]
+    fn test_read_rejects_llms_with_outline() {
+        let result = parse_command(
+            &args("read https://example.com --llms index --outline"),
+            &default_flags(),
+        );
+        assert!(matches!(result, Err(ParseError::InvalidValue { .. })));
+    }
+
+    #[test]
+    fn test_read_rejects_invalid_llms_mode() {
+        let result = parse_command(
+            &args("read https://example.com --llms toc"),
+            &default_flags(),
+        );
+        assert!(matches!(result, Err(ParseError::InvalidValue { .. })));
+    }
+
+    #[test]
+    fn test_read_filter_without_llms_or_outline_filters_page_sections() {
+        let cmd = parse_command(
+            &args("read https://example.com --filter auth"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "read");
+        assert_eq!(cmd["url"], "https://example.com");
+        assert_eq!(cmd["filter"], "auth");
+    }
+
+    #[test]
+    fn test_read_rejects_invalid_timeout() {
+        let result = parse_command(&args("read example.com --timeout nope"), &default_flags());
+        assert!(matches!(result, Err(ParseError::InvalidValue { .. })));
     }
 
     #[test]
@@ -5180,5 +5654,46 @@ mod tests {
     fn test_batch_no_args_no_commands_field() {
         let cmd = parse_command(&args("batch"), &default_flags()).unwrap();
         assert!(cmd.get("commands").is_none());
+    }
+
+    #[test]
+    fn test_auth_login_credential_provider_flags() {
+        let cmd = parse_command(
+            &args(
+                "auth login github --credential-provider onepassword --item GitHub --url https://github.com/login --username-selector #login_field --password-selector #password --submit-selector input[type=submit]",
+            ),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "auth_login");
+        assert_eq!(cmd["name"], "github");
+        assert_eq!(cmd["credentialProvider"], "onepassword");
+        assert_eq!(cmd["credentialItem"], "GitHub");
+        assert_eq!(cmd["url"], "https://github.com/login");
+        assert_eq!(cmd["usernameSelector"], "#login_field");
+        assert_eq!(cmd["passwordSelector"], "#password");
+        assert_eq!(cmd["submitSelector"], "input[type=submit]");
+    }
+
+    #[test]
+    fn test_auth_login_credential_provider_requires_value() {
+        let err = parse_command(
+            &args("auth login github --credential-provider"),
+            &default_flags(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, ParseError::MissingArguments { .. }));
+    }
+
+    #[test]
+    fn test_auth_login_item_does_not_consume_next_flag_as_value() {
+        let err = parse_command(
+            &args("auth login github --credential-provider vault --item --url https://github.com/login"),
+            &default_flags(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, ParseError::MissingArguments { .. }));
     }
 }
