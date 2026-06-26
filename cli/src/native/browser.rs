@@ -310,6 +310,7 @@ pub struct BrowserManager {
 const LIGHTPANDA_CDP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const LIGHTPANDA_CDP_CONNECT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const LIGHTPANDA_TARGET_INIT_TIMEOUT: Duration = Duration::from_secs(10);
+const BROWSER_CLOSE_CDP_TIMEOUT: Duration = Duration::from_secs(2);
 
 impl BrowserManager {
     pub async fn launch(options: LaunchOptions, engine: Option<&str>) -> Result<Self, String> {
@@ -806,12 +807,12 @@ impl BrowserManager {
             // without shutting down the user's browser.
             let _ = self
                 .client
-                .send_command_no_params("Browser.close", None)
+                .send_command_with_timeout("Browser.close", None, None, BROWSER_CLOSE_CDP_TIMEOUT)
                 .await;
         }
 
         if let Some(mut process) = self.browser_process.take() {
-            let timeout = std::time::Duration::from_secs(5);
+            let timeout = Duration::from_secs(5);
             let _ = tokio::task::spawn_blocking(move || {
                 process.wait_or_kill(timeout);
             })
