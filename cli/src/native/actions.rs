@@ -5836,7 +5836,9 @@ fn parse_json_string(value: Value, what: &str) -> Result<Value, String> {
 
 async fn handle_react_tree(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let result = mgr.evaluate(react::scripts::TREE_SNAPSHOT, None).await?;
+    let script =
+        react::scripts::TREE_SNAPSHOT.replace("{{PICK_RI}}", react::scripts::PICK_REACT_RENDERER);
+    let result = mgr.evaluate(&script, None).await?;
     let nodes_json = parse_json_string(result, "react tree")?;
     let nodes: Vec<react::TreeNode> = serde_json::from_value(nodes_json)
         .map_err(|e| format!("Failed to parse tree nodes: {}", e))?;
@@ -5868,7 +5870,9 @@ async fn handle_react_inspect(cmd: &Value, state: &DaemonState) -> Result<Value,
         .and_then(|v| v.as_i64())
         .ok_or("Missing 'fiberId' parameter (numeric React fiber id)")?;
 
-    let script = react::scripts::TREE_INSPECT.replace("{{ID}}", &fiber_id.to_string());
+    let script = react::scripts::TREE_INSPECT
+        .replace("{{ID}}", &fiber_id.to_string())
+        .replace("{{PICK_RI}}", react::scripts::PICK_REACT_RENDERER);
     let result = mgr.evaluate(&script, None).await?;
     let parsed = parse_json_string(result, "react inspect")?;
     Ok(parsed)
@@ -5907,7 +5911,9 @@ async fn handle_react_renders_stop(cmd: &Value, state: &DaemonState) -> Result<V
 
 async fn handle_react_suspense(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let result = mgr.evaluate(react::scripts::SUSPENSE_WALK, None).await?;
+    let script =
+        react::scripts::SUSPENSE_WALK.replace("{{PICK_RI}}", react::scripts::PICK_REACT_RENDERER);
+    let result = mgr.evaluate(&script, None).await?;
     let boundaries_json = parse_json_string(result, "react suspense")?;
     let boundaries: Vec<react::Boundary> = serde_json::from_value(boundaries_json.clone())
         .map_err(|e| format!("Failed to parse suspense boundaries: {}", e))?;
