@@ -1431,6 +1431,18 @@ fn main() {
         && flags.cdp.is_none()
         && flags.provider.is_none()
         && !flags.auto_connect
+        // Skip when the daemon was already running. It already holds a
+        // configured browser, and these launch-time options are reported as
+        // ignored above (see the `already_running` warning). Re-sending a
+        // `launch` command here carries this invocation's options (e.g. an
+        // empty `args` list when `--args` was only passed to the original
+        // `open`), which differs from the running browser's launch hash and
+        // forces a needless close + relaunch. On hosts that require specific
+        // launch flags to start Chrome at all (e.g. `--no-sandbox` on headless
+        // Linux/containers), that relaunch starts Chrome without them and
+        // wedges the daemon. Mirrors the same guard on the --auto-connect,
+        // --cdp, and --provider launch paths (#962).
+        && !daemon_result.already_running
     {
         let mut launch_cmd = json!({
             "id": gen_id(),
