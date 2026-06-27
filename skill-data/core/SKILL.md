@@ -60,6 +60,15 @@ agent-browser mcp --tools core,network,react
 
 Configure the MCP client to launch `agent-browser` with `["mcp"]`. The server defaults to MCP protocol 2025-11-25 and accepts older supported client protocol versions during initialization. The default tools profile is `core`, which keeps MCP context small for everyday browser automation. Use `--tools all` for the full typed CLI parity surface, or combine profiles with commas, such as `--tools core,network,react`. Profiles are `core`, `network`, `state`, `debug`, `tabs`, `react`, `mobile`, and `all`; the `debug` profile includes plugin registry and command.run tools. Each tool accepts typed arguments plus `extraArgs` for advanced CLI flags and exact CLI parity. Tool discovery is paginated and includes read-only/open-world annotations so modern MCP clients can load the large typed surface incrementally. Use the tool `session` argument or `AGENT_BROWSER_SESSION` to isolate browser sessions.
 
+## Exa web search
+
+When `EXA_API_KEY` is set, the `chat` command gains an `exa_web_search` tool. The AI uses it automatically to find information instead of navigating to a search engine. Results include titles, URLs, and text snippets. After searching, the AI can open result URLs with `agent_browser` for deeper exploration.
+
+```bash
+export EXA_API_KEY=your_key
+agent-browser chat "search for the latest news about AI agents"
+```
+
 ## Reading a page
 
 ```bash
