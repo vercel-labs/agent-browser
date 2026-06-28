@@ -3720,6 +3720,10 @@ fn parse_key_chord(input: &str) -> (String, Option<i32>) {
     let mut key_parts: Vec<&str> = Vec::new();
 
     for part in &parts {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
         match part.to_lowercase().as_str() {
             "alt" => modifiers |= 1,
             "control" | "ctrl" => modifiers |= 2,
@@ -11209,6 +11213,13 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
     #[test]
     fn test_parse_key_chord_control_shift_a() {
         let (key, mods) = parse_key_chord("Control+Shift+a");
+        assert_eq!(key, "a");
+        assert_eq!(mods, Some(2 | 8));
+    }
+
+    #[test]
+    fn test_parse_key_chord_trims_parts() {
+        let (key, mods) = parse_key_chord(" Control + Shift + a ");
         assert_eq!(key, "a");
         assert_eq!(mods, Some(2 | 8));
     }
