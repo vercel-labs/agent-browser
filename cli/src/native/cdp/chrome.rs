@@ -5,6 +5,12 @@ use std::time::Duration;
 
 use super::discovery::discover_cdp_url;
 
+/// Maximum time to keep the direct CDP WebSocket handshake open during
+/// `--auto-connect`. Chrome 144+ can pause this handshake while showing the
+/// remote-debugging permission prompt, so the timeout must leave enough time
+/// for a user or automation agent to approve it.
+const AUTO_CONNECT_WS_VERIFY_TIMEOUT_SECS: u64 = 30;
+
 pub struct ChromeProcess {
     child: Child,
     pub ws_url: String,
@@ -709,11 +715,15 @@ async fn resolve_cdp_from_active_port(port: u16, ws_path: &str) -> Result<String
 
 /// Verify that a WebSocket endpoint is a live CDP server by sending
 /// `Browser.getVersion` and checking for a valid response.
+///
+/// Keep the direct WebSocket handshake open long enough for Chrome's
+/// remote-debugging permission prompt to be approved. A short timeout can make
+/// `--auto-connect` fail while the prompt is still waiting for input.
 async fn verify_ws_endpoint(ws_url: &str) -> bool {
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::Message;
 
-    let timeout = Duration::from_secs(2);
+    let timeout = Duration::from_secs(AUTO_CONNECT_WS_VERIFY_TIMEOUT_SECS);
     let result = tokio::time::timeout(timeout, async {
         let (mut ws, _) = tokio_tungstenite::connect_async(ws_url).await.ok()?;
         let cmd = r#"{"id":1,"method":"Browser.getVersion"}"#;
