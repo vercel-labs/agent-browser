@@ -151,7 +151,7 @@ async function main() {
     console.log('');
     console.log('To build the native binary locally:');
     console.log('  1. Install Rust: https://rustup.rs');
-    console.log('  2. Run: npm run build:native');
+    console.log('  2. Run: pnpm run build:native');
   }
 
   writeInstallMethod();
