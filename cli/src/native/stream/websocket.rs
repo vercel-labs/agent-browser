@@ -307,14 +307,7 @@ async fn handle_client_message(msg: &str, client: &CdpClient, session_id: Option
             let _ = client
                 .send_command(
                     "Input.dispatchKeyEvent",
-                    Some(json!({
-                        "type": parsed.get("eventType").and_then(|v| v.as_str()).unwrap_or("keyDown"),
-                        "key": parsed.get("key"),
-                        "code": parsed.get("code"),
-                        "text": parsed.get("text"),
-                        "windowsVirtualKeyCode": parsed.get("windowsVirtualKeyCode").and_then(|v| v.as_i64()).unwrap_or(0),
-                        "modifiers": parsed.get("modifiers").and_then(|v| v.as_i64()).unwrap_or(0),
-                    })),
+                    Some(build_key_event_params(&parsed)),
                     session_id,
                 )
                 .await;
@@ -334,5 +327,63 @@ async fn handle_client_message(msg: &str, client: &CdpClient, session_id: Option
         }
         "status" => {}
         _ => {}
+    }
+}
+
+/// Build the `Input.dispatchKeyEvent` params from a parsed `input_keyboard` message.
+fn build_key_event_params(parsed: &Value) -> Value {
+    let mut params = json!({
+        "type": parsed.get("eventType").and_then(|v| v.as_str()).unwrap_or("keyDown"),
+        "key": parsed.get("key"),
+        "code": parsed.get("code"),
+        "text": parsed.get("text"),
+        "windowsVirtualKeyCode": parsed.get("windowsVirtualKeyCode").and_then(|v| v.as_i64()).unwrap_or(0),
+        "modifiers": parsed.get("modifiers").and_then(|v| v.as_i64()).unwrap_or(0),
+    });
+    // CDP types `commands` as array<string>; forward only a well-formed array so
+    // a malformed value can't make CDP reject the whole keystroke (the result is
+    // discarded by the caller, so the failure would be silent).
+    if let Some(commands) = parsed
+        .get("commands")
+        .filter(|v| v.as_array().is_some_and(|a| a.iter().all(Value::is_string)))
+    {
+        params["commands"] = commands.clone();
+    }
+    params
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn forwards_commands_to_cdp() {
+        let parsed = json!({
+            "eventType": "keyDown", "key": "a", "code": "KeyA",
+            "windowsVirtualKeyCode": 65, "modifiers": 4,
+            "commands": ["selectAll"]
+        });
+        let params = build_key_event_params(&parsed);
+        assert_eq!(params.get("commands"), Some(&json!(["selectAll"])));
+    }
+
+    #[test]
+    fn omits_commands_when_absent() {
+        let parsed = json!({ "eventType": "keyDown", "key": "a", "code": "KeyA" });
+        let params = build_key_event_params(&parsed);
+        assert!(params.get("commands").is_none());
+    }
+
+    #[test]
+    fn drops_malformed_commands() {
+        // Non-array, or array with a non-string element: dropped so the keystroke
+        // still dispatches instead of CDP rejecting the whole event.
+        for bad in [json!([1]), json!("selectAll"), json!([["nested"]])] {
+            let parsed = json!({ "eventType": "keyDown", "key": "a", "commands": bad });
+            assert!(
+                build_key_event_params(&parsed).get("commands").is_none(),
+                "should drop {bad}"
+            );
+        }
     }
 }

@@ -45,6 +45,30 @@ import { activeSessionNameAtom, activePortAtom } from "@/store/sessions";
 
 const SCREENCAST_ENGINES = new Set(["chrome"]);
 
+// macOS routes Cmd-chord editing/navigation through native key bindings, which
+// CDP exposes via Input.dispatchKeyEvent's `commands`. A bare keyDown with the
+// Meta modifier is not enough for this command class (see issue #1453).
+function macKeyCommands(e: KeyboardEvent): string[] | undefined {
+  if (!e.metaKey) return undefined;
+  const shift = e.shiftKey;
+  // Shift and CapsLock uppercase a single-char `key` ("Z", "A"); named keys
+  // ("ArrowLeft", "Backspace") must stay as-is, so only fold single chars.
+  const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+  switch (key) {
+    case "a": return ["selectAll"];
+    case "c": return ["copy"];
+    case "x": return ["cut"];
+    case "v": return ["paste"];
+    case "z": return shift ? ["redo"] : ["undo"];
+    case "ArrowLeft": return [shift ? "moveToBeginningOfLineAndModifySelection" : "moveToBeginningOfLine"];
+    case "ArrowRight": return [shift ? "moveToEndOfLineAndModifySelection" : "moveToEndOfLine"];
+    case "ArrowUp": return [shift ? "moveToBeginningOfDocumentAndModifySelection" : "moveToBeginningOfDocument"];
+    case "ArrowDown": return [shift ? "moveToEndOfDocumentAndModifySelection" : "moveToEndOfDocument"];
+    case "Backspace": return ["deleteToBeginningOfLine"];
+    default: return undefined;
+  }
+}
+
 function cdpModifiers(e: React.MouseEvent | React.WheelEvent): number {
   let m = 0;
   if (e.altKey) m |= 1;
@@ -360,15 +384,25 @@ export function Viewport() {
   const dispatchKey = useCallback(
     (e: KeyboardEvent, eventType: string) => {
       const info = KEY_INFO[e.key];
-      const text = eventType === "keyDown"
-        ? (info?.text ?? (e.key.length === 1 ? e.key : undefined))
-        : undefined;
+      // CDP only processes a keyDown (navigation, editing commands, even arrow keys)
+      // when a `text` field is present — omitting it makes CDP drop the event. So a
+      // keyDown always carries text: the printable char, or "" for non-printable
+      // keys (arrows, Home, …) and for Meta chords where the char must not type.
+      // Scoped to Meta (matches macKeyCommands): blanking text for Ctrl chords on
+      // Windows/Linux would strip the printable char without supplying a command.
+      const suppressText = e.metaKey;
+      const text = eventType !== "keyDown"
+        ? undefined
+        : suppressText
+          ? ""
+          : (info?.text ?? (e.key.length === 1 ? e.key : ""));
       const keyCode = info?.keyCode ?? (e.key.length === 1 ? e.key.charCodeAt(0) : 0);
       let m = 0;
       if (e.altKey) m |= 1;
       if (e.ctrlKey) m |= 2;
       if (e.metaKey) m |= 4;
       if (e.shiftKey) m |= 8;
+      const commands = eventType === "keyDown" ? macKeyCommands(e) : undefined;
       sendInput({
         type: "input_keyboard",
         eventType,
@@ -377,6 +411,7 @@ export function Viewport() {
         text,
         windowsVirtualKeyCode: keyCode,
         modifiers: m,
+        ...(commands ? { commands } : {}),
       });
     },
     [sendInput],
