@@ -938,6 +938,24 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
         // === Inspect ===
         "inspect" => Ok(json!({ "id": id, "action": "inspect" })),
 
+        // === Focus emulation ===
+        // Make the active tab behave as a focused, visible page even while it is
+        // backgrounded / occluded, so automation commits without raising the
+        // window or stealing the user's OS focus.
+        "focus-emulate" => {
+            let enabled = match (rest.first().map(|s| s.as_ref()), rest.len()) {
+                (Some("on"), 1) => true,
+                (Some("off"), 1) => false,
+                _ => {
+                    return Err(ParseError::MissingArguments {
+                        context: "focus-emulate".to_string(),
+                        usage: "focus-emulate <on|off>",
+                    })
+                }
+            };
+            Ok(json!({ "id": id, "action": "focus_emulate", "enabled": enabled }))
+        }
+
         // === Authentication Vault ===
         "auth" => {
             let sub = rest.first().map(|s| s.as_ref());
@@ -1496,6 +1514,13 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                                 cmd["label"] = json!(name);
                                 i += 2;
                             }
+                            // Open the tab in the background (not foregrounded), so
+                            // it does not steal the user's current tab/focus. Pair
+                            // with `focus-emulate on` to keep it operable while hidden.
+                            "--background" => {
+                                cmd["background"] = json!(true);
+                                i += 1;
+                            }
                             other if !other.starts_with("--") && cmd.get("url").is_none() => {
                                 cmd["url"] = json!(other);
                                 i += 1;
@@ -1503,7 +1528,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                             other => {
                                 return Err(ParseError::UnknownSubcommand {
                                     subcommand: other.to_string(),
-                                    valid_options: &["--label", "<url>"],
+                                    valid_options: &["--label", "--background", "<url>"],
                                 });
                             }
                         }
@@ -3946,6 +3971,25 @@ mod tests {
     }
 
     #[test]
+    fn test_tab_new_background() {
+        let cmd = parse_command(&args("tab new --background"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "tab_new");
+        assert_eq!(cmd["background"], true);
+    }
+
+    #[test]
+    fn test_tab_new_background_with_url() {
+        let cmd = parse_command(
+            &args("tab new --background https://example.com"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "tab_new");
+        assert_eq!(cmd["background"], true);
+        assert_eq!(cmd["url"], "https://example.com");
+    }
+
+    #[test]
     fn test_tab_list() {
         let cmd = parse_command(&args("tab list"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "tab_list");
@@ -5595,6 +5639,27 @@ mod tests {
     fn test_inspect() {
         let cmd = parse_command(&args("inspect"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "inspect");
+    }
+
+    #[test]
+    fn test_focus_emulate_on() {
+        let cmd = parse_command(&args("focus-emulate on"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "focus_emulate");
+        assert_eq!(cmd["enabled"], true);
+    }
+
+    #[test]
+    fn test_focus_emulate_off() {
+        let cmd = parse_command(&args("focus-emulate off"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "focus_emulate");
+        assert_eq!(cmd["enabled"], false);
+    }
+
+    #[test]
+    fn test_focus_emulate_requires_on_or_off() {
+        assert!(parse_command(&args("focus-emulate"), &default_flags()).is_err());
+        assert!(parse_command(&args("focus-emulate maybe"), &default_flags()).is_err());
+        assert!(parse_command(&args("focus-emulate on extra"), &default_flags()).is_err());
     }
 
     #[test]
