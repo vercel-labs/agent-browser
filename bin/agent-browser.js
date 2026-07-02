@@ -8,62 +8,14 @@
  * binary directly (zero overhead).
  */
 
-import { spawn, execSync } from 'child_process';
+import { spawn } from 'child_process';
 import { existsSync, accessSync, chmodSync, constants } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { platform, arch } from 'os';
+import { getBinaryName, getExecutableCommand } from '../scripts/platform.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-
-// Detect if the system uses musl libc (e.g. Alpine Linux)
-function isMusl() {
-  if (platform() !== 'linux') return false;
-  try {
-    const result = execSync('ldd --version 2>&1 || true', { encoding: 'utf8' });
-    return result.toLowerCase().includes('musl');
-  } catch {
-    return existsSync('/lib/ld-musl-x86_64.so.1') || existsSync('/lib/ld-musl-aarch64.so.1');
-  }
-}
-
-// Map Node.js platform/arch to binary naming convention
-function getBinaryName() {
-  const os = platform();
-  const cpuArch = arch();
-
-  let osKey;
-  switch (os) {
-    case 'darwin':
-      osKey = 'darwin';
-      break;
-    case 'linux':
-      osKey = isMusl() ? 'linux-musl' : 'linux';
-      break;
-    case 'win32':
-      osKey = 'win32';
-      break;
-    default:
-      return null;
-  }
-
-  let archKey;
-  switch (cpuArch) {
-    case 'x64':
-    case 'x86_64':
-      archKey = 'x64';
-      break;
-    case 'arm64':
-    case 'aarch64':
-      archKey = 'arm64';
-      break;
-    default:
-      return null;
-  }
-
-  const ext = os === 'win32' ? '.exe' : '';
-  return `agent-browser-${osKey}-${archKey}${ext}`;
-}
 
 function main() {
   const binaryName = getBinaryName();
@@ -101,8 +53,10 @@ function main() {
     }
   }
 
+  const command = getExecutableCommand(binaryPath, process.argv.slice(2));
+
   // Spawn the native binary with inherited stdio
-  const child = spawn(binaryPath, process.argv.slice(2), {
+  const child = spawn(command.executable, command.args, {
     stdio: 'inherit',
     windowsHide: false,
   });

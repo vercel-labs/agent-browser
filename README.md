@@ -64,6 +64,10 @@ agent-browser install --with-deps
 
 This exits nonzero if the package manager cannot install every required browser library.
 
+### Termux / Android
+
+On Termux, install with npm as usual. The wrapper reuses the matching Linux native binary and launches it through `grun`, so no separate Android native package is needed.
+
 ### Updating
 
 Upgrade to the latest version:
@@ -1418,6 +1422,7 @@ The daemon starts automatically on first command and persists between commands f
 | Linux ARM64 | Native Rust |
 | Linux x64   | Native Rust |
 | Windows x64 | Native Rust |
+| Termux / Android | Linux binary via `grun` |
 
 ## Usage with AI Agents
 

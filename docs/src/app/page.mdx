@@ -19,7 +19,7 @@ npx agent-browser open example.com
 - **Observable**: [Video recording](/recording), [streaming](/streaming), [debugging](/debugging), [profiler](/profiler), and [diffing](/diffing) tools are built in
 - **Modern apps**: [Network control](/network), [React & Web Vitals](/react), [init scripts](/init-scripts), and [Next.js + Vercel](/next) workflows have first-class docs
 - **Stateful**: [Sessions](/sessions), profiles, auth state, cookies, storage, proxy, and security controls support long-running agents
-- **Cross-platform**: macOS, Linux, Windows with native binaries
+- **Cross-platform**: macOS, Linux, Windows, and Termux/Android with native binaries
 
 ## Works with
 
@@ -62,4 +62,4 @@ Daemon starts automatically and persists between commands.
 
 ## Platforms
 
-Native Rust binaries for macOS (ARM64, x64), Linux (ARM64, x64), and Windows (x64).
+Native Rust binaries for macOS (ARM64, x64), Linux (ARM64, x64), and Windows (x64). Termux/Android npm installs reuse the matching Linux binary through `grun`.
