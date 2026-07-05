@@ -17,7 +17,7 @@ use crate::validation::{is_valid_session_name, session_name_error};
 use super::a11y;
 use super::auth;
 use super::browser::{should_track_target, BrowserManager, WaitUntil, WedgeReport};
-use super::cdp::chrome::{prepare_nss_home, LaunchOptions};
+use super::cdp::chrome::{prepare_nss_home, LaunchOptions, DEFAULT_AUTO_CONNECT_TIMEOUT_MS};
 use super::cdp::client::CdpClient;
 use super::cdp::types::{
     AttachToTargetParams, AttachToTargetResult, CdpEvent, DispatchMouseEventParams,
@@ -3098,7 +3098,13 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
             if state.browser.is_some() || state.active_provider_session.is_some() {
                 let _ = auto_save_restore_state(state).await;
             }
-            if let Err(e) = auto_launch(state, plugins_from_command_or_env(cmd)).await {
+            if let Err(e) = auto_launch_with_timeout(
+                state,
+                plugins_from_command_or_env(cmd),
+                auto_connect_timeout_from_command_or_env(cmd),
+            )
+            .await
+            {
                 let context = auto_launch_error_context(env::var("AGENT_BROWSER_CDP").is_ok());
                 return error_response(&id, &format!("{}: {}", context, e));
             }
@@ -3658,6 +3664,30 @@ async fn apply_tab_binding_on_attach_or_rollback(state: &mut DaemonState) -> Res
 // ---------------------------------------------------------------------------
 // Auto-launch
 // ---------------------------------------------------------------------------
+
+fn auto_connect_timeout_from_ms(ms: Option<u64>) -> tokio::time::Duration {
+    tokio::time::Duration::from_millis(ms.unwrap_or(DEFAULT_AUTO_CONNECT_TIMEOUT_MS))
+}
+
+fn auto_connect_timeout_from_env() -> tokio::time::Duration {
+    auto_connect_timeout_from_ms(
+        env::var("AGENT_BROWSER_AUTO_CONNECT_TIMEOUT")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok()),
+    )
+}
+
+fn auto_connect_timeout_from_command_or_env(cmd: &Value) -> tokio::time::Duration {
+    auto_connect_timeout_from_ms(
+        cmd.get("autoConnectTimeout")
+            .and_then(|v| v.as_u64())
+            .or_else(|| {
+                env::var("AGENT_BROWSER_AUTO_CONNECT_TIMEOUT")
+                    .ok()
+                    .and_then(|s| s.parse::<u64>().ok())
+            }),
+    )
+}
 
 /// Open a fresh tab so auto-connect navigations don't hijack the user's
 /// existing tabs. Used when no persisted binding re-established a tab.
@@ -4322,28 +4352,50 @@ async fn apply_session_setup(state: &mut DaemonState, session_id: &str) -> Resul
     Ok(())
 }
 
+/// Test entry point: resolve the auto-connect budget from the daemon
+/// environment. Production callers use `auto_launch_with_timeout` so implicit
+/// recovery honors the current invocation's `autoConnectTimeout` instead of
+/// the daemon's spawn-time environment.
+#[cfg(test)]
 async fn auto_launch(
     state: &mut DaemonState,
     plugins: Vec<crate::plugins::PluginConfig>,
 ) -> Result<(), String> {
+    auto_launch_with_timeout(state, plugins, auto_connect_timeout_from_env()).await
+}
+
+async fn auto_launch_with_timeout(
+    state: &mut DaemonState,
+    plugins: Vec<crate::plugins::PluginConfig>,
+    auto_connect_timeout: tokio::time::Duration,
+) -> Result<(), String> {
     if state.attached_target.is_some() {
-        return handle_launch(&json!({ "action": "launch", "plugins": plugins }), state)
-            .await
-            .map(|_| ());
+        // Carry this invocation's budget so reattaching to an auto-connect
+        // target does not fall back to the daemon's spawn-time environment.
+        let launch = json!({
+            "action": "launch",
+            "plugins": plugins,
+            "autoConnectTimeout": auto_connect_timeout.as_millis() as u64,
+        });
+        return handle_launch(&launch, state).await.map(|_| ());
     }
     if env::var("AGENT_BROWSER_CDP").is_ok()
         || env::var("AGENT_BROWSER_AUTO_CONNECT").is_ok()
         || !env::var("AGENT_BROWSER_PROVIDER")
             .is_ok_and(|provider| provider_is_browser_use(&provider))
     {
-        return auto_launch_inner(state, plugins).await;
+        // Boxed here and in handle_launch_for_target: debug builds keep several
+        // copies of an inline launch future in the caller's poll frame, and the
+        // implicit launch chain from execute_command into connect_auto then
+        // overflows a 2 MiB tokio worker stack.
+        return Box::pin(auto_launch_inner(state, plugins, auto_connect_timeout)).await;
     }
     let credentials = state.proxy_credentials.read().await.clone();
     let scripts = state.plugin_init_scripts.clone();
     let setup = state.session_setup.clone();
     let result = match tokio::time::timeout(
         BROWSER_USE_SETUP_DEADLINE,
-        auto_launch_inner(state, plugins),
+        Box::pin(auto_launch_inner(state, plugins, auto_connect_timeout)),
     )
     .await
     {
@@ -4361,6 +4413,7 @@ async fn auto_launch(
 async fn auto_launch_inner(
     state: &mut DaemonState,
     plugins: Vec<crate::plugins::PluginConfig>,
+    auto_connect_timeout: tokio::time::Duration,
 ) -> Result<(), String> {
     if has_active_browser_session(state) {
         close_before_implicit_relaunch(state).await?;
@@ -4470,7 +4523,7 @@ async fn auto_launch_inner(
             None,
         );
         state.reset_input_state();
-        state.browser = Some(BrowserManager::connect_auto().await?);
+        state.browser = Some(BrowserManager::connect_auto(auto_connect_timeout).await?);
         if !apply_tab_binding_on_attach_or_rollback(state).await? {
             if let Err(e) = open_fresh_tab_for_auto_connect(state).await {
                 let _ = rollback_failed_launch(state).await;
@@ -5235,16 +5288,17 @@ async fn handle_launch_for_target(
             .and_then(Value::as_str)
             .is_some_and(provider_is_browser_use)
     {
-        return handle_launch_inner(cmd, state).await;
+        return Box::pin(handle_launch_inner(cmd, state)).await;
     }
     let filter = state.domain_filter.read().await.clone();
     let credentials = state.proxy_credentials.read().await.clone();
     let scripts = state.plugin_init_scripts.clone();
     let setup = state.session_setup.clone();
-    let result = match tokio::time::timeout(deadline, handle_launch_inner(cmd, state)).await {
-        Ok(result) => result,
-        Err(_) => Err(browser_use_setup_timeout(state).await),
-    };
+    let result =
+        match tokio::time::timeout(deadline, Box::pin(handle_launch_inner(cmd, state))).await {
+            Ok(result) => result,
+            Err(_) => Err(browser_use_setup_timeout(state).await),
+        };
     if result.is_err() {
         restore_domain_filter(state, &filter).await;
         *state.proxy_credentials.write().await = credentials;
@@ -5560,7 +5614,9 @@ async fn handle_launch_inner(cmd: &Value, state: &mut DaemonState) -> Result<Val
 
     if auto_connect {
         state.reset_input_state();
-        state.browser = Some(BrowserManager::connect_auto().await?);
+        state.browser = Some(
+            BrowserManager::connect_auto(auto_connect_timeout_from_command_or_env(cmd)).await?,
+        );
         if !apply_tab_binding_on_attach_or_rollback(state).await? {
             if let Err(e) = open_fresh_tab_for_auto_connect(state).await {
                 let _ = rollback_failed_launch(state).await;
@@ -19046,6 +19102,40 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         env.remove("AGENT_BROWSER_DEFAULT_TIMEOUT");
         let state = DaemonState::new();
         assert_eq!(state.default_timeout_ms, 25_000);
+    }
+
+    #[test]
+    fn test_auto_connect_timeout_from_env() {
+        let env = EnvGuard::new(&["AGENT_BROWSER_AUTO_CONNECT_TIMEOUT"]);
+        env.set("AGENT_BROWSER_AUTO_CONNECT_TIMEOUT", "12000");
+
+        assert_eq!(
+            auto_connect_timeout_from_env(),
+            tokio::time::Duration::from_millis(12_000)
+        );
+    }
+
+    #[test]
+    fn test_auto_connect_timeout_from_command_overrides_env() {
+        let env = EnvGuard::new(&["AGENT_BROWSER_AUTO_CONNECT_TIMEOUT"]);
+        env.set("AGENT_BROWSER_AUTO_CONNECT_TIMEOUT", "12000");
+        let cmd = json!({ "autoConnectTimeout": 25000 });
+
+        assert_eq!(
+            auto_connect_timeout_from_command_or_env(&cmd),
+            tokio::time::Duration::from_millis(25_000)
+        );
+    }
+
+    #[test]
+    fn test_auto_connect_timeout_default() {
+        let env = EnvGuard::new(&["AGENT_BROWSER_AUTO_CONNECT_TIMEOUT"]);
+        env.remove("AGENT_BROWSER_AUTO_CONNECT_TIMEOUT");
+
+        assert_eq!(
+            auto_connect_timeout_from_env(),
+            tokio::time::Duration::from_millis(DEFAULT_AUTO_CONNECT_TIMEOUT_MS)
+        );
     }
 
     #[tokio::test]
