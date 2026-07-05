@@ -85,6 +85,7 @@ pub(super) fn check(checks: &mut Vec<Check>, opts: &DoctorOptions) {
         pin_tab: false,
         idle_timeout: None,
         default_timeout: None,
+        auto_connect_timeout: None,
         cdp: None,
         no_auto_dialog: false,
         plugins: None,

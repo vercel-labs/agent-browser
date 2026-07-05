@@ -489,6 +489,7 @@ EOF
 --engine <name>         # chrome (default), lightpanda, obscura (experimental)
 --webgpu                # enable WebGPU (software Vulkan on Linux, no GPU needed)
 --auto-connect          # connect to an already-running Chrome
+# autoConnectTimeout / AGENT_BROWSER_AUTO_CONNECT_TIMEOUT adjusts auto-connect approval/discovery wait for a connection attempt (default 20000ms when omitted, including implicit recovery); changing or omitting it reuses an existing daemon and browser connection
 --cdp <port|url>        # connect to a CDP port or WebSocket URL; root query slash is optional
 --profile <name|path>   # use a Chrome profile (login state survives)
 --headers <json>        # HTTP headers scoped to the URL's origin
