@@ -87,6 +87,18 @@ fn attach_input_mode(cmd: &mut serde_json::Value, flags: &Flags) {
     }
 }
 
+fn effective_auto_connect_timeout_ms(flags: &Flags) -> u64 {
+    flags
+        .auto_connect_timeout
+        .unwrap_or(crate::native::cdp::chrome::DEFAULT_AUTO_CONNECT_TIMEOUT_MS)
+}
+
+/// Carry the effective timeout on every command so implicit recovery uses the
+/// current invocation's budget instead of the daemon's spawn-time environment.
+fn attach_auto_connect_timeout_to_command(cmd: &mut serde_json::Value, flags: &Flags) {
+    cmd["autoConnectTimeout"] = json!(effective_auto_connect_timeout_ms(flags));
+}
+
 fn attach_plugins_to_command(cmd: &mut serde_json::Value, plugins: &[plugins::PluginConfig]) {
     cmd["plugins"] = json!(plugins);
 }
@@ -415,6 +427,25 @@ fn confirmation_prompt_from_response(resp: &Response) -> Option<ConfirmationProm
     resp.data.as_ref().and_then(confirmation_prompt_from_data)
 }
 
+/// The answer to a confirmation prompt. An approval replays the parked
+/// command, which can first run an auto-connect attempt, so it carries this
+/// invocation's budget and the client waits long enough for it.
+fn confirmation_answer_command(
+    approved: bool,
+    confirmation_id: &str,
+    flags: &Flags,
+) -> serde_json::Value {
+    let mut cmd = json!({
+        "id": gen_id(),
+        "action": if approved { "confirm" } else { "deny" },
+        "confirmationId": confirmation_id
+    });
+    if approved {
+        attach_auto_connect_timeout_to_command(&mut cmd, flags);
+    }
+    cmd
+}
+
 fn run_interactive_confirmations(
     mut resp: Response,
     flags: &Flags,
@@ -437,19 +468,7 @@ fn run_interactive_confirmations(
             false
         };
 
-        let confirm_cmd = if approved {
-            json!({
-                "id": gen_id(),
-                "action": "confirm",
-                "confirmationId": prompt.confirmation_id
-            })
-        } else {
-            json!({
-                "id": gen_id(),
-                "action": "deny",
-                "confirmationId": prompt.confirmation_id
-            })
-        };
+        let confirm_cmd = confirmation_answer_command(approved, &prompt.confirmation_id, flags);
 
         match send_command(confirm_cmd, &flags.session) {
             Ok(next_resp) => {
@@ -1646,6 +1665,7 @@ fn main() {
     attach_plugins_to_command(&mut cmd, &flags.plugins);
 
     attach_pin_tab_to_command(&mut cmd, &flags);
+    attach_auto_connect_timeout_to_command(&mut cmd, &flags);
     attach_restore_config_to_command(&mut cmd, &flags);
 
     // Validate restore/session persistence name before starting daemon
@@ -1787,6 +1807,7 @@ fn main() {
         pin_tab: flags.pin_tab,
         idle_timeout: flags.idle_timeout.as_deref(),
         default_timeout: flags.default_timeout,
+        auto_connect_timeout: flags.auto_connect_timeout,
         cdp: flags.cdp.as_deref(),
         cdp_headers: flags.cdp_headers.as_deref(),
         no_auto_dialog: flags.no_auto_dialog,
@@ -2021,6 +2042,7 @@ fn run_batch(
         }
 
         attach_pin_tab_to_command(&mut parsed, flags);
+        attach_auto_connect_timeout_to_command(&mut parsed, flags);
 
         match send_command_with_respawn(parsed, &flags.session, daemon_opts) {
             Ok(resp) => {
@@ -2500,6 +2522,7 @@ mod tests {
         flags.cdp = None;
         flags.provider = None;
         flags.auto_connect = false;
+        flags.auto_connect_timeout = None;
         flags
     }
 
@@ -2521,6 +2544,19 @@ mod tests {
         let mut disabled_cmd = json!({ "action": "launch" });
         attach_pin_tab_to_command(&mut disabled_cmd, &flags);
         assert_eq!(disabled_cmd["pinTab"], false);
+    }
+
+    #[test]
+    fn test_attach_auto_connect_timeout_to_command_uses_default_when_omitted() {
+        let flags = neutral_launch_config_flags();
+        let mut cmd = json!({ "action": "evaluate" });
+
+        attach_auto_connect_timeout_to_command(&mut cmd, &flags);
+
+        assert_eq!(
+            cmd["autoConnectTimeout"],
+            crate::native::cdp::chrome::DEFAULT_AUTO_CONNECT_TIMEOUT_MS
+        );
     }
 
     #[test]
@@ -2568,6 +2604,45 @@ mod tests {
             root_schema["properties"]["clearCaCert"],
             docs_schema["properties"]["clearCaCert"]
         );
+    }
+
+    #[test]
+    fn test_confirmation_approval_carries_the_auto_connect_timeout() {
+        let mut flags = neutral_launch_config_flags();
+        flags.auto_connect_timeout = Some(60_000);
+
+        let approval = confirmation_answer_command(true, "c1", &flags);
+
+        assert_eq!(approval["action"], "confirm");
+        assert_eq!(approval["confirmationId"], "c1");
+        assert_eq!(approval["autoConnectTimeout"], 60_000);
+        assert!(
+            connection::read_timeout_for(&approval) >= std::time::Duration::from_millis(60_000),
+            "the client must wait at least the approval window the replay may use"
+        );
+        assert_eq!(
+            confirmation_answer_command(false, "c1", &flags)["action"],
+            "deny"
+        );
+    }
+
+    #[test]
+    fn test_published_schemas_default_auto_connect_timeout_matches_runtime() {
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("cli should have a repository parent");
+        for schema_path in ["agent-browser.schema.json", "docs/public/schema.json"] {
+            let schema: serde_json::Value = serde_json::from_str(
+                &std::fs::read_to_string(repo_root.join(schema_path)).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                schema["properties"]["autoConnectTimeout"]["default"],
+                crate::native::cdp::chrome::DEFAULT_AUTO_CONNECT_TIMEOUT_MS,
+                "{} advertises a different autoConnectTimeout default than the runtime",
+                schema_path
+            );
+        }
     }
 
     #[test]

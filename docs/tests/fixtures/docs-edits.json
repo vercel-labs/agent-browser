@@ -3,7 +3,7 @@
     "/commands": [
       {
         "from": "--auto-connect           # Auto-discover and connect to running Chrome",
-        "to": "--auto-connect           # Auto-discover and connect to running Chrome\n--no-auto-connect        # Return an --auto-connect session to a local launch (overrides AGENT_BROWSER_AUTO_CONNECT)"
+        "to": "--auto-connect           # Auto-discover and connect to running Chrome\n--no-auto-connect        # Return an --auto-connect session to a local launch (overrides AGENT_BROWSER_AUTO_CONNECT)\n# autoConnectTimeout / AGENT_BROWSER_AUTO_CONNECT_TIMEOUT adjusts auto-connect discovery and approval wait for a connection attempt (default 20000ms when omitted, including implicit recovery); changing or omitting it reuses an existing daemon and browser connection"
       },
       {
         "from": "# Trust a CA for locally launched Chromium on Linux",
@@ -337,8 +337,8 @@
   },
   "resources": {
     "/schema.json": {
-      "size": 9813,
-      "sha256": "2b250f5cd22c2e91efc2d924be140efe6c4197c3e0e5b2bab3f439134b6dbe12"
+      "size": 10246,
+      "sha256": "c37d94a78bb2e267e167d31add984d68b611ef83408fb13130248d36d32917a2"
     }
   }
 }
