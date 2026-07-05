@@ -45,6 +45,8 @@ agent-browser --auto-connect snapshot
 AGENT_BROWSER_AUTO_CONNECT=1 agent-browser snapshot
 ```
 
+Chrome 144+ may show a remote-debugging approval prompt. Auto-connect waits up to 10000ms by default for discovery and approval. Set `autoConnectTimeout` in config or `AGENT_BROWSER_AUTO_CONNECT_TIMEOUT` in the environment to give yourself a longer approval window, such as 30000ms.
+
 Auto-connect discovers Chrome by:
 
 1. Reading Chrome's `DevToolsActivePort` file from the default user data directory
@@ -104,6 +106,7 @@ This enables control of:
     <tr><td><code>--headed</code></td><td>Show browser window</td></tr>
     <tr><td><code>{"--cdp <port|url>"}</code></td><td>CDP connection (port or WebSocket URL)</td></tr>
     <tr><td><code>--auto-connect</code></td><td>Auto-discover and connect to running Chrome</td></tr>
+    <tr><td><code>autoConnectTimeout</code></td><td>Config/env only auto-connect discovery timeout in ms</td></tr>
     <tr><td><code>--color-scheme &lt;scheme&gt;</code></td><td>Persistent color scheme (<code>dark</code>, <code>light</code>, <code>no-preference</code>)</td></tr>
     <tr><td><code>--debug</code></td><td>Debug output</td></tr>
   </tbody>

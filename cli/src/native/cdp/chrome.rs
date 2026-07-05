@@ -3,7 +3,12 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
-use super::discovery::discover_cdp_url;
+use super::discovery::discover_cdp_url_http_with_timeout;
+
+/// Default auto-connect discovery timeout. Long enough to approve Chrome's
+/// remote-debugging prompt in most cases; raise it with `autoConnectTimeout` or
+/// `AGENT_BROWSER_AUTO_CONNECT_TIMEOUT` for slower workflows.
+pub const DEFAULT_AUTO_CONNECT_TIMEOUT_MS: u64 = 10_000;
 
 pub struct ChromeProcess {
     child: Child,
@@ -660,78 +665,83 @@ pub fn read_devtools_active_port(user_data_dir: &Path) -> Option<(u16, String)> 
     Some((port, ws_path))
 }
 
-pub async fn auto_connect_cdp() -> Result<String, String> {
-    let user_data_dirs = get_chrome_user_data_dirs();
-
-    for dir in &user_data_dirs {
-        if let Some((port, ws_path)) = read_devtools_active_port(dir) {
-            if let Ok(ws_url) = resolve_cdp_from_active_port(port, &ws_path).await {
-                return Ok(ws_url);
-            }
-            // Port is dead — remove the stale file so future runs skip it.
-            let stale = dir.join("DevToolsActivePort");
-            let _ = std::fs::remove_file(&stale);
-        }
-    }
-
-    // Fallback: probe common ports
-    for port in [9222u16, 9229] {
-        if let Ok(ws_url) = discover_cdp_url("127.0.0.1", port, None).await {
-            return Ok(ws_url);
-        }
-    }
-
-    Err("No running Chrome instance found. Launch Chrome with --remote-debugging-port or use --cdp.".to_string())
-}
-
-/// Resolve a CDP WebSocket URL from a DevToolsActivePort entry.
+/// A candidate CDP endpoint discovered for `--auto-connect`.
 ///
-/// Tries the exact WebSocket path from DevToolsActivePort first (single
-/// prompt on M144+), then falls back to legacy HTTP discovery for older
-/// Chrome versions. This order avoids triggering duplicate remote-debugging
-/// permission prompts (#1210, #1206).
-async fn resolve_cdp_from_active_port(port: u16, ws_path: &str) -> Result<String, String> {
-    let ws_url = format!("ws://127.0.0.1:{}{}", port, ws_path);
-    if verify_ws_endpoint(&ws_url).await {
-        return Ok(ws_url);
-    }
-
-    // Pre-M144 fallback: HTTP endpoints (/json/version, /json/list, etc.)
-    if let Ok(ws_url) = discover_cdp_url("127.0.0.1", port, None).await {
-        return Ok(ws_url);
-    }
-
-    Err(format!(
-        "Cannot connect to Chrome on port {}: both direct WebSocket and HTTP discovery failed",
-        port
-    ))
+/// Discovery resolves URLs *without* opening a WebSocket, so it never triggers
+/// Chrome's remote-debugging approval prompt. The caller opens a single real
+/// connection to a reachable candidate.
+#[derive(Debug, Clone)]
+pub struct AutoConnectCandidate {
+    /// Fully-formed `ws://host:port/path` URL to connect to.
+    pub ws_url: String,
+    /// Host used for the reachability pre-check (e.g. `127.0.0.1`).
+    pub host: String,
+    /// Port used for the reachability pre-check.
+    pub port: u16,
+    /// `DevToolsActivePort` file that should be removed if the port is dead.
+    pub stale_devtools_file: Option<PathBuf>,
 }
 
-/// Verify that a WebSocket endpoint is a live CDP server by sending
-/// `Browser.getVersion` and checking for a valid response.
-async fn verify_ws_endpoint(ws_url: &str) -> bool {
-    use futures_util::{SinkExt, StreamExt};
-    use tokio_tungstenite::tungstenite::Message;
+/// Resolve ordered auto-connect candidate endpoints without opening any
+/// WebSocket connection.
+///
+/// Order, deduplicated by port so a single Chrome instance is only contacted
+/// once:
+/// 1. Exact `DevToolsActivePort` URLs from known Chrome/Chromium/Brave
+///    user-data directories (Chrome 144+ UI remote debugging writes these with
+///    a dynamic port and the exact browser WebSocket path).
+/// 2. HTTP discovery (`/json/version`, `/json/list`) on common fixed
+///    remote-debugging ports. Plain HTTP never triggers the approval prompt.
+/// 3. Generic `/devtools/browser` fallback for common ports, used when Chrome
+///    136+ exposes CDP over WebSocket but serves no HTTP discovery endpoints.
+pub async fn auto_connect_candidates(discovery_timeout: Duration) -> Vec<AutoConnectCandidate> {
+    let mut candidates: Vec<AutoConnectCandidate> = Vec::new();
+    let mut seen_ports: std::collections::HashSet<u16> = std::collections::HashSet::new();
 
-    let timeout = Duration::from_secs(2);
-    let result = tokio::time::timeout(timeout, async {
-        let (mut ws, _) = tokio_tungstenite::connect_async(ws_url).await.ok()?;
-        let cmd = r#"{"id":1,"method":"Browser.getVersion"}"#;
-        ws.send(Message::Text(cmd.into())).await.ok()?;
-        while let Some(Ok(msg)) = ws.next().await {
-            if let Message::Text(text) = msg {
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
-                    if v.get("id").and_then(|id| id.as_u64()) == Some(1) {
-                        let _ = ws.close(None).await;
-                        return Some(());
-                    }
-                }
+    for dir in get_chrome_user_data_dirs() {
+        if let Some((port, ws_path)) = read_devtools_active_port(&dir) {
+            if seen_ports.insert(port) {
+                candidates.push(AutoConnectCandidate {
+                    ws_url: format!("ws://127.0.0.1:{}{}", port, ws_path),
+                    host: "127.0.0.1".to_string(),
+                    port,
+                    stale_devtools_file: Some(dir.join("DevToolsActivePort")),
+                });
             }
         }
-        None
-    })
-    .await;
-    matches!(result, Ok(Some(())))
+    }
+
+    for port in [9222u16, 9229] {
+        if seen_ports.contains(&port) {
+            continue;
+        }
+        // HTTP discovery is plain HTTP: it does not trigger Chrome's approval
+        // prompt and returns the exact browser WebSocket URL when available.
+        if let Ok(ws_url) =
+            discover_cdp_url_http_with_timeout("127.0.0.1", port, None, discovery_timeout).await
+        {
+            seen_ports.insert(port);
+            candidates.push(AutoConnectCandidate {
+                ws_url,
+                host: "127.0.0.1".to_string(),
+                port,
+                stale_devtools_file: None,
+            });
+        }
+        if seen_ports.contains(&port) {
+            continue;
+        }
+        // Final fallback: a generic WebSocket URL for Chrome 136+ UI remote
+        // debugging, which exposes CDP over WebSocket without HTTP endpoints.
+        candidates.push(AutoConnectCandidate {
+            ws_url: format!("ws://127.0.0.1:{}/devtools/browser", port),
+            host: "127.0.0.1".to_string(),
+            port,
+            stale_devtools_file: None,
+        });
+    }
+
+    candidates
 }
 
 /// Returns the default Chrome user-data directory paths for the current platform.
@@ -1894,101 +1904,5 @@ mod tests {
             result.args.iter().any(|a| a == "--password-store=basic"),
             "profile path should keep keychain flags"
         );
-    }
-
-    // -------------------------------------------------------------------
-    // auto_connect_cdp discovery-order tests (#1210, #1206)
-    // -------------------------------------------------------------------
-
-    /// When DevToolsActivePort provides a ws_path and the port is reachable,
-    /// `resolve_cdp_from_active_port` should return the exact ws_path URL
-    /// WITHOUT calling HTTP discovery first.
-    #[tokio::test]
-    async fn test_resolve_cdp_from_active_port_prefers_ws_path() {
-        use futures_util::{SinkExt, StreamExt};
-        use tokio_tungstenite::tungstenite::Message as WsMsg;
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let ws_path = "/devtools/browser/test-uuid-1234".to_string();
-
-        let server = tokio::spawn(async move {
-            // accept: verify_ws_endpoint() WebSocket handshake
-            let (stream, _) = listener.accept().await.unwrap();
-            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
-            if let Some(Ok(WsMsg::Text(text))) = ws.next().await {
-                let req: serde_json::Value = serde_json::from_str(&text).unwrap();
-                let id = req.get("id").unwrap();
-                let reply = format!(
-                    r#"{{"id":{},"result":{{"protocolVersion":"1.3","product":"Chrome/147"}}}}"#,
-                    id
-                );
-                ws.send(WsMsg::Text(reply)).await.unwrap();
-            }
-            let _ = ws.close(None).await;
-        });
-
-        let result = resolve_cdp_from_active_port(port, &ws_path).await;
-        assert!(result.is_ok(), "should succeed: {:?}", result);
-        let url = result.unwrap();
-        assert!(
-            url.contains("test-uuid-1234"),
-            "should use exact ws_path from DevToolsActivePort, got: {}",
-            url
-        );
-        assert_eq!(url, format!("ws://127.0.0.1:{}{}", port, ws_path));
-        server.await.unwrap();
-    }
-
-    /// When the exact ws_path connection fails, `resolve_cdp_from_active_port`
-    /// should fall back to HTTP discovery.
-    #[tokio::test]
-    async fn test_resolve_cdp_from_active_port_falls_back_to_http_discovery() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-
-        let server = tokio::spawn(async move {
-            // 1st accept: verify_ws_endpoint() ws_path probe — reject (just close)
-            let (s1, _) = listener.accept().await.unwrap();
-            drop(s1);
-
-            // 2nd accept: HTTP /json/version from discover_cdp_url()
-            let (mut s2, _) = listener.accept().await.unwrap();
-            let mut buf = [0u8; 2048];
-            let _ = s2.read(&mut buf).await;
-            let body = format!(
-                r#"{{"webSocketDebuggerUrl":"ws://127.0.0.1:{}/devtools/browser/fallback-uuid"}}"#,
-                port
-            );
-            let resp = format!(
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\n\r\n{}",
-                body.len(),
-                body
-            );
-            s2.write_all(resp.as_bytes()).await.unwrap();
-        });
-
-        let result = resolve_cdp_from_active_port(port, "/devtools/browser/nonexistent-uuid").await;
-        assert!(result.is_ok(), "should fall back to HTTP: {:?}", result);
-        let url = result.unwrap();
-        assert!(
-            url.contains("fallback-uuid"),
-            "should use HTTP discovery fallback, got: {}",
-            url
-        );
-        server.await.unwrap();
-    }
-
-    /// When neither ws_path nor HTTP discovery works, return an error.
-    #[tokio::test]
-    async fn test_resolve_cdp_from_active_port_both_fail() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
-
-        let result = resolve_cdp_from_active_port(port, "/devtools/browser/dead").await;
-        assert!(result.is_err(), "should fail when nothing is listening");
     }
 }

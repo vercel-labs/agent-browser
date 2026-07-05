@@ -1217,6 +1217,7 @@ fn main() {
         auto_connect: flags.auto_connect,
         idle_timeout: flags.idle_timeout.as_deref(),
         default_timeout: flags.default_timeout,
+        auto_connect_timeout: flags.auto_connect_timeout,
         cdp: flags.cdp.as_deref(),
         no_auto_dialog: flags.no_auto_dialog,
         plugins: Some(plugin_registry_json.as_str()),
@@ -1258,6 +1259,10 @@ fn main() {
         if let Some(ref dp) = flags.download_path {
             launch_cmd["downloadPath"] = json!(dp);
         }
+
+        launch_cmd["autoConnectTimeout"] = json!(flags
+            .auto_connect_timeout
+            .unwrap_or(crate::native::cdp::chrome::DEFAULT_AUTO_CONNECT_TIMEOUT_MS));
 
         let err = match send_command(launch_cmd, &flags.session) {
             Ok(resp) if resp.success => None,

@@ -3090,6 +3090,7 @@ mod tests {
             hide_scrollbars: true,
             device: None,
             auto_connect: false,
+            auto_connect_timeout: None,
             session_name: None,
             restore: None,
             restore_save: None,

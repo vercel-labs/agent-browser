@@ -902,6 +902,7 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 | `--headed` | Show browser window (not headless) (or `AGENT_BROWSER_HEADED` env) |
 | `--cdp <port\|url>` | Connect via Chrome DevTools Protocol (port or WebSocket URL) |
 | `--auto-connect` | Auto-discover and connect to running Chrome (or `AGENT_BROWSER_AUTO_CONNECT` env) |
+| `autoConnectTimeout` | Config/env only: auto-connect discovery timeout in ms (or `AGENT_BROWSER_AUTO_CONNECT_TIMEOUT` env, default: 10000) |
 | `--color-scheme <scheme>` | Color scheme: `dark`, `light`, `no-preference` (or `AGENT_BROWSER_COLOR_SCHEME` env) |
 | `--download-path <path>` | Default download directory (or `AGENT_BROWSER_DOWNLOAD_PATH` env) |
 | `--content-boundaries` | Wrap page output in boundary markers for LLM safety (or `AGENT_BROWSER_CONTENT_BOUNDARIES` env) |
@@ -990,6 +991,7 @@ Create an `agent-browser.json` file to set persistent defaults instead of repeat
   "userAgent": "my-agent/1.0",
   "hideScrollbars": false,
   "ignoreHttpsErrors": true,
+  "autoConnectTimeout": 25000,
   "plugins": [
     {
       "name": "vault",
@@ -1303,6 +1305,8 @@ agent-browser --auto-connect snapshot
 # Or via environment variable
 AGENT_BROWSER_AUTO_CONNECT=1 agent-browser snapshot
 ```
+
+Chrome 144+ may show a remote-debugging approval prompt. Auto-connect waits up to 10000ms by default for discovery and approval. Set `autoConnectTimeout` in config or `AGENT_BROWSER_AUTO_CONNECT_TIMEOUT` in the environment to give yourself a longer approval window, such as 30000ms.
 
 Auto-connect discovers Chrome by:
 
