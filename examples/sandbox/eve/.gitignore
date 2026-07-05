@@ -1,0 +1,16 @@
+node_modules
+.env
+.env.local
+.env.*
+!.env.example
+!.env.*.example
+.eve
+.vercel
+.workflow-data
+.next
+.output
+.nitro
+dist
+.DS_Store
+*.tsbuildinfo
+next-env.d.ts

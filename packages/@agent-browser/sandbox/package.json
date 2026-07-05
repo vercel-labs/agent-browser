@@ -1,0 +1,61 @@
+{
+  "name": "@agent-browser/sandbox",
+  "version": "0.31.1",
+  "description": "Helpers for running agent-browser inside sandbox runtimes",
+  "type": "module",
+  "sideEffects": false,
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./eve": {
+      "types": "./dist/eve.d.ts",
+      "import": "./dist/eve.js"
+    },
+    "./vercel": {
+      "types": "./dist/vercel.d.ts",
+      "import": "./dist/vercel.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepack": "pnpm run build",
+    "test": "pnpm run build && node --test test/*.test.mjs"
+  },
+  "keywords": [
+    "agent-browser",
+    "sandbox",
+    "vercel",
+    "eve",
+    "browser-automation"
+  ],
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/vercel-labs/agent-browser",
+    "directory": "packages/@agent-browser/sandbox"
+  },
+  "bugs": {
+    "url": "https://github.com/vercel-labs/agent-browser/issues"
+  },
+  "homepage": "https://agent-browser.dev",
+  "publishConfig": {
+    "access": "public"
+  },
+  "peerDependencies": {
+    "@vercel/sandbox": ">=1.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@vercel/sandbox": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "typescript": "5.9.3"
+  }
+}

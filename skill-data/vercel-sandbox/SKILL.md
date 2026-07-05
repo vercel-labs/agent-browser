@@ -10,68 +10,25 @@ Run agent-browser + headless Chrome inside ephemeral Vercel Sandbox microVMs. A 
 ## Dependencies
 
 ```bash
-pnpm add @vercel/sandbox
+pnpm add @agent-browser/sandbox @vercel/sandbox
 ```
 
-The sandbox VM needs system dependencies for Chromium plus agent-browser itself. Use sandbox snapshots (below) to pre-install everything for sub-second startup.
+The sandbox VM needs system dependencies for Chromium plus agent-browser itself. The `@agent-browser/sandbox` helpers install them by default for fresh sandboxes and use sandbox snapshots (below) for sub-second startup. Pass `installSystemDependencies: false` only when the sandbox image already provides Chromium's required libraries.
 
 ## Core Pattern
 
 ```ts
-import { Sandbox } from "@vercel/sandbox";
-
-// System libraries required by Chromium on the sandbox VM (Amazon Linux / dnf)
-const CHROMIUM_SYSTEM_DEPS = [
-  "nss", "nspr", "libxkbcommon", "atk", "at-spi2-atk", "at-spi2-core",
-  "libXcomposite", "libXdamage", "libXrandr", "libXfixes", "libXcursor",
-  "libXi", "libXtst", "libXScrnSaver", "libXext", "mesa-libgbm", "libdrm",
-  "mesa-libGL", "mesa-libEGL", "cups-libs", "alsa-lib", "pango", "cairo",
-  "gtk3", "dbus-libs",
-];
-
-function getSandboxCredentials() {
-  if (
-    process.env.VERCEL_TOKEN &&
-    process.env.VERCEL_TEAM_ID &&
-    process.env.VERCEL_PROJECT_ID
-  ) {
-    return {
-      token: process.env.VERCEL_TOKEN,
-      teamId: process.env.VERCEL_TEAM_ID,
-      projectId: process.env.VERCEL_PROJECT_ID,
-    };
-  }
-  return {};
-}
+import {
+  createAgentBrowserSnapshot,
+  runAgentBrowserCommand,
+  withAgentBrowserSandbox,
+  type VercelSandboxSession,
+} from "@agent-browser/sandbox/vercel";
 
 async function withBrowser<T>(
-  fn: (sandbox: InstanceType<typeof Sandbox>) => Promise<T>,
+  fn: (sandbox: VercelSandboxSession) => Promise<T>,
 ): Promise<T> {
-  const snapshotId = process.env.AGENT_BROWSER_SNAPSHOT_ID;
-  const credentials = getSandboxCredentials();
-
-  const sandbox = snapshotId
-    ? await Sandbox.create({
-        ...credentials,
-        source: { type: "snapshot", snapshotId },
-        timeout: 120_000,
-      })
-    : await Sandbox.create({ ...credentials, runtime: "node24", timeout: 120_000 });
-
-  if (!snapshotId) {
-    await sandbox.runCommand("sh", [
-      "-c",
-      `sudo dnf clean all 2>&1 && sudo dnf install -y --skip-broken ${CHROMIUM_SYSTEM_DEPS.join(" ")} 2>&1 && sudo ldconfig 2>&1`,
-    ]);
-    await sandbox.runCommand("npm", ["install", "-g", "agent-browser"]);
-    await sandbox.runCommand("npx", ["agent-browser", "install"]);
-  }
-
-  try {
-    return await fn(sandbox);
-  } finally {
-    await sandbox.stop();
-  }
+  return withAgentBrowserSandbox(fn);
 }
 ```
 
@@ -82,21 +39,22 @@ The `screenshot --json` command saves to a file and returns the path. Read the f
 ```ts
 export async function screenshotUrl(url: string) {
   return withBrowser(async (sandbox) => {
-    await sandbox.runCommand("agent-browser", ["open", url]);
+    await runAgentBrowserCommand(sandbox, ["open", url]);
 
-    const titleResult = await sandbox.runCommand("agent-browser", [
-      "get", "title", "--json",
+    const titleResult = await runAgentBrowserCommand<{ data?: { title?: string } }>(sandbox, [
+      "get", "title",
     ]);
-    const title = JSON.parse(await titleResult.stdout())?.data?.title || url;
+    const title = titleResult.json?.data?.title || url;
 
-    const ssResult = await sandbox.runCommand("agent-browser", [
-      "screenshot", "--json",
+    const ssResult = await runAgentBrowserCommand<{ data?: { path?: string } }>(sandbox, [
+      "screenshot",
     ]);
-    const ssPath = JSON.parse(await ssResult.stdout())?.data?.path;
+    const ssPath = ssResult.json?.data?.path;
+    if (!ssPath) throw new Error("Screenshot did not return a file path.");
     const b64Result = await sandbox.runCommand("base64", ["-w", "0", ssPath]);
     const screenshot = (await b64Result.stdout()).trim();
 
-    await sandbox.runCommand("agent-browser", ["close"]);
+    await runAgentBrowserCommand(sandbox, ["close"], { json: false });
 
     return { title, screenshot };
   });
@@ -108,21 +66,20 @@ export async function screenshotUrl(url: string) {
 ```ts
 export async function snapshotUrl(url: string) {
   return withBrowser(async (sandbox) => {
-    await sandbox.runCommand("agent-browser", ["open", url]);
+    await runAgentBrowserCommand(sandbox, ["open", url]);
 
-    const titleResult = await sandbox.runCommand("agent-browser", [
-      "get", "title", "--json",
+    const titleResult = await runAgentBrowserCommand<{ data?: { title?: string } }>(sandbox, [
+      "get", "title",
     ]);
-    const title = JSON.parse(await titleResult.stdout())?.data?.title || url;
+    const title = titleResult.json?.data?.title || url;
 
-    const snapResult = await sandbox.runCommand("agent-browser", [
-      "snapshot", "-i", "-c",
-    ]);
-    const snapshot = await snapResult.stdout();
+    const snapResult = await runAgentBrowserCommand(sandbox, ["snapshot", "-i", "-c"], {
+      json: false,
+    });
 
-    await sandbox.runCommand("agent-browser", ["close"]);
+    await runAgentBrowserCommand(sandbox, ["close"], { json: false });
 
-    return { title, snapshot };
+    return { title, snapshot: snapResult.stdout };
   });
 }
 ```
@@ -134,29 +91,30 @@ The sandbox persists between commands, so you can run full automation sequences:
 ```ts
 export async function fillAndSubmitForm(url: string, data: Record<string, string>) {
   return withBrowser(async (sandbox) => {
-    await sandbox.runCommand("agent-browser", ["open", url]);
+    await runAgentBrowserCommand(sandbox, ["open", url]);
 
-    const snapResult = await sandbox.runCommand("agent-browser", [
-      "snapshot", "-i",
-    ]);
-    const snapshot = await snapResult.stdout();
+    const snapResult = await runAgentBrowserCommand(sandbox, ["snapshot", "-i"], {
+      json: false,
+    });
+    const snapshot = snapResult.stdout;
     // Parse snapshot to find element refs...
 
     for (const [ref, value] of Object.entries(data)) {
-      await sandbox.runCommand("agent-browser", ["fill", ref, value]);
+      await runAgentBrowserCommand(sandbox, ["fill", ref, value]);
     }
 
-    await sandbox.runCommand("agent-browser", ["click", "@e5"]);
-    await sandbox.runCommand("agent-browser", ["wait", "--load", "networkidle"]);
+    await runAgentBrowserCommand(sandbox, ["click", "@e5"]);
+    await runAgentBrowserCommand(sandbox, ["wait", "--load", "networkidle"]);
 
-    const ssResult = await sandbox.runCommand("agent-browser", [
-      "screenshot", "--json",
+    const ssResult = await runAgentBrowserCommand<{ data?: { path?: string } }>(sandbox, [
+      "screenshot",
     ]);
-    const ssPath = JSON.parse(await ssResult.stdout())?.data?.path;
+    const ssPath = ssResult.json?.data?.path;
+    if (!ssPath) throw new Error("Screenshot did not return a file path.");
     const b64Result = await sandbox.runCommand("base64", ["-w", "0", ssPath]);
     const screenshot = (await b64Result.stdout()).trim();
 
-    await sandbox.runCommand("agent-browser", ["close"]);
+    await runAgentBrowserCommand(sandbox, ["close"], { json: false });
 
     return { screenshot };
   });
@@ -165,7 +123,7 @@ export async function fillAndSubmitForm(url: string, data: Record<string, string
 
 ## Sandbox Snapshots (Fast Startup)
 
-A **sandbox snapshot** is a saved VM image of a Vercel Sandbox with system dependencies + agent-browser + Chromium already installed. Think of it like a Docker image -- instead of installing dependencies from scratch every time, the sandbox boots from the pre-built image.
+A **sandbox snapshot** is a saved VM image of a Vercel Sandbox with system dependencies + agent-browser + Chromium already installed. Think of it like a Docker image: instead of installing dependencies from scratch every time, the sandbox boots from the pre-built image.
 
 This is unrelated to agent-browser's *accessibility snapshot* feature (`agent-browser snapshot`), which dumps a page's accessibility tree. A sandbox snapshot is a Vercel infrastructure concept for fast VM startup.
 
@@ -176,32 +134,7 @@ Without a sandbox snapshot, each run installs system deps + agent-browser + Chro
 The snapshot must include system dependencies (via `dnf`), agent-browser, and Chromium:
 
 ```ts
-import { Sandbox } from "@vercel/sandbox";
-
-const CHROMIUM_SYSTEM_DEPS = [
-  "nss", "nspr", "libxkbcommon", "atk", "at-spi2-atk", "at-spi2-core",
-  "libXcomposite", "libXdamage", "libXrandr", "libXfixes", "libXcursor",
-  "libXi", "libXtst", "libXScrnSaver", "libXext", "mesa-libgbm", "libdrm",
-  "mesa-libGL", "mesa-libEGL", "cups-libs", "alsa-lib", "pango", "cairo",
-  "gtk3", "dbus-libs",
-];
-
-async function createSnapshot(): Promise<string> {
-  const sandbox = await Sandbox.create({
-    runtime: "node24",
-    timeout: 300_000,
-  });
-
-  await sandbox.runCommand("sh", [
-    "-c",
-    `sudo dnf clean all 2>&1 && sudo dnf install -y --skip-broken ${CHROMIUM_SYSTEM_DEPS.join(" ")} 2>&1 && sudo ldconfig 2>&1`,
-  ]);
-  await sandbox.runCommand("npm", ["install", "-g", "agent-browser"]);
-  await sandbox.runCommand("npx", ["agent-browser", "install"]);
-
-  const snapshot = await sandbox.snapshot();
-  return snapshot.snapshotId;
-}
+const snapshotId = await createAgentBrowserSnapshot();
 ```
 
 Run this once, then set the environment variable:

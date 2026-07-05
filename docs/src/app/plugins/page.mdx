@@ -1,0 +1,409 @@
+# Plugins
+
+Plugins let agent-browser integrate with external tools without adding those tools to core. A plugin is a local executable that reads one JSON request from stdin and writes one JSON response to stdout.
+
+Use plugins for vault-backed login, custom browser providers, local launch customization, and domain-specific commands such as CAPTCHA solving.
+
+## When to write a plugin
+
+Write a plugin when the integration needs vendor SDKs, local CLIs, credentials, paid APIs, or behavior that should not become an agent-browser dependency.
+
+Good plugin fits:
+
+- Resolve login credentials from an external vault
+- Launch a browser through a hosted provider and return a CDP WebSocket URL
+- Add local Chrome launch arguments, extensions, or init scripts
+- Run a namespaced command such as `captcha.solve`
+
+Keep browser automation itself in agent-browser. A plugin should provide data or launch configuration, then let agent-browser continue driving the browser.
+
+## What to build as a plugin
+
+These are good places for plugin authors to start:
+
+- **New cloud browser providers**: Hosted browser platforms are good models for `browser.provider`. Existing built-ins can stay in core for compatibility, but new providers should usually start as plugins.
+- **Vault integrations**: Password managers, secret stores, and enterprise SSO helpers fit `credential.read`. Keep the local encrypted auth vault in core, but put vendor-specific vault access in plugins.
+- **Stealth and anti-detection**: These techniques change quickly and can be risky to support in core. They fit `launch.mutate` plugins that append launch args, extensions, init scripts, or user-agent overrides.
+- **CAPTCHA solvers**: CAPTCHA integrations are plugin territory because they involve third-party APIs, credentials, policy concerns, and fast vendor churn. They can use `command.run` or a custom capability such as `captcha.solve`.
+- **Vendor-specific auth helpers**: Login helpers for a specific app, IdP, or enterprise flow should live outside core unless they become generic browser automation primitives.
+
+## Add a plugin someone else built
+
+Use `plugin add` with the package or repository name:
+
+```bash
+agent-browser plugin add agent-browser-plugin-captcha
+agent-browser plugin add @company/agent-browser-plugin-vault --name vault
+agent-browser plugin add org/agent-browser-plugin-cloud-browser
+```
+
+agent-browser chooses the source from the reference:
+
+<table>
+  <thead>
+    <tr><th>Reference</th><th>Source</th><th>Example</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>name</code></td><td>npm package</td><td><code>agent-browser-plugin-captcha</code></td></tr>
+    <tr><td><code>@scope/name</code></td><td>scoped npm package</td><td><code>@company/agent-browser-plugin-vault</code></td></tr>
+    <tr><td><code>owner/repo</code></td><td>GitHub repository</td><td><code>org/agent-browser-plugin-cloud-browser</code></td></tr>
+  </tbody>
+</table>
+
+`plugin add` writes `./agent-browser.json` by default. Use `--global` to write `~/.agent-browser/config.json` instead.
+
+During add, agent-browser runs the package once and asks for `plugin.manifest`. A plugin manifest declares the plugin name and capabilities. If a plugin does not support manifests yet, use the capabilities from the plugin README:
+
+```bash
+agent-browser plugin add agent-browser-plugin-captcha --capability command.run --capability captcha.solve --no-manifest
+```
+
+Verify the plugin is configured:
+
+```bash
+agent-browser plugin list
+agent-browser plugin show captcha
+```
+
+Then use it through the command path for its capability:
+
+```bash
+agent-browser auth login my-app --credential-provider vault --item "My App"
+agent-browser --provider cloud-browser open https://example.com
+agent-browser open https://example.com
+agent-browser plugin run captcha captcha.solve --payload '{"siteKey":"abc","url":"https://example.com"}'
+```
+
+`launch.mutate` plugins run automatically for local launches such as `agent-browser open`.
+
+## Configure a plugin
+
+`plugin add` creates this config for you. You can also edit the `plugins` array manually:
+
+```json
+{
+  "plugins": [
+    {
+      "name": "vault",
+      "command": "agent-browser-plugin-vault",
+      "args": [],
+      "capabilities": ["credential.read"]
+    },
+    {
+      "name": "captcha",
+      "command": "agent-browser-plugin-captcha",
+      "capabilities": ["command.run", "captcha.solve"]
+    }
+  ]
+}
+```
+
+Inspect the registry:
+
+```bash
+agent-browser plugin list
+agent-browser plugin show vault
+```
+
+`AGENT_BROWSER_PLUGINS` can replace config discovery with a JSON array using the same shape.
+
+Do not put API tokens, vault tokens, or passwords in plugin `args`. Use the vendor's own CLI login, keychain, environment, or session mechanism outside agent-browser config.
+
+## Protocol
+
+agent-browser starts the executable, writes this envelope to stdin, waits for stdout, and parses stdout as JSON:
+
+```json
+{
+  "protocol": "agent-browser.plugin.v1",
+  "type": "credential.resolve",
+  "capability": "credential.read",
+  "request": {}
+}
+```
+
+Every successful response must include the same protocol and `success: true`:
+
+```json
+{
+  "protocol": "agent-browser.plugin.v1",
+  "success": true,
+  "data": {}
+}
+```
+
+Only stdout is parsed. Write no logs to stdout. agent-browser suppresses plugin stderr for core integrations, so use files or your own debug mode when developing.
+
+Core integrations suppress plugin-provided error text in user-facing errors to reduce accidental secret exposure. Generic `plugin run` keeps plugin error text because it is a developer-facing command.
+
+## Plugin manifest
+
+Support `plugin.manifest` so users can add your plugin without manually entering capabilities:
+
+```json
+{
+  "protocol": "agent-browser.plugin.v1",
+  "type": "plugin.manifest",
+  "capability": "plugin.manifest",
+  "request": {}
+}
+```
+
+Return the plugin name and capabilities:
+
+```json
+{
+  "protocol": "agent-browser.plugin.v1",
+  "success": true,
+  "manifest": {
+    "name": "captcha",
+    "capabilities": ["command.run", "captcha.solve"],
+    "description": "Solve CAPTCHA challenges through Example CAPTCHA"
+  }
+}
+```
+
+With a manifest, users can run:
+
+```bash
+agent-browser plugin add agent-browser-plugin-captcha
+```
+
+Without a manifest, users must pass `--capability` flags during add.
+
+## Capabilities
+
+<table>
+  <thead>
+    <tr><th>Capability</th><th>Request type</th><th>How users invoke it</th><th>Response field</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>credential.read</code></td><td><code>credential.resolve</code></td><td><code>auth login --credential-provider &lt;name&gt;</code></td><td><code>credential</code></td></tr>
+    <tr><td><code>browser.provider</code></td><td><code>browser.launch</code>, <code>browser.close</code></td><td><code>--provider &lt;name&gt;</code></td><td><code>browser</code></td></tr>
+    <tr><td><code>launch.mutate</code></td><td><code>launch.mutate</code></td><td>Any local launch</td><td><code>launch</code></td></tr>
+    <tr><td><code>command.run</code></td><td>Custom request type</td><td><code>plugin run &lt;name&gt; &lt;type&gt;</code></td><td><code>data</code></td></tr>
+  </tbody>
+</table>
+
+Plugins may declare custom capabilities such as `captcha.solve`. `plugin run` can invoke `command.run` and custom capabilities, but it cannot invoke core capabilities or protocol request types directly. Use the dedicated command path for `credential.read`, `browser.provider`, and `launch.mutate`.
+
+## Minimal plugin
+
+This plugin implements `captcha.solve` and returns a fake token:
+
+```js
+#!/usr/bin/env node
+
+const chunks = [];
+for await (const chunk of process.stdin) {
+  chunks.push(chunk);
+}
+
+const input = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+
+function reply(body) {
+  process.stdout.write(
+    JSON.stringify({
+      protocol: "agent-browser.plugin.v1",
+      success: true,
+      ...body,
+    })
+  );
+}
+
+if (input.protocol !== "agent-browser.plugin.v1") {
+  process.stdout.write(
+    JSON.stringify({
+      protocol: "agent-browser.plugin.v1",
+      success: false,
+      error: "unsupported protocol",
+    })
+  );
+  process.exit(0);
+}
+
+if (input.type === "plugin.manifest") {
+  reply({
+    manifest: {
+      name: "captcha",
+      capabilities: ["command.run", "captcha.solve"],
+      description: "Example CAPTCHA plugin",
+    },
+  });
+  process.exit(0);
+}
+
+if (input.type === "captcha.solve") {
+  reply({
+    data: {
+      token: "example-token",
+      siteKey: input.request.siteKey,
+      url: input.request.url,
+    },
+  });
+  process.exit(0);
+}
+
+process.stdout.write(
+  JSON.stringify({
+    protocol: "agent-browser.plugin.v1",
+    success: false,
+    error: `unsupported request type: ${input.type}`,
+  })
+);
+```
+
+Make it executable and configure it:
+
+```bash
+chmod +x ./agent-browser-plugin-captcha
+```
+
+```json
+{
+  "plugins": [
+    {
+      "name": "captcha",
+      "command": "./agent-browser-plugin-captcha",
+      "capabilities": ["command.run", "captcha.solve"]
+    }
+  ]
+}
+```
+
+Run it:
+
+```bash
+agent-browser plugin run captcha captcha.solve --payload '{"siteKey":"abc","url":"https://example.com"}'
+```
+
+## Credential plugin
+
+A credential plugin receives:
+
+```json
+{
+  "protocol": "agent-browser.plugin.v1",
+  "type": "credential.resolve",
+  "capability": "credential.read",
+  "request": {
+    "profileName": "my-app",
+    "itemRef": "My App",
+    "url": "https://app.example.com/login"
+  }
+}
+```
+
+Return `credential`:
+
+```json
+{
+  "protocol": "agent-browser.plugin.v1",
+  "success": true,
+  "credential": {
+    "username": "alice@example.com",
+    "password": "secret",
+    "url": "https://app.example.com/login",
+    "usernameSelector": "#username",
+    "passwordSelector": "#password",
+    "submitSelector": "input[type=submit]"
+  }
+}
+```
+
+Use it for one login:
+
+```bash
+agent-browser auth login my-app --credential-provider vault --item "My App"
+```
+
+For external vaults, prefer calling the vendor CLI from the plugin and relying on its existing local session. Do not pass vault tokens in `agent-browser.json`.
+
+## Browser provider plugin
+
+A browser provider plugin receives `browser.launch` and returns a CDP URL:
+
+```json
+{
+  "protocol": "agent-browser.plugin.v1",
+  "success": true,
+  "browser": {
+    "cdpUrl": "ws://127.0.0.1:9222/devtools/browser/session",
+    "directPage": false,
+    "metadata": {
+      "sessionId": "provider-session-id"
+    },
+    "cleanup": {
+      "sessionId": "provider-session-id"
+    }
+  }
+}
+```
+
+Then users launch through the plugin name:
+
+```bash
+agent-browser --provider cloud-browser open https://example.com
+```
+
+If `cleanup` is returned and connection fails, agent-browser later sends it back as the request body for `browser.close`.
+
+## Launch mutator plugin
+
+A launch mutator receives local launch options before Chrome starts and can append arguments, extensions, init scripts, or a user agent:
+
+```json
+{
+  "protocol": "agent-browser.plugin.v1",
+  "success": true,
+  "launch": {
+    "args": ["--disable-blink-features=AutomationControlled"],
+    "extensions": ["/absolute/path/to/extension"],
+    "initScripts": [
+      "Object.defineProperty(navigator, 'webdriver', { get: () => undefined });"
+    ],
+    "userAgent": "my-agent/1.0"
+  }
+}
+```
+
+Configure it with `launch.mutate`, then use any local launch command:
+
+```bash
+agent-browser open https://example.com
+```
+
+Launch mutators do not run for CDP connections or remote browser providers because those browsers are already running outside the local launch path.
+
+## Policy and confirmation
+
+Plugin access is exposed as capability-scoped policy actions:
+
+```bash
+agent-browser --confirm-actions plugin:vault:credential.read auth login my-app --credential-provider vault --item "My App"
+agent-browser --confirm-actions plugin:cloud-browser:browser.provider --provider cloud-browser open https://example.com
+agent-browser --confirm-actions plugin:stealth:launch.mutate open https://example.com
+```
+
+The action string is `plugin:<name>:<capability>`.
+
+## Packaging guidance
+
+For npm packages, expose a `bin` command with no required stdout logs:
+
+```json
+{
+  "name": "agent-browser-plugin-example",
+  "bin": {
+    "agent-browser-plugin-example": "./bin/plugin.js"
+  }
+}
+```
+
+Keep the plugin small and explicit:
+
+- Declare only the capabilities it actually supports
+- Read exactly one request from stdin
+- Write exactly one JSON response to stdout
+- Keep secrets out of command-line arguments
+- Let agent-browser handle navigation, selectors, screenshots, state, and policy

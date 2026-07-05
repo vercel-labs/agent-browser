@@ -19,6 +19,12 @@ agent-browser session list
 
 # Show current session
 agent-browser session
+
+# Generate a stable worktree-scoped session id
+agent-browser session id --scope worktree --prefix next-dev-loop
+
+# Inspect daemon, launch, and restore status
+agent-browser session info --json
 ```
 
 ## Session isolation
@@ -114,51 +120,52 @@ agent-browser --auto-connect state save ./my-auth.json
 # Load auth at launch
 agent-browser --state ./my-auth.json open https://app.example.com/dashboard
 
-# Or load into an existing session
+# Or load into an already-launched session
+agent-browser open about:blank
 agent-browser state load ./my-auth.json
 agent-browser open https://app.example.com/dashboard
 ```
 
-Combine with `--session-name` so the imported auth auto-persists across restarts:
+Combine with `--session <id> --restore` so the imported auth auto-persists across restarts:
 
 ```bash
-agent-browser --session-name myapp state load ./my-auth.json
-# From now on, state auto-saves/restores for "myapp"
+SESSION="$(agent-browser session id --scope worktree --prefix myapp)"
+agent-browser --session "$SESSION" --restore --state ./my-auth.json open https://app.example.com/dashboard
+# From now on, state auto-saves/restores for this session
 ```
 
 State files contain session tokens in plaintext. Add them to `.gitignore` and delete when no longer needed. For encryption at rest, see [State encryption](#state-encryption) below.
 
 ## Session persistence
 
-Use `--session-name` to automatically save and restore cookies and localStorage across browser restarts:
+Use `--restore` with a stable `--session` to automatically save and restore cookies and localStorage across browser restarts:
 
 ```bash
-# Auto-save/load state for "twitter" session
-agent-browser --session-name twitter open twitter.com
+# Auto-save/load state for this worktree
+SESSION="$(agent-browser session id --scope worktree --prefix twitter)"
+agent-browser --session "$SESSION" --restore open twitter.com
 
 # Login once, then state persists automatically
-agent-browser --session-name twitter click "#login"
+agent-browser --session "$SESSION" --restore click "#login"
 
-# Or via environment variable
-export AGENT_BROWSER_SESSION_NAME=twitter
-agent-browser open twitter.com
+# Optional validation prevents a bad restore from overwriting the previous good state
+agent-browser --session "$SESSION" --restore --restore-check-text Dashboard open twitter.com
 ```
 
-State files are stored in `~/.agent-browser/sessions/` and automatically loaded on daemon start.
+State files are stored in `~/.agent-browser/sessions/` and automatically loaded before navigation. With the default `--restore-save auto` policy, failed restore or failed validation skips auto-save.
 
-### Session name rules
+### Restore key rules
 
-Session names must contain only alphanumeric characters, hyphens, and underscores:
+Session and restore names must contain only alphanumeric characters, hyphens, and underscores. Use `agent-browser session id` to generate a valid key:
 
 ```bash
-# Valid session names
-agent-browser --session-name my-project open example.com
-agent-browser --session-name test_session_v2 open example.com
+# Valid generated key
+agent-browser session id --scope worktree --prefix my-project
 
 # Invalid (will be rejected)
-agent-browser --session-name "../bad" open example.com    # path traversal
-agent-browser --session-name "my session" open example.com # spaces
-agent-browser --session-name "foo/bar" open example.com    # slashes
+agent-browser --session "../bad" --restore open example.com    # path traversal
+agent-browser --session "my session" --restore open example.com # spaces
+agent-browser --session "foo/bar" --restore open example.com    # slashes
 ```
 
 ## State encryption
@@ -173,7 +180,7 @@ openssl rand -hex 32
 export AGENT_BROWSER_ENCRYPTION_KEY=<your-64-char-hex-key>
 
 # State files are now encrypted automatically
-agent-browser --session-name secure-session open example.com
+agent-browser --session secure-session --restore open example.com
 
 # List states shows encryption status
 agent-browser state list
@@ -260,7 +267,13 @@ agent-browser set headers '{"X-Custom-Header": "value"}'
   </thead>
   <tbody>
     <tr><td><code>AGENT_BROWSER_SESSION</code></td><td>Browser session ID (default: "default")</td></tr>
-    <tr><td><code>AGENT_BROWSER_SESSION_NAME</code></td><td>Auto-save/load state persistence name</td></tr>
+    <tr><td><code>AGENT_BROWSER_NAMESPACE</code></td><td>Namespace for daemon sockets and restore-state directories</td></tr>
+    <tr><td><code>AGENT_BROWSER_RESTORE</code></td><td>Auto-save/load state persistence key</td></tr>
+    <tr><td><code>AGENT_BROWSER_RESTORE_SAVE</code></td><td>Restore save policy: <code>auto</code>, <code>always</code>, or <code>never</code></td></tr>
+    <tr><td><code>AGENT_BROWSER_RESTORE_CHECK_URL</code></td><td>URL pattern restored state must match</td></tr>
+    <tr><td><code>AGENT_BROWSER_RESTORE_CHECK_TEXT</code></td><td>Page text restored state must contain</td></tr>
+    <tr><td><code>AGENT_BROWSER_RESTORE_CHECK_FN</code></td><td>JavaScript expression restored state must satisfy</td></tr>
+    <tr><td><code>AGENT_BROWSER_SESSION_NAME</code></td><td>Legacy auto-save/load state persistence name</td></tr>
     <tr><td><code>AGENT_BROWSER_ENCRYPTION_KEY</code></td><td>64-char hex key for AES-256-GCM encryption</td></tr>
     <tr><td><code>AGENT_BROWSER_STATE_EXPIRE_DAYS</code></td><td>Auto-delete states older than N days (default: 30)</td></tr>
   </tbody>

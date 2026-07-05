@@ -20,6 +20,7 @@ jobs:
       contents: read
     outputs:
       should_release: ${{ steps.check.outputs.should_release }}
+      should_publish_sandbox: ${{ steps.check.outputs.should_publish_sandbox }}
       needs_github_release: ${{ steps.check.outputs.needs_github_release }}
       version: ${{ steps.check.outputs.version }}
     steps:
@@ -35,10 +36,14 @@ jobs:
         id: check
         run: |
           LOCAL_VERSION=$(node -p "require('./package.json').version")
+          SANDBOX_VERSION=$(node -p "require('./packages/@agent-browser/sandbox/package.json').version")
           echo "Local version: $LOCAL_VERSION"
+          echo "Sandbox package version: $SANDBOX_VERSION"
 
           NPM_VERSION=$(npm view agent-browser version 2>/dev/null || echo "0.0.0")
+          SANDBOX_NPM_VERSION=$(npm view @agent-browser/sandbox version 2>/dev/null || echo "0.0.0")
           echo "npm version: $NPM_VERSION"
+          echo "@agent-browser/sandbox npm version: $SANDBOX_NPM_VERSION"
 
           if [ "$LOCAL_VERSION" != "$NPM_VERSION" ]; then
             echo "Version changed: $NPM_VERSION -> $LOCAL_VERSION"
@@ -59,6 +64,13 @@ jobs:
               echo "needs_github_release=true" >> "$GITHUB_OUTPUT"
             fi
           fi
+          if [ "$SANDBOX_VERSION" != "$SANDBOX_NPM_VERSION" ]; then
+            echo "Sandbox package version changed: $SANDBOX_NPM_VERSION -> $SANDBOX_VERSION"
+            echo "should_publish_sandbox=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Sandbox package version unchanged on npm, skipping publish"
+            echo "should_publish_sandbox=false" >> "$GITHUB_OUTPUT"
+          fi
           echo "version=$LOCAL_VERSION" >> "$GITHUB_OUTPUT"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -74,37 +86,44 @@ jobs:
         include:
           - name: Linux x64
             os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
+            rust_target: x86_64-unknown-linux-gnu
+            build_target: x86_64-unknown-linux-gnu.2.28
             binary: agent-browser-linux-x64
             use_zigbuild: true
           - name: Linux ARM64
             os: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
+            rust_target: aarch64-unknown-linux-gnu
+            build_target: aarch64-unknown-linux-gnu.2.28
             binary: agent-browser-linux-arm64
             use_zigbuild: true
           - name: Linux musl x64
             os: ubuntu-latest
-            target: x86_64-unknown-linux-musl
+            rust_target: x86_64-unknown-linux-musl
+            build_target: x86_64-unknown-linux-musl
             binary: agent-browser-linux-musl-x64
             use_zigbuild: true
           - name: Linux musl ARM64
             os: ubuntu-latest
-            target: aarch64-unknown-linux-musl
+            rust_target: aarch64-unknown-linux-musl
+            build_target: aarch64-unknown-linux-musl
             binary: agent-browser-linux-musl-arm64
             use_zigbuild: true
           - name: Windows x64
             os: ubuntu-latest
-            target: x86_64-pc-windows-gnu
+            rust_target: x86_64-pc-windows-gnu
+            build_target: x86_64-pc-windows-gnu
             binary: agent-browser-win32-x64.exe
             use_zigbuild: false
           - name: macOS x64
             os: macos-latest
-            target: x86_64-apple-darwin
+            rust_target: x86_64-apple-darwin
+            build_target: x86_64-apple-darwin
             binary: agent-browser-darwin-x64
             use_zigbuild: false
           - name: macOS ARM64
             os: macos-latest
-            target: aarch64-apple-darwin
+            rust_target: aarch64-apple-darwin
+            build_target: aarch64-apple-darwin
             binary: agent-browser-darwin-arm64
             use_zigbuild: false
 
@@ -133,7 +152,7 @@ jobs:
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: ${{ matrix.rust_target }}
 
       - name: Install cross-compilation tools (Linux)
         if: runner.os == 'Linux'
@@ -145,7 +164,7 @@ jobs:
         if: matrix.use_zigbuild
         run: |
           pip3 install ziglang
-          cargo install cargo-zigbuild
+          cargo install cargo-zigbuild --version 0.22.3 --locked
 
       - name: Configure Rust linkers
         if: runner.os == 'Linux'
@@ -166,21 +185,31 @@ jobs:
 
       - name: Build with zigbuild
         if: matrix.use_zigbuild
-        run: cargo zigbuild --release --manifest-path cli/Cargo.toml --target ${{ matrix.target }}
+        run: cargo zigbuild --release --manifest-path cli/Cargo.toml --target ${{ matrix.build_target }}
 
       - name: Build with cargo
         if: '!matrix.use_zigbuild'
-        run: cargo build --release --manifest-path cli/Cargo.toml --target ${{ matrix.target }}
+        run: cargo build --release --manifest-path cli/Cargo.toml --target ${{ matrix.rust_target }}
 
       - name: Copy binary
         run: |
           mkdir -p artifacts
-          if [[ "${{ matrix.target }}" == *"windows"* ]]; then
-            cp cli/target/${{ matrix.target }}/release/agent-browser.exe artifacts/${{ matrix.binary }}
+          if [[ "${{ matrix.rust_target }}" == *"windows"* ]]; then
+            cp cli/target/${{ matrix.rust_target }}/release/agent-browser.exe artifacts/${{ matrix.binary }}
           else
-            cp cli/target/${{ matrix.target }}/release/agent-browser artifacts/${{ matrix.binary }}
+            cp cli/target/${{ matrix.rust_target }}/release/agent-browser artifacts/${{ matrix.binary }}
             chmod +x artifacts/${{ matrix.binary }}
           fi
+
+      - name: Verify Linux GNU glibc floor
+        if: matrix.binary == 'agent-browser-linux-x64' || matrix.binary == 'agent-browser-linux-arm64'
+        run: |
+          set -euo pipefail
+          if objdump -p artifacts/${{ matrix.binary }} | grep -E 'GLIBC_2\.([3-9][0-9]|29)'; then
+            echo "ERROR: ${{ matrix.binary }} requires glibc newer than 2.28"
+            exit 1
+          fi
+          objdump -p artifacts/${{ matrix.binary }} | sed -n '/Version References:/,$p'
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -264,12 +293,57 @@ jobs:
           echo "All 7 platform binaries present and valid"
 
       - name: Publish to npm
-        run: npm publish --provenance
+        run: pnpm publish --provenance --no-git-checks
+
+  publish-sandbox:
+    name: Publish sandbox package to npm
+    needs: [check-release, publish]
+    if: >-
+      always() &&
+      needs.check-release.outputs.should_publish_sandbox == 'true' &&
+      (
+        needs.check-release.outputs.should_release != 'true' ||
+        needs.publish.result == 'success'
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: Release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Sync version
+        run: pnpm run version:sync
+
+      - name: Publish sandbox package to npm
+        working-directory: packages/@agent-browser/sandbox
+        run: pnpm publish --provenance --access public --no-git-checks
 
   github-release:
     name: Create GitHub Release
-    needs: [check-release, build-binaries, publish]
-    if: always() && needs.build-binaries.result == 'success' && needs.check-release.outputs.needs_github_release == 'true'
+    needs: [check-release, build-binaries, publish, publish-sandbox]
+    if: >-
+      always() &&
+      needs.build-binaries.result == 'success' &&
+      needs.check-release.outputs.needs_github_release == 'true' &&
+      (needs.publish.result == 'success' || needs.publish.result == 'skipped') &&
+      (needs.publish-sandbox.result == 'success' || needs.publish-sandbox.result == 'skipped')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

@@ -16,7 +16,14 @@ Multiple isolated browser sessions with state persistence and concurrent browsin
 
 ## Named Sessions
 
-Use `--session` flag to isolate browser contexts:
+Use `--session` to isolate browser contexts. Agent skills should derive one stable id and reuse it on every command:
+
+```bash
+SESSION="$(agent-browser session id --scope worktree --prefix my-skill)"
+agent-browser --session "$SESSION" --restore open https://app.example.com/login
+```
+
+`--scope worktree` uses the Git worktree root when available, then the Git root, then the canonical current directory. This is the recommended default for agents because worktrees are commonly used for parallel agent runs.
 
 ```bash
 # Session 1: Authentication flow
@@ -42,33 +49,31 @@ Each session has independent:
 
 ## Session State Persistence
 
-### Save Session State
+### Automatic Restore
 
 ```bash
-# Save cookies, storage, and auth state
-agent-browser state save /path/to/auth-state.json
+# Bare --restore uses the current --session as the persistence key
+SESSION="$(agent-browser session id --scope worktree --prefix next-dev-loop)"
+agent-browser --session "$SESSION" --restore open https://app.example.com/dashboard
 ```
 
-### Load Session State
+State is loaded before navigation and saved on close, daemon shutdown, idle timeout, and compatible relaunch. The default save policy is `--restore-save auto`, which skips auto-save if restore failed or validation failed.
 
 ```bash
-# Restore saved state
-agent-browser state load /path/to/auth-state.json
-
-# Continue with authenticated session
-agent-browser open https://app.example.com/dashboard
+agent-browser --session "$SESSION" --restore --restore-check-url "**/dashboard" open https://app.example.com/dashboard
+agent-browser --session "$SESSION" --restore --restore-check-text Dashboard open https://app.example.com/dashboard
+agent-browser --session "$SESSION" --restore --restore-check-fn "!!localStorage.getItem('session')" open https://app.example.com/dashboard
 ```
 
-### State File Contents
+Use `agent-browser session info --json` for diagnostics:
 
-```json
-{
-  "cookies": [...],
-  "localStorage": {...},
-  "sessionStorage": {...},
-  "origins": [...]
-}
+```bash
+agent-browser --session "$SESSION" session info --json
 ```
+
+### Manual State Files
+
+Use `state save`, `state load`, and `--state <path>` when you need an explicit portable JSON file. Do not make agents construct paths under `~/.agent-browser/sessions/`; prefer `--restore` for reusable agent sessions.
 
 ## Common Patterns
 
@@ -76,26 +81,8 @@ agent-browser open https://app.example.com/dashboard
 
 ```bash
 #!/bin/bash
-# Save login state once, reuse many times
-
-STATE_FILE="/tmp/auth-state.json"
-
-# Check if we have saved state
-if [[ -f "$STATE_FILE" ]]; then
-    agent-browser state load "$STATE_FILE"
-    agent-browser open https://app.example.com/dashboard
-else
-    # Perform login
-    agent-browser open https://app.example.com/login
-    agent-browser snapshot -i
-    agent-browser fill @e1 "$USERNAME"
-    agent-browser fill @e2 "$PASSWORD"
-    agent-browser click @e3
-    agent-browser wait --load networkidle
-
-    # Save for future use
-    agent-browser state save "$STATE_FILE"
-fi
+SESSION="$(agent-browser session id --scope worktree --prefix app)"
+agent-browser --session "$SESSION" --restore open https://app.example.com/dashboard
 ```
 
 ### Concurrent Scraping

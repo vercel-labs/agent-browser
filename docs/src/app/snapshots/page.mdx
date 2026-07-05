@@ -76,7 +76,9 @@ agent-browser screenshot --annotate ./page.png
 agent-browser click @e2
 ```
 
-Annotated screenshots also cache refs, so you can interact with elements immediately. This is useful when the text snapshot is insufficient -- unlabeled icons, canvas content, or visual layout verification.
+Headless Chromium screenshots hide native scrollbars for consistent image output. Pass `--hide-scrollbars false` when launching to keep native scrollbars visible.
+
+Annotated screenshots also cache refs, so you can interact with elements immediately. This is useful when the text snapshot is insufficient for unlabeled icons, canvas content, or visual layout verification.
 
 ## Iframes
 

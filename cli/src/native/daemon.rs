@@ -11,10 +11,13 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::signal;
 use tokio::sync::{mpsc, Notify, RwLock};
 
-use super::actions::{execute_command, DaemonState};
+use super::actions::{
+    auto_save_restore_state, close_current_browser, execute_command, DaemonState,
+};
 use super::cdp::client::CdpClient;
 use super::state;
 use super::stream::StreamServer;
+use crate::connection::INTERNAL_DAEMON_SHUTDOWN_ACTION;
 
 pub async fn run_daemon(session: &str) {
     let socket_dir = get_daemon_socket_dir();
@@ -207,15 +210,15 @@ async fn run_socket_server(
             }
             _ = drain_interval.tick() => {
                 let mut s = state.lock().await;
-                if let Some(ref mut mgr) = s.browser {
-                    if mgr.has_process_exited() {
-                        let _ = mgr.close().await;
-                        s.browser = None;
-                        s.screencasting = false;
-                        s.update_stream_client().await;
-                    } else {
-                        s.drain_cdp_events_background().await;
-                    }
+                let process_exited = s
+                    .browser
+                    .as_mut()
+                    .map(|mgr| mgr.has_process_exited())
+                    .unwrap_or(false);
+                if process_exited {
+                    let _ = close_current_browser(&mut s).await;
+                } else if s.browser.is_some() {
+                    s.drain_cdp_events_background().await;
                 }
             }
             _ = async {
@@ -225,9 +228,8 @@ async fn run_socket_server(
                 }
             }, if idle_timeout_ms.is_some() => {
                 let mut s = state.lock().await;
-                if let Some(ref mut mgr) = s.browser {
-                    let _ = mgr.close().await;
-                }
+                let _ = auto_save_restore_state(&mut s).await;
+                let _ = close_current_browser(&mut s).await;
                 break;
             }
             _ = reset_rx.recv(), if idle_timeout_ms.is_some() => {
@@ -243,9 +245,8 @@ async fn run_socket_server(
             }
             _ = shutdown_signal() => {
                 let mut s = state.lock().await;
-                if let Some(ref mut mgr) = s.browser {
-                    let _ = mgr.close().await;
-                }
+                let _ = auto_save_restore_state(&mut s).await;
+                let _ = close_current_browser(&mut s).await;
                 break;
             }
         }
@@ -325,9 +326,8 @@ async fn run_socket_server(
                 }
             }, if idle_timeout_ms.is_some() => {
                 let mut s = state.lock().await;
-                if let Some(ref mut mgr) = s.browser {
-                    let _ = mgr.close().await;
-                }
+                let _ = auto_save_restore_state(&mut s).await;
+                let _ = close_current_browser(&mut s).await;
                 let _ = fs::remove_file(&port_path);
                 break;
             }
@@ -342,9 +342,8 @@ async fn run_socket_server(
             }
             _ = shutdown_signal() => {
                 let mut s = state.lock().await;
-                if let Some(ref mut mgr) = s.browser {
-                    let _ = mgr.close().await;
-                }
+                let _ = auto_save_restore_state(&mut s).await;
+                let _ = close_current_browser(&mut s).await;
                 let _ = fs::remove_file(&port_path);
                 break;
             }
@@ -399,7 +398,11 @@ async fn handle_connection<S>(
                     let _ = tx.try_send(());
                 }
 
-                let is_close = cmd.get("action").and_then(|v| v.as_str()) == Some("close");
+                let action = cmd
+                    .get("action")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
 
                 let response = {
                     let mut s = state.lock().await;
@@ -412,7 +415,7 @@ async fn handle_connection<S>(
                     break;
                 }
 
-                if is_close {
+                if close_completed_response(&action, &response) {
                     if let Some(ref path) = stream_file_cleanup {
                         let _ = fs::remove_file(path);
                     }
@@ -434,6 +437,35 @@ fn looks_like_http(line: &str) -> bool {
         "GET ", "POST ", "PUT ", "DELETE ", "PATCH ", "HEAD ", "OPTIONS ", "CONNECT ", "TRACE ",
     ];
     prefixes.iter().any(|p| line.starts_with(p))
+}
+
+fn close_completed_response(action: &str, response: &Value) -> bool {
+    if !matches!(
+        action,
+        "close" | "confirm" | INTERNAL_DAEMON_SHUTDOWN_ACTION
+    ) {
+        return false;
+    }
+
+    fn data_closed(data: &Value) -> bool {
+        data.get("closed").and_then(|v| v.as_bool()) == Some(true)
+    }
+
+    if response.get("success").and_then(|v| v.as_bool()) != Some(true) {
+        return false;
+    }
+
+    let Some(data) = response.get("data") else {
+        return false;
+    };
+    if data_closed(data) {
+        return true;
+    }
+
+    data.get("result").is_some_and(|result| {
+        result.get("success").and_then(|v| v.as_bool()) == Some(true)
+            && result.get("data").is_some_and(data_closed)
+    })
 }
 
 async fn shutdown_signal() {
@@ -482,32 +514,12 @@ async fn shutdown_signal() {
 }
 
 fn get_daemon_socket_dir() -> PathBuf {
-    if let Ok(dir) = env::var("AGENT_BROWSER_SOCKET_DIR") {
-        if !dir.is_empty() {
-            return PathBuf::from(dir);
-        }
-    }
-
-    if let Ok(xdg) = env::var("XDG_RUNTIME_DIR") {
-        if !xdg.is_empty() {
-            return PathBuf::from(xdg).join("agent-browser");
-        }
-    }
-
-    if let Some(home) = dirs::home_dir() {
-        return home.join(".agent-browser");
-    }
-
-    std::env::temp_dir().join("agent-browser")
+    crate::connection::get_socket_dir()
 }
 
 #[cfg(windows)]
 fn get_port_for_session(session: &str) -> u16 {
-    let mut hash: i32 = 0;
-    for c in session.chars() {
-        hash = ((hash << 5).wrapping_sub(hash)).wrapping_add(c as i32);
-    }
-    49152 + ((hash.unsigned_abs() as u32 % 16383) as u16)
+    crate::connection::get_port_for_session(session)
 }
 
 #[cfg(test)]
@@ -515,13 +527,78 @@ mod tests {
     #[allow(unused_imports)]
     use super::*;
 
+    #[test]
+    fn test_daemon_socket_dir_matches_client_namespace() {
+        let guard = crate::test_utils::EnvGuard::new(&[
+            "AGENT_BROWSER_SOCKET_DIR",
+            "XDG_RUNTIME_DIR",
+            "AGENT_BROWSER_NAMESPACE",
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+        guard.set("AGENT_BROWSER_SOCKET_DIR", dir.path().to_str().unwrap());
+        guard.remove("XDG_RUNTIME_DIR");
+        guard.set("AGENT_BROWSER_NAMESPACE", "Worktree: One");
+
+        let socket_dir = get_daemon_socket_dir();
+
+        assert_eq!(socket_dir, crate::connection::get_socket_dir());
+        assert!(socket_dir.ends_with(
+            std::path::PathBuf::from("namespaces")
+                .join("worktree-one")
+                .join("run")
+        ));
+    }
+
     #[cfg(windows)]
     #[test]
     fn test_port_matches_client_algorithm() {
+        let guard = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_NAMESPACE"]);
+        guard.remove("AGENT_BROWSER_NAMESPACE");
+
         assert_eq!(get_port_for_session("default"), 50838);
         assert_eq!(get_port_for_session("my-session"), 63105);
         assert_eq!(get_port_for_session("work"), 51184);
         assert_eq!(get_port_for_session(""), 49152);
+    }
+
+    #[test]
+    fn test_close_completed_response_requires_actual_close_result() {
+        let confirmation_response = serde_json::json!({
+            "success": true,
+            "data": {
+                "confirmation_required": true,
+                "confirmation_id": "close-1",
+                "action": "close"
+            }
+        });
+
+        assert!(!close_completed_response("close", &confirmation_response));
+    }
+
+    #[test]
+    fn test_close_completed_response_accepts_direct_and_confirmed_close() {
+        let direct = serde_json::json!({
+            "success": true,
+            "data": { "closed": true }
+        });
+        let confirmed = serde_json::json!({
+            "success": true,
+            "data": {
+                "confirmed": true,
+                "action": "close",
+                "result": {
+                    "success": true,
+                    "data": { "closed": true }
+                }
+            }
+        });
+
+        assert!(close_completed_response("close", &direct));
+        assert!(close_completed_response(
+            crate::connection::INTERNAL_DAEMON_SHUTDOWN_ACTION,
+            &direct
+        ));
+        assert!(close_completed_response("confirm", &confirmed));
     }
 
     /// Guard against re-introducing `waitpid(-1)` in daemon code.

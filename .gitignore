@@ -45,6 +45,9 @@ yarn.lock
 # Environment
 .env
 .env.local
+.env.*
+!.env.example
+!.env.*.example
 
 # Windows debug instance config
 scripts/windows-debug/.instance
@@ -67,4 +70,8 @@ docs/package-lock.json
 # next
 .next/
 out/
+<<<<<<< HEAD
 agent-browser-*.tgz
+=======
+next-env.d.ts
+>>>>>>> refs/tags/v0.31.1

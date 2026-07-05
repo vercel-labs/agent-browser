@@ -7,24 +7,20 @@ hidden: true
 
 # agent-browser
 
-Fast browser automation CLI for AI agents. Chrome/Chromium via CDP with
-accessibility-tree snapshots and compact `@eN` element refs.
+Fast browser automation CLI for AI agents. Chrome/Chromium via CDP with accessibility-tree snapshots and compact `@eN` element refs.
 
 Install: `npm i -g agent-browser && agent-browser install`
 
 ## Start here
 
-This file is a discovery stub, not the usage guide. Before running any
-`agent-browser` command, load the actual workflow content from the CLI:
+This file is a discovery stub, not the usage guide. Before running any `agent-browser` command, load the actual workflow content from the CLI:
 
 ```bash
 agent-browser skills get core             # start here — workflows, common patterns, troubleshooting
 agent-browser skills get core --full      # include full command reference and templates
 ```
 
-The CLI serves skill content that always matches the installed version,
-so instructions never go stale. The content in this stub cannot change
-between releases, which is why it just points at `skills get core`.
+The CLI serves skill content that always matches the installed version, so instructions never go stale. The content in this stub cannot change between releases, which is why it just points at `skills get core`.
 
 ## Specialized skills
 
@@ -38,8 +34,7 @@ agent-browser skills get vercel-sandbox    # agent-browser inside Vercel Sandbox
 agent-browser skills get agentcore         # AWS Bedrock AgentCore cloud browsers
 ```
 
-Run `agent-browser skills list` to see everything available on the
-installed version.
+Run `agent-browser skills list` to see everything available on the installed version.
 
 ## Why agent-browser
 

@@ -5,8 +5,11 @@ mod connection;
 mod doctor;
 mod flags;
 mod install;
+mod mcp;
 mod native;
 mod output;
+mod plugins;
+mod read;
 mod skills;
 #[cfg(test)]
 mod test_utils;
@@ -14,9 +17,11 @@ mod upgrade;
 mod validation;
 
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::env;
 use std::fs;
-use std::process::exit;
+use std::path::PathBuf;
+use std::process::{exit, Command};
 
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::CloseHandle;
@@ -25,8 +30,8 @@ use windows_sys::Win32::System::Threading::OpenProcess;
 
 use commands::{gen_id, parse_command, ParseError};
 use connection::{
-    cleanup_stale_files, ensure_daemon, get_socket_dir, is_pid_alive, send_command, walk_daemons,
-    DaemonOptions,
+    cleanup_stale_files, daemon_unreachable, ensure_daemon, get_socket_dir, is_pid_alive,
+    send_command, walk_daemons, DaemonOptions, Response,
 };
 use flags::{clean_args, parse_flags, Flags};
 use install::run_install;
@@ -58,6 +63,216 @@ fn print_json_error_with_type(message: impl AsRef<str>, error_type: &str) {
         "error": message.as_ref(),
         "type": error_type,
     }));
+}
+
+fn should_send_hide_scrollbars_launch_option(
+    cli_hide_scrollbars: bool,
+    hide_scrollbars: bool,
+) -> bool {
+    cli_hide_scrollbars || !hide_scrollbars
+}
+
+fn apply_hide_scrollbars_launch_option(
+    launch_cmd: &mut serde_json::Value,
+    cli_hide_scrollbars: bool,
+    hide_scrollbars: bool,
+) {
+    if should_send_hide_scrollbars_launch_option(cli_hide_scrollbars, hide_scrollbars) {
+        launch_cmd["hideScrollbars"] = json!(hide_scrollbars);
+    }
+}
+
+fn attach_script_launch_options(launch_cmd: &mut serde_json::Value, flags: &Flags) {
+    if !flags.init_scripts.is_empty() {
+        launch_cmd["initScripts"] = json!(&flags.init_scripts);
+    }
+    if !flags.enable.is_empty() {
+        launch_cmd["enable"] = json!(&flags.enable);
+    }
+}
+
+fn attach_plugins_to_command(cmd: &mut serde_json::Value, plugins: &[plugins::PluginConfig]) {
+    cmd["plugins"] = json!(plugins);
+}
+
+fn restore_key_from_flags(flags: &Flags) -> Option<&str> {
+    flags.restore.as_deref().or(flags.session_name.as_deref())
+}
+
+fn is_valid_restore_save_policy(policy: &str) -> bool {
+    matches!(policy, "auto" | "always" | "never")
+}
+
+fn incompatible_launch_mode_error(flags: &Flags) -> Option<&'static str> {
+    if flags.cdp.is_some() && flags.provider.is_some() {
+        return Some("Cannot use --cdp and -p/--provider together");
+    }
+
+    if flags.auto_connect && flags.cdp.is_some() {
+        return Some("Cannot use --auto-connect and --cdp together");
+    }
+
+    if flags.auto_connect && flags.provider.is_some() {
+        return Some("Cannot use --auto-connect and -p/--provider together");
+    }
+
+    if flags.provider.is_some() && !flags.extensions.is_empty() {
+        return Some(
+            "Cannot use --extension with -p/--provider (extensions require local browser)",
+        );
+    }
+
+    if flags.cdp.is_some() && !flags.extensions.is_empty() {
+        return Some("Cannot use --extension with --cdp (extensions require local browser)");
+    }
+
+    None
+}
+
+fn attach_restore_config_to_command(cmd: &mut serde_json::Value, flags: &Flags) {
+    if let Some(restore_key) = restore_key_from_flags(flags) {
+        cmd["restoreKey"] = json!(restore_key);
+        cmd["restoreSave"] = json!(flags.restore_save.as_deref().unwrap_or("auto"));
+        cmd["restoreCheckUrl"] = flags
+            .restore_check_url
+            .as_ref()
+            .map(|check| json!(check))
+            .unwrap_or(serde_json::Value::Null);
+        cmd["restoreCheckText"] = flags
+            .restore_check_text
+            .as_ref()
+            .map(|check| json!(check))
+            .unwrap_or(serde_json::Value::Null);
+        cmd["restoreCheckFn"] = flags
+            .restore_check_fn
+            .as_ref()
+            .map(|check| json!(check))
+            .unwrap_or(serde_json::Value::Null);
+    }
+}
+
+fn mark_restarted_background(resp: &mut Response) {
+    if !resp.success {
+        return;
+    }
+
+    let Some(data) = resp.data.as_mut().and_then(|v| v.as_object_mut()) else {
+        return;
+    };
+
+    let lifecycle = data
+        .entry("lifecycle".to_string())
+        .or_insert_with(|| json!({}));
+    if !lifecycle.is_object() {
+        *lifecycle = json!({});
+    }
+    if let Some(obj) = lifecycle.as_object_mut() {
+        obj.insert("restartedBackground".to_string(), json!(true));
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConfirmationPrompt {
+    action: String,
+    category: String,
+    description: String,
+    confirmation_id: String,
+}
+
+fn confirmation_prompt_from_data(data: &serde_json::Value) -> Option<ConfirmationPrompt> {
+    if data
+        .get("confirmation_required")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        let action = data
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        return Some(ConfirmationPrompt {
+            action: action.clone(),
+            category: data
+                .get("category")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            description: data
+                .get("description")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .unwrap_or(action.as_str())
+                .to_string(),
+            confirmation_id: data
+                .get("confirmation_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+        });
+    }
+
+    data.get("result")
+        .and_then(|v| v.get("data"))
+        .and_then(confirmation_prompt_from_data)
+}
+
+fn confirmation_prompt_from_response(resp: &Response) -> Option<ConfirmationPrompt> {
+    resp.data.as_ref().and_then(confirmation_prompt_from_data)
+}
+
+fn run_interactive_confirmations(
+    mut resp: Response,
+    flags: &Flags,
+    output_opts: &OutputOptions,
+) -> Response {
+    while let Some(prompt) = confirmation_prompt_from_response(&resp) {
+        eprintln!("[agent-browser] Action requires confirmation:");
+        if prompt.category.is_empty() {
+            eprintln!("  {}", prompt.description);
+        } else {
+            eprintln!("  {}: {}", prompt.category, prompt.description);
+        }
+        eprint!("  Allow? [y/N]: ");
+
+        let mut input = String::new();
+        let approved = if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+            std::io::stdin().read_line(&mut input).is_ok()
+                && matches!(input.trim().to_lowercase().as_str(), "y" | "yes")
+        } else {
+            false
+        };
+
+        let confirm_cmd = if approved {
+            json!({
+                "id": gen_id(),
+                "action": "confirm",
+                "confirmationId": prompt.confirmation_id
+            })
+        } else {
+            json!({
+                "id": gen_id(),
+                "action": "deny",
+                "confirmationId": prompt.confirmation_id
+            })
+        };
+
+        match send_command(confirm_cmd, &flags.session) {
+            Ok(next_resp) => {
+                if !approved {
+                    eprintln!("{} Action denied", color::error_indicator());
+                    exit(1);
+                }
+                resp = next_resp;
+            }
+            Err(e) => {
+                eprintln!("{} {}", color::error_indicator(), e);
+                exit(1);
+            }
+        }
+    }
+
+    print_response_with_opts(&resp, None, output_opts);
+    resp
 }
 
 struct ParsedProxy {
@@ -181,10 +396,194 @@ fn run_profiles(json_mode: bool) {
     }
 }
 
+fn canonical_path(path: PathBuf) -> PathBuf {
+    path.canonicalize().unwrap_or(path)
+}
+
+fn git_toplevel() -> Option<PathBuf> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8(output.stdout).ok()?;
+    let path = raw.trim();
+    if path.is_empty() {
+        None
+    } else {
+        Some(canonical_path(PathBuf::from(path)))
+    }
+}
+
+fn resolve_session_id_scope(scope: &str) -> Result<(String, PathBuf), String> {
+    match scope {
+        "worktree" => {
+            let path = git_toplevel().unwrap_or_else(|| {
+                canonical_path(env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+            });
+            Ok(("worktree".to_string(), path))
+        }
+        "cwd" => {
+            let path = canonical_path(env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+            Ok(("cwd".to_string(), path))
+        }
+        "git-root" => git_toplevel()
+            .map(|path| ("git-root".to_string(), path))
+            .ok_or_else(|| "Not inside a Git working tree".to_string()),
+        other => Err(format!(
+            "Unknown session id scope '{}'. Use worktree, cwd, or git-root.",
+            other
+        )),
+    }
+}
+
+fn run_session_id(args: &[String], json_mode: bool) {
+    let mut scope = "worktree".to_string();
+    let mut prefix: Option<String> = None;
+    let mut json_output = json_mode;
+
+    let mut i = 2;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--scope" => {
+                if let Some(value) = args.get(i + 1) {
+                    scope = value.clone();
+                    i += 1;
+                }
+            }
+            "--prefix" => {
+                if let Some(value) = args.get(i + 1) {
+                    prefix = Some(value.clone());
+                    i += 1;
+                }
+            }
+            "--json" => json_output = true,
+            _ => {}
+        }
+        i += 1;
+    }
+
+    let (resolved_scope, path) = match resolve_session_id_scope(&scope) {
+        Ok(result) => result,
+        Err(e) => {
+            if json_output {
+                print_json_error(e);
+            } else {
+                eprintln!("{} {}", color::error_indicator(), e);
+            }
+            exit(1);
+        }
+    };
+
+    let path_str = path.to_string_lossy().to_string();
+    let mut hasher = Sha256::new();
+    hasher.update(path_str.as_bytes());
+    let hash = format!("{:x}", hasher.finalize());
+    let suffix = &hash[..12];
+
+    let prefix = prefix
+        .as_deref()
+        .map(validation::sanitize_session_component)
+        .filter(|s| !s.is_empty());
+    let session = match prefix {
+        Some(prefix) => format!("{}-{}", prefix, suffix),
+        None => suffix.to_string(),
+    };
+
+    if json_output {
+        print_json_value(json!({
+            "success": true,
+            "data": {
+                "session": session,
+                "scope": resolved_scope,
+                "path": path_str,
+                "hash": suffix
+            }
+        }));
+    } else {
+        println!("{}", session);
+    }
+}
+
+fn run_session_info(session: &str, json_mode: bool) {
+    let inventory = walk_daemons();
+    let active = inventory.sessions.iter().find(|s| s.name == session);
+    let runtime = active.and_then(|_| {
+        send_command(
+            json!({
+                "id": gen_id(),
+                "action": "session_info"
+            }),
+            session,
+        )
+        .ok()
+    });
+
+    let runtime_data = runtime.as_ref().and_then(|resp| resp.data.clone());
+    let runtime_error = runtime.as_ref().and_then(|resp| {
+        if resp.success {
+            None
+        } else {
+            resp.error.clone()
+        }
+    });
+
+    if json_mode {
+        print_json_value(json!({
+            "success": true,
+            "data": {
+                "session": session,
+                "namespace": env::var("AGENT_BROWSER_NAMESPACE").ok(),
+                "socketDir": get_socket_dir().to_string_lossy(),
+                "active": active.is_some(),
+                "pid": active.map(|s| s.pid),
+                "version": active.and_then(|s| s.version.clone()),
+                "runtime": runtime_data,
+                "runtimeError": runtime_error,
+            }
+        }));
+        return;
+    }
+
+    println!("Session: {}", session);
+    println!("Socket dir: {}", get_socket_dir().to_string_lossy());
+    if let Ok(namespace) = env::var("AGENT_BROWSER_NAMESPACE") {
+        println!("Namespace: {}", namespace);
+    }
+    if let Some(active) = active {
+        println!("Daemon: running (pid {})", active.pid);
+        if let Some(ref version) = active.version {
+            println!("Version: {}", version);
+        }
+    } else {
+        println!("Daemon: not running");
+    }
+    if let Some(data) = runtime_data {
+        if let Some(restore_status) = data.get("restoreStatus").and_then(|v| v.as_str()) {
+            println!("Restore status: {}", restore_status);
+        }
+        if let Some(save_status) = data.get("saveStatus").and_then(|v| v.as_str()) {
+            println!("Save status: {}", save_status);
+        }
+        if let Some(engine) = data.get("engine").and_then(|v| v.as_str()) {
+            println!("Engine: {}", engine);
+        }
+        if let Some(launched) = data.get("browserLaunched").and_then(|v| v.as_bool()) {
+            println!("Browser launched: {}", launched);
+        }
+    } else if let Some(err) = runtime_error {
+        println!("Runtime info unavailable: {}", err);
+    }
+}
+
 fn run_session(args: &[String], session: &str, json_mode: bool) {
     let subcommand = args.get(1).map(|s| s.as_str());
 
     match subcommand {
+        Some("id") => run_session_id(args, json_mode),
+        Some("info") => run_session_info(session, json_mode),
         Some("list") => {
             let sessions: Vec<String> = walk_daemons()
                 .sessions
@@ -511,7 +910,13 @@ fn main() {
     }
 
     let args: Vec<String> = env::args().skip(1).collect();
-    let flags = parse_flags(&args);
+    let mut flags = parse_flags(&args);
+    if flags.restore_uses_session {
+        flags.restore = Some(flags.session.clone());
+    }
+    if let Some(ref namespace) = flags.namespace {
+        env::set_var("AGENT_BROWSER_NAMESPACE", namespace);
+    }
     let clean = clean_args(&args);
 
     let has_help = args.iter().any(|a| a == "--help" || a == "-h");
@@ -602,6 +1007,25 @@ fn main() {
         return;
     }
 
+    // Handle plugin registry commands (doesn't need daemon)
+    if matches!(
+        clean.first().map(|s| s.as_str()),
+        Some("plugin") | Some("plugins")
+    ) {
+        plugins::run_plugin_command(&clean, &flags.plugins, flags.json);
+        return;
+    }
+
+    // Handle MCP stdio server mode. This must never share stdout with normal
+    // CLI output because stdout is reserved for JSON-RPC protocol messages.
+    if clean.first().map(|s| s.as_str()) == Some("mcp") {
+        if let Err(err) = mcp::run_mcp(&clean[1..]) {
+            eprintln!("{} {}", color::error_indicator(), err);
+            exit(1);
+        }
+        return;
+    }
+
     // Handle session separately (doesn't need daemon)
     if clean.first().map(|s| s.as_str()) == Some("session") {
         run_session(&clean, &flags.session, flags.json);
@@ -679,12 +1103,35 @@ fn main() {
         }
     }
 
-    // Validate session name before starting daemon
-    if let Some(ref name) = flags.session_name {
+    // Send plugin config with commands so an already-running daemon can use
+    // current config without a restart. The daemon strips this from stream
+    // broadcasts before observers see the command payload.
+    attach_plugins_to_command(&mut cmd, &flags.plugins);
+    attach_restore_config_to_command(&mut cmd, &flags);
+
+    let restore_key = restore_key_from_flags(&flags);
+
+    // Validate restore/session persistence name before starting daemon
+    if let Some(name) = restore_key {
         if !validation::is_valid_session_name(name) {
             let msg = validation::session_name_error(name);
             if flags.json {
                 print_json_error_with_type(msg, "invalid_session_name");
+            } else {
+                eprintln!("{} {}", color::error_indicator(), msg);
+            }
+            exit(1);
+        }
+    }
+
+    if let Some(ref policy) = flags.restore_save {
+        if !is_valid_restore_save_policy(policy) {
+            let msg = format!(
+                "Invalid --restore-save value '{}'. Use auto, always, or never.",
+                policy
+            );
+            if flags.json {
+                print_json_error_with_type(msg, "invalid_value");
             } else {
                 eprintln!("{} {}", color::error_indicator(), msg);
             }
@@ -719,6 +1166,15 @@ fn main() {
         return;
     }
 
+    if let Some(msg) = incompatible_launch_mode_error(&flags) {
+        if flags.json {
+            print_json_error(msg);
+        } else {
+            eprintln!("{} {}", color::error_indicator(), msg);
+        }
+        exit(1);
+    }
+
     // Parse proxy URL to separate server from credentials for the daemon.
     let (proxy_server, proxy_username, proxy_password) = if let Some(ref proxy_str) = flags.proxy {
         let parsed = parse_proxy(proxy_str);
@@ -726,6 +1182,8 @@ fn main() {
     } else {
         (None, None, None)
     };
+    let plugin_registry_json =
+        serde_json::to_string(&flags.plugins).unwrap_or_else(|_| "[]".to_string());
     let daemon_opts = DaemonOptions {
         headed: flags.headed,
         debug: flags.debug,
@@ -741,11 +1199,16 @@ fn main() {
         proxy_password: proxy_password.as_deref(),
         ignore_https_errors: flags.ignore_https_errors,
         allow_file_access: flags.allow_file_access,
+        hide_scrollbars: flags.hide_scrollbars,
         profile: flags.profile.as_deref(),
         state: flags.state.as_deref(),
         provider: flags.provider.as_deref(),
         device: flags.device.as_deref(),
-        session_name: flags.session_name.as_deref(),
+        session_name: restore_key,
+        restore_save: flags.restore_save.as_deref(),
+        restore_check_url: flags.restore_check_url.as_deref(),
+        restore_check_text: flags.restore_check_text.as_deref(),
+        restore_check_fn: flags.restore_check_fn.as_deref(),
         download_path: flags.download_path.as_deref(),
         allowed_domains: flags.allowed_domains.as_deref(),
         action_policy: flags.action_policy.as_deref(),
@@ -756,6 +1219,7 @@ fn main() {
         default_timeout: flags.default_timeout,
         cdp: flags.cdp.as_deref(),
         no_auto_dialog: flags.no_auto_dialog,
+        plugins: Some(plugin_registry_json.as_str()),
     };
 
     let daemon_result = match ensure_daemon(&flags.session, &daemon_opts) {
@@ -769,127 +1233,19 @@ fn main() {
             exit(1);
         }
     };
+    let _daemon_was_already_running = daemon_result.already_running;
+    let daemon_restarted = daemon_result.restarted;
 
-    // Warn if launch-time options were explicitly passed via CLI but daemon was already running
-    // Only warn about flags that were passed on the command line, not those set via environment
-    // variables (since the daemon already uses the env vars when it starts).
-    if daemon_result.already_running {
-        let ignored_flags: Vec<&str> = [
-            if flags.cli_executable_path {
-                Some("--executable-path")
-            } else {
-                None
-            },
-            if flags.cli_extensions {
-                Some("--extension")
-            } else {
-                None
-            },
-            if flags.cli_profile {
-                Some("--profile")
-            } else {
-                None
-            },
-            if flags.cli_state {
-                Some("--state")
-            } else {
-                None
-            },
-            if flags.cli_args { Some("--args") } else { None },
-            if flags.cli_user_agent {
-                Some("--user-agent")
-            } else {
-                None
-            },
-            if flags.cli_proxy {
-                Some("--proxy")
-            } else {
-                None
-            },
-            if flags.cli_proxy_bypass {
-                Some("--proxy-bypass")
-            } else {
-                None
-            },
-            flags.ignore_https_errors.then_some("--ignore-https-errors"),
-            flags.cli_allow_file_access.then_some("--allow-file-access"),
-            flags.cli_download_path.then_some("--download-path"),
-            flags.cli_headed.then_some("--headed"),
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
-
-        if !ignored_flags.is_empty() && !flags.json {
-            eprintln!(
-                "{} {} ignored: daemon already running. Use 'agent-browser close' first to restart with new options.",
-                color::warning_indicator(),
-                ignored_flags.join(", ")
-            );
-        }
-    }
-
-    // Validate mutually exclusive options
-    if flags.cdp.is_some() && flags.provider.is_some() {
-        let msg = "Cannot use --cdp and -p/--provider together";
-        if flags.json {
-            print_json_error(msg);
-        } else {
-            eprintln!("{} {}", color::error_indicator(), msg);
-        }
-        exit(1);
-    }
-
-    if flags.auto_connect && flags.cdp.is_some() {
-        let msg = "Cannot use --auto-connect and --cdp together";
-        if flags.json {
-            print_json_error(msg);
-        } else {
-            eprintln!("{} {}", color::error_indicator(), msg);
-        }
-        exit(1);
-    }
-
-    if flags.auto_connect && flags.provider.is_some() {
-        let msg = "Cannot use --auto-connect and -p/--provider together";
-        if flags.json {
-            print_json_error(msg);
-        } else {
-            eprintln!("{} {}", color::error_indicator(), msg);
-        }
-        exit(1);
-    }
-
-    if flags.provider.is_some() && !flags.extensions.is_empty() {
-        let msg = "Cannot use --extension with -p/--provider (extensions require local browser)";
-        if flags.json {
-            print_json_error(msg);
-        } else {
-            eprintln!("{} {}", color::error_indicator(), msg);
-        }
-        exit(1);
-    }
-
-    if flags.cdp.is_some() && !flags.extensions.is_empty() {
-        let msg = "Cannot use --extension with --cdp (extensions require local browser)";
-        if flags.json {
-            print_json_error(msg);
-        } else {
-            eprintln!("{} {}", color::error_indicator(), msg);
-        }
-        exit(1);
-    }
-
-    // Auto-connect to existing browser.
-    // Skip when the daemon was already running — it already holds the connection
-    // from a previous auto-connect launch, so re-sending the launch command would
-    // redundantly probe Chrome and may trigger repeated permission prompts (#962).
-    if flags.auto_connect && !daemon_result.already_running {
+    // Auto-connect to existing browser. This is sent even when the daemon is
+    // already running so launch compatibility stays idempotent.
+    if flags.auto_connect {
         let mut launch_cmd = json!({
             "id": gen_id(),
             "action": "launch",
             "autoConnect": true
         });
+        attach_script_launch_options(&mut launch_cmd, &flags);
+        attach_restore_config_to_command(&mut launch_cmd, &flags);
 
         if flags.ignore_https_errors {
             launch_cmd["ignoreHTTPSErrors"] = json!(true);
@@ -924,7 +1280,6 @@ fn main() {
 
     // Connect via CDP if --cdp flag is set
     // Accepts either a port number (e.g., "9222") or a full URL (e.g., "ws://..." or "wss://...")
-    // Skip when daemon already running — it already holds the CDP connection.
     if let Some(ref cdp_value) = flags.cdp {
         // Validate CDP value eagerly (even when daemon is already running) so
         // the user gets an immediate error for bad input instead of a silent no-op.
@@ -984,72 +1339,72 @@ fn main() {
             })
         };
 
-        if !daemon_result.already_running {
-            let mut launch_cmd = launch_cmd;
+        let mut launch_cmd = launch_cmd;
+        attach_script_launch_options(&mut launch_cmd, &flags);
+        attach_restore_config_to_command(&mut launch_cmd, &flags);
 
-            if flags.ignore_https_errors {
-                launch_cmd["ignoreHTTPSErrors"] = json!(true);
+        if flags.ignore_https_errors {
+            launch_cmd["ignoreHTTPSErrors"] = json!(true);
+        }
+
+        if let Some(ref cs) = flags.color_scheme {
+            launch_cmd["colorScheme"] = json!(cs);
+        }
+
+        if let Some(ref dp) = flags.download_path {
+            launch_cmd["downloadPath"] = json!(dp);
+        }
+
+        let err = match send_command(launch_cmd, &flags.session) {
+            Ok(resp) if resp.success => None,
+            Ok(resp) => Some(
+                resp.error
+                    .unwrap_or_else(|| "CDP connection failed".to_string()),
+            ),
+            Err(e) => Some(e.to_string()),
+        };
+
+        if let Some(msg) = err {
+            if flags.json {
+                print_json_error(msg);
+            } else {
+                eprintln!("{} {}", color::error_indicator(), msg);
             }
-
-            if let Some(ref cs) = flags.color_scheme {
-                launch_cmd["colorScheme"] = json!(cs);
-            }
-
-            if let Some(ref dp) = flags.download_path {
-                launch_cmd["downloadPath"] = json!(dp);
-            }
-
-            let err = match send_command(launch_cmd, &flags.session) {
-                Ok(resp) if resp.success => None,
-                Ok(resp) => Some(
-                    resp.error
-                        .unwrap_or_else(|| "CDP connection failed".to_string()),
-                ),
-                Err(e) => Some(e.to_string()),
-            };
-
-            if let Some(msg) = err {
-                if flags.json {
-                    print_json_error(msg);
-                } else {
-                    eprintln!("{} {}", color::error_indicator(), msg);
-                }
-                exit(1);
-            }
+            exit(1);
         }
     }
 
-    // Launch with cloud provider if -p flag is set
-    // Skip when daemon already running — it already holds the provider connection.
+    // Launch with cloud provider if -p flag is set.
     if let Some(ref provider) = flags.provider {
-        if !daemon_result.already_running {
-            let mut launch_cmd = json!({
-                "id": gen_id(),
-                "action": "launch",
-                "provider": provider
-            });
+        let mut launch_cmd = json!({
+            "id": gen_id(),
+            "action": "launch",
+            "provider": provider
+        });
+        launch_cmd["plugins"] = json!(flags.plugins.clone());
+        attach_script_launch_options(&mut launch_cmd, &flags);
+        attach_restore_config_to_command(&mut launch_cmd, &flags);
 
-            if let Some(ref cs) = flags.color_scheme {
-                launch_cmd["colorScheme"] = json!(cs);
+        if let Some(ref cs) = flags.color_scheme {
+            launch_cmd["colorScheme"] = json!(cs);
+        }
+
+        let err = match send_command(launch_cmd, &flags.session) {
+            Ok(resp) if resp.success => None,
+            Ok(resp) => Some(
+                resp.error
+                    .unwrap_or_else(|| "Provider connection failed".to_string()),
+            ),
+            Err(e) => Some(e.to_string()),
+        };
+
+        if let Some(msg) = err {
+            if flags.json {
+                print_json_error(msg);
+            } else {
+                eprintln!("{} {}", color::error_indicator(), msg);
             }
-
-            let err = match send_command(launch_cmd, &flags.session) {
-                Ok(resp) if resp.success => None,
-                Ok(resp) => Some(
-                    resp.error
-                        .unwrap_or_else(|| "Provider connection failed".to_string()),
-                ),
-                Err(e) => Some(e.to_string()),
-            };
-
-            if let Some(msg) = err {
-                if flags.json {
-                    print_json_error(msg);
-                } else {
-                    eprintln!("{} {}", color::error_indicator(), msg);
-                }
-                exit(1);
-            }
+            exit(1);
         }
     }
 
@@ -1063,9 +1418,15 @@ fn main() {
         || flags.args.is_some()
         || flags.user_agent.is_some()
         || flags.allow_file_access
+        || should_send_hide_scrollbars_launch_option(
+            flags.cli_hide_scrollbars,
+            flags.hide_scrollbars,
+        )
         || flags.color_scheme.is_some()
         || flags.download_path.is_some()
         || flags.engine.is_some()
+        || !flags.init_scripts.is_empty()
+        || !flags.enable.is_empty()
         || !flags.extensions.is_empty())
         && flags.cdp.is_none()
         && flags.provider.is_none()
@@ -1076,6 +1437,8 @@ fn main() {
             "action": "launch",
             "headless": !flags.headed
         });
+        launch_cmd["plugins"] = json!(flags.plugins.clone());
+        attach_restore_config_to_command(&mut launch_cmd, &flags);
 
         let cmd_obj = launch_cmd
             .as_object_mut()
@@ -1129,6 +1492,14 @@ fn main() {
             cmd_obj.insert("extensions".to_string(), json!(&flags.extensions));
         }
 
+        if !flags.init_scripts.is_empty() {
+            cmd_obj.insert("initScripts".to_string(), json!(&flags.init_scripts));
+        }
+
+        if !flags.enable.is_empty() {
+            cmd_obj.insert("enable".to_string(), json!(&flags.enable));
+        }
+
         if flags.ignore_https_errors {
             launch_cmd["ignoreHTTPSErrors"] = json!(true);
         }
@@ -1136,6 +1507,12 @@ fn main() {
         if flags.allow_file_access {
             launch_cmd["allowFileAccess"] = json!(true);
         }
+
+        apply_hide_scrollbars_launch_option(
+            &mut launch_cmd,
+            flags.cli_hide_scrollbars,
+            flags.hide_scrollbars,
+        );
 
         if let Some(ref cs) = flags.color_scheme {
             launch_cmd["colorScheme"] = json!(cs);
@@ -1193,68 +1570,28 @@ fn main() {
                 .map(commands::shell_words_split)
                 .collect::<Vec<Vec<String>>>()
         });
-        run_batch(&flags, bail, arg_commands);
+        run_batch(&flags, &daemon_opts, bail, arg_commands);
         return;
     }
 
     let output_opts = OutputOptions::from_flags(&flags);
 
-    match send_command(cmd.clone(), &flags.session) {
-        Ok(resp) => {
-            let success = resp.success;
-            // Handle interactive confirmation
-            if flags.confirm_interactive {
-                if let Some(data) = &resp.data {
-                    if data
-                        .get("confirmation_required")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false)
-                    {
-                        let desc = data
-                            .get("description")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("unknown action");
-                        let category = data.get("category").and_then(|v| v.as_str()).unwrap_or("");
-                        let cid = data
-                            .get("confirmation_id")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
-
-                        eprintln!("[agent-browser] Action requires confirmation:");
-                        eprintln!("  {}: {}", category, desc);
-                        eprint!("  Allow? [y/N]: ");
-
-                        let mut input = String::new();
-                        let approved = if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
-                            std::io::stdin().read_line(&mut input).is_ok()
-                                && matches!(input.trim().to_lowercase().as_str(), "y" | "yes")
-                        } else {
-                            false
-                        };
-
-                        let confirm_cmd = if approved {
-                            json!({ "id": gen_id(), "action": "confirm", "confirmationId": cid })
-                        } else {
-                            json!({ "id": gen_id(), "action": "deny", "confirmationId": cid })
-                        };
-
-                        match send_command(confirm_cmd, &flags.session) {
-                            Ok(r) => {
-                                if !approved {
-                                    eprintln!("{} Action denied", color::error_indicator());
-                                    exit(1);
-                                }
-                                print_response_with_opts(&r, None, &output_opts);
-                            }
-                            Err(e) => {
-                                eprintln!("{} {}", color::error_indicator(), e);
-                                exit(1);
-                            }
-                        }
-                        return;
-                    }
-                }
+    match send_command_with_respawn(cmd.clone(), &flags.session, &daemon_opts) {
+        Ok(mut resp) => {
+            if daemon_restarted {
+                mark_restarted_background(&mut resp);
             }
+            if flags.confirm_interactive && confirmation_prompt_from_response(&resp).is_some() {
+                resp = run_interactive_confirmations(resp, &flags, &output_opts);
+                if daemon_restarted {
+                    mark_restarted_background(&mut resp);
+                }
+                if !resp.success {
+                    exit(1);
+                }
+                return;
+            }
+            let success = resp.success;
             // Extract action for context-specific output handling
             let action = cmd.get("action").and_then(|v| v.as_str());
             print_response_with_opts(&resp, action, &output_opts);
@@ -1273,7 +1610,31 @@ fn main() {
     }
 }
 
-fn run_batch(flags: &Flags, bail: bool, arg_commands: Option<Vec<Vec<String>>>) {
+/// send_command plus the daemon-shutdown-race recovery: ensure_daemon no
+/// longer pays a settle-sleep on every invocation, so a daemon that exited
+/// right after its liveness check surfaces as an unreachable socket on the
+/// request itself. Respawn once and retry before reporting failure.
+fn send_command_with_respawn(
+    cmd: serde_json::Value,
+    session: &str,
+    daemon_opts: &DaemonOptions,
+) -> Result<connection::Response, String> {
+    let first_attempt = send_command(cmd.clone(), session);
+    match first_attempt {
+        Err(ref e) if daemon_unreachable(e) => match ensure_daemon(session, daemon_opts) {
+            Ok(_) => send_command(cmd, session),
+            Err(_) => first_attempt,
+        },
+        other => other,
+    }
+}
+
+fn run_batch(
+    flags: &Flags,
+    daemon_opts: &DaemonOptions,
+    bail: bool,
+    arg_commands: Option<Vec<Vec<String>>>,
+) {
     let commands: Vec<Vec<String>> = if let Some(cmds) = arg_commands {
         cmds
     } else {
@@ -1326,7 +1687,7 @@ fn run_batch(flags: &Flags, bail: bool, arg_commands: Option<Vec<Vec<String>>>) 
             continue;
         }
 
-        let parsed = match parse_command(cmd_args, flags) {
+        let mut parsed = match parse_command(cmd_args, flags) {
             Ok(c) => c,
             Err(e) => {
                 had_error = true;
@@ -1358,8 +1719,10 @@ fn run_batch(flags: &Flags, bail: bool, arg_commands: Option<Vec<Vec<String>>>) 
             .get("action")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
+        attach_plugins_to_command(&mut parsed, &flags.plugins);
+        attach_restore_config_to_command(&mut parsed, flags);
 
-        match send_command(parsed, &flags.session) {
+        match send_command_with_respawn(parsed, &flags.session, daemon_opts) {
             Ok(resp) => {
                 if flags.json {
                     results.push(json!({
@@ -1488,5 +1851,201 @@ mod tests {
             parsed["error"],
             "Daemon process exited during startup:\nline \"quoted\"\u{001b}[2mansi\u{001b}[22m"
         );
+    }
+
+    #[test]
+    fn test_hide_scrollbars_launch_option_serialization() {
+        assert!(!should_send_hide_scrollbars_launch_option(false, true));
+        assert!(should_send_hide_scrollbars_launch_option(false, false));
+        assert!(should_send_hide_scrollbars_launch_option(true, true));
+
+        let mut default_cmd = json!({ "action": "launch" });
+        apply_hide_scrollbars_launch_option(&mut default_cmd, false, true);
+        assert!(default_cmd.get("hideScrollbars").is_none());
+
+        let mut config_false_cmd = json!({ "action": "launch" });
+        apply_hide_scrollbars_launch_option(&mut config_false_cmd, false, false);
+        assert_eq!(config_false_cmd["hideScrollbars"], false);
+
+        let mut cli_true_cmd = json!({ "action": "launch" });
+        apply_hide_scrollbars_launch_option(&mut cli_true_cmd, true, true);
+        assert_eq!(cli_true_cmd["hideScrollbars"], true);
+    }
+
+    #[test]
+    fn test_attach_plugins_to_command_adds_registry_payload() {
+        let plugins = vec![crate::plugins::PluginConfig {
+            name: "stealth".to_string(),
+            command: "agent-browser-plugin-stealth".to_string(),
+            capabilities: vec!["launch.mutate".to_string()],
+            ..crate::plugins::PluginConfig::default()
+        }];
+        let mut cmd = json!({ "action": "navigate", "url": "https://example.com" });
+
+        attach_plugins_to_command(&mut cmd, &plugins);
+
+        assert_eq!(cmd["plugins"][0]["name"], "stealth");
+        assert_eq!(cmd["plugins"][0]["capabilities"][0], "launch.mutate");
+    }
+
+    #[test]
+    fn test_attach_plugins_to_command_adds_empty_registry_payload() {
+        let mut cmd = json!({ "action": "navigate", "url": "https://example.com" });
+
+        attach_plugins_to_command(&mut cmd, &[]);
+
+        assert_eq!(cmd["plugins"], json!([]));
+    }
+
+    #[test]
+    fn test_attach_restore_config_to_command_uses_session_for_bare_restore() {
+        let args = vec![
+            "--session".to_string(),
+            "next-loop".to_string(),
+            "--restore".to_string(),
+            "--restore-save".to_string(),
+            "always".to_string(),
+            "--restore-check-url".to_string(),
+            "**/dashboard".to_string(),
+            "--restore-check-text".to_string(),
+            "Dashboard".to_string(),
+            "--restore-check-fn".to_string(),
+            "!!localStorage.getItem('session')".to_string(),
+            "open".to_string(),
+            "http://localhost:3000".to_string(),
+        ];
+        let mut flags = parse_flags(&args);
+        if flags.restore_uses_session {
+            flags.restore = Some(flags.session.clone());
+        }
+        let mut cmd = json!({ "action": "launch" });
+
+        attach_restore_config_to_command(&mut cmd, &flags);
+
+        assert_eq!(cmd["restoreKey"], "next-loop");
+        assert_eq!(cmd["restoreSave"], "always");
+        assert_eq!(cmd["restoreCheckUrl"], "**/dashboard");
+        assert_eq!(cmd["restoreCheckText"], "Dashboard");
+        assert_eq!(cmd["restoreCheckFn"], "!!localStorage.getItem('session')");
+    }
+
+    #[test]
+    fn test_attach_restore_config_to_command_sends_defaults_and_clears_checks() {
+        let args = vec![
+            "--session".to_string(),
+            "next-loop".to_string(),
+            "--restore".to_string(),
+            "open".to_string(),
+            "http://localhost:3000".to_string(),
+        ];
+        let mut flags = parse_flags(&args);
+        if flags.restore_uses_session {
+            flags.restore = Some(flags.session.clone());
+        }
+        let mut cmd = json!({ "action": "navigate" });
+
+        attach_restore_config_to_command(&mut cmd, &flags);
+
+        assert_eq!(cmd["restoreKey"], "next-loop");
+        assert_eq!(cmd["restoreSave"], "auto");
+        assert!(cmd["restoreCheckUrl"].is_null());
+        assert!(cmd["restoreCheckText"].is_null());
+        assert!(cmd["restoreCheckFn"].is_null());
+    }
+
+    fn launch_mode_flags(auto_connect: bool, cdp: bool, provider: bool, extensions: bool) -> Flags {
+        let mut flags = parse_flags(&[]);
+        flags.auto_connect = auto_connect;
+        flags.cdp = cdp.then(|| "9222".to_string());
+        flags.provider = provider.then(|| "ios".to_string());
+        flags.extensions = if extensions {
+            vec!["/tmp/ext".to_string()]
+        } else {
+            Vec::new()
+        };
+        flags
+    }
+
+    #[test]
+    fn test_incompatible_launch_mode_error_matches_existing_messages() {
+        let cases = [
+            (
+                launch_mode_flags(false, true, true, false),
+                "Cannot use --cdp and -p/--provider together",
+            ),
+            (
+                launch_mode_flags(true, true, false, false),
+                "Cannot use --auto-connect and --cdp together",
+            ),
+            (
+                launch_mode_flags(true, false, true, false),
+                "Cannot use --auto-connect and -p/--provider together",
+            ),
+            (
+                launch_mode_flags(false, false, true, true),
+                "Cannot use --extension with -p/--provider (extensions require local browser)",
+            ),
+            (
+                launch_mode_flags(false, true, false, true),
+                "Cannot use --extension with --cdp (extensions require local browser)",
+            ),
+        ];
+
+        for (flags, expected) in cases {
+            assert_eq!(incompatible_launch_mode_error(&flags), Some(expected));
+        }
+    }
+
+    #[test]
+    fn test_incompatible_launch_mode_error_allows_compatible_flags() {
+        assert_eq!(
+            incompatible_launch_mode_error(&launch_mode_flags(true, false, false, false)),
+            None
+        );
+        assert_eq!(
+            incompatible_launch_mode_error(&launch_mode_flags(false, true, false, false)),
+            None
+        );
+        assert_eq!(
+            incompatible_launch_mode_error(&launch_mode_flags(false, false, true, false)),
+            None
+        );
+    }
+
+    #[test]
+    fn test_resolve_session_id_scope_accepts_cwd_and_rejects_unknown() {
+        let (scope, path) = resolve_session_id_scope("cwd").unwrap();
+
+        assert_eq!(scope, "cwd");
+        assert!(path.is_absolute());
+        assert!(resolve_session_id_scope("branch").is_err());
+    }
+
+    #[test]
+    fn test_confirmation_prompt_from_response_finds_nested_confirm_result() {
+        let resp = Response {
+            success: true,
+            data: Some(json!({
+                "confirmed": true,
+                "action": "navigate",
+                "result": {
+                    "id": "original-command",
+                    "success": true,
+                    "data": {
+                        "confirmation_required": true,
+                        "confirmation_id": "original-command",
+                        "action": "plugin:stealth:launch.mutate"
+                    }
+                }
+            })),
+            error: None,
+            warning: None,
+        };
+
+        let prompt = confirmation_prompt_from_response(&resp).unwrap();
+
+        assert_eq!(prompt.action, "plugin:stealth:launch.mutate");
+        assert_eq!(prompt.description, "plugin:stealth:launch.mutate");
+        assert_eq!(prompt.confirmation_id, "original-command");
     }
 }
