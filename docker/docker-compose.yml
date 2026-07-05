@@ -17,25 +17,6 @@ services:
       - ../bin:/output
     command: |
       -c '
-<<<<<<< HEAD
-        set -e
-        if [ ! -f /packages/dashboard/out/index.html ] || grep -q "Dashboard not built" /packages/dashboard/out/index.html; then
-          echo "Dashboard output is missing. Run: pnpm run build:dashboard"
-          exit 1
-        fi
-        echo "Building for Linux platforms (parallel)..."
-        
-        # Build both targets in parallel
-        (echo "→ Linux x64" && cargo zigbuild --release --target x86_64-unknown-linux-gnu && cp /build/target/x86_64-unknown-linux-gnu/release/agent-browser /output/agent-browser-linux-x64 && chmod +x /output/agent-browser-linux-x64 && echo "✓ Linux x64 done") &
-        PID1=$!
-        
-        (echo "→ Linux ARM64" && cargo zigbuild --release --target aarch64-unknown-linux-gnu && cp /build/target/aarch64-unknown-linux-gnu/release/agent-browser /output/agent-browser-linux-arm64 && chmod +x /output/agent-browser-linux-arm64 && echo "✓ Linux ARM64 done") &
-        PID2=$!
-        
-        # Wait for both to complete
-        wait $PID1 $PID2
-        
-=======
         set -euo pipefail
         echo "Building for Linux platforms..."
 
@@ -53,7 +34,6 @@ services:
         chmod +x /output/agent-browser-linux-arm64
         echo "✓ Linux ARM64 done"
 
->>>>>>> refs/tags/v0.31.1
         echo ""
         echo "✓ Linux platforms built successfully!"
         ls -la /output/agent-browser-linux-*
@@ -71,15 +51,7 @@ services:
       - ../bin:/output
     command: |
       -c '
-<<<<<<< HEAD
-        set -e
-        if [ ! -f /packages/dashboard/out/index.html ] || grep -q "Dashboard not built" /packages/dashboard/out/index.html; then
-          echo "Dashboard output is missing. Run: pnpm run build:dashboard"
-          exit 1
-        fi
-=======
         set -euo pipefail
->>>>>>> refs/tags/v0.31.1
         echo "Building for Windows x64..."
 
         rm -f /output/agent-browser-win32-x64.exe
@@ -109,16 +81,6 @@ services:
       - OUTPUT_NAME=${OUTPUT_NAME:-agent-browser-linux-x64}
     command: |
       -c '
-<<<<<<< HEAD
-        if [ ! -f /packages/dashboard/out/index.html ] || grep -q "Dashboard not built" /packages/dashboard/out/index.html; then
-          echo "Dashboard output is missing. Run: pnpm run build:dashboard"
-          exit 1
-        fi
-        cargo zigbuild --release --target $TARGET
-        cp /build/target/$TARGET/release/agent-browser* /output/$OUTPUT_NAME
-        chmod +x /output/$OUTPUT_NAME 2>/dev/null || true
-        echo "✓ Built $OUTPUT_NAME"
-=======
         set -euo pipefail
 
         rust_target="$${RUST_TARGET:-}"
@@ -201,5 +163,4 @@ services:
         cp "$$source_path" /output/$$OUTPUT_NAME
         chmod +x /output/$$OUTPUT_NAME 2>/dev/null || true
         echo "✓ Built $$OUTPUT_NAME"
->>>>>>> refs/tags/v0.31.1
       '

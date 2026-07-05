@@ -1,9 +1,5 @@
 # Multi-platform Rust cross-compilation image
-<<<<<<< HEAD
-FROM rust:1.95.0-bookworm
-=======
 FROM rust:1.88-bookworm
->>>>>>> refs/tags/v0.31.1
 
 # Install cross-compilation toolchains
 RUN apt-get update && apt-get install -y \

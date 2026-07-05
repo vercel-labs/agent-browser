@@ -70,8 +70,5 @@ docs/package-lock.json
 # next
 .next/
 out/
-<<<<<<< HEAD
 agent-browser-*.tgz
-=======
 next-env.d.ts
->>>>>>> refs/tags/v0.31.1
