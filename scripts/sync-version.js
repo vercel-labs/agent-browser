@@ -56,6 +56,36 @@ if (dashboardPkg.version !== version) {
   console.log(`  packages/dashboard/package.json already up to date`);
 }
 
+// Update packages/@agent-browser/sandbox/package.json
+const sandboxPkgPath = join(rootDir, "packages", "@agent-browser", "sandbox", "package.json");
+const sandboxPkg = JSON.parse(readFileSync(sandboxPkgPath, "utf-8"));
+if (sandboxPkg.version !== version) {
+  const oldVersion = sandboxPkg.version;
+  sandboxPkg.version = version;
+  writeFileSync(sandboxPkgPath, JSON.stringify(sandboxPkg, null, 2) + "\n");
+  console.log(`  Updated packages/@agent-browser/sandbox/package.json: ${oldVersion} -> ${version}`);
+} else {
+  console.log(`  packages/@agent-browser/sandbox/package.json already up to date`);
+}
+
+// Update package runtime version constant
+const sandboxVersionPath = join(
+  rootDir,
+  "packages",
+  "@agent-browser",
+  "sandbox",
+  "src",
+  "version.ts",
+);
+const sandboxVersionSource = `export const AGENT_BROWSER_SANDBOX_VERSION = "${version}";\n`;
+const currentSandboxVersionSource = readFileSync(sandboxVersionPath, "utf-8");
+if (currentSandboxVersionSource !== sandboxVersionSource) {
+  writeFileSync(sandboxVersionPath, sandboxVersionSource);
+  console.log(`  Updated packages/@agent-browser/sandbox/src/version.ts -> ${version}`);
+} else {
+  console.log(`  packages/@agent-browser/sandbox/src/version.ts already up to date`);
+}
+
 // Update Cargo.lock to match Cargo.toml
 if (cargoTomlUpdated) {
   try {

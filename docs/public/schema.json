@@ -20,9 +20,35 @@
       "type": "string",
       "description": "Session identifier."
     },
+    "restore": {
+      "type": "string",
+      "description": "Auto-save/restore persistence key. A bare CLI --restore uses the current session; config values use this explicit key."
+    },
+    "restoreSave": {
+      "type": "string",
+      "enum": ["auto", "always", "never"],
+      "default": "auto",
+      "description": "Auto-save policy for restored state."
+    },
+    "restoreCheckUrl": {
+      "type": "string",
+      "description": "URL glob that restored state must match before auto-save."
+    },
+    "restoreCheckText": {
+      "type": "string",
+      "description": "Visible page text that restored state must expose before auto-save."
+    },
+    "restoreCheckFn": {
+      "type": "string",
+      "description": "JavaScript expression that must evaluate truthy before restored state is auto-saved."
+    },
+    "namespace": {
+      "type": "string",
+      "description": "Namespace that isolates daemon sockets and restore-state directories."
+    },
     "sessionName": {
       "type": "string",
-      "description": "Auto-save/load state persistence name."
+      "description": "Legacy alias for restore persistence key."
     },
     "executablePath": {
       "type": "string",
@@ -34,6 +60,21 @@
         "type": "string"
       },
       "description": "Paths to browser extensions. Extensions from user-level and project-level configs are concatenated."
+    },
+    "initScripts": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Page init script paths registered before navigation."
+    },
+    "enable": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": ["react-devtools"]
+      },
+      "description": "Built-in launch features to enable."
     },
     "profile": {
       "type": "string",
@@ -164,6 +205,43 @@
     "headers": {
       "type": "string",
       "description": "Custom HTTP headers supplied as a JSON-formatted string."
+    },
+    "plugins": {
+      "type": "array",
+      "description": "External plugin registry. Project-level entries are appended after user-level entries, and duplicate names resolve to the later entry.",
+      "items": {
+        "type": "object",
+        "required": ["name", "command"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Plugin name used by commands such as auth login --credential-provider."
+          },
+          "command": {
+            "type": "string",
+            "description": "Executable path or command name for the plugin process."
+          },
+          "args": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Optional arguments passed to the plugin process. Do not store secrets here."
+          },
+          "capabilities": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Capabilities declared by the plugin. Built-in capability names include credential.read, browser.provider, launch.mutate, and command.run; plugins may also declare custom names such as captcha.solve."
+          },
+          "source": {
+            "type": "string",
+            "description": "Optional source recorded by agent-browser plugin add, such as npm:agent-browser-plugin-example or github:owner/repo."
+          }
+        },
+        "additionalProperties": true
+      }
     }
   },
   "additionalProperties": true

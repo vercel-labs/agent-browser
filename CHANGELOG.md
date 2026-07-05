@@ -1,8 +1,130 @@
 # agent-browser
 
-## 0.27.1
+## 0.31.1
 
 <!-- release:start -->
+### Bug Fixes
+
+- Fixed the **React renderer** so it picks the react-dom renderer instead of hardcoding renderer id 1, which prevented reading an empty tree on Next.js 16.3 Turbopack (#1491)
+
+### Contributors
+
+- @gaojude
+<!-- release:end -->
+
+## 0.31.0
+
+### New Features
+
+- **Restore workflow** - Added `--restore`, `--restore-save`, restore validation flags, worktree-scoped `session id`, `session info`, and `--namespace` so agent runs can use stable, isolated, automatically restored browser state without managing state files by hand (#1486)
+
+### Improvements
+
+- Hardened **session lifecycle handling** with explicit daemon and browser compatibility checks, lifecycle status output, MCP support for restore options, and safer auto-save behavior that avoids overwriting good state after a failed restore or failed validation (#1486)
+
+### Bug Fixes
+
+- Fixed **restore lifecycle edge cases** around switching restore keys with a live browser, daemon configuration startup races, launch mode validation, and clearing restore failures after an explicit state load (#1486)
+
+### Contributors
+
+- @ctate
+
+## 0.30.1
+
+### Bug Fixes
+
+- Fixed **URL waits** so `wait --url` and `waitforurl` honor glob patterns such as `**/dashboard` against the full active URL (#1483)
+
+### Contributors
+
+- @gaearon
+
+## 0.30.0
+
+### New Features
+
+- **Read command** - Added `agent-browser read [url]` and the matching MCP tool for agent-readable text extraction. URL reads prefer Markdown, try `.md` and nearby `llms.txt` docs, support outlines, filters, raw and JSON output, headers, and domain/output safeguards; omitting the URL reads the rendered active tab DOM with current browser state (#1480)
+
+### Contributors
+
+- @ctate
+
+## 0.29.1
+
+### Improvements
+
+- Defaulted **sandbox system dependency installs** so the Eve and Vercel sandbox helpers install Chromium's required libraries unless explicitly disabled, making first-run sandbox setup simpler (#1469)
+
+### Contributors
+
+- @ctate
+
+## 0.29.0
+
+### New Features
+
+- **Sandbox package** - Added `@agent-browser/sandbox` with shared, Eve, and Vercel Sandbox helpers, example projects, and docs for running agent-browser in hosted sandbox environments (#1465)
+
+### Improvements
+
+- Updated **sandbox release flow** so the new package stays version-synced with the CLI release and publishes from the correct workspace path (#1465)
+- Reflowed **documentation prose** across the README, docs site, examples, and skills so Markdown and MDX wrap naturally in editors and renderers (#1466)
+
+### Contributors
+
+- @ctate
+
+## 0.28.0
+
+### New Features
+
+- **MCP server** - Added `agent-browser mcp`, a stdio Model Context Protocol server with typed tools, paginated discovery, protocol negotiation, and startup tool profiles. The default `core` profile keeps context small, while `--tools all` exposes full CLI parity and composed profiles such as `core,network,react` are supported (#1454)
+- **Plugin system** - Added out-of-process plugin support over the `agent-browser.plugin.v1` stdio protocol, with `plugin add/list/show/run`, manifest discovery, npm and GitHub refs, credential providers, browser provider plugins, launch mutators, custom command capabilities, config and env registry support, and capability-scoped policy gates (#1452)
+
+### Infrastructure
+
+- Added **context footprint eval coverage** for CLI skills, MCP core, and MCP full-profile surfaces, plus MCP parity tests to keep tool behavior aligned with the CLI (#1454)
+
+### Contributors
+
+- @ctate
+
+## 0.27.3
+
+### Bug Fixes
+
+- Fixed **Windows ARM64 installs** by falling back to the Windows x64 binary during postinstall, avoiding failed downloads for a native ARM64 artifact that is not published (#1269)
+
+### Contributors
+
+- @EternalRights
+
+## 0.27.2
+
+### Bug Fixes
+
+- Fixed **click reliability** by scrolling off-viewport elements into view before resolving coordinates, handling JavaScript dialogs promptly, recovering mouse state after dialog-opening clicks, and detecting click interception by overlays before dispatching input (#1432, #1434)
+- Fixed **frame-scoped selectors and waits** so CSS-selector actions and `wait` respect the selected iframe, including cross-process iframes, with translated click coordinates (#1432)
+- Fixed **wait timeout handling** so the documented 25s default is used, `--timeout` is honored across wait variants, and long waits receive an appropriate client read budget (#1432)
+- Fixed **agent-facing form commands** so `find label` matches `aria-label` and `aria-labelledby`, `select` errors when no option matches, and `type` parses `--clear` and `--delay` instead of typing them as text (#1432)
+
+### Improvements
+
+- Cut **warm CLI command latency** from about 150ms to about 1ms by removing the unconditional daemon settle sleep and retrying once when a stale daemon socket is discovered (#1432)
+- Extended **daemon respawn and retry** handling to batch commands so batches recover from a daemon exit after the initial liveness check (#1432)
+
+### Infrastructure
+
+- Pinned **GNU Linux release artifacts** to glibc 2.28 with zigbuild, added a release guard for newer GLIBC symbols, and aligned Docker release helpers with the pinned target (#1417)
+
+### Contributors
+
+- @ctate
+- @heshamkhaledd
+
+## 0.27.1
+
 ### Improvements
 
 - Improved **`vitals` command** output formatting for better readability (#1404)
@@ -10,7 +132,6 @@
 ### Documentation
 
 - Surfaced agent-browser feature coverage in documentation (#1403)
-<!-- release:end -->
 
 ## 0.27.0
 

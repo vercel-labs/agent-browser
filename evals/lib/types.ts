@@ -1,4 +1,8 @@
-export type Category = "skill-loading" | "skill-selection" | "command-usage";
+export type Category =
+  | "skill-loading"
+  | "skill-selection"
+  | "command-usage"
+  | "context-footprint";
 export type ProviderName = "claude" | "codex";
 
 export interface ProviderOptions {

@@ -8,13 +8,50 @@
 //! Kept as raw strings rather than TS/JS files because the daemon is a single
 //! Rust binary with no filesystem vendor step at runtime.
 
+/// JS helper injected into every renderer-reading script via the `{{PICK_RI}}`
+/// placeholder. Defines `__abPickReactRendererId(hook)`, which returns the id of
+/// the renderer interface that actually holds the app's DOM tree.
+///
+/// We used to hardcode `rendererInterfaces.get(1)`, assuming the first renderer
+/// to call `hook.inject()` is react-dom. In Turbopack RSC apps (e.g. Next.js
+/// 16.3+) the `react-server-dom-*` Flight client registers first as id 1 with
+/// zero fiber roots, so `get(1)` read an empty tree and every `react` command
+/// silently reported nothing. Instead, pick the first non-Flight renderer that
+/// has mounted fiber roots, falling back to any renderer with roots, then any
+/// renderer at all.
+pub const PICK_REACT_RENDERER: &str = r#"
+  function __abPickReactRendererId(hook) {
+    const ris = hook && hook.rendererInterfaces;
+    if (!ris || !ris.get || !ris.keys) return null;
+    const rootsOf = (id) => {
+      try { return hook.getFiberRoots ? hook.getFiberRoots(id).size : 0; } catch (e) { return 0; }
+    };
+    const isFlight = (id) => {
+      const r = hook.renderers && hook.renderers.get && hook.renderers.get(id);
+      return /react-server-dom/.test((r && r.rendererPackageName) || "");
+    };
+    let firstWithRoots = null, firstAny = null;
+    for (const id of ris.keys()) {
+      if (!ris.get(id)) continue;
+      if (firstAny === null) firstAny = id;
+      if (rootsOf(id) > 0) {
+        if (firstWithRoots === null) firstWithRoots = id;
+        if (!isFlight(id)) return id;
+      }
+    }
+    return firstWithRoots !== null ? firstWithRoots : firstAny;
+  }
+"#;
+
 /// Build a no-argument async IIFE page-eval that returns the component tree as
 /// JSON.
 pub const TREE_SNAPSHOT: &str = r#"
 (async () => {
   const hook = window.__REACT_DEVTOOLS_GLOBAL_HOOK__;
   if (!hook) throw new Error("React DevTools hook not installed - relaunch with --enable react-devtools");
-  const ri = hook.rendererInterfaces && hook.rendererInterfaces.get && hook.rendererInterfaces.get(1);
+{{PICK_RI}}
+  const __abRiId = __abPickReactRendererId(hook);
+  const ri = (__abRiId != null && hook.rendererInterfaces && hook.rendererInterfaces.get) ? hook.rendererInterfaces.get(__abRiId) : null;
   if (!ri) throw new Error("No React renderer attached - the page has not booted React yet");
 
   const batches = await new Promise((resolve) => {
@@ -100,10 +137,12 @@ pub const TREE_INSPECT: &str = r#"
 (() => {
   const id = {{ID}};
   const hook = window.__REACT_DEVTOOLS_GLOBAL_HOOK__;
-  const ri = hook && hook.rendererInterfaces && hook.rendererInterfaces.get && hook.rendererInterfaces.get(1);
+{{PICK_RI}}
+  const __abRiId = __abPickReactRendererId(hook);
+  const ri = (__abRiId != null && hook.rendererInterfaces && hook.rendererInterfaces.get) ? hook.rendererInterfaces.get(__abRiId) : null;
   if (!ri) throw new Error("No React renderer attached");
   if (!ri.hasElementWithId(id)) throw new Error("element " + id + " not found (page reloaded?)");
-  const result = ri.inspectElement(1, id, null, true);
+  const result = ri.inspectElement(__abRiId, id, null, true);
   if (!result || result.type !== "full-data") {
     throw new Error("inspect failed: " + (result && result.type));
   }
@@ -431,7 +470,9 @@ pub const SUSPENSE_WALK: &str = r#"
 (async () => {
   const hook = window.__REACT_DEVTOOLS_GLOBAL_HOOK__;
   if (!hook) throw new Error("React DevTools hook not installed - relaunch with --enable react-devtools");
-  const ri = hook.rendererInterfaces && hook.rendererInterfaces.get && hook.rendererInterfaces.get(1);
+{{PICK_RI}}
+  const __abRiId = __abPickReactRendererId(hook);
+  const ri = (__abRiId != null && hook.rendererInterfaces && hook.rendererInterfaces.get) ? hook.rendererInterfaces.get(__abRiId) : null;
   if (!ri) throw new Error("No React renderer attached");
 
   const batches = await new Promise((resolve) => {
@@ -468,7 +509,7 @@ pub const SUSPENSE_WALK: &str = r#"
     if (ri.hasElementWithId(b.id)) {
       const displayName = ri.getDisplayNameForElementID(b.id);
       if (displayName) boundary.name = displayName;
-      const result = ri.inspectElement(1, b.id, null, true);
+      const result = ri.inspectElement(__abRiId, b.id, null, true);
       if (result && result.type === "full-data") {
         parseInspection(boundary, result.value);
       }
@@ -743,3 +784,59 @@ pub const PUSHSTATE: &str = r#"
   return location.href;
 })({{URL}})
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every renderer-reading script must select its renderer via the injected
+    /// `__abPickReactRendererId` helper rather than the old hardcoded
+    /// `rendererInterfaces.get(1)`. On Turbopack RSC apps (Next.js 16.3+) the
+    /// Flight renderer registers first as id 1 with no fiber roots, so the
+    /// hardcoded id made `react tree`/`inspect`/`suspense` read an empty tree.
+    #[test]
+    fn renderer_scripts_use_picker_not_hardcoded_id_1() {
+        for (name, script) in [
+            ("TREE_SNAPSHOT", TREE_SNAPSHOT),
+            ("TREE_INSPECT", TREE_INSPECT),
+            ("SUSPENSE_WALK", SUSPENSE_WALK),
+        ] {
+            assert!(
+                script.contains("{{PICK_RI}}"),
+                "{name} must inject the renderer picker via the {{{{PICK_RI}}}} placeholder"
+            );
+
+            let full = script.replace("{{PICK_RI}}", PICK_REACT_RENDERER);
+            assert!(
+                !full.contains("{{PICK_RI}}"),
+                "{name} still has an unresolved {{{{PICK_RI}}}} placeholder after injection"
+            );
+            assert!(
+                full.contains("function __abPickReactRendererId"),
+                "{name} is missing the picker definition after injection"
+            );
+            assert!(
+                full.contains("__abPickReactRendererId(hook)"),
+                "{name} does not call the picker to choose a renderer"
+            );
+            assert!(
+                !full.contains(".get(1)"),
+                "{name} still hardcodes rendererInterfaces.get(1)"
+            );
+            assert!(
+                !full.contains("inspectElement(1,"),
+                "{name} still hardcodes inspectElement with renderer id 1"
+            );
+        }
+    }
+
+    /// The picker prefers a non-Flight renderer with mounted fiber roots and
+    /// falls back gracefully, never assuming a fixed renderer id.
+    #[test]
+    fn picker_skips_flight_and_falls_back() {
+        assert!(PICK_REACT_RENDERER.contains("react-server-dom"));
+        assert!(PICK_REACT_RENDERER.contains("getFiberRoots"));
+        assert!(PICK_REACT_RENDERER.contains("firstWithRoots"));
+        assert!(PICK_REACT_RENDERER.contains("firstAny"));
+    }
+}

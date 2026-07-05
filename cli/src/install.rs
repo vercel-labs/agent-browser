@@ -2,7 +2,7 @@ use crate::color;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::process::{exit, Command, Stdio};
+use std::process::{exit, Command, ExitStatus, Stdio};
 
 const LAST_KNOWN_GOOD_URL: &str =
     "https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json";
@@ -497,85 +497,134 @@ pub fn run_install(with_deps: bool) {
     }
 }
 
-fn report_install_status(status: io::Result<std::process::ExitStatus>) {
+fn install_status_result(status: io::Result<ExitStatus>) -> Result<(), String> {
     match status {
-        Ok(s) if s.success() => {
+        Ok(s) if s.success() => Ok(()),
+        Ok(s) => Err(format!(
+            "dependency install command failed with exit code {}",
+            s.code()
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        )),
+        Err(e) => Err(format!("could not run install command: {}", e)),
+    }
+}
+
+fn report_install_status(status: io::Result<ExitStatus>) {
+    match install_status_result(status) {
+        Ok(()) => {
             println!(
                 "{} System dependencies installed",
                 color::success_indicator()
             )
         }
-        Ok(_) => eprintln!(
-            "{} Failed to install some dependencies. You may need to run manually with sudo.",
-            color::warning_indicator()
-        ),
-        Err(e) => eprintln!(
-            "{} Could not run install command: {}",
-            color::warning_indicator(),
-            e
-        ),
+        Err(e) => {
+            eprintln!(
+                "{} Failed to install system dependencies: {}",
+                color::error_indicator(),
+                e
+            );
+            eprintln!("  Install the missing packages manually or retry with a supported package manager.");
+            exit(1);
+        }
     }
+}
+
+fn apt_dependency_specs() -> Vec<(&'static str, Option<&'static str>)> {
+    vec![
+        ("libxcb-shm0", None),
+        ("libx11-xcb1", None),
+        ("libx11-6", None),
+        ("libxcb1", None),
+        ("libxext6", None),
+        ("libxrandr2", None),
+        ("libxcomposite1", None),
+        ("libxcursor1", None),
+        ("libxdamage1", None),
+        ("libxfixes3", None),
+        ("libxi6", None),
+        ("libgtk-3-0", Some("libgtk-3-0t64")),
+        ("libpangocairo-1.0-0", Some("libpangocairo-1.0-0t64")),
+        ("libpango-1.0-0", Some("libpango-1.0-0t64")),
+        ("libatk1.0-0", Some("libatk1.0-0t64")),
+        ("libcairo-gobject2", Some("libcairo-gobject2t64")),
+        ("libcairo2", Some("libcairo2t64")),
+        ("libgdk-pixbuf-2.0-0", Some("libgdk-pixbuf-2.0-0t64")),
+        ("libxrender1", None),
+        ("libasound2", Some("libasound2t64")),
+        ("libfreetype6", None),
+        ("libfontconfig1", None),
+        ("libdbus-1-3", Some("libdbus-1-3t64")),
+        ("libnss3", None),
+        ("libnspr4", None),
+        ("libatk-bridge2.0-0", Some("libatk-bridge2.0-0t64")),
+        ("libdrm2", None),
+        ("libxkbcommon0", None),
+        ("libatspi2.0-0", Some("libatspi2.0-0t64")),
+        ("libcups2", Some("libcups2t64")),
+        ("libxshmfence1", None),
+        ("libgbm1", None),
+        // Fonts: without actual font files, pages render with missing glyphs
+        // (tofu). This is especially visible for CJK and emoji characters.
+        ("fonts-noto-color-emoji", None),
+        ("fonts-noto-cjk", None),
+        ("fonts-freefont-ttf", None),
+    ]
+}
+
+fn resolve_apt_deps_with<F>(mut package_exists: F) -> Vec<&'static str>
+where
+    F: FnMut(&str) -> bool,
+{
+    apt_dependency_specs()
+        .into_iter()
+        .map(|(base, t64_variant)| {
+            if let Some(t64) = t64_variant {
+                if package_exists(t64) {
+                    return t64;
+                }
+            }
+            base
+        })
+        .collect()
+}
+
+fn resolve_apt_deps() -> Vec<&'static str> {
+    resolve_apt_deps_with(package_exists_apt)
 }
 
 fn install_linux_deps() {
     println!("{}", color::cyan("Installing system dependencies..."));
 
     let (pkg_mgr, deps) = if which_exists("apt-get") {
+        // Run apt-get update before resolving t64 package variants. Fresh
+        // sandbox images may have no local package index yet, which would
+        // make apt-cache miss packages that are actually available.
+        println!("Running: sudo apt-get update");
+        let update_status = Command::new("sudo").args(["apt-get", "update"]).status();
+
+        match update_status {
+            Ok(s) if !s.success() => {
+                eprintln!(
+                    "{} apt-get update failed. Continuing with existing package lists.",
+                    color::warning_indicator()
+                );
+            }
+            Err(e) => {
+                eprintln!(
+                    "{} Could not run apt-get update: {}",
+                    color::warning_indicator(),
+                    e
+                );
+            }
+            _ => {}
+        }
+
         // On Ubuntu 24.04+, many libraries were renamed with a t64 suffix as
         // part of the 64-bit time_t transition. Using the old names can cause
-        // apt to propose removing hundreds of system packages to resolve
-        // conflicts. We check for the t64 variant first to avoid this.
-        let apt_deps: Vec<&str> = vec![
-            ("libxcb-shm0", None),
-            ("libx11-xcb1", None),
-            ("libx11-6", None),
-            ("libxcb1", None),
-            ("libxext6", None),
-            ("libxrandr2", None),
-            ("libxcomposite1", None),
-            ("libxcursor1", None),
-            ("libxdamage1", None),
-            ("libxfixes3", None),
-            ("libxi6", None),
-            ("libgtk-3-0", Some("libgtk-3-0t64")),
-            ("libpangocairo-1.0-0", Some("libpangocairo-1.0-0t64")),
-            ("libpango-1.0-0", Some("libpango-1.0-0t64")),
-            ("libatk1.0-0", Some("libatk1.0-0t64")),
-            ("libcairo-gobject2", Some("libcairo-gobject2t64")),
-            ("libcairo2", Some("libcairo2t64")),
-            ("libgdk-pixbuf-2.0-0", Some("libgdk-pixbuf-2.0-0t64")),
-            ("libxrender1", None),
-            ("libasound2", Some("libasound2t64")),
-            ("libfreetype6", None),
-            ("libfontconfig1", None),
-            ("libdbus-1-3", Some("libdbus-1-3t64")),
-            ("libnss3", None),
-            ("libnspr4", None),
-            ("libatk-bridge2.0-0", Some("libatk-bridge2.0-0t64")),
-            ("libdrm2", None),
-            ("libxkbcommon0", None),
-            ("libatspi2.0-0", Some("libatspi2.0-0t64")),
-            ("libcups2", Some("libcups2t64")),
-            ("libxshmfence1", None),
-            ("libgbm1", None),
-            // Fonts: without actual font files, pages render with missing glyphs
-            // (tofu). This is especially visible for CJK and emoji characters.
-            ("fonts-noto-color-emoji", None),
-            ("fonts-noto-cjk", None),
-            ("fonts-freefont-ttf", None),
-        ]
-        .into_iter()
-        .map(|(base, t64_variant)| {
-            if let Some(t64) = t64_variant {
-                if package_exists_apt(t64) {
-                    return t64;
-                }
-            }
-            base
-        })
-        .collect();
-
-        ("apt-get", apt_deps)
+        // apt to propose removing packages or fail on images where only the
+        // t64 package exists.
+        ("apt-get", resolve_apt_deps())
     } else if which_exists("dnf") {
         (
             "dnf",
@@ -639,27 +688,6 @@ fn install_linux_deps() {
     };
 
     if pkg_mgr == "apt-get" {
-        // Run apt-get update first
-        println!("Running: sudo apt-get update");
-        let update_status = Command::new("sudo").args(["apt-get", "update"]).status();
-
-        match update_status {
-            Ok(s) if !s.success() => {
-                eprintln!(
-                    "{} apt-get update failed. Continuing with existing package lists.",
-                    color::warning_indicator()
-                );
-            }
-            Err(e) => {
-                eprintln!(
-                    "{} Could not run apt-get update: {}",
-                    color::warning_indicator(),
-                    e
-                );
-            }
-            _ => {}
-        }
-
         // Simulate the install first to detect if apt would remove any
         // packages. This prevents the catastrophic scenario where installing
         // these libraries triggers removal of hundreds of system packages
@@ -676,6 +704,23 @@ fn install_linux_deps() {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 let combined = format!("{}\n{}", stdout, stderr);
+
+                if !output.status.success() {
+                    eprintln!(
+                        "{} Aborting: apt could not install the required browser dependencies.",
+                        color::error_indicator()
+                    );
+                    if !stdout.trim().is_empty() {
+                        eprintln!("{}", stdout.trim());
+                    }
+                    if !stderr.trim().is_empty() {
+                        eprintln!("{}", stderr.trim());
+                    }
+                    eprintln!();
+                    eprintln!("  To install dependencies manually, run:");
+                    eprintln!("    sudo apt-get install {}", deps.join(" "));
+                    exit(1);
+                }
 
                 // Count packages that would be removed
                 let removals: Vec<&str> = combined
@@ -778,6 +823,20 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
+    fn failed_exit_status() -> ExitStatus {
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            ExitStatus::from_raw(1 << 8)
+        }
+
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::ExitStatusExt;
+            ExitStatus::from_raw(1)
+        }
+    }
+
     fn http_response(status: u16, reason: &str, body: &[u8]) -> Vec<u8> {
         let header = format!(
             "HTTP/1.1 {} {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -804,6 +863,41 @@ mod tests {
         let request = String::from_utf8_lossy(&buf[..n]).to_string();
         s.write_all(response).await.unwrap();
         request
+    }
+
+    #[test]
+    fn resolve_apt_deps_prefers_available_t64_variants() {
+        let deps = resolve_apt_deps_with(|pkg| matches!(pkg, "libasound2t64" | "libgtk-3-0t64"));
+
+        assert!(deps.contains(&"libasound2t64"));
+        assert!(!deps.contains(&"libasound2"));
+        assert!(deps.contains(&"libgtk-3-0t64"));
+        assert!(!deps.contains(&"libgtk-3-0"));
+        assert!(deps.contains(&"libnss3"));
+    }
+
+    #[test]
+    fn resolve_apt_deps_falls_back_to_base_names_when_t64_missing() {
+        let deps = resolve_apt_deps_with(|_| false);
+
+        assert!(deps.contains(&"libasound2"));
+        assert!(!deps.contains(&"libasound2t64"));
+        assert!(deps.contains(&"libgtk-3-0"));
+        assert!(!deps.contains(&"libgtk-3-0t64"));
+    }
+
+    #[test]
+    fn install_status_result_rejects_failed_dependency_command() {
+        let err = install_status_result(Ok(failed_exit_status())).unwrap_err();
+        assert!(err.contains("dependency install command failed"));
+    }
+
+    #[test]
+    fn install_status_result_rejects_command_spawn_failure() {
+        let err =
+            install_status_result(Err(io::Error::new(io::ErrorKind::NotFound, "missing sudo")))
+                .unwrap_err();
+        assert!(err.contains("could not run install command"));
     }
 
     #[tokio::test]

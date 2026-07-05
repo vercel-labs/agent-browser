@@ -41,7 +41,8 @@ let evalHome: string | null = null;
 
 function getEvalHome(model: string): string {
   if (!evalHome) {
-    evalHome = join(tmpdir(), `agent-browser-evals-${process.pid}`);
+    const tmpRoot = existsSync("/private/tmp") ? "/private/tmp" : tmpdir();
+    evalHome = join(tmpRoot, `agent-browser-evals-${process.pid}`);
   }
   const configDir = join(evalHome, ".codex");
   const configPath = join(configDir, "config.toml");
@@ -109,21 +110,25 @@ function spawnCodex(
   model: string,
   timeout: number,
 ): Promise<{ output: string; stderr: string; exitCode: number }> {
-  const escaped = prompt.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
   const proc = Bun.spawn(
     [
       "codex",
       "exec",
       "--dangerously-bypass-approvals-and-sandbox",
       "--json",
-      escaped,
+      "--model",
+      model,
+      "-",
     ],
     {
+      stdin: "pipe",
       stdout: "pipe",
       stderr: "pipe",
       env: getCodexEnv(model),
     },
   );
+  proc.stdin.write(prompt);
+  proc.stdin.end();
 
   return Promise.race([
     (async () => {
@@ -159,10 +164,11 @@ export const codexProvider: Provider = {
       const durationMs = Math.round(performance.now() - start);
 
       if (result.exitCode !== 0) {
+        const detail = result.stderr.trim() || result.output.slice(0, 1000);
         return {
           output: "",
           durationMs,
-          error: `codex exited with code ${result.exitCode}: ${result.stderr}`,
+          error: `codex exited with code ${result.exitCode}: ${detail}`,
         };
       }
 
@@ -187,10 +193,11 @@ export const codexProvider: Provider = {
       const durationMs = Math.round(performance.now() - start);
 
       if (result.exitCode !== 0) {
+        const detail = result.stderr.trim() || result.output.slice(0, 1000);
         return {
           output: "",
           durationMs,
-          error: `codex exited with code ${result.exitCode}: ${result.stderr}`,
+          error: `codex exited with code ${result.exitCode}: ${detail}`,
         };
       }
 

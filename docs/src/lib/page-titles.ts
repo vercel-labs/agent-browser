@@ -5,6 +5,7 @@ export const PAGE_TITLES: Record<string, string> = {
   skills: "Skills",
   commands: "Commands",
   configuration: "Configuration",
+  plugins: "Plugins",
   selectors: "Selectors",
   snapshots: "Snapshots",
   sessions: "Sessions",

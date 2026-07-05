@@ -33,6 +33,10 @@ bun run run.ts --provider codex
 bun run run.ts --category skill-loading
 bun run run.ts --category skill-selection
 bun run run.ts --category command-usage
+bun run run.ts --category context-footprint
+
+# Run deterministic CLI vs MCP context footprint measurement
+bun run context-footprint.ts
 
 # Use a specific model (overrides provider default)
 bun run run.ts --model anthropic/claude-opus-4.6
@@ -54,6 +58,7 @@ Or via package scripts:
 bun run eval           # run all (Claude)
 bun run eval:claude    # run all (Claude, explicit)
 bun run eval:codex     # run all (Codex)
+bun run eval:context   # measure CLI vs MCP context footprint
 bun run eval:judge     # run all with LLM judge
 bun run eval:json      # JSON output
 ```
@@ -81,6 +86,12 @@ Tests that the agent picks the correct specialized skill for the task. For examp
 ### command-usage
 
 Tests that the agent produces correct agent-browser commands for common workflows: navigation + screenshot, form filling with snapshot-interact pattern, diffing, authentication, data extraction.
+
+### context-footprint
+
+Tests that the agent understands the context tradeoff between CLI and MCP. The CLI path starts with the thin installed skill, then uses `agent-browser skills list` and `agent-browser skills get core --full` to load the live command reference. The MCP path uses `initialize` plus paginated `tools/list` discovery with typed schemas and annotations.
+
+`bun run context-footprint.ts` is the deterministic companion eval. It measures bytes and approximate tokens for the thin skill, CLI skill output, MCP `initialize`, the default core MCP profile, and the full `--tools all` MCP profile. It writes a JSON report to `evals/results/context-footprint.json`.
 
 ## How It Works
 

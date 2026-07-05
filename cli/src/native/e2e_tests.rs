@@ -94,6 +94,63 @@ async fn create_storage_state_with_cookie(path: &str, cookie_name: &str, cookie_
     assert_success(&resp);
 }
 
+async fn create_restore_state_with_cookie(
+    restore_key: &str,
+    cookie_name: &str,
+    cookie_value: &str,
+) {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({
+            "id": "1",
+            "action": "navigate",
+            "url": "https://example.com",
+            "restoreKey": restore_key
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "2",
+            "action": "cookies_set",
+            "name": cookie_name,
+            "value": cookie_value,
+            "domain": ".example.com",
+            "path": "/",
+            "expires": 2000000000
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(&json!({ "id": "3", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["saveStatus"], "saved");
+}
+
+fn cleanup_restore_state_files(restore_key: &str) {
+    let Some(sessions_dir) = dirs::home_dir().map(|home| home.join(".agent-browser/sessions"))
+    else {
+        return;
+    };
+
+    if let Ok(entries) = std::fs::read_dir(&sessions_dir) {
+        for entry in entries.flatten() {
+            let fname = entry.file_name().to_string_lossy().to_string();
+            if fname.starts_with(&format!("{}-", restore_key)) {
+                let path = entry.path();
+                let _ = std::fs::remove_file(&path);
+                let _ = std::fs::remove_file(format!("{}.previous", path.to_string_lossy()));
+            }
+        }
+    }
+}
+
 async fn send_raw_http_request(port: u64, request: &str) -> String {
     let mut stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{port}"))
         .await
@@ -2702,6 +2759,89 @@ async fn e2e_error_handling() {
     assert_success(&resp);
 }
 
+#[tokio::test]
+#[ignore]
+async fn e2e_click_reports_covering_overlay() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = r#"
+        <html>
+        <body>
+            <button id="target" onclick="document.getElementById('result').textContent = 'clicked'">
+                Target
+            </button>
+            <div id="consent-banner" style="position:fixed;inset:0;z-index:10;background:rgba(0,0,0,0.1)">
+                <button id="dismiss" style="position:absolute;right:20px;bottom:20px"
+                    onclick="document.getElementById('consent-banner').remove()">
+                    Dismiss
+                </button>
+            </div>
+            <div id="result">idle</div>
+        </body>
+        </html>
+    "#;
+    let url = format!("data:text/html;base64,{}", STANDARD.encode(html));
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "click", "selector": "#target" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(resp["success"], false, "covered target should fail: {resp}");
+    let error = resp["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("covered by <div#consent-banner>"),
+        "unexpected covered-click error: {}",
+        error
+    );
+
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "gettext", "selector": "#result" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["text"], "idle");
+
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "click", "selector": "#dismiss" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "click", "selector": "#target" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "7", "action": "gettext", "selector": "#result" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["text"], "clicked");
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 // ---------------------------------------------------------------------------
 // Profile cookie persistence across restarts
 // ---------------------------------------------------------------------------
@@ -3493,6 +3633,58 @@ async fn start_echo_server() -> (String, tokio::task::JoinHandle<()>) {
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
                      Access-Control-Allow-Origin: *\r\nContent-Length: {}\r\n\
                      Connection: close\r\n\r\n{}",
+                    body.len(),
+                    body,
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.flush().await;
+            });
+        }
+    });
+
+    (base_url, handle)
+}
+
+/// Starts a tiny cookie-gated app that behaves like a Next dev target with
+/// cookie-backed login state.
+async fn start_cookie_login_server() -> (String, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let base_url = format!("http://127.0.0.1:{}", port);
+
+    let handle = tokio::spawn(async move {
+        for _ in 0..100 {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
+            };
+
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 8192];
+                let n = stream.read(&mut buf).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..n]);
+                let request_line = request.lines().next().unwrap_or_default();
+                let path = request_line.split_whitespace().nth(1).unwrap_or("/");
+                let has_auth_cookie = request.lines().any(|line| {
+                    line.to_ascii_lowercase().starts_with("cookie:")
+                        && line.contains("next_dev_loop_auth=1")
+                });
+
+                let mut headers = vec!["Content-Type: text/html".to_string()];
+                let body = if path.starts_with("/login") {
+                    headers.push(
+                        "Set-Cookie: next_dev_loop_auth=1; Path=/; Max-Age=3600; SameSite=Lax"
+                            .to_string(),
+                    );
+                    "<!doctype html><title>Logged in</title><main>Login complete</main>".to_string()
+                } else if has_auth_cookie {
+                    "<!doctype html><title>Home</title><main>Welcome back</main>".to_string()
+                } else {
+                    "<!doctype html><title>Home</title><main>Please sign in</main>".to_string()
+                };
+
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\n{}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    headers.join("\r\n"),
                     body.len(),
                     body,
                 );
@@ -5101,11 +5293,7 @@ async fn e2e_session_name_auto_restores_cookies() {
     }
 
     // Session 2: fresh DaemonState with same session_name. Navigate without
-    // explicit launch — this triggers auto_launch which calls
-    // try_auto_restore_state.
-    //
-    // NOTE: an explicit `launch` command skips auto_launch entirely, so
-    // session-name auto-restore only fires via the auto_launch path.
+    // explicit launch, which triggers auto_launch and restore.
     {
         let mut state = DaemonState::new();
 
@@ -5150,6 +5338,423 @@ async fn e2e_session_name_auto_restores_cookies() {
             }
         }
     }
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_restore_loads_during_explicit_launch_before_navigation() {
+    let restore_key = format!(
+        "e2e-explicit-restore-{}",
+        &uuid::Uuid::new_v4().to_string()[..8]
+    );
+    let env = EnvGuard::new(&[
+        "AGENT_BROWSER_SESSION_NAME",
+        "AGENT_BROWSER_RESTORE_SAVE",
+        "AGENT_BROWSER_STATE",
+        "AGENT_BROWSER_ENCRYPTION_KEY",
+    ]);
+    env.remove("AGENT_BROWSER_SESSION_NAME");
+    env.remove("AGENT_BROWSER_RESTORE_SAVE");
+    env.remove("AGENT_BROWSER_STATE");
+    env.remove("AGENT_BROWSER_ENCRYPTION_KEY");
+
+    {
+        let mut state = DaemonState::new();
+        let resp = execute_command(
+            &json!({
+                "id": "1",
+                "action": "launch",
+                "headless": true,
+                "restoreKey": restore_key
+            }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        let resp = execute_command(
+            &json!({ "id": "2", "action": "navigate", "url": "https://example.com" }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        let resp = execute_command(
+            &json!({
+                "id": "3",
+                "action": "cookies_set",
+                "name": "explicit_restore_test",
+                "value": "loaded_before_navigation",
+                "domain": ".example.com",
+                "path": "/",
+                "expires": 2000000000
+            }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        let resp = execute_command(&json!({ "id": "4", "action": "close" }), &mut state).await;
+        assert_success(&resp);
+        assert_eq!(get_data(&resp)["saveStatus"], "saved");
+    }
+
+    let path = super::state::find_auto_state_file(&restore_key)
+        .expect("first close should create restore state");
+
+    {
+        let mut state = DaemonState::new();
+        let resp = execute_command(
+            &json!({
+                "id": "10",
+                "action": "launch",
+                "headless": true,
+                "restoreKey": restore_key
+            }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+        assert_eq!(get_data(&resp)["lifecycle"]["restoreStatus"], "loaded");
+
+        let resp = execute_command(
+            &json!({ "id": "11", "action": "navigate", "url": "https://example.com" }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        let resp =
+            execute_command(&json!({ "id": "12", "action": "cookies_get" }), &mut state).await;
+        assert_success(&resp);
+        let cookies = get_data(&resp)["cookies"].as_array().unwrap();
+        let found = cookies.iter().any(|c| {
+            c["name"] == "explicit_restore_test" && c["value"] == "loaded_before_navigation"
+        });
+        assert!(
+            found,
+            "Cookie should be restored by explicit launch before first navigation. Cookies found: {:?}",
+            cookies
+                .iter()
+                .map(|c| c["name"].as_str().unwrap_or("?"))
+                .collect::<Vec<_>>()
+        );
+
+        let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+        assert_success(&resp);
+    }
+
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(format!("{}.previous", path));
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_restore_preserves_cookie_login_after_close_and_reopen() {
+    let restore_key = format!(
+        "e2e-next-cookie-login-{}",
+        &uuid::Uuid::new_v4().to_string()[..8]
+    );
+    let env = EnvGuard::new(&[
+        "AGENT_BROWSER_SESSION_NAME",
+        "AGENT_BROWSER_RESTORE_SAVE",
+        "AGENT_BROWSER_STATE",
+        "AGENT_BROWSER_ENCRYPTION_KEY",
+    ]);
+    env.remove("AGENT_BROWSER_SESSION_NAME");
+    env.remove("AGENT_BROWSER_RESTORE_SAVE");
+    env.remove("AGENT_BROWSER_STATE");
+    env.remove("AGENT_BROWSER_ENCRYPTION_KEY");
+
+    let (base_url, _server) = start_cookie_login_server().await;
+
+    {
+        let mut state = DaemonState::new();
+
+        let resp = execute_command(
+            &json!({
+                "id": "1",
+                "action": "navigate",
+                "url": base_url.clone(),
+                "restoreKey": restore_key
+            }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+        assert_eq!(get_data(&resp)["lifecycle"]["restoreStatus"], "missing");
+
+        let resp = execute_command(
+            &json!({ "id": "2", "action": "evaluate", "script": "document.body.innerText" }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+        assert!(
+            get_data(&resp)["result"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Please sign in"),
+            "first homepage load should be logged out: {}",
+            resp
+        );
+
+        let resp = execute_command(
+            &json!({
+                "id": "3",
+                "action": "navigate",
+                "url": format!("{}/login", base_url),
+                "restoreKey": restore_key
+            }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        let resp = execute_command(
+            &json!({
+                "id": "4",
+                "action": "navigate",
+                "url": base_url.clone(),
+                "restoreKey": restore_key
+            }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        let resp = execute_command(
+            &json!({ "id": "5", "action": "evaluate", "script": "document.body.innerText" }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+        assert!(
+            get_data(&resp)["result"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Welcome back"),
+            "login route should set cookie for current browser: {}",
+            resp
+        );
+
+        let resp = execute_command(&json!({ "id": "6", "action": "close" }), &mut state).await;
+        assert_success(&resp);
+        assert_eq!(get_data(&resp)["saveStatus"], "saved");
+    }
+
+    let path = super::state::find_auto_state_file(&restore_key)
+        .expect("close should save cookie-backed restore state");
+
+    {
+        let mut state = DaemonState::new();
+        let resp = execute_command(
+            &json!({
+                "id": "10",
+                "action": "navigate",
+                "url": base_url.clone(),
+                "restoreKey": restore_key
+            }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+        assert_eq!(get_data(&resp)["lifecycle"]["restoreStatus"], "loaded");
+
+        let resp = execute_command(
+            &json!({ "id": "11", "action": "evaluate", "script": "document.body.innerText" }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+        assert!(
+            get_data(&resp)["result"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Welcome back"),
+            "reopened session should keep cookie login on homepage: {}",
+            resp
+        );
+
+        let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+        assert_success(&resp);
+    }
+
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(format!("{}.previous", path));
+    cleanup_restore_state_files(&restore_key);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_restore_validation_failure_does_not_overwrite_state() {
+    let restore_key = format!(
+        "e2e-restore-validation-{}",
+        &uuid::Uuid::new_v4().to_string()[..8]
+    );
+
+    {
+        let mut state = DaemonState::new();
+        let resp = execute_command(
+            &json!({
+                "id": "1",
+                "action": "navigate",
+                "url": "https://example.com",
+                "restoreKey": restore_key
+            }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        let resp = execute_command(
+            &json!({
+                "id": "2",
+                "action": "cookies_set",
+                "name": "restore_validation_test",
+                "value": "known_good",
+                "domain": ".example.com",
+                "path": "/",
+                "expires": 2000000000
+            }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        let resp = execute_command(&json!({ "id": "3", "action": "close" }), &mut state).await;
+        assert_success(&resp);
+        assert_eq!(get_data(&resp)["saveStatus"], "saved");
+    }
+
+    let path = super::state::find_auto_state_file(&restore_key)
+        .expect("first close should create restore state");
+    let before = std::fs::read_to_string(&path).expect("state file should be readable");
+
+    {
+        let mut state = DaemonState::new();
+        let resp = execute_command(
+            &json!({
+                "id": "10",
+                "action": "navigate",
+                "url": "https://example.com",
+                "restoreKey": restore_key,
+                "restoreCheckText": "text-that-does-not-exist-in-the-page"
+            }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+        assert_eq!(
+            get_data(&resp)["lifecycle"]["restoreStatus"],
+            "loaded_but_invalid"
+        );
+
+        let resp = execute_command(&json!({ "id": "11", "action": "close" }), &mut state).await;
+        assert_success(&resp);
+        assert_eq!(get_data(&resp)["saveStatus"], "skipped_restore_failed");
+    }
+
+    let after = std::fs::read_to_string(&path).expect("state file should still be readable");
+    assert_eq!(
+        before, after,
+        "failed restore validation must not overwrite previous state"
+    );
+
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(format!("{}.previous", path));
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_restore_key_switch_reloads_instead_of_reusing_live_browser() {
+    let restore_key_a = format!(
+        "e2e-restore-switch-a-{}",
+        &uuid::Uuid::new_v4().to_string()[..8]
+    );
+    let restore_key_b = format!(
+        "e2e-restore-switch-b-{}",
+        &uuid::Uuid::new_v4().to_string()[..8]
+    );
+    let cookie_name = "restore_switch_test";
+    let env = EnvGuard::new(&[
+        "AGENT_BROWSER_SESSION_NAME",
+        "AGENT_BROWSER_RESTORE_SAVE",
+        "AGENT_BROWSER_STATE",
+        "AGENT_BROWSER_ENCRYPTION_KEY",
+    ]);
+    env.remove("AGENT_BROWSER_SESSION_NAME");
+    env.remove("AGENT_BROWSER_RESTORE_SAVE");
+    env.remove("AGENT_BROWSER_STATE");
+    env.remove("AGENT_BROWSER_ENCRYPTION_KEY");
+
+    create_restore_state_with_cookie(&restore_key_a, cookie_name, "value-a").await;
+    create_restore_state_with_cookie(&restore_key_b, cookie_name, "value-b").await;
+
+    let path_a = super::state::find_auto_state_file(&restore_key_a)
+        .expect("first restore key should have saved state");
+    let path_b = super::state::find_auto_state_file(&restore_key_b)
+        .expect("second restore key should have saved state");
+
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({
+            "id": "10",
+            "action": "navigate",
+            "url": "https://example.com",
+            "restoreKey": restore_key_a
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(&json!({ "id": "11", "action": "cookies_get" }), &mut state).await;
+    assert_success(&resp);
+    let cookies = get_data(&resp)["cookies"].as_array().unwrap();
+    assert!(
+        cookies
+            .iter()
+            .any(|c| c["name"] == cookie_name && c["value"] == "value-a"),
+        "first restore key should load value-a: {:?}",
+        cookies
+    );
+
+    let resp = execute_command(
+        &json!({
+            "id": "20",
+            "action": "navigate",
+            "url": "https://example.com",
+            "restoreKey": restore_key_b
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["lifecycle"]["relaunchedBrowser"], true);
+
+    let resp = execute_command(&json!({ "id": "21", "action": "cookies_get" }), &mut state).await;
+    assert_success(&resp);
+    let cookies = get_data(&resp)["cookies"].as_array().unwrap();
+    assert!(
+        cookies
+            .iter()
+            .any(|c| c["name"] == cookie_name && c["value"] == "value-b"),
+        "switching restore keys should load value-b, not reuse value-a: {:?}",
+        cookies
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+
+    let saved_b = std::fs::read_to_string(&path_b).expect("state file should remain readable");
+    assert!(saved_b.contains("value-b"));
+    assert!(!saved_b.contains("value-a"));
+
+    let _ = std::fs::remove_file(&path_a);
+    let _ = std::fs::remove_file(format!("{}.previous", path_a));
+    let _ = std::fs::remove_file(&path_b);
+    let _ = std::fs::remove_file(format!("{}.previous", path_b));
 }
 
 /// Verify that explicit `state_load` restores cookies into an existing
@@ -5366,6 +5971,78 @@ async fn e2e_react_tree_with_enable_hook() {
     assert!(
         tree.contains("Counter"),
         "Expected tree to contain 'Counter': {}",
+        tree
+    );
+
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_relaunch_when_enable_changes_installs_react_hook() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": &react_fixture_url() }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(&json!({ "id": "3", "action": "react_tree" }), &mut state).await;
+    assert!(
+        resp.get("success").and_then(|v| v.as_bool()) == Some(false),
+        "React tree should fail before react-devtools is enabled: {}",
+        resp
+    );
+
+    let resp = execute_command(
+        &json!({
+            "id": "4",
+            "action": "launch",
+            "headless": true,
+            "enable": ["react-devtools"]
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert!(
+        get_data(&resp).get("reused").is_none(),
+        "changed enable list must relaunch, not reuse: {}",
+        resp
+    );
+    assert_eq!(
+        get_data(&resp)["lifecycle"]["relaunchedBrowser"],
+        true,
+        "lifecycle should report browser relaunch"
+    );
+
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "navigate", "url": &react_fixture_url() }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+
+    let resp = execute_command(&json!({ "id": "6", "action": "react_tree" }), &mut state).await;
+    assert_success(&resp);
+    let tree = get_data(&resp)
+        .get("tree")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    assert!(
+        tree.contains("App"),
+        "Expected tree to contain App: {}",
         tree
     );
 

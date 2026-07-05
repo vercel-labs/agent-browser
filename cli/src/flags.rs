@@ -1,4 +1,5 @@
 use crate::color;
+use crate::plugins::PluginConfig;
 use serde::Deserialize;
 use std::env;
 use std::fs;
@@ -58,6 +59,12 @@ pub struct Config {
     pub debug: Option<bool>,
     pub session: Option<String>,
     pub session_name: Option<String>,
+    pub restore: Option<String>,
+    pub restore_save: Option<String>,
+    pub restore_check_url: Option<String>,
+    pub restore_check_text: Option<String>,
+    pub restore_check_fn: Option<String>,
+    pub namespace: Option<String>,
     pub executable_path: Option<String>,
     pub extensions: Option<Vec<String>>,
     pub init_scripts: Option<Vec<String>>,
@@ -92,6 +99,7 @@ pub struct Config {
     pub idle_timeout: Option<String>,
     pub no_auto_dialog: Option<bool>,
     pub model: Option<String>,
+    pub plugins: Option<Vec<PluginConfig>>,
 }
 
 impl Config {
@@ -102,6 +110,12 @@ impl Config {
             debug: other.debug.or(self.debug),
             session: other.session.or(self.session),
             session_name: other.session_name.or(self.session_name),
+            restore: other.restore.or(self.restore),
+            restore_save: other.restore_save.or(self.restore_save),
+            restore_check_url: other.restore_check_url.or(self.restore_check_url),
+            restore_check_text: other.restore_check_text.or(self.restore_check_text),
+            restore_check_fn: other.restore_check_fn.or(self.restore_check_fn),
+            namespace: other.namespace.or(self.namespace),
             executable_path: other.executable_path.or(self.executable_path),
             extensions: match (self.extensions, other.extensions) {
                 (Some(mut a), Some(b)) => {
@@ -154,6 +168,13 @@ impl Config {
             idle_timeout: other.idle_timeout.or(self.idle_timeout),
             no_auto_dialog: other.no_auto_dialog.or(self.no_auto_dialog),
             model: other.model.or(self.model),
+            plugins: match (self.plugins, other.plugins) {
+                (Some(mut a), Some(b)) => {
+                    a.extend(b);
+                    Some(a)
+                }
+                (a, b) => b.or(a),
+            },
         }
     }
 }
@@ -220,6 +241,11 @@ fn parse_bool_arg(args: &[String], i: usize) -> (bool, bool) {
 fn extract_config_path(args: &[String]) -> Option<Option<String>> {
     const FLAGS_WITH_VALUE: &[&str] = &[
         "--session",
+        "--restore-save",
+        "--restore-check-url",
+        "--restore-check-text",
+        "--restore-check-fn",
+        "--namespace",
         "--headers",
         "--executable-path",
         "--cdp",
@@ -299,6 +325,13 @@ pub struct Flags {
     pub headed: bool,
     pub debug: bool,
     pub session: String,
+    pub restore: Option<String>,
+    pub restore_save: Option<String>,
+    pub restore_check_url: Option<String>,
+    pub restore_check_text: Option<String>,
+    pub restore_check_fn: Option<String>,
+    pub namespace: Option<String>,
+    pub restore_uses_session: bool,
     pub headers: Option<String>,
     pub executable_path: Option<String>,
     pub cdp: Option<String>,
@@ -335,6 +368,7 @@ pub struct Flags {
     pub default_timeout: Option<u64>, // AGENT_BROWSER_DEFAULT_TIMEOUT in ms
     pub no_auto_dialog: bool,
     pub model: Option<String>,
+    pub plugins: Vec<PluginConfig>,
     pub verbose: bool,
     pub quiet: bool,
 
@@ -355,6 +389,7 @@ pub struct Flags {
     pub cli_annotate: bool,
     pub cli_download_path: bool,
     pub cli_headed: bool,
+    pub cli_restore: bool,
 }
 
 pub fn parse_flags(args: &[String]) -> Flags {
@@ -411,6 +446,23 @@ pub fn parse_flags(args: &[String]) -> Flags {
         config.enable.unwrap_or_default()
     };
 
+    let plugins = env::var("AGENT_BROWSER_PLUGINS")
+        .ok()
+        .and_then(
+            |raw| match serde_json::from_str::<Vec<PluginConfig>>(&raw) {
+                Ok(plugins) => Some(plugins),
+                Err(e) => {
+                    eprintln!(
+                        "{} invalid AGENT_BROWSER_PLUGINS value: {}",
+                        color::warning_indicator(),
+                        e
+                    );
+                    None
+                }
+            },
+        )
+        .unwrap_or_else(|| config.plugins.unwrap_or_default());
+
     let mut flags = Flags {
         json: env_var_is_truthy("AGENT_BROWSER_JSON") || config.json.unwrap_or(false),
         headed: env_var_is_truthy("AGENT_BROWSER_HEADED") || config.headed.unwrap_or(false),
@@ -419,6 +471,23 @@ pub fn parse_flags(args: &[String]) -> Flags {
             .ok()
             .or(config.session)
             .unwrap_or_else(|| "default".to_string()),
+        restore: env::var("AGENT_BROWSER_RESTORE").ok().or(config.restore),
+        restore_save: env::var("AGENT_BROWSER_RESTORE_SAVE")
+            .ok()
+            .or(config.restore_save),
+        restore_check_url: env::var("AGENT_BROWSER_RESTORE_CHECK_URL")
+            .ok()
+            .or(config.restore_check_url),
+        restore_check_text: env::var("AGENT_BROWSER_RESTORE_CHECK_TEXT")
+            .ok()
+            .or(config.restore_check_text),
+        restore_check_fn: env::var("AGENT_BROWSER_RESTORE_CHECK_FN")
+            .ok()
+            .or(config.restore_check_fn),
+        namespace: env::var("AGENT_BROWSER_NAMESPACE")
+            .ok()
+            .or(config.namespace),
+        restore_uses_session: false,
         headers: config.headers,
         executable_path: env::var("AGENT_BROWSER_EXECUTABLE_PATH")
             .ok()
@@ -514,6 +583,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
         no_auto_dialog: env_var_is_truthy("AGENT_BROWSER_NO_AUTO_DIALOG")
             || config.no_auto_dialog.unwrap_or(false),
         model: env::var("AI_GATEWAY_MODEL").ok().or(config.model),
+        plugins,
         verbose: false,
         quiet: false,
         cli_executable_path: false,
@@ -531,11 +601,27 @@ pub fn parse_flags(args: &[String]) -> Flags {
         cli_annotate: false,
         cli_download_path: false,
         cli_headed: false,
+        cli_restore: false,
     };
 
     let mut i = 0;
+    let mut seen_command = false;
     while i < args.len() {
-        match args[i].as_str() {
+        let arg = args[i].as_str();
+        if !arg.starts_with('-') && looks_like_command(arg) {
+            seen_command = true;
+        }
+        match arg {
+            s if s.starts_with("--restore=") => {
+                flags.cli_restore = true;
+                let value = s.trim_start_matches("--restore=");
+                if value.is_empty() {
+                    flags.restore_uses_session = true;
+                } else {
+                    flags.restore = Some(value.to_string());
+                    flags.restore_uses_session = false;
+                }
+            }
             "--json" => {
                 let (val, consumed) = parse_bool_arg(args, i);
                 flags.json = val;
@@ -561,6 +647,53 @@ pub fn parse_flags(args: &[String]) -> Flags {
             "--session" => {
                 if let Some(s) = args.get(i + 1) {
                     flags.session = s.clone();
+                    i += 1;
+                }
+            }
+            "--restore" => {
+                flags.cli_restore = true;
+                let next = args.get(i + 1);
+                if seen_command {
+                    flags.restore_uses_session = true;
+                } else if let Some(s) = next {
+                    if !s.starts_with('-') && !looks_like_command(s) {
+                        flags.restore = Some(s.clone());
+                        flags.restore_uses_session = false;
+                        i += 1;
+                    } else {
+                        flags.restore_uses_session = true;
+                    }
+                } else {
+                    flags.restore_uses_session = true;
+                }
+            }
+            "--restore-save" => {
+                if let Some(s) = args.get(i + 1) {
+                    flags.restore_save = Some(s.clone());
+                    i += 1;
+                }
+            }
+            "--restore-check-url" => {
+                if let Some(s) = args.get(i + 1) {
+                    flags.restore_check_url = Some(s.clone());
+                    i += 1;
+                }
+            }
+            "--restore-check-text" => {
+                if let Some(s) = args.get(i + 1) {
+                    flags.restore_check_text = Some(s.clone());
+                    i += 1;
+                }
+            }
+            "--restore-check-fn" => {
+                if let Some(s) = args.get(i + 1) {
+                    flags.restore_check_fn = Some(s.clone());
+                    i += 1;
+                }
+            }
+            "--namespace" => {
+                if let Some(s) = args.get(i + 1) {
+                    flags.namespace = Some(s.clone());
                     i += 1;
                 }
             }
@@ -852,6 +985,10 @@ pub fn parse_flags(args: &[String]) -> Flags {
     flags
 }
 
+fn looks_like_command(value: &str) -> bool {
+    crate::commands::is_top_level_command(value)
+}
+
 pub fn clean_args(args: &[String]) -> Vec<String> {
     let mut result = Vec::new();
     let mut skip_next = false;
@@ -881,6 +1018,11 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
     // Global flags that always take a value (need to skip the next arg too)
     const GLOBAL_FLAGS_WITH_VALUE: &[&str] = &[
         "--session",
+        "--restore-save",
+        "--restore-check-url",
+        "--restore-check-text",
+        "--restore-check-fn",
+        "--namespace",
         "--headers",
         "--executable-path",
         "--cdp",
@@ -913,6 +1055,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
     ];
 
     let mut i = 0;
+    let mut seen_command = false;
     while i < args.len() {
         let arg = &args[i];
         if skip_next {
@@ -920,8 +1063,23 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
             i += 1;
             continue;
         }
+        if arg.starts_with("--restore=") {
+            i += 1;
+            continue;
+        }
         if GLOBAL_FLAGS_WITH_VALUE.contains(&arg.as_str()) {
             skip_next = true;
+            i += 1;
+            continue;
+        }
+        if arg == "--restore" {
+            if !seen_command {
+                if let Some(v) = args.get(i + 1) {
+                    if !v.starts_with('-') && !looks_like_command(v) {
+                        i += 1;
+                    }
+                }
+            }
             i += 1;
             continue;
         }
@@ -933,6 +1091,9 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
             }
             i += 1;
             continue;
+        }
+        if !arg.starts_with('-') && looks_like_command(arg) {
+            seen_command = true;
         }
         result.push(arg.clone());
         i += 1;
@@ -1048,6 +1209,85 @@ mod tests {
 
         let clean = clean_args(&input);
         assert_eq!(clean, vec!["open", "example.com"]);
+    }
+
+    #[test]
+    fn test_parse_restore_without_value_uses_session() {
+        let input = args("--session next-loop --restore open http://localhost:3000");
+        let flags = parse_flags(&input);
+
+        assert_eq!(flags.session, "next-loop");
+        assert!(flags.restore_uses_session);
+        assert!(flags.restore.is_none());
+        assert_eq!(clean_args(&input), vec!["open", "http://localhost:3000"]);
+    }
+
+    #[test]
+    fn test_parse_restore_with_explicit_key() {
+        let input = args("--restore login-state open http://localhost:3000");
+        let flags = parse_flags(&input);
+
+        assert_eq!(flags.restore.as_deref(), Some("login-state"));
+        assert!(!flags.restore_uses_session);
+        assert_eq!(clean_args(&input), vec!["open", "http://localhost:3000"]);
+    }
+
+    #[test]
+    fn test_parse_restore_after_command_does_not_consume_url() {
+        let input = args("--session next-loop open --restore http://localhost:3000");
+        let flags = parse_flags(&input);
+
+        assert_eq!(flags.session, "next-loop");
+        assert!(flags.restore_uses_session);
+        assert!(flags.restore.is_none());
+        assert_eq!(clean_args(&input), vec!["open", "http://localhost:3000"]);
+    }
+
+    #[test]
+    fn test_parse_restore_equals_with_explicit_key_after_command() {
+        let input = args("open --restore=login-state http://localhost:3000");
+        let flags = parse_flags(&input);
+
+        assert_eq!(flags.restore.as_deref(), Some("login-state"));
+        assert!(!flags.restore_uses_session);
+        assert_eq!(clean_args(&input), vec!["open", "http://localhost:3000"]);
+    }
+
+    #[test]
+    fn test_parse_bare_restore_before_auth_command_uses_session() {
+        let input = args("--session next-loop --restore auth list");
+        let flags = parse_flags(&input);
+
+        assert_eq!(flags.session, "next-loop");
+        assert!(flags.restore_uses_session);
+        assert!(flags.restore.is_none());
+        assert_eq!(clean_args(&input), vec!["auth", "list"]);
+    }
+
+    #[test]
+    fn test_parse_bare_restore_before_hover_command_uses_session() {
+        let input = args("--session next-loop --restore hover button");
+        let flags = parse_flags(&input);
+
+        assert_eq!(flags.session, "next-loop");
+        assert!(flags.restore_uses_session);
+        assert!(flags.restore.is_none());
+        assert_eq!(clean_args(&input), vec!["hover", "button"]);
+    }
+
+    #[test]
+    fn test_parse_restore_policy_checks_and_namespace() {
+        let input = args(
+            "--namespace work-a --restore-save never --restore-check-url **/dashboard --restore-check-text Dashboard --restore-check-fn window.ok open",
+        );
+        let flags = parse_flags(&input);
+
+        assert_eq!(flags.namespace.as_deref(), Some("work-a"));
+        assert_eq!(flags.restore_save.as_deref(), Some("never"));
+        assert_eq!(flags.restore_check_url.as_deref(), Some("**/dashboard"));
+        assert_eq!(flags.restore_check_text.as_deref(), Some("Dashboard"));
+        assert_eq!(flags.restore_check_fn.as_deref(), Some("window.ok"));
+        assert_eq!(clean_args(&input), vec!["open"]);
     }
 
     #[test]
@@ -1192,7 +1432,15 @@ mod tests {
             "allowFileAccess": true,
             "cdp": "9222",
             "autoConnect": true,
-            "headers": "{\"Auth\":\"token\"}"
+            "headers": "{\"Auth\":\"token\"}",
+            "plugins": [
+                {
+                    "name": "onepassword",
+                    "command": "agent-browser-plugin-1password",
+                    "args": ["--account", "team"],
+                    "capabilities": ["credential.read"]
+                }
+            ]
         }"#;
         let config: Config = serde_json::from_str(json).unwrap();
         assert_eq!(config.headed, Some(true));
@@ -1219,6 +1467,14 @@ mod tests {
         assert_eq!(config.cdp.as_deref(), Some("9222"));
         assert_eq!(config.auto_connect, Some(true));
         assert_eq!(config.headers.as_deref(), Some("{\"Auth\":\"token\"}"));
+        let plugin = &config.plugins.as_ref().unwrap()[0];
+        assert_eq!(plugin.name, "onepassword");
+        assert_eq!(plugin.command, "agent-browser-plugin-1password");
+        assert_eq!(
+            plugin.args,
+            vec!["--account".to_string(), "team".to_string()]
+        );
+        assert_eq!(plugin.capabilities, vec!["credential.read".to_string()]);
     }
 
     #[test]
