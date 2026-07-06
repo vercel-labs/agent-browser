@@ -417,6 +417,8 @@ EOF
 --restore [name]        # auto-save/restore session state, defaults to --session
 --restore-save <policy> # auto, always, or never
 --namespace <name>      # isolate daemon sockets and restore-state directories
+--tab-name <name>       # route commands to a named tab with isolated refs/frame state
+--session-name <name>   # legacy alias for restore persistence key
 ```
 
 ## When to load another skill
