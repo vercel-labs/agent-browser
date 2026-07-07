@@ -117,6 +117,17 @@ fn build_ffmpeg_command(output_path: &str) -> tokio::process::Command {
         .stderr(Stdio::piped())
         .kill_on_drop(true);
 
+    // ffmpeg is a console-subsystem app. The recording daemon is spawned
+    // DETACHED_PROCESS (no console to inherit), so on Windows a plain spawn makes
+    // the OS allocate a visible console window for ffmpeg that stays up for the
+    // whole recording. CREATE_NO_WINDOW suppresses it; the piped stdin/stderr are
+    // unaffected.
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
     cmd
 }
 
