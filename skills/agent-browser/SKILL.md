@@ -9,7 +9,9 @@ hidden: true
 
 Fast browser automation CLI for AI agents. Chrome/Chromium via CDP with accessibility-tree snapshots and compact `@eN` element refs.
 
-Install: `npm i -g agent-browser && agent-browser install`
+Install: `npm i -g agent-browser@0.31.1 && agent-browser install`
+
+> **Security note:** Pin to a specific version to avoid silent upgrades from unreviewed releases. Verify the current release at [github.com/vercel-labs/agent-browser/releases](https://github.com/vercel-labs/agent-browser/releases) before installing. Unpinned global installs (`npm i -g agent-browser`) are convenient but accept whatever version the registry serves at install time.
 
 ## Start here
 
