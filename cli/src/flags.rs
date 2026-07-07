@@ -9,6 +9,37 @@ const CONFIG_DIR: &str = ".agent-browser";
 const CONFIG_FILENAME: &str = "config.json";
 const PROJECT_CONFIG_FILENAME: &str = "agent-browser.json";
 
+/// Split browser launch args on commas/newlines without breaking flag values that contain commas.
+pub fn split_launch_args(value: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut current = String::new();
+
+    for segment in value.split(&[',', '\n'][..]) {
+        let segment = segment.trim();
+        if segment.is_empty() {
+            continue;
+        }
+
+        if segment.starts_with("--") {
+            if !current.is_empty() {
+                args.push(current.trim().to_string());
+            }
+            current = segment.to_string();
+        } else if current.is_empty() {
+            current = segment.to_string();
+        } else {
+            current.push(',');
+            current.push_str(segment);
+        }
+    }
+
+    if !current.is_empty() {
+        args.push(current.trim().to_string());
+    }
+
+    args
+}
+
 /// Parse idle timeout from user-friendly format.
 /// Supports: "10s" (seconds), "3m" (minutes), "1h" (hours), or raw milliseconds.
 fn parse_idle_timeout(s: &str) -> Result<String, String> {
@@ -1748,6 +1779,30 @@ mod tests {
         let flags = parse_flags(&args("--hide-scrollbars open"));
         assert!(flags.hide_scrollbars);
         assert!(flags.cli_hide_scrollbars);
+    }
+
+    #[test]
+    fn test_split_launch_args_preserves_comma_in_flag_values() {
+        let args = split_launch_args("--disable-features=A,B,C,--no-sandbox");
+        assert_eq!(
+            args,
+            vec![
+                "--disable-features=A,B,C".to_string(),
+                "--no-sandbox".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_split_launch_args_newline_separated() {
+        let args = split_launch_args("--no-sandbox\n--disable-blink-features=AutomationControlled");
+        assert_eq!(
+            args,
+            vec![
+                "--no-sandbox".to_string(),
+                "--disable-blink-features=AutomationControlled".to_string(),
+            ]
+        );
     }
 
     #[test]
