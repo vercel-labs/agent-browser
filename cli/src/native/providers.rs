@@ -140,11 +140,13 @@ pub async fn close_provider_session_with_plugins(
         "browser-use" => {
             if let Ok(api_key) = env::var("BROWSER_USE_API_KEY") {
                 let _ = client
-                    .delete(format!(
+                    .patch(format!(
                         "https://api.browser-use.com/api/v3/browsers/{}",
                         session.session_id
                     ))
                     .header("X-Browser-Use-API-Key", &api_key)
+                    .header("Content-Type", "application/json")
+                    .json(&json!({ "action": "stop" }))
                     .send()
                     .await;
             }
