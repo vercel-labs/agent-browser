@@ -1,0 +1,57 @@
+name: Build Native Binary
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build Linux x64 Binary
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      - name: Cache pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/pnpm/store/v10
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Install npm dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: cli
+
+      - name: Build native binary
+        run: pnpm build:native
+
+      - name: Install browser dependencies
+        run: ./bin/agent-browser install
+
+      - name: Link globally
+        run: pnpm link --global
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-browser-linux-x64
+          path: bin/agent-browser-linux-x64
+          if-no-files-found: error
