@@ -31,7 +31,7 @@ use windows_sys::Win32::System::Threading::OpenProcess;
 use commands::{gen_id, parse_command, ParseError};
 use connection::{
     cleanup_stale_files, daemon_unreachable, ensure_daemon, get_socket_dir, is_pid_alive,
-    send_command, walk_daemons, DaemonOptions, Response,
+    read_provider_session_id, send_command, walk_daemons, DaemonOptions, Response,
 };
 use flags::{clean_args, parse_flags, Flags};
 use install::run_install;
@@ -787,11 +787,97 @@ fn run_dashboard_stop(json_mode: bool) {
     }
 }
 
+fn read_provider_file(session: &str) -> Option<String> {
+    let path = get_socket_dir().join(format!("{}.provider", session));
+    fs::read_to_string(path)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Best-effort cleanup of a remote provider session when the local daemon is
+/// unreachable. This prevents orphaned cloud sessions (e.g. Browser Use) from
+/// counting against the plan's concurrent session limit.
+async fn cleanup_orphaned_provider_session(session: &str) {
+    let provider = match read_provider_file(session) {
+        Some(p) => p,
+        None => return,
+    };
+    let session_id = match read_provider_session_id(session) {
+        Some(id) => id,
+        None => return,
+    };
+
+    let client = reqwest::Client::new();
+    match provider.as_str() {
+        "browser-use" | "browseruse" => {
+            if let Ok(api_key) = env::var("BROWSER_USE_API_KEY") {
+                let _ = client
+                    .patch(format!(
+                        "https://api.browser-use.com/api/v3/browsers/{}",
+                        session_id
+                    ))
+                    .header("X-Browser-Use-API-Key", &api_key)
+                    .header("Content-Type", "application/json")
+                    .json(&json!({ "action": "stop" }))
+                    .send()
+                    .await;
+            }
+        }
+        "browserbase" => {
+            if let Ok(api_key) = env::var("BROWSERBASE_API_KEY") {
+                let _ = client
+                    .post(format!(
+                        "https://api.browserbase.com/v1/sessions/{}",
+                        session_id
+                    ))
+                    .header("Content-Type", "application/json")
+                    .header("X-BB-API-Key", &api_key)
+                    .json(&serde_json::json!({ "status": "REQUEST_RELEASE" }))
+                    .send()
+                    .await;
+            }
+        }
+        "browserless" => {
+            let _ = client.delete(&session_id).send().await;
+        }
+        "kernel" => {
+            if let Ok(api_key) = env::var("KERNEL_API_KEY") {
+                let endpoint = env::var("KERNEL_ENDPOINT")
+                    .unwrap_or_else(|_| "https://api.onkernel.com".to_string());
+                let _ = client
+                    .delete(format!(
+                        "{}/browsers/{}",
+                        endpoint.trim_end_matches('/'),
+                        session_id
+                    ))
+                    .header("Authorization", format!("Bearer {}", api_key))
+                    .send()
+                    .await;
+            }
+        }
+        _ => {}
+    }
+}
+
 fn run_close_all(flags: &Flags) {
     // walk_daemons auto-cleans stale .pid / .sock / .stream sidecar files and
     // separates out the standalone dashboard. We only want to send `close` to
     // real session daemons; the dashboard has its own `dashboard stop`.
     let inventory = walk_daemons();
+
+    // Clean up orphaned provider sessions for dead daemons that were already
+    // cleaned up by walk_daemons(). This prevents cloud sessions (e.g. Browser Use)
+    // from counting against the plan's concurrent session limit.
+    let rt = tokio::runtime::Runtime::new().ok();
+    for cleaned in &inventory.cleaned {
+        if let Some(rt) = rt.as_ref() {
+            rt.block_on(cleanup_orphaned_provider_session(&cleaned.name));
+        }
+        // Also remove leftover .provider file
+        let _ = fs::remove_file(get_socket_dir().join(format!("{}.provider", cleaned.name)));
+    }
+
     let sessions: Vec<(String, u32)> = inventory
         .sessions
         .iter()
@@ -836,6 +922,12 @@ fn run_close_all(flags: &Flags) {
                         windows_sys::Win32::System::Threading::TerminateProcess(handle, 1);
                         CloseHandle(handle);
                     }
+                }
+                // Best-effort cleanup of remote provider session (e.g. Browser Use)
+                // so orphaned cloud sessions don't count against plan limits.
+                let rt = tokio::runtime::Runtime::new().ok();
+                if let Some(rt) = rt {
+                    rt.block_on(cleanup_orphaned_provider_session(session));
                 }
                 cleanup_stale_files(session);
                 closed.push(session.clone());
