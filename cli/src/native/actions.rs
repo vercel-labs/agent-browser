@@ -5178,6 +5178,29 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
                 .unwrap_or_else(|_| "about:blank".to_string())
         };
 
+        // Capture the current browser state before creating the recording context.
+        // `record start` promises to preserve cookies and localStorage, but the
+        // recording target lives in a fresh browser context. Reuse the same
+        // storage-state path as `state save/load` so cookies, localStorage, and
+        // sessionStorage stay in sync with the rest of the CLI.
+        let temp_state_arg = std::env::temp_dir()
+            .join(format!(
+                "agent-browser-recording-state-{}.json",
+                uuid::Uuid::new_v4()
+            ))
+            .to_string_lossy()
+            .to_string();
+        let saved_storage_state = state::save_state(
+            &mgr.client,
+            &old_session_id,
+            Some(&temp_state_arg),
+            state.session_name.as_deref(),
+            &state.session_id,
+            mgr.visited_origins(),
+        )
+        .await
+        .ok();
+
         // Capture current cookies
         let cookies_result = mgr
             .client
@@ -5267,6 +5290,12 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
                         .await;
                 }
             }
+        }
+
+        // Transfer localStorage/sessionStorage to the new recording context.
+        if let Some(ref storage_path) = saved_storage_state {
+            let _ = state::load_state(&mgr.client, &new_session_id, storage_path).await;
+            let _ = fs::remove_file(storage_path);
         }
 
         // Add page and switch to it

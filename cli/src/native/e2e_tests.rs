@@ -4881,6 +4881,85 @@ async fn e2e_recording_inherits_viewport() {
     assert_success(&resp);
 }
 
+/// Verify that `recording_start` preserves storage from the current page when
+/// it creates the fresh recording context. The CLI help promises cookies and
+/// localStorage survive recording; authenticated SPAs often depend on this.
+#[tokio::test]
+#[ignore]
+async fn e2e_recording_preserves_storage() {
+    let (base_url, _server) = start_echo_server().await;
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": base_url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "3",
+            "action": "evaluate",
+            "script": "localStorage.setItem('ab_record_local', 'from-current-context'); sessionStorage.setItem('ab_record_session', 'from-current-context'); 'ok'"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], "ok");
+
+    let rec_path =
+        std::env::temp_dir().join(format!("ab-e2e-rec-storage-{}.webm", std::process::id()));
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "recording_start", "path": rec_path.to_string_lossy() }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+    let resp = execute_command(
+        &json!({
+            "id": "5",
+            "action": "evaluate",
+            "script": "({ local: localStorage.getItem('ab_record_local'), session: sessionStorage.getItem('ab_record_session') })"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["result"]["local"],
+        "from-current-context",
+        "recording context should inherit localStorage"
+    );
+    assert_eq!(
+        get_data(&resp)["result"]["session"],
+        "from-current-context",
+        "recording context should inherit sessionStorage"
+    );
+
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "recording_stop" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let _ = std::fs::remove_file(&rec_path);
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 // ---------------------------------------------------------------------------
 // --state / storageState flag: cookies should be loaded at launch time
 // ---------------------------------------------------------------------------
