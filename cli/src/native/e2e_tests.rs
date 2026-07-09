@@ -1855,6 +1855,113 @@ async fn e2e_viewport_emulation() {
 }
 
 // ---------------------------------------------------------------------------
+// Mobile emulation: touch + UA-CH
+// ---------------------------------------------------------------------------
+
+// A mobile viewport must produce a real touch environment, not just a narrow
+// width: navigator.maxTouchPoints > 0 and (pointer: coarse) must be true, so
+// touch/pointer-gated layouts render their mobile branch. Also verifies that a
+// subsequent `viewport` without an explicit `mobile` flag inherits the current
+// mobile state instead of silently resetting to desktop.
+#[tokio::test]
+#[ignore]
+async fn e2e_mobile_touch_emulation() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": "data:text/html,<h1>Touch</h1>" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Mobile viewport -> touch enabled.
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "viewport", "width": 375, "height": 667, "deviceScaleFactor": 2.0, "mobile": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "evaluate", "script": "navigator.maxTouchPoints" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert!(
+        get_data(&resp)["result"].as_i64().unwrap() > 0,
+        "maxTouchPoints should be > 0 under a mobile viewport"
+    );
+
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "evaluate", "script": "matchMedia('(pointer: coarse)').matches" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["result"],
+        true,
+        "(pointer: coarse) should match under a mobile viewport"
+    );
+
+    // Resize without specifying `mobile` -> should INHERIT mobile (touch stays on).
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "viewport", "width": 390, "height": 844 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["mobile"],
+        true,
+        "viewport without explicit mobile should inherit the current mobile state"
+    );
+
+    let resp = execute_command(
+        &json!({ "id": "7", "action": "evaluate", "script": "navigator.maxTouchPoints" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert!(
+        get_data(&resp)["result"].as_i64().unwrap() > 0,
+        "touch should persist after a resize that omits the mobile flag"
+    );
+
+    // Explicit mobile:false -> touch disabled again.
+    let resp = execute_command(
+        &json!({ "id": "8", "action": "viewport", "width": 1280, "height": 900, "mobile": false }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "9", "action": "evaluate", "script": "navigator.maxTouchPoints" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["result"].as_i64().unwrap(),
+        0,
+        "maxTouchPoints should be 0 after switching back to a desktop viewport"
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+// ---------------------------------------------------------------------------
 // Hover, scroll, press
 // ---------------------------------------------------------------------------
 

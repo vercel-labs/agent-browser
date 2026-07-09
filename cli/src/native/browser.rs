@@ -1173,6 +1173,24 @@ impl BrowserManager {
             )
             .await?;
 
+        // A mobile device metrics override alone does NOT give a page a real
+        // touch environment: navigator.maxTouchPoints stays 0, no touch events
+        // fire, and `(pointer: coarse)` stays false, so touch/pointer-gated
+        // layouts render their desktop branch (false positives in mobile QA).
+        // Enable/disable touch emulation to match the mobile flag.
+        self.client
+            .send_command(
+                "Emulation.setTouchEmulationEnabled",
+                Some(json!({
+                    "enabled": mobile,
+                    // CDP requires maxTouchPoints in 1..=16; it is ignored when
+                    // `enabled` is false, so keep it >= 1 even when disabling.
+                    "maxTouchPoints": if mobile { 5 } else { 1 },
+                })),
+                Some(session_id),
+            )
+            .await?;
+
         // Screencast captures the actual content area, not the emulated CSS
         // viewport, so resize the content area to match.
         if let Ok(target_id) = self.active_target_id() {
@@ -1210,10 +1228,46 @@ impl BrowserManager {
 
     pub async fn set_user_agent(&self, user_agent: &str) -> Result<(), String> {
         let session_id = self.active_session_id()?;
+        // Overriding only the UA string leaves navigator.userAgentData.mobile
+        // (User-Agent Client Hints) unchanged, so UA-CH-gated code still sees a
+        // desktop client. Derive the UA-CH metadata from the UA string and send
+        // it alongside, so a mobile UA yields userAgentData.mobile === true.
+        let is_iphone = user_agent.contains("iPhone");
+        let is_ipad = user_agent.contains("iPad");
+        let is_android = user_agent.contains("Android");
+        // Phones carry the "Mobile" token; tablets (iPad) do not.
+        let mobile = user_agent.contains("Mobile") || is_iphone || is_android;
+        let platform = if is_iphone || is_ipad {
+            "iOS"
+        } else if is_android {
+            "Android"
+        } else {
+            "macOS"
+        };
+        let model = if is_iphone {
+            "iPhone"
+        } else if is_ipad {
+            "iPad"
+        } else {
+            ""
+        };
         self.client
             .send_command(
                 "Emulation.setUserAgentOverride",
-                Some(json!({ "userAgent": user_agent })),
+                Some(json!({
+                    "userAgent": user_agent,
+                    "userAgentMetadata": {
+                        "brands": [],
+                        "fullVersionList": [],
+                        "platform": platform,
+                        "platformVersion": "",
+                        "architecture": "",
+                        "model": model,
+                        "mobile": mobile,
+                        "bitness": "",
+                        "wow64": false,
+                    },
+                })),
                 Some(session_id),
             )
             .await?;
