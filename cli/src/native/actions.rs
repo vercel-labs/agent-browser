@@ -330,6 +330,10 @@ pub struct DaemonState {
     pub stream_server: Option<Arc<StreamServer>>,
     /// Hash of launch options used for the current browser, for relaunch detection.
     launch_hash: Option<u64>,
+    /// Profile path/name used for the current browser. Sticky across commands:
+    /// headed re-launches omit `--profile` by default, and treating that as
+    /// "no profile" would relaunch into a blank temp profile (#1211).
+    current_profile: Option<String>,
     /// Browser engine name (e.g. "chrome", "lightpanda") for observability.
     pub engine: String,
     /// Default timeout for wait operations, from AGENT_BROWSER_DEFAULT_TIMEOUT env var.
@@ -407,6 +411,7 @@ impl DaemonState {
             stream_client: None,
             stream_server: None,
             launch_hash: None,
+            current_profile: None,
             engine: env::var("AGENT_BROWSER_ENGINE").unwrap_or_else(|_| "chrome".to_string()),
             // README documents 25s, intentionally below the CLI's 30s IPC
             // read timeout so the daemon reports a proper timeout error
@@ -773,7 +778,7 @@ impl DaemonState {
                     }
 
                     let tab_id = mgr.assign_tab_id();
-                    mgr.add_page(super::browser::PageInfo {
+                    mgr.add_page_background(super::browser::PageInfo {
                         tab_id,
                         label: None,
                         target_id: te.target_info.target_id.clone(),
@@ -1480,6 +1485,7 @@ pub(crate) async fn close_current_browser(state: &mut DaemonState) -> Result<(),
 
     close_active_provider_session(state).await;
     state.launch_hash = None;
+    state.current_profile = None;
     state.screencasting = false;
     state.reset_input_state();
     state.update_stream_client().await;
@@ -2222,10 +2228,12 @@ async fn auto_launch(
         "local",
         None,
     );
+    let profile_for_state = options.profile.clone();
     let mgr = BrowserManager::launch(options, engine.as_deref()).await?;
     state.reset_input_state();
     state.browser = Some(mgr);
     state.launch_hash = Some(hash);
+    state.current_profile = profile_for_state;
     state.subscribe_to_browser_events();
     state.start_fetch_handler();
     state.start_dialog_handler();
@@ -2764,7 +2772,10 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         profile: cmd
             .get("profile")
             .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
+            .map(|s| s.to_string())
+            // Keep the session's profile when a headed re-launch omits --profile.
+            // Otherwise launch_hash changes and we wipe the open page for #1211.
+            .or_else(|| state.current_profile.clone()),
         allow_file_access: cmd
             .get("allowFileAccess")
             .and_then(|v| v.as_bool())
@@ -3013,9 +3024,11 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     state.engine = engine.as_deref().unwrap_or("chrome").to_string();
     write_engine_file(&state.session_id, &state.engine);
     write_extensions_file_from_paths(&state.session_id, launch_options.extensions.as_deref());
+    let profile_for_state = launch_options.profile.clone();
     state.reset_input_state();
     state.browser = Some(BrowserManager::launch(launch_options, engine.as_deref()).await?);
     state.launch_hash = Some(new_hash);
+    state.current_profile = profile_for_state;
     state.subscribe_to_browser_events();
     state.start_fetch_handler();
     state.start_dialog_handler();
@@ -10641,6 +10654,39 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
                 "local",
                 None
             )
+        );
+    }
+
+    #[test]
+    fn test_sticky_profile_keeps_launch_hash_stable() {
+        // Headed re-launches often omit --profile. Without sticky fill that
+        // would change launch_hash and wipe the open page (#1211).
+        let mut original = LaunchOptions {
+            headless: false,
+            profile: Some("/tmp/agent-browser-sticky-profile".to_string()),
+            ..Default::default()
+        };
+        let hash_with_profile =
+            launch_hash(&original, &[], &[], &[], Some("chrome"), "local", None);
+
+        let omitted = LaunchOptions {
+            headless: false,
+            profile: None,
+            ..Default::default()
+        };
+        assert_ne!(
+            hash_with_profile,
+            launch_hash(&omitted, &[], &[], &[], Some("chrome"), "local", None),
+            "omitting profile must change the hash (so sticky fill is load-bearing)"
+        );
+
+        // Same as handle_launch: fill from current_profile before hashing.
+        original.profile = Some("/tmp/agent-browser-sticky-profile".to_string());
+        let mut sticky = omitted;
+        sticky.profile = original.profile.clone();
+        assert_eq!(
+            hash_with_profile,
+            launch_hash(&sticky, &[], &[], &[], Some("chrome"), "local", None),
         );
     }
 
