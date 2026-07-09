@@ -72,6 +72,8 @@ agent-browser snapshot -s "#main"         # scope to a CSS selector
 agent-browser snapshot -i --json          # machine-readable output
 ```
 
+With `-u`, very long link targets are truncated in the `url=` field; fetch the full href with `get attr @<ref> href`.
+
 Snapshot output looks like:
 
 ```

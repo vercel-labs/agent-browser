@@ -204,7 +204,7 @@ fn format_compact_number(value: f64) -> String {
     }
 }
 
-fn truncate_field(value: &str, max_chars: usize) -> String {
+pub(crate) fn truncate_field(value: &str, max_chars: usize) -> String {
     if value.chars().count() <= max_chars {
         return value.to_string();
     }
@@ -3753,6 +3753,18 @@ mod tests {
         OutputOptions,
     };
     use serde_json::json;
+
+    #[test]
+    fn test_truncate_field_caps_long_values() {
+        let short = "https://example.com/page";
+        assert_eq!(super::truncate_field(short, 96), short);
+
+        let long = format!("https://example.com/{}", "a".repeat(500));
+        let out = super::truncate_field(&long, 96);
+        assert_eq!(out.chars().count(), 96);
+        assert!(out.starts_with("https://example.com/"));
+        assert!(out.ends_with("..."));
+    }
 
     #[test]
     fn test_format_stream_status_text_for_enabled_stream() {
