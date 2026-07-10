@@ -15,6 +15,7 @@ export const PAGE_TITLES: Record<string, string> = {
   dashboard: "Dashboard",
   streaming: "Streaming",
   recording: "Video Recording",
+  webgpu: "WebGPU",
   debugging: "Debugging",
   profiler: "Profiler",
   react: "React & Web Vitals",

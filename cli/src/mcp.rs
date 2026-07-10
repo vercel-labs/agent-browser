@@ -749,7 +749,8 @@ fn tools() -> Vec<Value> {
             "Launch the browser and optionally navigate to a URL.",
             json!({
                 "url": { "type": "string", "description": "URL to open. Omit to launch about:blank." },
-                "headed": { "type": "boolean", "default": false, "description": "Show the browser window." }
+                "headed": { "type": "boolean", "default": false, "description": "Show the browser window." },
+                "webgpu": { "type": "boolean", "default": false, "description": "Enable WebGPU (SwiftShader software Vulkan on Linux; no GPU required)." }
             }),
             &[],
         ),
@@ -2311,6 +2312,9 @@ fn call_open(arguments: &Value) -> Result<Value, ProtocolError> {
     if optional_bool(arguments, "headed")?.unwrap_or(false) {
         args.push("--headed".to_string());
     }
+    if optional_bool(arguments, "webgpu")?.unwrap_or(false) {
+        args.push("--webgpu".to_string());
+    }
     args.push("open".to_string());
     if let Some(url) = optional_string(arguments, "url")? {
         if !url.is_empty() {
@@ -3707,6 +3711,18 @@ mod tests {
         assert!(names.contains(&TOOL_SESSION_ID));
         assert!(names.contains(&TOOL_SESSION_INFO));
         assert!(!names.contains(&"agent_browser_frame_list"));
+    }
+
+    #[test]
+    fn open_tool_exposes_launch_options() {
+        let tools = tools();
+        let open = tools
+            .iter()
+            .find(|t| t["name"].as_str() == Some(TOOL_OPEN))
+            .unwrap();
+        let props = &open["inputSchema"]["properties"];
+        assert!(props.get("headed").is_some());
+        assert!(props.get("webgpu").is_some());
     }
 
     #[test]

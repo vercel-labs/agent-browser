@@ -18,6 +18,7 @@ mod launch;
 mod network;
 mod providers;
 mod security;
+mod webgpu;
 
 use serde_json::{json, Value};
 
@@ -29,6 +30,8 @@ pub struct DoctorOptions {
     pub quick: bool,
     pub fix: bool,
     pub json: bool,
+    /// Run the live WebGPU render probe (opt-in; launches a second Chrome).
+    pub webgpu: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -109,6 +112,10 @@ pub fn run_doctor(opts: DoctorOptions) -> i32 {
 
     if !opts.quick {
         launch::check(&mut checks);
+    }
+
+    if opts.webgpu {
+        webgpu::check(&mut checks);
     }
 
     if opts.fix {

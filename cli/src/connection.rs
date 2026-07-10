@@ -442,6 +442,7 @@ pub struct DaemonOptions<'a> {
     pub ignore_https_errors: bool,
     pub allow_file_access: bool,
     pub hide_scrollbars: bool,
+    pub webgpu: bool,
     pub profile: Option<&'a str>,
     pub state: Option<&'a str>,
     pub provider: Option<&'a str>,
@@ -514,6 +515,9 @@ fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
         "AGENT_BROWSER_HIDE_SCROLLBARS",
         if opts.hide_scrollbars { "1" } else { "0" },
     );
+    if opts.webgpu {
+        cmd.env("AGENT_BROWSER_WEBGPU", "1");
+    }
     if let Some(prof) = opts.profile {
         cmd.env("AGENT_BROWSER_PROFILE", prof);
     }
@@ -1247,6 +1251,7 @@ mod tests {
             ignore_https_errors: false,
             allow_file_access: false,
             hide_scrollbars: true,
+            webgpu: false,
             profile: None,
             state: None,
             provider: None,

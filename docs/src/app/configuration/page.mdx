@@ -82,6 +82,7 @@ Global launch, output, provider, and chat options can be set in the config file 
     <tr><td><code>provider</code></td><td><code>-p, --provider</code></td><td>string</td></tr>
     <tr><td><code>device</code></td><td><code>--device</code></td><td>string</td></tr>
     <tr><td><code>hideScrollbars</code></td><td><code>--hide-scrollbars</code></td><td>boolean</td></tr>
+    <tr><td><code>webgpu</code></td><td><code>--webgpu</code></td><td>boolean</td></tr>
     <tr><td><code>ignoreHttpsErrors</code></td><td><code>--ignore-https-errors</code></td><td>boolean</td></tr>
     <tr><td><code>allowFileAccess</code></td><td><code>--allow-file-access</code></td><td>boolean</td></tr>
     <tr><td><code>cdp</code></td><td><code>--cdp</code></td><td>string</td></tr>
@@ -270,6 +271,7 @@ These environment variables configure additional daemon and runtime behavior:
     <tr><td><code>AGENT_BROWSER_INIT_SCRIPTS</code></td><td>Comma-separated paths to page init scripts.</td><td>(none)</td></tr>
     <tr><td><code>AGENT_BROWSER_ENABLE</code></td><td>Comma-separated built-in init script features such as <code>react-devtools</code>.</td><td>(none)</td></tr>
     <tr><td><code>AGENT_BROWSER_HEADED</code></td><td>Show browser window instead of running headless (<code>1</code> to enable).</td><td>(disabled)</td></tr>
+    <tr><td><code>AGENT_BROWSER_WEBGPU</code></td><td>Enable WebGPU; SwiftShader software Vulkan on Linux, no GPU required (<code>1</code> to enable).</td><td>(disabled)</td></tr>
     <tr><td><code>AGENT_BROWSER_JSON</code></td><td>Use JSON output by default.</td><td>(disabled)</td></tr>
     <tr><td><code>AGENT_BROWSER_ANNOTATE</code></td><td>Enable annotated screenshots by default.</td><td>(disabled)</td></tr>
     <tr><td><code>AGENT_BROWSER_CDP</code></td><td>Connect the daemon to a CDP port or WebSocket URL.</td><td>(none)</td></tr>

@@ -963,6 +963,7 @@ fn main() {
             quick: args.iter().any(|a| a == "--quick"),
             fix: args.iter().any(|a| a == "--fix"),
             json: flags.json,
+            webgpu: flags.webgpu,
         };
         exit(doctor::run_doctor(opts));
     }
@@ -1200,6 +1201,7 @@ fn main() {
         ignore_https_errors: flags.ignore_https_errors,
         allow_file_access: flags.allow_file_access,
         hide_scrollbars: flags.hide_scrollbars,
+        webgpu: flags.webgpu,
         profile: flags.profile.as_deref(),
         state: flags.state.as_deref(),
         provider: flags.provider.as_deref(),
@@ -1422,6 +1424,8 @@ fn main() {
             flags.cli_hide_scrollbars,
             flags.hide_scrollbars,
         )
+        || flags.webgpu
+        || flags.cli_webgpu
         || flags.color_scheme.is_some()
         || flags.download_path.is_some()
         || flags.engine.is_some()
@@ -1513,6 +1517,10 @@ fn main() {
             flags.cli_hide_scrollbars,
             flags.hide_scrollbars,
         );
+
+        if flags.webgpu || flags.cli_webgpu {
+            launch_cmd["webgpu"] = json!(flags.webgpu);
+        }
 
         if let Some(ref cs) = flags.color_scheme {
             launch_cmd["colorScheme"] = json!(cs);

@@ -66,6 +66,7 @@ pub(super) fn check(checks: &mut Vec<Check>) {
         ignore_https_errors: false,
         allow_file_access: false,
         hide_scrollbars: true,
+        webgpu: false,
         profile: None,
         state: None,
         provider: None,

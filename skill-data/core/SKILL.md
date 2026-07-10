@@ -400,6 +400,8 @@ EOF
 
 **Cross-origin iframe not accessible** Cross-origin iframes that block accessibility tree access are silently skipped. Use `frame "#iframe"` to switch into them explicitly if the parent opts in, otherwise the iframe's contents aren't available via snapshot — fall back to `eval` in the iframe's origin or use the `--headers` flag to satisfy CORS.
 
+**WebGPU page renders black in screenshots** Headless Chrome doesn't expose WebGPU by default; three.js `WebGPURenderer` then silently falls back or renders nothing. Relaunch with the `--webgpu` flag, wait for the app's first rendered frame, then screenshot. On Linux install `libvulkan1 mesa-vulkan-drivers` first. Verify with `agent-browser doctor --webgpu`. See [references/webgpu.md](references/webgpu.md).
+
 **Authentication expires mid-workflow** Use `--session <id> --restore` so your session survives browser restarts. Check `agent-browser session info --json` if restore fails. See [references/session-management.md](references/session-management.md) and [references/authentication.md](references/authentication.md).
 
 ## Global flags worth knowing
@@ -408,6 +410,7 @@ EOF
 --session <name>        # isolated browser session
 --json                  # JSON output (for machine parsing)
 --headed                # show the window (default is headless)
+--webgpu                # enable WebGPU (software Vulkan on Linux, no GPU needed)
 --auto-connect          # connect to an already-running Chrome
 --cdp <port>            # connect to a specific CDP port
 --profile <name|path>   # use a Chrome profile (login state survives)
@@ -466,4 +469,5 @@ That pulls in:
 - `references/profiling.md` — Chrome DevTools tracing and profiling
 - `references/video-recording.md` — video capture options
 - `references/proxy-support.md` — proxy configuration
+- `references/webgpu.md` — screenshots/video of WebGPU pages (three.js, Babylon.js), Linux/CI setup
 - `templates/*` — starter shell scripts for auth, capture, form automation

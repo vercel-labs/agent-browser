@@ -78,6 +78,7 @@ pub struct Config {
     pub provider: Option<String>,
     pub device: Option<String>,
     pub hide_scrollbars: Option<bool>,
+    pub webgpu: Option<bool>,
     pub ignore_https_errors: Option<bool>,
     pub allow_file_access: Option<bool>,
     pub cdp: Option<String>,
@@ -147,6 +148,7 @@ impl Config {
             provider: other.provider.or(self.provider),
             device: other.device.or(self.device),
             hide_scrollbars: other.hide_scrollbars.or(self.hide_scrollbars),
+            webgpu: other.webgpu.or(self.webgpu),
             ignore_https_errors: other.ignore_https_errors.or(self.ignore_https_errors),
             allow_file_access: other.allow_file_access.or(self.allow_file_access),
             cdp: other.cdp.or(self.cdp),
@@ -348,6 +350,7 @@ pub struct Flags {
     pub ignore_https_errors: bool,
     pub allow_file_access: bool,
     pub hide_scrollbars: bool,
+    pub webgpu: bool,
     pub device: Option<String>,
     pub auto_connect: bool,
     pub session_name: Option<String>,
@@ -389,6 +392,7 @@ pub struct Flags {
     pub cli_annotate: bool,
     pub cli_download_path: bool,
     pub cli_headed: bool,
+    pub cli_webgpu: bool,
     pub cli_restore: bool,
 }
 
@@ -524,6 +528,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
         hide_scrollbars: env_var_bool("AGENT_BROWSER_HIDE_SCROLLBARS")
             .or(config.hide_scrollbars)
             .unwrap_or(true),
+        webgpu: env_var_is_truthy("AGENT_BROWSER_WEBGPU") || config.webgpu.unwrap_or(false),
         device: env::var("AGENT_BROWSER_IOS_DEVICE").ok().or(config.device),
         auto_connect: env_var_is_truthy("AGENT_BROWSER_AUTO_CONNECT")
             || config.auto_connect.unwrap_or(false),
@@ -601,6 +606,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
         cli_annotate: false,
         cli_download_path: false,
         cli_headed: false,
+        cli_webgpu: false,
         cli_restore: false,
     };
 
@@ -633,6 +639,14 @@ pub fn parse_flags(args: &[String]) -> Flags {
                 let (val, consumed) = parse_bool_arg(args, i);
                 flags.headed = val;
                 flags.cli_headed = true;
+                if consumed {
+                    i += 1;
+                }
+            }
+            "--webgpu" => {
+                let (val, consumed) = parse_bool_arg(args, i);
+                flags.webgpu = val;
+                flags.cli_webgpu = true;
                 if consumed {
                     i += 1;
                 }
@@ -997,6 +1011,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
     const GLOBAL_BOOL_FLAGS: &[&str] = &[
         "--json",
         "--headed",
+        "--webgpu",
         "--debug",
         "--ignore-https-errors",
         "--allow-file-access",
@@ -1696,6 +1711,42 @@ mod tests {
     fn test_headed_bare_defaults_true() {
         let flags = parse_flags(&args("--headed open example.com"));
         assert!(flags.headed);
+    }
+
+    #[test]
+    fn test_webgpu_default_false() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_WEBGPU"]);
+        guard.remove("AGENT_BROWSER_WEBGPU");
+        let flags = parse_flags(&args("open example.com"));
+        assert!(!flags.webgpu);
+        assert!(!flags.cli_webgpu);
+    }
+
+    #[test]
+    fn test_webgpu_bare_defaults_true() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_WEBGPU"]);
+        guard.remove("AGENT_BROWSER_WEBGPU");
+        let flags = parse_flags(&args("--webgpu open example.com"));
+        assert!(flags.webgpu);
+        assert!(flags.cli_webgpu);
+    }
+
+    #[test]
+    fn test_webgpu_false_explicit() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_WEBGPU"]);
+        guard.remove("AGENT_BROWSER_WEBGPU");
+        let flags = parse_flags(&args("--webgpu false open example.com"));
+        assert!(!flags.webgpu);
+        assert!(flags.cli_webgpu);
+    }
+
+    #[test]
+    fn test_webgpu_env_var() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_WEBGPU"]);
+        guard.set("AGENT_BROWSER_WEBGPU", "1");
+        let flags = parse_flags(&args("open example.com"));
+        assert!(flags.webgpu);
+        assert!(!flags.cli_webgpu);
     }
 
     #[test]

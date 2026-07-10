@@ -219,6 +219,7 @@ fn launch_hash(
     opts.user_agent.hash(&mut h);
     opts.allow_file_access.hash(&mut h);
     opts.hide_scrollbars.hash(&mut h);
+    opts.webgpu.hash(&mut h);
     enable_features.hash(&mut h);
     init_script_paths.hash(&mut h);
     plugin_init_scripts.hash(&mut h);
@@ -2341,6 +2342,7 @@ async fn apply_launch_mutator_plugins(
             "downloadPath": options.download_path.clone(),
             "hideScrollbars": options.hide_scrollbars,
             "allowFileAccess": options.allow_file_access,
+            "webgpu": options.webgpu,
         }
     });
 
@@ -2403,6 +2405,7 @@ fn launch_options_from_env() -> LaunchOptions {
         hide_scrollbars: hide_scrollbars_from_env(),
         viewport_size: None,
         use_real_keychain: false,
+        webgpu: webgpu_from_env(),
     }
 }
 
@@ -2416,6 +2419,18 @@ fn hide_scrollbars_from_launch_cmd(cmd: &Value) -> bool {
     cmd.get("hideScrollbars")
         .and_then(|v| v.as_bool())
         .unwrap_or_else(hide_scrollbars_from_env)
+}
+
+fn webgpu_from_env() -> bool {
+    env::var("AGENT_BROWSER_WEBGPU")
+        .map(|v| v == "1" || v == "true")
+        .unwrap_or(false)
+}
+
+fn webgpu_from_launch_cmd(cmd: &Value) -> bool {
+    cmd.get("webgpu")
+        .and_then(|v| v.as_bool())
+        .unwrap_or_else(webgpu_from_env)
 }
 
 async fn try_auto_restore_state(state: &mut DaemonState) {
@@ -2799,6 +2814,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         hide_scrollbars: hide_scrollbars_from_launch_cmd(cmd),
         viewport_size: None,
         use_real_keychain: false,
+        webgpu: webgpu_from_launch_cmd(cmd),
     };
 
     state.plugin_init_scripts.clear();
@@ -10620,6 +10636,41 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         guard.set("AGENT_BROWSER_HIDE_SCROLLBARS", "false");
         let opts = launch_options_from_env();
         assert!(!opts.hide_scrollbars);
+    }
+
+    #[test]
+    fn test_launch_options_from_env_webgpu() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_WEBGPU"]);
+        guard.remove("AGENT_BROWSER_WEBGPU");
+        assert!(!launch_options_from_env().webgpu);
+        guard.set("AGENT_BROWSER_WEBGPU", "1");
+        assert!(launch_options_from_env().webgpu);
+    }
+
+    #[test]
+    fn test_webgpu_from_launch_cmd() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_WEBGPU"]);
+        guard.remove("AGENT_BROWSER_WEBGPU");
+        assert!(webgpu_from_launch_cmd(&json!({ "webgpu": true })));
+        assert!(!webgpu_from_launch_cmd(&json!({ "webgpu": false })));
+        // Falls back to the env var when the command omits the field.
+        assert!(!webgpu_from_launch_cmd(&json!({})));
+        guard.set("AGENT_BROWSER_WEBGPU", "1");
+        assert!(webgpu_from_launch_cmd(&json!({})));
+        assert!(!webgpu_from_launch_cmd(&json!({ "webgpu": false })));
+    }
+
+    #[test]
+    fn test_launch_hash_includes_webgpu() {
+        let base = LaunchOptions::default();
+        let webgpu = LaunchOptions {
+            webgpu: true,
+            ..Default::default()
+        };
+        assert_ne!(
+            launch_hash(&base, &[], &[], &[], Some("chrome"), "local", None),
+            launch_hash(&webgpu, &[], &[], &[], Some("chrome"), "local", None)
+        );
     }
 
     #[test]

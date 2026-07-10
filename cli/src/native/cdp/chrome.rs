@@ -113,6 +113,11 @@ pub struct LaunchOptions {
     /// Chrome uses the real system keychain. Set automatically when launching
     /// with a copied Chrome profile.
     pub use_real_keychain: bool,
+    /// Enable WebGPU in environments where Chrome does not expose it by
+    /// default (headless, GPU-less containers, blocklisted GPUs). On Linux
+    /// this routes WebGPU through SwiftShader's software Vulkan with software
+    /// compositing so it works without a GPU or display.
+    pub webgpu: bool,
 }
 
 impl Default for LaunchOptions {
@@ -136,6 +141,7 @@ impl Default for LaunchOptions {
             hide_scrollbars: true,
             viewport_size: None,
             use_real_keychain: false,
+            webgpu: false,
         }
     }
 }
@@ -147,6 +153,13 @@ struct ChromeArgs {
 }
 
 fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
+    // Chrome only honors the last --enable-features switch on the command
+    // line, so every feature must be collected into a single flag.
+    let mut enable_features = vec!["NetworkService", "NetworkServiceInProcess"];
+    if options.webgpu && cfg!(target_os = "linux") {
+        enable_features.push("Vulkan");
+    }
+
     let mut args = vec![
         "--remote-debugging-port=0".to_string(),
         "--no-first-run".to_string(),
@@ -160,9 +173,26 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
         "--disable-prompt-on-repost".to_string(),
         "--disable-sync".to_string(),
         "--disable-features=Translate".to_string(),
-        "--enable-features=NetworkService,NetworkServiceInProcess".to_string(),
+        format!("--enable-features={}", enable_features.join(",")),
         "--metrics-recording-only".to_string(),
     ];
+
+    if options.webgpu {
+        // WebGPU is not exposed in headless or GPU-blocklisted environments
+        // unless explicitly enabled.
+        args.push("--enable-unsafe-webgpu".to_string());
+        if cfg!(target_os = "linux") {
+            // Route WebGPU through SwiftShader's software Vulkan and disable
+            // Vulkan surface presentation (software compositing). This
+            // combination produces real pixels in GPU-less containers and CI;
+            // hardware-Vulkan users can override via --args (later switches
+            // win). macOS and Windows use the hardware Metal/D3D backends.
+            args.push("--use-angle=vulkan".to_string());
+            args.push("--use-vulkan=swiftshader".to_string());
+            args.push("--use-webgpu-adapter=swiftshader".to_string());
+            args.push("--disable-vulkan-surface".to_string());
+        }
+    }
 
     if !options.use_real_keychain {
         args.push("--password-store=basic".to_string());
@@ -1483,6 +1513,72 @@ mod tests {
             .args
             .iter()
             .any(|a| a.contains("--disable-features") && a.contains("Translate")));
+        if let Some(ref dir) = result.temp_user_data_dir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn test_build_args_webgpu_default_off() {
+        let opts = LaunchOptions::default();
+        let result = build_chrome_args(&opts).unwrap();
+        assert!(!result.args.iter().any(|a| a == "--enable-unsafe-webgpu"));
+        assert!(!result.args.iter().any(|a| a.contains("Vulkan")));
+        assert!(!result
+            .args
+            .iter()
+            .any(|a| a.starts_with("--use-webgpu-adapter")));
+        if let Some(ref dir) = result.temp_user_data_dir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn test_build_args_webgpu_includes_webgpu_flags() {
+        let opts = LaunchOptions {
+            webgpu: true,
+            ..Default::default()
+        };
+        let result = build_chrome_args(&opts).unwrap();
+        assert!(result.args.iter().any(|a| a == "--enable-unsafe-webgpu"));
+        if cfg!(target_os = "linux") {
+            assert!(result
+                .args
+                .iter()
+                .any(|a| a == "--enable-features=NetworkService,NetworkServiceInProcess,Vulkan"));
+            assert!(result.args.iter().any(|a| a == "--use-angle=vulkan"));
+            assert!(result.args.iter().any(|a| a == "--use-vulkan=swiftshader"));
+            assert!(result
+                .args
+                .iter()
+                .any(|a| a == "--use-webgpu-adapter=swiftshader"));
+            assert!(result.args.iter().any(|a| a == "--disable-vulkan-surface"));
+        } else {
+            assert!(!result
+                .args
+                .iter()
+                .any(|a| a.starts_with("--use-webgpu-adapter")));
+        }
+        if let Some(ref dir) = result.temp_user_data_dir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn test_build_args_single_enable_features_flag() {
+        let opts = LaunchOptions {
+            webgpu: true,
+            ..Default::default()
+        };
+        let result = build_chrome_args(&opts).unwrap();
+        // Chrome only honors the last --enable-features switch, so the preset
+        // must never emit more than one.
+        let count = result
+            .args
+            .iter()
+            .filter(|a| a.starts_with("--enable-features="))
+            .count();
+        assert_eq!(count, 1);
         if let Some(ref dir) = result.temp_user_data_dir {
             let _ = std::fs::remove_dir_all(dir);
         }

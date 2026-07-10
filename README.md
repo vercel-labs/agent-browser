@@ -903,6 +903,7 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 | `--screenshot-quality <n>` | JPEG quality 0-100 (or `AGENT_BROWSER_SCREENSHOT_QUALITY` env) |
 | `--screenshot-format <fmt>` | Screenshot format: `png`, `jpeg` (or `AGENT_BROWSER_SCREENSHOT_FORMAT` env) |
 | `--headed` | Show browser window (not headless) (or `AGENT_BROWSER_HEADED` env) |
+| `--webgpu` | Enable WebGPU; SwiftShader software Vulkan on Linux, no GPU required (or `AGENT_BROWSER_WEBGPU` env) |
 | `--cdp <port\|url>` | Connect via Chrome DevTools Protocol (port or WebSocket URL) |
 | `--auto-connect` | Auto-discover and connect to running Chrome (or `AGENT_BROWSER_AUTO_CONNECT` env) |
 | `--color-scheme <scheme>` | Color scheme: `dark`, `light`, `no-preference` (or `AGENT_BROWSER_COLOR_SCHEME` env) |
@@ -1152,6 +1153,33 @@ agent-browser open example.com --headed
 This opens a visible browser window instead of running headless.
 
 > **Note:** Browser extensions work in both headed and headless mode (Chrome's `--headless=new`).
+
+## WebGPU
+
+Headless Chrome does not expose WebGPU by default, so screenshots of WebGPU pages (three.js `WebGPURenderer`, Babylon.js, etc.) silently render black. The `--webgpu` flag enables a launch preset that makes WebGPU work, including in GPU-less containers and CI:
+
+```bash
+agent-browser --webgpu open https://my-webgpu-app.example.com
+agent-browser screenshot app.png
+```
+
+On macOS and Windows this uses the hardware Metal/D3D backend. On Linux it routes WebGPU through SwiftShader's software Vulkan (no GPU or display needed), which requires the system Vulkan loader and Mesa ICD:
+
+```bash
+apt-get install -y libvulkan1 mesa-vulkan-drivers
+```
+
+Verify the full pipeline (adapter, render pass, and screenshot capture) with:
+
+```bash
+agent-browser doctor --webgpu
+```
+
+Notes for WebGPU pages:
+
+- WebGPU only exists in secure contexts (`https://`, `http://localhost`, or `file://`).
+- three.js `WebGPURenderer` initializes asynchronously and silently falls back to WebGL2 when no adapter is available — wait for the app to render its first frame before taking a screenshot.
+- To prefer a real GPU on Linux instead of SwiftShader, override the adapter with `--args "--use-webgpu-adapter=default"` (user args win over the preset).
 
 ## Authenticated Sessions
 

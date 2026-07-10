@@ -445,6 +445,7 @@ Diagnose your install, auto-clean stale daemon files, and optionally repair comm
 agent-browser doctor                     # Full diagnosis (env, Chrome, daemons, config, providers, network, launch test)
 agent-browser doctor --offline --quick   # Local-only, fastest
 agent-browser doctor --fix               # Also run destructive repairs (reinstall Chrome, purge old state, ...)
+agent-browser doctor --webgpu            # Also run a live WebGPU render probe (see the WebGPU page)
 agent-browser doctor --json              # Structured JSON output for agents
 ```
 
@@ -552,6 +553,7 @@ See [Init Scripts & Extensions](/init-scripts) for launch-time scripts, runtime 
 --screenshot-quality <n>  # JPEG quality 0-100 (or AGENT_BROWSER_SCREENSHOT_QUALITY)
 --screenshot-format <fmt> # Format: png (default), jpeg (or AGENT_BROWSER_SCREENSHOT_FORMAT)
 --headed                 # Show browser window (not headless)
+--webgpu                 # Enable WebGPU (software Vulkan on Linux, no GPU needed)
 --cdp <port|url>         # Connect via Chrome DevTools Protocol (port or WebSocket URL)
 --auto-connect           # Auto-discover and connect to running Chrome
 --color-scheme <scheme>  # Color scheme: dark, light, no-preference
