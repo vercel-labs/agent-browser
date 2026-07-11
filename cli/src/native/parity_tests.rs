@@ -719,3 +719,81 @@ async fn test_state_find_auto_returns_none_for_nonexistent() {
     let result = state::find_auto_state_file("nonexistent-session-xyz");
     assert!(result.is_none());
 }
+
+// ---------------------------------------------------------------------------
+// 5. Session-to-tab binding (--pin-tab) parity
+// ---------------------------------------------------------------------------
+
+/// Set up an isolated socket dir and session so `DaemonState::new` and the
+/// binding helpers cannot pick up a stray binding file from the real runtime
+/// directory. Returns the env guard and the tempdir; keep both alive for the
+/// duration of the test (the tempdir is deleted on drop).
+fn pin_tab_env(session: &str) -> (crate::test_utils::EnvGuard<'static>, tempfile::TempDir) {
+    let guard = crate::test_utils::EnvGuard::new(&[
+        "AGENT_BROWSER_SOCKET_DIR",
+        "XDG_RUNTIME_DIR",
+        "AGENT_BROWSER_NAMESPACE",
+        "AGENT_BROWSER_SESSION",
+        "AGENT_BROWSER_PIN_TAB",
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    guard.set("AGENT_BROWSER_SOCKET_DIR", dir.path().to_str().unwrap());
+    guard.remove("XDG_RUNTIME_DIR");
+    guard.remove("AGENT_BROWSER_NAMESPACE");
+    guard.set("AGENT_BROWSER_SESSION", session);
+    guard.remove("AGENT_BROWSER_PIN_TAB");
+    (guard, dir)
+}
+
+#[tokio::test]
+async fn test_pin_tab_command_field_enables_strict_binding() {
+    let (_guard, _dir) = pin_tab_env("parity-pin-cmd");
+    // A skip-launch action (no browser needed) still runs the early pinTab
+    // hook, so this exercises the flag plumbing without Chrome.
+    let mut state = DaemonState::new();
+    assert!(!state.pin_tab, "pin_tab should default to false");
+
+    let cmd = json!({ "action": "state_list", "id": "pin-1", "pinTab": true });
+    let result = execute_command(&cmd, &mut state).await;
+    assert_eq!(result["success"], true);
+    assert!(state.pin_tab, "pinTab command field should enable pin_tab");
+}
+
+#[tokio::test]
+async fn test_daemon_state_new_defaults_pin_tab_false() {
+    let (_guard, _dir) = pin_tab_env("parity-pin-default");
+    let state = DaemonState::new();
+    assert!(!state.pin_tab);
+}
+
+#[tokio::test]
+async fn test_daemon_state_new_reads_pin_tab_env() {
+    let (guard, _dir) = pin_tab_env("parity-pin-env");
+    guard.set("AGENT_BROWSER_PIN_TAB", "1");
+    let state = DaemonState::new();
+    assert!(
+        state.pin_tab,
+        "AGENT_BROWSER_PIN_TAB=1 should enable pin_tab"
+    );
+}
+
+#[tokio::test]
+async fn test_daemon_state_new_reads_sticky_pinned_binding() {
+    use super::tab_binding::{save, TabBinding};
+    let (_guard, _dir) = pin_tab_env("parity-pin-sticky");
+    // A persisted binding with pinned=true makes --pin-tab sticky across
+    // restarts even when the env var is absent.
+    save(
+        "parity-pin-sticky",
+        &TabBinding {
+            target_id: "ABCDEF0123456789".to_string(),
+            url: "https://example.com".to_string(),
+            pinned: true,
+        },
+    );
+    let state = DaemonState::new();
+    assert!(
+        state.pin_tab,
+        "a persisted pinned binding should enable pin_tab"
+    );
+}

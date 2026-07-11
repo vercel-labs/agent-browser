@@ -223,6 +223,8 @@ agent-browser tab close docs             # close by label
 
 Labels are never auto-generated, never rewritten on navigation, and must be unique within a session. To interact with another tab, switch to it first: the daemon maintains a single active tab, so refs (`@eN`) belong to the tab that was active when the snapshot ran.
 
+`tab list --json` also reports each tab's CDP `targetId`, accepted anywhere a tab ref is accepted (`tab <targetId>`, `tab close <targetId>`). Target ids stay stable across daemon restarts, unlike `t<N>` ids, which are per-daemon counters. With `--pin-tab` the session is pinned to its bound tab: if that tab is closed, commands fail with a `tab_gone` error instead of falling back to another tab, and `tab new` or `tab list` recover.
+
 ## Frames
 
 ```bash
@@ -367,6 +369,7 @@ agent-browser --session <name> ...    # Isolated browser session
 agent-browser --json ...              # JSON output for parsing
 agent-browser --headed ...            # Show browser window (not headless)
 agent-browser --cdp <port> ...        # Connect via Chrome DevTools Protocol
+agent-browser --pin-tab ...           # Pin the session to its bound tab (strict tab binding)
 agent-browser -p <provider> ...       # Browser provider or configured provider plugin
 agent-browser --proxy <url> ...       # Use proxy server
 agent-browser --proxy-bypass <hosts>  # Hosts to bypass proxy

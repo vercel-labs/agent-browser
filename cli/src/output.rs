@@ -2289,17 +2289,23 @@ Manage browser tabs in the current window. Stable tab ids look like `t1`,
 `t2`, `t3`. An id is never reused within a session, so scripts can keep
 referring to the same tab across commands. Optional user-assigned labels
 (e.g. `docs`, `app`) are interchangeable with ids everywhere a tab ref is
-accepted.
+accepted. CDP target ids (from `tab list --json`) are also accepted as tab
+refs; unlike `t<N>` ids they stay stable across daemon restarts.
+
+Each session remembers its active tab (bound by CDP target id) and returns
+to it after a daemon restart. With --pin-tab, commands fail with a
+`tab_gone` error instead of falling back to another tab when the bound tab
+is closed; recover with `tab new` or `tab list`.
 
 Operations:
   list                       List open tabs with their ids and labels (default)
   new [url]                  Open a new tab
   new --label <name> [url]   Open a new tab with a label like `docs` or `app`
-  close [t<N>|label]         Close a tab (current if no ref given)
-  <t<N>|label>               Switch to a tab by id or label
+  close [t<N>|label|target]  Close a tab (current if no ref given)
+  <t<N>|label|target>        Switch to a tab by id, label, or CDP target id
 
 Global Options:
-  --json               Output as JSON
+  --json               Output as JSON (includes each tab's targetId)
   --session <name>     Use specific session
 
 Examples:
@@ -2313,6 +2319,8 @@ Examples:
   agent-browser tab close
   agent-browser tab close t1
   agent-browser tab close docs
+  agent-browser tab list --json                        # Includes CDP target ids
+  agent-browser tab close 4A0B7C4E1F2D3A4B5C6D7E8F90A1B2C3  # Close by target id
 "##
         }
 
@@ -3524,6 +3532,9 @@ Options:
   --screenshot-format <fmt>  Screenshot format: png, jpeg (or AGENT_BROWSER_SCREENSHOT_FORMAT)
   --headed                   Show browser window (not headless) (or AGENT_BROWSER_HEADED env)
   --cdp <port>               Connect via CDP (Chrome DevTools Protocol)
+  --pin-tab                  Pin the session to its bound tab (or AGENT_BROWSER_PIN_TAB env)
+                             Commands fail with a tab_gone error instead of falling back
+                             to another tab when the bound tab is closed. Sticky per session.
   --color-scheme <scheme>    Color scheme: dark, light, no-preference (or AGENT_BROWSER_COLOR_SCHEME)
   --download-path <path>     Default download directory (or AGENT_BROWSER_DOWNLOAD_PATH)
   --content-boundaries       Wrap page output in boundary markers (or AGENT_BROWSER_CONTENT_BOUNDARIES)
@@ -3588,6 +3599,7 @@ Environment:
   AGENT_BROWSER_IGNORE_HTTPS_ERRORS Ignore HTTPS certificate errors
   AGENT_BROWSER_PROVIDER         Browser provider (ios, browserbase, kernel, browseruse, browserless, agentcore, or plugin name)
   AGENT_BROWSER_AUTO_CONNECT     Auto-discover and connect to running Chrome
+  AGENT_BROWSER_PIN_TAB          Pin the session to its bound tab (strict tab binding)
   AGENT_BROWSER_ALLOW_FILE_ACCESS Allow file:// URLs to access local files
   AGENT_BROWSER_HIDE_SCROLLBARS  Hide scrollbars in headless Chromium screenshots (default: true)
   AGENT_BROWSER_COLOR_SCHEME     Color scheme preference (dark, light, no-preference)
@@ -3636,6 +3648,7 @@ Examples:
   agent-browser screenshot --annotate    # Labeled screenshot for vision models
   agent-browser wait 2000               # Wait for slow pages to settle
   agent-browser --cdp 9222 snapshot      # Connect via CDP port
+  agent-browser --cdp 9222 --pin-tab open example.com  # Pin session to its own tab
   agent-browser --auto-connect snapshot  # Auto-discover running Chrome
   agent-browser stream enable            # Start runtime streaming on an auto-selected port
   agent-browser stream status            # Inspect runtime streaming state

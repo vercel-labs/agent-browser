@@ -81,6 +81,7 @@ pub(super) fn check(checks: &mut Vec<Check>) {
         confirm_actions: None,
         engine: None,
         auto_connect: false,
+        pin_tab: false,
         idle_timeout: None,
         default_timeout: None,
         cdp: None,

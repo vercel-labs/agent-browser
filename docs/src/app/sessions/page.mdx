@@ -36,6 +36,19 @@ Each session has its own:
 - Navigation history
 - Authentication state
 
+## Tab pinning in a shared browser
+
+Full isolation applies when each session launches its own browser. When sessions instead share one Chrome over `--cdp`, only the tab selection separates them. Each session remembers which tab it is bound to (by CDP target id, persisted across daemon restarts), so a restarted daemon reattaches to the session's own tab instead of adopting the most recently active one.
+
+Add `--pin-tab` (or set `AGENT_BROWSER_PIN_TAB=1`) to make the binding strict:
+
+```bash
+agent-browser --session agent1 --cdp 9222 --pin-tab open https://site-a.com
+agent-browser --session agent2 --cdp 9222 --pin-tab open https://site-b.com
+```
+
+With `--pin-tab`, a session whose bound tab was closed gets a `tab_gone` error (with <code>"code": "tab_gone"</code> in `--json` output) instead of silently acting on another session's tab; run `tab new <url>` or pick a tab from `tab list` to recover. The flag is sticky per session. See [CDP Mode](/cdp-mode) for details.
+
 ## Chrome profile reuse
 
 The simplest way to reuse your existing login state: pass a Chrome profile name to `--profile`. agent-browser copies the profile to a temp directory (read-only snapshot) and launches Chrome with your existing cookies and sessions.
@@ -270,6 +283,7 @@ agent-browser set headers '{"X-Custom-Header": "value"}'
   <tbody>
     <tr><td><code>AGENT_BROWSER_SESSION</code></td><td>Browser session ID (default: "default")</td></tr>
     <tr><td><code>AGENT_BROWSER_NAMESPACE</code></td><td>Namespace for daemon sockets and restore-state directories</td></tr>
+    <tr><td><code>AGENT_BROWSER_PIN_TAB</code></td><td>Pin the session to its bound tab (strict tab binding)</td></tr>
     <tr><td><code>AGENT_BROWSER_RESTORE</code></td><td>Auto-save/load state persistence key</td></tr>
     <tr><td><code>AGENT_BROWSER_RESTORE_SAVE</code></td><td>Restore save policy: <code>auto</code>, <code>always</code>, or <code>never</code></td></tr>
     <tr><td><code>AGENT_BROWSER_AUTOSAVE_INTERVAL_MS</code></td><td>Minimum ms between periodic session autosaves (default: 30000, <code>0</code> disables)</td></tr>

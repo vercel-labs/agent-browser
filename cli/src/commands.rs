@@ -3090,6 +3090,7 @@ mod tests {
             hide_scrollbars: true,
             device: None,
             auto_connect: false,
+            pin_tab: false,
             session_name: None,
             restore: None,
             restore_save: None,

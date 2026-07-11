@@ -341,6 +341,8 @@ agent-browser click @e3              # click uses docs's refs
 agent-browser tab close docs         # close by label
 ```
 
+`tab list --json` also reports each tab's CDP `targetId`, and target ids are accepted anywhere a tab ref is accepted (`tab <targetId>`, `tab close <targetId>`). Unlike `t<N>` ids, which are per-daemon counters, target ids stay stable across daemon restarts, so they're the right handle for scripts coordinating multiple sessions on one browser.
+
 ### Frames
 
 ```bash
@@ -626,6 +628,27 @@ Each session has its own:
 - Navigation history
 - Authentication state
 
+### Tab pinning
+
+When several sessions share one Chrome over `--cdp`, each session remembers which tab it is bound to (by CDP target id, persisted across daemon restarts). A restarted daemon reattaches to the session's own tab instead of adopting whatever tab happens to be active, which is usually another session's.
+
+By default, if the bound tab is closed the session falls back to a neighboring tab (legacy behavior). Pass `--pin-tab` (or set `AGENT_BROWSER_PIN_TAB=1`) to make the binding strict:
+
+```bash
+# Two agents sharing one Chrome, each pinned to its own tab
+agent-browser --session agent1 --cdp 9222 --pin-tab open site-a.com
+agent-browser --session agent2 --cdp 9222 --pin-tab open site-b.com
+```
+
+With `--pin-tab`:
+
+- Attaching with no binding opens a fresh tab instead of adopting an existing one
+- If the bound tab is closed, commands fail with a `tab_gone` error (exit code 1; `--json` responses carry `"code": "tab_gone"`) instead of silently acting on another tab
+- `tab list`, `tab new`, and `tab <ref>` still work in that state, so an agent can recover by binding a new tab
+- Tabs opened by other sessions or the user never steal the pinned session's active tab
+
+The flag is sticky per session: pass it once and later commands and daemon restarts keep the strict semantics.
+
 ## Chrome Profile Reuse
 
 The fastest way to use your existing login state: pass a Chrome profile name to `--profile`:
@@ -905,6 +928,7 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 | `--headed` | Show browser window (not headless) (or `AGENT_BROWSER_HEADED` env) |
 | `--cdp <port\|url>` | Connect via Chrome DevTools Protocol (port or WebSocket URL) |
 | `--auto-connect` | Auto-discover and connect to running Chrome (or `AGENT_BROWSER_AUTO_CONNECT` env) |
+| `--pin-tab` | Pin the session to its bound tab; fail with `tab_gone` instead of falling back to another tab (or `AGENT_BROWSER_PIN_TAB` env) |
 | `--color-scheme <scheme>` | Color scheme: `dark`, `light`, `no-preference` (or `AGENT_BROWSER_COLOR_SCHEME` env) |
 | `--download-path <path>` | Default download directory (or `AGENT_BROWSER_DOWNLOAD_PATH` env) |
 | `--content-boundaries` | Wrap page output in boundary markers for LLM safety (or `AGENT_BROWSER_CONTENT_BOUNDARIES` env) |
