@@ -13,9 +13,26 @@ agent-browser screenshot app.png
 `--webgpu` (or `AGENT_BROWSER_WEBGPU=1`, or `"webgpu": true` in agent-browser.json) applies a launch preset:
 
 - everywhere: `--enable-unsafe-webgpu` (WebGPU is hidden in headless/blocklisted environments by default)
-- Linux only: `--enable-features=Vulkan --use-angle=vulkan --use-vulkan=swiftshader --use-webgpu-adapter=swiftshader --disable-vulkan-surface` — routes WebGPU through SwiftShader's software Vulkan with software compositing, so it works with no GPU and no display (containers, CI)
+- Linux only: `--enable-features=Vulkan --use-angle=vulkan --use-vulkan=swiftshader --use-webgpu-adapter=swiftshader --disable-vulkan-surface` — routes WebGPU through SwiftShader's software Vulkan, so it works with no GPU (containers, CI)
 
 macOS uses the hardware Metal backend; Windows uses D3D. Nothing extra to install on either.
+
+## Platform matrix (verified)
+
+| Platform | WebGPU rendering (headless) | Screenshots of WebGPU canvases |
+|---|---|---|
+| macOS | works | works headless |
+| Windows | works (hardware D3D) | **headless captures black** — use `--headed` on a logged-in desktop |
+| Linux | works (SwiftShader Vulkan) | headless capture not supported upstream — use `--headed` under Xvfb |
+
+The Windows/Linux screenshot gap is an upstream headless-Chrome limitation: WebGPU canvas *presentation* never reaches the headless compositor, even though rendering itself works (verified by pixel readback). It is not an agent-browser or flag problem — no known flag combination fixes it. Rendering, `eval`-based pixel readbacks, and compute all work headless everywhere.
+
+For screenshots on Windows, the session must run headed in a logged-in desktop session (an ssh/Session-0 context is not enough — schedule the launch on the interactive desktop, e.g. `schtasks /IT`, then drive it from anywhere). On Linux, run headed under a virtual display:
+
+```bash
+xvfb-run -a -s '-screen 0 1280x720x24' agent-browser --webgpu --headed open https://my-webgpu-app.example.com
+agent-browser screenshot app.png
+```
 
 ## Verify the pipeline
 
@@ -23,7 +40,10 @@ macOS uses the hardware Metal backend; Windows uses D3D. Nothing extra to instal
 agent-browser doctor --webgpu
 ```
 
-This launches a scratch session with the preset, requests an adapter, renders a red clear through a real WebGPU render pass, and pixel-checks both an in-page readback and a decoded screenshot. If both pass, WebGPU screenshots will work. Failures include the failing stage (api / adapter / pixels / screenshot) and the adapter that was used.
+This launches a scratch session with the preset and pixel-checks two stages separately:
+
+1. **render** — requests an adapter (with retries; a cold Chrome returns null while the GPU process starts), clears an offscreen texture to red through a real render pass, and reads the buffer back. Proves WebGPU works at all, and reports the adapter (e.g. `nvidia ampere`, `apple metal-3`, `google swiftshader`).
+2. **screenshot** — decodes an actual screenshot of a presenting canvas. Proves the capture path. Expected to fail headless on Windows/Linux (see matrix); the failure message says so and points at `--headed`.
 
 ## Linux / containers / CI
 
@@ -33,22 +53,18 @@ The SwiftShader Vulkan path needs the system Vulkan loader and Mesa ICD. Without
 apt-get install -y libvulkan1 mesa-vulkan-drivers
 ```
 
-Minimal Docker recipe (Debian/Ubuntu base):
+Container recipe (Debian/Ubuntu base; xvfb needed only for the screenshot path):
 
 ```dockerfile
 FROM node:22-bookworm-slim
 RUN apt-get update && apt-get install -y \
-    ca-certificates libvulkan1 mesa-vulkan-drivers \
+    ca-certificates libvulkan1 mesa-vulkan-drivers xvfb xauth \
     && rm -rf /var/lib/apt/lists/*
 RUN npm install -g agent-browser \
     && agent-browser install   # downloads Chrome for Testing
-# sanity check at build time (optional):
-# RUN agent-browser doctor --webgpu --offline
 ```
 
-No real GPU, `/dev/dri`, or Xvfb is required — the preset composites in software under `--headless=new`.
-
-To prefer a real GPU on a Linux machine that has working hardware Vulkan, override the adapter (user `--args` win over the preset):
+No real GPU or `/dev/dri` is required. To prefer a real GPU on a Linux machine that has working hardware Vulkan, override the adapter (user `--args` win over the preset):
 
 ```bash
 agent-browser --webgpu --args "--use-webgpu-adapter=default" open ...
@@ -80,7 +96,18 @@ agent-browser eval "document.querySelector('canvas').getContext('webgpu') ? 'web
 
 ## Reading pixels back inside the page
 
-If you `eval` your own WebGPU readback: `drawImage(webgpuCanvas, ...)` must run **in the same task** as the `queue.submit()`. After any `await`, the frame is presented and the current texture expires — you'll read transparent black even though rendering worked. (Screenshots don't have this problem; they capture presented frames.)
+If you `eval` your own WebGPU readback, don't snapshot the canvas (`drawImage(webgpuCanvas, ...)`) — it depends on presentation timing and reads transparent black on Windows even when rendering works. Render to an offscreen texture and read it back deterministically:
+
+```js
+const tex = device.createTexture({ size: [w, h], format: 'rgba8unorm',
+  usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
+// ...render to tex, then:
+encoder.copyTextureToBuffer({ texture: tex }, { buffer, bytesPerRow }, [w, h]);
+device.queue.submit([encoder.finish()]);
+await buffer.mapAsync(GPUMapMode.READ);
+```
+
+This works headless on every platform (it's how `doctor --webgpu` proves rendering).
 
 ## Performance expectations
 

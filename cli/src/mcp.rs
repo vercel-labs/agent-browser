@@ -1720,7 +1720,7 @@ fn parity_tools() -> Vec<Value> {
             TOOL_DOCTOR,
             "Doctor",
             "Diagnose the installation.",
-            json!({ "offline": { "type": "boolean" }, "quick": { "type": "boolean" }, "fix": { "type": "boolean" } }),
+            json!({ "offline": { "type": "boolean" }, "quick": { "type": "boolean" }, "fix": { "type": "boolean" }, "webgpu": { "type": "boolean", "description": "Also run a live WebGPU render probe (launches a second Chrome)." } }),
             &[],
         ),
         tool(
@@ -3208,6 +3208,7 @@ fn call_doctor(arguments: &Value) -> Result<Value, ProtocolError> {
         ("offline", "--offline"),
         ("quick", "--quick"),
         ("fix", "--fix"),
+        ("webgpu", "--webgpu"),
     ] {
         if optional_bool(arguments, key)?.unwrap_or(false) {
             args.push(flag.to_string());
@@ -3722,6 +3723,20 @@ mod tests {
             .unwrap();
         let props = &open["inputSchema"]["properties"];
         assert!(props.get("headed").is_some());
+        assert!(props.get("webgpu").is_some());
+    }
+
+    #[test]
+    fn doctor_tool_exposes_webgpu_option() {
+        let tools = tools();
+        let doctor = tools
+            .iter()
+            .find(|t| t["name"].as_str() == Some(TOOL_DOCTOR))
+            .unwrap();
+        let props = &doctor["inputSchema"]["properties"];
+        assert!(props.get("offline").is_some());
+        assert!(props.get("quick").is_some());
+        assert!(props.get("fix").is_some());
         assert!(props.get("webgpu").is_some());
     }
 

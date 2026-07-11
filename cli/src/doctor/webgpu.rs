@@ -1,17 +1,26 @@
 //! WebGPU probe: spawn a scratch daemon session with the WebGPU preset
 //! enabled, render through a real WebGPU pass, and assert on actual pixels
-//! twice: an in-page canvas readback and a decoded screenshot. WebGPU
+//! twice: an offscreen buffer readback and a decoded screenshot. WebGPU
 //! failures are silent black (a screenshot request still returns 200), so
 //! only pixel values prove anything. Opt-in via `agent-browser doctor
 //! --webgpu` because it launches a second Chrome.
 //!
-//! Two subtleties this probe encodes:
+//! Subtleties this probe encodes (each verified on real machines):
 //! - `navigator.gpu` only exists in secure contexts, and the daemon's
 //!   `about:blank` is not one; the probe navigates to a temp `file://` page
 //!   (file URLs are potentially trustworthy) so it works offline.
-//! - The canvas readback must happen in the same task as the queue submit.
-//!   After any `await`, the frame is presented and the current texture
-//!   expires, so `drawImage` observes transparent black.
+//! - The render proof is `copyTextureToBuffer` + `mapAsync` on an offscreen
+//!   texture, never a canvas snapshot: canvas readback is presentation-timing
+//!   dependent and reads transparent black on Windows even when rendering
+//!   works.
+//! - Every await in the probe script races a timeout. Runtime.evaluate with
+//!   awaitPromise never returns if a WebGPU promise stalls, which would hang
+//!   doctor indefinitely.
+//! - The screenshot check exercises the compositor path separately: headless
+//!   Chrome cannot capture WebGPU canvas presentation on Windows and Linux
+//!   because of an upstream limitation, so render can pass while the
+//!   screenshot fails. The failure message points at `--headed` on a real or
+//!   virtual display, which is the verified workaround.
 
 use std::env;
 use std::path::PathBuf;
@@ -33,39 +42,58 @@ const PROBE_HTML: &str = "<!doctype html><html><head><style>html,body{margin:0;p
 /// Async IIFE evaluated in the page. Returns `{ ok, stage, detail, adapter }`.
 /// Uses only single quotes so it embeds cleanly in the JSON envelope.
 const PROBE_JS: &str = r#"(async () => {
+  const withTimeout = (p, ms, label) => Promise.race([
+    Promise.resolve(p),
+    new Promise((_, rej) => setTimeout(() => rej(new Error(label + ' timed out after ' + ms + 'ms')), ms)),
+  ]);
   try {
     if (!window.isSecureContext) return { ok: false, stage: 'context', detail: 'page is not a secure context' };
     if (!navigator.gpu) return { ok: false, stage: 'api', detail: 'navigator.gpu is undefined' };
-    const adapter = await navigator.gpu.requestAdapter();
-    if (!adapter) return { ok: false, stage: 'adapter', detail: 'requestAdapter() returned null' };
+    // A cold Chrome can return null while the GPU process is still starting
+    // (observed on Windows when eval runs right after launch); retry briefly.
+    let adapter = null;
+    for (let i = 0; i < 5 && !adapter; i++) {
+      if (i > 0) await new Promise(r => setTimeout(r, 1000));
+      adapter = await withTimeout(navigator.gpu.requestAdapter(), 10000, 'requestAdapter');
+    }
+    if (!adapter) return { ok: false, stage: 'adapter', detail: 'requestAdapter() returned null (5 attempts)' };
     const info = adapter.info || {};
     const desc = [info.vendor, info.architecture, info.description].filter(Boolean).join(' ') || 'unknown adapter';
-    const device = await adapter.requestDevice();
-    const canvas = document.getElementById('c');
-    const ctx = canvas.getContext('webgpu');
-    if (!ctx) return { ok: false, stage: 'canvas', detail: 'getContext(webgpu) returned null', adapter: desc };
-    ctx.configure({ device, format: navigator.gpu.getPreferredCanvasFormat(), alphaMode: 'opaque' });
-    const draw = () => {
-      const enc = device.createCommandEncoder();
-      const pass = enc.beginRenderPass({ colorAttachments: [{
-        view: ctx.getCurrentTexture().createView(),
-        clearValue: { r: 1, g: 0, b: 0, a: 1 }, loadOp: 'clear', storeOp: 'store',
-      }] });
-      pass.end();
-      device.queue.submit([enc.finish()]);
-    };
-    draw();
-    // Same-task readback: no await between submit and drawImage, or the
-    // frame is presented and the texture expires to transparent black.
-    const c2 = document.createElement('canvas');
-    c2.width = 64; c2.height = 64;
-    const g = c2.getContext('2d');
-    g.drawImage(canvas, 0, 0);
-    const p = g.getImageData(32, 32, 1, 1).data;
+    const device = await withTimeout(adapter.requestDevice(), 10000, 'requestDevice');
+    // Deterministic render proof: offscreen texture -> buffer readback.
+    const tex = device.createTexture({ size: [64, 64], format: 'rgba8unorm', usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
+    const buf = device.createBuffer({ size: 256 * 64, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const enc = device.createCommandEncoder();
+    const pass = enc.beginRenderPass({ colorAttachments: [{
+      view: tex.createView(),
+      clearValue: { r: 1, g: 0, b: 0, a: 1 }, loadOp: 'clear', storeOp: 'store',
+    }] });
+    pass.end();
+    enc.copyTextureToBuffer({ texture: tex }, { buffer: buf, bytesPerRow: 256 }, [64, 64]);
+    device.queue.submit([enc.finish()]);
+    await withTimeout(buf.mapAsync(GPUMapMode.READ), 10000, 'mapAsync');
+    const p = new Uint8Array(buf.getMappedRange(256 * 32 + 32 * 4, 4)).slice();
+    buf.unmap();
     const ok = p[0] > 200 && p[1] < 64 && p[2] < 64;
-    // Keep presenting like a real app so the screenshot sees fresh frames.
-    const loop = () => { draw(); requestAnimationFrame(loop); };
-    requestAnimationFrame(loop);
+    // Drive the visible canvas with a rAF render loop so the follow-up
+    // screenshot check exercises the presentation/compositor path.
+    const canvas = document.getElementById('c');
+    const ctx = canvas && canvas.getContext('webgpu');
+    if (ctx) {
+      ctx.configure({ device, format: navigator.gpu.getPreferredCanvasFormat(), alphaMode: 'opaque' });
+      const draw = () => {
+        const e = device.createCommandEncoder();
+        const r = e.beginRenderPass({ colorAttachments: [{
+          view: ctx.getCurrentTexture().createView(),
+          clearValue: { r: 1, g: 0, b: 0, a: 1 }, loadOp: 'clear', storeOp: 'store',
+        }] });
+        r.end();
+        device.queue.submit([e.finish()]);
+      };
+      draw();
+      const loop = () => { draw(); requestAnimationFrame(loop); };
+      requestAnimationFrame(loop);
+    }
     return { ok, stage: 'pixels', detail: 'rgba(' + [p[0], p[1], p[2], p[3]].join(',') + ')', adapter: desc };
   } catch (e) {
     return { ok: false, stage: 'exception', detail: String((e && e.message) || e) };
@@ -175,7 +203,6 @@ pub(super) fn check(checks: &mut Vec<Check>) {
         return;
     }
     guard.session = Some(session.clone());
-
     let launch_cmd = json!({
         "id": new_id(),
         "action": "launch",
@@ -195,10 +222,22 @@ pub(super) fn check(checks: &mut Vec<Check>) {
         return;
     }
 
+    let page_url = match url::Url::from_file_path(&page_path) {
+        Ok(u) => u.to_string(),
+        Err(()) => {
+            checks.push(Check::new(
+                "webgpu.setup",
+                CATEGORY,
+                Status::Fail,
+                format!("Could not build file URL for {}", page_path.display()),
+            ));
+            return;
+        }
+    };
     let open_cmd = json!({
         "id": new_id(),
         "action": "navigate",
-        "url": format!("file://{}", page_path.display()),
+        "url": page_url,
     });
     if let Err(e) = send_json(open_cmd, &session) {
         checks.push(
@@ -212,7 +251,6 @@ pub(super) fn check(checks: &mut Vec<Check>) {
         );
         return;
     }
-
     let eval_cmd = json!({
         "id": new_id(),
         "action": "evaluate",
@@ -298,13 +336,25 @@ pub(super) fn check(checks: &mut Vec<Check>) {
             ));
         }
         Ok((r, g, b)) => {
-            checks.push(probe_fail(
-                "webgpu.screenshot",
-                format!(
-                    "Screenshot did not capture WebGPU output: expected red, got rgb({},{},{})",
-                    r, g, b
-                ),
-            ));
+            // Rendering passed but the presented canvas is not in the
+            // capture: headless Chrome cannot composite WebGPU canvas
+            // presentation on Windows/Linux (upstream limitation).
+            checks.push(
+                Check::new(
+                    "webgpu.screenshot",
+                    CATEGORY,
+                    Status::Fail,
+                    format!(
+                        "WebGPU renders, but headless screenshots miss the canvas (expected red, got rgb({},{},{})); this is a known headless Chrome limitation on this platform",
+                        r, g, b
+                    ),
+                )
+                .with_fix(if cfg!(target_os = "linux") {
+                    "run WebGPU sessions with --headed under a display (e.g. xvfb-run) for screenshots"
+                } else {
+                    "run WebGPU sessions with --headed on a logged-in desktop for screenshots"
+                }),
+            );
         }
         Err(e) => {
             checks.push(probe_fail(

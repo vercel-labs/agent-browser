@@ -963,7 +963,10 @@ fn main() {
             quick: args.iter().any(|a| a == "--quick"),
             fix: args.iter().any(|a| a == "--fix"),
             json: flags.json,
-            webgpu: flags.webgpu,
+            // Explicit CLI opt-in only: a global AGENT_BROWSER_WEBGPU/config
+            // "webgpu": true must not make every doctor run launch the extra
+            // Chrome probe (and fail on hosts missing Vulkan deps).
+            webgpu: flags.cli_webgpu && flags.webgpu,
         };
         exit(doctor::run_doctor(opts));
     }

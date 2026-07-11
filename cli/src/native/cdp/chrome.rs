@@ -1252,6 +1252,12 @@ fn find_playwright_chromium() -> Option<PathBuf> {
 
 #[cfg(target_os = "linux")]
 fn build_playwright_binary_path(chromium_dir: &Path) -> PathBuf {
+    // Playwright's Linux layout is chrome-linux/chrome; chrome-linux64 is
+    // the Chrome-for-Testing naming kept as a fallback.
+    let standard = chromium_dir.join("chrome-linux/chrome");
+    if standard.exists() {
+        return standard;
+    }
     chromium_dir.join("chrome-linux64/chrome")
 }
 

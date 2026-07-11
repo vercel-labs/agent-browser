@@ -1156,18 +1156,20 @@ This opens a visible browser window instead of running headless.
 
 ## WebGPU
 
-Headless Chrome does not expose WebGPU by default, so screenshots of WebGPU pages (three.js `WebGPURenderer`, Babylon.js, etc.) silently render black. The `--webgpu` flag enables a launch preset that makes WebGPU work, including in GPU-less containers and CI:
+Headless Chrome does not expose WebGPU by default, so pages using it (three.js `WebGPURenderer`, Babylon.js, etc.) silently render black. The `--webgpu` flag enables a launch preset that makes WebGPU work, including in GPU-less containers and CI:
 
 ```bash
 agent-browser --webgpu open https://my-webgpu-app.example.com
 agent-browser screenshot app.png
 ```
 
-On macOS and Windows this uses the hardware Metal/D3D backend. On Linux it routes WebGPU through SwiftShader's software Vulkan (no GPU or display needed), which requires the system Vulkan loader and Mesa ICD:
+On macOS and Windows this uses the hardware Metal/D3D backend. On Linux it routes WebGPU through SwiftShader's software Vulkan (no GPU needed), which requires the system Vulkan loader and Mesa ICD:
 
 ```bash
 apt-get install -y libvulkan1 mesa-vulkan-drivers
 ```
+
+One upstream caveat: headless Chrome cannot capture WebGPU canvas presentation in screenshots on Windows and Linux (rendering and in-page readbacks work; the capture is black). Screenshots of WebGPU pages work headless on macOS; on Windows run `--headed` in a logged-in desktop session, on Linux run `--headed` under Xvfb (`xvfb-run -a agent-browser --webgpu --headed open ...`).
 
 Verify the full pipeline (adapter, render pass, and screenshot capture) with:
 
@@ -1180,6 +1182,8 @@ Notes for WebGPU pages:
 - WebGPU only exists in secure contexts (`https://`, `http://localhost`, or `file://`).
 - three.js `WebGPURenderer` initializes asynchronously and silently falls back to WebGL2 when no adapter is available — wait for the app to render its first frame before taking a screenshot.
 - To prefer a real GPU on Linux instead of SwiftShader, override the adapter with `--args "--use-webgpu-adapter=default"` (user args win over the preset).
+
+See the [WebGPU docs page](https://agent-browser.dev/webgpu) for the full platform matrix and container recipe.
 
 ## Authenticated Sessions
 
