@@ -1110,8 +1110,12 @@ fn main() {
 
     // Strict session-to-tab binding: sent with every command so an
     // already-running daemon adopts it too (it is sticky once enabled).
+    // An explicit --no-pin-tab sends false to disable a sticky pin; the
+    // field is omitted entirely when the user expressed no preference.
     if flags.pin_tab {
         cmd["pinTab"] = json!(true);
+    } else if flags.cli_pin_tab {
+        cmd["pinTab"] = json!(false);
     }
     attach_restore_config_to_command(&mut cmd, &flags);
 

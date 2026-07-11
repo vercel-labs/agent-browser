@@ -393,6 +393,10 @@ pub struct Flags {
     pub cli_download_path: bool,
     pub cli_headed: bool,
     pub cli_restore: bool,
+    /// True when --pin-tab / --no-pin-tab was passed on the command line, so
+    /// an explicit disable can be sent to the daemon (a bare `pin_tab: false`
+    /// just means "absent" and must not override a sticky pin).
+    pub cli_pin_tab: bool,
 }
 
 pub fn parse_flags(args: &[String]) -> Flags {
@@ -606,6 +610,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
         cli_download_path: false,
         cli_headed: false,
         cli_restore: false,
+        cli_pin_tab: false,
     };
 
     let mut i = 0;
@@ -848,6 +853,15 @@ pub fn parse_flags(args: &[String]) -> Flags {
             "--pin-tab" => {
                 let (val, consumed) = parse_bool_arg(args, i);
                 flags.pin_tab = val;
+                flags.cli_pin_tab = true;
+                if consumed {
+                    i += 1;
+                }
+            }
+            "--no-pin-tab" => {
+                let (val, consumed) = parse_bool_arg(args, i);
+                flags.pin_tab = !val;
+                flags.cli_pin_tab = true;
                 if consumed {
                     i += 1;
                 }
@@ -1014,6 +1028,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--hide-scrollbars",
         "--auto-connect",
         "--pin-tab",
+        "--no-pin-tab",
         "--annotate",
         "--content-boundaries",
         "--confirm-interactive",

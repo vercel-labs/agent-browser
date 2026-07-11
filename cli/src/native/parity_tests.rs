@@ -790,10 +790,93 @@ async fn test_daemon_state_new_reads_sticky_pinned_binding() {
             url: "https://example.com".to_string(),
             pinned: true,
         },
-    );
+    )
+    .unwrap();
     let state = DaemonState::new();
     assert!(
         state.pin_tab,
         "a persisted pinned binding should enable pin_tab"
     );
+}
+
+#[tokio::test]
+async fn test_pin_tab_false_disables_pin_in_running_daemon() {
+    let (_guard, _dir) = pin_tab_env("parity-pin-disable-live");
+    let mut state = DaemonState::new();
+
+    let cmd = json!({ "action": "state_list", "id": "pin-on", "pinTab": true });
+    let result = execute_command(&cmd, &mut state).await;
+    assert_eq!(result["success"], true);
+    assert!(state.pin_tab);
+
+    let cmd = json!({ "action": "state_list", "id": "pin-off", "pinTab": false });
+    let result = execute_command(&cmd, &mut state).await;
+    assert_eq!(result["success"], true);
+    assert!(
+        !state.pin_tab,
+        "pinTab: false should disable pin_tab in a running daemon"
+    );
+}
+
+#[tokio::test]
+async fn test_pin_tab_false_disables_persisted_pin_across_restart() {
+    use super::tab_binding::{load, save, TabBinding};
+    let (_guard, _dir) = pin_tab_env("parity-pin-disable-sticky");
+    // Simulate a prior pinned session.
+    save(
+        "parity-pin-disable-sticky",
+        &TabBinding {
+            target_id: "ABCDEF0123456789".to_string(),
+            url: "https://example.com".to_string(),
+            pinned: true,
+        },
+    )
+    .unwrap();
+
+    // Fresh daemon restores the sticky pin; an explicit pinTab: false must
+    // disable it and rewrite the persisted record even with no browser
+    // attached, so the disable survives another restart.
+    let mut state = DaemonState::new();
+    assert!(state.pin_tab, "sticky pin should be restored");
+    let cmd = json!({ "action": "state_list", "id": "pin-off", "pinTab": false });
+    let result = execute_command(&cmd, &mut state).await;
+    assert_eq!(result["success"], true);
+    assert!(!state.pin_tab);
+
+    let binding = load("parity-pin-disable-sticky")
+        .unwrap()
+        .expect("binding file should still exist");
+    assert!(
+        !binding.pinned,
+        "the persisted binding must record pinned=false"
+    );
+    let state = DaemonState::new();
+    assert!(!state.pin_tab, "the disable must survive a daemon restart");
+}
+
+#[tokio::test]
+async fn test_pin_tab_absent_keeps_current_state() {
+    let (_guard, _dir) = pin_tab_env("parity-pin-absent");
+    let mut state = DaemonState::new();
+    let cmd = json!({ "action": "state_list", "id": "pin-on", "pinTab": true });
+    execute_command(&cmd, &mut state).await;
+    assert!(state.pin_tab);
+
+    // A command without the pinTab field must not reset the sticky pin.
+    let cmd = json!({ "action": "state_list", "id": "no-field" });
+    let result = execute_command(&cmd, &mut state).await;
+    assert_eq!(result["success"], true);
+    assert!(state.pin_tab, "absent pinTab must leave the pin enabled");
+}
+
+#[tokio::test]
+async fn test_daemon_state_new_with_corrupt_binding_does_not_pin() {
+    let (_guard, _dir) = pin_tab_env("parity-pin-corrupt");
+    let path = super::tab_binding::binding_path("parity-pin-corrupt");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, "{\"targetId\":\"AAAA\",\"pin").unwrap();
+    // A corrupt file must not silently enable (or crash) pinning here; the
+    // attach path reports it as a recovery error instead.
+    let state = DaemonState::new();
+    assert!(!state.pin_tab);
 }

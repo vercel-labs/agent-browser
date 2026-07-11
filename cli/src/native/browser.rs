@@ -705,8 +705,14 @@ impl BrowserManager {
     // -----------------------------------------------------------------------
 
     /// Enable or disable strict pin-tab semantics for this session.
+    /// Disabling also clears a pending `tab_gone` state (which only exists
+    /// under pin semantics) so the session falls back to legacy selection
+    /// instead of staying stuck on errors for a pin it no longer has.
     pub fn set_pin_tab(&mut self, pin: bool) {
         self.pin_tab = pin;
+        if !pin {
+            self.bound_target_gone = None;
+        }
     }
 
     pub fn pin_tab(&self) -> bool {

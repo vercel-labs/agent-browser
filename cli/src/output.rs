@@ -2295,7 +2295,8 @@ refs; unlike `t<N>` ids they stay stable across daemon restarts.
 Each session remembers its active tab (bound by CDP target id) and returns
 to it after a daemon restart. With --pin-tab, commands fail with a
 `tab_gone` error instead of falling back to another tab when the bound tab
-is closed; recover with `tab new` or `tab list`.
+is closed; recover with `tab new` or `tab list`. The pin is sticky per
+session; pass --no-pin-tab to turn it off again.
 
 Operations:
   list                       List open tabs with their ids and labels (default)
@@ -3535,6 +3536,7 @@ Options:
   --pin-tab                  Pin the session to its bound tab (or AGENT_BROWSER_PIN_TAB env)
                              Commands fail with a tab_gone error instead of falling back
                              to another tab when the bound tab is closed. Sticky per session.
+  --no-pin-tab               Disable a sticky pin previously enabled with --pin-tab
   --color-scheme <scheme>    Color scheme: dark, light, no-preference (or AGENT_BROWSER_COLOR_SCHEME)
   --download-path <path>     Default download directory (or AGENT_BROWSER_DOWNLOAD_PATH)
   --content-boundaries       Wrap page output in boundary markers (or AGENT_BROWSER_CONTENT_BOUNDARIES)

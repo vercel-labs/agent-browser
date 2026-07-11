@@ -6416,11 +6416,15 @@ async fn current_url(state: &mut DaemonState, id: &str) -> Value {
     execute_command(&json!({ "id": id, "action": "url" }), state).await
 }
 
+fn load_binding(session: &str, expect: &str) -> super::tab_binding::TabBinding {
+    super::tab_binding::load(session)
+        .expect("binding file should be readable")
+        .expect(expect)
+}
+
 #[tokio::test]
 #[ignore]
 async fn e2e_pin_tab_rebinds_after_daemon_restart() {
-    use super::tab_binding;
-
     let (guard, _dir) = binding_test_env();
     let (mut host, ws_url) = launch_binding_host(&guard).await;
 
@@ -6429,14 +6433,14 @@ async fn e2e_pin_tab_rebinds_after_daemon_restart() {
 
     // Session A binds its own tab (pin mode creates a fresh tab on attach).
     let state_a = attach_pinned_session(&guard, "e2e-bind-a", &ws_url, url_a).await;
-    let binding_a = tab_binding::load("e2e-bind-a").expect("session A binding should persist");
+    let binding_a = load_binding("e2e-bind-a", "session A binding should persist");
     assert!(binding_a.pinned, "binding should record pinned=true");
     assert_eq!(binding_a.url, url_a);
 
     // Session B binds its own tab and navigates last, so B's tab is the most
     // recently active one (the tab a naive re-attach would adopt).
     let mut state_b = attach_pinned_session(&guard, "e2e-bind-b", &ws_url, url_b).await;
-    let binding_b = tab_binding::load("e2e-bind-b").expect("session B binding should persist");
+    let binding_b = load_binding("e2e-bind-b", "session B binding should persist");
     assert_ne!(
         binding_a.target_id, binding_b.target_id,
         "sessions must bind distinct tabs"
@@ -6469,7 +6473,7 @@ async fn e2e_pin_tab_rebinds_after_daemon_restart() {
         url_a,
         "restarted session A must operate on A's original tab"
     );
-    let binding_a2 = tab_binding::load("e2e-bind-a").expect("binding should still exist");
+    let binding_a2 = load_binding("e2e-bind-a", "binding should still exist");
     assert_eq!(
         binding_a2.target_id, binding_a.target_id,
         "re-attach must keep the original bound target"
@@ -6504,8 +6508,6 @@ async fn e2e_pin_tab_rebinds_after_daemon_restart() {
 #[tokio::test]
 #[ignore]
 async fn e2e_pin_tab_gone_error_and_recovery() {
-    use super::tab_binding;
-
     let (guard, _dir) = binding_test_env();
     let (mut host, ws_url) = launch_binding_host(&guard).await;
 
@@ -6513,7 +6515,7 @@ async fn e2e_pin_tab_gone_error_and_recovery() {
     let url_b = "data:text/html,gone-session-b";
 
     let mut state_a = attach_pinned_session(&guard, "e2e-gone-a", &ws_url, url_a).await;
-    let binding_a = tab_binding::load("e2e-gone-a").expect("session A binding should persist");
+    let binding_a = load_binding("e2e-gone-a", "session A binding should persist");
     let mut state_b = attach_pinned_session(&guard, "e2e-gone-b", &ws_url, url_b).await;
 
     // Session B closes A's tab by targetId (targetIds are accepted anywhere a
@@ -6564,7 +6566,7 @@ async fn e2e_pin_tab_gone_error_and_recovery() {
     assert_success(&resp);
     assert_eq!(get_data(&resp)["url"], url_a2);
 
-    let binding_a2 = tab_binding::load("e2e-gone-a").expect("binding should be rewritten");
+    let binding_a2 = load_binding("e2e-gone-a", "binding should be rewritten");
     assert_ne!(
         binding_a2.target_id, binding_a.target_id,
         "recovery must bind a new target"

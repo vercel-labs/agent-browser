@@ -3115,6 +3115,7 @@ mod tests {
             cli_download_path: false,
             cli_headed: false,
             cli_restore: false,
+            cli_pin_tab: false,
             annotate: false,
             color_scheme: None,
             download_path: None,

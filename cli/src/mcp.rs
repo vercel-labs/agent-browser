@@ -1593,10 +1593,10 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_CONNECT,
             "Connect CDP",
-            "Connect to a browser over CDP. With pinTab, the session is strictly bound to its own tab: it re-binds by target id after restarts and fails with a tab_gone error instead of adopting another tab.",
+            "Connect to a browser over CDP. With pinTab, the session is strictly bound to its own tab: it re-binds by target id after restarts and fails with a tab_gone error instead of adopting another tab. Pass pinTab: false to explicitly disable a sticky pin; omit it to keep the current state.",
             json!({
                 "target": { "type": "string", "description": "CDP port or URL." },
-                "pinTab": { "type": "boolean", "default": false, "description": "Strict session-to-tab binding (sticky for the session)." }
+                "pinTab": { "type": "boolean", "description": "Strict session-to-tab binding (sticky for the session). Explicit false disables a sticky pin; omitted leaves it unchanged." }
             }),
             &["target"],
         ),
@@ -2288,8 +2288,10 @@ fn call_one_string(arguments: &Value, command: &str, key: &str) -> Result<Value,
 fn call_connect(arguments: &Value) -> Result<Value, ProtocolError> {
     let mut args = vec!["connect".to_string()];
     args.push(required_string(arguments, "target")?);
-    if arguments.get("pinTab").and_then(|v| v.as_bool()) == Some(true) {
-        args.push("--pin-tab".to_string());
+    match arguments.get("pinTab").and_then(|v| v.as_bool()) {
+        Some(true) => args.push("--pin-tab".to_string()),
+        Some(false) => args.push("--no-pin-tab".to_string()),
+        None => {}
     }
     call_cli_tool(arguments, args, None)
 }

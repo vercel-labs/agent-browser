@@ -64,7 +64,7 @@ Every session remembers which tab it is bound to (by CDP target id, persisted in
 - Recovery commands still work in that state: run `tab new <url>` to bind a fresh tab, or `tab list` and switch to an existing one
 - Tabs opened by other sessions or the user never steal the pinned session's active tab
 
-The flag is sticky per session: pass it once at session creation and later commands and daemon restarts keep the strict semantics. Use each tab's `targetId` from `tab list --json` when one session needs to reference another session's tab; target ids stay stable across daemon restarts.
+The flag is sticky per session: pass it once at session creation and later commands and daemon restarts keep the strict semantics. Pass `--no-pin-tab` to explicitly turn the pin off again. Use each tab's `targetId` from `tab list --json` when one session needs to reference another session's tab; target ids stay stable across daemon restarts.
 
 ## Session State Persistence
 
