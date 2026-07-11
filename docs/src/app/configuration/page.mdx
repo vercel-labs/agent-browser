@@ -272,6 +272,7 @@ These environment variables configure additional daemon and runtime behavior:
     <tr><td><code>AGENT_BROWSER_ENABLE</code></td><td>Comma-separated built-in init script features such as <code>react-devtools</code>.</td><td>(none)</td></tr>
     <tr><td><code>AGENT_BROWSER_HEADED</code></td><td>Show browser window instead of running headless (<code>1</code> to enable).</td><td>(disabled)</td></tr>
     <tr><td><code>AGENT_BROWSER_WEBGPU</code></td><td>Enable WebGPU; SwiftShader software Vulkan on Linux, no GPU required (<code>1</code> to enable).</td><td>(disabled)</td></tr>
+    <tr><td><code>AGENT_BROWSER_NO_XVFB</code></td><td>Disable automatic Xvfb virtual display for headed mode on displayless Linux hosts (<code>1</code> to disable).</td><td>(auto-Xvfb enabled)</td></tr>
     <tr><td><code>AGENT_BROWSER_JSON</code></td><td>Use JSON output by default.</td><td>(disabled)</td></tr>
     <tr><td><code>AGENT_BROWSER_ANNOTATE</code></td><td>Enable annotated screenshots by default.</td><td>(disabled)</td></tr>
     <tr><td><code>AGENT_BROWSER_CDP</code></td><td>Connect the daemon to a CDP port or WebSocket URL.</td><td>(none)</td></tr>

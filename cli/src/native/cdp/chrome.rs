@@ -12,6 +12,10 @@ pub struct ChromeProcess {
     /// On Unix, the process group ID used to kill the entire Chrome process tree.
     #[cfg(unix)]
     pgid: Option<i32>,
+    /// Private Xvfb server auto-started for headed mode on displayless Linux
+    /// hosts. Dropped (and killed) after the Chrome tree is torn down.
+    #[cfg(target_os = "linux")]
+    xvfb: Option<XvfbServer>,
 }
 
 impl ChromeProcess {
@@ -84,6 +88,93 @@ impl Drop for ChromeProcess {
             }
         }
     }
+}
+
+/// A private Xvfb virtual display owned by one Chrome process.
+///
+/// Headed Chrome on Linux needs an X display, and some workloads need headed
+/// mode on hosts that have none: headless Chrome cannot composite WebGPU
+/// canvas presentation into screenshots (upstream limitation), so WebGPU
+/// capture requires a real or virtual display. When headed mode is requested,
+/// no DISPLAY is set, and Xvfb is installed, launch spawns a private server
+/// instead of failing. Opt out with AGENT_BROWSER_NO_XVFB=1.
+#[cfg(target_os = "linux")]
+struct XvfbServer {
+    child: Child,
+    display: String,
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for XvfbServer {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn maybe_start_xvfb(options: &LaunchOptions) -> Option<XvfbServer> {
+    if options.headless {
+        return None;
+    }
+    if std::env::var("DISPLAY")
+        .map(|d| !d.is_empty())
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    if std::env::var("AGENT_BROWSER_NO_XVFB").map(|v| v == "1" || v == "true") == Ok(true) {
+        return None;
+    }
+
+    let (w, h) = options.viewport_size.unwrap_or((1280, 720));
+    // Probe candidate display numbers; the X socket file existing means the
+    // display is taken. A lost race just makes Xvfb exit and we move on.
+    for n in 99..120 {
+        if Path::new(&format!("/tmp/.X11-unix/X{}", n)).exists() {
+            continue;
+        }
+        let display = format!(":{}", n);
+        let mut child = match Command::new("Xvfb")
+            .args([
+                display.as_str(),
+                "-screen",
+                "0",
+                &format!("{}x{}x24", w, h),
+                "-nolisten",
+                "tcp",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            Ok(c) => c,
+            // Xvfb not installed (or not executable): headed launch proceeds
+            // without a display and surfaces Chrome's own error.
+            Err(_) => return None,
+        };
+
+        // Wait for the server socket; if Xvfb dies (display race, bad args),
+        // try the next display number.
+        let socket = format!("/tmp/.X11-unix/X{}", n);
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            if Path::new(&socket).exists() {
+                return Some(XvfbServer { child, display });
+            }
+            if matches!(child.try_wait(), Ok(Some(_)) | Err(_)) {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    None
 }
 
 #[derive(Clone)]
@@ -388,11 +479,21 @@ fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<Chro
         }
     };
 
+    #[cfg(target_os = "linux")]
+    let xvfb = maybe_start_xvfb(options);
+
     let mut cmd = Command::new(chrome_path);
     cmd.args(&args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
+
+    // Scope the virtual display to the Chrome child; the daemon's own
+    // environment is left untouched.
+    #[cfg(target_os = "linux")]
+    if let Some(ref x) = xvfb {
+        cmd.env("DISPLAY", &x.display);
+    }
 
     // Place Chrome in its own process group so we can kill the entire tree
     // (main process + GPU/renderer/utility/crashpad helpers) with a single
@@ -464,6 +565,8 @@ fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<Chro
         temp_user_data_dir,
         #[cfg(unix)]
         pgid,
+        #[cfg(target_os = "linux")]
+        xvfb,
     })
 }
 

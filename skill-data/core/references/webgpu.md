@@ -23,16 +23,18 @@ macOS uses the hardware Metal backend; Windows uses D3D. Nothing extra to instal
 |---|---|---|
 | macOS | works | works headless |
 | Windows | works (hardware D3D) | **headless captures black** — use `--headed` on a logged-in desktop |
-| Linux | works (SwiftShader Vulkan) | headless capture not supported upstream — use `--headed` under Xvfb |
+| Linux | works (SwiftShader Vulkan) | headless capture not supported upstream — add `--headed` (virtual display starts automatically) |
 
 The Windows/Linux screenshot gap is an upstream headless-Chrome limitation: WebGPU canvas *presentation* never reaches the headless compositor, even though rendering itself works (verified by pixel readback). It is not an agent-browser or flag problem — no known flag combination fixes it. Rendering, `eval`-based pixel readbacks, and compute all work headless everywhere.
 
-For screenshots on Windows, the session must run headed in a logged-in desktop session (an ssh/Session-0 context is not enough — schedule the launch on the interactive desktop, e.g. `schtasks /IT`, then drive it from anywhere). On Linux, run headed under a virtual display:
+On Linux, `--headed` is all you need even on displayless servers and containers: when no `DISPLAY` is set and Xvfb is installed (`apt-get install -y xvfb`), agent-browser starts a private virtual display for the browser and tears it down with it. Set `AGENT_BROWSER_NO_XVFB=1` to opt out.
 
 ```bash
-xvfb-run -a -s '-screen 0 1280x720x24' agent-browser --webgpu --headed open https://my-webgpu-app.example.com
-agent-browser screenshot app.png
+agent-browser --webgpu --headed open https://my-webgpu-app.example.com
+agent-browser screenshot app.png   # real WebGPU pixels, no display hardware
 ```
+
+On Windows, the session must run headed in a logged-in desktop session (an ssh/Session-0 context is not enough — schedule the launch on the interactive desktop, e.g. `schtasks /IT`, then drive it from anywhere).
 
 ## Verify the pipeline
 
@@ -53,7 +55,7 @@ The SwiftShader Vulkan path needs the system Vulkan loader and Mesa ICD. Without
 apt-get install -y libvulkan1 mesa-vulkan-drivers
 ```
 
-Container recipe (Debian/Ubuntu base; xvfb needed only for the screenshot path):
+Container recipe (Debian/Ubuntu base; xvfb needed only for the screenshot path). Verified with both Chrome for Testing and Debian's `chromium` package (set `AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium` for the latter — useful on ARM64, where Chrome for Testing has no Linux builds):
 
 ```dockerfile
 FROM node:22-bookworm-slim

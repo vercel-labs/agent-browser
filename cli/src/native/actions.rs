@@ -2364,9 +2364,7 @@ async fn apply_launch_mutator_plugins(
 }
 
 fn launch_options_from_env() -> LaunchOptions {
-    let headed = env::var("AGENT_BROWSER_HEADED")
-        .map(|v| v == "1" || v == "true")
-        .unwrap_or(false);
+    let headed = headed_from_env();
 
     let extensions: Option<Vec<String>> = env::var("AGENT_BROWSER_EXTENSIONS").ok().map(|v| {
         v.split([',', '\n'])
@@ -2419,6 +2417,12 @@ fn hide_scrollbars_from_launch_cmd(cmd: &Value) -> bool {
     cmd.get("hideScrollbars")
         .and_then(|v| v.as_bool())
         .unwrap_or_else(hide_scrollbars_from_env)
+}
+
+fn headed_from_env() -> bool {
+    env::var("AGENT_BROWSER_HEADED")
+        .map(|v| v == "1" || v == "true")
+        .unwrap_or(false)
 }
 
 fn webgpu_from_env() -> bool {
@@ -2715,10 +2719,13 @@ async fn try_load_storage_state(state: &mut DaemonState, path: &Option<String>) 
 // ---------------------------------------------------------------------------
 
 async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    // Absent field falls back to the daemon's spawn-time env (mirrors
+    // hideScrollbars/webgpu), keeping the launch hash stable when follow-up
+    // commands send launch envelopes without an explicit headed choice.
     let headless = cmd
         .get("headless")
         .and_then(|v| v.as_bool())
-        .unwrap_or(true);
+        .unwrap_or_else(|| !headed_from_env());
     let cdp_url = cmd.get("cdpUrl").and_then(|v| v.as_str());
     let cdp_port = cmd.get("cdpPort").and_then(|v| v.as_u64());
     let auto_connect = cmd

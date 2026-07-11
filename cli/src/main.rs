@@ -1442,8 +1442,16 @@ fn main() {
         let mut launch_cmd = json!({
             "id": gen_id(),
             "action": "launch",
-            "headless": !flags.headed
         });
+        // Only send headless when the user set it on this invocation. When
+        // absent, the daemon falls back to its spawn-time AGENT_BROWSER_HEADED
+        // env, so a follow-up command without --headed (common when env vars
+        // like AGENT_BROWSER_ARGS force a launch command on every call) does
+        // not flip a headed session back to headless and relaunch the browser
+        // onto about:blank.
+        if flags.headed || flags.cli_headed {
+            launch_cmd["headless"] = json!(!flags.headed);
+        }
         launch_cmd["plugins"] = json!(flags.plugins.clone());
         attach_restore_config_to_command(&mut launch_cmd, &flags);
 

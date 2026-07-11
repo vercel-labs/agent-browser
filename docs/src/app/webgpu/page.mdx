@@ -36,16 +36,17 @@ macOS uses the hardware Metal backend and Windows uses D3D — nothing extra to 
   <tbody>
     <tr><td>macOS</td><td>works</td><td>works headless</td></tr>
     <tr><td>Windows</td><td>works (hardware D3D)</td><td>headless captures black — use <code>--headed</code> on a logged-in desktop</td></tr>
-    <tr><td>Linux</td><td>works (SwiftShader Vulkan)</td><td>headless capture not supported upstream — use <code>--headed</code> under Xvfb</td></tr>
+    <tr><td>Linux</td><td>works (SwiftShader Vulkan)</td><td>headless capture not supported upstream — add <code>--headed</code> (virtual display starts automatically)</td></tr>
   </tbody>
 </table>
 
-The Windows/Linux screenshot gap is an upstream headless-Chrome limitation: WebGPU canvas *presentation* never reaches the headless compositor even though rendering works (verifiable by pixel readback). No flag combination is known to fix it. On Linux, run headed under a virtual display:
+The Windows/Linux screenshot gap is an upstream headless-Chrome limitation: WebGPU canvas *presentation* never reaches the headless compositor even though rendering works (verifiable by pixel readback). No flag combination is known to fix it.
+
+On Linux, `--headed` is all you need even on displayless servers and containers: when no `DISPLAY` is set and Xvfb is installed (`apt-get install -y xvfb`), agent-browser starts a private virtual display for the browser and tears it down with it (`AGENT_BROWSER_NO_XVFB=1` opts out):
 
 ```bash
-xvfb-run -a -s '-screen 0 1280x720x24' \
-  agent-browser --webgpu --headed open https://my-webgpu-app.example.com
-agent-browser screenshot app.png
+agent-browser --webgpu --headed open https://my-webgpu-app.example.com
+agent-browser screenshot app.png   # real WebGPU pixels, no display hardware
 ```
 
 On Windows, the headed session must run in a logged-in desktop session — launching from an ssh/service context is not enough (schedule the launch on the interactive desktop with `schtasks /IT`, then drive the session from anywhere).

@@ -350,7 +350,7 @@ pub(super) fn check(checks: &mut Vec<Check>) {
                     ),
                 )
                 .with_fix(if cfg!(target_os = "linux") {
-                    "run WebGPU sessions with --headed under a display (e.g. xvfb-run) for screenshots"
+                    "add --headed (a virtual display starts automatically; needs Xvfb: apt-get install -y xvfb)"
                 } else {
                     "run WebGPU sessions with --headed on a logged-in desktop for screenshots"
                 }),

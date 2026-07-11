@@ -1152,6 +1152,8 @@ agent-browser open example.com --headed
 
 This opens a visible browser window instead of running headless.
 
+On Linux hosts with no display (servers, containers), `--headed` still works: when `DISPLAY` is unset and Xvfb is installed, agent-browser starts a private virtual display for the browser and cleans it up on close (opt out with `AGENT_BROWSER_NO_XVFB=1`). Needed for [WebGPU screenshots](#webgpu), and useful for extensions that misbehave headless.
+
 > **Note:** Browser extensions work in both headed and headless mode (Chrome's `--headless=new`).
 
 ## WebGPU
@@ -1169,7 +1171,7 @@ On macOS and Windows this uses the hardware Metal/D3D backend. On Linux it route
 apt-get install -y libvulkan1 mesa-vulkan-drivers
 ```
 
-One upstream caveat: headless Chrome cannot capture WebGPU canvas presentation in screenshots on Windows and Linux (rendering and in-page readbacks work; the capture is black). Screenshots of WebGPU pages work headless on macOS; on Windows run `--headed` in a logged-in desktop session, on Linux run `--headed` under Xvfb (`xvfb-run -a agent-browser --webgpu --headed open ...`).
+One upstream caveat: headless Chrome cannot capture WebGPU canvas presentation in screenshots on Windows and Linux (rendering and in-page readbacks work; the capture is black). Screenshots of WebGPU pages work headless on macOS; on Windows run `--headed` in a logged-in desktop session; on Linux just add `--headed` — when no `DISPLAY` is set and Xvfb is installed, agent-browser starts a private virtual display automatically (opt out with `AGENT_BROWSER_NO_XVFB=1`).
 
 Verify the full pipeline (adapter, render pass, and screenshot capture) with:
 

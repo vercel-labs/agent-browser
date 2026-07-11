@@ -3587,6 +3587,7 @@ Environment:
   AGENT_BROWSER_INIT_SCRIPTS     Comma-separated paths to page init scripts
   AGENT_BROWSER_ENABLE           Comma-separated built-in init script features (e.g. react-devtools)
   AGENT_BROWSER_HEADED           Show browser window (not headless)
+  AGENT_BROWSER_NO_XVFB          Disable automatic Xvfb for headed mode on displayless Linux hosts
   AGENT_BROWSER_WEBGPU           Enable WebGPU (SwiftShader software Vulkan on Linux)
   AGENT_BROWSER_JSON             JSON output
   AGENT_BROWSER_ANNOTATE         Annotated screenshot with numbered labels and legend
