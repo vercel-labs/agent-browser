@@ -6475,6 +6475,23 @@ async fn e2e_pin_tab_rebinds_after_daemon_restart() {
         "re-attach must keep the original bound target"
     );
 
+    // Lifecycle-dependent commands must work on the restored tab: attach
+    // only enables the CDP domains on the first target, so the restore path
+    // must enable them on the bound tab too or navigate hangs waiting for
+    // Page lifecycle events (timeout guards against the hang regression).
+    let url_a2 = "data:text/html,session-a-page-2";
+    let resp = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        execute_command(
+            &json!({ "id": "a2-nav", "action": "navigate", "url": url_a2 }),
+            &mut state_a2,
+        ),
+    )
+    .await
+    .expect("navigate on the restored tab must not hang");
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["targetId"], binding_a.target_id);
+
     // Session B is unaffected.
     let resp = current_url(&mut state_b, "b-url").await;
     assert_success(&resp);

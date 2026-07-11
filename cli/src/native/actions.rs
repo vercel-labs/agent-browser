@@ -2158,6 +2158,15 @@ async fn apply_tab_binding_on_attach(state: &mut DaemonState) -> Result<bool, St
                 .as_mut()
                 .map(|mgr| mgr.restore_target_binding(&b.target_id, &b.url))
                 .unwrap_or(false);
+            if restored {
+                // Attach only enables the CDP domains on the first target;
+                // the restored tab needs them too (like tab_switch), or
+                // lifecycle-dependent commands such as navigate hang.
+                if let Some(ref mgr) = state.browser {
+                    let session_id = mgr.active_session_id()?.to_string();
+                    mgr.enable_domains_pub(&session_id).await?;
+                }
+            }
             if restored || pin {
                 // Restored, or entered the tab_gone state (the stale binding
                 // file is intentionally kept so the state is re-derived if
