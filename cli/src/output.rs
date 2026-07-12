@@ -1262,8 +1262,9 @@ you stage state (network routes, cookies, init scripts) before the first
 real navigation — useful for SSR debug, auth setup, and capturing fresh
 `react suspense` / `vitals` state without noise from a prior page.
 
-With a URL, launches and navigates. If no protocol is provided, https://
-is automatically prepended.
+With a URL, launches and navigates. Inputs without a recognized URL scheme are
+normalized with https://. The chrome:// and edge:// schemes are passed through
+unchanged; edge:// URLs require launching an Edge executable.
 
 The `goto` and `navigate` aliases still require a URL.
 
@@ -1279,6 +1280,7 @@ Examples:
   agent-browser open                     # Launch, no nav
   agent-browser open example.com
   agent-browser open https://github.com
+  agent-browser --executable-path /path/to/msedge open edge://extensions
   agent-browser open localhost:3000
   agent-browser open api.example.com --headers '{"Authorization": "Bearer token"}'
     # ^ Headers only sent to api.example.com, not other domains
