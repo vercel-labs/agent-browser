@@ -1167,8 +1167,8 @@ fn render_tree(
     if let Some(ref cursor_info) = node.cursor_info {
         line.push_str(&format!(
             " {} [{}]",
-            &cursor_info.kind,
-            &cursor_info.hints.join(", ")
+            cursor_info.kind,
+            cursor_info.hints.join(", ")
         ));
     }
 

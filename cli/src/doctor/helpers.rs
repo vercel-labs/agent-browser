@@ -38,10 +38,7 @@ pub(super) fn disk_free_bytes(path: &Path) -> Option<u64> {
     // state dir hasn't been created yet).
     let mut probe: PathBuf = path.to_path_buf();
     while !probe.exists() {
-        match probe.parent() {
-            Some(p) => probe = p.to_path_buf(),
-            None => return None,
-        }
+        probe = probe.parent()?.to_path_buf();
     }
     let c_path = CString::new(probe.as_os_str().as_bytes()).ok()?;
     let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };

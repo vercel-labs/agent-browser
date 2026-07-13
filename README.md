@@ -341,6 +341,8 @@ agent-browser click @e3              # click uses docs's refs
 agent-browser tab close docs         # close by label
 ```
 
+Switching to a tab discarded by Chrome's Memory Saver reactivates it, since a discarded tab has no renderer to drive. Reactivation reloads the discarded page and resets its unsaved state, and the switch result reports `"revived": true`.
+
 ### Frames
 
 ```bash

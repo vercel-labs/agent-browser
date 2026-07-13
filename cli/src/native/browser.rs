@@ -88,11 +88,14 @@ fn validate_lightpanda_options(options: &LaunchOptions) -> Result<(), String> {
     Ok(())
 }
 
-/// Liveness-probe timeout: a live renderer answers in ms; a discarded tab
-/// never answers, which is the only discard signal CDP exposes (#1528).
+/// Liveness-probe timeout. A live renderer answers in ms; a discarded tab has
+/// no renderer and never answers, so a short timeout is the only discard signal
+/// CDP exposes (#1528). A false positive is cheap: recovery reactivates the tab,
+/// which only reloads a genuinely discarded one and just focuses a live one.
 const RENDERER_PROBE_TIMEOUT_MS: u64 = 3_000;
 
-/// How long a revived renderer gets to answer after Page.reload.
+/// How long a reactivated renderer gets to start answering before the tab is
+/// declared unrecoverable.
 const REVIVED_RENDERER_TIMEOUT_MS: u64 = 10_000;
 
 /// Returns true for Chrome internal targets that should not be selected
@@ -647,33 +650,58 @@ impl BrowserManager {
         .is_ok()
     }
 
-    /// Ensure the tab has a live renderer, reviving a discarded one with
-    /// Page.reload (the browser process answers it even when the renderer is
-    /// dead, and respawns it without stealing focus).
-    async fn ensure_renderer_alive(&self, session_id: &str) -> Result<(), String> {
+    /// Ensure the tab has a live renderer, recovering a non-responsive one with
+    /// Target.activateTarget. Activation reloads a genuinely discarded tab (its
+    /// renderer is gone) but only focuses a live-but-slow one, so a probe false
+    /// positive cannot lose page state. It is a browser-level command that
+    /// answers promptly, so it cannot ride the renderer command timeout the way
+    /// a page-level reload could. Returns whether recovery ran, so callers can
+    /// report that the page may have been reloaded (#1528).
+    async fn ensure_renderer_alive(
+        &self,
+        session_id: &str,
+        target_id: &str,
+    ) -> Result<bool, String> {
         if self
             .renderer_responds(session_id, RENDERER_PROBE_TIMEOUT_MS)
             .await
         {
-            return Ok(());
+            return Ok(false);
         }
-        self.client
-            .send_command_no_params("Page.reload", Some(session_id))
-            .await
-            .map_err(|e| {
-                format!(
-                    "tab is not responding (discarded or crashed) and Page.reload failed: {}",
+        match tokio::time::timeout(
+            Duration::from_millis(REVIVED_RENDERER_TIMEOUT_MS),
+            self.client.send_command(
+                "Target.activateTarget",
+                Some(json!({ "targetId": target_id })),
+                None,
+            ),
+        )
+        .await
+        {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => {
+                return Err(format!(
+                    "tab is not responding (discarded or crashed) and Target.activateTarget \
+                     failed: {}",
                     e
+                ))
+            }
+            Err(_) => {
+                return Err(
+                    "tab is not responding (discarded or crashed) and Target.activateTarget \
+                     timed out"
+                        .to_string(),
                 )
-            })?;
+            }
+        }
         if self
             .renderer_responds(session_id, REVIVED_RENDERER_TIMEOUT_MS)
             .await
         {
-            Ok(())
+            Ok(true)
         } else {
             Err(
-                "tab is not responding (discarded or crashed) and did not recover after reload"
+                "tab is not responding (discarded or crashed) and did not recover after activation"
                     .to_string(),
             )
         }
@@ -1141,16 +1169,20 @@ impl BrowserManager {
         }
 
         let session_id = self.pages[index].session_id.clone();
+        let target_id = self.pages[index].target_id.clone();
         // A discarded background tab has no renderer to answer Page.enable,
         // so the switch used to hang and leave active_page_index on the dead
         // tab. Revive first; commit the switch only once it's usable (#1528).
-        self.ensure_renderer_alive(&session_id).await.map_err(|e| {
-            format!(
-                "Cannot switch to tab {}: {}",
-                format_tab_id(self.pages[index].tab_id),
-                e
-            )
-        })?;
+        let revived = self
+            .ensure_renderer_alive(&session_id, &target_id)
+            .await
+            .map_err(|e| {
+                format!(
+                    "Cannot switch to tab {}: {}",
+                    format_tab_id(self.pages[index].tab_id),
+                    e
+                )
+            })?;
         self.enable_domains(&session_id).await?;
         self.active_page_index = index;
 
@@ -1169,12 +1201,19 @@ impl BrowserManager {
         }
 
         let page = &self.pages[index];
-        Ok(json!({
+        let mut result = json!({
             "tabId": format_tab_id(page.tab_id),
             "label": page.label,
             "url": url,
             "title": title,
-        }))
+        });
+        // Surface the revival so agents know a discarded tab was reactivated
+        // and its page may have been reloaded, rather than recovering silently
+        // (#1528).
+        if revived {
+            result["revived"] = json!(true);
+        }
+        Ok(result)
     }
 
     pub async fn tab_close(&mut self, index: Option<usize>) -> Result<Value, String> {
@@ -2271,7 +2310,8 @@ mod tests {
 
     /// Mock CDP endpoint with two page targets; the second mimics a
     /// Memory-Saver-discarded tab: its session exists but renderer-bound
-    /// commands get no response until Page.reload revives it (when `revivable`).
+    /// commands get no response until Target.activateTarget revives it (when
+    /// `revivable`).
     async fn start_mock_cdp_browser_with_discarded_tab(revivable: bool) -> String {
         use futures_util::{SinkExt, StreamExt};
         use tokio_tungstenite::tungstenite::Message;
@@ -2334,10 +2374,11 @@ mod tests {
                         let target = cmd["params"]["targetId"].as_str().unwrap_or("");
                         Some(respond(json!({ "sessionId": format!("S-{}", target) })))
                     }
-                    // The browser process answers Page.reload even when the
-                    // renderer is gone, and the reload respawns it.
-                    "Page.reload" => {
-                        if session == "S-T-DISCARDED" && revivable {
+                    // The browser answers Target.activateTarget even when the
+                    // renderer is gone, and activating a discarded tab reloads
+                    // and respawns it.
+                    "Target.activateTarget" => {
+                        if cmd["params"]["targetId"].as_str() == Some("T-DISCARDED") && revivable {
                             revived = true;
                         }
                         Some(respond(json!({})))
@@ -2359,9 +2400,10 @@ mod tests {
         url
     }
 
-    /// Regression test for #1528: switching to a discarded tab must revive
-    /// it via Page.reload instead of hanging until the CDP command timeout
-    /// (and wedging the daemon behind the held state lock).
+    /// Regression test for #1528: switching to a discarded tab must revive it
+    /// via Target.activateTarget instead of hanging until the CDP command
+    /// timeout (and wedging the daemon behind the held state lock), and report
+    /// the revival.
     #[tokio::test]
     async fn test_tab_switch_revives_discarded_tab() {
         let url = start_mock_cdp_browser_with_discarded_tab(true).await;
@@ -2375,6 +2417,11 @@ mod tests {
             .expect("switching to a discarded tab should revive it");
 
         assert_eq!(result["tabId"], json!("t2"));
+        assert_eq!(
+            result["revived"],
+            json!(true),
+            "a revived tab must report revived:true so the recovery is not silent"
+        );
         assert_eq!(mgr.active_page_index, 1);
     }
 
@@ -2396,6 +2443,131 @@ mod tests {
         assert_eq!(
             mgr.active_page_index, 0,
             "a failed switch must not leave the active tab pointing at a dead renderer"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Regression tests for the #1528 review notes.
+    // -----------------------------------------------------------------------
+
+    /// Mock CDP endpoint whose second tab is responsive. Returns a counter of
+    /// Target.activateTarget calls, so a test can assert a responsive tab is
+    /// never needlessly reactivated.
+    async fn start_mock_cdp_browser_responsive(
+    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use futures_util::{SinkExt, StreamExt};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let activations = Arc::new(AtomicUsize::new(0));
+        let activations_task = activations.clone();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!(
+            "ws://127.0.0.1:{}/devtools/browser/mock",
+            listener.local_addr().unwrap().port()
+        );
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let (mut tx, mut rx) = ws.split();
+
+            while let Some(Ok(msg)) = rx.next().await {
+                let text = match msg {
+                    Message::Text(t) => t,
+                    Message::Ping(p) => {
+                        let _ = tx.send(Message::Pong(p)).await;
+                        continue;
+                    }
+                    _ => continue,
+                };
+                let cmd: Value = match serde_json::from_str(&text) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                let Some(id) = cmd["id"].as_u64() else {
+                    continue;
+                };
+                let method = cmd["method"].as_str().unwrap_or("");
+                let respond = |result: Value| json!({ "id": id, "result": result }).to_string();
+
+                if method == "Target.activateTarget" {
+                    activations_task.fetch_add(1, Ordering::SeqCst);
+                }
+
+                let reply = match method {
+                    "Target.getTargets" => Some(respond(json!({
+                        "targetInfos": [
+                            { "targetId": "T-ONE", "type": "page", "title": "one",
+                              "url": "https://one.test/", "attached": false },
+                            { "targetId": "T-TWO", "type": "page", "title": "two",
+                              "url": "https://two.test/", "attached": false },
+                        ]
+                    }))),
+                    "Target.attachToTarget" => {
+                        let target = cmd["params"]["targetId"].as_str().unwrap_or("");
+                        Some(respond(json!({ "sessionId": format!("S-{}", target) })))
+                    }
+                    "Runtime.evaluate" => Some(respond(
+                        json!({ "result": { "type": "string", "value": "https://two.test/" } }),
+                    )),
+                    _ => Some(respond(json!({}))),
+                };
+                if let Some(r) = reply {
+                    let _ = tx.send(Message::Text(r)).await;
+                }
+            }
+        });
+
+        (url, activations)
+    }
+
+    /// A responsive tab must not be reactivated: recovery only runs when the
+    /// liveness probe gets no answer, so a healthy tab keeps its state and is
+    /// never touched by Target.activateTarget (#1528).
+    #[tokio::test]
+    async fn test_tab_switch_does_not_revive_responsive_tab() {
+        let (url, activations) = start_mock_cdp_browser_responsive().await;
+        let mut mgr = BrowserManager::connect_cdp(&url).await.expect("connect");
+        assert_eq!(mgr.pages.len(), 2);
+
+        let result = tokio::time::timeout(Duration::from_secs(20), mgr.tab_switch(1))
+            .await
+            .expect("tab_switch must not hang")
+            .expect("switching to a responsive tab should succeed");
+
+        assert!(
+            result.get("revived").is_none(),
+            "a responsive tab must not be marked revived"
+        );
+        assert_eq!(
+            activations.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a responsive tab must not be reactivated"
+        );
+    }
+
+    /// A liveness probe that times out (discarded tab never answers) must not
+    /// leave its CDP request behind in the pending map after the switch (#1528).
+    #[tokio::test]
+    async fn test_tab_switch_cancelled_probe_leaves_no_pending_request() {
+        let url = start_mock_cdp_browser_with_discarded_tab(true).await;
+        let mut mgr = BrowserManager::connect_cdp(&url).await.expect("connect");
+
+        let _ = tokio::time::timeout(Duration::from_secs(20), mgr.tab_switch(1))
+            .await
+            .expect("tab_switch must not hang")
+            .expect("switching to a discarded tab should revive it");
+
+        // Cleanup runs on the guard's drop via a spawned task; let it settle.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        assert_eq!(
+            mgr.client.pending_len().await,
+            0,
+            "a cancelled probe left an orphaned CDP request in the pending map"
         );
     }
 }

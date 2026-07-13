@@ -599,18 +599,25 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
         // Tab switch
         if action == Some("tab_switch") {
             if let Some(tab_id) = data.get("tabId").and_then(|v| v.as_str()) {
+                let note = if data.get("revived").and_then(|v| v.as_bool()) == Some(true) {
+                    " (revived, page may have reloaded)"
+                } else {
+                    ""
+                };
                 if let Some(url) = data.get("url").and_then(|v| v.as_str()) {
                     println!(
-                        "{} Switched to tab [{}] ({})",
+                        "{} Switched to tab [{}] ({}){}",
                         color::success_indicator(),
                         tab_id,
-                        url
+                        url,
+                        note
                     );
                 } else {
                     println!(
-                        "{} Switched to tab [{}]",
+                        "{} Switched to tab [{}]{}",
                         color::success_indicator(),
-                        tab_id
+                        tab_id,
+                        note
                     );
                 }
                 return;
