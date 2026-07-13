@@ -10496,7 +10496,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         assert!(state.browser.is_none());
         assert!(state.domain_filter.read().await.is_none());
         assert_eq!(state.session_id, "default");
-        assert!(!state.tracing_state.active);
+        assert!(state.tracing_state.active.is_none());
         assert!(!state.recording_state.active);
         assert_eq!(state.mouse_state.x, 0.0);
         assert_eq!(state.mouse_state.y, 0.0);
