@@ -27,6 +27,7 @@ const INTERACTIVE_ROLES: &[&str] = &[
     "tab",
     "treeitem",
     "Iframe",
+    "TurboFrame",
 ];
 
 const CONTENT_ROLES: &[&str] = &[
@@ -40,6 +41,7 @@ const CONTENT_ROLES: &[&str] = &[
     "region",
     "main",
     "navigation",
+    "LabelText",
 ];
 
 const STRUCTURAL_ROLES: &[&str] = &[
@@ -304,6 +306,24 @@ pub async fn take_snapshot(
         .await?;
 
     let (mut tree_nodes, root_indices) = build_tree(&ax_tree.nodes);
+
+    // Annotate <turbo-frame> custom elements so they appear as labeled containers
+    // in the snapshot. Because turbo-frames live in the same document (not a
+    // separate browsing context), their children already appear in the main AX
+    // tree — we just need to override the generic role/name on the container node
+    // so it renders as an identifiable "TurboFrame" section.
+    let turbo_frames =
+        find_turbo_frame_info(client, session_id, effective_session_id, frame_id).await;
+    if !turbo_frames.is_empty() {
+        for node in tree_nodes.iter_mut() {
+            if let Some(bid) = node.backend_node_id {
+                if let Some(frame_name) = turbo_frames.get(&bid) {
+                    node.role = "TurboFrame".to_string();
+                    node.name = frame_name.clone();
+                }
+            }
+        }
+    }
 
     // When a selector is given, find AX nodes whose backendDOMNodeId falls
     // within the target DOM subtree and pick the top-level ones as roots.
@@ -604,6 +624,142 @@ async fn resolve_iframe_frame_id(
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .ok_or_else(|| "Could not resolve iframe frame ID".to_string())
+}
+
+/// Returns a map from backendNodeId → frame name for all <turbo-frame> elements
+/// found in the document being snapshotted.
+///
+/// Three cases are handled:
+///  - Main frame: query `DOM.getDocument` on the main session.
+///  - Cross-origin iframe: `effective_session_id` is a dedicated CDP session;
+///    `DOM.getDocument` on it returns the iframe's document directly.
+///  - Same-origin iframe: `effective_session_id == session_id` but a `frame_id`
+///    is present. Use `DOM.getFrameOwner` + `DOM.describeNode` to navigate to
+///    the iframe's content document before querying.
+async fn find_turbo_frame_info(
+    client: &CdpClient,
+    session_id: &str,
+    effective_session_id: &str,
+    frame_id: Option<&str>,
+) -> HashMap<i64, String> {
+    let mut map = HashMap::new();
+
+    // Determine the (query_session, root_node_id) to use for DOM.querySelectorAll.
+    let same_origin_iframe =
+        frame_id.is_some() && effective_session_id == session_id;
+
+    let (query_session, root_node_id) = if same_origin_iframe {
+        // Same-origin iframe: resolve the iframe element's content document
+        // nodeId via DOM.getFrameOwner, then DOM.describeNode.
+        let frame_id_str = frame_id.unwrap();
+        let Ok(owner) = client
+            .send_command(
+                "DOM.getFrameOwner",
+                Some(serde_json::json!({ "frameId": frame_id_str })),
+                Some(session_id),
+            )
+            .await
+        else {
+            return map;
+        };
+        let Some(backend_node_id) = owner.get("backendNodeId").and_then(|v| v.as_i64()) else {
+            return map;
+        };
+        let Ok(described) = client
+            .send_command(
+                "DOM.describeNode",
+                Some(serde_json::json!({ "backendNodeId": backend_node_id, "depth": 1 })),
+                Some(session_id),
+            )
+            .await
+        else {
+            return map;
+        };
+        let Some(content_doc_node_id) = described
+            .get("node")
+            .and_then(|n| n.get("contentDocument"))
+            .and_then(|cd| cd.get("nodeId"))
+            .and_then(|v| v.as_i64())
+        else {
+            return map;
+        };
+        (session_id, content_doc_node_id)
+    } else {
+        // Main frame or cross-origin iframe (dedicated session).
+        let Ok(doc) = client
+            .send_command(
+                "DOM.getDocument",
+                Some(serde_json::json!({ "depth": 0 })),
+                Some(effective_session_id),
+            )
+            .await
+        else {
+            return map;
+        };
+        let Some(root_node_id) = doc
+            .get("root")
+            .and_then(|r| r.get("nodeId"))
+            .and_then(|v| v.as_i64())
+        else {
+            return map;
+        };
+        (effective_session_id, root_node_id)
+    };
+
+    // Query all <turbo-frame> elements within the resolved document.
+    let Ok(result) = client
+        .send_command(
+            "DOM.querySelectorAll",
+            Some(serde_json::json!({ "nodeId": root_node_id, "selector": "turbo-frame" })),
+            Some(query_session),
+        )
+        .await
+    else {
+        return map;
+    };
+    let Some(node_ids) = result.get("nodeIds").and_then(|v| v.as_array()) else {
+        return map;
+    };
+
+    for node_id_val in node_ids {
+        let Some(node_id) = node_id_val.as_i64() else {
+            continue;
+        };
+        let Ok(described) = client
+            .send_command(
+                "DOM.describeNode",
+                Some(serde_json::json!({ "nodeId": node_id, "depth": 0 })),
+                Some(query_session),
+            )
+            .await
+        else {
+            continue;
+        };
+        let Some(node) = described.get("node") else {
+            continue;
+        };
+        let Some(backend_node_id) = node.get("backendNodeId").and_then(|v| v.as_i64()) else {
+            continue;
+        };
+
+        // attributes is a flat array: ["name1", "value1", "name2", "value2", ...]
+        let frame_name = node
+            .get("attributes")
+            .and_then(|v| v.as_array())
+            .and_then(|attrs| {
+                attrs
+                    .chunks(2)
+                    .find(|pair| pair.first().and_then(|v| v.as_str()) == Some("id"))
+                    .and_then(|pair| pair.get(1))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            })
+            .unwrap_or_else(|| format!("turbo-frame-{}", backend_node_id));
+
+        map.insert(backend_node_id, frame_name);
+    }
+
+    map
 }
 
 async fn find_cursor_interactive_elements(
@@ -936,7 +1092,12 @@ fn build_tree(nodes: &[AXNode]) -> (Vec<TreeNode>, Vec<usize>) {
             extract_properties(&node.properties);
 
         if (node.ignored.unwrap_or(false) && role != "RootWebArea") || role == "InlineTextBox" {
-            tree_nodes.push(TreeNode::empty());
+            // Preserve backend_node_id even for ignored nodes so that
+            // post-build annotations (e.g. turbo-frame detection) can find
+            // and promote them to visible nodes.
+            let mut empty = TreeNode::empty();
+            empty.backend_node_id = node.backend_d_o_m_node_id;
+            tree_nodes.push(empty);
             id_to_idx.insert(node.node_id.clone(), i);
             continue;
         }
@@ -1024,6 +1185,30 @@ fn build_tree(nodes: &[AXNode]) -> (Vec<TreeNode>, Vec<usize>) {
             && tree_nodes[i].name == tree_nodes[children_indices[0]].name
         {
             tree_nodes[children_indices[0]].clear();
+        }
+    }
+
+    // Derive accessible name for LabelText nodes from their StaticText children
+    // when Chrome does not compute one (e.g. when the associated input is hidden).
+    for i in 0..tree_nodes.len() {
+        if tree_nodes[i].role != "LabelText" || !tree_nodes[i].name.is_empty() {
+            continue;
+        }
+        let name: String = tree_nodes[i]
+            .children
+            .iter()
+            .filter_map(|&ci| {
+                let c = &tree_nodes[ci];
+                if c.role == "StaticText" && !c.name.is_empty() {
+                    Some(c.name.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        if !name.is_empty() {
+            tree_nodes[i].name = name;
         }
     }
 
