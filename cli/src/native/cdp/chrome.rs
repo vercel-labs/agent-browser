@@ -98,10 +98,16 @@ impl Drop for ChromeProcess {
 /// capture requires a real or virtual display. When headed mode is requested,
 /// no DISPLAY is set, and Xvfb is installed, launch spawns a private server
 /// instead of failing. Opt out with AGENT_BROWSER_NO_XVFB=1.
+///
+/// The server requires MIT-MAGIC-COOKIE-1 authentication (`-auth`): without
+/// authorization records an X server allows any local user to connect, which
+/// on a shared host would let other accounts observe the browser and inject
+/// input. Only the paired Chrome process receives the cookie via XAUTHORITY.
 #[cfg(target_os = "linux")]
 struct XvfbServer {
     child: Child,
     display: String,
+    auth_file: PathBuf,
 }
 
 #[cfg(target_os = "linux")]
@@ -109,7 +115,45 @@ impl Drop for XvfbServer {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        let _ = std::fs::remove_file(&self.auth_file);
     }
+}
+
+/// Write an .Xauthority file containing one FamilyWild MIT-MAGIC-COOKIE-1
+/// record with a random cookie, created 0600.
+///
+/// FamilyWild (0xffff, empty address and display number) matches any display,
+/// which sidesteps a chicken-and-egg with `-displayfd`: the display number is
+/// only known after the server starts, but the auth file must exist before.
+/// The server side is unaffected -- X servers compare only the cookie bytes
+/// for MIT-MAGIC-COOKIE-1 -- and client libraries (libXau/libxcb) accept
+/// FamilyWild entries for any display.
+#[cfg(target_os = "linux")]
+fn write_xauth_file(path: &Path) -> std::io::Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    // Uuid v4 carries 122 random bits in 16 bytes.
+    let cookie = uuid::Uuid::new_v4();
+    let name = b"MIT-MAGIC-COOKIE-1";
+
+    // .Xauthority records are sequences of big-endian u16-length-prefixed
+    // fields: family, address, display number, auth name, auth data.
+    let mut buf: Vec<u8> = Vec::with_capacity(10 + name.len() + 16);
+    buf.extend_from_slice(&0xffffu16.to_be_bytes()); // FamilyWild
+    buf.extend_from_slice(&0u16.to_be_bytes()); // address: empty
+    buf.extend_from_slice(&0u16.to_be_bytes()); // display number: empty
+    buf.extend_from_slice(&(name.len() as u16).to_be_bytes());
+    buf.extend_from_slice(name);
+    buf.extend_from_slice(&16u16.to_be_bytes());
+    buf.extend_from_slice(cookie.as_bytes());
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(&buf)
 }
 
 #[cfg(target_os = "linux")]
@@ -129,6 +173,17 @@ fn maybe_start_xvfb(options: &LaunchOptions) -> Option<XvfbServer> {
 
     let (w, h) = options.viewport_size.unwrap_or((1280, 720));
 
+    // Private MIT-MAGIC-COOKIE-1 authority file; passed to the server via
+    // -auth and to the paired Chrome via XAUTHORITY. Removed on Drop.
+    let auth_file =
+        std::env::temp_dir().join(format!("agent-browser-xauth-{}", uuid::Uuid::new_v4()));
+    if write_xauth_file(&auth_file).is_err() {
+        return None;
+    }
+    let cleanup_auth = |path: &Path| {
+        let _ = std::fs::remove_file(path);
+    };
+
     // Let Xvfb allocate the display itself with -displayfd: the server binds
     // the first free display atomically and writes its number to the given
     // fd. Probing /tmp/.X11-unix for free numbers is racy -- two concurrent
@@ -141,6 +196,7 @@ fn maybe_start_xvfb(options: &LaunchOptions) -> Option<XvfbServer> {
     // SAFETY: plain pipe(2); both ends are wrapped in File below so they are
     // closed on every path out of this function.
     if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+        cleanup_auth(&auth_file);
         return None;
     }
     // SAFETY: fds are fresh from pipe(2) and owned exclusively here.
@@ -156,6 +212,8 @@ fn maybe_start_xvfb(options: &LaunchOptions) -> Option<XvfbServer> {
             &format!("{}x{}x24", w, h),
             "-nolisten",
             "tcp",
+            "-auth",
+            &auth_file.display().to_string(),
         ])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -165,7 +223,10 @@ fn maybe_start_xvfb(options: &LaunchOptions) -> Option<XvfbServer> {
         Ok(c) => c,
         // Xvfb not installed (or not executable): headed launch proceeds
         // without a display and surfaces Chrome's own error.
-        Err(_) => return None,
+        Err(_) => {
+            cleanup_auth(&auth_file);
+            return None;
+        }
     };
     // Drop the parent's copy of the write end so the read below sees EOF as
     // soon as Xvfb exits without reporting a display.
@@ -193,6 +254,7 @@ fn maybe_start_xvfb(options: &LaunchOptions) -> Option<XvfbServer> {
                             return Some(XvfbServer {
                                 child,
                                 display: format!(":{}", num),
+                                auth_file,
                             });
                         }
                         Err(_) => break,
@@ -210,6 +272,7 @@ fn maybe_start_xvfb(options: &LaunchOptions) -> Option<XvfbServer> {
     }
     let _ = child.kill();
     let _ = child.wait();
+    cleanup_auth(&auth_file);
     None
 }
 
@@ -524,11 +587,12 @@ fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<Chro
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
 
-    // Scope the virtual display to the Chrome child; the daemon's own
-    // environment is left untouched.
+    // Scope the virtual display and its auth cookie to the Chrome child;
+    // the daemon's own environment is left untouched.
     #[cfg(target_os = "linux")]
     if let Some(ref x) = xvfb {
         cmd.env("DISPLAY", &x.display);
+        cmd.env("XAUTHORITY", &x.auth_file);
     }
 
     // Place Chrome in its own process group so we can kill the entire tree
@@ -1835,6 +1899,36 @@ mod tests {
         }
 
         assert!(!dir.exists(), "Temp dir should be cleaned up on drop");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_write_xauth_file_wildcard_cookie_record() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = std::env::temp_dir().join(format!("xauth-test-{}", uuid::Uuid::new_v4()));
+        write_xauth_file(&path).unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "authority file must be private");
+
+        let bytes = std::fs::read(&path).unwrap();
+        // family=FamilyWild, empty address, empty number
+        assert_eq!(&bytes[..6], &[0xff, 0xff, 0, 0, 0, 0]);
+        // name length + MIT-MAGIC-COOKIE-1
+        assert_eq!(&bytes[6..8], &18u16.to_be_bytes());
+        assert_eq!(&bytes[8..26], b"MIT-MAGIC-COOKIE-1");
+        // 16-byte cookie
+        assert_eq!(&bytes[26..28], &16u16.to_be_bytes());
+        assert_eq!(bytes.len(), 28 + 16);
+
+        // A second write must produce a different cookie.
+        let path2 = std::env::temp_dir().join(format!("xauth-test-{}", uuid::Uuid::new_v4()));
+        write_xauth_file(&path2).unwrap();
+        assert_ne!(std::fs::read(&path2).unwrap()[28..], bytes[28..]);
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&path2);
     }
 
     #[test]
