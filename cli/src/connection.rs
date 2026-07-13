@@ -585,6 +585,10 @@ fn daemon_config_fingerprint(opts: &DaemonOptions) -> String {
     opts.idle_timeout.hash(&mut hasher);
     opts.default_timeout.hash(&mut hasher);
     opts.no_auto_dialog.hash(&mut hasher);
+    // ignore_https_errors is baked into the browser context at launch, so a changed
+    // value must restart the daemon instead of being silently kept from the first
+    // spawn (a reused daemon otherwise ignores the new value with no warning) (#1359).
+    opts.ignore_https_errors.hash(&mut hasher);
     format!("{:016x}", hasher.finish())
 }
 
@@ -1289,6 +1293,27 @@ mod tests {
         assert_ne!(
             daemon_config_fingerprint(&base),
             daemon_config_fingerprint(&domains_changed)
+        );
+    }
+
+    #[test]
+    fn test_daemon_config_fingerprint_tracks_ignore_https_errors() {
+        // Regression for #1359: ignore_https_errors is applied at browser launch, so a
+        // changed value must change the fingerprint (which triggers a daemon restart)
+        // instead of being silently kept from the first spawn.
+        let off = test_daemon_options(None, false, None);
+        let on = DaemonOptions {
+            ignore_https_errors: true,
+            ..test_daemon_options(None, false, None)
+        };
+        assert_ne!(
+            daemon_config_fingerprint(&off),
+            daemon_config_fingerprint(&on)
+        );
+        // Same value still reuses silently (no spurious restart, no warning).
+        assert_eq!(
+            daemon_config_fingerprint(&off),
+            daemon_config_fingerprint(&test_daemon_options(None, false, None))
         );
     }
 
