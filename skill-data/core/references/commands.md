@@ -365,7 +365,8 @@ Tool calls use the same config files and environment variables as the CLI. Each 
 ```bash
 agent-browser --session <name> ...    # Isolated browser session
 agent-browser --json ...              # JSON output for parsing
-agent-browser --headed ...            # Show browser window (not headless)
+agent-browser --headed ...            # Show browser window (not headless; on displayless Linux an Xvfb display starts automatically)
+agent-browser --webgpu ...            # Enable WebGPU (SwiftShader software Vulkan on Linux, no GPU needed)
 agent-browser --cdp <port> ...        # Connect via Chrome DevTools Protocol
 agent-browser -p <provider> ...       # Browser provider or configured provider plugin
 agent-browser --proxy <url> ...       # Use proxy server
@@ -449,6 +450,8 @@ AGENT_BROWSER_EXTENSIONS="/ext1,/ext2"       # Comma-separated extension paths
 AGENT_BROWSER_INIT_SCRIPTS="/a.js,/b.js"     # Comma-separated init script paths
 AGENT_BROWSER_ENABLE="react-devtools"        # Comma-separated built-in init script features
 AGENT_BROWSER_HIDE_SCROLLBARS="false"        # Keep native scrollbars visible in headless Chromium screenshots
+AGENT_BROWSER_WEBGPU="1"                     # Enable the WebGPU launch preset (see references/webgpu.md)
+AGENT_BROWSER_NO_XVFB="1"                    # Disable automatic Xvfb for headed mode on displayless Linux
 AGENT_BROWSER_PROVIDER="browserbase"         # Browser provider or configured provider plugin
 AGENT_BROWSER_STREAM_PORT="9223"             # Override WebSocket streaming port (default: OS-assigned)
 AGENT_BROWSER_CONFIG="./agent-browser.json"  # Custom config file

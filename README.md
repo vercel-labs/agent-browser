@@ -1183,7 +1183,7 @@ Notes for WebGPU pages:
 
 - WebGPU only exists in secure contexts (`https://`, `http://localhost`, or `file://`).
 - three.js `WebGPURenderer` initializes asynchronously and silently falls back to WebGL2 when no adapter is available — wait for the app to render its first frame before taking a screenshot.
-- To prefer a real GPU on Linux instead of SwiftShader, override the adapter with `--args "--use-webgpu-adapter=default"` (user args win over the preset).
+- To prefer a real GPU on Linux instead of SwiftShader, override both the Vulkan driver and the adapter with `--args "--use-vulkan=native,--use-webgpu-adapter=default"` (user args win over the preset; `--use-webgpu-adapter` alone still enumerates only SwiftShader).
 
 See the [WebGPU docs page](https://agent-browser.dev/webgpu) for the full platform matrix and container recipe.
 

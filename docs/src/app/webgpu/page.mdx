@@ -90,10 +90,10 @@ RUN npm install -g agent-browser \
     && agent-browser install
 ```
 
-No real GPU or `/dev/dri` is required. To prefer hardware Vulkan on a Linux machine that has working drivers, override the adapter — user args win over the preset:
+No real GPU or `/dev/dri` is required. To prefer hardware Vulkan on a Linux machine that has working drivers, override both the Vulkan driver and the adapter — the preset pins `--use-vulkan=swiftshader`, so overriding only the adapter still enumerates SwiftShader (user args win over the preset):
 
 ```bash
-agent-browser --webgpu --args "--use-webgpu-adapter=default" open ...
+agent-browser --webgpu --args "--use-vulkan=native,--use-webgpu-adapter=default" open ...
 ```
 
 ## Gotchas
@@ -115,4 +115,4 @@ agent-browser eval "document.querySelector('canvas').getContext('webgpu') ? 'web
 
 **Custom pixel readbacks: avoid canvas snapshots.** `drawImage(webgpuCanvas, ...)` depends on presentation timing and reads transparent black on some platforms even when rendering works. Render to an offscreen texture and read it back with `copyTextureToBuffer` + `mapAsync` — deterministic on every platform (this is how the doctor probe proves rendering).
 
-**SwiftShader is a CPU rasterizer.** Simple scenes render fine; heavy scenes run at single-digit FPS. That rarely matters for screenshots, but for smooth video of complex scenes use hardware (macOS/Windows, or Linux with real Vulkan drivers and `--use-webgpu-adapter=default`).
+**SwiftShader is a CPU rasterizer.** Simple scenes render fine; heavy scenes run at single-digit FPS. That rarely matters for screenshots, but for smooth video of complex scenes use hardware (macOS/Windows, or Linux with real Vulkan drivers and `--use-vulkan=native,--use-webgpu-adapter=default`).

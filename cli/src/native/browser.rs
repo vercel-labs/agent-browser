@@ -80,6 +80,9 @@ fn validate_lightpanda_options(options: &LaunchOptions) -> Result<(), String> {
     if !options.headless {
         return Err("Headed mode is not supported with Lightpanda (headless only)".to_string());
     }
+    if options.webgpu {
+        return Err("WebGPU (--webgpu) is not supported with Lightpanda".to_string());
+    }
     if !options.args.is_empty() {
         return Err(
             "Custom Chrome arguments (--args) are not supported with Lightpanda".to_string(),
@@ -2023,6 +2026,17 @@ mod tests {
             "Timed out after 10000ms waiting for Lightpanda Target domain to initialize"
         ));
         assert!(err.contains("Target.setDiscoverTargets failed"));
+    }
+
+    #[test]
+    fn test_validate_lightpanda_rejects_webgpu() {
+        let options = LaunchOptions {
+            webgpu: true,
+            ..Default::default()
+        };
+        let err = validate_lightpanda_options(&options).unwrap_err();
+        assert!(err.contains("WebGPU"));
+        assert!(validate_lightpanda_options(&LaunchOptions::default()).is_ok());
     }
 
     #[test]

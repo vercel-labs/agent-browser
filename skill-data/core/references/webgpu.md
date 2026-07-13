@@ -66,10 +66,10 @@ RUN npm install -g agent-browser \
     && agent-browser install   # downloads Chrome for Testing
 ```
 
-No real GPU or `/dev/dri` is required. To prefer a real GPU on a Linux machine that has working hardware Vulkan, override the adapter (user `--args` win over the preset):
+No real GPU or `/dev/dri` is required. To prefer a real GPU on a Linux machine that has working hardware Vulkan, override both the Vulkan driver and the adapter — the preset pins `--use-vulkan=swiftshader`, so overriding only the adapter still enumerates SwiftShader (user `--args` win over the preset):
 
 ```bash
-agent-browser --webgpu --args "--use-webgpu-adapter=default" open ...
+agent-browser --webgpu --args "--use-vulkan=native,--use-webgpu-adapter=default" open ...
 ```
 
 ## Secure contexts
@@ -113,4 +113,4 @@ This works headless on every platform (it's how `doctor --webgpu` proves renderi
 
 ## Performance expectations
 
-SwiftShader is a CPU rasterizer. Simple scenes render fine; heavy three.js scenes are single-digit FPS. For screenshots that's usually irrelevant; for smooth video capture of complex scenes, use hardware (macOS/Windows, or Linux with `--use-webgpu-adapter=default` and real Vulkan drivers).
+SwiftShader is a CPU rasterizer. Simple scenes render fine; heavy three.js scenes are single-digit FPS. For screenshots that's usually irrelevant; for smooth video capture of complex scenes, use hardware (macOS/Windows, or Linux with `--use-vulkan=native,--use-webgpu-adapter=default` and real Vulkan drivers).

@@ -128,52 +128,88 @@ fn maybe_start_xvfb(options: &LaunchOptions) -> Option<XvfbServer> {
     }
 
     let (w, h) = options.viewport_size.unwrap_or((1280, 720));
-    // Probe candidate display numbers; the X socket file existing means the
-    // display is taken. A lost race just makes Xvfb exit and we move on.
-    for n in 99..120 {
-        if Path::new(&format!("/tmp/.X11-unix/X{}", n)).exists() {
-            continue;
-        }
-        let display = format!(":{}", n);
-        let mut child = match Command::new("Xvfb")
-            .args([
-                display.as_str(),
-                "-screen",
-                "0",
-                &format!("{}x{}x24", w, h),
-                "-nolisten",
-                "tcp",
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-        {
-            Ok(c) => c,
-            // Xvfb not installed (or not executable): headed launch proceeds
-            // without a display and surfaces Chrome's own error.
-            Err(_) => return None,
-        };
 
-        // Wait for the server socket; if Xvfb dies (display race, bad args),
-        // try the next display number.
-        let socket = format!("/tmp/.X11-unix/X{}", n);
-        let deadline = std::time::Instant::now() + Duration::from_secs(3);
-        loop {
-            if Path::new(&socket).exists() {
-                return Some(XvfbServer { child, display });
+    // Let Xvfb allocate the display itself with -displayfd: the server binds
+    // the first free display atomically and writes its number to the given
+    // fd. Probing /tmp/.X11-unix for free numbers is racy -- two concurrent
+    // sessions could adopt the same display, and closing one would kill the
+    // display under the other session's Chrome.
+    use std::io::Read;
+    use std::os::unix::io::FromRawFd;
+
+    let mut fds = [0i32; 2];
+    // SAFETY: plain pipe(2); both ends are wrapped in File below so they are
+    // closed on every path out of this function.
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    // SAFETY: fds are fresh from pipe(2) and owned exclusively here.
+    let mut read_end = unsafe { std::fs::File::from_raw_fd(fds[0]) };
+    let write_end = unsafe { std::fs::File::from_raw_fd(fds[1]) };
+
+    let mut child = match Command::new("Xvfb")
+        .args([
+            "-displayfd",
+            &fds[1].to_string(),
+            "-screen",
+            "0",
+            &format!("{}x{}x24", w, h),
+            "-nolisten",
+            "tcp",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(c) => c,
+        // Xvfb not installed (or not executable): headed launch proceeds
+        // without a display and surfaces Chrome's own error.
+        Err(_) => return None,
+    };
+    // Drop the parent's copy of the write end so the read below sees EOF as
+    // soon as Xvfb exits without reporting a display.
+    drop(write_end);
+
+    // SAFETY: read_end owns fds[0]; make it non-blocking so a wedged Xvfb
+    // cannot stall the launch past the deadline.
+    unsafe {
+        let flags = libc::fcntl(fds[0], libc::F_GETFL);
+        libc::fcntl(fds[0], libc::F_SETFL, flags | libc::O_NONBLOCK);
+    }
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut buf: Vec<u8> = Vec::new();
+    loop {
+        let mut chunk = [0u8; 16];
+        match read_end.read(&mut chunk) {
+            // EOF: Xvfb exited without binding a display.
+            Ok(0) => break,
+            Ok(n) => {
+                buf.extend_from_slice(&chunk[..n]);
+                if let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+                    match String::from_utf8_lossy(&buf[..pos]).trim().parse::<u32>() {
+                        Ok(num) => {
+                            return Some(XvfbServer {
+                                child,
+                                display: format!(":{}", num),
+                            });
+                        }
+                        Err(_) => break,
+                    }
+                }
             }
-            if matches!(child.try_wait(), Ok(Some(_)) | Err(_)) {
-                break;
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                if std::time::Instant::now() >= deadline {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(50));
             }
-            if std::time::Instant::now() >= deadline {
-                let _ = child.kill();
-                let _ = child.wait();
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(50));
+            Err(_) => break,
         }
     }
+    let _ = child.kill();
+    let _ = child.wait();
     None
 }
 

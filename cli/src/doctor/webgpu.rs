@@ -180,7 +180,10 @@ pub(super) fn check(checks: &mut Vec<Check>) {
         allowed_domains: None,
         action_policy: None,
         confirm_actions: None,
-        engine: None,
+        // Pinned: the probe is Chrome-specific, and an inherited
+        // AGENT_BROWSER_ENGINE=lightpanda would otherwise test the wrong
+        // browser and report a false WebGPU failure.
+        engine: Some("chrome"),
         auto_connect: false,
         idle_timeout: None,
         default_timeout: None,
@@ -208,6 +211,7 @@ pub(super) fn check(checks: &mut Vec<Check>) {
         "action": "launch",
         "headless": true,
         "webgpu": true,
+        "engine": "chrome",
     });
     if let Err(e) = send_json(launch_cmd, &session) {
         checks.push(
