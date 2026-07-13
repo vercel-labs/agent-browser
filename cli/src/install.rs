@@ -7,6 +7,38 @@ use std::process::{exit, Command, ExitStatus, Stdio};
 const LAST_KNOWN_GOOD_URL: &str =
     "https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json";
 
+// Full history of every Chrome for Testing build, keyed by exact version. Used
+// to install a specific version (`install 131`) rather than a channel head.
+const KNOWN_GOOD_VERSIONS_URL: &str =
+    "https://googlechromelabs.github.io/chrome-for-testing/known-good-versions-with-downloads.json";
+
+/// What the user asked `install` to fetch.
+#[derive(Debug, Clone)]
+pub enum InstallTarget {
+    /// No argument: the Stable channel head (backwards-compatible default).
+    Stable,
+    /// A named channel: Stable, Beta, Dev, or Canary.
+    Channel(String),
+    /// A version or version prefix, e.g. "131" or "131.0.6778.204".
+    Version(String),
+}
+
+/// Parse a Chrome version string ("131.0.6778.204") into comparable numbers.
+/// Missing or non-numeric parts sort as 0 so partial strings still order.
+fn version_key(v: &str) -> [u64; 4] {
+    let mut key = [0u64; 4];
+    for (i, part) in v.split('.').take(4).enumerate() {
+        key[i] = part.parse().unwrap_or(0);
+    }
+    key
+}
+
+/// True when `version` satisfies `spec`: either an exact match or a
+/// dot-delimited prefix ("131" matches "131.0.6778.204", but not "1310").
+fn version_matches(version: &str, spec: &str) -> bool {
+    version == spec || version.starts_with(&format!("{}.", spec))
+}
+
 pub fn get_browsers_dir() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -98,6 +130,38 @@ pub fn find_installed_chrome() -> Option<PathBuf> {
     None
 }
 
+/// List installed Chrome versions (newest first), each with its binary path.
+/// Only entries with a real binary on disk are returned.
+pub fn list_installed_chromes() -> Vec<(String, PathBuf)> {
+    let browsers_dir = get_browsers_dir();
+    let entries = match fs::read_dir(&browsers_dir) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut found: Vec<(String, PathBuf)> = entries
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let name = e.file_name().to_str()?.to_string();
+            let version = name.strip_prefix("chrome-")?.to_string();
+            let bin = chrome_binary_in_dir(&e.path())?;
+            bin.exists().then_some((version, bin))
+        })
+        .collect();
+
+    found.sort_by_key(|b| std::cmp::Reverse(version_key(&b.0)));
+    found
+}
+
+/// Find an installed Chrome whose version satisfies `spec` (exact or prefix).
+/// When several match, returns the highest version.
+pub fn find_installed_chrome_matching(spec: &str) -> Option<PathBuf> {
+    list_installed_chromes()
+        .into_iter()
+        .find(|(version, _)| version_matches(version, spec))
+        .map(|(_, bin)| bin)
+}
+
 fn chrome_binary_in_dir(dir: &Path) -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     {
@@ -182,7 +246,26 @@ fn platform_key() -> &'static str {
     }
 }
 
-async fn fetch_download_url() -> Result<(String, String), String> {
+/// Extract the Chrome download URL for the current platform from a node that
+/// has a `downloads.chrome` array (a channel entry or a version entry).
+fn chrome_url_for_platform(node: &serde_json::Value) -> Option<String> {
+    let platform = platform_key();
+    node.get("downloads")
+        .and_then(|d| d.get("chrome"))
+        .and_then(|c| c.as_array())
+        .and_then(|arr| {
+            arr.iter().find_map(|entry| {
+                if entry.get("platform")?.as_str()? == platform {
+                    Some(entry.get("url")?.as_str()?.to_string())
+                } else {
+                    None
+                }
+            })
+        })
+}
+
+/// Resolve the (version, download URL) for a named channel head.
+async fn fetch_channel_url(channel: &str) -> Result<(String, String), String> {
     let client = http_client()?;
     let resp = client
         .get(LAST_KNOWN_GOOD_URL)
@@ -195,35 +278,91 @@ async fn fetch_download_url() -> Result<(String, String), String> {
         .await
         .map_err(|e| format!("Failed to parse version info: {}", e))?;
 
-    let channel = body
-        .get("channels")
-        .and_then(|c| c.get("Stable"))
-        .ok_or("No Stable channel found in version info")?;
+    let channels = body.get("channels").ok_or("No channels in version info")?;
 
-    let version = channel
+    // Match the channel name case-insensitively (users type "beta", the JSON
+    // uses "Beta"). Fall back to a clear error listing what is available.
+    let (name, node) = channels
+        .as_object()
+        .and_then(|obj| {
+            obj.iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(channel))
+                .map(|(k, v)| (k.clone(), v.clone()))
+        })
+        .ok_or_else(|| {
+            let available = channels
+                .as_object()
+                .map(|o| o.keys().cloned().collect::<Vec<_>>().join(", "))
+                .unwrap_or_default();
+            format!("Unknown channel '{}'. Available: {}", channel, available)
+        })?;
+
+    let version = node
         .get("version")
         .and_then(|v| v.as_str())
-        .ok_or("No version string found")?
+        .ok_or_else(|| format!("No version string for channel {}", name))?
         .to_string();
 
-    let platform = platform_key();
-
-    let url = channel
-        .get("downloads")
-        .and_then(|d| d.get("chrome"))
-        .and_then(|c| c.as_array())
-        .and_then(|arr| {
-            arr.iter().find_map(|entry| {
-                if entry.get("platform")?.as_str()? == platform {
-                    Some(entry.get("url")?.as_str()?.to_string())
-                } else {
-                    None
-                }
-            })
-        })
-        .ok_or_else(|| format!("No download URL found for platform: {}", platform))?;
+    let url = chrome_url_for_platform(&node)
+        .ok_or_else(|| format!("No download URL found for platform: {}", platform_key()))?;
 
     Ok((version, url))
+}
+
+/// Resolve the (version, download URL) for a specific version or prefix.
+/// When `spec` is a prefix like "131", picks the highest matching version.
+async fn fetch_version_url(spec: &str) -> Result<(String, String), String> {
+    let client = http_client()?;
+    let resp = client
+        .get(KNOWN_GOOD_VERSIONS_URL)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to fetch version list: {}", format_reqwest_error(&e)))?;
+
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse version list: {}", e))?;
+
+    let versions = body
+        .get("versions")
+        .and_then(|v| v.as_array())
+        .ok_or("No versions array in version list")?;
+
+    // Collect every version that satisfies the spec, then take the highest by
+    // numeric key so "131" resolves to the latest 131.x build.
+    let best = versions
+        .iter()
+        .filter_map(|entry| {
+            let v = entry.get("version")?.as_str()?;
+            if version_matches(v, spec) {
+                Some((version_key(v), v.to_string(), entry))
+            } else {
+                None
+            }
+        })
+        .max_by_key(|(key, _, _)| *key);
+
+    let (_, version, node) = best.ok_or_else(|| {
+        format!(
+            "No Chrome for Testing build matches '{}'. Try a version like 131 or 131.0.6778.204.",
+            spec
+        )
+    })?;
+
+    let url = chrome_url_for_platform(node)
+        .ok_or_else(|| format!("No download URL found for platform: {}", platform_key()))?;
+
+    Ok((version, url))
+}
+
+/// Resolve (version, url) for whatever the user asked to install.
+async fn resolve_target(target: &InstallTarget) -> Result<(String, String), String> {
+    match target {
+        InstallTarget::Stable => fetch_channel_url("Stable").await,
+        InstallTarget::Channel(c) => fetch_channel_url(c).await,
+        InstallTarget::Version(v) => fetch_version_url(v).await,
+    }
 }
 
 fn format_reqwest_error(e: &reqwest::Error) -> String {
@@ -397,7 +536,7 @@ fn extract_zip(bytes: Vec<u8>, dest: &Path) -> Result<(), String> {
     Ok(())
 }
 
-pub fn run_install(with_deps: bool) {
+pub fn run_install(with_deps: bool, target: InstallTarget) {
     if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
         eprintln!(
             "{} Chrome for Testing does not provide Linux ARM64 builds.",
@@ -439,7 +578,7 @@ pub fn run_install(with_deps: bool) {
             exit(1);
         });
 
-    let (version, url) = match rt.block_on(fetch_download_url()) {
+    let (version, url) = match rt.block_on(resolve_target(&target)) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("{} {}", color::error_indicator(), e);
@@ -863,6 +1002,24 @@ mod tests {
         let request = String::from_utf8_lossy(&buf[..n]).to_string();
         s.write_all(response).await.unwrap();
         request
+    }
+
+    #[test]
+    fn version_matches_exact_and_prefix() {
+        assert!(version_matches("131.0.6778.204", "131.0.6778.204"));
+        assert!(version_matches("131.0.6778.204", "131"));
+        assert!(version_matches("131.0.6778.204", "131.0"));
+        // A prefix must land on a dot boundary, not a digit run.
+        assert!(!version_matches("1310.0.0.0", "131"));
+        assert!(!version_matches("130.0.6723.116", "131"));
+    }
+
+    #[test]
+    fn version_key_orders_numerically_not_lexically() {
+        // Lexical sort would put "99" after "204"; numeric must not.
+        assert!(version_key("131.0.6778.204") > version_key("131.0.6778.99"));
+        assert!(version_key("150.0.0.0") > version_key("131.0.6778.264"));
+        assert!(version_key("131") < version_key("131.0.6778.1"));
     }
 
     #[test]

@@ -965,7 +965,53 @@ fn main() {
     // Handle install separately
     if clean.first().map(|s| s.as_str()) == Some("install") {
         let with_deps = args.iter().any(|a| a == "--with-deps" || a == "-d");
-        run_install(with_deps);
+        // `install --channel <name>` beats `install <version>`; bare `install`
+        // keeps the Stable default.
+        let channel = args
+            .iter()
+            .position(|a| a == "--channel")
+            .and_then(|i| args.get(i + 1))
+            .cloned();
+        let target = if let Some(c) = channel {
+            install::InstallTarget::Channel(c)
+        } else if let Some(v) = clean.get(1) {
+            install::InstallTarget::Version(v.clone())
+        } else {
+            install::InstallTarget::Stable
+        };
+        run_install(with_deps, target);
+        return;
+    }
+
+    // Handle `chrome` version management separately (no daemon needed).
+    if clean.first().map(|s| s.as_str()) == Some("chrome") {
+        match clean.get(1).map(|s| s.as_str()) {
+            Some("list") | None => {
+                let installed = install::list_installed_chromes();
+                if installed.is_empty() {
+                    println!("No Chrome versions installed. Run `agent-browser install`.");
+                } else {
+                    // Newest is the implicit default when no --chrome is passed.
+                    for (idx, (version, path)) in installed.iter().enumerate() {
+                        let marker = if idx == 0 { "* " } else { "  " };
+                        println!("{}{}", marker, version);
+                        if flags.verbose {
+                            println!("    {}", path.display());
+                        }
+                    }
+                    println!();
+                    println!("* = default (newest). Select another with --chrome <version>.");
+                }
+            }
+            Some(other) => {
+                eprintln!(
+                    "{} Unknown chrome subcommand '{}'. Try: agent-browser chrome list",
+                    color::error_indicator(),
+                    other
+                );
+                exit(1);
+            }
+        }
         return;
     }
 

@@ -270,6 +270,8 @@ fn extract_config_path(args: &[String]) -> Option<Option<String>> {
         "--allowed-domains",
         "--action-policy",
         "--confirm-actions",
+        "--chrome",
+        "--channel",
         "--engine",
         "--screenshot-dir",
         "--screenshot-quality",
@@ -741,6 +743,29 @@ pub fn parse_flags(args: &[String]) -> Flags {
                     i += 1;
                 }
             }
+            // Select an installed Chrome for Testing version by number or
+            // prefix ("--chrome 131"). Resolves to a concrete binary and reuses
+            // the same launch path as --executable-path.
+            "--chrome" => {
+                if let Some(spec) = args.get(i + 1) {
+                    match crate::install::find_installed_chrome_matching(spec) {
+                        Some(bin) => {
+                            flags.executable_path = Some(bin.display().to_string());
+                            flags.cli_executable_path = true;
+                        }
+                        None => {
+                            eprintln!(
+                                "{} No installed Chrome matches '{}'. Run `agent-browser install {}` first, or `agent-browser chrome list` to see what is installed.",
+                                color::error_indicator(),
+                                spec,
+                                spec
+                            );
+                            std::process::exit(1);
+                        }
+                    }
+                    i += 1;
+                }
+            }
             "--extension" => {
                 if let Some(s) = args.get(i + 1) {
                     flags.extensions.push(s.clone());
@@ -1065,6 +1090,8 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--action-policy",
         "--confirm-actions",
         "--config",
+        "--chrome",
+        "--channel",
         "--engine",
         "--screenshot-dir",
         "--screenshot-quality",
