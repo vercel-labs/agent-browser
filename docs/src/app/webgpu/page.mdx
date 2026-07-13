@@ -69,7 +69,7 @@ WebGPU probe
         fix: run WebGPU sessions with --headed on a logged-in desktop for screenshots
 ```
 
-On macOS both checks pass headless; on Windows/Linux the second check tells you when the platform needs `--headed` for capture.
+On macOS both checks pass headless; on Windows/Linux the second check tells you when the platform needs `--headed` for capture. Run `agent-browser doctor --webgpu --headed` to validate that path itself — on displayless Linux the probe starts its own Xvfb, so both checks should pass.
 
 ## Linux, containers, and CI
 

@@ -987,6 +987,10 @@ fn main() {
             // "webgpu": true must not make every doctor run launch the extra
             // Chrome probe (and fail on hosts missing Vulkan deps).
             webgpu: flags.cli_webgpu && flags.webgpu,
+            debug: flags.debug,
+            // Merged (env/config included) so the probe reflects how the
+            // user's sessions actually launch.
+            headed: flags.headed,
         };
         exit(doctor::run_doctor(opts));
     }
@@ -1551,6 +1555,12 @@ fn main() {
 
         if flags.webgpu || flags.cli_webgpu {
             launch_cmd["webgpu"] = json!(flags.webgpu);
+        }
+
+        // Env-only opt-out for automatic Xvfb; stamped from the CLI's fresh
+        // environment so it applies to daemons spawned before the var was set.
+        if flags.no_xvfb {
+            launch_cmd["noXvfb"] = json!(true);
         }
 
         if let Some(ref cs) = flags.color_scheme {

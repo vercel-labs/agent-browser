@@ -2781,6 +2781,9 @@ Options:
   --webgpu             Also run a live WebGPU render probe (renders via a real
                        WebGPU pass and pixel-checks both an in-page readback
                        and a decoded screenshot; launches a second Chrome)
+  --headed             Run the WebGPU probe headed to validate the capture
+                       path (auto-Xvfb on displayless Linux)
+  --debug              Verbose diagnostics from the probes' scratch daemons
   --fix                Also run destructive repairs
   --json               JSON output
 
@@ -2792,6 +2795,7 @@ Examples:
   agent-browser doctor
   agent-browser doctor --offline --quick
   agent-browser doctor --webgpu
+  agent-browser doctor --webgpu --headed
   agent-browser doctor --fix
   agent-browser doctor --json
 "##

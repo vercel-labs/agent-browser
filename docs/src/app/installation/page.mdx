@@ -104,7 +104,7 @@ It checks:
 <tr><td>Providers</td><td>Env vars for Browserless, Browserbase, Browser Use, Kernel, AgentCore (AWS creds), Appium (for <code>--provider ios</code>), and <code>AI_GATEWAY_API_KEY</code> for chat</td></tr>
 <tr><td>Network</td><td>Reachability of the Chrome for Testing CDN, AI Gateway (if configured), and any currently selected provider endpoint (skipped under <code>--offline</code>)</td></tr>
 <tr><td>Launch test</td><td>Spawns a scratch session, launches headless Chrome, navigates to <code>about:blank</code>, then closes. Measures wall time (skipped under <code>--quick</code>)</td></tr>
-<tr><td>WebGPU probe</td><td>Opt-in via <code>--webgpu</code>: launches a scratch session with the <a href="/webgpu">WebGPU preset</a>, renders through a real WebGPU pass, and pixel-checks both an in-page readback and a decoded screenshot</td></tr>
+<tr><td>WebGPU probe</td><td>Opt-in via <code>--webgpu</code>: launches a scratch session with the <a href="/webgpu">WebGPU preset</a>, renders through a real WebGPU pass, and pixel-checks both an offscreen readback and a decoded screenshot. Add <code>--headed</code> to validate the headed/Xvfb capture path</td></tr>
 </tbody>
 </table>
 

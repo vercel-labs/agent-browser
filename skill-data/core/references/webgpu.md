@@ -47,6 +47,8 @@ This launches a scratch session with the preset and pixel-checks two stages sepa
 1. **render** — requests an adapter (with retries; a cold Chrome returns null while the GPU process starts), clears an offscreen texture to red through a real render pass, and reads the buffer back. Proves WebGPU works at all, and reports the adapter (e.g. `nvidia ampere`, `apple metal-3`, `google swiftshader`).
 2. **screenshot** — decodes an actual screenshot of a presenting canvas. Proves the capture path. Expected to fail headless on Windows/Linux (see matrix); the failure message says so and points at `--headed`.
 
+Add `--headed` (`agent-browser doctor --webgpu --headed`) to validate the capture path itself — on displayless Linux the probe starts its own Xvfb, so both checks should pass.
+
 ## Linux / containers / CI
 
 The SwiftShader Vulkan path needs the system Vulkan loader and Mesa ICD. Without them `requestAdapter()` returns null (or fails with "A valid external Instance reference no longer exists"):

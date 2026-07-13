@@ -180,7 +180,7 @@ fn maybe_start_xvfb(options: &LaunchOptions) -> Option<XvfbServer> {
     {
         return None;
     }
-    if std::env::var("AGENT_BROWSER_NO_XVFB").map(|v| v == "1" || v == "true") == Ok(true) {
+    if options.no_xvfb {
         return None;
     }
 
@@ -321,6 +321,11 @@ pub struct LaunchOptions {
     /// this routes WebGPU through SwiftShader's software Vulkan with software
     /// compositing so it works without a GPU or display.
     pub webgpu: bool,
+    /// Disable automatic Xvfb for headed launches on displayless Linux
+    /// hosts (AGENT_BROWSER_NO_XVFB). Carried as a launch option so the
+    /// CLI's current environment wins over the env a long-lived daemon was
+    /// spawned with.
+    pub no_xvfb: bool,
 }
 
 impl Default for LaunchOptions {
@@ -345,6 +350,7 @@ impl Default for LaunchOptions {
             viewport_size: None,
             use_real_keychain: false,
             webgpu: false,
+            no_xvfb: false,
         }
     }
 }

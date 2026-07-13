@@ -3089,6 +3089,7 @@ mod tests {
             allow_file_access: false,
             hide_scrollbars: true,
             webgpu: false,
+            no_xvfb: false,
             device: None,
             auto_connect: false,
             session_name: None,

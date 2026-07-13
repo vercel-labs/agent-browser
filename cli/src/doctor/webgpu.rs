@@ -29,7 +29,7 @@ use std::time::{Instant, SystemTime};
 use serde_json::{json, Value};
 
 use super::helpers::new_id;
-use super::{Check, Status};
+use super::{Check, DoctorOptions, Status};
 use crate::connection::{cleanup_stale_files, ensure_daemon, send_command, DaemonOptions};
 
 const CATEGORY: &str = "WebGPU probe";
@@ -108,7 +108,7 @@ const PROBE_JS: &str = r#"(async () => {
   }
 })()"#;
 
-pub(super) fn check(checks: &mut Vec<Check>) {
+pub(super) fn check(checks: &mut Vec<Check>, opts: &DoctorOptions) {
     if env::var("AGENT_BROWSER_PROVIDER").is_ok() {
         checks.push(Check::new(
             "webgpu.skipped.provider",
@@ -190,9 +190,9 @@ pub(super) fn check(checks: &mut Vec<Check>) {
         return;
     }
 
-    let opts = DaemonOptions {
-        headed: false,
-        debug: false,
+    let daemon_opts = DaemonOptions {
+        headed: opts.headed,
+        debug: opts.debug,
         executable_path: None,
         extensions: &[],
         init_scripts: &[],
@@ -233,7 +233,7 @@ pub(super) fn check(checks: &mut Vec<Check>) {
     };
 
     let started = Instant::now();
-    if let Err(e) = ensure_daemon(&session, &opts) {
+    if let Err(e) = ensure_daemon(&session, &daemon_opts) {
         checks.push(
             Check::new(
                 "webgpu.daemon",
@@ -249,7 +249,7 @@ pub(super) fn check(checks: &mut Vec<Check>) {
     let launch_cmd = json!({
         "id": new_id(),
         "action": "launch",
-        "headless": true,
+        "headless": !opts.headed,
         "webgpu": true,
         "engine": "chrome",
     });
@@ -370,14 +370,40 @@ pub(super) fn check(checks: &mut Vec<Check>) {
         return;
     }
 
+    let mode = if opts.headed { "headed" } else { "headless" };
     match center_pixel(&shot_path) {
         Ok((r, g, b)) if r > 200 && g < 64 && b < 64 => {
             checks.push(Check::new(
                 "webgpu.screenshot",
                 CATEGORY,
                 Status::Pass,
-                format!("Screenshot captured WebGPU output (rgb({},{},{}))", r, g, b),
+                format!(
+                    "Screenshot captured WebGPU output in {} mode (rgb({},{},{}))",
+                    mode, r, g, b
+                ),
             ));
+        }
+        Ok((r, g, b)) if opts.headed => {
+            // Headed capture is the supported path; a miss here means the
+            // display setup is broken, not an upstream limitation.
+            checks.push(
+                Check::new(
+                    "webgpu.screenshot",
+                    CATEGORY,
+                    Status::Fail,
+                    format!(
+                        "WebGPU renders, but headed screenshots missed the canvas (expected red, got rgb({},{},{}))",
+                        r, g, b
+                    ),
+                )
+                .with_fix(if cfg!(target_os = "linux") {
+                    "check that Xvfb is installed (apt-get install -y xvfb) or run under a real display"
+                } else if cfg!(target_os = "windows") {
+                    "run from a logged-in interactive desktop session (ssh/Session 0 cannot present frames)"
+                } else {
+                    "re-run with --debug for launch logs"
+                }),
+            );
         }
         Ok((r, g, b)) => {
             // Rendering passed but the presented canvas is not in the
@@ -394,7 +420,7 @@ pub(super) fn check(checks: &mut Vec<Check>) {
                     ),
                 )
                 .with_fix(if cfg!(target_os = "linux") {
-                    "add --headed (a virtual display starts automatically; needs Xvfb: apt-get install -y xvfb)"
+                    "re-run doctor --webgpu --headed to validate capture (a virtual display starts automatically; needs Xvfb: apt-get install -y xvfb)"
                 } else {
                     "run WebGPU sessions with --headed on a logged-in desktop for screenshots"
                 }),

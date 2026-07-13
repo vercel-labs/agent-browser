@@ -351,6 +351,9 @@ pub struct Flags {
     pub allow_file_access: bool,
     pub hide_scrollbars: bool,
     pub webgpu: bool,
+    /// Env-only (AGENT_BROWSER_NO_XVFB): disable automatic Xvfb for headed
+    /// launches on displayless Linux hosts.
+    pub no_xvfb: bool,
     pub device: Option<String>,
     pub auto_connect: bool,
     pub session_name: Option<String>,
@@ -529,6 +532,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
             .or(config.hide_scrollbars)
             .unwrap_or(true),
         webgpu: env_var_is_truthy("AGENT_BROWSER_WEBGPU") || config.webgpu.unwrap_or(false),
+        no_xvfb: env_var_is_truthy("AGENT_BROWSER_NO_XVFB"),
         device: env::var("AGENT_BROWSER_IOS_DEVICE").ok().or(config.device),
         auto_connect: env_var_is_truthy("AGENT_BROWSER_AUTO_CONNECT")
             || config.auto_connect.unwrap_or(false),

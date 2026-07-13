@@ -220,6 +220,7 @@ fn launch_hash(
     opts.allow_file_access.hash(&mut h);
     opts.hide_scrollbars.hash(&mut h);
     opts.webgpu.hash(&mut h);
+    opts.no_xvfb.hash(&mut h);
     enable_features.hash(&mut h);
     init_script_paths.hash(&mut h);
     plugin_init_scripts.hash(&mut h);
@@ -2343,6 +2344,7 @@ async fn apply_launch_mutator_plugins(
             "hideScrollbars": options.hide_scrollbars,
             "allowFileAccess": options.allow_file_access,
             "webgpu": options.webgpu,
+            "noXvfb": options.no_xvfb,
         }
     });
 
@@ -2404,6 +2406,7 @@ fn launch_options_from_env() -> LaunchOptions {
         viewport_size: None,
         use_real_keychain: false,
         webgpu: webgpu_from_env(),
+        no_xvfb: no_xvfb_from_env(),
     }
 }
 
@@ -2435,6 +2438,18 @@ fn webgpu_from_launch_cmd(cmd: &Value) -> bool {
     cmd.get("webgpu")
         .and_then(|v| v.as_bool())
         .unwrap_or_else(webgpu_from_env)
+}
+
+fn no_xvfb_from_env() -> bool {
+    env::var("AGENT_BROWSER_NO_XVFB")
+        .map(|v| v == "1" || v == "true")
+        .unwrap_or(false)
+}
+
+fn no_xvfb_from_launch_cmd(cmd: &Value) -> bool {
+    cmd.get("noXvfb")
+        .and_then(|v| v.as_bool())
+        .unwrap_or_else(no_xvfb_from_env)
 }
 
 async fn try_auto_restore_state(state: &mut DaemonState) {
@@ -2822,6 +2837,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         viewport_size: None,
         use_real_keychain: false,
         webgpu: webgpu_from_launch_cmd(cmd),
+        no_xvfb: no_xvfb_from_launch_cmd(cmd),
     };
 
     state.plugin_init_scripts.clear();
@@ -10665,6 +10681,32 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         guard.set("AGENT_BROWSER_WEBGPU", "1");
         assert!(webgpu_from_launch_cmd(&json!({})));
         assert!(!webgpu_from_launch_cmd(&json!({ "webgpu": false })));
+    }
+
+    #[test]
+    fn test_no_xvfb_from_launch_cmd() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_NO_XVFB"]);
+        guard.remove("AGENT_BROWSER_NO_XVFB");
+        assert!(no_xvfb_from_launch_cmd(&json!({ "noXvfb": true })));
+        assert!(!no_xvfb_from_launch_cmd(&json!({ "noXvfb": false })));
+        // Falls back to the daemon env when the command omits the field.
+        assert!(!no_xvfb_from_launch_cmd(&json!({})));
+        guard.set("AGENT_BROWSER_NO_XVFB", "1");
+        assert!(no_xvfb_from_launch_cmd(&json!({})));
+        assert!(!no_xvfb_from_launch_cmd(&json!({ "noXvfb": false })));
+    }
+
+    #[test]
+    fn test_launch_hash_includes_no_xvfb() {
+        let base = LaunchOptions::default();
+        let no_xvfb = LaunchOptions {
+            no_xvfb: true,
+            ..Default::default()
+        };
+        assert_ne!(
+            launch_hash(&base, &[], &[], &[], Some("chrome"), "local", None),
+            launch_hash(&no_xvfb, &[], &[], &[], Some("chrome"), "local", None)
+        );
     }
 
     #[test]

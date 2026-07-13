@@ -32,6 +32,13 @@ pub struct DoctorOptions {
     pub json: bool,
     /// Run the live WebGPU render probe (opt-in; launches a second Chrome).
     pub webgpu: bool,
+    /// Forward --debug to the scratch daemons the live probes spawn, so the
+    /// "re-run with --debug" fix hints actually produce diagnostics.
+    pub debug: bool,
+    /// Run the WebGPU probe headed instead of headless, validating the
+    /// capture path the probe's own failure hint recommends (auto-Xvfb on
+    /// displayless Linux, logged-in desktop on Windows).
+    pub headed: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -111,11 +118,11 @@ pub fn run_doctor(opts: DoctorOptions) -> i32 {
     }
 
     if !opts.quick {
-        launch::check(&mut checks);
+        launch::check(&mut checks, &opts);
     }
 
     if opts.webgpu {
-        webgpu::check(&mut checks);
+        webgpu::check(&mut checks, &opts);
     }
 
     if opts.fix {

@@ -1720,7 +1720,7 @@ fn parity_tools() -> Vec<Value> {
             TOOL_DOCTOR,
             "Doctor",
             "Diagnose the installation.",
-            json!({ "offline": { "type": "boolean" }, "quick": { "type": "boolean" }, "fix": { "type": "boolean" }, "webgpu": { "type": "boolean", "description": "Also run a live WebGPU render probe (launches a second Chrome)." } }),
+            json!({ "offline": { "type": "boolean" }, "quick": { "type": "boolean" }, "fix": { "type": "boolean" }, "webgpu": { "type": "boolean", "description": "Also run a live WebGPU render probe (launches a second Chrome)." }, "headed": { "type": "boolean", "description": "Run the WebGPU probe headed to validate the capture path (auto-Xvfb on displayless Linux)." } }),
             &[],
         ),
         tool(
@@ -3220,6 +3220,7 @@ fn call_doctor(arguments: &Value) -> Result<Value, ProtocolError> {
         ("quick", "--quick"),
         ("fix", "--fix"),
         ("webgpu", "--webgpu"),
+        ("headed", "--headed"),
     ] {
         if optional_bool(arguments, key)?.unwrap_or(false) {
             args.push(flag.to_string());
@@ -3770,6 +3771,7 @@ mod tests {
         assert!(props.get("quick").is_some());
         assert!(props.get("fix").is_some());
         assert!(props.get("webgpu").is_some());
+        assert!(props.get("headed").is_some());
     }
 
     #[test]
