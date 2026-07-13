@@ -83,6 +83,7 @@ pub struct Config {
     pub allow_file_access: Option<bool>,
     pub cdp: Option<String>,
     pub auto_connect: Option<bool>,
+    pub auto_connect_timeout: Option<u64>,
     pub headers: Option<String>,
     pub annotate: Option<bool>,
     pub color_scheme: Option<String>,
@@ -153,6 +154,7 @@ impl Config {
             allow_file_access: other.allow_file_access.or(self.allow_file_access),
             cdp: other.cdp.or(self.cdp),
             auto_connect: other.auto_connect.or(self.auto_connect),
+            auto_connect_timeout: other.auto_connect_timeout.or(self.auto_connect_timeout),
             headers: other.headers.or(self.headers),
             annotate: other.annotate.or(self.annotate),
             color_scheme: other.color_scheme.or(self.color_scheme),
@@ -356,6 +358,7 @@ pub struct Flags {
     pub no_xvfb: bool,
     pub device: Option<String>,
     pub auto_connect: bool,
+    pub auto_connect_timeout: Option<u64>,
     pub session_name: Option<String>,
     pub annotate: bool,
     pub color_scheme: Option<String>,
@@ -536,6 +539,10 @@ pub fn parse_flags(args: &[String]) -> Flags {
         device: env::var("AGENT_BROWSER_IOS_DEVICE").ok().or(config.device),
         auto_connect: env_var_is_truthy("AGENT_BROWSER_AUTO_CONNECT")
             || config.auto_connect.unwrap_or(false),
+        auto_connect_timeout: env::var("AGENT_BROWSER_AUTO_CONNECT_TIMEOUT")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .or(config.auto_connect_timeout),
         session_name: env::var("AGENT_BROWSER_SESSION_NAME")
             .ok()
             .or(config.session_name),
@@ -1451,6 +1458,7 @@ mod tests {
             "allowFileAccess": true,
             "cdp": "9222",
             "autoConnect": true,
+            "autoConnectTimeout": 12000,
             "headers": "{\"Auth\":\"token\"}",
             "plugins": [
                 {
@@ -1485,6 +1493,7 @@ mod tests {
         assert_eq!(config.allow_file_access, Some(true));
         assert_eq!(config.cdp.as_deref(), Some("9222"));
         assert_eq!(config.auto_connect, Some(true));
+        assert_eq!(config.auto_connect_timeout, Some(12000));
         assert_eq!(config.headers.as_deref(), Some("{\"Auth\":\"token\"}"));
         let plugin = &config.plugins.as_ref().unwrap()[0];
         assert_eq!(plugin.name, "onepassword");
@@ -1820,6 +1829,32 @@ mod tests {
     fn test_auto_connect_false() {
         let flags = parse_flags(&args("--auto-connect false open"));
         assert!(!flags.auto_connect);
+    }
+
+    #[test]
+    fn test_auto_connect_timeout_from_env() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_AUTO_CONNECT_TIMEOUT"]);
+        guard.set("AGENT_BROWSER_AUTO_CONNECT_TIMEOUT", "12000");
+
+        let flags = parse_flags(&args("snapshot"));
+
+        assert_eq!(flags.auto_connect_timeout, Some(12000));
+    }
+
+    #[test]
+    fn test_config_merge_auto_connect_timeout_project_overrides_user() {
+        let user = Config {
+            auto_connect_timeout: Some(10000),
+            ..Config::default()
+        };
+        let project = Config {
+            auto_connect_timeout: Some(25000),
+            ..Config::default()
+        };
+
+        let merged = user.merge(project);
+
+        assert_eq!(merged.auto_connect_timeout, Some(25000));
     }
 
     #[test]

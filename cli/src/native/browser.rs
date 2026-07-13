@@ -5,7 +5,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, Mutex};
 
-use super::cdp::chrome::{auto_connect_cdp, launch_chrome, ChromeProcess, LaunchOptions};
+use super::cdp::chrome::{
+    auto_connect_candidates, launch_chrome, AutoConnectCandidate, ChromeProcess, LaunchOptions,
+};
 use super::cdp::client::CdpClient;
 use super::cdp::discovery::discover_cdp_url;
 use super::cdp::lightpanda::{launch_lightpanda, LightpandaLaunchOptions, LightpandaProcess};
@@ -112,6 +114,26 @@ fn update_page_target_info_in_pages(pages: &mut [PageInfo], target: &TargetInfo)
         return true;
     }
     false
+}
+
+/// Distinguishes why a CDP connection attempt failed, so auto-connect can
+/// decide whether to try the next candidate or stop.
+enum CdpConnectError {
+    /// No listener / transport refused at the WebSocket endpoint. Safe to move
+    /// on to the next candidate (and prune a stale DevToolsActivePort file).
+    Unreachable(String),
+    /// Reached the endpoint but a CDP setup command failed, or approval did not
+    /// arrive within the configured timeout. Terminal: another connection to
+    /// the same live endpoint would only re-trigger Chrome's approval prompt.
+    Other(String),
+}
+
+impl CdpConnectError {
+    fn message(&self) -> &str {
+        match self {
+            CdpConnectError::Unreachable(m) | CdpConnectError::Other(m) => m,
+        }
+    }
 }
 
 fn active_page_index_after_removal(
@@ -435,29 +457,41 @@ impl BrowserManager {
     }
 
     pub async fn connect_cdp(url: &str) -> Result<Self, String> {
-        Self::connect_cdp_inner(url, false, None).await
+        Self::connect_cdp_inner(url, false, None)
+            .await
+            .map_err(|e| e.message().to_string())
     }
 
     /// Connect to a provider CDP proxy where the WebSocket IS the page session.
     /// Skips browser-level Target.* commands that most proxies don't support.
     pub async fn connect_cdp_direct(url: &str) -> Result<Self, String> {
-        Self::connect_cdp_inner(url, true, None).await
+        Self::connect_cdp_inner(url, true, None)
+            .await
+            .map_err(|e| e.message().to_string())
     }
 
     pub async fn connect_cdp_with_headers(
         url: &str,
         headers: Option<Vec<(String, String)>>,
     ) -> Result<Self, String> {
-        Self::connect_cdp_inner(url, false, headers).await
+        Self::connect_cdp_inner(url, false, headers)
+            .await
+            .map_err(|e| e.message().to_string())
     }
 
     async fn connect_cdp_inner(
         url: &str,
         direct_page: bool,
         headers: Option<Vec<(String, String)>>,
-    ) -> Result<Self, String> {
-        let ws_url = resolve_cdp_url(url).await?;
-        let client = Arc::new(CdpClient::connect_with_headers(&ws_url, headers).await?);
+    ) -> Result<Self, CdpConnectError> {
+        let ws_url = resolve_cdp_url(url)
+            .await
+            .map_err(CdpConnectError::Unreachable)?;
+        let client = Arc::new(
+            CdpClient::connect_with_headers(&ws_url, headers)
+                .await
+                .map_err(CdpConnectError::Unreachable)?,
+        );
         let mut manager = Self {
             client,
             browser_process: None,
@@ -483,16 +517,66 @@ impl BrowserManager {
                 target_type: "page".to_string(),
             });
             manager.active_page_index = 0;
-            manager.enable_domains_direct().await?;
+            manager
+                .enable_domains_direct()
+                .await
+                .map_err(CdpConnectError::Other)?;
         } else {
-            manager.discover_and_attach_targets().await?;
+            manager
+                .discover_and_attach_targets()
+                .await
+                .map_err(CdpConnectError::Other)?;
         }
         Ok(manager)
     }
 
-    pub async fn connect_auto() -> Result<Self, String> {
-        let ws_url = auto_connect_cdp().await?;
-        Self::connect_cdp(&ws_url).await
+    pub async fn connect_auto(timeout: std::time::Duration) -> Result<Self, String> {
+        let candidates = auto_connect_candidates(timeout).await;
+        Self::connect_auto_from_candidates(candidates, timeout).await
+    }
+
+    /// Try each discovered candidate in order. Each candidate gets at most one
+    /// real CDP connection, bounded by `timeout`; there is no throwaway probe,
+    /// so a live Chrome instance is prompted at most once per `--auto-connect`.
+    ///
+    /// A transport-level refusal (`Unreachable`) prunes any stale
+    /// `DevToolsActivePort` file and moves on. A setup failure or approval
+    /// timeout (`Other`) is terminal: retrying the same live endpoint would
+    /// only produce another approval prompt.
+    async fn connect_auto_from_candidates(
+        candidates: Vec<AutoConnectCandidate>,
+        timeout: std::time::Duration,
+    ) -> Result<Self, String> {
+        for candidate in candidates {
+            let attempt = tokio::time::timeout(
+                timeout,
+                Self::connect_cdp_inner(&candidate.ws_url, false, None),
+            )
+            .await;
+            match attempt {
+                Ok(Ok(mgr)) => return Ok(mgr),
+                Ok(Err(CdpConnectError::Unreachable(_))) => {
+                    if let Some(stale) = candidate.stale_devtools_file {
+                        let _ = std::fs::remove_file(&stale);
+                    }
+                    continue;
+                }
+                Ok(Err(CdpConnectError::Other(msg))) => return Err(msg),
+                Err(_) => {
+                    return Err(format!(
+                        "Auto-connect timed out after {}ms waiting for Chrome's \
+                         remote-debugging approval. Increase `autoConnectTimeout` or \
+                         launch Chrome with `--remote-debugging-port`.",
+                        timeout.as_millis()
+                    ));
+                }
+            }
+        }
+
+        Err(
+            "No running Chrome instance found. Launch Chrome with --remote-debugging-port or use --cdp."
+                .to_string(),
+        )
     }
 
     async fn discover_and_attach_targets(&mut self) -> Result<(), String> {
@@ -593,19 +677,18 @@ impl BrowserManager {
     }
 
     async fn enable_domains(&self, session_id: &str) -> Result<(), String> {
+        // Resume first: Chrome 144+ real browser sessions can pause targets
+        // after attach, and domain enable commands may hang until resumed.
+        let _ = self
+            .client
+            .send_command_no_params("Runtime.runIfWaitingForDebugger", Some(session_id))
+            .await;
         self.client
             .send_command_no_params("Page.enable", Some(session_id))
             .await?;
         self.client
             .send_command_no_params("Runtime.enable", Some(session_id))
             .await?;
-        // Resume the target if it is paused waiting for the debugger.
-        // This is needed for real browser sessions (Chrome 144+) where targets
-        // are paused after attach until explicitly resumed. No-op otherwise.
-        let _ = self
-            .client
-            .send_command_no_params("Runtime.runIfWaitingForDebugger", Some(session_id))
-            .await;
         self.client
             .send_command_no_params("Network.enable", Some(session_id))
             .await?;
@@ -629,16 +712,16 @@ impl BrowserManager {
 
     /// Enable domains on a direct page connection (no session_id needed).
     async fn enable_domains_direct(&self) -> Result<(), String> {
+        let _ = self
+            .client
+            .send_command_no_params("Runtime.runIfWaitingForDebugger", None)
+            .await;
         self.client
             .send_command_no_params("Page.enable", None)
             .await?;
         self.client
             .send_command_no_params("Runtime.enable", None)
             .await?;
-        let _ = self
-            .client
-            .send_command_no_params("Runtime.runIfWaitingForDebugger", None)
-            .await;
         self.client
             .send_command_no_params("Network.enable", None)
             .await?;
@@ -1729,6 +1812,98 @@ mod tests {
     fn test_format_tab_id() {
         assert_eq!(format_tab_id(1), "t1");
         assert_eq!(format_tab_id(42), "t42");
+    }
+
+    #[tokio::test]
+    async fn test_auto_connect_keeps_first_devtools_active_port_websocket() {
+        use futures_util::{SinkExt, StreamExt};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio_tungstenite::tungstenite::Message as WsMsg;
+
+        // One candidate derived from a DevToolsActivePort file pointing at a
+        // live WebSocket server. The candidate carries no prior probe, so the
+        // server should see exactly one WebSocket connection (the real one).
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let profile_dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            profile_dir.path().join("DevToolsActivePort"),
+            format!("{}\n/devtools/browser/test-browser\n", port),
+        )
+        .unwrap();
+
+        let connections = Arc::new(AtomicUsize::new(0));
+        let server_connections = Arc::clone(&connections);
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            server_connections.fetch_add(1, Ordering::SeqCst);
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+
+            while let Some(Ok(WsMsg::Text(text))) = ws.next().await {
+                let req: Value = serde_json::from_str(&text).unwrap();
+                let id = req.get("id").cloned().unwrap_or_else(|| json!(0));
+                let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
+                let result = match method {
+                    "Target.getTargets" => json!({
+                        "targetInfos": [{
+                            "targetId": "page-1",
+                            "type": "page",
+                            "title": "",
+                            "url": "about:blank",
+                            "attached": false
+                        }]
+                    }),
+                    "Target.attachToTarget" => json!({ "sessionId": "session-1" }),
+                    _ => json!({}),
+                };
+                ws.send(WsMsg::Text(
+                    json!({ "id": id, "result": result }).to_string(),
+                ))
+                .await
+                .unwrap();
+            }
+        });
+
+        let candidates = vec![AutoConnectCandidate {
+            ws_url: format!("ws://127.0.0.1:{}/devtools/browser/test-browser", port),
+            host: "127.0.0.1".to_string(),
+            port,
+            stale_devtools_file: Some(profile_dir.path().join("DevToolsActivePort")),
+        }];
+        let manager =
+            BrowserManager::connect_auto_from_candidates(candidates, Duration::from_secs(5))
+                .await
+                .expect("auto-connect should keep the first DevToolsActivePort WebSocket");
+
+        assert_eq!(connections.load(Ordering::SeqCst), 1);
+        assert_eq!(manager.pages.len(), 1);
+        drop(manager);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn test_auto_connect_skips_dead_candidate_without_prompting() {
+        // A candidate pointing at a port with no listener is skipped via the TCP
+        // reachability check. Its stale DevToolsActivePort file is removed, and
+        // no WebSocket connection is attempted.
+        let profile_dir = tempfile::tempdir().unwrap();
+        let stale = profile_dir.path().join("DevToolsActivePort");
+        std::fs::write(&stale, "65500\n/devtools/browser/dead\n").unwrap();
+
+        let candidates = vec![AutoConnectCandidate {
+            ws_url: "ws://127.0.0.1:65500/devtools/browser/dead".to_string(),
+            host: "127.0.0.1".to_string(),
+            port: 65500,
+            stale_devtools_file: Some(stale.clone()),
+        }];
+        let result =
+            BrowserManager::connect_auto_from_candidates(candidates, Duration::from_secs(5)).await;
+
+        assert!(result.is_err(), "no live candidate should error");
+        assert!(
+            !stale.exists(),
+            "stale DevToolsActivePort should be pruned after an unreachable candidate"
+        );
     }
 
     #[test]

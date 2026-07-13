@@ -412,6 +412,7 @@ EOF
 --headed                # show the window (default is headless)
 --webgpu                # enable WebGPU (software Vulkan on Linux, no GPU needed)
 --auto-connect          # connect to an already-running Chrome
+# autoConnectTimeout / AGENT_BROWSER_AUTO_CONNECT_TIMEOUT adjusts auto-connect approval/discovery wait (default 10000ms)
 --cdp <port>            # connect to a specific CDP port
 --profile <name|path>   # use a Chrome profile (login state survives)
 --headers <json>        # HTTP headers scoped to the URL's origin

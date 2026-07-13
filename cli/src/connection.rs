@@ -460,6 +460,7 @@ pub struct DaemonOptions<'a> {
     pub auto_connect: bool,
     pub idle_timeout: Option<&'a str>,
     pub default_timeout: Option<u64>,
+    pub auto_connect_timeout: Option<u64>,
     pub cdp: Option<&'a str>,
     pub no_auto_dialog: bool,
     pub plugins: Option<&'a str>,
@@ -569,6 +570,9 @@ fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
     if let Some(timeout) = opts.default_timeout {
         cmd.env("AGENT_BROWSER_DEFAULT_TIMEOUT", timeout.to_string());
     }
+    if let Some(timeout) = opts.auto_connect_timeout {
+        cmd.env("AGENT_BROWSER_AUTO_CONNECT_TIMEOUT", timeout.to_string());
+    }
     if let Some(cdp) = opts.cdp {
         cmd.env("AGENT_BROWSER_CDP", cdp);
     }
@@ -588,6 +592,7 @@ fn daemon_config_fingerprint(opts: &DaemonOptions) -> String {
     opts.allowed_domains.hash(&mut hasher);
     opts.idle_timeout.hash(&mut hasher);
     opts.default_timeout.hash(&mut hasher);
+    opts.auto_connect_timeout.hash(&mut hasher);
     opts.no_auto_dialog.hash(&mut hasher);
     format!("{:016x}", hasher.finish())
 }
@@ -1088,7 +1093,11 @@ fn has_os_error(error: &str, code: u32) -> bool {
 /// the extended budget, and that field is set client-side per invocation,
 /// avoiding the daemon's spawn-time env snapshot drifting from the client.
 fn read_timeout_for(cmd: &Value) -> Duration {
-    let op_ms = cmd.get("timeout").and_then(|v| v.as_u64()).unwrap_or(0);
+    let op_ms = cmd
+        .get("timeout")
+        .or_else(|| cmd.get("autoConnectTimeout"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
     Duration::from_millis(op_ms.saturating_add(10_000).max(30_000))
 }
 
@@ -1232,6 +1241,7 @@ mod tests {
 
     fn test_daemon_options<'a>(
         idle_timeout: Option<&'a str>,
+        auto_connect_timeout: Option<u64>,
         no_auto_dialog: bool,
         allowed_domains: Option<&'a [String]>,
     ) -> DaemonOptions<'a> {
@@ -1269,6 +1279,7 @@ mod tests {
             auto_connect: false,
             idle_timeout,
             default_timeout: None,
+            auto_connect_timeout,
             cdp: None,
             no_auto_dialog,
             plugins: None,
@@ -1276,16 +1287,32 @@ mod tests {
     }
 
     #[test]
+    fn test_read_timeout_tracks_auto_connect_timeout() {
+        let cmd = json!({
+            "action": "launch",
+            "autoConnect": true,
+            "autoConnectTimeout": 45000
+        });
+
+        assert_eq!(read_timeout_for(&cmd), Duration::from_millis(55_000));
+    }
+
+    #[test]
     fn test_daemon_config_fingerprint_tracks_daemon_owned_options() {
         let domains = vec!["example.com".to_string()];
-        let base = test_daemon_options(None, false, None);
-        let idle_changed = test_daemon_options(Some("1000"), false, None);
-        let dialog_changed = test_daemon_options(None, true, None);
-        let domains_changed = test_daemon_options(None, false, Some(&domains));
+        let base = test_daemon_options(None, None, false, None);
+        let idle_changed = test_daemon_options(Some("1000"), None, false, None);
+        let auto_connect_timeout_changed = test_daemon_options(None, Some(12000), false, None);
+        let dialog_changed = test_daemon_options(None, None, true, None);
+        let domains_changed = test_daemon_options(None, None, false, Some(&domains));
 
         assert_ne!(
             daemon_config_fingerprint(&base),
             daemon_config_fingerprint(&idle_changed)
+        );
+        assert_ne!(
+            daemon_config_fingerprint(&base),
+            daemon_config_fingerprint(&auto_connect_timeout_changed)
         );
         assert_ne!(
             daemon_config_fingerprint(&base),
@@ -1305,8 +1332,8 @@ mod tests {
         guard.remove("AGENT_BROWSER_NAMESPACE");
 
         let session = "race-config";
-        let winner_opts = test_daemon_options(Some("1000"), false, None);
-        let loser_opts = test_daemon_options(Some("2000"), false, None);
+        let winner_opts = test_daemon_options(Some("1000"), None, false, None);
+        let loser_opts = test_daemon_options(Some("2000"), None, false, None);
 
         fs::create_dir_all(get_socket_dir()).unwrap();
         fs::write(get_pid_path(session), "12345").unwrap();
@@ -1327,7 +1354,7 @@ mod tests {
         guard.remove("AGENT_BROWSER_NAMESPACE");
 
         let session = "race-config-match";
-        let opts = test_daemon_options(Some("1000"), false, None);
+        let opts = test_daemon_options(Some("1000"), None, false, None);
 
         fs::create_dir_all(get_socket_dir()).unwrap();
         fs::write(get_pid_path(session), "12345").unwrap();
@@ -1349,7 +1376,7 @@ mod tests {
         guard.remove("AGENT_BROWSER_NAMESPACE");
 
         let session = "startup-config";
-        let opts = test_daemon_options(Some("1000"), false, None);
+        let opts = test_daemon_options(Some("1000"), None, false, None);
         fs::create_dir_all(get_socket_dir()).unwrap();
 
         let config_path = get_config_path(session);
@@ -1376,7 +1403,7 @@ mod tests {
         guard.remove("AGENT_BROWSER_NAMESPACE");
 
         let session = "race-config-owner";
-        let opts = test_daemon_options(Some("1000"), false, None);
+        let opts = test_daemon_options(Some("1000"), None, false, None);
         let spawned_pid = 67890;
 
         fs::create_dir_all(get_socket_dir()).unwrap();

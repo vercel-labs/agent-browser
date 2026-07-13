@@ -132,6 +132,12 @@
       "type": "boolean",
       "description": "Auto-discover and connect to a running Chrome instance."
     },
+    "autoConnectTimeout": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 10000,
+      "description": "Auto-connect discovery timeout in milliseconds, including Chrome remote-debugging approval prompts."
+    },
     "annotate": {
       "type": "boolean",
       "description": "Annotated screenshot with numbered element labels."

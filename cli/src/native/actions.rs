@@ -14,7 +14,7 @@ use crate::validation::{is_valid_session_name, session_name_error};
 
 use super::auth;
 use super::browser::{should_track_target, BrowserManager, WaitUntil};
-use super::cdp::chrome::LaunchOptions;
+use super::cdp::chrome::{LaunchOptions, DEFAULT_AUTO_CONNECT_TIMEOUT_MS};
 use super::cdp::client::CdpClient;
 use super::cdp::types::{
     AttachToTargetParams, AttachToTargetResult, CdpEvent, CreateTargetResult,
@@ -2064,10 +2064,36 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
 // Auto-launch
 // ---------------------------------------------------------------------------
 
+fn auto_connect_timeout_from_ms(ms: Option<u64>) -> tokio::time::Duration {
+    tokio::time::Duration::from_millis(ms.unwrap_or(DEFAULT_AUTO_CONNECT_TIMEOUT_MS))
+}
+
+fn auto_connect_timeout_from_env() -> tokio::time::Duration {
+    auto_connect_timeout_from_ms(
+        env::var("AGENT_BROWSER_AUTO_CONNECT_TIMEOUT")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok()),
+    )
+}
+
+fn auto_connect_timeout_from_command_or_env(cmd: &Value) -> tokio::time::Duration {
+    auto_connect_timeout_from_ms(
+        cmd.get("autoConnectTimeout")
+            .and_then(|v| v.as_u64())
+            .or_else(|| {
+                env::var("AGENT_BROWSER_AUTO_CONNECT_TIMEOUT")
+                    .ok()
+                    .and_then(|s| s.parse::<u64>().ok())
+            }),
+    )
+}
+
 /// Connect to a running Chrome via auto-discovery and open a fresh tab so
 /// subsequent navigations don't hijack the user's existing tabs.
-async fn connect_auto_with_fresh_tab() -> Result<BrowserManager, String> {
-    let mut mgr = BrowserManager::connect_auto().await?;
+async fn connect_auto_with_fresh_tab(
+    timeout: tokio::time::Duration,
+) -> Result<BrowserManager, String> {
+    let mut mgr = BrowserManager::connect_auto(timeout).await?;
     mgr.tab_new(None, None).await?;
     let session_id = mgr.active_session_id()?.to_string();
     let _ = mgr
@@ -2145,7 +2171,7 @@ async fn auto_launch(
             None,
         );
         state.reset_input_state();
-        state.browser = Some(connect_auto_with_fresh_tab().await?);
+        state.browser = Some(connect_auto_with_fresh_tab(auto_connect_timeout_from_env()).await?);
         state.launch_hash = Some(hash);
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
@@ -2932,7 +2958,8 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
 
     if auto_connect {
         state.reset_input_state();
-        state.browser = Some(connect_auto_with_fresh_tab().await?);
+        state.browser =
+            Some(connect_auto_with_fresh_tab(auto_connect_timeout_from_command_or_env(cmd)).await?);
         state.launch_hash = Some(new_hash);
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
@@ -11129,6 +11156,40 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         env.remove("AGENT_BROWSER_DEFAULT_TIMEOUT");
         let state = DaemonState::new();
         assert_eq!(state.default_timeout_ms, 25_000);
+    }
+
+    #[test]
+    fn test_auto_connect_timeout_from_env() {
+        let env = EnvGuard::new(&["AGENT_BROWSER_AUTO_CONNECT_TIMEOUT"]);
+        env.set("AGENT_BROWSER_AUTO_CONNECT_TIMEOUT", "12000");
+
+        assert_eq!(
+            auto_connect_timeout_from_env(),
+            tokio::time::Duration::from_millis(12_000)
+        );
+    }
+
+    #[test]
+    fn test_auto_connect_timeout_from_command_overrides_env() {
+        let env = EnvGuard::new(&["AGENT_BROWSER_AUTO_CONNECT_TIMEOUT"]);
+        env.set("AGENT_BROWSER_AUTO_CONNECT_TIMEOUT", "12000");
+        let cmd = json!({ "autoConnectTimeout": 25000 });
+
+        assert_eq!(
+            auto_connect_timeout_from_command_or_env(&cmd),
+            tokio::time::Duration::from_millis(25_000)
+        );
+    }
+
+    #[test]
+    fn test_auto_connect_timeout_default() {
+        let env = EnvGuard::new(&["AGENT_BROWSER_AUTO_CONNECT_TIMEOUT"]);
+        env.remove("AGENT_BROWSER_AUTO_CONNECT_TIMEOUT");
+
+        assert_eq!(
+            auto_connect_timeout_from_env(),
+            tokio::time::Duration::from_millis(DEFAULT_AUTO_CONNECT_TIMEOUT_MS)
+        );
     }
 
     #[tokio::test]
