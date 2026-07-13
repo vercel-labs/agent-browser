@@ -126,6 +126,26 @@ fn incompatible_launch_mode_error(flags: &Flags) -> Option<&'static str> {
         return Some("Cannot use --extension with --cdp (extensions require local browser)");
     }
 
+    // The WebGPU preset is Chrome launch flags; it cannot be applied to a
+    // browser agent-browser did not launch. Rejecting (rather than silently
+    // ignoring) matches the --extension handling above. `--webgpu false`
+    // overrides an env/config-enabled preset for these modes.
+    if flags.webgpu && flags.cdp.is_some() {
+        return Some(
+            "Cannot use --webgpu with --cdp (the WebGPU preset requires a local browser launch; pass --webgpu false to override env/config)",
+        );
+    }
+    if flags.webgpu && flags.provider.is_some() {
+        return Some(
+            "Cannot use --webgpu with -p/--provider (the WebGPU preset requires a local browser launch; pass --webgpu false to override env/config)",
+        );
+    }
+    if flags.webgpu && flags.auto_connect {
+        return Some(
+            "Cannot use --webgpu with --auto-connect (the WebGPU preset requires a local browser launch; pass --webgpu false to override env/config)",
+        );
+    }
+
     None
 }
 
@@ -1974,6 +1994,8 @@ mod tests {
 
     fn launch_mode_flags(auto_connect: bool, cdp: bool, provider: bool, extensions: bool) -> Flags {
         let mut flags = parse_flags(&[]);
+        // Deterministic regardless of ambient AGENT_BROWSER_WEBGPU.
+        flags.webgpu = false;
         flags.auto_connect = auto_connect;
         flags.cdp = cdp.then(|| "9222".to_string());
         flags.provider = provider.then(|| "ios".to_string());
@@ -2013,6 +2035,44 @@ mod tests {
         for (flags, expected) in cases {
             assert_eq!(incompatible_launch_mode_error(&flags), Some(expected));
         }
+    }
+
+    #[test]
+    fn test_incompatible_launch_mode_error_rejects_webgpu_attach_modes() {
+        let with_webgpu = |mut flags: Flags| {
+            flags.webgpu = true;
+            flags
+        };
+        let cases = [
+            (
+                with_webgpu(launch_mode_flags(false, true, false, false)),
+                "Cannot use --webgpu with --cdp (the WebGPU preset requires a local browser launch; pass --webgpu false to override env/config)",
+            ),
+            (
+                with_webgpu(launch_mode_flags(false, false, true, false)),
+                "Cannot use --webgpu with -p/--provider (the WebGPU preset requires a local browser launch; pass --webgpu false to override env/config)",
+            ),
+            (
+                with_webgpu(launch_mode_flags(true, false, false, false)),
+                "Cannot use --webgpu with --auto-connect (the WebGPU preset requires a local browser launch; pass --webgpu false to override env/config)",
+            ),
+        ];
+        for (flags, expected) in cases {
+            assert_eq!(incompatible_launch_mode_error(&flags), Some(expected));
+        }
+
+        // webgpu alone (local launch) is fine.
+        assert_eq!(
+            incompatible_launch_mode_error(&with_webgpu(launch_mode_flags(
+                false, false, false, false
+            ))),
+            None
+        );
+        // Attach modes without webgpu stay allowed.
+        assert_eq!(
+            incompatible_launch_mode_error(&launch_mode_flags(false, true, false, false)),
+            None
+        );
     }
 
     #[test]

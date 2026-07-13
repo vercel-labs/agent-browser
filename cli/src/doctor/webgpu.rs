@@ -93,6 +93,14 @@ const PROBE_JS: &str = r#"(async () => {
       draw();
       const loop = () => { draw(); requestAnimationFrame(loop); };
       requestAnimationFrame(loop);
+      // Let a couple of frames present before the follow-up screenshot so a
+      // capture cannot race the first presentation into a false failure.
+      // Raced with a timeout: some headless environments only tick frames
+      // on demand, and a bare rAF await would hang the probe there.
+      await Promise.race([
+        new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))),
+        new Promise(r => setTimeout(r, 750)),
+      ]);
     }
     return { ok, stage: 'pixels', detail: 'rgba(' + [p[0], p[1], p[2], p[3]].join(',') + ')', adapter: desc };
   } catch (e) {
@@ -120,19 +128,59 @@ pub(super) fn check(checks: &mut Vec<Check>) {
         return;
     }
 
-    let stamp = format!(
-        "{}-{}",
+    let session = format!(
+        "doctor-webgpu-{}-{}",
         std::process::id(),
         SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .map(|d| d.as_millis())
             .unwrap_or(0)
     );
-    let session = format!("doctor-webgpu-{}", stamp);
-    let page_path = env::temp_dir().join(format!("agent-browser-doctor-webgpu-{}.html", stamp));
-    let shot_path = env::temp_dir().join(format!("agent-browser-doctor-webgpu-{}.png", stamp));
 
-    if let Err(e) = std::fs::write(&page_path, PROBE_HTML) {
+    // Probe files live in a private, unpredictably named directory (0700 on
+    // unix). Predictable paths in a world-writable temp dir would let
+    // another local user pre-create them as symlinks and redirect the
+    // writes; the page file additionally uses create_new so an existing
+    // path is never followed.
+    let work_dir = env::temp_dir().join(format!(
+        "agent-browser-doctor-webgpu-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let mut dir_builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        dir_builder.mode(0o700);
+    }
+    if let Err(e) = dir_builder.create(&work_dir) {
+        checks.push(Check::new(
+            "webgpu.setup",
+            CATEGORY,
+            Status::Fail,
+            format!("Could not create probe directory: {}", e),
+        ));
+        return;
+    }
+    let page_path = work_dir.join("probe.html");
+    let shot_path = work_dir.join("probe.png");
+
+    // Armed after `ensure_daemon` succeeds; Drop closes the scratch session,
+    // cleans sidecar files, and removes the probe directory on every path
+    // out of this function.
+    let mut guard = ProbeGuard {
+        session: None,
+        work_dir: work_dir.clone(),
+    };
+
+    let write_page = || -> std::io::Result<()> {
+        use std::io::Write as _;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&page_path)?;
+        file.write_all(PROBE_HTML.as_bytes())
+    };
+    if let Err(e) = write_page() {
         checks.push(Check::new(
             "webgpu.setup",
             CATEGORY,
@@ -141,14 +189,6 @@ pub(super) fn check(checks: &mut Vec<Check>) {
         ));
         return;
     }
-
-    // Armed after `ensure_daemon` succeeds; Drop closes the scratch session,
-    // cleans sidecar files, and removes temp files on every path out of
-    // this function.
-    let mut guard = ProbeGuard {
-        session: None,
-        files: vec![page_path.clone(), shot_path.clone()],
-    };
 
     let opts = DaemonOptions {
         headed: false,
@@ -408,7 +448,7 @@ fn send_json(cmd: Value, session: &str) -> Result<(), String> {
 /// Best-effort cleanup when the probe panics or returns early.
 struct ProbeGuard {
     session: Option<String>,
-    files: Vec<PathBuf>,
+    work_dir: PathBuf,
 }
 
 impl Drop for ProbeGuard {
@@ -418,8 +458,6 @@ impl Drop for ProbeGuard {
             let _ = send_command(close_cmd, session);
             cleanup_stale_files(session);
         }
-        for f in &self.files {
-            let _ = std::fs::remove_file(f);
-        }
+        let _ = std::fs::remove_dir_all(&self.work_dir);
     }
 }
