@@ -70,4 +70,5 @@ docs/package-lock.json
 # next
 .next/
 out/
+agent-browser-*.tgz
 next-env.d.ts

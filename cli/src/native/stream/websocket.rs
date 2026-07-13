@@ -312,9 +312,23 @@ async fn handle_client_message(msg: &str, client: &CdpClient, session_id: Option
                         "key": parsed.get("key"),
                         "code": parsed.get("code"),
                         "text": parsed.get("text"),
+                        "unmodifiedText": parsed.get("unmodifiedText"),
                         "windowsVirtualKeyCode": parsed.get("windowsVirtualKeyCode").and_then(|v| v.as_i64()).unwrap_or(0),
+                        "nativeVirtualKeyCode": parsed.get("nativeVirtualKeyCode").and_then(|v| v.as_i64()).unwrap_or(0),
                         "modifiers": parsed.get("modifiers").and_then(|v| v.as_i64()).unwrap_or(0),
                     })),
+                    session_id,
+                )
+                .await;
+        }
+        "input_text" => {
+            let Some(text) = parsed.get("text").and_then(|v| v.as_str()) else {
+                return;
+            };
+            let _ = client
+                .send_command(
+                    "Input.insertText",
+                    Some(json!({ "text": text })),
                     session_id,
                 )
                 .await;
