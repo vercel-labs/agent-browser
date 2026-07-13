@@ -1,8 +1,23 @@
 # agent-browser
 
-## 0.31.1
+## 0.31.2
 
 <!-- release:start -->
+### New Features
+
+- **WebGPU launch preset** - Added `--webgpu` across the CLI, config, environment, and MCP surfaces, with hardware backends on macOS and Windows, software Vulkan on Linux, automatic Xvfb for displayless headed sessions, and a `doctor --webgpu` render and screenshot probe (#1529)
+
+### Improvements
+
+- Added periodic **restore-state autosaves** while the browser remains open, preserving recent state after a browser window is closed by hand and capturing background page changes while honoring the restore save policy. The interval is configurable with `AGENT_BROWSER_AUTOSAVE_INTERVAL_MS` (#1509)
+
+### Contributors
+
+- @ctate
+<!-- release:end -->
+
+## 0.31.1
+
 ### Bug Fixes
 
 - Fixed the **React renderer** so it picks the react-dom renderer instead of hardcoding renderer id 1, which prevented reading an empty tree on Next.js 16.3 Turbopack (#1491)
@@ -10,7 +25,6 @@
 ### Contributors
 
 - @gaojude
-<!-- release:end -->
 
 ## 0.31.0
 

@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.31.2
+
+<p className="text-[#888] text-sm">July 13, 2026</p>
+
+### New Features
+
+- **WebGPU launch preset** - Added `--webgpu` across the CLI, config, environment, and MCP surfaces, with hardware backends on macOS and Windows, software Vulkan on Linux, automatic Xvfb for displayless headed sessions, and a `doctor --webgpu` render and screenshot probe (#1529)
+
+### Improvements
+
+- Added periodic **restore-state autosaves** while the browser remains open, preserving recent state after a browser window is closed by hand and capturing background page changes while honoring the restore save policy. The interval is configurable with `AGENT_BROWSER_AUTOSAVE_INTERVAL_MS` (#1509)
+
+---
+
 ## v0.31.1
 
 <p className="text-[#888] text-sm">June 26, 2026</p>
