@@ -499,7 +499,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
         executable_path: env::var("AGENT_BROWSER_EXECUTABLE_PATH")
             .ok()
             .or(config.executable_path),
-        cdp: config.cdp,
+        cdp: env::var("AGENT_BROWSER_CDP").ok().or(config.cdp),
         extensions,
         init_scripts,
         enable,
@@ -1742,6 +1742,17 @@ mod tests {
         let flags = parse_flags(&args("--webgpu false open example.com"));
         assert!(!flags.webgpu);
         assert!(flags.cli_webgpu);
+    }
+
+    #[test]
+    fn test_cdp_env_var_resolves_into_flags() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_CDP"]);
+        guard.set("AGENT_BROWSER_CDP", "9222");
+        let flags = parse_flags(&args("open example.com"));
+        assert_eq!(flags.cdp.as_deref(), Some("9222"));
+        guard.remove("AGENT_BROWSER_CDP");
+        let flags = parse_flags(&args("open example.com"));
+        assert!(flags.cdp.is_none());
     }
 
     #[test]

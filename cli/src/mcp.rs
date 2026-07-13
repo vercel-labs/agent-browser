@@ -1720,7 +1720,7 @@ fn parity_tools() -> Vec<Value> {
             TOOL_DOCTOR,
             "Doctor",
             "Diagnose the installation.",
-            json!({ "offline": { "type": "boolean" }, "quick": { "type": "boolean" }, "fix": { "type": "boolean" }, "webgpu": { "type": "boolean", "description": "Also run a live WebGPU render probe (launches a second Chrome)." }, "headed": { "type": "boolean", "description": "Run the WebGPU probe headed to validate the capture path (auto-Xvfb on displayless Linux)." } }),
+            json!({ "offline": { "type": "boolean" }, "quick": { "type": "boolean" }, "fix": { "type": "boolean" }, "webgpu": { "type": "boolean", "description": "Also run a live WebGPU render probe (launches a second Chrome)." }, "headed": { "type": "boolean", "description": "Run the WebGPU probe headed to validate the capture path (auto-Xvfb on displayless Linux). Explicit true/false overrides AGENT_BROWSER_HEADED/config." }, "debug": { "type": "boolean", "description": "Verbose diagnostics from the probes' scratch daemons." } }),
             &[],
         ),
         tool(
@@ -3213,19 +3213,36 @@ fn plugin_run_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
     Ok(args)
 }
 
-fn call_doctor(arguments: &Value) -> Result<Value, ProtocolError> {
+/// Build the CLI args for the doctor tool. offline/quick/fix are parsed by
+/// doctor as bare presence flags, so they are only sent when true; the
+/// value-taking booleans are forwarded explicitly so callers can override
+/// env/config defaults (e.g. headed: false with AGENT_BROWSER_HEADED=1).
+fn doctor_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
     let mut args = vec!["doctor".to_string()];
     for (key, flag) in [
         ("offline", "--offline"),
         ("quick", "--quick"),
         ("fix", "--fix"),
-        ("webgpu", "--webgpu"),
-        ("headed", "--headed"),
     ] {
         if optional_bool(arguments, key)?.unwrap_or(false) {
             args.push(flag.to_string());
         }
     }
+    for (key, flag) in [
+        ("webgpu", "--webgpu"),
+        ("headed", "--headed"),
+        ("debug", "--debug"),
+    ] {
+        if let Some(value) = optional_bool(arguments, key)? {
+            args.push(flag.to_string());
+            args.push(value.to_string());
+        }
+    }
+    Ok(args)
+}
+
+fn call_doctor(arguments: &Value) -> Result<Value, ProtocolError> {
+    let args = doctor_args(arguments)?;
     call_cli_tool(arguments, args, None)
 }
 
@@ -3772,6 +3789,27 @@ mod tests {
         assert!(props.get("fix").is_some());
         assert!(props.get("webgpu").is_some());
         assert!(props.get("headed").is_some());
+        assert!(props.get("debug").is_some());
+    }
+
+    #[test]
+    fn doctor_args_forwards_explicit_booleans() {
+        assert_eq!(doctor_args(&json!({})).unwrap(), vec!["doctor"]);
+        // Presence flags only sent when true.
+        assert_eq!(
+            doctor_args(&json!({ "offline": true, "quick": false })).unwrap(),
+            vec!["doctor", "--offline"]
+        );
+        // Value-taking booleans forwarded both ways so env/config can be
+        // overridden.
+        assert_eq!(
+            doctor_args(&json!({ "webgpu": true, "headed": false })).unwrap(),
+            vec!["doctor", "--webgpu", "true", "--headed", "false"]
+        );
+        assert_eq!(
+            doctor_args(&json!({ "debug": true })).unwrap(),
+            vec!["doctor", "--debug", "true"]
+        );
     }
 
     #[test]

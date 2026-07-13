@@ -1557,11 +1557,10 @@ fn main() {
             launch_cmd["webgpu"] = json!(flags.webgpu);
         }
 
-        // Env-only opt-out for automatic Xvfb; stamped from the CLI's fresh
-        // environment so it applies to daemons spawned before the var was set.
-        if flags.no_xvfb {
-            launch_cmd["noXvfb"] = json!(true);
-        }
+        // Env-only opt-out for automatic Xvfb; always stamped from the CLI's
+        // fresh environment so both setting and unsetting the var take effect
+        // on daemons spawned before the change.
+        launch_cmd["noXvfb"] = json!(flags.no_xvfb);
 
         if let Some(ref cs) = flags.color_scheme {
             launch_cmd["colorScheme"] = json!(cs);
