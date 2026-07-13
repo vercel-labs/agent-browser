@@ -749,8 +749,8 @@ fn tools() -> Vec<Value> {
             "Launch the browser and optionally navigate to a URL.",
             json!({
                 "url": { "type": "string", "description": "URL to open. Omit to launch about:blank." },
-                "headed": { "type": "boolean", "default": false, "description": "Show the browser window." },
-                "webgpu": { "type": "boolean", "default": false, "description": "Enable WebGPU (SwiftShader software Vulkan on Linux; no GPU required)." }
+                "headed": { "type": "boolean", "description": "Show the browser window. Explicit true/false overrides AGENT_BROWSER_HEADED and config; omit to use those defaults." },
+                "webgpu": { "type": "boolean", "description": "Enable WebGPU (SwiftShader software Vulkan on Linux; no GPU required). Explicit true/false overrides AGENT_BROWSER_WEBGPU and config; omit to use those defaults." }
             }),
             &[],
         ),
@@ -2307,13 +2307,19 @@ fn call_keyboard(arguments: &Value, subcommand: &str) -> Result<Value, ProtocolE
     )
 }
 
-fn call_open(arguments: &Value) -> Result<Value, ProtocolError> {
+/// Build the CLI args for the open tool. Explicit booleans are forwarded as
+/// `--flag true|false` so an MCP caller can override env/config defaults
+/// (e.g. webgpu: false with AGENT_BROWSER_WEBGPU=1 set); an absent field
+/// sends nothing and leaves the env/config resolution to the CLI.
+fn open_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
     let mut args = Vec::new();
-    if optional_bool(arguments, "headed")?.unwrap_or(false) {
+    if let Some(headed) = optional_bool(arguments, "headed")? {
         args.push("--headed".to_string());
+        args.push(headed.to_string());
     }
-    if optional_bool(arguments, "webgpu")?.unwrap_or(false) {
+    if let Some(webgpu) = optional_bool(arguments, "webgpu")? {
         args.push("--webgpu".to_string());
+        args.push(webgpu.to_string());
     }
     args.push("open".to_string());
     if let Some(url) = optional_string(arguments, "url")? {
@@ -2321,6 +2327,11 @@ fn call_open(arguments: &Value) -> Result<Value, ProtocolError> {
             args.push(url);
         }
     }
+    Ok(args)
+}
+
+fn call_open(arguments: &Value) -> Result<Value, ProtocolError> {
+    let args = open_args(arguments)?;
     call_cli_tool(arguments, args, None)
 }
 
@@ -3724,6 +3735,27 @@ mod tests {
         let props = &open["inputSchema"]["properties"];
         assert!(props.get("headed").is_some());
         assert!(props.get("webgpu").is_some());
+    }
+
+    #[test]
+    fn open_args_forwards_explicit_booleans() {
+        // Absent fields send nothing (env/config resolution stays with the CLI).
+        assert_eq!(open_args(&json!({})).unwrap(), vec!["open"]);
+
+        // Explicit true and false are both forwarded, so MCP callers can
+        // override AGENT_BROWSER_WEBGPU/config just like `--webgpu false`.
+        assert_eq!(
+            open_args(&json!({ "webgpu": false, "url": "https://example.com" })).unwrap(),
+            vec!["--webgpu", "false", "open", "https://example.com"]
+        );
+        assert_eq!(
+            open_args(&json!({ "headed": true, "webgpu": true })).unwrap(),
+            vec!["--headed", "true", "--webgpu", "true", "open"]
+        );
+        assert_eq!(
+            open_args(&json!({ "headed": false })).unwrap(),
+            vec!["--headed", "false", "open"]
+        );
     }
 
     #[test]
