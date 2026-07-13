@@ -935,7 +935,15 @@ fn build_tree(nodes: &[AXNode]) -> (Vec<TreeNode>, Vec<usize>) {
         let (level, checked, expanded, selected, disabled, required) =
             extract_properties(&node.properties);
 
-        if (node.ignored.unwrap_or(false) && role != "RootWebArea") || role == "InlineTextBox" {
+        // Chrome marks ignored:true on whitespace-only StaticText nodes that originate
+        // from React `{' '}` expressions (compiled to `<!-- --> `). These nodes carry
+        // the inter-word space needed by the aggregation step below.
+        let is_whitespace_static = role == "StaticText"
+            && !name.is_empty()
+            && name.chars().all(|c: char| c.is_ascii_whitespace());
+        if ((node.ignored.unwrap_or(false) && role != "RootWebArea") || role == "InlineTextBox")
+            && !is_whitespace_static
+        {
             tree_nodes.push(TreeNode::empty());
             id_to_idx.insert(node.node_id.clone(), i);
             continue;
@@ -1004,7 +1012,6 @@ fn build_tree(nodes: &[AXNode]) -> (Vec<TreeNode>, Vec<usize>) {
 
             // If we have a sequence of at least two StaticText
             if end > start + 1 {
-                // Collect and aggregate all names from the sequence
                 let aggregated_name: String = (start..end)
                     .map(|idx| tree_nodes[children_indices[idx]].name.clone())
                     .collect();
@@ -1069,7 +1076,11 @@ fn render_tree(
     // Reduce unnecessary indentation and rendering
     if node.role.is_empty()
         || (node.role == "generic" && !node.has_ref && node.children.len() <= 1)
-        || (node.role == "StaticText" && node.name.replace(INVISIBLE_CHARS, "").is_empty())
+        || (node.role == "StaticText"
+            && node
+                .name
+                .chars()
+                .all(|c| INVISIBLE_CHARS.contains(&c) || c.is_ascii_whitespace()))
     {
         // Ignored node -- still render children
         for &child in &node.children {
@@ -1582,5 +1593,103 @@ mod tests {
         promote_hidden_inputs(&mut nodes, &cursor_elements);
 
         assert_eq!(nodes[0].role, "LabelText"); // unchanged
+    }
+
+    // -----------------------------------------------------------------------
+    // StaticText aggregation — JSX whitespace (Issue #1271)
+    // React `{' '}` compiles to `<!-- --> ` in HTML. Chrome marks the resulting
+    // whitespace-only text node as `ignored:true`. The tests below verify that
+    // the space survives aggregation and that no synthetic space is ever injected.
+    // -----------------------------------------------------------------------
+
+    fn make_ax_node(
+        node_id: &str,
+        role: &str,
+        name: &str,
+        children: Vec<&str>,
+        ignored: bool,
+    ) -> AXNode {
+        use serde_json::Value;
+        AXNode {
+            node_id: node_id.to_string(),
+            role: Some(AXValue {
+                value_type: "role".to_string(),
+                value: Some(Value::String(role.to_string())),
+            }),
+            name: if name.is_empty() {
+                None
+            } else {
+                Some(AXValue {
+                    value_type: "computedString".to_string(),
+                    value: Some(Value::String(name.to_string())),
+                })
+            },
+            value: None,
+            description: None,
+            properties: None,
+            child_ids: if children.is_empty() {
+                None
+            } else {
+                Some(children.iter().map(|s| s.to_string()).collect())
+            },
+            backend_d_o_m_node_id: None,
+            ignored: Some(ignored),
+        }
+    }
+
+    // React `{' '}` compiles to `<!-- --> ` in HTML. Chrome marks the resulting
+    // whitespace-only text node as ignored:true. The space must survive aggregation.
+    #[test]
+    fn test_static_text_aggregation_preserves_ignored_whitespace_node() {
+        let nodes = vec![
+            make_ax_node(
+                "1",
+                "heading",
+                "You posted again yesterday. Two likes. One from your mom.",
+                vec!["2", "3", "4"],
+                false,
+            ),
+            make_ax_node(
+                "2",
+                "StaticText",
+                "You posted again yesterday.",
+                vec![],
+                false,
+            ),
+            make_ax_node("3", "StaticText", " ", vec![], true),
+            make_ax_node(
+                "4",
+                "StaticText",
+                "Two likes. One from your mom.",
+                vec![],
+                false,
+            ),
+        ];
+
+        let (tree_nodes, _) = build_tree(&nodes);
+
+        // tree_nodes[1] is the first StaticText child; aggregation folds the
+        // ignored whitespace node and the trailing text into it.
+        assert_eq!(
+            tree_nodes[1].name,
+            "You posted again yesterday. Two likes. One from your mom.",
+        );
+    }
+
+    // Consecutive StaticText siblings without an intervening whitespace node are
+    // concatenated as-is; no synthetic space is inserted to avoid false positives
+    // on genuinely adjacent text like `$10`.
+    #[test]
+    fn test_static_text_aggregation_no_false_positive_space() {
+        let nodes = vec![
+            make_ax_node("1", "heading", "$10", vec!["2", "3"], false),
+            make_ax_node("2", "StaticText", "$", vec![], false),
+            make_ax_node("3", "StaticText", "10", vec![], false),
+        ];
+
+        let (tree_nodes, _) = build_tree(&nodes);
+
+        // tree_nodes[1] is the first StaticText child.
+        assert_eq!(tree_nodes[1].name, "$10");
     }
 }
