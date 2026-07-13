@@ -531,7 +531,11 @@ pub fn parse_flags(args: &[String]) -> Flags {
         hide_scrollbars: env_var_bool("AGENT_BROWSER_HIDE_SCROLLBARS")
             .or(config.hide_scrollbars)
             .unwrap_or(true),
-        webgpu: env_var_is_truthy("AGENT_BROWSER_WEBGPU") || config.webgpu.unwrap_or(false),
+        // Tri-state env read so AGENT_BROWSER_WEBGPU=false overrides a
+        // config-enabled preset (documented precedence: env beats config).
+        webgpu: env_var_bool("AGENT_BROWSER_WEBGPU")
+            .or(config.webgpu)
+            .unwrap_or(false),
         no_xvfb: env_var_is_truthy("AGENT_BROWSER_NO_XVFB"),
         device: env::var("AGENT_BROWSER_IOS_DEVICE").ok().or(config.device),
         auto_connect: env_var_is_truthy("AGENT_BROWSER_AUTO_CONNECT")
@@ -1753,6 +1757,38 @@ mod tests {
         guard.remove("AGENT_BROWSER_CDP");
         let flags = parse_flags(&args("open example.com"));
         assert!(flags.cdp.is_none());
+    }
+
+    #[test]
+    fn test_webgpu_env_false_overrides_config_true() {
+        use std::io::Write;
+        let guard = EnvGuard::new(&["AGENT_BROWSER_WEBGPU"]);
+        let dir = std::env::temp_dir().join("ab-test-webgpu-precedence");
+        let _ = fs::create_dir_all(&dir);
+        let config_path = dir.join("agent-browser.json");
+        let mut f = fs::File::create(&config_path).unwrap();
+        writeln!(f, r#"{{"webgpu": true}}"#).unwrap();
+        let cfg = config_path.display().to_string();
+
+        // Config alone enables the preset.
+        guard.remove("AGENT_BROWSER_WEBGPU");
+        let flags = parse_flags(&args(&format!("--config {} open example.com", cfg)));
+        assert!(flags.webgpu);
+
+        // An explicit falsy env value overrides config (env beats config).
+        for falsy in ["false", "0", "no"] {
+            guard.set("AGENT_BROWSER_WEBGPU", falsy);
+            let flags = parse_flags(&args(&format!("--config {} open example.com", cfg)));
+            assert!(!flags.webgpu, "AGENT_BROWSER_WEBGPU={} must disable", falsy);
+        }
+
+        // Truthy env still enables without config.
+        guard.set("AGENT_BROWSER_WEBGPU", "1");
+        let flags = parse_flags(&args("open example.com"));
+        assert!(flags.webgpu);
+
+        let _ = fs::remove_file(&config_path);
+        let _ = fs::remove_dir(&dir);
     }
 
     #[test]

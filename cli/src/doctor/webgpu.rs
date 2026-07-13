@@ -299,6 +299,12 @@ pub(super) fn check(checks: &mut Vec<Check>, opts: &DoctorOptions) {
         "id": new_id(),
         "action": "evaluate",
         "script": PROBE_JS,
+        // Client-side read budget (read_timeout_for adds 10s margin). The
+        // probe script's worst case is ~75s: five 10s adapter attempts with
+        // 1s retry sleeps, plus 10s device request and 10s mapAsync races.
+        // Without this the 30s default read timeout would surface as a
+        // transient EAGAIN and re-send the whole evaluation.
+        "timeout": 90_000,
     });
     let result = match send_command(eval_cmd, &session) {
         Ok(resp) if resp.success => resp
