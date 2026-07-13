@@ -157,8 +157,21 @@ fn write_xauth_file(path: &Path) -> std::io::Result<()> {
 }
 
 #[cfg(target_os = "linux")]
+/// True when the launch will effectively run headed and therefore needs a
+/// display. This must track `build_chrome_args`: extensions suppress
+/// `--headless=new` (content scripts are not injected headless), so a
+/// nominally headless launch with extensions is headed in practice.
+fn xvfb_applicable(options: &LaunchOptions) -> bool {
+    let has_extensions = options
+        .extensions
+        .as_ref()
+        .is_some_and(|exts| !exts.is_empty());
+    !options.headless || has_extensions
+}
+
+#[cfg(target_os = "linux")]
 fn maybe_start_xvfb(options: &LaunchOptions) -> Option<XvfbServer> {
-    if options.headless {
+    if !xvfb_applicable(options) {
         return None;
     }
     if std::env::var("DISPLAY")
@@ -345,9 +358,30 @@ struct ChromeArgs {
 fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
     // Chrome only honors the last --enable-features switch on the command
     // line, so every feature must be collected into a single flag.
-    let mut enable_features = vec!["NetworkService", "NetworkServiceInProcess"];
+    let mut enable_features: Vec<String> = vec![
+        "NetworkService".to_string(),
+        "NetworkServiceInProcess".to_string(),
+    ];
     if options.webgpu && cfg!(target_os = "linux") {
-        enable_features.push("Vulkan");
+        enable_features.push("Vulkan".to_string());
+    }
+
+    // User-supplied --enable-features values are merged into that single
+    // flag too: appending them as a second switch would silently clobber
+    // the preset's features (e.g. drop the WebGPU preset's Vulkan). To turn
+    // a preset feature off, pass --disable-features=<name>, which Chrome
+    // resolves as disabled.
+    let mut user_args: Vec<String> = Vec::new();
+    for arg in &options.args {
+        if let Some(values) = arg.strip_prefix("--enable-features=") {
+            for feature in values.split(',').map(str::trim).filter(|f| !f.is_empty()) {
+                if !enable_features.iter().any(|f| f == feature) {
+                    enable_features.push(feature.to_string());
+                }
+            }
+        } else {
+            user_args.push(arg.clone());
+        }
     }
 
     let mut args = vec![
@@ -461,7 +495,7 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
         args.push(format!("--window-size={},{}", w, h));
     }
 
-    args.extend(options.args.iter().cloned());
+    args.extend(user_args);
 
     if should_disable_sandbox(&args) {
         args.push("--no-sandbox".to_string());
@@ -1771,6 +1805,74 @@ mod tests {
         if let Some(ref dir) = result.temp_user_data_dir {
             let _ = std::fs::remove_dir_all(dir);
         }
+    }
+
+    #[test]
+    fn test_build_args_merges_user_enable_features() {
+        let opts = LaunchOptions {
+            webgpu: true,
+            args: vec![
+                "--enable-features=Foo,Bar".to_string(),
+                "--some-other-flag".to_string(),
+                // Duplicate of a preset feature must not repeat.
+                "--enable-features=NetworkService".to_string(),
+            ],
+            ..Default::default()
+        };
+        let result = build_chrome_args(&opts).unwrap();
+        let flags: Vec<&String> = result
+            .args
+            .iter()
+            .filter(|a| a.starts_with("--enable-features="))
+            .collect();
+        assert_eq!(flags.len(), 1, "user features must merge, not clobber");
+        let features: Vec<&str> = flags[0]
+            .strip_prefix("--enable-features=")
+            .unwrap()
+            .split(',')
+            .collect();
+        assert!(features.contains(&"NetworkService"));
+        assert!(features.contains(&"Foo"));
+        assert!(features.contains(&"Bar"));
+        if cfg!(target_os = "linux") {
+            assert!(
+                features.contains(&"Vulkan"),
+                "user --enable-features must not drop the WebGPU preset's Vulkan"
+            );
+        }
+        assert_eq!(
+            features.iter().filter(|f| **f == "NetworkService").count(),
+            1
+        );
+        assert!(result.args.iter().any(|a| a == "--some-other-flag"));
+        if let Some(ref dir) = result.temp_user_data_dir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_xvfb_applicable_tracks_effective_headed_mode() {
+        // Plain headless: no display needed.
+        assert!(!xvfb_applicable(&LaunchOptions::default()));
+        // Headed: needs a display.
+        assert!(xvfb_applicable(&LaunchOptions {
+            headless: false,
+            ..Default::default()
+        }));
+        // Nominally headless with extensions: build_chrome_args suppresses
+        // --headless, so this runs headed and needs a display too.
+        assert!(xvfb_applicable(&LaunchOptions {
+            headless: true,
+            extensions: Some(vec!["/tmp/ext".to_string()]),
+            ..Default::default()
+        }));
+        // An empty extension list does not force headed mode.
+        assert!(!xvfb_applicable(&LaunchOptions {
+            headless: true,
+            extensions: Some(Vec::new()),
+            ..Default::default()
+        }));
     }
 
     #[test]
