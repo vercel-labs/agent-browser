@@ -292,6 +292,9 @@ jobs:
           fi
           echo "All 7 platform binaries present and valid"
 
+      - name: Generate binary checksums
+        run: node scripts/generate-checksums.js
+
       - name: Publish to npm
         run: pnpm publish --provenance --no-git-checks
 

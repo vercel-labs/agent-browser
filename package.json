@@ -28,7 +28,8 @@
     "build:docker": "docker build --platform linux/amd64 -t agent-browser-builder -f docker/Dockerfile.build .",
     "release": "npm run version:sync && npm run build:all-platforms && npm publish",
     "postinstall": "node scripts/postinstall.js",
-    "build:dashboard": "cd packages/dashboard && pnpm build"
+    "build:dashboard": "cd packages/dashboard && pnpm build",
+    "test:scripts": "node --test scripts/"
   },
   "keywords": [
     "browser",
