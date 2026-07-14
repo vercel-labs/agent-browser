@@ -10,9 +10,12 @@ importers:
 
   .:
     dependencies:
+      '@agent-browser/eve':
+        specifier: link:../../packages/@agent-browser/eve
+        version: link:../../packages/@agent-browser/eve
       '@agent-browser/sandbox':
-        specifier: file:../../../packages/@agent-browser/sandbox
-        version: file:../../../packages/@agent-browser/sandbox
+        specifier: file:../../packages/@agent-browser/sandbox
+        version: file:../../packages/@agent-browser/sandbox
       '@radix-ui/react-use-controllable-state':
         specifier: 1.2.2
         version: 1.2.2(@types/react@19.2.15)(react@19.2.6)
@@ -42,7 +45,7 @@ importers:
         version: 4.3.0
       '@vercel/connect':
         specifier: 0.2.2
-        version: 0.2.2(ai@7.0.0-beta.178(zod@4.4.3))(eve@0.11.9(ai@7.0.0-beta.178(zod@4.4.3))(jiti@2.7.0)(next@16.2.6(react-dom@19.2.6(react@19.2.6))(react@19.2.6))(react@19.2.6))
+        version: 0.2.2(ai@7.0.0-beta.178(zod@4.4.3))(eve@0.22.6(ai@7.0.0-beta.178(zod@4.4.3))(jiti@2.7.0))
       ai:
         specifier: 7.0.0-beta.178
         version: 7.0.0-beta.178(zod@4.4.3)
@@ -56,8 +59,8 @@ importers:
         specifier: 1.1.1
         version: 1.1.1(@types/react-dom@19.2.3(@types/react@19.2.15))(@types/react@19.2.15)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)
       eve:
-        specifier: ^0.11.9
-        version: 0.11.9(ai@7.0.0-beta.178(zod@4.4.3))(jiti@2.7.0)(next@16.2.6(react-dom@19.2.6(react@19.2.6))(react@19.2.6))(react@19.2.6)
+        specifier: ^0.22.5
+        version: 0.22.6(ai@7.0.0-beta.178(zod@4.4.3))(jiti@2.7.0)
       lucide-react:
         specifier: 1.16.0
         version: 1.16.0(react@19.2.6)
@@ -113,8 +116,8 @@ importers:
 
 packages:
 
-  '@agent-browser/sandbox@file:../../../packages/@agent-browser/sandbox':
-    resolution: {directory: ../../../packages/@agent-browser/sandbox, type: directory}
+  '@agent-browser/sandbox@file:../../packages/@agent-browser/sandbox':
+    resolution: {directory: ../../packages/@agent-browser/sandbox, type: directory}
     peerDependencies:
       '@vercel/sandbox': '>=1.0.0'
     peerDependenciesMeta:
@@ -2064,45 +2067,24 @@ packages:
   estree-util-is-identifier-name@3.0.0:
     resolution: {integrity: sha512-hFtqIDZTIUZ9BXLb8y4pYGyk6+wekIivNVTcmvk8NoOh+VeRn5y6cEHzbURrWbfp1fIqdVipilzj+lfaadNZmg==}
 
-  eve@0.11.9:
-    resolution: {integrity: sha512-GEG8dumhJhfDzpXe6QnB59dmkSBuGXktkUItCVMS90zlNS9bzgZdLTrzQOchglkdD2RdDBXBtYyX1UYmRVUVzw==}
+  eve@0.22.6:
+    resolution: {integrity: sha512-LC3eGoWysnTxsTRaQomZkNcuOpGZqVuqA9i0qGzLFUKuj5le6bEpeHPe0wHYcOwI7RCyaMYZYpNPNkHRvaGVlg==}
     engines: {node: '>=24'}
     hasBin: true
     peerDependencies:
       '@opentelemetry/api': ^1.0.0
-      '@sveltejs/kit': ^2.0.0
-      ai: 7.0.0-beta.178
+      ai: ^7.0.0
       braintrust: ^3.0.0
       just-bash: ^3.0.0
       microsandbox: ^0.5.0
-      next: ^16.0.0
-      nuxt: ^4.0.0
-      react: ^19.0.0
-      svelte: ^5.0.0
-      vite: ^8.0.0
-      vue: ^3.5.0
     peerDependenciesMeta:
       '@opentelemetry/api':
-        optional: true
-      '@sveltejs/kit':
         optional: true
       braintrust:
         optional: true
       just-bash:
         optional: true
       microsandbox:
-        optional: true
-      next:
-        optional: true
-      nuxt:
-        optional: true
-      react:
-        optional: true
-      svelte:
-        optional: true
-      vite:
-        optional: true
-      vue:
         optional: true
 
   eventsource-parser@3.1.0:
@@ -3143,7 +3125,7 @@ packages:
 
 snapshots:
 
-  '@agent-browser/sandbox@file:../../../packages/@agent-browser/sandbox': {}
+  '@agent-browser/sandbox@file:../../packages/@agent-browser/sandbox': {}
 
   '@ai-sdk/gateway@4.0.0-beta.109(zod@4.4.3)':
     dependencies:
@@ -4670,12 +4652,12 @@ snapshots:
     dependencies:
       execa: 5.1.1
 
-  '@vercel/connect@0.2.2(ai@7.0.0-beta.178(zod@4.4.3))(eve@0.11.9(ai@7.0.0-beta.178(zod@4.4.3))(jiti@2.7.0)(next@16.2.6(react-dom@19.2.6(react@19.2.6))(react@19.2.6))(react@19.2.6))':
+  '@vercel/connect@0.2.2(ai@7.0.0-beta.178(zod@4.4.3))(eve@0.22.6(ai@7.0.0-beta.178(zod@4.4.3))(jiti@2.7.0))':
     dependencies:
       '@vercel/oidc': 3.6.1
     optionalDependencies:
       ai: 7.0.0-beta.178(zod@4.4.3)
-      eve: 0.11.9(ai@7.0.0-beta.178(zod@4.4.3))(jiti@2.7.0)(next@16.2.6(react-dom@19.2.6(react@19.2.6))(react@19.2.6))(react@19.2.6)
+      eve: 0.22.6(ai@7.0.0-beta.178(zod@4.4.3))(jiti@2.7.0)
 
   '@vercel/oidc@3.2.0': {}
 
@@ -4996,13 +4978,10 @@ snapshots:
 
   estree-util-is-identifier-name@3.0.0: {}
 
-  eve@0.11.9(ai@7.0.0-beta.178(zod@4.4.3))(jiti@2.7.0)(next@16.2.6(react-dom@19.2.6(react@19.2.6))(react@19.2.6))(react@19.2.6):
+  eve@0.22.6(ai@7.0.0-beta.178(zod@4.4.3))(jiti@2.7.0):
     dependencies:
       ai: 7.0.0-beta.178(zod@4.4.3)
       nitro: 3.0.260610-beta(jiti@2.7.0)
-    optionalDependencies:
-      next: 16.2.6(react-dom@19.2.6(react@19.2.6))(react@19.2.6)
-      react: 19.2.6
     transitivePeerDependencies:
       - '@azure/app-configuration'
       - '@azure/cosmos'
@@ -5038,6 +5017,7 @@ snapshots:
       - rollup
       - sqlite3
       - uploadthing
+      - vite
       - wrangler
       - xml2js
       - zephyr-agent

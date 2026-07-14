@@ -16,10 +16,7 @@ import {
 import { cn } from "@/lib/utils";
 import { AgentMessage } from "./agent-message";
 
-const AGENT_NAME = "Agent Browser Sandbox";
-const BETA_TERMS_HREF = "https://vercel.com/docs/release-phases/public-beta-agreement";
-
-type AgentStatus = ReturnType<typeof useEveAgent>["status"];
+const AGENT_NAME = "eve + agent-browser Example";
 
 export function AgentChat() {
   const agent = useEveAgent();
@@ -35,7 +32,7 @@ export function AgentChat() {
 
   const composer = (
     <PromptInput onSubmit={handleSubmit}>
-      <PromptInputTextarea placeholder="Send a message…" />
+      <PromptInputTextarea autoFocus placeholder="Send a message…" />
       <PromptInputSubmit onStop={agent.stop} status={agent.status} />
     </PromptInput>
   );
@@ -43,19 +40,8 @@ export function AgentChat() {
   return (
     <main className="flex h-dvh flex-col overflow-hidden bg-background text-foreground">
       {isEmpty ? null : (
-        <header className="flex h-14 shrink-0 items-center justify-center gap-3 pl-4 pr-2">
-          <span className="flex min-w-0 items-center gap-2">
-            <span className="truncate text-muted-foreground text-sm">{AGENT_NAME}</span>
-            <StatusDot status={agent.status} />
-          </span>
-          <a
-            className="rounded-full border border-amber-500/30 px-2 py-0.5 font-medium text-amber-700 text-xs transition-colors hover:bg-amber-500/10 dark:text-amber-300"
-            href={BETA_TERMS_HREF}
-            rel="noreferrer"
-            target="_blank"
-          >
-            Public preview
-          </a>
+        <header className="flex h-14 shrink-0 items-center justify-center pl-4 pr-2">
+          <span className="truncate text-muted-foreground text-sm">{AGENT_NAME}</span>
         </header>
       )}
 
@@ -99,46 +85,12 @@ export function AgentChat() {
         )}
       >
         {isEmpty ? (
-          <div className="flex flex-col items-center gap-3 text-center">
+          <div className="flex flex-col items-center text-center">
             <h1 className="font-medium text-5xl tracking-tighter">{AGENT_NAME}</h1>
-            <a
-              className="rounded-full border border-amber-500/30 px-2 py-0.5 font-medium text-amber-700 text-xs transition-colors hover:bg-amber-500/10 dark:text-amber-300"
-              href={BETA_TERMS_HREF}
-              rel="noreferrer"
-              target="_blank"
-            >
-              Public preview
-            </a>
           </div>
         ) : null}
         <div className="w-full">{composer}</div>
       </div>
     </main>
-  );
-}
-
-function StatusDot({ status }: { readonly status: AgentStatus }) {
-  const isLive = status === "submitted" || status === "streaming";
-  const tone =
-    status === "error"
-      ? "bg-destructive"
-      : isLive
-        ? "bg-emerald-500"
-        : status === "ready"
-          ? "bg-muted-foreground"
-          : "bg-muted-foreground/50";
-
-  return (
-    <span className="relative flex size-1">
-      {isLive ? (
-        <span
-          className={cn(
-            "absolute inline-flex size-full animate-ping rounded-full opacity-75",
-            tone,
-          )}
-        />
-      ) : null}
-      <span className={cn("relative inline-flex size-1 rounded-full transition-colors", tone)} />
-    </span>
   );
 }

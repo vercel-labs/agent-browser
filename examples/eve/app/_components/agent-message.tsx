@@ -3,14 +3,8 @@
 import type { EveDynamicToolPart, EveMessage, EveMessagePart } from "eve/react";
 import { Message, MessageContent, MessageResponse } from "@/components/ai-elements/message";
 import { Reasoning, ReasoningContent, ReasoningTrigger } from "@/components/ai-elements/reasoning";
-import {
-  Tool,
-  ToolContent,
-  ToolHeader,
-  ToolInput,
-  ToolOutput,
-} from "@/components/ai-elements/tool";
 import { Button } from "@/components/ui/button";
+import { ToolActivity } from "./browser-activity";
 
 export type AgentInputResponse = {
   readonly optionId?: string;
@@ -82,27 +76,16 @@ function AgentMessagePart({
         </Reasoning>
       );
     case "dynamic-tool":
-      return (
-        <Tool
-          defaultOpen={part.state === "approval-requested" || part.state === "approval-responded"}
-        >
-          <ToolHeader
-            state={part.state}
-            title={part.toolName}
-            toolName={part.toolName}
-            type="dynamic-tool"
+      if (part.toolMetadata?.eve?.inputRequest) {
+        return (
+          <InputRequestActions
+            canRespond={canRespond}
+            part={part}
+            onInputResponses={onInputResponses}
           />
-          <ToolContent>
-            <ToolInput input={part.input} />
-            <InputRequestActions
-              canRespond={canRespond}
-              part={part}
-              onInputResponses={onInputResponses}
-            />
-            <ToolOutput errorText={part.errorText} output={part.output} />
-          </ToolContent>
-        </Tool>
-      );
+        );
+      }
+      return <ToolActivity part={part} />;
   }
 }
 

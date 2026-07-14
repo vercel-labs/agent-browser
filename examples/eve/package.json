@@ -1,5 +1,5 @@
 {
-  "name": "agent-browser-eve-sandbox-example",
+  "name": "agent-browser-eve-example",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -14,10 +14,11 @@
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
-    "@agent-browser/sandbox": "file:../../../packages/@agent-browser/sandbox",
+    "@agent-browser/eve": "link:../../packages/@agent-browser/eve",
+    "@agent-browser/sandbox": "file:../../packages/@agent-browser/sandbox",
     "@vercel/connect": "0.2.2",
     "ai": "7.0.0-beta.178",
-    "eve": "^0.11.9",
+    "eve": "^0.22.5",
     "zod": "4.4.3",
     "@radix-ui/react-use-controllable-state": "1.2.2",
     "@shikijs/core": "4.1.0",

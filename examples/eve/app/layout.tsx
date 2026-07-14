@@ -20,7 +20,7 @@ const mono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Agent Browser Sandbox",
+  title: "eve + agent-browser Example",
   description: "An Eve example that runs agent-browser in Vercel Sandbox.",
 };
 
