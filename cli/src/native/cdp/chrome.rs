@@ -12,6 +12,10 @@ pub struct ChromeProcess {
     /// On Unix, the process group ID used to kill the entire Chrome process tree.
     #[cfg(unix)]
     pgid: Option<i32>,
+    /// Windows Job Object that owns the complete Chrome process tree. Its
+    /// kill-on-close limit also cleans up helpers if the daemon is terminated.
+    #[cfg(windows)]
+    job: WindowsJob,
     /// Private Xvfb server auto-started for headed mode on displayless Linux
     /// hosts. Dropped (and killed) after the Chrome tree is torn down.
     #[cfg(target_os = "linux")]
@@ -31,6 +35,8 @@ impl ChromeProcess {
                 libc::kill(-pgid, libc::SIGKILL);
             }
         }
+        #[cfg(windows)]
+        self.job.terminate();
         let _ = self.child.wait();
     }
 
@@ -61,6 +67,77 @@ impl ChromeProcess {
         }
 
         self.kill();
+    }
+}
+
+#[cfg(windows)]
+struct WindowsJob {
+    handle: windows_sys::Win32::Foundation::HANDLE,
+}
+
+#[cfg(windows)]
+impl WindowsJob {
+    fn assign(child: &Child) -> Result<Self, String> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+            SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        };
+
+        // SAFETY: the Win32 structures are plain data for which an all-zero
+        // value is the documented baseline. Handles are checked before use and
+        // owned by WindowsJob after successful creation.
+        unsafe {
+            let handle = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if handle == 0 {
+                return Err(format!(
+                    "Failed to create Chrome Job Object: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+
+            let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            if SetInformationJobObject(
+                handle,
+                JobObjectExtendedLimitInformation,
+                &limits as *const _ as *const std::ffi::c_void,
+                std::mem::size_of_val(&limits) as u32,
+            ) == 0
+            {
+                let error = std::io::Error::last_os_error();
+                windows_sys::Win32::Foundation::CloseHandle(handle);
+                return Err(format!("Failed to configure Chrome Job Object: {}", error));
+            }
+
+            let process_handle = child.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE;
+            if AssignProcessToJobObject(handle, process_handle) == 0 {
+                let error = std::io::Error::last_os_error();
+                windows_sys::Win32::Foundation::CloseHandle(handle);
+                return Err(format!("Failed to assign Chrome to Job Object: {}", error));
+            }
+
+            Ok(Self { handle })
+        }
+    }
+
+    fn terminate(&self) {
+        // SAFETY: handle is a live Job Object owned by self.
+        unsafe {
+            windows_sys::Win32::System::JobObjects::TerminateJobObject(self.handle, 1);
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for WindowsJob {
+    fn drop(&mut self) {
+        // Closing the last handle triggers JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE.
+        // SAFETY: WindowsJob exclusively owns this valid handle.
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(self.handle);
+        }
     }
 }
 
@@ -501,6 +578,22 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
         args.push(format!("--window-size={},{}", w, h));
     }
 
+    // New headless Chrome still creates hidden native windows on Windows. A
+    // Chromium/DWM regression can occasionally composite one as a black
+    // rectangle even though Win32 reports it as invisible. Keep those windows
+    // outside the virtual desktop unless the caller explicitly chose a
+    // position. This does not affect the CDP viewport or screenshots.
+    #[cfg(windows)]
+    if options.headless
+        && !has_extensions
+        && !options
+            .args
+            .iter()
+            .any(|a| a.starts_with("--window-position="))
+    {
+        args.push("--window-position=-32000,-32000".to_string());
+    }
+
     args.extend(user_args);
 
     if should_disable_sandbox(&args) {
@@ -661,6 +754,13 @@ fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<Chro
         format!("Failed to launch Chrome at {:?}: {}", chrome_path, e)
     })?;
 
+    #[cfg(windows)]
+    let job = WindowsJob::assign(&child).inspect_err(|_| {
+        let _ = child.kill();
+        let _ = child.wait();
+        cleanup_temp_dir(&temp_user_data_dir);
+    })?;
+
     // Shared overall deadline so we don't double-wait (poll + stderr fallback).
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
 
@@ -705,6 +805,8 @@ fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<Chro
         temp_user_data_dir,
         #[cfg(unix)]
         pgid,
+        #[cfg(windows)]
+        job,
         #[cfg(target_os = "linux")]
         xvfb,
     })
@@ -1652,6 +1754,11 @@ mod tests {
             .iter()
             .any(|a| a == "--enable-unsafe-swiftshader"));
         assert!(result.args.iter().any(|a| a == "--window-size=1280,720"));
+        #[cfg(windows)]
+        assert!(result
+            .args
+            .iter()
+            .any(|a| a == "--window-position=-32000,-32000"));
         // Temp dir created when no profile
         assert!(result.temp_user_data_dir.is_some());
         let dir = result.temp_user_data_dir.unwrap();
@@ -1717,6 +1824,25 @@ mod tests {
         let result = build_chrome_args(&opts).unwrap();
         assert!(!result.args.iter().any(|a| a == "--window-size=1280,720"));
         assert!(result.args.iter().any(|a| a == "--window-size=1920,1080"));
+        if let Some(ref dir) = result.temp_user_data_dir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_build_args_custom_window_position_not_overridden() {
+        let opts = LaunchOptions {
+            headless: true,
+            args: vec!["--window-position=100,200".to_string()],
+            ..Default::default()
+        };
+        let result = build_chrome_args(&opts).unwrap();
+        assert!(!result
+            .args
+            .iter()
+            .any(|a| a == "--window-position=-32000,-32000"));
+        assert!(result.args.iter().any(|a| a == "--window-position=100,200"));
         if let Some(ref dir) = result.temp_user_data_dir {
             let _ = std::fs::remove_dir_all(dir);
         }
@@ -1994,12 +2120,16 @@ mod tests {
             // We can't actually spawn Chrome here, but we can verify the Drop
             // logic by creating a small helper process.
             let child = spawn_noop_child();
+            #[cfg(windows)]
+            let job = WindowsJob::assign(&child).expect("dummy child should join Job Object");
             let _process = ChromeProcess {
                 child,
                 ws_url: String::new(),
                 temp_user_data_dir: Some(dir.clone()),
                 #[cfg(unix)]
                 pgid: None,
+                #[cfg(windows)]
+                job,
                 #[cfg(target_os = "linux")]
                 xvfb: None,
             };
