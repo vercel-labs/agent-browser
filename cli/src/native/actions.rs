@@ -7547,24 +7547,45 @@ async fn handle_waitfordownload(cmd: &Value, state: &DaemonState) -> Result<Valu
 async fn handle_window_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
 
-    // Create a new browser context
-    let context_result = mgr
-        .client
-        .send_command_no_params("Target.createBrowserContext", None)
-        .await?;
-    let context_id = context_result
-        .get("browserContextId")
-        .and_then(|v| v.as_str())
-        .ok_or("Failed to create browser context")?
-        .to_string();
+    // By default `window new` opens a real OS window in the browser's DEFAULT
+    // context, so it inherits the founder's login/cookies. The legacy behavior
+    // (a fresh, incognito-like BrowserContext that loses all session state —
+    // see vercel-labs/agent-browser#890) is now opt-in via `--isolated`.
+    //
+    // `new_window: true` makes it a window rather than a tab; `focus: false`
+    // (with `background: false`) opens it without stealing OS focus from the
+    // human's foreground window.
+    let isolated = cmd
+        .get("isolated")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let create_params = if isolated {
+        let context_result = mgr
+            .client
+            .send_command_no_params("Target.createBrowserContext", None)
+            .await?;
+        let context_id = context_result
+            .get("browserContextId")
+            .and_then(|v| v.as_str())
+            .ok_or("Failed to create browser context")?
+            .to_string();
+        let mut params = super::cdp::types::CreateTargetParams::new("about:blank");
+        params.browser_context_id = Some(context_id);
+        params
+    } else {
+        super::cdp::types::CreateTargetParams {
+            url: "about:blank".to_string(),
+            new_window: Some(true),
+            background: Some(false),
+            focus: Some(false),
+            browser_context_id: None,
+        }
+    };
 
     let create_result: super::cdp::types::CreateTargetResult = mgr
         .client
-        .send_command_typed(
-            "Target.createTarget",
-            &json!({ "url": "about:blank", "browserContextId": context_id }),
-            None,
-        )
+        .send_command_typed("Target.createTarget", &create_params, None)
         .await?;
 
     let attach: super::cdp::types::AttachToTargetResult = mgr
