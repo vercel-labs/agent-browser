@@ -2453,6 +2453,19 @@ async fn e2e_domain_filter() {
     .await;
     assert_success(&resp);
 
+    // The active about:blank document must be patched immediately, not only
+    // after a later navigation.
+    let resp = execute_command(
+        &json!({
+            "id": "1-rtc", "action": "evaluate",
+            "script": "(() => { try { new RTCPeerConnection({iceServers:[{urls:'stun:secret.blocked.com:3478'}]}); return 'NOT_BLOCKED'; } catch (error) { return error.name; } })()",
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], "SecurityError");
+
     // Allowed domain
     let resp = execute_command(
         &json!({ "id": "2", "action": "navigate", "url": "https://example.com" }),
@@ -2501,6 +2514,31 @@ async fn e2e_domain_filter() {
         result.starts_with("blocked:"),
         "Fetch to blocked domain should fail, got: {}",
         result,
+    );
+
+    // WebRTC uses DNS and UDP outside CDP Fetch interception, so the domain
+    // filter must disable both Chromium constructor names before page scripts
+    // can create a peer connection.
+    let resp = execute_command(
+        &json!({
+            "id": "6", "action": "evaluate",
+            "script": "['RTCPeerConnection','webkitRTCPeerConnection'].filter(name => typeof window[name] === 'function').map(name => { try { new window[name]({iceServers:[{urls:'stun:secret.blocked.com:3478'}]}); return name + ':NOT_BLOCKED'; } catch (error) { return name + ':' + error.name; } })",
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let results = get_data(&resp)["result"].as_array().unwrap();
+    assert!(
+        !results.is_empty(),
+        "RTCPeerConnection should be available in Chrome"
+    );
+    assert!(
+        results.iter().all(|result| result
+            .as_str()
+            .is_some_and(|value| value.ends_with(":SecurityError"))),
+        "Every peer connection constructor should be blocked, got: {:?}",
+        results,
     );
 
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;

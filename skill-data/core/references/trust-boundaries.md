@@ -45,6 +45,7 @@ The hook in particular exposes `window.__REACT_DEVTOOLS_GLOBAL_HOOK__` to every 
 
 ## Network interception and automation artifacts
 
+- `--allowed-domains` blocks non-allowlisted HTTP traffic, WebSocket and EventSource connections, and `sendBeacon` calls. It also disables `RTCPeerConnection` for Chromium sessions because STUN, TURN, and related DNS traffic do not pass through CDP HTTP interception. Locally launched Chrome additionally disables non-proxied WebRTC UDP. The iOS and Safari providers reject this option because they cannot enforce equivalent containment. Treat this as browser-level containment and combine it with host or container egress controls when you need an operating-system security boundary, especially for remote CDP browsers that were running before agent-browser connected.
 - `network route` can fail or mock requests. Treat it the way you treat production traffic manipulation — confirm with the user before using it against anything other than a dev server.
 - `har start` / `har stop` records every request and response body to disk, including auth headers and bearer tokens. Don't share HAR files without redaction.
 - Screenshots and videos can accidentally capture secrets (auto-filled form fields, visible tokens in URL bars, etc.). Review before sending.

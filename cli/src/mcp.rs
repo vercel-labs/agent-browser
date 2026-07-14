@@ -1874,6 +1874,14 @@ fn tool(name: &str, title: &str, description: &str, properties: Value, required:
         }),
     );
     props.insert(
+        "allowedDomains".to_string(),
+        json!({
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active."
+        }),
+    );
+    props.insert(
         "extraArgs".to_string(),
         json!({
             "type": "array",
@@ -3493,6 +3501,12 @@ fn append_common_global_args(
         args.push("--restore-check-fn".to_string());
         args.push(check);
     }
+    if let Some(domains) = optional_string_array(arguments, "allowedDomains")? {
+        if !domains.is_empty() {
+            args.push("--allowed-domains".to_string());
+            args.push(domains.join(","));
+        }
+    }
 
     Ok(())
 }
@@ -4051,6 +4065,22 @@ mod tests {
     }
 
     #[test]
+    fn common_global_args_include_allowed_domains() {
+        let mut args = Vec::new();
+
+        append_common_global_args(
+            &mut args,
+            &json!({
+                "allowedDomains": ["example.com", "*.example.org"]
+            }),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(args, vec!["--allowed-domains", "example.com,*.example.org"]);
+    }
+
+    #[test]
     fn tool_schema_includes_extra_args_for_cli_parity() {
         let tools = tools();
         let open = tools
@@ -4068,6 +4098,10 @@ mod tests {
         assert_eq!(
             open["inputSchema"]["properties"]["namespace"]["type"],
             "string"
+        );
+        assert_eq!(
+            open["inputSchema"]["properties"]["allowedDomains"]["type"],
+            "array"
         );
     }
 

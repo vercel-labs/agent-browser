@@ -358,7 +358,7 @@ Common tools include:
 - `agent_browser_eval`
 - `agent_browser_close`
 
-Tool calls use the same config files and environment variables as the CLI. Each tool accepts typed arguments plus `extraArgs` for advanced CLI flags and exact CLI parity. Tool discovery is paginated and includes read-only/open-world annotations so modern MCP clients can load the large typed surface incrementally. Use the `session` tool argument or `AGENT_BROWSER_SESSION` to isolate browser state.
+Tool calls use the same config files and environment variables as the CLI. Each tool accepts typed arguments plus `extraArgs` for advanced CLI flags and exact CLI parity. The common `allowedDomains` array maps to `--allowed-domains` and activates the same WebRTC containment. Tool discovery is paginated and includes read-only/open-world annotations so modern MCP clients can load the large typed surface incrementally. Use the `session` tool argument or `AGENT_BROWSER_SESSION` to isolate browser state.
 
 ## Global Options
 
@@ -456,5 +456,6 @@ AGENT_BROWSER_PROVIDER="browserbase"         # Browser provider or configured pr
 AGENT_BROWSER_STREAM_PORT="9223"             # Override WebSocket streaming port (default: OS-assigned)
 AGENT_BROWSER_CONFIG="./agent-browser.json"  # Custom config file
 AGENT_BROWSER_CDP="9222"                     # Connect daemon to CDP port or WebSocket URL
+AGENT_BROWSER_ALLOWED_DOMAINS="example.com"  # Restrict network domains and Chromium WebRTC peer connections
 AGENT_BROWSER_PLUGINS='[{"name":"vault","command":"agent-browser-plugin-vault","capabilities":["credential.read"]},{"name":"stealth","command":"agent-browser-plugin-stealth","capabilities":["launch.mutate"]}]'
 ```

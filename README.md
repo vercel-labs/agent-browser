@@ -517,7 +517,7 @@ Common tools include:
 - `agent_browser_eval`
 - `agent_browser_close`
 
-Each tool has typed fields such as `url`, `selector`, `text`, `key`, and `session`, so MCP clients show meaningful approval prompts instead of raw command arrays. Each tool also accepts `extraArgs` for advanced CLI flags and exact CLI parity. Tool discovery is paginated and includes read-only/open-world annotations so modern MCP clients can load the large typed surface incrementally.
+Each tool has typed fields such as `url`, `selector`, `text`, `key`, `session`, and `allowedDomains`, so MCP clients show meaningful approval prompts instead of raw command arrays. The common `allowedDomains` array maps to `--allowed-domains` and activates the same WebRTC containment. Each tool also accepts `extraArgs` for advanced CLI flags and exact CLI parity. Tool discovery is paginated and includes read-only/open-world annotations so modern MCP clients can load the large typed surface incrementally.
 
 Example MCP client config:
 
@@ -720,7 +720,7 @@ agent-browser includes security features for safe AI agent deployments. All feat
 - **Authentication Vault**: Store credentials locally (always encrypted), reference by name. The LLM never sees passwords. `auth login` navigates with `load` and then waits for login form selectors to appear (SPA-friendly, timeout follows the default action timeout). A key is auto-generated at `~/.agent-browser/.encryption-key` if `AGENT_BROWSER_ENCRYPTION_KEY` is not set: `echo "pass" | agent-browser auth save github --url https://github.com/login --username user --password-stdin` then `agent-browser auth login github`
 - **Plugin System**: Extend agent-browser with external executable plugins. Plugins run out-of-process over the `agent-browser.plugin.v1` stdio JSON protocol and declare capabilities such as `credential.read`, `browser.provider`, `launch.mutate`, or `command.run`.
 - **Content Boundary Markers**: Wrap page output in delimiters so LLMs can distinguish tool output from untrusted content: `--content-boundaries`
-- **Domain Allowlist**: Restrict navigation to trusted domains (wildcards like `*.example.com` also match the bare domain): `--allowed-domains "example.com,*.example.com"`. Sub-resource requests (scripts, images, fetch) and WebSocket/EventSource connections to non-allowed domains are also blocked. Include any CDN domains your target pages depend on (e.g., `*.cdn.example.com`).
+- **Domain Allowlist**: Restrict navigation to trusted domains (wildcards like `*.example.com` also match the bare domain): `--allowed-domains "example.com,*.example.com"`. Sub-resource requests (scripts, images, fetch), WebSocket/EventSource connections, and `sendBeacon` calls to non-allowed domains are blocked. WebRTC peer connections are disabled in Chromium sessions while the allowlist is active to prevent STUN, TURN, and DNS traffic from bypassing HTTP interception. The iOS and Safari providers reject this option because they cannot enforce the same containment. Include any CDN domains your target pages depend on (e.g., `*.cdn.example.com`).
 - **Action Policy**: Gate destructive actions with a static policy file: `--action-policy ./policy.json`
 - **Action Confirmation**: Require explicit approval for sensitive action categories: `--confirm-actions eval,download`
 - **Output Length Limits**: Prevent context flooding: `--max-output 50000`
@@ -910,7 +910,7 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 | `--download-path <path>` | Default download directory (or `AGENT_BROWSER_DOWNLOAD_PATH` env) |
 | `--content-boundaries` | Wrap page output in boundary markers for LLM safety (or `AGENT_BROWSER_CONTENT_BOUNDARIES` env) |
 | `--max-output <chars>` | Truncate page output to N characters (or `AGENT_BROWSER_MAX_OUTPUT` env) |
-| `--allowed-domains <list>` | Comma-separated allowed domain patterns (or `AGENT_BROWSER_ALLOWED_DOMAINS` env) |
+| `--allowed-domains <list>` | Comma-separated allowed domain patterns; also disables Chromium WebRTC peer connections (or `AGENT_BROWSER_ALLOWED_DOMAINS` env) |
 | `--action-policy <path>` | Path to action policy JSON file (or `AGENT_BROWSER_ACTION_POLICY` env) |
 | `--confirm-actions <list>` | Action categories requiring confirmation (or `AGENT_BROWSER_CONFIRM_ACTIONS` env) |
 | `--confirm-interactive` | Interactive confirmation prompts; auto-denies if stdin is not a TTY (or `AGENT_BROWSER_CONFIRM_INTERACTIVE` env) |

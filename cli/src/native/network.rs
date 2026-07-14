@@ -167,8 +167,45 @@ pub async fn install_domain_filter_script(
         return Ok(());
     }
 
+    let script = domain_filter_script(allowed_domains);
+
+    client
+        .send_command(
+            "Page.addScriptToEvaluateOnNewDocument",
+            Some(json!({ "source": &script })),
+            Some(session_id),
+        )
+        .await?;
+
+    // The init script protects future documents. Evaluate it immediately as
+    // well so about:blank and pages that were already loaded over remote CDP
+    // do not retain an unfiltered RTCPeerConnection constructor.
+    let evaluation = client
+        .send_command(
+            "Runtime.evaluate",
+            Some(json!({ "expression": &script })),
+            Some(session_id),
+        )
+        .await?;
+    if let Some(details) = evaluation.get("exceptionDetails") {
+        let message = details
+            .get("exception")
+            .and_then(|exception| exception.get("description"))
+            .and_then(Value::as_str)
+            .or_else(|| details.get("text").and_then(Value::as_str))
+            .unwrap_or("unknown JavaScript error");
+        return Err(format!(
+            "Failed to apply domain filter to the current document: {}",
+            message
+        ));
+    }
+
+    Ok(())
+}
+
+fn domain_filter_script(allowed_domains: &[String]) -> String {
     let domains_json = serde_json::to_string(allowed_domains).unwrap_or("[]".to_string());
-    let script = format!(
+    format!(
         r#"(() => {{
             const _allowed = {};
             function _isDomainAllowed(hostname) {{
@@ -211,19 +248,33 @@ pub async fn install_domain_filter_script(
                     return origBeacon.call(navigator, url, data);
                 }};
             }}
+            function _blockPeerConnection(name) {{
+                if (typeof window[name] !== 'function') return;
+                const BlockedPeerConnection = function() {{
+                    throw new DOMException(
+                        'RTCPeerConnection blocked while domain filtering is active',
+                        'SecurityError'
+                    );
+                }};
+                Object.defineProperty(BlockedPeerConnection, 'prototype', {{
+                    value: Object.freeze(Object.create(null)),
+                    writable: false
+                }});
+                try {{
+                    Object.defineProperty(window, name, {{
+                        value: BlockedPeerConnection,
+                        writable: false,
+                        configurable: false
+                    }});
+                }} catch (_) {{
+                    window[name] = BlockedPeerConnection;
+                }}
+            }}
+            _blockPeerConnection('RTCPeerConnection');
+            _blockPeerConnection('webkitRTCPeerConnection');
         }})()"#,
         domains_json,
-    );
-
-    client
-        .send_command(
-            "Page.addScriptToEvaluateOnNewDocument",
-            Some(json!({ "source": script })),
-            Some(session_id),
-        )
-        .await?;
-
-    Ok(())
+    )
 }
 
 /// Enable Fetch-based network interception for domain filtering.
@@ -248,7 +299,7 @@ pub async fn install_domain_filter_fetch(
 }
 
 /// Install both layers of domain filtering on a session:
-/// 1. JS patching (WebSocket, EventSource, sendBeacon)
+/// 1. JS patching (WebSocket, EventSource, sendBeacon, RTCPeerConnection)
 /// 2. Fetch-based network interception
 pub async fn install_domain_filter(
     client: &CdpClient,
@@ -491,6 +542,15 @@ mod tests {
     fn test_parse_domain_list() {
         let domains = parse_domain_list("A.com, B.com , *.C.com");
         assert_eq!(domains, vec!["a.com", "b.com", "*.c.com"]);
+    }
+
+    #[test]
+    fn test_domain_filter_script_blocks_peer_connection_constructors() {
+        let script = domain_filter_script(&["example.com".to_string()]);
+        assert!(script.contains("_blockPeerConnection('RTCPeerConnection')"));
+        assert!(script.contains("_blockPeerConnection('webkitRTCPeerConnection')"));
+        assert!(script.contains("RTCPeerConnection blocked while domain filtering is active"));
+        assert!(script.contains("configurable: false"));
     }
 
     #[test]

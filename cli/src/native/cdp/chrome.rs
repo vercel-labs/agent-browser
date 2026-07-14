@@ -326,6 +326,9 @@ pub struct LaunchOptions {
     /// CLI's current environment wins over the env a long-lived daemon was
     /// spawned with.
     pub no_xvfb: bool,
+    /// Restrict WebRTC to proxied transports so direct UDP cannot bypass the
+    /// HTTP domain filter. Enabled automatically with `--allowed-domains`.
+    pub restrict_webrtc: bool,
 }
 
 impl Default for LaunchOptions {
@@ -351,6 +354,7 @@ impl Default for LaunchOptions {
             use_real_keychain: false,
             webgpu: false,
             no_xvfb: false,
+            restrict_webrtc: false,
         }
     }
 }
@@ -502,6 +506,15 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
     }
 
     args.extend(user_args);
+
+    if options.restrict_webrtc {
+        // Append this after user and plugin arguments so an unsafe custom
+        // policy cannot override the containment setting. JavaScript-level
+        // RTCPeerConnection blocking is the primary control; this prevents
+        // direct UDP traffic if page code obtains a native constructor.
+        args.retain(|arg| !arg.starts_with("--force-webrtc-ip-handling-policy="));
+        args.push("--force-webrtc-ip-handling-policy=disable_non_proxied_udp".to_string());
+    }
 
     if should_disable_sandbox(&args) {
         args.push("--no-sandbox".to_string());
@@ -1777,6 +1790,28 @@ mod tests {
             .args
             .iter()
             .any(|a| a.starts_with("--use-webgpu-adapter")));
+        if let Some(ref dir) = result.temp_user_data_dir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn test_build_args_restrict_webrtc_enforces_safe_policy() {
+        let opts = LaunchOptions {
+            restrict_webrtc: true,
+            args: vec!["--force-webrtc-ip-handling-policy=default".to_string()],
+            ..Default::default()
+        };
+        let result = build_chrome_args(&opts).unwrap();
+        let policies: Vec<&String> = result
+            .args
+            .iter()
+            .filter(|arg| arg.starts_with("--force-webrtc-ip-handling-policy="))
+            .collect();
+        assert_eq!(
+            policies,
+            vec![&"--force-webrtc-ip-handling-policy=disable_non_proxied_udp".to_string()]
+        );
         if let Some(ref dir) = result.temp_user_data_dir {
             let _ = std::fs::remove_dir_all(dir);
         }

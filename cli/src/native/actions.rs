@@ -221,6 +221,7 @@ fn launch_hash(
     opts.hide_scrollbars.hash(&mut h);
     opts.webgpu.hash(&mut h);
     opts.no_xvfb.hash(&mut h);
+    opts.restrict_webrtc.hash(&mut h);
     enable_features.hash(&mut h);
     init_script_paths.hash(&mut h);
     plugin_init_scripts.hash(&mut h);
@@ -2077,6 +2078,50 @@ async fn connect_auto_with_fresh_tab() -> Result<BrowserManager, String> {
     Ok(mgr)
 }
 
+async fn install_active_network_controls(
+    state: &DaemonState,
+    handle_auth_requests: bool,
+) -> Result<(), String> {
+    let mgr = state
+        .browser
+        .as_ref()
+        .ok_or("Browser is not available for network control installation")?;
+    let session_id = mgr.active_session_id()?;
+    let filter = state.domain_filter.read().await.clone();
+
+    if let Some(ref filter) = filter {
+        network::install_domain_filter(
+            &mgr.client,
+            session_id,
+            &filter.allowed_domains,
+            handle_auth_requests,
+        )
+        .await?;
+        network::sanitize_existing_pages(&mgr.client, &mgr.pages_list(), filter).await;
+    } else if handle_auth_requests {
+        network::install_domain_filter_fetch(&mgr.client, session_id, true).await?;
+    }
+
+    Ok(())
+}
+
+async fn install_network_controls_or_close(
+    state: &mut DaemonState,
+    handle_auth_requests: bool,
+) -> Result<(), String> {
+    if let Err(error) = install_active_network_controls(state, handle_auth_requests).await {
+        let close_error = close_current_browser(state).await.err();
+        return Err(match close_error {
+            Some(close_error) => format!(
+                "Failed to install browser network controls: {} (also failed to close browser: {})",
+                error, close_error
+            ),
+            None => format!("Failed to install browser network controls: {}", error),
+        });
+    }
+    Ok(())
+}
+
 async fn auto_launch(
     state: &mut DaemonState,
     plugins: Vec<crate::plugins::PluginConfig>,
@@ -2128,6 +2173,7 @@ async fn auto_launch(
         state.start_fetch_handler();
         state.start_dialog_handler();
         state.update_stream_client().await;
+        install_network_controls_or_close(state, has_proxy_auth).await?;
         apply_launch_init_scripts(state, &enable_features, &init_script_paths).await;
         try_auto_restore_state(state).await;
         try_load_storage_state(state, &storage_state_path).await;
@@ -2151,6 +2197,7 @@ async fn auto_launch(
         state.start_fetch_handler();
         state.start_dialog_handler();
         state.update_stream_client().await;
+        install_network_controls_or_close(state, has_proxy_auth).await?;
         apply_launch_init_scripts(state, &enable_features, &init_script_paths).await;
         try_auto_restore_state(state).await;
         try_load_storage_state(state, &storage_state_path).await;
@@ -2198,6 +2245,7 @@ async fn auto_launch(
                     state.start_dialog_handler();
                     state.update_stream_client().await;
                     write_provider_file(&state.session_id, &p);
+                    install_network_controls_or_close(state, has_proxy_auth).await?;
                     apply_launch_init_scripts(state, &enable_features, &init_script_paths).await;
                     try_auto_restore_state(state).await;
                     try_load_storage_state(state, &storage_state_path).await;
@@ -2232,15 +2280,7 @@ async fn auto_launch(
     state.start_fetch_handler();
     state.start_dialog_handler();
     state.update_stream_client().await;
-
-    // Enable Fetch with handleAuthRequests for proxy authentication
-    if has_proxy_auth {
-        if let Some(ref mgr) = state.browser {
-            if let Ok(session_id) = mgr.active_session_id() {
-                let _ = network::install_domain_filter_fetch(&mgr.client, session_id, true).await;
-            }
-        }
-    }
+    install_network_controls_or_close(state, has_proxy_auth).await?;
 
     apply_launch_init_scripts(state, &enable_features, &init_script_paths).await;
     try_auto_restore_state(state).await;
@@ -2283,6 +2323,22 @@ fn string_array_from_command(cmd: &Value, key: &str) -> Option<Vec<String>> {
             .filter_map(|v| v.as_str().map(|s| s.to_string()))
             .collect()
     })
+}
+
+fn allowed_domains_from_launch_command(cmd: &Value) -> Option<Vec<String>> {
+    let value = cmd.get("allowedDomains")?;
+    let raw_domains: Vec<&str> = match value {
+        Value::String(domains) => domains.split(',').collect(),
+        Value::Array(domains) => domains.iter().filter_map(Value::as_str).collect(),
+        _ => Vec::new(),
+    };
+    Some(
+        raw_domains
+            .into_iter()
+            .map(|domain| domain.trim().to_lowercase())
+            .filter(|domain| !domain.is_empty())
+            .collect(),
+    )
 }
 
 async fn apply_launch_init_scripts(
@@ -2407,6 +2463,8 @@ fn launch_options_from_env() -> LaunchOptions {
         use_real_keychain: false,
         webgpu: webgpu_from_env(),
         no_xvfb: no_xvfb_from_env(),
+        restrict_webrtc: env::var("AGENT_BROWSER_ALLOWED_DOMAINS")
+            .is_ok_and(|domains| !domains.trim().is_empty()),
     }
 }
 
@@ -2767,6 +2825,21 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         .map(String::from)
         .or_else(|| env::var("AGENT_BROWSER_ENGINE").ok());
 
+    if let Some(domains) = allowed_domains_from_launch_command(cmd) {
+        let mut filter = state.domain_filter.write().await;
+        *filter = if domains.is_empty() {
+            None
+        } else {
+            Some(DomainFilter::new(&domains.join(",")))
+        };
+    }
+    let restrict_webrtc = state
+        .domain_filter
+        .read()
+        .await
+        .as_ref()
+        .is_some_and(|filter| !filter.allowed_domains.is_empty());
+
     let mut launch_options = LaunchOptions {
         headless,
         executable_path: cmd
@@ -2838,6 +2911,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         use_real_keychain: false,
         webgpu: webgpu_from_launch_cmd(cmd),
         no_xvfb: no_xvfb_from_launch_cmd(cmd),
+        restrict_webrtc,
     };
 
     state.plugin_init_scripts.clear();
@@ -2902,6 +2976,17 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         launch_options.executable_path.as_deref(),
     )?;
 
+    // Store proxy credentials before any local or remote CDP branch enables
+    // Fetch interception with authentication handling.
+    let has_proxy_auth = launch_options.proxy_username.is_some();
+    if has_proxy_auth {
+        let mut creds = state.proxy_credentials.write().await;
+        *creds = Some((
+            launch_options.proxy_username.clone().unwrap_or_default(),
+            launch_options.proxy_password.clone().unwrap_or_default(),
+        ));
+    }
+
     if let Some(url) = cdp_url {
         state.reset_input_state();
         state.browser = Some(BrowserManager::connect_cdp(url).await?);
@@ -2910,6 +2995,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         state.start_fetch_handler();
         state.start_dialog_handler();
         state.update_stream_client().await;
+        install_network_controls_or_close(state, has_proxy_auth).await?;
         apply_launch_init_scripts(state, &enable_features, &init_script_paths).await;
         try_auto_restore_state(state).await;
         load_storage_state_or_rollback(state, &storage_state_owned).await?;
@@ -2924,6 +3010,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         state.start_fetch_handler();
         state.start_dialog_handler();
         state.update_stream_client().await;
+        install_network_controls_or_close(state, has_proxy_auth).await?;
         apply_launch_init_scripts(state, &enable_features, &init_script_paths).await;
         try_auto_restore_state(state).await;
         load_storage_state_or_rollback(state, &storage_state_owned).await?;
@@ -2938,6 +3025,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         state.start_fetch_handler();
         state.start_dialog_handler();
         state.update_stream_client().await;
+        install_network_controls_or_close(state, has_proxy_auth).await?;
         apply_launch_init_scripts(state, &enable_features, &init_script_paths).await;
         try_auto_restore_state(state).await;
         load_storage_state_or_rollback(state, &storage_state_owned).await?;
@@ -2947,9 +3035,21 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     if let Some(provider) = provider_name {
         match provider.to_lowercase().as_str() {
             "ios" => {
+                if restrict_webrtc {
+                    return Err(
+                        "--allowed-domains is not supported with the iOS provider because WebRTC containment cannot be enforced"
+                            .to_string(),
+                    );
+                }
                 return launch_ios(cmd, state).await;
             }
             "safari" => {
+                if restrict_webrtc {
+                    return Err(
+                        "--allowed-domains is not supported with the Safari provider because WebRTC containment cannot be enforced"
+                            .to_string(),
+                    );
+                }
                 return launch_safari(cmd, state).await;
             }
             _ => {
@@ -2990,6 +3090,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
                         state.start_dialog_handler();
                         state.update_stream_client().await;
                         write_provider_file(&state.session_id, provider);
+                        install_network_controls_or_close(state, has_proxy_auth).await?;
                         apply_launch_init_scripts(state, &enable_features, &init_script_paths)
                             .await;
                         try_auto_restore_state(state).await;
@@ -3030,25 +3131,6 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         }
     }
 
-    // Store proxy credentials for Fetch.authRequired handling
-    let has_proxy_auth = launch_options.proxy_username.is_some();
-    if has_proxy_auth {
-        let mut creds = state.proxy_credentials.write().await;
-        *creds = Some((
-            launch_options.proxy_username.clone().unwrap_or_default(),
-            launch_options.proxy_password.clone().unwrap_or_default(),
-        ));
-    }
-
-    if let Some(ref domains) = cmd
-        .get("allowedDomains")
-        .and_then(|v| v.as_str())
-        .map(String::from)
-    {
-        let mut df = state.domain_filter.write().await;
-        *df = Some(DomainFilter::new(domains));
-    }
-
     state.engine = engine.as_deref().unwrap_or("chrome").to_string();
     write_engine_file(&state.session_id, &state.engine);
     write_extensions_file_from_paths(&state.session_id, launch_options.extensions.as_deref());
@@ -3060,38 +3142,10 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     state.start_dialog_handler();
     state.update_stream_client().await;
 
-    // Enable Fetch interception (domain filtering and/or proxy auth).
-    // Only call Fetch.enable once to avoid overwriting handleAuthRequests.
-    {
-        let df = state.domain_filter.read().await;
-        let has_domain_filter = df.is_some();
-
-        if has_domain_filter || has_proxy_auth {
-            if let Some(ref mgr) = state.browser {
-                if let Ok(session_id) = mgr.active_session_id() {
-                    if let Some(ref filter) = *df {
-                        let _ = network::install_domain_filter(
-                            &mgr.client,
-                            session_id,
-                            &filter.allowed_domains,
-                            has_proxy_auth,
-                        )
-                        .await;
-                        network::sanitize_existing_pages(&mgr.client, &mgr.pages_list(), filter)
-                            .await;
-                    } else {
-                        // No domain filter, but proxy auth needs Fetch.enable
-                        let _ = network::install_domain_filter_fetch(
-                            &mgr.client,
-                            session_id,
-                            has_proxy_auth,
-                        )
-                        .await;
-                    }
-                }
-            }
-        }
-    }
+    // Install containment before loading state or running user init scripts.
+    // Failure closes the browser so a requested allowlist never degrades to an
+    // unrestricted session.
+    install_network_controls_or_close(state, has_proxy_auth).await?;
 
     apply_launch_init_scripts(state, &enable_features, &init_script_paths).await;
     try_auto_restore_state(state).await;
@@ -10631,14 +10685,20 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
 
     #[test]
     fn test_launch_options_from_env_defaults() {
-        let guard = EnvGuard::new(&["AGENT_BROWSER_HEADED", "AGENT_BROWSER_HIDE_SCROLLBARS"]);
+        let guard = EnvGuard::new(&[
+            "AGENT_BROWSER_HEADED",
+            "AGENT_BROWSER_HIDE_SCROLLBARS",
+            "AGENT_BROWSER_ALLOWED_DOMAINS",
+        ]);
         guard.remove("AGENT_BROWSER_HEADED");
         guard.remove("AGENT_BROWSER_HIDE_SCROLLBARS");
+        guard.remove("AGENT_BROWSER_ALLOWED_DOMAINS");
         let opts = launch_options_from_env();
         assert!(opts.headless);
         assert!(opts.args.is_empty());
         assert!(!opts.allow_file_access);
         assert!(opts.hide_scrollbars);
+        assert!(!opts.restrict_webrtc);
     }
 
     #[test]
@@ -10720,6 +10780,58 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
             launch_hash(&base, &[], &[], &[], Some("chrome"), "local", None),
             launch_hash(&webgpu, &[], &[], &[], Some("chrome"), "local", None)
         );
+    }
+
+    #[test]
+    fn test_allowed_domains_enable_webrtc_restriction_and_launch_hashing() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_ALLOWED_DOMAINS"]);
+        guard.set("AGENT_BROWSER_ALLOWED_DOMAINS", "example.com");
+        assert!(launch_options_from_env().restrict_webrtc);
+
+        let base = LaunchOptions::default();
+        let restricted = LaunchOptions {
+            restrict_webrtc: true,
+            ..Default::default()
+        };
+        assert_ne!(
+            launch_hash(&base, &[], &[], &[], Some("chrome"), "local", None),
+            launch_hash(&restricted, &[], &[], &[], Some("chrome"), "local", None)
+        );
+    }
+
+    #[test]
+    fn test_allowed_domains_from_launch_command_accepts_cli_array_and_legacy_string() {
+        assert_eq!(
+            allowed_domains_from_launch_command(&json!({
+                "allowedDomains": ["Example.COM", " *.example.org "]
+            })),
+            Some(vec!["example.com".to_string(), "*.example.org".to_string()])
+        );
+        assert_eq!(
+            allowed_domains_from_launch_command(&json!({
+                "allowedDomains": "Example.COM, *.example.org"
+            })),
+            Some(vec!["example.com".to_string(), "*.example.org".to_string()])
+        );
+    }
+
+    #[tokio::test]
+    async fn test_allowed_domains_reject_providers_without_webrtc_containment() {
+        for provider in ["ios", "safari"] {
+            let mut state = DaemonState::new();
+            let error = handle_launch(
+                &json!({
+                    "action": "launch",
+                    "provider": provider,
+                    "allowedDomains": ["example.com"]
+                }),
+                &mut state,
+            )
+            .await
+            .unwrap_err();
+            assert!(error.contains("WebRTC containment"), "got: {}", error);
+            assert!(error.to_lowercase().contains(provider), "got: {}", error);
+        }
     }
 
     #[test]
