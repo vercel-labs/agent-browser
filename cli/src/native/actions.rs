@@ -193,6 +193,7 @@ struct DrainedEvents {
 /// state replaces the prior session instead of merging into it.
 fn launch_hash(
     opts: &LaunchOptions,
+    allowed_domains: &[String],
     plugin_init_scripts: &[String],
     enable_features: &[String],
     init_script_paths: &[String],
@@ -222,6 +223,7 @@ fn launch_hash(
     opts.webgpu.hash(&mut h);
     opts.no_xvfb.hash(&mut h);
     opts.restrict_webrtc.hash(&mut h);
+    allowed_domains.hash(&mut h);
     enable_features.hash(&mut h);
     init_script_paths.hash(&mut h);
     plugin_init_scripts.hash(&mut h);
@@ -360,7 +362,7 @@ impl DaemonState {
             domain_filter: Arc::new(RwLock::new(
                 env::var("AGENT_BROWSER_ALLOWED_DOMAINS")
                     .ok()
-                    .filter(|s| !s.is_empty())
+                    .filter(|s| !s.trim().is_empty())
                     .map(|s| DomainFilter::new(&s)),
             )),
             event_tracker: EventTracker::new(),
@@ -720,6 +722,14 @@ impl DaemonState {
             if let Some(ref mgr) = self.browser {
                 let _ = mgr
                     .client
+                    .send_command_no_params("Page.enable", Some(iframe_sid.as_str()))
+                    .await;
+                let _ = mgr
+                    .client
+                    .send_command_no_params("Runtime.enable", Some(iframe_sid.as_str()))
+                    .await;
+                let _ = mgr
+                    .client
                     .send_command_no_params(
                         "Runtime.runIfWaitingForDebugger",
                         Some(iframe_sid.as_str()),
@@ -738,6 +748,24 @@ impl DaemonState {
                         .client
                         .send_command_no_params("Network.enable", Some(iframe_sid.as_str()))
                         .await;
+                }
+
+                let filter = self.domain_filter.read().await.clone();
+                let has_proxy_creds = self.proxy_credentials.read().await.is_some();
+                if filter.is_some() || has_proxy_creds {
+                    if let Err(error) = install_network_controls_for_session(
+                        &mgr.client,
+                        iframe_sid,
+                        filter.as_ref(),
+                        has_proxy_creds,
+                    )
+                    .await
+                    {
+                        eprintln!(
+                            "Warning: failed to install network controls on iframe session: {}",
+                            error
+                        );
+                    }
                 }
             }
         }
@@ -2078,6 +2106,66 @@ async fn connect_auto_with_fresh_tab() -> Result<BrowserManager, String> {
     Ok(mgr)
 }
 
+async fn current_allowed_domains(state: &DaemonState) -> Vec<String> {
+    state
+        .domain_filter
+        .read()
+        .await
+        .as_ref()
+        .map(|filter| filter.allowed_domains.clone())
+        .unwrap_or_default()
+}
+
+fn network_control_session_ids_from_pages(
+    pages: &[super::browser::PageInfo],
+    active_session_id: Option<&str>,
+) -> Result<Vec<String>, String> {
+    let mut session_ids: Vec<String> = Vec::new();
+    for page in pages {
+        if !session_ids.iter().any(|sid| sid == &page.session_id) {
+            session_ids.push(page.session_id.clone());
+        }
+    }
+
+    if session_ids.is_empty() {
+        let active = active_session_id.ok_or("No active page")?;
+        session_ids.push(active.to_string());
+    }
+
+    Ok(session_ids)
+}
+
+fn network_control_session_ids(mgr: &BrowserManager) -> Result<Vec<String>, String> {
+    let pages = mgr.pages_list();
+    let active_session_id = if pages.is_empty() {
+        Some(mgr.active_session_id()?)
+    } else {
+        None
+    };
+    network_control_session_ids_from_pages(&pages, active_session_id)
+}
+
+async fn install_network_controls_for_session(
+    client: &CdpClient,
+    session_id: &str,
+    filter: Option<&DomainFilter>,
+    handle_auth_requests: bool,
+) -> Result<(), String> {
+    if let Some(filter) = filter {
+        network::install_domain_filter(
+            client,
+            session_id,
+            &filter.allowed_domains,
+            handle_auth_requests,
+        )
+        .await?;
+    } else if handle_auth_requests {
+        network::install_domain_filter_fetch(client, session_id, true).await?;
+    }
+
+    Ok(())
+}
+
 async fn install_active_network_controls(
     state: &DaemonState,
     handle_auth_requests: bool,
@@ -2086,20 +2174,22 @@ async fn install_active_network_controls(
         .browser
         .as_ref()
         .ok_or("Browser is not available for network control installation")?;
-    let session_id = mgr.active_session_id()?;
     let filter = state.domain_filter.read().await.clone();
+    let session_ids = network_control_session_ids(mgr)?;
 
-    if let Some(ref filter) = filter {
-        network::install_domain_filter(
+    for session_id in session_ids {
+        mgr.enable_domains_pub(&session_id).await?;
+        install_network_controls_for_session(
             &mgr.client,
-            session_id,
-            &filter.allowed_domains,
+            &session_id,
+            filter.as_ref(),
             handle_auth_requests,
         )
         .await?;
+    }
+
+    if let Some(ref filter) = filter {
         network::sanitize_existing_pages(&mgr.client, &mgr.pages_list(), filter).await;
-    } else if handle_auth_requests {
-        network::install_domain_filter_fetch(&mgr.client, session_id, true).await?;
     }
 
     Ok(())
@@ -2137,6 +2227,7 @@ async fn auto_launch(
     let engine = env::var("AGENT_BROWSER_ENGINE").ok();
     let enable_features = launch_enable_features_from_env();
     let init_script_paths = launch_init_script_paths_from_env();
+    let allowed_domains = current_allowed_domains(state).await;
 
     // Extract storage_state before options is moved into BrowserManager::launch.
     let storage_state_path = options.storage_state.clone();
@@ -2159,6 +2250,7 @@ async fn auto_launch(
         let mgr = BrowserManager::connect_cdp(&cdp).await?;
         let hash = launch_hash(
             &options,
+            &allowed_domains,
             &state.plugin_init_scripts,
             &enable_features,
             &init_script_paths,
@@ -2183,6 +2275,7 @@ async fn auto_launch(
     if env::var("AGENT_BROWSER_AUTO_CONNECT").is_ok() {
         let hash = launch_hash(
             &options,
+            &allowed_domains,
             &state.plugin_init_scripts,
             &enable_features,
             &init_script_paths,
@@ -2229,6 +2322,7 @@ async fn auto_launch(
                 Ok(mgr) => {
                     let hash = launch_hash(
                         &options,
+                        &allowed_domains,
                         &state.plugin_init_scripts,
                         &enable_features,
                         &init_script_paths,
@@ -2265,6 +2359,7 @@ async fn auto_launch(
     write_extensions_file_from_paths(&state.session_id, options.extensions.as_deref());
     let hash = launch_hash(
         &options,
+        &allowed_domains,
         &state.plugin_init_scripts,
         &enable_features,
         &init_script_paths,
@@ -2833,12 +2928,8 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
             Some(DomainFilter::new(&domains.join(",")))
         };
     }
-    let restrict_webrtc = state
-        .domain_filter
-        .read()
-        .await
-        .as_ref()
-        .is_some_and(|filter| !filter.allowed_domains.is_empty());
+    let allowed_domains = current_allowed_domains(state).await;
+    let restrict_webrtc = !allowed_domains.is_empty();
 
     let mut launch_options = LaunchOptions {
         headless,
@@ -2926,6 +3017,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         launch_connection_identity(cdp_url, cdp_port, auto_connect, provider_name);
     let new_hash = launch_hash(
         &launch_options,
+        &allowed_domains,
         &state.plugin_init_scripts,
         &enable_features,
         &init_script_paths,
@@ -3749,9 +3841,37 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
             })?
             .to_string();
 
-        let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
+        let defer_url_until_controls = {
+            let df = state.domain_filter.read().await;
+            if let Some(ref filter) = *df {
+                filter.check_url(&href)?;
+                !filter.allowed_domains.is_empty()
+            } else {
+                false
+            }
+        };
+
         state.ref_map.clear();
-        mgr.tab_new(Some(&href), None).await?;
+        {
+            let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
+            mgr.tab_new(
+                if defer_url_until_controls {
+                    None
+                } else {
+                    Some(&href)
+                },
+                None,
+            )
+            .await?;
+        }
+
+        let has_proxy_creds = state.proxy_credentials.read().await.is_some();
+        install_network_controls_or_close(state, has_proxy_creds).await?;
+
+        if defer_url_until_controls {
+            let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
+            mgr.navigate(&href, WaitUntil::Load).await?;
+        }
 
         return Ok(json!({ "clicked": selector, "newTab": true, "url": href }));
     }
@@ -4929,40 +5049,87 @@ async fn handle_tab_list(state: &DaemonState) -> Result<Value, String> {
 }
 
 async fn handle_tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
     let url = cmd.get("url").and_then(|v| v.as_str());
     let label = cmd.get("label").and_then(|v| v.as_str());
+    let defer_url_until_controls = {
+        let df = state.domain_filter.read().await;
+        if let Some(ref filter) = *df {
+            if let Some(url) = url {
+                filter.check_url(url)?;
+            }
+            !filter.allowed_domains.is_empty() && url.is_some()
+        } else {
+            false
+        }
+    };
+
     state.ref_map.clear();
     state.iframe_sessions.clear();
     state.active_frame_id = None;
-    mgr.tab_new(url, label).await
+    let mut result = {
+        let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
+        mgr.tab_new(if defer_url_until_controls { None } else { url }, label)
+            .await?
+    };
+
+    let has_proxy_creds = state.proxy_credentials.read().await.is_some();
+    install_network_controls_or_close(state, has_proxy_creds).await?;
+
+    if defer_url_until_controls {
+        if let Some(url) = url {
+            let nav = {
+                let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
+                mgr.navigate(url, WaitUntil::Load).await?
+            };
+            if let Some(obj) = result.as_object_mut() {
+                if let Some(value) = nav.get("url") {
+                    obj.insert("url".to_string(), value.clone());
+                }
+                if let Some(value) = nav.get("title") {
+                    obj.insert("title".to_string(), value.clone());
+                }
+            }
+        }
+    }
+
+    Ok(result)
 }
 
 async fn handle_tab_switch(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
     let tab_ref_str = cmd
         .get("tabId")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'tabId' parameter (expected `t<N>` or a label)")?;
     let tab_ref = super::browser::TabRef::parse(tab_ref_str)?;
-    let tab_id = mgr.resolve_tab_ref(&tab_ref)?;
+    let tab_id = {
+        let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+        mgr.resolve_tab_ref(&tab_ref)?
+    };
     state.ref_map.clear();
     state.iframe_sessions.clear();
     state.active_frame_id = None;
-    let result = mgr.tab_switch_by_id(tab_id).await?;
+    let result = {
+        let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
+        mgr.tab_switch_by_id(tab_id).await?
+    };
+
+    let has_proxy_creds = state.proxy_credentials.read().await.is_some();
+    install_network_controls_or_close(state, has_proxy_creds).await?;
 
     if let Some(ref server) = state.stream_server {
-        if let Ok(dims) = mgr
-            .evaluate(
-                "JSON.stringify([window.innerWidth,window.innerHeight])",
-                None,
-            )
-            .await
-        {
-            if let Some(s) = dims.get("result").and_then(|v| v.as_str()) {
-                if let Ok(arr) = serde_json::from_str::<Vec<u32>>(s) {
-                    if arr.len() == 2 && arr[0] > 0 && arr[1] > 0 {
-                        server.set_viewport(arr[0], arr[1]).await;
+        if let Some(ref mgr) = state.browser {
+            if let Ok(dims) = mgr
+                .evaluate(
+                    "JSON.stringify([window.innerWidth,window.innerHeight])",
+                    None,
+                )
+                .await
+            {
+                if let Some(s) = dims.get("result").and_then(|v| v.as_str()) {
+                    if let Ok(arr) = serde_json::from_str::<Vec<u32>>(s) {
+                        if arr.len() == 2 && arr[0] > 0 && arr[1] > 0 {
+                            server.set_viewport(arr[0], arr[1]).await;
+                        }
                     }
                 }
             }
@@ -10764,8 +10931,8 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
             ..Default::default()
         };
         assert_ne!(
-            launch_hash(&base, &[], &[], &[], Some("chrome"), "local", None),
-            launch_hash(&no_xvfb, &[], &[], &[], Some("chrome"), "local", None)
+            launch_hash(&base, &[], &[], &[], &[], Some("chrome"), "local", None),
+            launch_hash(&no_xvfb, &[], &[], &[], &[], Some("chrome"), "local", None)
         );
     }
 
@@ -10777,8 +10944,8 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
             ..Default::default()
         };
         assert_ne!(
-            launch_hash(&base, &[], &[], &[], Some("chrome"), "local", None),
-            launch_hash(&webgpu, &[], &[], &[], Some("chrome"), "local", None)
+            launch_hash(&base, &[], &[], &[], &[], Some("chrome"), "local", None),
+            launch_hash(&webgpu, &[], &[], &[], &[], Some("chrome"), "local", None)
         );
     }
 
@@ -10794,8 +10961,40 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
             ..Default::default()
         };
         assert_ne!(
-            launch_hash(&base, &[], &[], &[], Some("chrome"), "local", None),
-            launch_hash(&restricted, &[], &[], &[], Some("chrome"), "local", None)
+            launch_hash(&base, &[], &[], &[], &[], Some("chrome"), "local", None),
+            launch_hash(
+                &restricted,
+                &[],
+                &[],
+                &[],
+                &[],
+                Some("chrome"),
+                "local",
+                None
+            )
+        );
+
+        assert_ne!(
+            launch_hash(
+                &restricted,
+                &["example.com".to_string()],
+                &[],
+                &[],
+                &[],
+                Some("chrome"),
+                "local",
+                None
+            ),
+            launch_hash(
+                &restricted,
+                &["other.example".to_string()],
+                &[],
+                &[],
+                &[],
+                Some("chrome"),
+                "local",
+                None
+            )
         );
     }
 
@@ -10812,6 +11011,62 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
                 "allowedDomains": "Example.COM, *.example.org"
             })),
             Some(vec!["example.com".to_string(), "*.example.org".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_network_control_session_ids_include_all_attached_pages() {
+        let pages = vec![
+            super::super::browser::PageInfo {
+                tab_id: 1,
+                label: None,
+                target_id: "target-1".to_string(),
+                session_id: "session-1".to_string(),
+                url: "about:blank".to_string(),
+                title: String::new(),
+                target_type: "page".to_string(),
+            },
+            super::super::browser::PageInfo {
+                tab_id: 2,
+                label: None,
+                target_id: "target-2".to_string(),
+                session_id: "session-2".to_string(),
+                url: "about:blank".to_string(),
+                title: String::new(),
+                target_type: "page".to_string(),
+            },
+            super::super::browser::PageInfo {
+                tab_id: 3,
+                label: None,
+                target_id: "target-3".to_string(),
+                session_id: "session-1".to_string(),
+                url: "about:blank".to_string(),
+                title: String::new(),
+                target_type: "page".to_string(),
+            },
+        ];
+
+        assert_eq!(
+            network_control_session_ids_from_pages(&pages, None).unwrap(),
+            vec!["session-1".to_string(), "session-2".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_network_control_session_ids_preserve_direct_page_session() {
+        let pages = vec![super::super::browser::PageInfo {
+            tab_id: 1,
+            label: None,
+            target_id: "provider-page".to_string(),
+            session_id: String::new(),
+            url: String::new(),
+            title: String::new(),
+            target_type: "page".to_string(),
+        }];
+
+        assert_eq!(
+            network_control_session_ids_from_pages(&pages, None).unwrap(),
+            vec![String::new()]
         );
     }
 
@@ -10843,9 +11098,19 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         ];
 
         assert_ne!(
-            launch_hash(&opts, &no_scripts, &[], &[], Some("chrome"), "local", None),
             launch_hash(
                 &opts,
+                &[],
+                &no_scripts,
+                &[],
+                &[],
+                Some("chrome"),
+                "local",
+                None
+            ),
+            launch_hash(
+                &opts,
+                &[],
                 &plugin_scripts,
                 &[],
                 &[],
@@ -10861,12 +11126,13 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         let opts = LaunchOptions::default();
 
         assert_ne!(
-            launch_hash(&opts, &[], &[], &[], Some("chrome"), "local", None),
-            launch_hash(&opts, &[], &[], &[], Some("lightpanda"), "local", None)
+            launch_hash(&opts, &[], &[], &[], &[], Some("chrome"), "local", None),
+            launch_hash(&opts, &[], &[], &[], &[], Some("lightpanda"), "local", None)
         );
         assert_ne!(
             launch_hash(
                 &opts,
+                &[],
                 &[],
                 &[],
                 &[],
@@ -10876,6 +11142,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
             ),
             launch_hash(
                 &opts,
+                &[],
                 &[],
                 &[],
                 &[],
@@ -10890,12 +11157,14 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
                 &[],
                 &[],
                 &[],
+                &[],
                 Some("chrome"),
                 "provider",
                 Some("browserbase")
             ),
             launch_hash(
                 &opts,
+                &[],
                 &[],
                 &[],
                 &[],

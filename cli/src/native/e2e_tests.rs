@@ -2466,6 +2466,38 @@ async fn e2e_domain_filter() {
     assert_success(&resp);
     assert_eq!(get_data(&resp)["result"], "SecurityError");
 
+    // New tabs created after launch must receive the same controls before a
+    // requested URL starts loading.
+    let resp = execute_command(
+        &json!({ "id": "1-tab", "action": "tab_new", "url": "https://example.com" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({
+            "id": "1-tab-rtc", "action": "evaluate",
+            "script": "(() => { try { new RTCPeerConnection({iceServers:[{urls:'stun:secret.blocked.com:3478'}]}); return 'NOT_BLOCKED'; } catch (error) { return error.name; } })()",
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], "SecurityError");
+
+    let resp = execute_command(
+        &json!({ "id": "1-tab-blocked", "action": "tab_new", "url": "https://blocked.com" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(resp["success"], false);
+    let error = resp["error"].as_str().unwrap_or("");
+    assert!(
+        error.contains("blocked.com") || error.contains("not allowed"),
+        "Blocked tab URL should fail before loading, got: {}",
+        error
+    );
+
     // Allowed domain
     let resp = execute_command(
         &json!({ "id": "2", "action": "navigate", "url": "https://example.com" }),
