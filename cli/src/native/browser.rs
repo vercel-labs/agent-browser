@@ -592,25 +592,34 @@ impl BrowserManager {
         self.enable_domains(session_id).await
     }
 
+    pub async fn prepare_domains_pub(&self, session_id: &str) -> Result<(), String> {
+        self.prepare_domains(session_id).await
+    }
+
+    pub async fn resume_if_waiting_pub(&self, session_id: &str) -> Result<(), String> {
+        self.resume_if_waiting(session_id).await
+    }
+
     async fn enable_domains(&self, session_id: &str) -> Result<(), String> {
+        self.prepare_domains(session_id).await?;
+        self.resume_if_waiting(session_id).await?;
+        Ok(())
+    }
+
+    async fn prepare_domains(&self, session_id: &str) -> Result<(), String> {
         self.client
             .send_command_no_params("Page.enable", Some(session_id))
             .await?;
         self.client
             .send_command_no_params("Runtime.enable", Some(session_id))
             .await?;
-        // Resume the target if it is paused waiting for the debugger.
-        // This is needed for real browser sessions (Chrome 144+) where targets
-        // are paused after attach until explicitly resumed. No-op otherwise.
-        let _ = self
-            .client
-            .send_command_no_params("Runtime.runIfWaitingForDebugger", Some(session_id))
-            .await;
         self.client
             .send_command_no_params("Network.enable", Some(session_id))
             .await?;
         // Enable auto-attach for cross-origin iframe support.
         // flatten: true gives each iframe its own session_id.
+        // waitForDebuggerOnStart keeps child targets paused until the daemon
+        // installs any required network controls and explicitly resumes them.
         // Ignored on engines that don't support it (e.g. Lightpanda).
         let _ = self
             .client
@@ -618,11 +627,21 @@ impl BrowserManager {
                 "Target.setAutoAttach",
                 Some(json!({
                     "autoAttach": true,
-                    "waitForDebuggerOnStart": false,
+                    "waitForDebuggerOnStart": true,
                     "flatten": true
                 })),
                 Some(session_id),
             )
+            .await;
+        Ok(())
+    }
+
+    async fn resume_if_waiting(&self, session_id: &str) -> Result<(), String> {
+        // Needed for real browser sessions (Chrome 144+) where targets are
+        // paused after attach until explicitly resumed. No-op otherwise.
+        let _ = self
+            .client
+            .send_command_no_params("Runtime.runIfWaitingForDebugger", Some(session_id))
             .await;
         Ok(())
     }

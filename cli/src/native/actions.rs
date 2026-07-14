@@ -690,12 +690,12 @@ impl DaemonState {
         recording::stop_recording_task(&mut self.recording_state).await
     }
 
-    pub async fn drain_cdp_events_background(&mut self) {
+    pub async fn drain_cdp_events_background(&mut self) -> Result<(), String> {
         let drained = self.drain_cdp_events();
-        self.apply_drained_events(drained).await;
+        self.apply_drained_events(drained).await
     }
 
-    async fn apply_drained_events(&mut self, drained: DrainedEvents) {
+    async fn apply_drained_events(&mut self, drained: DrainedEvents) -> Result<(), String> {
         // ACK screencast frames
         if !drained.pending_acks.is_empty() {
             if let Some(ref browser) = self.browser {
@@ -719,54 +719,43 @@ impl DaemonState {
         for (frame_id, iframe_sid) in &drained.attached_iframe_sessions {
             self.iframe_sessions
                 .insert(frame_id.clone(), iframe_sid.clone());
-            if let Some(ref mgr) = self.browser {
-                let _ = mgr
-                    .client
-                    .send_command_no_params("Page.enable", Some(iframe_sid.as_str()))
-                    .await;
-                let _ = mgr
-                    .client
-                    .send_command_no_params("Runtime.enable", Some(iframe_sid.as_str()))
-                    .await;
-                let _ = mgr
-                    .client
-                    .send_command_no_params(
-                        "Runtime.runIfWaitingForDebugger",
-                        Some(iframe_sid.as_str()),
-                    )
-                    .await;
-                let _ = mgr
-                    .client
-                    .send_command_no_params("DOM.enable", Some(iframe_sid.as_str()))
-                    .await;
-                let _ = mgr
-                    .client
-                    .send_command_no_params("Accessibility.enable", Some(iframe_sid.as_str()))
-                    .await;
-                if self.har_recording || self.request_tracking {
+            let filter = self.domain_filter.read().await.clone();
+            let has_proxy_creds = self.proxy_credentials.read().await.is_some();
+            let controls_active = filter.is_some() || has_proxy_creds;
+            let setup_result = if let Some(ref mgr) = self.browser {
+                async {
+                    mgr.prepare_domains_pub(iframe_sid).await?;
                     let _ = mgr
                         .client
-                        .send_command_no_params("Network.enable", Some(iframe_sid.as_str()))
+                        .send_command_no_params("DOM.enable", Some(iframe_sid.as_str()))
                         .await;
-                }
-
-                let filter = self.domain_filter.read().await.clone();
-                let has_proxy_creds = self.proxy_credentials.read().await.is_some();
-                if filter.is_some() || has_proxy_creds {
-                    if let Err(error) = install_network_controls_for_session(
-                        &mgr.client,
-                        iframe_sid,
-                        filter.as_ref(),
-                        has_proxy_creds,
-                    )
-                    .await
-                    {
-                        eprintln!(
-                            "Warning: failed to install network controls on iframe session: {}",
-                            error
-                        );
+                    let _ = mgr
+                        .client
+                        .send_command_no_params("Accessibility.enable", Some(iframe_sid.as_str()))
+                        .await;
+                    if controls_active {
+                        install_network_controls_for_session(
+                            &mgr.client,
+                            iframe_sid,
+                            filter.as_ref(),
+                            has_proxy_creds,
+                        )
+                        .await?;
                     }
+                    mgr.resume_if_waiting_pub(iframe_sid).await
                 }
+                .await
+            } else {
+                Ok(())
+            };
+            if let Err(error) = setup_result {
+                if controls_active {
+                    return close_after_network_control_failure(self, error).await;
+                }
+                eprintln!(
+                    "Warning: failed to prepare iframe session controls: {}",
+                    error
+                );
             }
         }
         for sid in &drained.detached_iframe_sessions {
@@ -775,32 +764,46 @@ impl DaemonState {
 
         // Attach and register new targets
         for te in &drained.new_targets {
-            if let Some(ref mut mgr) = self.browser {
-                let attach_result: Result<AttachToTargetResult, String> = mgr
-                    .client
-                    .send_command_typed(
-                        "Target.attachToTarget",
-                        &AttachToTargetParams {
-                            target_id: te.target_info.target_id.clone(),
-                            flatten: true,
-                        },
-                        None,
-                    )
-                    .await;
-                if let Ok(attach) = attach_result {
-                    let _ = mgr.enable_domains_pub(&attach.session_id).await;
-
-                    // Install domain filter on new pages
-                    let df = self.domain_filter.read().await;
-                    if let Some(ref filter) = *df {
-                        let has_proxy_creds = self.proxy_credentials.read().await.is_some();
-                        let _ = network::install_domain_filter(
+            let filter = self.domain_filter.read().await.clone();
+            let has_proxy_creds = self.proxy_credentials.read().await.is_some();
+            let controls_active = filter.is_some() || has_proxy_creds;
+            let setup_result = if let Some(ref mut mgr) = self.browser {
+                async {
+                    let attach: AttachToTargetResult = mgr
+                        .client
+                        .send_command_typed(
+                            "Target.attachToTarget",
+                            &AttachToTargetParams {
+                                target_id: te.target_info.target_id.clone(),
+                                flatten: true,
+                            },
+                            None,
+                        )
+                        .await?;
+                    mgr.prepare_domains_pub(&attach.session_id).await?;
+                    if controls_active {
+                        install_network_controls_for_session(
                             &mgr.client,
                             &attach.session_id,
-                            &filter.allowed_domains,
+                            filter.as_ref(),
                             has_proxy_creds,
                         )
-                        .await;
+                        .await?;
+                    }
+
+                    let mut page_url = te.target_info.url.clone();
+                    if let Some(ref filter) = filter {
+                        if should_blank_existing_url(&page_url, filter) {
+                            let _ = mgr
+                                .client
+                                .send_command(
+                                    "Page.navigate",
+                                    Some(json!({ "url": "about:blank" })),
+                                    Some(&attach.session_id),
+                                )
+                                .await;
+                            page_url = "about:blank".to_string();
+                        }
                     }
 
                     let tab_id = mgr.assign_tab_id();
@@ -808,12 +811,22 @@ impl DaemonState {
                         tab_id,
                         label: None,
                         target_id: te.target_info.target_id.clone(),
-                        session_id: attach.session_id,
-                        url: te.target_info.url.clone(),
+                        session_id: attach.session_id.clone(),
+                        url: page_url,
                         title: te.target_info.title.clone(),
                         target_type: te.target_info.target_type.clone(),
                     });
+                    mgr.resume_if_waiting_pub(&attach.session_id).await
                 }
+                .await
+            } else {
+                Ok(())
+            };
+            if let Err(error) = setup_result {
+                if controls_active {
+                    return close_after_network_control_failure(self, error).await;
+                }
+                eprintln!("Warning: failed to prepare new page session: {}", error);
             }
         }
 
@@ -823,6 +836,8 @@ impl DaemonState {
                 mgr.update_page_target_info(&te.target_info);
             }
         }
+
+        Ok(())
     }
 
     fn drain_cdp_events(&mut self) -> DrainedEvents {
@@ -1521,6 +1536,20 @@ pub(crate) async fn close_current_browser(state: &mut DaemonState) -> Result<(),
     Ok(())
 }
 
+async fn close_after_network_control_failure(
+    state: &mut DaemonState,
+    error: String,
+) -> Result<(), String> {
+    let close_error = close_current_browser(state).await.err();
+    Err(match close_error {
+        Some(close_error) => format!(
+            "Failed to install browser network controls: {} (also failed to close browser: {})",
+            error, close_error
+        ),
+        None => format!("Failed to install browser network controls: {}", error),
+    })
+}
+
 fn provider_plugin_launch_options_from_command(cmd: &Value) -> Value {
     let mut options = serde_json::Map::new();
     if let Some(headless) = cmd.get("headless").and_then(|v| v.as_bool()) {
@@ -1664,7 +1693,9 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
     }
 
     // Drain and apply pending CDP events (console, errors, screencast frames, target lifecycle)
-    state.drain_cdp_events_background().await;
+    if let Err(e) = state.drain_cdp_events_background().await {
+        return error_response(&id, &super::browser::to_ai_friendly_error(&e));
+    }
 
     // Keep element resolution in sync with the `frame` selection (see
     // element::set_active_frame for why this is mirrored).
@@ -2044,7 +2075,16 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
 
     // Re-drain so a dialog opened by THIS command is reflected in the warning
     // below; events are otherwise only drained at the start of a command.
-    state.drain_cdp_events_background().await;
+    if let Err(e) = state.drain_cdp_events_background().await {
+        resp = error_response(&id, &super::browser::to_ai_friendly_error(&e));
+        inject_lifecycle(
+            &mut resp,
+            state,
+            lifecycle_reused,
+            lifecycle_launched,
+            lifecycle_relaunched_browser,
+        );
+    }
 
     // Auto-report pending JavaScript dialog so agents know why commands may hang
     if action != "dialog" {
@@ -2145,6 +2185,29 @@ fn network_control_session_ids(mgr: &BrowserManager) -> Result<Vec<String>, Stri
     network_control_session_ids_from_pages(&pages, active_session_id)
 }
 
+fn should_blank_existing_url(url: &str, filter: &DomainFilter) -> bool {
+    if url.is_empty() || url == "about:blank" {
+        return false;
+    }
+    url::Url::parse(url)
+        .ok()
+        .and_then(|parsed| {
+            parsed
+                .host_str()
+                .map(|hostname| !filter.is_allowed(hostname))
+        })
+        .unwrap_or(false)
+}
+
+fn check_url_allowed_by_filter(filter: Option<&DomainFilter>, url: &str) -> Result<(), String> {
+    if let Some(filter) = filter {
+        if url != "about:blank" {
+            filter.check_url(url)?;
+        }
+    }
+    Ok(())
+}
+
 async fn install_network_controls_for_session(
     client: &CdpClient,
     session_id: &str,
@@ -2178,7 +2241,7 @@ async fn install_active_network_controls(
     let session_ids = network_control_session_ids(mgr)?;
 
     for session_id in session_ids {
-        mgr.enable_domains_pub(&session_id).await?;
+        mgr.prepare_domains_pub(&session_id).await?;
         install_network_controls_for_session(
             &mgr.client,
             &session_id,
@@ -2186,6 +2249,7 @@ async fn install_active_network_controls(
             handle_auth_requests,
         )
         .await?;
+        mgr.resume_if_waiting_pub(&session_id).await?;
     }
 
     if let Some(ref filter) = filter {
@@ -2200,14 +2264,7 @@ async fn install_network_controls_or_close(
     handle_auth_requests: bool,
 ) -> Result<(), String> {
     if let Err(error) = install_active_network_controls(state, handle_auth_requests).await {
-        let close_error = close_current_browser(state).await.err();
-        return Err(match close_error {
-            Some(close_error) => format!(
-                "Failed to install browser network controls: {} (also failed to close browser: {})",
-                error, close_error
-            ),
-            None => format!("Failed to install browser network controls: {}", error),
-        });
+        return close_after_network_control_failure(state, error).await;
     }
     Ok(())
 }
@@ -5424,8 +5481,12 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
         .filter(|s| !s.is_empty());
 
     let viewport = state.viewport;
+    let domain_filter = state.domain_filter.read().await.clone();
+    if let Some(url) = recording_url {
+        check_url_allowed_by_filter(domain_filter.as_ref(), url)?;
+    }
 
-    let (client, new_session_id) = {
+    let (client, new_session_id, nav_url) = {
         let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
         let old_session_id = mgr.active_session_id()?.to_string();
 
@@ -5437,6 +5498,7 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
                 .await
                 .unwrap_or_else(|_| "about:blank".to_string())
         };
+        check_url_allowed_by_filter(domain_filter.as_ref(), &nav_url)?;
 
         // Capture current cookies
         let cookies_result = mgr
@@ -5479,7 +5541,7 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
             .await?;
 
         let new_session_id = attach_result.session_id.clone();
-        mgr.enable_domains_pub(&new_session_id).await?;
+        mgr.prepare_domains_pub(&new_session_id).await?;
 
         // Re-apply download behavior to the recording context.
         // Without this, downloads in the recording context are silently dropped
@@ -5536,30 +5598,28 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
             label: None,
             target_id: create_result.target_id,
             session_id: new_session_id.clone(),
-            url: nav_url.clone(),
+            url: "about:blank".to_string(),
             title: String::new(),
             target_type: "page".to_string(),
         });
 
+        (mgr.client.clone(), new_session_id, nav_url)
+    };
+
+    let has_proxy_creds = state.proxy_credentials.read().await.is_some();
+    install_network_controls_or_close(state, has_proxy_creds).await?;
+
+    {
+        let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
         if let Some((w, h, scale, mobile)) = viewport {
             let _ = mgr.set_viewport(w, h, scale, mobile).await;
         }
 
-        // Navigate to URL
+        // Navigate only after domain filtering and WebRTC containment are active.
         if nav_url != "about:blank" {
-            let _ = mgr
-                .client
-                .send_command(
-                    "Page.navigate",
-                    Some(json!({ "url": nav_url })),
-                    Some(&new_session_id),
-                )
-                .await;
-            tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+            mgr.navigate(&nav_url, WaitUntil::Load).await?;
         }
-
-        (mgr.client.clone(), new_session_id)
-    };
+    }
 
     let result = recording::recording_start(&mut state.recording_state, path)?;
     state.start_recording_task(client, new_session_id).await?;
@@ -5592,6 +5652,13 @@ async fn handle_recording_restart(cmd: &Value, state: &mut DaemonState) -> Resul
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .map(String::from);
+
+    {
+        let domain_filter = state.domain_filter.read().await;
+        if let Some(ref url) = recording_url {
+            check_url_allowed_by_filter(domain_filter.as_ref(), url)?;
+        }
+    }
 
     let _ = state.stop_recording_task().await;
     let previous_path = if state.recording_state.active {
@@ -7766,50 +7833,58 @@ async fn handle_waitfordownload(cmd: &Value, state: &DaemonState) -> Result<Valu
 }
 
 async fn handle_window_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
+    let tab_id = {
+        let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
 
-    // Create a new browser context
-    let context_result = mgr
-        .client
-        .send_command_no_params("Target.createBrowserContext", None)
-        .await?;
-    let context_id = context_result
-        .get("browserContextId")
-        .and_then(|v| v.as_str())
-        .ok_or("Failed to create browser context")?
-        .to_string();
+        // Create a new browser context
+        let context_result = mgr
+            .client
+            .send_command_no_params("Target.createBrowserContext", None)
+            .await?;
+        let context_id = context_result
+            .get("browserContextId")
+            .and_then(|v| v.as_str())
+            .ok_or("Failed to create browser context")?
+            .to_string();
 
-    let create_result: super::cdp::types::CreateTargetResult = mgr
-        .client
-        .send_command_typed(
-            "Target.createTarget",
-            &json!({ "url": "about:blank", "browserContextId": context_id }),
-            None,
-        )
-        .await?;
+        let create_result: super::cdp::types::CreateTargetResult = mgr
+            .client
+            .send_command_typed(
+                "Target.createTarget",
+                &json!({ "url": "about:blank", "browserContextId": context_id }),
+                None,
+            )
+            .await?;
 
-    let attach: super::cdp::types::AttachToTargetResult = mgr
-        .client
-        .send_command_typed(
-            "Target.attachToTarget",
-            &super::cdp::types::AttachToTargetParams {
-                target_id: create_result.target_id.clone(),
-                flatten: true,
-            },
-            None,
-        )
-        .await?;
+        let attach: super::cdp::types::AttachToTargetResult = mgr
+            .client
+            .send_command_typed(
+                "Target.attachToTarget",
+                &super::cdp::types::AttachToTargetParams {
+                    target_id: create_result.target_id.clone(),
+                    flatten: true,
+                },
+                None,
+            )
+            .await?;
 
-    let tab_id = mgr.assign_tab_id();
-    mgr.add_page(super::browser::PageInfo {
-        tab_id,
-        label: None,
-        target_id: create_result.target_id,
-        session_id: attach.session_id,
-        url: "about:blank".to_string(),
-        title: String::new(),
-        target_type: "page".to_string(),
-    });
+        mgr.prepare_domains_pub(&attach.session_id).await?;
+
+        let tab_id = mgr.assign_tab_id();
+        mgr.add_page(super::browser::PageInfo {
+            tab_id,
+            label: None,
+            target_id: create_result.target_id,
+            session_id: attach.session_id,
+            url: "about:blank".to_string(),
+            title: String::new(),
+            target_type: "page".to_string(),
+        });
+        tab_id
+    };
+
+    let has_proxy_creds = state.proxy_credentials.read().await.is_some();
+    install_network_controls_or_close(state, has_proxy_creds).await?;
 
     if let Some(viewport) = cmd.get("viewport") {
         let width = viewport
@@ -7820,6 +7895,7 @@ async fn handle_window_new(cmd: &Value, state: &mut DaemonState) -> Result<Value
             .get("height")
             .and_then(|v| v.as_i64())
             .unwrap_or(720) as i32;
+        let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
         mgr.set_viewport(width, height, 1.0, false).await?;
 
         // Update stream server viewport
@@ -7828,7 +7904,11 @@ async fn handle_window_new(cmd: &Value, state: &mut DaemonState) -> Result<Value
         }
     }
 
-    let total = mgr.page_count();
+    let total = state
+        .browser
+        .as_ref()
+        .ok_or("Browser not launched")?
+        .page_count();
     state.ref_map.clear();
 
     Ok(json!({
@@ -10308,6 +10388,60 @@ mod tests {
             .unwrap()
             .contains("Browser not launched"));
         assert!(state.browser.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_recording_start_rejects_disallowed_url_before_browser() {
+        let mut state = DaemonState::new();
+        {
+            let mut df = state.domain_filter.write().await;
+            *df = Some(DomainFilter::new("example.com"));
+        }
+
+        let error = handle_recording_start(
+            &json!({
+                "action": "recording_start",
+                "id": "record-denied",
+                "path": "/tmp/agent-browser-denied.webm",
+                "url": "https://evil.example/private"
+            }),
+            &mut state,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.contains("evil.example"), "got: {}", error);
+        assert!(error.contains("allowed domains"), "got: {}", error);
+        assert!(state.browser.is_none());
+        assert!(!state.recording_state.active);
+    }
+
+    #[tokio::test]
+    async fn test_recording_restart_rejects_disallowed_url_before_state_changes() {
+        let mut state = DaemonState::new();
+        {
+            let mut df = state.domain_filter.write().await;
+            *df = Some(DomainFilter::new("example.com"));
+        }
+        state.recording_state.active = true;
+        state.recording_state.output_path = "/tmp/current.webm".to_string();
+
+        let error = handle_recording_restart(
+            &json!({
+                "action": "recording_restart",
+                "id": "record-restart-denied",
+                "path": "/tmp/next.webm",
+                "url": "https://evil.example/private"
+            }),
+            &mut state,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.contains("evil.example"), "got: {}", error);
+        assert!(error.contains("allowed domains"), "got: {}", error);
+        assert!(state.recording_state.active);
+        assert_eq!(state.recording_state.output_path, "/tmp/current.webm");
     }
 
     #[tokio::test]

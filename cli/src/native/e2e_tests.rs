@@ -2498,6 +2498,23 @@ async fn e2e_domain_filter() {
         error
     );
 
+    let resp = execute_command(
+        &json!({ "id": "1-window", "action": "window_new" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({
+            "id": "1-window-rtc", "action": "evaluate",
+            "script": "(() => { try { new RTCPeerConnection({iceServers:[{urls:'stun:secret.blocked.com:3478'}]}); return 'NOT_BLOCKED'; } catch (error) { return error.name; } })()",
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], "SecurityError");
+
     // Allowed domain
     let resp = execute_command(
         &json!({ "id": "2", "action": "navigate", "url": "https://example.com" }),
