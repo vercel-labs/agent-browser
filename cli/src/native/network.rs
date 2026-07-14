@@ -253,11 +253,19 @@ fn build_domain_filter_script(allowed_domains: &[String]) -> String {
                     return host !== '' && _isDomainAllowed(host);
                 }};
                 const _sanitizeRtcConfig = (config) => {{
-                    if (!config || config.iceServers == null) return config;
-                    const servers = Array.from(config.iceServers);
+                    if (config == null) return config;
+                    // Read each field once, then hand Chrome a rebuilt object of
+                    // plain values so a getter can't feed Chrome a value we never
+                    // saw (TOCTOU). The null/absent paths rebuild too, so an
+                    // iceServers/urls getter can't return null to us and a host
+                    // to Chrome.
+                    const iceServers = config.iceServers;
+                    if (iceServers == null) return Object.assign({{}}, config, {{ iceServers: iceServers }});
+                    const servers = Array.from(iceServers);
                     const outServers = servers.map((server) => {{
-                        if (!server || server.urls == null) return server;
+                        if (server == null) return server;
                         const raw = server.urls;
+                        if (raw == null) return Object.assign({{}}, server, {{ urls: raw }});
                         const list = Array.isArray(raw) ? Array.from(raw) : [raw];
                         const urls = list.map((entry) => {{
                             const s = String(entry);
@@ -573,10 +581,11 @@ mod tests {
         assert!(script.contains("stuns?|turns?"));
         assert!(script.contains("setConfiguration"));
         assert!(script.contains("RTCPeerConnection ICE server blocked"));
-        // Hardening: coerce like WebIDL, snapshot the config, reject userinfo.
+        // Hardening: coerce like WebIDL, snapshot the config once, reject userinfo.
         assert!(script.contains("String(raw)"));
         assert!(script.contains("String(entry)"));
-        assert!(script.contains("Array.from(config.iceServers)"));
+        assert!(script.contains("const iceServers = config.iceServers"));
+        assert!(script.contains("Array.from(iceServers)"));
         assert!(script.contains("indexOf('@')"));
     }
 
