@@ -1,0 +1,82 @@
+# Eve Extension
+
+`@agent-browser/eve` mounts the full agent-browser tool set into an [Eve](https://eve.dev) agent. The tools run `agent-browser` inside the agent sandbox, so the browser process, downloads, screenshots, and state stay out of the Next.js runtime.
+
+## Install
+
+```bash
+pnpm add @agent-browser/eve
+```
+
+`eve` is a peer dependency and should already be present in an Eve app. Add `@agent-browser/sandbox` directly too if your sandbox bootstrap imports the preinstall helpers shown below.
+
+```bash
+pnpm add @agent-browser/sandbox
+```
+
+## Mount
+
+Create an extension mount under `agent/extensions/`. The file name becomes the tool namespace.
+
+```ts
+// agent/extensions/browser.ts
+import browser from "@agent-browser/eve";
+
+export default browser({
+  allowedDomains: ["example.com", "*.example.com"],
+  maxOutputChars: 50000,
+});
+```
+
+The agent gets namespaced tools such as `browser__navigate`, `browser__snapshot`, `browser__click`, `browser__fill`, `browser__find`, `browser__screenshot`, `browser__console`, and `browser__network_requests`.
+
+## Sandbox bootstrap
+
+The extension can install `agent-browser`, Chromium, and required Linux libraries on first tool use. For production, install them in the Eve sandbox template so sessions start warm.
+
+```ts
+// agent/sandbox.ts
+import { agentBrowserRevalidationKey, installAgentBrowser } from "@agent-browser/sandbox/eve";
+import { defineSandbox } from "eve/sandbox";
+import { vercel } from "eve/sandbox/vercel";
+
+export default defineSandbox({
+  backend: vercel({ resources: { vcpus: 2 } }),
+  revalidationKey: () => agentBrowserRevalidationKey(),
+  async bootstrap({ use }) {
+    const sandbox = await use();
+    await installAgentBrowser(sandbox);
+  },
+});
+```
+
+## Configuration
+
+Common options:
+
+- `allowedDomains` restricts navigation and subresources.
+- `contentBoundaries` wraps page output in boundary markers.
+- `maxOutputChars` truncates large page output.
+- `inlineScreenshots` embeds screenshots as data URLs for channels that can render them.
+- `autoInstall`, `installSpec`, `installBrowser`, and `installSystemDependencies` control first-use installation.
+- `session` and `sessionPrefix` control browser session naming.
+- `binary` points at the `agent-browser` executable inside the sandbox.
+- `proxy` configures browser proxy use.
+
+## Agent workflow
+
+Have the agent navigate, snapshot, then act on snapshot refs. Snapshot refs like `[ref=e12]` become `@e12` selectors for interaction tools.
+
+```text
+Inspect https://example.com and summarize what is visible.
+```
+
+For reading articles or docs, prefer `browser__read`. For apps, use `browser__snapshot` before interaction and resnapshot after page changes.
+
+## Security
+
+Cookie, storage, and saved-auth-state commands are intentionally not exposed by the extension because they can reveal credential material to the model. Use standard Eve extension overrides when you need to disable a tool, add approval requirements, or provide an app-specific guarded tool.
+
+## Example
+
+See [`examples/eve`](https://github.com/vercel-labs/agent-browser/tree/main/examples/eve) for a complete Next.js Eve app with the extension mounted.

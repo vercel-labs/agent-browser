@@ -27,7 +27,35 @@ interface CommandEnvelope<TData> {
 export const SELECTOR_HINT =
   'Element selector: a ref from the snapshot tool like "@e12" (most reliable), a CSS selector like "#login .submit", "text=Sign in", or "xpath=//button[1]".';
 
+/**
+ * Upper bound on acquiring the sandbox session and on a single command run.
+ * The sandbox layer can occasionally wedge while (re)opening a session; an
+ * unbounded await leaves the whole turn stuck on a running tool forever.
+ * Generous enough for a cold template-backed session create.
+ */
+const SANDBOX_DEADLINE_MS = 180_000;
+
 const pendingInstalls = new Map<string, Promise<void>>();
+
+async function withDeadline<T>(work: PromiseLike<T>, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          reject(
+            new Error(
+              `${label} did not respond within ${SANDBOX_DEADLINE_MS / 1000}s. The browser sandbox may be starting up or unavailable — try again shortly.`,
+            ),
+          );
+        }, SANDBOX_DEADLINE_MS);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 /**
  * Run an agent-browser command in the eve sandbox and return the parsed
@@ -46,7 +74,10 @@ export async function runBrowser<TData = unknown>(
     binary: config.binary,
     session: config.session ?? defaultSessionName(config.sessionPrefix, sandbox.id),
   });
-  const raw = await sandbox.run({ abortSignal: ctx.abortSignal, command });
+  const raw = await withDeadline(
+    sandbox.run({ abortSignal: ctx.abortSignal, command }),
+    "The browser command",
+  );
   const result = createAgentBrowserCommandResult<CommandEnvelope<TData>>({
     command,
     exitCode: raw.exitCode,
@@ -65,7 +96,7 @@ export async function runBrowser<TData = unknown>(
 }
 
 async function requireSandbox(ctx: BrowserToolContext): Promise<EveSandboxSession> {
-  const sandbox = await ctx.getSandbox();
+  const sandbox = await withDeadline(ctx.getSandbox(), "The sandbox session");
   if (sandbox === null || sandbox === undefined) {
     throw new Error(
       "The browser tools require an eve sandbox. Configure agent/sandbox.ts in the consuming agent.",

@@ -48,6 +48,7 @@ export const navigation: NavSection[] = [
       { name: "iOS Simulator", href: "/ios" },
       { name: "Security", href: "/security" },
       { name: "Next.js + Vercel", href: "/next" },
+      { name: "Eve Extension", href: "/eve" },
       { name: "Native Mode", href: "/native-mode" },
     ],
   },

@@ -21,6 +21,7 @@ jobs:
     outputs:
       should_release: ${{ steps.check.outputs.should_release }}
       should_publish_sandbox: ${{ steps.check.outputs.should_publish_sandbox }}
+      should_publish_eve: ${{ steps.check.outputs.should_publish_eve }}
       needs_github_release: ${{ steps.check.outputs.needs_github_release }}
       version: ${{ steps.check.outputs.version }}
     steps:
@@ -37,13 +38,17 @@ jobs:
         run: |
           LOCAL_VERSION=$(node -p "require('./package.json').version")
           SANDBOX_VERSION=$(node -p "require('./packages/@agent-browser/sandbox/package.json').version")
+          EVE_VERSION=$(node -p "require('./packages/@agent-browser/eve/package.json').version")
           echo "Local version: $LOCAL_VERSION"
           echo "Sandbox package version: $SANDBOX_VERSION"
+          echo "Eve package version: $EVE_VERSION"
 
           NPM_VERSION=$(npm view agent-browser version 2>/dev/null || echo "0.0.0")
           SANDBOX_NPM_VERSION=$(npm view @agent-browser/sandbox version 2>/dev/null || echo "0.0.0")
+          EVE_NPM_VERSION=$(npm view @agent-browser/eve version 2>/dev/null || echo "0.0.0")
           echo "npm version: $NPM_VERSION"
           echo "@agent-browser/sandbox npm version: $SANDBOX_NPM_VERSION"
+          echo "@agent-browser/eve npm version: $EVE_NPM_VERSION"
 
           if [ "$LOCAL_VERSION" != "$NPM_VERSION" ]; then
             echo "Version changed: $NPM_VERSION -> $LOCAL_VERSION"
@@ -70,6 +75,13 @@ jobs:
           else
             echo "Sandbox package version unchanged on npm, skipping publish"
             echo "should_publish_sandbox=false" >> "$GITHUB_OUTPUT"
+          fi
+          if [ "$EVE_VERSION" != "$EVE_NPM_VERSION" ]; then
+            echo "Eve package version changed: $EVE_NPM_VERSION -> $EVE_VERSION"
+            echo "should_publish_eve=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Eve package version unchanged on npm, skipping publish"
+            echo "should_publish_eve=false" >> "$GITHUB_OUTPUT"
           fi
           echo "version=$LOCAL_VERSION" >> "$GITHUB_OUTPUT"
         env:
@@ -335,15 +347,60 @@ jobs:
         working-directory: packages/@agent-browser/sandbox
         run: pnpm publish --provenance --access public --no-git-checks
 
+  publish-eve:
+    name: Publish Eve package to npm
+    needs: [check-release, publish, publish-sandbox]
+    if: >-
+      always() &&
+      needs.check-release.outputs.should_publish_eve == 'true' &&
+      (
+        needs.check-release.outputs.should_release != 'true' ||
+        needs.publish.result == 'success'
+      ) &&
+      (
+        needs.check-release.outputs.should_publish_sandbox != 'true' ||
+        needs.publish-sandbox.result == 'success'
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: Release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Sync version
+        run: pnpm run version:sync
+
+      - name: Publish Eve package to npm
+        working-directory: packages/@agent-browser/eve
+        run: pnpm publish --provenance --access public --no-git-checks
+
   github-release:
     name: Create GitHub Release
-    needs: [check-release, build-binaries, publish, publish-sandbox]
+    needs: [check-release, build-binaries, publish, publish-sandbox, publish-eve]
     if: >-
       always() &&
       needs.build-binaries.result == 'success' &&
       needs.check-release.outputs.needs_github_release == 'true' &&
       (needs.publish.result == 'success' || needs.publish.result == 'skipped') &&
-      (needs.publish-sandbox.result == 'success' || needs.publish-sandbox.result == 'skipped')
+      (needs.publish-sandbox.result == 'success' || needs.publish-sandbox.result == 'skipped') &&
+      (needs.publish-eve.result == 'success' || needs.publish-eve.result == 'skipped')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

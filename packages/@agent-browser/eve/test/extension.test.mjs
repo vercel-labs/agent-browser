@@ -197,6 +197,39 @@ test("wait_for builds each condition variant", async () => {
   assert.ok(waits[4].includes("wait 250"), waits[4]);
 });
 
+test("wait_for caps every condition with a timeout and reports outcomes", async () => {
+  resetConfig();
+  const sandbox = fakeSandbox({ id: "capped-waits" });
+  const outcome = await tools.wait_for.execute({ selector: "#app" }, fakeCtx(sandbox));
+  assert.ok(sandbox.commands.at(-1).includes("wait '#app' --timeout 10000"), sandbox.commands.at(-1));
+  assert.equal(outcome.satisfied, true);
+  assert.equal(outcome.condition, "element #app");
+});
+
+test("wait_for treats a timeout as an outcome, not an error", async () => {
+  resetConfig();
+  const sandbox = fakeSandbox({
+    id: "timeout-outcome",
+    respond: () => ({
+      exitCode: 1,
+      stdout: JSON.stringify({
+        success: false,
+        data: null,
+        error: "Wait timed out after 10000ms",
+      }),
+    }),
+  });
+  const outcome = await tools.wait_for.execute(
+    { loadState: "networkidle", timeoutMs: 10_000 },
+    fakeCtx(sandbox),
+  );
+  assert.deepEqual(outcome, {
+    condition: "load state networkidle",
+    satisfied: false,
+    timedOut: true,
+  });
+});
+
 test("get validates selector and attribute requirements", async () => {
   resetConfig();
   const ctx = fakeCtx(fakeSandbox());
@@ -391,6 +424,20 @@ test("screenshot skips inlining when disabled in config", async () => {
   );
   assert.equal(output.imageDataUrl, undefined);
   resetConfig();
+});
+
+test("errors instead of hanging when the sandbox stops responding", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  resetConfig({ autoInstall: false });
+  const sandbox = { id: "wedged", run: () => new Promise(() => {}) };
+  const rejection = assert.rejects(
+    () => tools.close.execute({}, fakeCtx(sandbox)),
+    /did not respond within 180s/,
+  );
+  // Let the async chain reach sandbox.run and arm the deadline timer.
+  await new Promise((resolve) => setImmediate(resolve));
+  t.mock.timers.tick(180_001);
+  await rejection;
 });
 
 test("mount factory validates config", () => {
