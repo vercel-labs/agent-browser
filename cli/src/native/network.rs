@@ -167,8 +167,25 @@ pub async fn install_domain_filter_script(
         return Ok(());
     }
 
+    let script = build_domain_filter_script(allowed_domains);
+
+    client
+        .send_command(
+            "Page.addScriptToEvaluateOnNewDocument",
+            Some(json!({ "source": script })),
+            Some(session_id),
+        )
+        .await?;
+
+    Ok(())
+}
+
+/// Build the init-script source that patches network-capable constructors
+/// (`WebSocket`, `EventSource`, `sendBeacon`, `RTCPeerConnection`) to enforce
+/// the domain allowlist client-side. Pure so it can be asserted on in tests.
+fn build_domain_filter_script(allowed_domains: &[String]) -> String {
     let domains_json = serde_json::to_string(allowed_domains).unwrap_or("[]".to_string());
-    let script = format!(
+    format!(
         r#"(() => {{
             const _allowed = {};
             function _isDomainAllowed(hostname) {{
@@ -211,19 +228,68 @@ pub async fn install_domain_filter_script(
                     return origBeacon.call(navigator, url, data);
                 }};
             }}
+            // RTCPeerConnection STUN/TURN egress bypasses the CDP Fetch layer,
+            // so gate ICE server hosts here. Coerce with String() (matches
+            // WebIDL, so String/toString tricks are caught), validate a copy
+            // and hand that to Chrome (so getter TOCTOU can't diverge), and
+            // fail closed on userinfo and malformed input.
+            const OrigRTC = window.RTCPeerConnection || window.webkitRTCPeerConnection;
+            if (OrigRTC) {{
+                const _iceHostAllowed = (raw) => {{
+                    const u = String(raw).trim();
+                    const m = /^(stuns?|turns?):([\s\S]*)/i.exec(u);
+                    if (!m) return true;
+                    let rest = m[2].split('?')[0].split('#')[0];
+                    if (rest.indexOf('@') !== -1) return false;
+                    let host;
+                    if (rest[0] === '[') {{
+                        const end = rest.indexOf(']');
+                        if (end === -1) return false;
+                        host = rest.slice(1, end);
+                    }} else {{
+                        host = rest.split(':')[0];
+                    }}
+                    host = host.replace(/\.+$/, '');
+                    return host !== '' && _isDomainAllowed(host);
+                }};
+                const _sanitizeRtcConfig = (config) => {{
+                    if (!config || config.iceServers == null) return config;
+                    const servers = Array.from(config.iceServers);
+                    const outServers = servers.map((server) => {{
+                        if (!server || server.urls == null) return server;
+                        const raw = server.urls;
+                        const list = Array.isArray(raw) ? Array.from(raw) : [raw];
+                        const urls = list.map((entry) => {{
+                            const s = String(entry);
+                            for (let part of s.split(',')) {{
+                                part = part.trim();
+                                if (part && !_iceHostAllowed(part)) throw new DOMException('RTCPeerConnection ICE server blocked: ' + part, 'SecurityError');
+                            }}
+                            return s;
+                        }});
+                        return Object.assign({{}}, server, {{ urls: urls }});
+                    }});
+                    return Object.assign({{}}, config, {{ iceServers: outServers }});
+                }};
+                const PatchedRTC = function(config) {{
+                    return new OrigRTC(_sanitizeRtcConfig(config));
+                }};
+                PatchedRTC.prototype = OrigRTC.prototype;
+                // Keep static methods (e.g. generateCertificate) and name.
+                try {{ Object.setPrototypeOf(PatchedRTC, OrigRTC); }} catch(e) {{}}
+                try {{ Object.defineProperty(PatchedRTC, 'name', {{ value: 'RTCPeerConnection' }}); }} catch(e) {{}}
+                const origSetConfig = OrigRTC.prototype && OrigRTC.prototype.setConfiguration;
+                if (origSetConfig) {{
+                    OrigRTC.prototype.setConfiguration = function(config) {{
+                        return origSetConfig.call(this, _sanitizeRtcConfig(config));
+                    }};
+                }}
+                window.RTCPeerConnection = PatchedRTC;
+                if (window.webkitRTCPeerConnection) window.webkitRTCPeerConnection = PatchedRTC;
+            }}
         }})()"#,
         domains_json,
-    );
-
-    client
-        .send_command(
-            "Page.addScriptToEvaluateOnNewDocument",
-            Some(json!({ "source": script })),
-            Some(session_id),
-        )
-        .await?;
-
-    Ok(())
+    )
 }
 
 /// Enable Fetch-based network interception for domain filtering.
@@ -491,6 +557,27 @@ mod tests {
     fn test_parse_domain_list() {
         let domains = parse_domain_list("A.com, B.com , *.C.com");
         assert_eq!(domains, vec!["a.com", "b.com", "*.c.com"]);
+    }
+
+    #[test]
+    fn test_domain_filter_script_patches_all_network_apis() {
+        let script = build_domain_filter_script(&["example.com".to_string()]);
+        // Allowlist is embedded and every network-capable constructor is wrapped.
+        assert!(script.contains("[\"example.com\"]"));
+        assert!(script.contains("window.WebSocket"));
+        assert!(script.contains("window.EventSource"));
+        assert!(script.contains("navigator.sendBeacon"));
+        // RTCPeerConnection guard.
+        assert!(script.contains("window.RTCPeerConnection = PatchedRTC"));
+        assert!(script.contains("webkitRTCPeerConnection"));
+        assert!(script.contains("stuns?|turns?"));
+        assert!(script.contains("setConfiguration"));
+        assert!(script.contains("RTCPeerConnection ICE server blocked"));
+        // Hardening: coerce like WebIDL, snapshot the config, reject userinfo.
+        assert!(script.contains("String(raw)"));
+        assert!(script.contains("String(entry)"));
+        assert!(script.contains("Array.from(config.iceServers)"));
+        assert!(script.contains("indexOf('@')"));
     }
 
     #[test]

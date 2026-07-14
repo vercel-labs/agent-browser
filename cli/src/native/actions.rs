@@ -2840,6 +2840,32 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         no_xvfb: no_xvfb_from_launch_cmd(cmd),
     };
 
+    // When domain filtering is active, stop WebRTC from using non-proxied UDP
+    // so STUN/TURN can't exfiltrate around the CDP Fetch layer. Added before the
+    // launch hash so toggling the filter forces a relaunch; skipped if the user
+    // already set the policy.
+    let domain_filter_active = cmd
+        .get("allowedDomains")
+        .and_then(|v| v.as_str())
+        .map(|s| !DomainFilter::new(s).allowed_domains.is_empty())
+        .unwrap_or(false)
+        || {
+            let df = state.domain_filter.read().await;
+            df.as_ref()
+                .map(|f| !f.allowed_domains.is_empty())
+                .unwrap_or(false)
+        };
+    if domain_filter_active
+        && !launch_options
+            .args
+            .iter()
+            .any(|a| a.starts_with("--force-webrtc-ip-handling-policy"))
+    {
+        launch_options
+            .args
+            .push("--force-webrtc-ip-handling-policy=disable_non_proxied_udp".to_string());
+    }
+
     state.plugin_init_scripts.clear();
     let local_launch =
         cdp_url.is_none() && cdp_port.is_none() && !auto_connect && provider_name.is_none();
