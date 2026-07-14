@@ -35,6 +35,7 @@ const CONTENT_ROLES: &[&str] = &[
     "gridcell",
     "columnheader",
     "rowheader",
+    "LayoutTableCell",
     "listitem",
     "article",
     "region",
@@ -343,9 +344,10 @@ pub async fn take_snapshot(
 
     let mut nodes_with_refs: Vec<(usize, usize)> = Vec::new();
 
-    // Pre-collect cursor-interactive elements so we can mark them with refs during tree building
+    // Pre-collect cursor-interactive elements so we can mark them with refs during tree building.
+    // Pass effective_session_id and frame_id so elements inside iframes are detected correctly.
     let cursor_elements: HashMap<i64, CursorElementInfo> =
-        find_cursor_interactive_elements(client, session_id)
+        find_cursor_interactive_elements(client, session_id, effective_session_id, frame_id)
             .await
             .unwrap_or_default();
 
@@ -400,6 +402,25 @@ pub async fn take_snapshot(
 
         tree_nodes[*idx].has_ref = true;
         tree_nodes[*idx].ref_id = Some(ref_id);
+    }
+
+    // Promote cursor-interactive nodes that were ignored in the AX tree.
+    // Ignored nodes have role="" (empty) but may have a backendNodeId in
+    // cursor_elements (e.g. a <table onclick="..."> that Chrome marks as
+    // a layout table and ignores). Give them role="generic" and fill in
+    // name from the cursor element's text so they render in the snapshot.
+    for node in tree_nodes.iter_mut() {
+        if !node.role.is_empty() || !node.has_ref {
+            continue;
+        }
+        if let Some(bid) = node.backend_node_id {
+            if let Some(cursor_info) = cursor_elements.get(&bid) {
+                node.role = "generic".to_string();
+                if node.name.is_empty() && !cursor_info.text.is_empty() {
+                    node.name = cursor_info.text.clone();
+                }
+            }
+        }
     }
 
     // Populate cursor_info for ref-bearing nodes
@@ -609,7 +630,34 @@ async fn resolve_iframe_frame_id(
 async fn find_cursor_interactive_elements(
     client: &CdpClient,
     session_id: &str,
+    effective_session_id: &str,
+    frame_id: Option<&str>,
 ) -> Result<HashMap<i64, CursorElementInfo>, String> {
+    // Resolve the session and optional contextId to use for JS evaluation.
+    // - Cross-origin iframe: effective_session_id is a dedicated CDP session;
+    //   Runtime.evaluate on it runs in that iframe's JS context automatically.
+    // - Same-origin iframe: effective_session_id == session_id but frame_id is
+    //   present; use Page.createIsolatedWorld to get a contextId for that frame.
+    // - Main frame: use session_id directly, no contextId needed.
+    let same_origin_iframe = frame_id.is_some() && effective_session_id == session_id;
+    let eval_context_id: Option<i64> = if same_origin_iframe {
+        if let Some(fid) = frame_id {
+            client
+                .send_command(
+                    "Page.createIsolatedWorld",
+                    Some(serde_json::json!({ "frameId": fid, "worldName": "__ab_cursor" })),
+                    Some(session_id),
+                )
+                .await
+                .ok()
+                .and_then(|r| r.get("executionContextId").and_then(|v| v.as_i64()))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     // Single JS evaluation that matches the v0.19.0 Node.js findCursorInteractiveElements():
     // - Uses querySelectorAll('*') to walk all elements
     // - Checks getComputedStyle(el).cursor === 'pointer'
@@ -699,17 +747,20 @@ async fn find_cursor_interactive_elements(
 })()
 "#;
 
-    let result: EvaluateResult = client
-        .send_command_typed(
-            "Runtime.evaluate",
-            &EvaluateParams {
-                expression: js.to_string(),
-                return_by_value: Some(true),
-                await_promise: Some(false),
-            },
-            Some(session_id),
-        )
+    // Build the Runtime.evaluate params; include contextId for same-origin iframes.
+    let mut eval_params = serde_json::json!({
+        "expression": js,
+        "returnByValue": true,
+        "awaitPromise": false
+    });
+    if let Some(ctx_id) = eval_context_id {
+        eval_params["contextId"] = serde_json::json!(ctx_id);
+    }
+    let result_raw: Value = client
+        .send_command("Runtime.evaluate", Some(eval_params), Some(effective_session_id))
         .await?;
+    let result: EvaluateResult = serde_json::from_value(result_raw)
+        .map_err(|e| format!("Failed to parse Runtime.evaluate result: {e}"))?;
 
     let elements: Vec<Value> = result
         .result
@@ -721,21 +772,63 @@ async fn find_cursor_interactive_elements(
         return Ok(HashMap::new());
     }
 
-    // Batch-resolve backendNodeIds: use DOM.getDocument to get the root nodeId,
-    // then DOM.querySelectorAll to get all tagged elements in a single call.
-    let doc: Value = client
-        .send_command(
-            "DOM.getDocument",
-            Some(serde_json::json!({ "depth": 0 })),
-            Some(session_id),
-        )
-        .await?;
-
-    let root_node_id = doc
-        .get("root")
-        .and_then(|r| r.get("nodeId"))
-        .and_then(|v| v.as_i64())
-        .ok_or("DOM.getDocument did not return root nodeId")?;
+    // Resolve the root nodeId for DOM.querySelectorAll.
+    // Same-origin iframes need DOM.getFrameOwner to reach the content document;
+    // cross-origin iframes and main frame use DOM.getDocument on their session.
+    let (dom_session, root_node_id) = if same_origin_iframe {
+        let frame_id_str = frame_id.unwrap();
+        let Ok(owner) = client
+            .send_command(
+                "DOM.getFrameOwner",
+                Some(serde_json::json!({ "frameId": frame_id_str })),
+                Some(session_id),
+            )
+            .await
+        else {
+            return Ok(HashMap::new());
+        };
+        let Some(backend_node_id) = owner.get("backendNodeId").and_then(|v| v.as_i64()) else {
+            return Ok(HashMap::new());
+        };
+        let Ok(described) = client
+            .send_command(
+                "DOM.describeNode",
+                Some(serde_json::json!({ "backendNodeId": backend_node_id, "depth": 1 })),
+                Some(session_id),
+            )
+            .await
+        else {
+            return Ok(HashMap::new());
+        };
+        let Some(content_doc_node_id) = described
+            .get("node")
+            .and_then(|n| n.get("contentDocument"))
+            .and_then(|cd| cd.get("nodeId"))
+            .and_then(|v| v.as_i64())
+        else {
+            return Ok(HashMap::new());
+        };
+        (session_id, content_doc_node_id)
+    } else {
+        let Ok(doc) = client
+            .send_command(
+                "DOM.getDocument",
+                Some(serde_json::json!({ "depth": 0 })),
+                Some(effective_session_id),
+            )
+            .await
+        else {
+            return Ok(HashMap::new());
+        };
+        let Some(nid) = doc
+            .get("root")
+            .and_then(|r| r.get("nodeId"))
+            .and_then(|v| v.as_i64())
+        else {
+            return Ok(HashMap::new());
+        };
+        (effective_session_id, nid)
+    };
 
     let query_result: Value = client
         .send_command(
@@ -744,7 +837,7 @@ async fn find_cursor_interactive_elements(
                 "nodeId": root_node_id,
                 "selector": "[data-__ab-ci]"
             })),
-            Some(session_id),
+            Some(dom_session),
         )
         .await?;
 
@@ -761,7 +854,7 @@ async fn find_cursor_interactive_elements(
             client.send_command(
                 "DOM.describeNode",
                 Some(serde_json::json!({ "nodeId": node_id })),
-                Some(session_id),
+                Some(dom_session),
             )
         })
         .collect();
@@ -796,17 +889,17 @@ async fn find_cursor_interactive_elements(
 
     // Clean up the data attributes we injected for backendNodeId resolution.
     let cleanup_js =
-        r#"(function(){ var els = document.querySelectorAll('[data-__ab-ci]'); for (var i = 0; i < els.length; i++) els[i].removeAttribute('data-__ab-ci'); return els.length; })()"#.to_string();
+        r#"(function(){ var els = document.querySelectorAll('[data-__ab-ci]'); for (var i = 0; i < els.length; i++) els[i].removeAttribute('data-__ab-ci'); return els.length; })()"#;
+    let mut cleanup_params = serde_json::json!({
+        "expression": cleanup_js,
+        "returnByValue": true,
+        "awaitPromise": false
+    });
+    if let Some(ctx_id) = eval_context_id {
+        cleanup_params["contextId"] = serde_json::json!(ctx_id);
+    }
     if let Err(e) = client
-        .send_command_typed::<EvaluateParams, EvaluateResult>(
-            "Runtime.evaluate",
-            &EvaluateParams {
-                expression: cleanup_js,
-                return_by_value: Some(true),
-                await_promise: Some(false),
-            },
-            Some(session_id),
-        )
+        .send_command("Runtime.evaluate", Some(cleanup_params), Some(effective_session_id))
         .await
     {
         eprintln!("[agent-browser] Warning: failed to clean up data-__ab-ci attributes: {e}");
