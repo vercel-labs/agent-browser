@@ -2208,6 +2208,69 @@ fn check_url_allowed_by_filter(filter: Option<&DomainFilter>, url: &str) -> Resu
     Ok(())
 }
 
+fn network_controls_required(filter: Option<&DomainFilter>, handle_auth_requests: bool) -> bool {
+    filter.is_some() || handle_auth_requests
+}
+
+fn should_defer_url_until_network_controls(
+    filter: Option<&DomainFilter>,
+    handle_auth_requests: bool,
+    url: Option<&str>,
+) -> Result<bool, String> {
+    let Some(url) = url else {
+        return Ok(false);
+    };
+
+    check_url_allowed_by_filter(filter, url)?;
+    Ok(filter.is_some_and(|filter| !filter.allowed_domains.is_empty()) || handle_auth_requests)
+}
+
+fn ensure_allowed_domains_supported_for_launch(
+    allowed_domains: &[String],
+    cdp_url: Option<&str>,
+    cdp_port: Option<u64>,
+    auto_connect: bool,
+    provider_name: Option<&str>,
+) -> Result<(), String> {
+    if allowed_domains.is_empty() {
+        return Ok(());
+    }
+
+    if cdp_url.is_some() || cdp_port.is_some() {
+        return Err(
+            "--allowed-domains is not supported with --cdp because WebRTC containment cannot be installed before existing page scripts run"
+                .to_string(),
+        );
+    }
+
+    if auto_connect {
+        return Err(
+            "--allowed-domains is not supported with --auto-connect because WebRTC containment cannot be installed before existing page scripts run"
+                .to_string(),
+        );
+    }
+
+    if let Some(provider) = provider_name {
+        match provider.to_lowercase().as_str() {
+            "ios" => {
+                return Err(
+                    "--allowed-domains is not supported with the iOS provider because WebRTC containment cannot be enforced"
+                        .to_string(),
+                );
+            }
+            "safari" => {
+                return Err(
+                    "--allowed-domains is not supported with the Safari provider because WebRTC containment cannot be enforced"
+                        .to_string(),
+                );
+            }
+            _ => {}
+        }
+    }
+
+    Ok(())
+}
+
 async fn install_network_controls_for_session(
     client: &CdpClient,
     session_id: &str,
@@ -2238,6 +2301,9 @@ async fn install_active_network_controls(
         .as_ref()
         .ok_or("Browser is not available for network control installation")?;
     let filter = state.domain_filter.read().await.clone();
+    if !network_controls_required(filter.as_ref(), handle_auth_requests) {
+        return Ok(());
+    }
     let session_ids = network_control_session_ids(mgr)?;
 
     for session_id in session_ids {
@@ -2267,6 +2333,20 @@ async fn install_network_controls_or_close(
         return close_after_network_control_failure(state, error).await;
     }
     Ok(())
+}
+
+async fn install_network_controls_or_resume_prepared_session(
+    state: &mut DaemonState,
+    handle_auth_requests: bool,
+    session_id: &str,
+) -> Result<(), String> {
+    let filter = state.domain_filter.read().await.clone();
+    if network_controls_required(filter.as_ref(), handle_auth_requests) {
+        install_network_controls_or_close(state, handle_auth_requests).await
+    } else {
+        let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+        mgr.resume_if_waiting_pub(session_id).await
+    }
 }
 
 async fn auto_launch(
@@ -2304,6 +2384,13 @@ async fn auto_launch(
     write_extensions_file(&state.session_id);
 
     if let Ok(cdp) = env::var("AGENT_BROWSER_CDP") {
+        ensure_allowed_domains_supported_for_launch(
+            &allowed_domains,
+            Some(cdp.as_str()),
+            None,
+            false,
+            None,
+        )?;
         let mgr = BrowserManager::connect_cdp(&cdp).await?;
         let hash = launch_hash(
             &options,
@@ -2330,6 +2417,7 @@ async fn auto_launch(
     }
 
     if env::var("AGENT_BROWSER_AUTO_CONNECT").is_ok() {
+        ensure_allowed_domains_supported_for_launch(&allowed_domains, None, None, true, None)?;
         let hash = launch_hash(
             &options,
             &allowed_domains,
@@ -2360,6 +2448,13 @@ async fn auto_launch(
     // command arriving before an explicit "launch") honours the provider env.
     if let Ok(provider) = env::var("AGENT_BROWSER_PROVIDER") {
         let p = provider.to_lowercase();
+        ensure_allowed_domains_supported_for_launch(
+            &allowed_domains,
+            None,
+            None,
+            false,
+            Some(p.as_str()),
+        )?;
         // ios/safari are device providers handled via explicit launch command
         if !p.is_empty() && p != "ios" && p != "safari" {
             let conn = providers::connect_provider_with_plugins(&p, &plugins).await?;
@@ -2984,25 +3079,13 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         .unwrap_or(existing_allowed_domains);
     let restrict_webrtc = !allowed_domains.is_empty();
 
-    if restrict_webrtc {
-        if let Some(provider) = provider_name {
-            match provider.to_lowercase().as_str() {
-                "ios" => {
-                    return Err(
-                        "--allowed-domains is not supported with the iOS provider because WebRTC containment cannot be enforced"
-                            .to_string(),
-                    );
-                }
-                "safari" => {
-                    return Err(
-                        "--allowed-domains is not supported with the Safari provider because WebRTC containment cannot be enforced"
-                            .to_string(),
-                    );
-                }
-                _ => {}
-            }
-        }
-    }
+    ensure_allowed_domains_supported_for_launch(
+        &allowed_domains,
+        cdp_url,
+        cdp_port,
+        auto_connect,
+        provider_name,
+    )?;
 
     if let Some(domains) = requested_allowed_domains {
         let mut filter = state.domain_filter.write().await;
@@ -3907,15 +3990,13 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
             })?
             .to_string();
 
-        let defer_url_until_controls = {
-            let df = state.domain_filter.read().await;
-            if let Some(ref filter) = *df {
-                filter.check_url(&href)?;
-                !filter.allowed_domains.is_empty()
-            } else {
-                false
-            }
-        };
+        let domain_filter = state.domain_filter.read().await.clone();
+        let has_proxy_creds = state.proxy_credentials.read().await.is_some();
+        let defer_url_until_controls = should_defer_url_until_network_controls(
+            domain_filter.as_ref(),
+            has_proxy_creds,
+            Some(&href),
+        )?;
 
         state.ref_map.clear();
         {
@@ -3931,7 +4012,6 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
             .await?;
         }
 
-        let has_proxy_creds = state.proxy_credentials.read().await.is_some();
         install_network_controls_or_close(state, has_proxy_creds).await?;
 
         if defer_url_until_controls {
@@ -5117,17 +5197,10 @@ async fn handle_tab_list(state: &DaemonState) -> Result<Value, String> {
 async fn handle_tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let url = cmd.get("url").and_then(|v| v.as_str());
     let label = cmd.get("label").and_then(|v| v.as_str());
-    let defer_url_until_controls = {
-        let df = state.domain_filter.read().await;
-        if let Some(ref filter) = *df {
-            if let Some(url) = url {
-                filter.check_url(url)?;
-            }
-            !filter.allowed_domains.is_empty() && url.is_some()
-        } else {
-            false
-        }
-    };
+    let domain_filter = state.domain_filter.read().await.clone();
+    let has_proxy_creds = state.proxy_credentials.read().await.is_some();
+    let defer_url_until_controls =
+        should_defer_url_until_network_controls(domain_filter.as_ref(), has_proxy_creds, url)?;
 
     state.ref_map.clear();
     state.iframe_sessions.clear();
@@ -5138,7 +5211,6 @@ async fn handle_tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
             .await?
     };
 
-    let has_proxy_creds = state.proxy_credentials.read().await.is_some();
     install_network_controls_or_close(state, has_proxy_creds).await?;
 
     if defer_url_until_controls {
@@ -5616,7 +5688,8 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
     };
 
     let has_proxy_creds = state.proxy_credentials.read().await.is_some();
-    install_network_controls_or_close(state, has_proxy_creds).await?;
+    install_network_controls_or_resume_prepared_session(state, has_proxy_creds, &new_session_id)
+        .await?;
 
     {
         let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
@@ -7842,7 +7915,7 @@ async fn handle_waitfordownload(cmd: &Value, state: &DaemonState) -> Result<Valu
 }
 
 async fn handle_window_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let tab_id = {
+    let (tab_id, session_id) = {
         let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
 
         // Create a new browser context
@@ -7884,16 +7957,17 @@ async fn handle_window_new(cmd: &Value, state: &mut DaemonState) -> Result<Value
             tab_id,
             label: None,
             target_id: create_result.target_id,
-            session_id: attach.session_id,
+            session_id: attach.session_id.clone(),
             url: "about:blank".to_string(),
             title: String::new(),
             target_type: "page".to_string(),
         });
-        tab_id
+        (tab_id, attach.session_id)
     };
 
     let has_proxy_creds = state.proxy_credentials.read().await.is_some();
-    install_network_controls_or_close(state, has_proxy_creds).await?;
+    install_network_controls_or_resume_prepared_session(state, has_proxy_creds, &session_id)
+        .await?;
 
     if let Some(viewport) = cmd.get("viewport") {
         let width = viewport
@@ -11158,6 +11232,45 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
     }
 
     #[test]
+    fn test_network_controls_required_only_when_filter_or_proxy_auth_active() {
+        let filter = DomainFilter::new("example.com");
+        assert!(!network_controls_required(None, false));
+        assert!(network_controls_required(Some(&filter), false));
+        assert!(network_controls_required(None, true));
+    }
+
+    #[test]
+    fn test_defer_new_tab_url_until_proxy_auth_controls_are_active() {
+        assert!(
+            should_defer_url_until_network_controls(None, true, Some("https://example.com"))
+                .unwrap()
+        );
+        assert!(!should_defer_url_until_network_controls(None, true, None).unwrap());
+        assert!(
+            !should_defer_url_until_network_controls(None, false, Some("https://example.com"))
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn test_defer_new_tab_url_checks_domain_filter() {
+        let filter = DomainFilter::new("example.com");
+        assert!(should_defer_url_until_network_controls(
+            Some(&filter),
+            false,
+            Some("https://example.com")
+        )
+        .unwrap());
+        let error = should_defer_url_until_network_controls(
+            Some(&filter),
+            false,
+            Some("https://blocked.com"),
+        )
+        .unwrap_err();
+        assert!(error.contains("blocked.com"), "got: {}", error);
+    }
+
+    #[test]
     fn test_network_control_session_ids_include_all_attached_pages() {
         let pages = vec![
             super::super::browser::PageInfo {
@@ -11235,6 +11348,44 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
             assert!(
                 state.domain_filter.read().await.is_none(),
                 "rejected provider launch should not commit allowedDomains"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_allowed_domains_reject_preexisting_external_cdp_sessions() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_ALLOWED_DOMAINS"]);
+        guard.remove("AGENT_BROWSER_ALLOWED_DOMAINS");
+
+        let cases = [
+            json!({
+                "action": "launch",
+                "cdpUrl": "ws://127.0.0.1:9222/devtools/browser/test",
+                "allowedDomains": ["example.com"]
+            }),
+            json!({
+                "action": "launch",
+                "cdpPort": 9222,
+                "allowedDomains": ["example.com"]
+            }),
+            json!({
+                "action": "launch",
+                "autoConnect": true,
+                "allowedDomains": ["example.com"]
+            }),
+        ];
+
+        for cmd in cases {
+            let mut state = DaemonState::new();
+            let error = handle_launch(&cmd, &mut state).await.unwrap_err();
+            assert!(
+                error.contains("existing page scripts"),
+                "unexpected error: {}",
+                error
+            );
+            assert!(
+                state.domain_filter.read().await.is_none(),
+                "rejected external launch should not commit allowedDomains"
             );
         }
     }
