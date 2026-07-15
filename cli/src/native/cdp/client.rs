@@ -294,6 +294,35 @@ impl CdpClient {
         self.send_command(method, None, session_id).await
     }
 
+    /// Send a CDP command without waiting for its response.
+    ///
+    /// This is useful for best-effort commands where Chrome may not emit a
+    /// response for every target session, but the command still needs to be
+    /// written before the caller can continue processing events.
+    pub async fn send_command_no_wait(
+        &self,
+        method: &str,
+        params: Option<Value>,
+        session_id: Option<&str>,
+    ) -> Result<(), String> {
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let cmd = CdpCommand {
+            id,
+            method: method.to_string(),
+            params,
+            session_id: session_id.filter(|s| !s.is_empty()).map(|s| s.to_string()),
+        };
+
+        let json = serde_json::to_string(&cmd)
+            .map_err(|e| format!("Failed to serialize CDP command: {}", e))?;
+
+        let mut ws_tx = self.ws_tx.lock().await;
+        ws_tx
+            .send(Message::Text(json))
+            .await
+            .map_err(|e| format!("Failed to send CDP command: {}", e))
+    }
+
     /// Send raw JSON through the WebSocket without tracking a response.
     /// Used by the inspect proxy to forward DevTools frontend messages.
     pub async fn send_raw(&self, json: String) -> Result<(), String> {

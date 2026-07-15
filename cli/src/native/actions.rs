@@ -180,6 +180,9 @@ struct DrainedEvents {
     attached_page_sessions: Vec<(TargetInfo, String)>,
     /// Cross-origin iframe (frame_id, session_id) pairs from Target.attachedToTarget.
     attached_iframe_sessions: Vec<(String, String)>,
+    /// Worker-like targets that can initiate network traffic but do not support
+    /// page-domain setup.
+    attached_worker_sessions: Vec<(TargetInfo, String)>,
     /// Attached non-page targets that still need to be resumed when auto-attach
     /// pauses them, even though agent-browser does not track them as tabs.
     attached_other_sessions: Vec<String>,
@@ -546,21 +549,25 @@ impl DaemonState {
                         let target_info = event.params.get("targetInfo").and_then(|value| {
                             serde_json::from_value::<TargetInfo>(value.clone()).ok()
                         });
-                        let target_needs_controls = target_info.as_ref().is_some_and(|target| {
-                            target.target_type == "iframe" || should_track_target(target)
-                        });
+                        let target_needs_controls = target_info
+                            .as_ref()
+                            .is_some_and(target_supports_network_controls);
 
                         let df = domain_filter.read().await.clone();
                         let has_proxy_creds = proxy_credentials.read().await.is_some();
                         let controls_active = df.is_some() || has_proxy_creds;
                         let controls_result = if controls_active && target_needs_controls {
                             async {
-                                prepare_auto_attached_session(&client, &sid).await?;
+                                if let Some(ref target) = target_info {
+                                    prepare_network_control_target_session(&client, &sid, target)
+                                        .await?;
+                                }
                                 install_network_controls_for_session(
                                     &client,
                                     &sid,
                                     df.as_ref(),
                                     has_proxy_creds,
+                                    target_info.as_ref().is_some_and(target_is_worker_like),
                                 )
                                 .await
                             }
@@ -571,8 +578,9 @@ impl DaemonState {
 
                         if controls_result.is_ok() {
                             let _ = client
-                                .send_command_no_params(
+                                .send_command_no_wait(
                                     "Runtime.runIfWaitingForDebugger",
+                                    None,
                                     Some(&sid),
                                 )
                                 .await;
@@ -797,6 +805,7 @@ impl DaemonState {
                             iframe_sid,
                             filter.as_ref(),
                             has_proxy_creds,
+                            false,
                         )
                         .await?;
                     }
@@ -832,6 +841,7 @@ impl DaemonState {
                             page_sid,
                             filter.as_ref(),
                             has_proxy_creds,
+                            false,
                         )
                         .await?;
                     }
@@ -883,6 +893,49 @@ impl DaemonState {
             }
         }
 
+        for (target_info, worker_sid) in &drained.attached_worker_sessions {
+            let filter = self.domain_filter.read().await.clone();
+            let has_proxy_creds = self.proxy_credentials.read().await.is_some();
+            let controls_active = filter.is_some() || has_proxy_creds;
+            let setup_result = if let Some(ref mgr) = self.browser {
+                async {
+                    prepare_network_control_target_session(&mgr.client, worker_sid, target_info)
+                        .await?;
+                    if controls_active {
+                        install_network_controls_for_session(
+                            &mgr.client,
+                            worker_sid,
+                            filter.as_ref(),
+                            has_proxy_creds,
+                            true,
+                        )
+                        .await?;
+                    }
+                    let _ = mgr
+                        .client
+                        .send_command_no_wait(
+                            "Runtime.runIfWaitingForDebugger",
+                            None,
+                            Some(worker_sid),
+                        )
+                        .await;
+                    Ok(())
+                }
+                .await
+            } else {
+                Ok(())
+            };
+            if let Err(error) = setup_result {
+                if controls_active {
+                    return close_after_network_control_failure(self, error).await;
+                }
+                eprintln!(
+                    "Warning: failed to prepare worker session controls: {}",
+                    error
+                );
+            }
+        }
+
         for sid in &drained.attached_other_sessions {
             if let Some(ref mgr) = self.browser {
                 let _ = mgr.resume_if_waiting_pub(sid).await;
@@ -918,6 +971,7 @@ impl DaemonState {
                             &attach.session_id,
                             filter.as_ref(),
                             has_proxy_creds,
+                            false,
                         )
                         .await?;
                     }
@@ -985,6 +1039,7 @@ impl DaemonState {
         let mut attached_page_sessions: Vec<(TargetInfo, String)> = Vec::new();
         let mut attached_page_target_ids: HashSet<String> = HashSet::new();
         let mut attached_iframe_sessions: Vec<(String, String)> = Vec::new();
+        let mut attached_worker_sessions: Vec<(TargetInfo, String)> = Vec::new();
         let mut attached_other_sessions: Vec<String> = Vec::new();
         let mut detached_iframe_sessions: Vec<String> = Vec::new();
 
@@ -1063,6 +1118,10 @@ impl DaemonState {
                                         attached_page_target_ids
                                             .insert(target_info.target_id.clone());
                                         attached_page_sessions.push((target_info, sid.to_string()));
+                                    }
+                                    Ok(target_info) if target_is_worker_like(&target_info) => {
+                                        attached_worker_sessions
+                                            .push((target_info, sid.to_string()));
                                     }
                                     _ => {
                                         attached_other_sessions.push(sid.to_string());
@@ -1427,6 +1486,7 @@ impl DaemonState {
             destroyed_targets,
             attached_page_sessions,
             attached_iframe_sessions,
+            attached_worker_sessions,
             attached_other_sessions,
             detached_iframe_sessions,
         }
@@ -2440,20 +2500,48 @@ async fn prepare_auto_attached_session(client: &CdpClient, session_id: &str) -> 
     Ok(())
 }
 
+fn target_is_worker_like(target: &TargetInfo) -> bool {
+    matches!(
+        target.target_type.as_str(),
+        "worker" | "service_worker" | "shared_worker"
+    )
+}
+
+fn target_supports_network_controls(target: &TargetInfo) -> bool {
+    target.target_type == "iframe" || should_track_target(target) || target_is_worker_like(target)
+}
+
+async fn prepare_network_control_target_session(
+    client: &CdpClient,
+    session_id: &str,
+    target: &TargetInfo,
+) -> Result<(), String> {
+    if target_is_worker_like(target) {
+        Ok(())
+    } else {
+        prepare_auto_attached_session(client, session_id).await
+    }
+}
+
 async fn install_network_controls_for_session(
     client: &CdpClient,
     session_id: &str,
     filter: Option<&DomainFilter>,
     handle_auth_requests: bool,
+    fetch_only: bool,
 ) -> Result<(), String> {
     if let Some(filter) = filter {
-        network::install_domain_filter(
-            client,
-            session_id,
-            &filter.allowed_domains,
-            handle_auth_requests,
-        )
-        .await?;
+        if fetch_only {
+            network::install_domain_filter_fetch(client, session_id, handle_auth_requests).await?;
+        } else {
+            network::install_domain_filter(
+                client,
+                session_id,
+                &filter.allowed_domains,
+                handle_auth_requests,
+            )
+            .await?;
+        }
     } else if handle_auth_requests {
         network::install_domain_filter_fetch(client, session_id, true).await?;
     }
@@ -2494,6 +2582,7 @@ async fn install_active_network_controls(
             &session_id,
             filter.as_ref(),
             handle_auth_requests,
+            false,
         )
         .await?;
         mgr.resume_if_waiting_pub(&session_id).await?;

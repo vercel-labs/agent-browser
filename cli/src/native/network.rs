@@ -177,9 +177,21 @@ pub async fn install_domain_filter_script(
         )
         .await?;
 
-    // The init script protects future documents. Evaluate it immediately as
-    // well so about:blank and pages that were already loaded over remote CDP
-    // do not retain an unfiltered RTCPeerConnection constructor.
+    install_domain_filter_runtime_script(client, session_id, allowed_domains).await?;
+
+    Ok(())
+}
+
+async fn install_domain_filter_runtime_script(
+    client: &CdpClient,
+    session_id: &str,
+    allowed_domains: &[String],
+) -> Result<(), String> {
+    if allowed_domains.is_empty() {
+        return Ok(());
+    }
+
+    let script = domain_filter_script(allowed_domains);
     let evaluation = client
         .send_command(
             "Runtime.evaluate",
@@ -195,7 +207,7 @@ pub async fn install_domain_filter_script(
             .or_else(|| details.get("text").and_then(Value::as_str))
             .unwrap_or("unknown JavaScript error");
         return Err(format!(
-            "Failed to apply domain filter to the current document: {}",
+            "Failed to apply domain filter to the current execution context: {}",
             message
         ));
     }
@@ -207,7 +219,16 @@ fn domain_filter_script(allowed_domains: &[String]) -> String {
     let domains_json = serde_json::to_string(allowed_domains).unwrap_or("[]".to_string());
     format!(
         r#"(() => {{
+            const _global = globalThis;
             const _allowed = {};
+            function _securityError(message) {{
+                if (typeof DOMException === 'function') {{
+                    return new DOMException(message, 'SecurityError');
+                }}
+                const error = new Error(message);
+                error.name = 'SecurityError';
+                return error;
+            }}
             function _isDomainAllowed(hostname) {{
                 hostname = hostname.toLowerCase();
                 for (const p of _allowed) {{
@@ -218,56 +239,56 @@ fn domain_filter_script(allowed_domains: &[String]) -> String {
                 }}
                 return false;
             }}
-            const OrigWS = window.WebSocket;
-            window.WebSocket = function(url, protocols) {{
-                try {{
-                    const u = new URL(url, location.href);
-                    if (!_isDomainAllowed(u.hostname)) throw new DOMException('WebSocket blocked: ' + u.hostname, 'SecurityError');
-                }} catch(e) {{ if (e instanceof DOMException) throw e; }}
-                return new OrigWS(url, protocols);
-            }};
-            window.WebSocket.prototype = OrigWS.prototype;
-            const OrigES = window.EventSource;
-            if (OrigES) {{
-                window.EventSource = function(url, opts) {{
+            const _baseHref = _global.location && _global.location.href ? _global.location.href : 'about:blank';
+            const OrigWS = _global.WebSocket;
+            if (typeof OrigWS === 'function') {{
+                _global.WebSocket = function(url, protocols) {{
                     try {{
-                        const u = new URL(url, location.href);
-                        if (!_isDomainAllowed(u.hostname)) throw new DOMException('EventSource blocked: ' + u.hostname, 'SecurityError');
-                    }} catch(e) {{ if (e instanceof DOMException) throw e; }}
+                        const u = new URL(url, _baseHref);
+                        if (!_isDomainAllowed(u.hostname)) throw _securityError('WebSocket blocked: ' + u.hostname);
+                    }} catch(e) {{ if (e && e.name === 'SecurityError') throw e; }}
+                    return new OrigWS(url, protocols);
+                }};
+                _global.WebSocket.prototype = OrigWS.prototype;
+            }}
+            const OrigES = _global.EventSource;
+            if (OrigES) {{
+                _global.EventSource = function(url, opts) {{
+                    try {{
+                        const u = new URL(url, _baseHref);
+                        if (!_isDomainAllowed(u.hostname)) throw _securityError('EventSource blocked: ' + u.hostname);
+                    }} catch(e) {{ if (e && e.name === 'SecurityError') throw e; }}
                     return new OrigES(url, opts);
                 }};
-                window.EventSource.prototype = OrigES.prototype;
+                _global.EventSource.prototype = OrigES.prototype;
             }}
-            const origBeacon = navigator.sendBeacon;
+            const origBeacon = _global.navigator && _global.navigator.sendBeacon;
             if (origBeacon) {{
-                navigator.sendBeacon = function(url, data) {{
+                _global.navigator.sendBeacon = function(url, data) {{
                     try {{
-                        const u = new URL(url, location.href);
+                        const u = new URL(url, _baseHref);
                         if (!_isDomainAllowed(u.hostname)) return false;
                     }} catch(e) {{ return false; }}
-                    return origBeacon.call(navigator, url, data);
+                    return origBeacon.call(_global.navigator, url, data);
                 }};
             }}
             function _blockPeerConnection(name) {{
-                if (typeof window[name] !== 'function') return;
+                if (typeof _global[name] !== 'function') return;
                 const BlockedPeerConnection = function() {{
-                    throw new DOMException(
-                        'RTCPeerConnection blocked while domain filtering is active',
-                        'SecurityError'
-                    );
+                    throw _securityError('RTCPeerConnection blocked while domain filtering is active');
                 }};
                 Object.defineProperty(BlockedPeerConnection, 'prototype', {{
                     value: Object.freeze(Object.create(null)),
                     writable: false
                 }});
                 try {{
-                    Object.defineProperty(window, name, {{
+                    Object.defineProperty(_global, name, {{
                         value: BlockedPeerConnection,
                         writable: false,
                         configurable: false
                     }});
                 }} catch (_) {{
-                    window[name] = BlockedPeerConnection;
+                    _global[name] = BlockedPeerConnection;
                 }}
             }}
             _blockPeerConnection('RTCPeerConnection');

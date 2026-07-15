@@ -656,7 +656,7 @@ impl BrowserManager {
         // paused after attach until explicitly resumed. No-op otherwise.
         let _ = self
             .client
-            .send_command_no_params("Runtime.runIfWaitingForDebugger", Some(session_id))
+            .send_command_no_wait("Runtime.runIfWaitingForDebugger", None, Some(session_id))
             .await;
         Ok(())
     }
