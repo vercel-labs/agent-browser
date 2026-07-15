@@ -294,7 +294,7 @@ fn domain_filter_script(allowed_domains: &[String]) -> String {
                 if (_workerUrlCache && _workerUrlCache.has(cacheKey)) return _workerUrlCache.get(cacheKey);
                 const installSource = '(' + _agentBrowserInstallDomainFilter.toString() + ')(' + JSON.stringify(_allowed) + ', ' + JSON.stringify(absolute) + ');\n';
                 const source = installSource + (isModule
-                    ? 'import ' + JSON.stringify(absolute) + ';\n'
+                    ? 'await import(' + JSON.stringify(absolute) + ');\n'
                     : 'importScripts(' + JSON.stringify(absolute) + ');\n');
                 const wrapped = _global.URL.createObjectURL(new Blob([source], {{ type: 'application/javascript' }}));
                 if (_workerUrlCache) _workerUrlCache.set(cacheKey, wrapped);
@@ -692,6 +692,13 @@ mod tests {
         assert!(script.contains("_blockPeerConnection('webkitRTCPeerConnection')"));
         assert!(script.contains("RTCPeerConnection blocked while domain filtering is active"));
         assert!(script.contains("configurable: false"));
+    }
+
+    #[test]
+    fn test_domain_filter_script_uses_dynamic_import_for_module_workers() {
+        let script = domain_filter_script(&["example.com".to_string()]);
+        assert!(script.contains("'await import(' + JSON.stringify(absolute)"));
+        assert!(!script.contains("'import ' + JSON.stringify(absolute)"));
     }
 
     #[test]
