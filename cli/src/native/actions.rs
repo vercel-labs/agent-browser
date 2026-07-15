@@ -2500,14 +2500,18 @@ fn chrome_switch_name(arg: &str) -> Option<&str> {
         .or_else(|| trimmed.strip_prefix('/'))
         .or_else(|| trimmed.strip_prefix('-'))
         .and_then(|switch| switch.split(['=', ' ']).next())
-        .filter(|name| !name.is_empty())
+        .filter(|name| !name.is_empty() && !name.contains(['/', '\\']))
 }
 
 fn is_startup_url_arg(arg: &str) -> bool {
-    let trimmed = arg.trim();
+    let trimmed = arg.trim().to_ascii_lowercase();
     trimmed.starts_with("http://")
         || trimmed.starts_with("https://")
         || trimmed.starts_with("file://")
+}
+
+fn is_positional_chrome_arg(arg: &str) -> bool {
+    !arg.trim().is_empty() && chrome_switch_name(arg).is_none()
 }
 
 /// Raw Chrome args can select an existing profile or open startup pages before
@@ -2516,6 +2520,9 @@ fn allowed_domains_disallowed_chrome_arg(args: &[String]) -> Option<&'static str
     for arg in args {
         if is_startup_url_arg(arg) {
             return Some("a startup URL");
+        }
+        if is_positional_chrome_arg(arg) {
+            return Some("a startup URL or path");
         }
         let Some(name) = chrome_switch_name(arg) else {
             continue;
@@ -11818,11 +11825,24 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
             ),
             (vec!["--app=https://example.com".to_string()], "--app"),
             (vec!["https://example.com".to_string()], "a startup URL"),
+            (vec!["HTTPS://example.com".to_string()], "a startup URL"),
+            (vec!["FILE:///tmp/page.html".to_string()], "a startup URL"),
+            (vec!["example.com".to_string()], "a startup URL or path"),
+            (vec!["/tmp/page.html".to_string()], "a startup URL or path"),
+            (
+                vec!["C:\\tmp\\page.html".to_string()],
+                "a startup URL or path",
+            ),
         ];
 
         for (args, expected) in cases {
             assert_eq!(allowed_domains_disallowed_chrome_arg(&args), Some(expected));
         }
+
+        assert_eq!(
+            allowed_domains_disallowed_chrome_arg(&["--window-size=1280,720".to_string()]),
+            None
+        );
     }
 
     #[tokio::test]
