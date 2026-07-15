@@ -199,6 +199,7 @@ struct DrainedEvents {
 /// `storage_state` is handled separately in `handle_launch()`: explicit
 /// `storageState` launches always require a clean local browser so the loaded
 /// state replaces the prior session instead of merging into it.
+#[allow(clippy::too_many_arguments)]
 fn launch_hash(
     opts: &LaunchOptions,
     allowed_domains: &[String],
@@ -2437,6 +2438,7 @@ fn ensure_allowed_domains_supported_for_launch(
     auto_connect: bool,
     profile: Option<&str>,
     provider_name: Option<&str>,
+    args: &[String],
 ) -> Result<(), String> {
     if allowed_domains.is_empty() {
         return Ok(());
@@ -2481,7 +2483,60 @@ fn ensure_allowed_domains_supported_for_launch(
         }
     }
 
+    if let Some(arg) = allowed_domains_disallowed_chrome_arg(args) {
+        return Err(format!(
+            "--allowed-domains is not supported with --args containing {} because Chrome may restore or open pages before network containment is installed",
+            arg
+        ));
+    }
+
     Ok(())
+}
+
+fn chrome_switch_name(arg: &str) -> Option<&str> {
+    let trimmed = arg.trim();
+    trimmed
+        .strip_prefix("--")
+        .or_else(|| trimmed.strip_prefix('/'))
+        .or_else(|| trimmed.strip_prefix('-'))
+        .and_then(|switch| switch.split(['=', ' ']).next())
+        .filter(|name| !name.is_empty())
+}
+
+fn is_startup_url_arg(arg: &str) -> bool {
+    let trimmed = arg.trim();
+    trimmed.starts_with("http://")
+        || trimmed.starts_with("https://")
+        || trimmed.starts_with("file://")
+}
+
+/// Raw Chrome args can select an existing profile or open startup pages before
+/// CDP interception and init scripts are installed.
+fn allowed_domains_disallowed_chrome_arg(args: &[String]) -> Option<&'static str> {
+    for arg in args {
+        if is_startup_url_arg(arg) {
+            return Some("a startup URL");
+        }
+        let Some(name) = chrome_switch_name(arg) else {
+            continue;
+        };
+        let lower = name.to_ascii_lowercase();
+        match lower.as_str() {
+            "user-data-dir" => return Some("--user-data-dir"),
+            "profile-directory" => return Some("--profile-directory"),
+            "restore-last-session" => return Some("--restore-last-session"),
+            "restore-session" => return Some("--restore-session"),
+            "app" => return Some("--app"),
+            "app-id" => return Some("--app-id"),
+            "app-launch-url-for-shortcuts-menu-item" => {
+                return Some("--app-launch-url-for-shortcuts-menu-item")
+            }
+            "load-and-launch-app" => return Some("--load-and-launch-app"),
+            _ => {}
+        }
+    }
+
+    None
 }
 
 async fn prepare_auto_attached_session(client: &CdpClient, session_id: &str) -> Result<(), String> {
@@ -2670,6 +2725,7 @@ async fn auto_launch(
             false,
             options.profile.as_deref(),
             None,
+            &options.args,
         )?;
         let mgr = BrowserManager::connect_cdp(&cdp).await?;
         let hash = launch_hash(
@@ -2704,6 +2760,7 @@ async fn auto_launch(
             true,
             options.profile.as_deref(),
             None,
+            &options.args,
         )?;
         let hash = launch_hash(
             &options,
@@ -2742,6 +2799,7 @@ async fn auto_launch(
             false,
             options.profile.as_deref(),
             Some(p.as_str()),
+            &options.args,
         )?;
         // ios/safari are device providers handled via explicit launch command
         if !p.is_empty() && p != "ios" && p != "safari" {
@@ -2795,7 +2853,26 @@ async fn auto_launch(
         }
     }
 
+    ensure_allowed_domains_supported_for_launch(
+        &allowed_domains,
+        None,
+        None,
+        false,
+        options.profile.as_deref(),
+        None,
+        &options.args,
+    )?;
+
     apply_launch_mutator_plugins(state, &mut options, plugins).await?;
+    ensure_allowed_domains_supported_for_launch(
+        &allowed_domains,
+        None,
+        None,
+        false,
+        options.profile.as_deref(),
+        None,
+        &options.args,
+    )?;
     write_extensions_file_from_paths(&state.session_id, options.extensions.as_deref());
     let hash = launch_hash(
         &options,
@@ -3370,6 +3447,15 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         .clone()
         .unwrap_or(existing_allowed_domains);
     let restrict_webrtc = !allowed_domains.is_empty();
+    let launch_args: Vec<String> = cmd
+        .get("args")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
 
     ensure_allowed_domains_supported_for_launch(
         &allowed_domains,
@@ -3378,16 +3464,8 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         auto_connect,
         profile.as_deref(),
         provider_name,
+        &launch_args,
     )?;
-
-    if let Some(domains) = requested_allowed_domains {
-        let mut filter = state.domain_filter.write().await;
-        *filter = if domains.is_empty() {
-            None
-        } else {
-            Some(DomainFilter::new(&domains.join(",")))
-        };
-    }
 
     let mut launch_options = LaunchOptions {
         headless,
@@ -3425,15 +3503,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
             .get("allowFileAccess")
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
-        args: cmd
-            .get("args")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                    .collect()
-            })
-            .unwrap_or_default(),
+        args: launch_args,
         extensions,
         storage_state: storage_state.map(String::from),
         user_agent: cmd
@@ -3466,6 +3536,24 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     if local_launch {
         apply_launch_mutator_plugins(state, &mut launch_options, plugins_from_command_or_env(cmd))
             .await?;
+    }
+    ensure_allowed_domains_supported_for_launch(
+        &allowed_domains,
+        cdp_url,
+        cdp_port,
+        auto_connect,
+        launch_options.profile.as_deref(),
+        provider_name,
+        &launch_options.args,
+    )?;
+
+    if let Some(domains) = requested_allowed_domains {
+        let mut filter = state.domain_filter.write().await;
+        *filter = if domains.is_empty() {
+            None
+        } else {
+            Some(DomainFilter::new(&domains.join(",")))
+        };
     }
 
     let (connection_kind, connection_target) =
@@ -11710,6 +11798,174 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         assert!(
             state.domain_filter.read().await.is_none(),
             "rejected profile launch should not commit allowedDomains"
+        );
+    }
+
+    #[test]
+    fn test_allowed_domains_disallowed_chrome_arg_detects_startup_args() {
+        let cases = [
+            (
+                vec!["--user-data-dir=/tmp/profile".to_string()],
+                "--user-data-dir",
+            ),
+            (
+                vec!["/profile-directory=Default".to_string()],
+                "--profile-directory",
+            ),
+            (
+                vec!["-restore-last-session".to_string()],
+                "--restore-last-session",
+            ),
+            (vec!["--app=https://example.com".to_string()], "--app"),
+            (vec!["https://example.com".to_string()], "a startup URL"),
+        ];
+
+        for (args, expected) in cases {
+            assert_eq!(allowed_domains_disallowed_chrome_arg(&args), Some(expected));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_allowed_domains_reject_profile_chrome_args() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_ALLOWED_DOMAINS"]);
+        guard.remove("AGENT_BROWSER_ALLOWED_DOMAINS");
+
+        let mut state = DaemonState::new();
+        let error = handle_launch(
+            &json!({
+                "action": "launch",
+                "args": ["--user-data-dir=/tmp/agent-browser-profile"],
+                "allowedDomains": ["example.com"]
+            }),
+            &mut state,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.contains("--args"), "got: {}", error);
+        assert!(error.contains("--user-data-dir"), "got: {}", error);
+        assert!(
+            error.contains("restore or open pages"),
+            "unexpected error: {}",
+            error
+        );
+        assert!(
+            state.domain_filter.read().await.is_none(),
+            "rejected raw profile args should not commit allowedDomains"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_allowed_domains_reject_env_profile_during_auto_launch() {
+        let guard = EnvGuard::new(&[
+            "AGENT_BROWSER_ALLOWED_DOMAINS",
+            "AGENT_BROWSER_PROFILE",
+            "AGENT_BROWSER_ARGS",
+            "AGENT_BROWSER_CDP",
+            "AGENT_BROWSER_AUTO_CONNECT",
+            "AGENT_BROWSER_PROVIDER",
+        ]);
+        guard.set("AGENT_BROWSER_ALLOWED_DOMAINS", "example.com");
+        guard.set("AGENT_BROWSER_PROFILE", "/tmp/agent-browser-profile");
+        guard.remove("AGENT_BROWSER_ARGS");
+        guard.remove("AGENT_BROWSER_CDP");
+        guard.remove("AGENT_BROWSER_AUTO_CONNECT");
+        guard.remove("AGENT_BROWSER_PROVIDER");
+
+        let mut state = DaemonState::new();
+        let error = auto_launch(&mut state, Vec::new()).await.unwrap_err();
+
+        assert!(error.contains("--profile"), "got: {}", error);
+        assert!(
+            error.contains("restore existing pages"),
+            "unexpected error: {}",
+            error
+        );
+        assert!(
+            state.browser.is_none(),
+            "auto_launch should reject before launching Chrome"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_allowed_domains_reject_env_profile_args_during_auto_launch() {
+        let guard = EnvGuard::new(&[
+            "AGENT_BROWSER_ALLOWED_DOMAINS",
+            "AGENT_BROWSER_PROFILE",
+            "AGENT_BROWSER_ARGS",
+            "AGENT_BROWSER_CDP",
+            "AGENT_BROWSER_AUTO_CONNECT",
+            "AGENT_BROWSER_PROVIDER",
+        ]);
+        guard.set("AGENT_BROWSER_ALLOWED_DOMAINS", "example.com");
+        guard.remove("AGENT_BROWSER_PROFILE");
+        guard.set(
+            "AGENT_BROWSER_ARGS",
+            "--user-data-dir=/tmp/agent-browser-profile",
+        );
+        guard.remove("AGENT_BROWSER_CDP");
+        guard.remove("AGENT_BROWSER_AUTO_CONNECT");
+        guard.remove("AGENT_BROWSER_PROVIDER");
+
+        let mut state = DaemonState::new();
+        let error = auto_launch(&mut state, Vec::new()).await.unwrap_err();
+
+        assert!(error.contains("--args"), "got: {}", error);
+        assert!(error.contains("--user-data-dir"), "got: {}", error);
+        assert!(
+            state.browser.is_none(),
+            "auto_launch should reject raw profile args before launching Chrome"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_allowed_domains_reject_plugin_profile_args() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let guard = EnvGuard::new(&["AGENT_BROWSER_ALLOWED_DOMAINS"]);
+        guard.remove("AGENT_BROWSER_ALLOWED_DOMAINS");
+        let dir = tempfile::tempdir().unwrap();
+        let plugin_path = dir.path().join("mock-launch-mutator");
+        fs::write(
+            &plugin_path,
+            r#"#!/bin/sh
+cat >/dev/null
+printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"launch":{"args":["--user-data-dir=/tmp/plugin-profile"]}}'
+"#,
+        )
+        .unwrap();
+        let mut perms = fs::metadata(&plugin_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&plugin_path, perms).unwrap();
+
+        let mut state = DaemonState::new();
+        let error = handle_launch(
+            &json!({
+                "action": "launch",
+                "allowedDomains": ["example.com"],
+                "plugins": [
+                    {
+                        "name": "profile-mutator",
+                        "command": plugin_path.to_string_lossy(),
+                        "capabilities": ["launch.mutate"]
+                    }
+                ]
+            }),
+            &mut state,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.contains("--args"), "got: {}", error);
+        assert!(error.contains("--user-data-dir"), "got: {}", error);
+        assert!(
+            state.domain_filter.read().await.is_none(),
+            "rejected plugin args should not commit allowedDomains"
+        );
+        assert!(
+            state.browser.is_none(),
+            "plugin args should be rejected before launching Chrome"
         );
     }
 
