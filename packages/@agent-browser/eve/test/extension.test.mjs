@@ -440,6 +440,73 @@ test("errors instead of hanging when the sandbox stops responding", async (t) =>
   await rejection;
 });
 
+test("errors instead of hanging when the install probe stops responding", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  resetConfig();
+  const sandbox = { id: "wedged-probe", run: () => new Promise(() => {}) };
+  const rejection = assert.rejects(
+    () => tools.close.execute({}, fakeCtx(sandbox)),
+    /The browser install probe did not respond within 180s/,
+  );
+  // Let the async chain reach the probe's sandbox.run and arm the deadline timer.
+  await new Promise((resolve) => setImmediate(resolve));
+  t.mock.timers.tick(180_001);
+  await rejection;
+});
+
+test("wait_for schema drops empty-string conditions", () => {
+  const parsed = tools.wait_for.inputSchema.parse({
+    jsCondition: "",
+    loadState: "",
+    selector: "",
+    text: "Welcome",
+    urlPattern: " ",
+  });
+  assert.equal(parsed.jsCondition, undefined);
+  assert.equal(parsed.loadState, undefined);
+  assert.equal(parsed.selector, undefined);
+  assert.equal(parsed.urlPattern, undefined);
+  assert.equal(parsed.text, "Welcome");
+});
+
+test("wait_for runs only the conditions that are actually set", async () => {
+  resetConfig();
+  const sandbox = fakeSandbox({ id: "wait-only-set" });
+  const input = tools.wait_for.inputSchema.parse({ selector: "", text: "Welcome", urlPattern: "" });
+  const result = await tools.wait_for.execute(input, fakeCtx(sandbox));
+  assert.deepEqual(result, { condition: 'text "Welcome"', satisfied: true, result: {} });
+  const waits = sandbox.commands.filter((command) => command.includes(" wait "));
+  assert.equal(waits.length, 1);
+  assert.ok(waits[0].includes("--text Welcome"));
+});
+
+test("wait_for reports load-state timeout as unsatisfied instead of throwing", async () => {
+  resetConfig();
+  const sandbox = fakeSandbox({
+    id: "wait-load-timeout",
+    respond: (command) =>
+      command.includes("--load")
+        ? {
+            exitCode: 1,
+            stdout: JSON.stringify({
+              success: false,
+              data: null,
+              error: "Timeout waiting for load state: networkidle",
+            }),
+          }
+        : {},
+  });
+  const result = await tools.wait_for.execute(
+    { loadState: "networkidle", timeoutMs: 1000 },
+    fakeCtx(sandbox),
+  );
+  assert.deepEqual(result, {
+    condition: "load state networkidle",
+    satisfied: false,
+    timedOut: true,
+  });
+});
+
 test("mount factory validates config", () => {
   assert.throws(() => extension({ maxOutputChars: -1 }));
   resetConfig();
