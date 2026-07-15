@@ -92,7 +92,7 @@ Global launch, output, provider, and chat options can be set in the config file 
     <tr><td><code>downloadPath</code></td><td><code>--download-path</code></td><td>string</td></tr>
     <tr><td><code>contentBoundaries</code></td><td><code>--content-boundaries</code></td><td>boolean</td></tr>
     <tr><td><code>maxOutput</code></td><td><code>--max-output</code></td><td>number</td></tr>
-    <tr><td><code>allowedDomains</code></td><td><code>--allowed-domains</code></td><td>string[]; also disables WebRTC in supported Chromium sessions</td></tr>
+    <tr><td><code>allowedDomains</code></td><td><code>--allowed-domains</code></td><td>string[]; also disables WebRTC in supported Chromium sessions and requires a fresh controllable browser context</td></tr>
     <tr><td><code>actionPolicy</code></td><td><code>--action-policy</code></td><td>string</td></tr>
     <tr><td><code>confirmActions</code></td><td><code>--confirm-actions</code></td><td>string</td></tr>
     <tr><td><code>confirmInteractive</code></td><td><code>--confirm-interactive</code></td><td>boolean</td></tr>
@@ -283,7 +283,7 @@ These environment variables configure additional daemon and runtime behavior:
     <tr><td><code>AGENT_BROWSER_DEBUG</code></td><td>Enable debug output (<code>1</code> to enable).</td><td>(disabled)</td></tr>
     <tr><td><code>AGENT_BROWSER_CONTENT_BOUNDARIES</code></td><td>Wrap page output in boundary markers for LLM safety.</td><td>(disabled)</td></tr>
     <tr><td><code>AGENT_BROWSER_MAX_OUTPUT</code></td><td>Max characters for page output (truncates beyond limit).</td><td>(unlimited)</td></tr>
-    <tr><td><code>AGENT_BROWSER_ALLOWED_DOMAINS</code></td><td>Comma-separated allowed domain patterns (e.g., <code>example.com,*.example.com</code>).</td><td>(unrestricted)</td></tr>
+    <tr><td><code>AGENT_BROWSER_ALLOWED_DOMAINS</code></td><td>Comma-separated allowed domain patterns (e.g., <code>example.com,*.example.com</code>). Requires a fresh controllable browser context.</td><td>(unrestricted)</td></tr>
     <tr><td><code>AGENT_BROWSER_ACTION_POLICY</code></td><td>Path to action policy JSON file.</td><td>(none)</td></tr>
     <tr><td><code>AGENT_BROWSER_CONFIRM_ACTIONS</code></td><td>Comma-separated action categories requiring confirmation.</td><td>(none)</td></tr>
     <tr><td><code>AGENT_BROWSER_CONFIRM_INTERACTIVE</code></td><td>Enable interactive confirmation prompts (auto-denies if stdin is not a TTY).</td><td>(disabled)</td></tr>

@@ -2772,8 +2772,8 @@ navigator.serviceWorker.register('/sw.js').then(async reg => {
     .await;
     assert_success(&resp);
 
-    let mut sw_result = String::new();
-    for _ in 0..30 {
+    let mut sw_result = "pending".to_string();
+    for _ in 0..50 {
         let resp = execute_command(
             &json!({
                 "id": "3",
@@ -2788,7 +2788,7 @@ navigator.serviceWorker.register('/sw.js').then(async reg => {
             .as_str()
             .unwrap_or("pending")
             .to_string();
-        if sw_result != "pending" {
+        if !matches!(sw_result.as_str(), "pending" | "started") {
             break;
         }
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
@@ -2801,8 +2801,8 @@ navigator.serviceWorker.register('/sw.js').then(async reg => {
     server.abort();
 
     assert!(
-        sw_result == "started" || sw_result.starts_with("blocked:"),
-        "Service worker should start and attempt the request, got: {}",
+        sw_result.starts_with("blocked:"),
+        "Service worker request should be blocked, got: {}",
         sw_result
     );
     assert!(

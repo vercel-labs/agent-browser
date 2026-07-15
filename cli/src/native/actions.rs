@@ -2435,6 +2435,7 @@ fn ensure_allowed_domains_supported_for_launch(
     cdp_url: Option<&str>,
     cdp_port: Option<u64>,
     auto_connect: bool,
+    profile: Option<&str>,
     provider_name: Option<&str>,
 ) -> Result<(), String> {
     if allowed_domains.is_empty() {
@@ -2451,6 +2452,13 @@ fn ensure_allowed_domains_supported_for_launch(
     if auto_connect {
         return Err(
             "--allowed-domains is not supported with --auto-connect because WebRTC containment cannot be installed before existing page scripts run"
+                .to_string(),
+        );
+    }
+
+    if profile.is_some() {
+        return Err(
+            "--allowed-domains is not supported with --profile because Chrome may restore existing pages before network containment is installed"
                 .to_string(),
         );
     }
@@ -2660,6 +2668,7 @@ async fn auto_launch(
             Some(cdp.as_str()),
             None,
             false,
+            options.profile.as_deref(),
             None,
         )?;
         let mgr = BrowserManager::connect_cdp(&cdp).await?;
@@ -2688,7 +2697,14 @@ async fn auto_launch(
     }
 
     if env::var("AGENT_BROWSER_AUTO_CONNECT").is_ok() {
-        ensure_allowed_domains_supported_for_launch(&allowed_domains, None, None, true, None)?;
+        ensure_allowed_domains_supported_for_launch(
+            &allowed_domains,
+            None,
+            None,
+            true,
+            options.profile.as_deref(),
+            None,
+        )?;
         let hash = launch_hash(
             &options,
             &allowed_domains,
@@ -2724,6 +2740,7 @@ async fn auto_launch(
             None,
             None,
             false,
+            options.profile.as_deref(),
             Some(p.as_str()),
         )?;
         // ios/safari are device providers handled via explicit launch command
@@ -3342,6 +3359,10 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         .and_then(|v| v.as_str())
         .map(String::from)
         .or_else(|| env::var("AGENT_BROWSER_ENGINE").ok());
+    let profile = cmd
+        .get("profile")
+        .and_then(|v| v.as_str())
+        .map(String::from);
 
     let requested_allowed_domains = allowed_domains_from_launch_command(cmd);
     let existing_allowed_domains = current_allowed_domains(state).await;
@@ -3355,6 +3376,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         cdp_url,
         cdp_port,
         auto_connect,
+        profile.as_deref(),
         provider_name,
     )?;
 
@@ -3398,10 +3420,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
             .and_then(|v| v.as_str())
             .map(String::from)
             .or_else(|| env::var("AGENT_BROWSER_PROXY_PASSWORD").ok()),
-        profile: cmd
-            .get("profile")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
+        profile,
         allow_file_access: cmd
             .get("allowFileAccess")
             .and_then(|v| v.as_bool())
@@ -11663,6 +11682,35 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
                 "rejected external launch should not commit allowedDomains"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_allowed_domains_reject_chrome_profiles() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_ALLOWED_DOMAINS"]);
+        guard.remove("AGENT_BROWSER_ALLOWED_DOMAINS");
+
+        let mut state = DaemonState::new();
+        let error = handle_launch(
+            &json!({
+                "action": "launch",
+                "profile": "/tmp/agent-browser-profile",
+                "allowedDomains": ["example.com"]
+            }),
+            &mut state,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.contains("--profile"), "got: {}", error);
+        assert!(
+            error.contains("restore existing pages"),
+            "unexpected error: {}",
+            error
+        );
+        assert!(
+            state.domain_filter.read().await.is_none(),
+            "rejected profile launch should not commit allowedDomains"
+        );
     }
 
     #[test]

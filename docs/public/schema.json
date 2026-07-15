@@ -159,7 +159,7 @@
       "items": {
         "type": "string"
       },
-      "description": "Allowed domain patterns (e.g., ['example.com', '*.example.com'])."
+      "description": "Allowed domain patterns (e.g., ['example.com', '*.example.com']). Requires a fresh controllable browser context, so CDP, auto-connect, Chrome profiles, iOS, and Safari are not supported."
     },
     "actionPolicy": {
       "type": "string",
