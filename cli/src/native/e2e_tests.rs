@@ -6330,3 +6330,254 @@ async fn e2e_removeinitscript_roundtrip() {
 
     let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
 }
+
+// ---------------------------------------------------------------------------
+// Session-to-tab binding (--pin-tab): two sessions sharing one Chrome over
+// CDP must not hijack each other's tabs. A restarted daemon re-binds to its
+// persisted target instead of adopting the most recently active tab, and a
+// pinned session whose tab is closed gets a tab_gone error instead of
+// silently acting on another session's tab.
+// ---------------------------------------------------------------------------
+
+/// Environment guard for binding tests: isolated socket dir (so binding
+/// files cannot leak between test runs) plus per-session env vars.
+fn binding_test_env() -> (EnvGuard<'static>, tempfile::TempDir) {
+    let guard = EnvGuard::new(&[
+        "AGENT_BROWSER_SOCKET_DIR",
+        "XDG_RUNTIME_DIR",
+        "AGENT_BROWSER_NAMESPACE",
+        "AGENT_BROWSER_SESSION",
+        "AGENT_BROWSER_PIN_TAB",
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    guard.set("AGENT_BROWSER_SOCKET_DIR", dir.path().to_str().unwrap());
+    guard.remove("XDG_RUNTIME_DIR");
+    guard.remove("AGENT_BROWSER_NAMESPACE");
+    guard.remove("AGENT_BROWSER_PIN_TAB");
+    (guard, dir)
+}
+
+/// Launch a host Chrome and return (host_state, ws_url) for other sessions
+/// to attach to over CDP.
+async fn launch_binding_host(guard: &EnvGuard<'static>) -> (DaemonState, String) {
+    guard.set("AGENT_BROWSER_SESSION", "e2e-bind-host");
+    let mut host = DaemonState::new();
+    let resp = execute_command(
+        &json!({
+            "id": "host-1",
+            "action": "launch",
+            "headless": true,
+            "args": ["--no-sandbox", "--disable-dev-shm-usage"]
+        }),
+        &mut host,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(&json!({ "id": "host-2", "action": "cdp_url" }), &mut host).await;
+    assert_success(&resp);
+    let ws_url = get_data(&resp)["cdpUrl"]
+        .as_str()
+        .expect("cdpUrl should be a string")
+        .to_string();
+    (host, ws_url)
+}
+
+/// Create a pinned session attached to the shared Chrome and navigate its
+/// bound tab to `url`. Returns the session's state.
+async fn attach_pinned_session(
+    guard: &EnvGuard<'static>,
+    session: &str,
+    ws_url: &str,
+    url: &str,
+) -> DaemonState {
+    guard.set("AGENT_BROWSER_SESSION", session);
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({
+            "id": format!("{}-launch", session),
+            "action": "launch",
+            "cdpUrl": ws_url,
+            "pinTab": true
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": format!("{}-nav", session), "action": "navigate", "url": url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    state
+}
+
+async fn current_url(state: &mut DaemonState, id: &str) -> Value {
+    execute_command(&json!({ "id": id, "action": "url" }), state).await
+}
+
+fn load_binding(session: &str, expect: &str) -> super::tab_binding::TabBinding {
+    super::tab_binding::load(session)
+        .expect("binding file should be readable")
+        .expect(expect)
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_pin_tab_rebinds_after_daemon_restart() {
+    let (guard, _dir) = binding_test_env();
+    let (mut host, ws_url) = launch_binding_host(&guard).await;
+
+    let url_a = "data:text/html,session-a-page";
+    let url_b = "data:text/html,session-b-page";
+
+    // Session A binds its own tab (pin mode creates a fresh tab on attach).
+    let state_a = attach_pinned_session(&guard, "e2e-bind-a", &ws_url, url_a).await;
+    let binding_a = load_binding("e2e-bind-a", "session A binding should persist");
+    assert!(binding_a.pinned, "binding should record pinned=true");
+    assert_eq!(binding_a.url, url_a);
+
+    // Session B binds its own tab and navigates last, so B's tab is the most
+    // recently active one (the tab a naive re-attach would adopt).
+    let mut state_b = attach_pinned_session(&guard, "e2e-bind-b", &ws_url, url_b).await;
+    let binding_b = load_binding("e2e-bind-b", "session B binding should persist");
+    assert_ne!(
+        binding_a.target_id, binding_b.target_id,
+        "sessions must bind distinct tabs"
+    );
+
+    // Simulate session A's daemon dying (idle timeout, crash, kill): drop the
+    // state without a clean close. The binding file survives.
+    drop(state_a);
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    // A restarted daemon for session A must re-bind to A's original tab by
+    // targetId, not adopt B's (most recently active) tab.
+    guard.set("AGENT_BROWSER_SESSION", "e2e-bind-a");
+    let mut state_a2 = DaemonState::new();
+    assert!(
+        state_a2.pin_tab,
+        "pin-tab should be sticky via the persisted binding"
+    );
+    let resp = execute_command(
+        &json!({ "id": "a2-launch", "action": "launch", "cdpUrl": ws_url }),
+        &mut state_a2,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = current_url(&mut state_a2, "a2-url").await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["url"],
+        url_a,
+        "restarted session A must operate on A's original tab"
+    );
+    let binding_a2 = load_binding("e2e-bind-a", "binding should still exist");
+    assert_eq!(
+        binding_a2.target_id, binding_a.target_id,
+        "re-attach must keep the original bound target"
+    );
+
+    // Lifecycle-dependent commands must work on the restored tab: attach
+    // only enables the CDP domains on the first target, so the restore path
+    // must enable them on the bound tab too or navigate hangs waiting for
+    // Page lifecycle events (timeout guards against the hang regression).
+    let url_a2 = "data:text/html,session-a-page-2";
+    let resp = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        execute_command(
+            &json!({ "id": "a2-nav", "action": "navigate", "url": url_a2 }),
+            &mut state_a2,
+        ),
+    )
+    .await
+    .expect("navigate on the restored tab must not hang");
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["targetId"], binding_a.target_id);
+
+    // Session B is unaffected.
+    let resp = current_url(&mut state_b, "b-url").await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["url"], url_b);
+
+    let resp = execute_command(&json!({ "id": "host-99", "action": "close" }), &mut host).await;
+    assert_success(&resp);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_pin_tab_gone_error_and_recovery() {
+    let (guard, _dir) = binding_test_env();
+    let (mut host, ws_url) = launch_binding_host(&guard).await;
+
+    let url_a = "data:text/html,gone-session-a";
+    let url_b = "data:text/html,gone-session-b";
+
+    let mut state_a = attach_pinned_session(&guard, "e2e-gone-a", &ws_url, url_a).await;
+    let binding_a = load_binding("e2e-gone-a", "session A binding should persist");
+    let mut state_b = attach_pinned_session(&guard, "e2e-gone-b", &ws_url, url_b).await;
+
+    // Session B closes A's tab by targetId (targetIds are accepted anywhere a
+    // tab ref is accepted and are stable across daemons).
+    let resp = execute_command(
+        &json!({ "id": "b-close-a", "action": "tab_close", "tabId": binding_a.target_id }),
+        &mut state_b,
+    )
+    .await;
+    assert_success(&resp);
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    // Session A must now fail loudly with a machine-readable tab_gone error
+    // instead of silently adopting a neighboring tab.
+    let resp = current_url(&mut state_a, "a-url-gone").await;
+    assert_eq!(resp["success"], false);
+    assert_eq!(
+        resp["code"],
+        "tab_gone",
+        "response should carry code=tab_gone, got: {}",
+        serde_json::to_string_pretty(&resp).unwrap_or_default()
+    );
+    let err = resp["error"].as_str().unwrap_or("");
+    assert!(
+        err.starts_with(super::browser::TAB_GONE_PREFIX),
+        "error should start with the tab_gone prefix, got: {}",
+        err
+    );
+
+    // Recovery commands still work in the gone state: tab_list is allowed,
+    // and tab_new binds a fresh tab.
+    let resp = execute_command(
+        &json!({ "id": "a-list", "action": "tab_list" }),
+        &mut state_a,
+    )
+    .await;
+    assert_success(&resp);
+
+    let url_a2 = "data:text/html,recovered-session-a";
+    let resp = execute_command(
+        &json!({ "id": "a-new", "action": "tab_new", "url": url_a2 }),
+        &mut state_a,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = current_url(&mut state_a, "a-url-recovered").await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["url"], url_a2);
+
+    let binding_a2 = load_binding("e2e-gone-a", "binding should be rewritten");
+    assert_ne!(
+        binding_a2.target_id, binding_a.target_id,
+        "recovery must bind a new target"
+    );
+    assert!(binding_a2.pinned, "recovered binding stays pinned");
+
+    // Session B keeps working on its own tab throughout.
+    let resp = current_url(&mut state_b, "b-url-after").await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["url"], url_b);
+
+    let resp = execute_command(&json!({ "id": "host-99", "action": "close" }), &mut host).await;
+    assert_success(&resp);
+}
