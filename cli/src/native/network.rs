@@ -299,16 +299,16 @@ pub async fn install_domain_filter_fetch(
 }
 
 /// Install both layers of domain filtering on a session:
-/// 1. JS patching (WebSocket, EventSource, sendBeacon, RTCPeerConnection)
-/// 2. Fetch-based network interception
+/// 1. Fetch-based network interception
+/// 2. JS patching (WebSocket, EventSource, sendBeacon, RTCPeerConnection)
 pub async fn install_domain_filter(
     client: &CdpClient,
     session_id: &str,
     allowed_domains: &[String],
     handle_auth_requests: bool,
 ) -> Result<(), String> {
-    install_domain_filter_script(client, session_id, allowed_domains).await?;
     install_domain_filter_fetch(client, session_id, handle_auth_requests).await?;
+    install_domain_filter_script(client, session_id, allowed_domains).await?;
     Ok(())
 }
 

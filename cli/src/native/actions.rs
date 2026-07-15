@@ -2977,7 +2977,34 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         .map(String::from)
         .or_else(|| env::var("AGENT_BROWSER_ENGINE").ok());
 
-    if let Some(domains) = allowed_domains_from_launch_command(cmd) {
+    let requested_allowed_domains = allowed_domains_from_launch_command(cmd);
+    let existing_allowed_domains = current_allowed_domains(state).await;
+    let allowed_domains = requested_allowed_domains
+        .clone()
+        .unwrap_or(existing_allowed_domains);
+    let restrict_webrtc = !allowed_domains.is_empty();
+
+    if restrict_webrtc {
+        if let Some(provider) = provider_name {
+            match provider.to_lowercase().as_str() {
+                "ios" => {
+                    return Err(
+                        "--allowed-domains is not supported with the iOS provider because WebRTC containment cannot be enforced"
+                            .to_string(),
+                    );
+                }
+                "safari" => {
+                    return Err(
+                        "--allowed-domains is not supported with the Safari provider because WebRTC containment cannot be enforced"
+                            .to_string(),
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+
+    if let Some(domains) = requested_allowed_domains {
         let mut filter = state.domain_filter.write().await;
         *filter = if domains.is_empty() {
             None
@@ -2985,8 +3012,6 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
             Some(DomainFilter::new(&domains.join(",")))
         };
     }
-    let allowed_domains = current_allowed_domains(state).await;
-    let restrict_webrtc = !allowed_domains.is_empty();
 
     let mut launch_options = LaunchOptions {
         headless,
@@ -3183,24 +3208,8 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
 
     if let Some(provider) = provider_name {
         match provider.to_lowercase().as_str() {
-            "ios" => {
-                if restrict_webrtc {
-                    return Err(
-                        "--allowed-domains is not supported with the iOS provider because WebRTC containment cannot be enforced"
-                            .to_string(),
-                    );
-                }
-                return launch_ios(cmd, state).await;
-            }
-            "safari" => {
-                if restrict_webrtc {
-                    return Err(
-                        "--allowed-domains is not supported with the Safari provider because WebRTC containment cannot be enforced"
-                            .to_string(),
-                    );
-                }
-                return launch_safari(cmd, state).await;
-            }
+            "ios" => return launch_ios(cmd, state).await,
+            "safari" => return launch_safari(cmd, state).await,
             _ => {
                 let command_plugins = plugins_from_command_or_env(cmd);
                 let conn = providers::connect_provider_with_plugins_and_options(
@@ -11206,6 +11215,9 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
 
     #[tokio::test]
     async fn test_allowed_domains_reject_providers_without_webrtc_containment() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_ALLOWED_DOMAINS"]);
+        guard.remove("AGENT_BROWSER_ALLOWED_DOMAINS");
+
         for provider in ["ios", "safari"] {
             let mut state = DaemonState::new();
             let error = handle_launch(
@@ -11220,6 +11232,10 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
             .unwrap_err();
             assert!(error.contains("WebRTC containment"), "got: {}", error);
             assert!(error.to_lowercase().contains(provider), "got: {}", error);
+            assert!(
+                state.domain_filter.read().await.is_none(),
+                "rejected provider launch should not commit allowedDomains"
+            );
         }
     }
 
