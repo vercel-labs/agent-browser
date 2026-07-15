@@ -98,7 +98,20 @@ pub struct HarEntry {
     /// Monotonic timestamp (seconds) from `Network.loadingFinished`; used to
     /// compute the `receive` timing phase.
     pub loading_finished_timestamp: Option<f64>,
+    /// Decoded response body, fetched via `Network.getResponseBody` after
+    /// `Network.loadingFinished`. `None` when no body was captured (no-body
+    /// status, redirect, evicted buffer, or over the size cap). Holds a base64
+    /// string when `response_body_base64` is true.
+    pub response_body: Option<String>,
+    /// True when `response_body` holds base64-encoded bytes (binary / non-UTF-8
+    /// response). Surfaces as HAR `content.encoding = "base64"`.
+    pub response_body_base64: bool,
 }
+
+/// Maximum decoded response-body size (bytes) stored on a HAR entry. Larger
+/// bodies keep their `size`/`mimeType` metadata but omit `text`, so one big
+/// download can't bloat the HAR. Not yet configurable via CLI.
+const MAX_HAR_BODY_BYTES: i64 = 10 * 1024 * 1024;
 
 pub struct RouteEntry {
     pub url_pattern: String,
@@ -180,6 +193,9 @@ struct DrainedEvents {
     attached_iframe_sessions: Vec<(String, String)>,
     /// Session IDs from Target.detachedFromTarget.
     detached_iframe_sessions: Vec<String>,
+    /// (requestId, sessionId) pairs from `Network.loadingFinished` during HAR
+    /// recording whose response body should be fetched in the async drain phase.
+    har_bodies_to_fetch: Vec<(String, Option<String>)>,
 }
 
 /// Compute a hash of the [`LaunchOptions`] fields that require a browser
@@ -794,6 +810,46 @@ impl DaemonState {
                 mgr.update_page_target_info(&te.target_info);
             }
         }
+
+        // Fetch response bodies for finished HAR requests. Response bodies are
+        // not pushed through CDP events, so each must be pulled explicitly with
+        // Network.getResponseBody while it is still buffered (buffers are
+        // enlarged in handle_har_start so they survive the drain gap). This is
+        // best-effort: any failure (no-body status, redirect, evicted buffer)
+        // simply leaves the entry without a `text` field.
+        if !drained.har_bodies_to_fetch.is_empty() {
+            if let Some(client) = self.browser.as_ref().map(|m| m.client.clone()) {
+                for (request_id, session_id) in &drained.har_bodies_to_fetch {
+                    let res = client
+                        .send_command(
+                            "Network.getResponseBody",
+                            Some(json!({ "requestId": request_id })),
+                            session_id.as_deref(),
+                        )
+                        .await;
+                    let Ok(res) = res else { continue };
+                    let base64 = res
+                        .get("base64Encoded")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    let Some(body) = res.get("body").and_then(|v| v.as_str()) else {
+                        continue;
+                    };
+                    if body.len() as i64 > MAX_HAR_BODY_BYTES {
+                        continue;
+                    }
+                    if let Some(entry) = self
+                        .har_entries
+                        .iter_mut()
+                        .rev()
+                        .find(|e| &e.request_id == request_id)
+                    {
+                        entry.response_body = Some(body.to_string());
+                        entry.response_body_base64 = base64;
+                    }
+                }
+            }
+        }
     }
 
     fn drain_cdp_events(&mut self) -> DrainedEvents {
@@ -803,6 +859,7 @@ impl DaemonState {
         };
 
         let mut pending_acks: Vec<i64> = Vec::new();
+        let mut har_bodies_to_fetch: Vec<(String, Option<String>)> = Vec::new();
         let mut new_targets: Vec<TargetCreatedEvent> = Vec::new();
         let mut new_target_ids: HashSet<String> = HashSet::new();
         let mut changed_targets: Vec<TargetInfoChangedEvent> = Vec::new();
@@ -1022,6 +1079,8 @@ impl DaemonState {
                                         response_body_size: -1,
                                         cdp_timing: None,
                                         loading_finished_timestamp: None,
+                                        response_body: None,
+                                        response_body_base64: false,
                                     });
                                 }
                                 if self.request_tracking {
@@ -1151,6 +1210,10 @@ impl DaemonState {
                                     entry.response_body_size = len;
                                 }
                             }
+                            // Queue this finished request for a body fetch in the
+                            // async drain phase (bodies aren't in the event itself).
+                            har_bodies_to_fetch
+                                .push((request_id.to_string(), event.session_id.clone()));
                         }
                         "Network.loadingFailed" if self.har_recording => {
                             let request_id = event
@@ -1241,6 +1304,7 @@ impl DaemonState {
             destroyed_targets,
             attached_iframe_sessions,
             detached_iframe_sessions,
+            har_bodies_to_fetch,
         }
     }
 }
@@ -7720,15 +7784,30 @@ async fn handle_video_stop(state: &mut DaemonState) -> Result<Value, String> {
 async fn handle_har_start(state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
+    // Enlarge the CDP network buffers so response bodies survive until we fetch
+    // them. Bodies are pulled during the async drain, which can run a little
+    // after loadingFinished; Chrome's ~10 MB/resource default evicts them fast.
+    let enable_params = json!({
+        "maxTotalBufferSize": 200_000_000_i64,
+        "maxResourceBufferSize": 100_000_000_i64,
+    });
     mgr.client
-        .send_command_no_params("Network.enable", Some(&session_id))
+        .send_command(
+            "Network.enable",
+            Some(enable_params.clone()),
+            Some(&session_id),
+        )
         .await?;
     // Also enable Network on cross-origin iframe sessions so their
     // requests are captured in the HAR output.
     for iframe_sid in state.iframe_sessions.values() {
         let _ = mgr
             .client
-            .send_command_no_params("Network.enable", Some(iframe_sid.as_str()))
+            .send_command(
+                "Network.enable",
+                Some(enable_params.clone()),
+                Some(iframe_sid.as_str()),
+            )
             .await;
     }
     state.har_recording = true;
@@ -7839,6 +7918,20 @@ fn har_entry_to_json(e: HarEntry) -> Value {
         request["postData"] = json!({ "mimeType": post_content_type, "text": body });
     }
 
+    // Response body content object: always carry `size` + `mimeType`, and add
+    // the decoded body as `text` when one was captured. Per the HAR 1.2 spec, a
+    // binary / non-UTF-8 body is base64 and tagged with `encoding: "base64"`.
+    let mut content = json!({
+        "size": e.response_body_size,
+        "mimeType": mime_type,
+    });
+    if let Some(body) = e.response_body {
+        content["text"] = Value::String(body);
+        if e.response_body_base64 {
+            content["encoding"] = Value::String("base64".to_string());
+        }
+    }
+
     json!({
         "startedDateTime": started_date_time,
         "time": total_time,
@@ -7849,10 +7942,7 @@ fn har_entry_to_json(e: HarEntry) -> Value {
             "httpVersion": e.http_version,
             "cookies": resp_cookies,
             "headers": resp_headers,
-            "content": {
-                "size": e.response_body_size,
-                "mimeType": mime_type,
-            },
+            "content": content,
             "redirectURL": e.redirect_url,
             "headersSize": -1,
             "bodySize": e.response_body_size,
@@ -8596,10 +8686,10 @@ async fn handle_request_detail(cmd: &Value, state: &mut DaemonState) -> Result<V
                     .get("body")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
+                result["responseBody"] = json!(body);
                 if base64_encoded {
-                    result["responseBody"] = json!(format!("[base64, {} chars]", body.len()));
-                } else {
-                    result["responseBody"] = json!(body);
+                    // Binary / non-UTF-8 body: `responseBody` holds base64.
+                    result["responseBodyEncoding"] = json!("base64");
                 }
             }
         }
@@ -10900,6 +10990,8 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
             response_body_size: 42,
             cdp_timing: None,
             loading_finished_timestamp: None,
+            response_body: None,
+            response_body_base64: false,
         };
 
         let har = har_entry_to_json(entry);
@@ -10923,6 +11015,61 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         assert_eq!(har["response"]["cookies"][0]["name"], "token");
         assert_eq!(har["response"]["cookies"][0]["value"], "xyz");
         assert_eq!(har["_resourceType"], "XHR");
+    }
+
+    fn har_entry_with_body(body: Option<&str>, base64: bool) -> HarEntry {
+        HarEntry {
+            request_id: "body-req".to_string(),
+            wall_time: 1773576000.0,
+            method: "GET".to_string(),
+            url: "https://api.example.com/data".to_string(),
+            request_headers: vec![],
+            post_data: None,
+            request_body_size: 0,
+            resource_type: "XHR".to_string(),
+            status: Some(200),
+            status_text: "OK".to_string(),
+            http_version: "HTTP/2.0".to_string(),
+            response_headers: vec![],
+            mime_type: "application/json".to_string(),
+            redirect_url: String::new(),
+            response_body_size: 11,
+            cdp_timing: None,
+            loading_finished_timestamp: None,
+            response_body: body.map(String::from),
+            response_body_base64: base64,
+        }
+    }
+
+    #[test]
+    fn test_har_entry_emits_text_response_body() {
+        let har = har_entry_to_json(har_entry_with_body(Some(r#"{"ok":true}"#), false));
+        assert_eq!(har["response"]["content"]["text"], r#"{"ok":true}"#);
+        assert!(
+            har["response"]["content"].get("encoding").is_none(),
+            "a UTF-8 text body must not carry a base64 encoding marker"
+        );
+        // Pre-existing content fields stay intact.
+        assert_eq!(har["response"]["content"]["mimeType"], "application/json");
+        assert_eq!(har["response"]["content"]["size"], 11);
+    }
+
+    #[test]
+    fn test_har_entry_emits_base64_body_with_encoding() {
+        let har = har_entry_to_json(har_entry_with_body(Some("iVBORw0KGgo="), true));
+        assert_eq!(har["response"]["content"]["text"], "iVBORw0KGgo=");
+        assert_eq!(har["response"]["content"]["encoding"], "base64");
+    }
+
+    #[test]
+    fn test_har_entry_without_body_omits_text() {
+        let har = har_entry_to_json(har_entry_with_body(None, false));
+        assert!(
+            har["response"]["content"].get("text").is_none(),
+            "no captured body -> no text key (preserves prior behaviour)"
+        );
+        assert!(har["response"]["content"].get("encoding").is_none());
+        assert_eq!(har["response"]["content"]["size"], 11);
     }
 
     #[test]
@@ -10982,6 +11129,8 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
             response_body_size: 0,
             cdp_timing: None,
             loading_finished_timestamp: None,
+            response_body: None,
+            response_body_base64: false,
         };
         let har = har_entry_to_json(entry);
         assert_eq!(har["response"]["cookies"][0]["name"], "token");
@@ -11037,6 +11186,8 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
             response_body_size: 128,
             cdp_timing: None,
             loading_finished_timestamp: None,
+            response_body: None,
+            response_body_base64: false,
         });
 
         let result = handle_har_stop(&json!({ "action": "har_stop" }), &mut state)
@@ -11084,6 +11235,8 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
             response_body_size: 64,
             cdp_timing: None,
             loading_finished_timestamp: None,
+            response_body: None,
+            response_body_base64: false,
         });
 
         let result = execute_command(

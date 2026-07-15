@@ -3957,6 +3957,78 @@ async fn e2e_headers_persist_same_origin_fetch() {
     assert_success(&resp);
 }
 
+/// HAR export captures the decoded response body as `content.text`.
+#[tokio::test]
+#[ignore]
+async fn e2e_har_captures_response_body() {
+    let (base_url, _server) = start_echo_server().await;
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Start HAR recording, then navigate to the JSON endpoint. The document
+    // response body is the echo server's `{"headers":{...}}` payload.
+    let resp = execute_command(&json!({ "id": "2", "action": "har_start" }), &mut state).await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "navigate", "url": format!("{}/data", base_url) }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Any subsequent command drains CDP events, which triggers the
+    // loadingFinished -> getResponseBody body fetch before we stop recording.
+    let resp = execute_command(&json!({ "id": "4", "action": "requests" }), &mut state).await;
+    assert_success(&resp);
+
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let har_path = std::env::temp_dir().join(format!("agent-browser-e2e-har-body-{nanos}.har"));
+    let resp = execute_command(
+        &json!({
+            "id": "5", "action": "har_stop",
+            "path": har_path.to_string_lossy().to_string(),
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let har: Value = serde_json::from_str(&std::fs::read_to_string(&har_path).unwrap()).unwrap();
+    let entries = har["log"]["entries"].as_array().expect("HAR entries array");
+    let doc = entries
+        .iter()
+        .find(|e| {
+            e["request"]["url"]
+                .as_str()
+                .map(|u| u.ends_with("/data"))
+                .unwrap_or(false)
+        })
+        .expect("HAR should contain the /data document request");
+    let text = doc["response"]["content"]["text"]
+        .as_str()
+        .expect("content.text must be populated with the response body");
+    let parsed: Value =
+        serde_json::from_str(text).expect("content.text should be the exact JSON body");
+    assert!(
+        parsed.get("headers").is_some(),
+        "captured body should be the echo JSON, got: {text}"
+    );
+
+    let _ = std::fs::remove_file(&har_path);
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 /// Headers set via --headers do NOT leak to a different origin.
 #[tokio::test]
 #[ignore]
