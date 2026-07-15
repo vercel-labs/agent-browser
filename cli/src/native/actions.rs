@@ -563,14 +563,28 @@ impl DaemonState {
                                     prepare_network_control_target_session(&client, &sid, target)
                                         .await?;
                                 }
-                                install_network_controls_for_session(
-                                    &client,
-                                    &sid,
-                                    df.as_ref(),
-                                    has_proxy_creds,
-                                    target_info.as_ref().is_some_and(target_is_worker_like),
-                                )
-                                .await
+                                if let Some(ref target) = target_info {
+                                    if target_is_worker_like(target) {
+                                        install_worker_network_controls_for_session(
+                                            &client,
+                                            &sid,
+                                            df.as_ref(),
+                                            has_proxy_creds,
+                                            target,
+                                        )
+                                        .await
+                                    } else {
+                                        install_network_controls_for_session(
+                                            &client,
+                                            &sid,
+                                            df.as_ref(),
+                                            has_proxy_creds,
+                                        )
+                                        .await
+                                    }
+                                } else {
+                                    Ok(())
+                                }
                             }
                             .await
                         } else {
@@ -806,7 +820,6 @@ impl DaemonState {
                             iframe_sid,
                             filter.as_ref(),
                             has_proxy_creds,
-                            false,
                         )
                         .await?;
                     }
@@ -842,7 +855,6 @@ impl DaemonState {
                             page_sid,
                             filter.as_ref(),
                             has_proxy_creds,
-                            false,
                         )
                         .await?;
                     }
@@ -903,12 +915,12 @@ impl DaemonState {
                     prepare_network_control_target_session(&mgr.client, worker_sid, target_info)
                         .await?;
                     if controls_active {
-                        install_network_controls_for_session(
+                        install_worker_network_controls_for_session(
                             &mgr.client,
                             worker_sid,
                             filter.as_ref(),
                             has_proxy_creds,
-                            true,
+                            target_info,
                         )
                         .await?;
                     }
@@ -972,7 +984,6 @@ impl DaemonState {
                             &attach.session_id,
                             filter.as_ref(),
                             has_proxy_creds,
-                            false,
                         )
                         .await?;
                     }
@@ -2577,6 +2588,10 @@ fn target_is_worker_like(target: &TargetInfo) -> bool {
     )
 }
 
+fn target_supports_worker_fetch_controls(target: &TargetInfo) -> bool {
+    target.target_type == "service_worker"
+}
+
 fn target_supports_network_controls(target: &TargetInfo) -> bool {
     target.target_type == "iframe" || should_track_target(target) || target_is_worker_like(target)
 }
@@ -2598,21 +2613,34 @@ async fn install_network_controls_for_session(
     session_id: &str,
     filter: Option<&DomainFilter>,
     handle_auth_requests: bool,
-    fetch_only: bool,
 ) -> Result<(), String> {
     if let Some(filter) = filter {
-        if fetch_only {
-            network::install_domain_filter_fetch(client, session_id, handle_auth_requests).await?;
-        } else {
-            network::install_domain_filter(
-                client,
-                session_id,
-                &filter.allowed_domains,
-                handle_auth_requests,
-            )
-            .await?;
-        }
+        network::install_domain_filter(
+            client,
+            session_id,
+            &filter.allowed_domains,
+            handle_auth_requests,
+        )
+        .await?;
     } else if handle_auth_requests {
+        network::install_domain_filter_fetch(client, session_id, true).await?;
+    }
+
+    Ok(())
+}
+
+async fn install_worker_network_controls_for_session(
+    client: &CdpClient,
+    session_id: &str,
+    filter: Option<&DomainFilter>,
+    handle_auth_requests: bool,
+    target: &TargetInfo,
+) -> Result<(), String> {
+    if filter.is_some() {
+        if target_supports_worker_fetch_controls(target) {
+            network::install_domain_filter_fetch(client, session_id, handle_auth_requests).await?;
+        }
+    } else if handle_auth_requests && target_supports_worker_fetch_controls(target) {
         network::install_domain_filter_fetch(client, session_id, true).await?;
     }
 
@@ -2652,7 +2680,6 @@ async fn install_active_network_controls(
             &session_id,
             filter.as_ref(),
             handle_auth_requests,
-            false,
         )
         .await?;
         mgr.resume_if_waiting_pub(&session_id).await?;
@@ -8937,7 +8964,8 @@ async fn resolve_fetch_paused(
     if let Some(filter) = domain_filter {
         if let Ok(parsed) = url::Url::parse(&paused.url) {
             let scheme = parsed.scheme();
-            if scheme != "http" && scheme != "https" {
+            let enforce_host = matches!(scheme, "http" | "https" | "ws" | "wss");
+            if !enforce_host {
                 if paused.resource_type.eq_ignore_ascii_case("document") {
                     let _ = client
                         .send_command(

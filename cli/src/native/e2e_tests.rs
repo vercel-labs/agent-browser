@@ -2812,6 +2812,153 @@ navigator.serviceWorker.register('/sw.js').then(async reg => {
     );
 }
 
+#[tokio::test]
+#[ignore]
+async fn e2e_domain_filter_blocks_worker_websocket_requests() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let requests = Arc::new(Mutex::new(Vec::<String>::new()));
+    let requests_for_server = requests.clone();
+    let server = tokio::spawn(async move {
+        for _ in 0..20 {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
+            };
+            let requests = requests_for_server.clone();
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 8192];
+                let n = stream.read(&mut buf).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..n]);
+                let request_line = request.lines().next().unwrap_or("").to_string();
+                if let Ok(mut logged) = requests.lock() {
+                    logged.push(request_line.clone());
+                }
+                let path = request_line.split_whitespace().nth(1).unwrap_or("/");
+
+                let (content_type, body) = if path == "/worker.js" {
+                    (
+                        "application/javascript",
+                        format!(
+                            r#"self.addEventListener('message', async () => {{
+    try {{
+        const response = await fetch('/worker-ping');
+        const text = await response.text();
+        if (text !== 'pong') {{
+            self.postMessage('fetch:' + text);
+            return;
+        }}
+    }} catch (error) {{
+        self.postMessage('fetch-error:' + error.name);
+        return;
+    }}
+
+    try {{
+        const ws = new WebSocket('ws://127.0.0.1:{}/leak');
+        ws.onopen = () => self.postMessage('leaked');
+        ws.onerror = () => self.postMessage('blocked:error');
+    }} catch (error) {{
+        self.postMessage('blocked:' + error.name);
+    }}
+}});"#,
+                            port
+                        ),
+                    )
+                } else if path == "/worker-ping" {
+                    ("text/plain", "pong".to_string())
+                } else {
+                    (
+                        "text/html",
+                        r#"<!doctype html><title>allowed</title><script>
+window.workerWsResult = 'pending';
+const worker = new Worker('/worker.js');
+worker.onmessage = event => {
+    window.workerWsResult = event.data;
+};
+worker.onerror = () => {
+    window.workerWsResult = 'worker:error';
+};
+worker.postMessage('go');
+</script>"#
+                            .to_string(),
+                    )
+                };
+
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    content_type,
+                    body.len(),
+                    body,
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.flush().await;
+            });
+        }
+    });
+
+    let mut state = DaemonState::new();
+    {
+        let mut df = state.domain_filter.write().await;
+        *df = Some(super::network::DomainFilter::new("localhost"));
+    }
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "2",
+            "action": "navigate",
+            "url": format!("http://localhost:{}/", port),
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let mut worker_result = "pending".to_string();
+    for _ in 0..50 {
+        let resp = execute_command(
+            &json!({
+                "id": "3",
+                "action": "evaluate",
+                "script": "window.workerWsResult || 'pending'",
+            }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+        worker_result = get_data(&resp)["result"]
+            .as_str()
+            .unwrap_or("pending")
+            .to_string();
+        if worker_result != "pending" {
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    }
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+    let logged = requests.lock().unwrap().clone();
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+    server.abort();
+
+    assert!(
+        worker_result.starts_with("blocked:"),
+        "Worker WebSocket should be blocked, got: {}",
+        worker_result
+    );
+    assert!(
+        !logged.iter().any(|line| line.contains(" /leak ")),
+        "Blocked worker WebSocket reached the server: {:?}",
+        logged
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Diff engine
 // ---------------------------------------------------------------------------
