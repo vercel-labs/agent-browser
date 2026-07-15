@@ -6,30 +6,7 @@ This package does not define model tools. Use it from framework-specific tools, 
 
 ## Eve
 
-```ts
-import { defineSandbox } from "eve/sandbox";
-import { vercel } from "eve/sandbox/vercel";
-import { agentBrowserRevalidationKey, installAgentBrowser } from "@agent-browser/sandbox/eve";
-
-export default defineSandbox({
-  backend: vercel({ runtime: "node24", resources: { vcpus: 2 } }),
-  revalidationKey: () => agentBrowserRevalidationKey(),
-  async bootstrap({ use }) {
-    const sandbox = await use();
-    await installAgentBrowser(sandbox);
-  },
-});
-```
-
-Then call `agent-browser` from an Eve tool:
-
-```ts
-import { runAgentBrowser } from "@agent-browser/sandbox/eve";
-
-const result = await runAgentBrowser(ctx, ["open", "https://example.com"]);
-```
-
-The Eve helper derives a short, stable `agent-browser` session name from the Eve sandbox id. Pass `session` to `runAgentBrowser` when multiple independent browser sessions should share one sandbox.
+For Eve agents, use [`@agent-browser/eve`](../eve/) — it mounts the full browser tool set and exposes the sandbox bootstrap helpers from `@agent-browser/eve/sandbox`, with this package as an internal dependency.
 
 ## Vercel Sandbox
 
@@ -53,7 +30,7 @@ const snapshot = await withAgentBrowserSandbox(async (sandbox) => {
 });
 ```
 
-The Eve and Vercel helpers install browser system dependencies by default. Pass `installSystemDependencies: false` only when the sandbox image already provides Chromium's required libraries.
+The Vercel helpers install browser system dependencies by default. Pass `installSystemDependencies: false` only when the sandbox image already provides Chromium's required libraries.
 
 Set `AGENT_BROWSER_SNAPSHOT_ID` to boot from a prebuilt Vercel Sandbox snapshot. Without a snapshot, the helper installs system dependencies, `agent-browser`, and Chrome on first boot.
 

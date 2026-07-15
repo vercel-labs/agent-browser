@@ -15,7 +15,6 @@
   },
   "dependencies": {
     "@agent-browser/eve": "link:../../packages/@agent-browser/eve",
-    "@agent-browser/sandbox": "file:../../packages/@agent-browser/sandbox",
     "@vercel/connect": "0.2.2",
     "ai": "7.0.0-beta.178",
     "eve": "^0.22.5",

@@ -62,7 +62,7 @@ Configure the MCP client to launch `agent-browser` with `["mcp"]`. The server de
 
 ## Eve agent integration
 
-For Eve agents, mount the `@agent-browser/eve` extension instead of hand-writing browser tools. It adds namespaced tools such as `browser__navigate`, `browser__snapshot`, `browser__click`, `browser__fill`, `browser__find`, and `browser__screenshot`, all backed by agent-browser running inside the Eve sandbox. Install `@agent-browser/sandbox` directly if the agent's `agent/sandbox.ts` bootstrap imports `installAgentBrowser` from `@agent-browser/sandbox/eve`.
+For Eve agents, mount the `@agent-browser/eve` extension instead of hand-writing browser tools. It adds namespaced tools such as `browser__navigate`, `browser__snapshot`, `browser__click`, `browser__fill`, `browser__find`, and `browser__screenshot`, all backed by agent-browser running inside the Eve sandbox. The sandbox bootstrap helpers (`installAgentBrowser`, `agentBrowserRevalidationKey`) ship with the same package under `@agent-browser/eve/sandbox`, so `agent/sandbox.ts` needs no extra dependency.
 
 ## Reading a page
 

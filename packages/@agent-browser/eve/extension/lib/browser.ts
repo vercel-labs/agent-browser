@@ -4,11 +4,7 @@ import {
   defaultSessionName,
   quoteShellArg,
 } from "@agent-browser/sandbox";
-import {
-  buildAgentBrowserCommand,
-  installAgentBrowser,
-  type EveSandboxSession,
-} from "@agent-browser/sandbox/eve";
+import { buildAgentBrowserCommand, installAgentBrowser, type EveSandboxSession } from "./sandbox";
 
 import extension from "../extension";
 

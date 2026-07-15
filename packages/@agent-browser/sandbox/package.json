@@ -13,10 +13,6 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
-    "./eve": {
-      "types": "./dist/eve.d.ts",
-      "import": "./dist/eve.js"
-    },
     "./vercel": {
       "types": "./dist/vercel.d.ts",
       "import": "./dist/vercel.js"

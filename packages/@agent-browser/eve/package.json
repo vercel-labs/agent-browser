@@ -20,11 +20,15 @@
     "./tools": {
       "types": "./dist/tools/index.d.ts",
       "default": "./dist/tools/index.mjs"
+    },
+    "./sandbox": {
+      "types": "./dist/sandbox/sandbox.d.ts",
+      "default": "./dist/sandbox/sandbox.js"
     }
   },
   "scripts": {
-    "build": "eve extension build",
-    "prepare": "eve extension build",
+    "build": "eve extension build && tsc -p tsconfig.sandbox.json",
+    "prepare": "eve extension build && tsc -p tsconfig.sandbox.json",
     "test": "pnpm run build && node --test test/*.test.mjs",
     "typecheck": "tsc"
   },

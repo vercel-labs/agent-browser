@@ -8,11 +8,7 @@
 pnpm add @agent-browser/eve
 ```
 
-`eve` is a peer dependency and should already be present in an Eve app. Add `@agent-browser/sandbox` directly too if your sandbox bootstrap imports the preinstall helpers shown below.
-
-```bash
-pnpm add @agent-browser/sandbox
-```
+`eve` is a peer dependency and should already be present in an Eve app. The sandbox preinstall helpers shown below ship with the same package, so no other install is needed.
 
 ## Mount
 
@@ -36,7 +32,7 @@ The extension can install `agent-browser`, Chromium, and required Linux librarie
 
 ```ts
 // agent/sandbox.ts
-import { agentBrowserRevalidationKey, installAgentBrowser } from "@agent-browser/sandbox/eve";
+import { agentBrowserRevalidationKey, installAgentBrowser } from "@agent-browser/eve/sandbox";
 import { defineSandbox } from "eve/sandbox";
 import { vercel } from "eve/sandbox/vercel";
 

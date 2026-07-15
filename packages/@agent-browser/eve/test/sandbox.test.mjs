@@ -6,7 +6,7 @@ import {
   buildAgentBrowserCommand,
   installAgentBrowser,
   runAgentBrowser,
-} from "../dist/eve.js";
+} from "../dist/sandbox/sandbox.js";
 
 test("builds Eve revalidation key from install options", () => {
   assert.equal(
