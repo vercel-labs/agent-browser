@@ -304,185 +304,14 @@ fn domain_filter_script(allowed_domains: &[String]) -> String {
                 if (_workerUrlCache) _workerUrlCache.set(cacheKey, wrapped);
                 return wrapped;
             }}
-            function _wrapWorkerWithCspFallback(worker, OrigCtor, checkedUrl, options, apiName, bootstrapUrl) {{
-                if (apiName !== 'Worker' || !worker || typeof worker.addEventListener !== 'function') {{
-                    return worker;
-                }}
-
-                const publicWorker = worker;
-                const originalAddEventListener = publicWorker.addEventListener.bind(publicWorker);
-                const originalRemoveEventListener = publicWorker.removeEventListener.bind(publicWorker);
-                const originalPostMessage = publicWorker.postMessage.bind(publicWorker);
-                const originalTerminate = publicWorker.terminate.bind(publicWorker);
-                const listenerRecords = [];
-                const propertyHandlers = Object.create(null);
-                const queuedMessages = [];
-                let activeWorker = publicWorker;
-                let closed = false;
-                let fallbackStarted = false;
-                let clearQueueTimer = null;
-
-                function _isCspBootstrapError(event) {{
-                    const message = String((event && event.message) || '');
-                    const filename = String((event && event.filename) || '');
-                    return filename === bootstrapUrl
-                        || filename.startsWith('blob:')
-                        || message.includes('Content Security Policy')
-                        || message.includes('violates the following Content Security Policy')
-                        || message.includes('Refused to create a worker')
-                        || message.includes('Refused to connect to')
-                        || (message === '' && filename === '');
-                }}
-                function _nativeAdd(target, type, listener, options) {{
-                    if (target === publicWorker) {{
-                        originalAddEventListener(type, listener, options);
-                    }} else {{
-                        target.addEventListener(type, listener, options);
-                    }}
-                }}
-                function _nativeRemove(target, type, listener, options) {{
-                    if (target === publicWorker) {{
-                        originalRemoveEventListener(type, listener, options);
-                    }} else {{
-                        target.removeEventListener(type, listener, options);
-                    }}
-                }}
-                function _nativePost(target, args) {{
-                    if (target === publicWorker) {{
-                        return originalPostMessage.apply(publicWorker, args);
-                    }}
-                    return target.postMessage.apply(target, args);
-                }}
-                function _nativeTerminate(target) {{
-                    if (target === publicWorker) {{
-                        return originalTerminate();
-                    }}
-                    return target.terminate();
-                }}
-                function _dispatchToUser(type, event) {{
-                    const propertyHandler = propertyHandlers['on' + type];
-                    if (typeof propertyHandler === 'function') {{
-                        propertyHandler.call(publicWorker, event);
-                    }} else if (propertyHandler && typeof propertyHandler.handleEvent === 'function') {{
-                        propertyHandler.handleEvent(event);
-                    }}
-                    for (const record of listenerRecords.slice()) {{
-                        if (record.type !== type) continue;
-                        if (typeof record.listener === 'function') {{
-                            record.listener.call(publicWorker, event);
-                        }} else if (record.listener && typeof record.listener.handleEvent === 'function') {{
-                            record.listener.handleEvent(event);
-                        }}
-                        if (record.options && record.options.once) {{
-                            publicWorker.removeEventListener(record.type, record.listener, record.options);
-                        }}
-                    }}
-                }}
-                function _clearQueuedMessagesSoon() {{
-                    if (clearQueueTimer || typeof _global.setTimeout !== 'function') return;
-                    clearQueueTimer = _global.setTimeout(() => {{
-                        queuedMessages.length = 0;
-                        clearQueueTimer = null;
-                    }}, 1000);
-                }}
-                function _startFallback(event) {{
-                    if (fallbackStarted || closed) return false;
-                    fallbackStarted = true;
-                    try {{
-                        if (event && typeof event.preventDefault === 'function') event.preventDefault();
-                        if (event && typeof event.stopImmediatePropagation === 'function') event.stopImmediatePropagation();
-                    }} catch (_) {{}}
-                    let fallbackWorker;
-                    try {{
-                        fallbackWorker = new OrigCtor(checkedUrl, options);
-                    }} catch (_) {{
-                        return false;
-                    }}
-                    activeWorker = fallbackWorker;
-                    _attachActiveWorker(fallbackWorker);
-                    for (const args of queuedMessages.splice(0)) {{
-                        try {{
-                            _nativePost(fallbackWorker, args);
-                        }} catch (_) {{}}
-                    }}
-                    return true;
-                }}
-                function _handleMessage(event) {{
-                    queuedMessages.length = 0;
-                    _dispatchToUser('message', event);
-                }}
-                function _handleMessageError(event) {{
-                    queuedMessages.length = 0;
-                    _dispatchToUser('messageerror', event);
-                }}
-                function _handleError(event) {{
-                    if (activeWorker === publicWorker && _isCspBootstrapError(event) && _startFallback(event)) {{
-                        return;
-                    }}
-                    queuedMessages.length = 0;
-                    _dispatchToUser('error', event);
-                }}
-                function _attachActiveWorker(target) {{
-                    _nativeAdd(target, 'message', _handleMessage);
-                    _nativeAdd(target, 'messageerror', _handleMessageError);
-                    _nativeAdd(target, 'error', _handleError);
-                }}
-
-                _attachActiveWorker(publicWorker);
-                publicWorker.addEventListener = function(type, listener, options) {{
-                    if (type === 'message' || type === 'messageerror' || type === 'error') {{
-                        listenerRecords.push({{ type, listener, options }});
-                        return;
-                    }}
-                    return _nativeAdd(activeWorker, type, listener, options);
-                }};
-                publicWorker.removeEventListener = function(type, listener, options) {{
-                    for (let i = listenerRecords.length - 1; i >= 0; i--) {{
-                        const record = listenerRecords[i];
-                        if (record.type === type && record.listener === listener) {{
-                            listenerRecords.splice(i, 1);
-                        }}
-                    }}
-                    if (type !== 'message' && type !== 'messageerror' && type !== 'error') {{
-                        return _nativeRemove(activeWorker, type, listener, options);
-                    }}
-                }};
-                publicWorker.postMessage = function() {{
-                    const args = Array.prototype.slice.call(arguments);
-                    queuedMessages.push(args);
-                    _clearQueuedMessagesSoon();
-                    return _nativePost(activeWorker, args);
-                }};
-                publicWorker.terminate = function() {{
-                    closed = true;
-                    queuedMessages.length = 0;
-                    return _nativeTerminate(activeWorker);
-                }};
-                for (const property of ['onmessage', 'onmessageerror', 'onerror']) {{
-                    Object.defineProperty(publicWorker, property, {{
-                        configurable: true,
-                        enumerable: true,
-                        get() {{
-                            return propertyHandlers[property] || null;
-                        }},
-                        set(handler) {{
-                            propertyHandlers[property] = handler;
-                        }}
-                    }});
-                }}
-
-                return publicWorker;
-            }}
             function _constructWorker(OrigCtor, scriptURL, options, apiName) {{
                 const checkedUrl = _checkedWorkerScriptUrl(scriptURL, apiName);
                 try {{
                     const bootstrapUrl = _workerScriptUrl(checkedUrl, options, apiName);
                     const worker = new OrigCtor(bootstrapUrl, options);
-                    return _wrapWorkerWithCspFallback(worker, OrigCtor, checkedUrl, options, apiName, bootstrapUrl);
+                    return worker;
                 }} catch (error) {{
-                    if (error && error.name === 'SecurityError') {{
-                        return new OrigCtor(checkedUrl, options);
-                    }}
+                    // Fail closed if the guarded bootstrap cannot be created.
                     throw error;
                 }}
             }}
@@ -881,14 +710,14 @@ mod tests {
     }
 
     #[test]
-    fn test_domain_filter_script_falls_back_when_worker_blob_is_csp_blocked() {
+    fn test_domain_filter_script_fails_closed_when_worker_blob_is_csp_blocked() {
         let script = domain_filter_script(&["example.com".to_string()]);
         assert!(script.contains("createObjectURL(new Blob"));
         assert!(script.contains("'await import(' + JSON.stringify(absolute)"));
-        assert!(script.contains("if (error && error.name === 'SecurityError')"));
-        assert!(script.contains("stopImmediatePropagation"));
-        assert!(script.contains("(message === '' && filename === '')"));
-        assert!(script.contains("return new OrigCtor(checkedUrl, options)"));
+        assert!(script.contains("const worker = new OrigCtor(bootstrapUrl, options)"));
+        assert!(script.contains("return worker"));
+        assert!(!script.contains("_wrapWorkerWithCspFallback"));
+        assert!(!script.contains("return new OrigCtor(checkedUrl, options)"));
     }
 
     #[test]

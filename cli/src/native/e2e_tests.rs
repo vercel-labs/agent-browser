@@ -2961,34 +2961,47 @@ worker.postMessage('go');
 
 #[tokio::test]
 #[ignore]
-async fn e2e_domain_filter_allows_csp_self_workers() {
+async fn e2e_domain_filter_blocks_csp_self_worker_fallback() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
+    let requests = Arc::new(Mutex::new(Vec::<String>::new()));
+    let requests_for_server = requests.clone();
     let server = tokio::spawn(async move {
         for _ in 0..20 {
             let Ok((mut stream, _)) = listener.accept().await else {
                 break;
             };
+            let requests = requests_for_server.clone();
             tokio::spawn(async move {
                 let mut buf = vec![0u8; 8192];
                 let n = stream.read(&mut buf).await.unwrap_or(0);
                 let request = String::from_utf8_lossy(&buf[..n]);
                 let request_line = request.lines().next().unwrap_or("").to_string();
+                if let Ok(mut logged) = requests.lock() {
+                    logged.push(request_line.clone());
+                }
                 let path = request_line.split_whitespace().nth(1).unwrap_or("/");
 
                 let (content_type, body, csp) = if path == "/worker.js" {
                     (
                         "application/javascript",
-                        r#"self.addEventListener('message', async () => {
-    try {
+                        format!(
+                            r#"self.addEventListener('message', async () => {{
+    try {{
         const response = await fetch('/worker-ping');
         const text = await response.text();
-        self.postMessage('started:' + text);
-    } catch (error) {
+        try {{
+            await fetch('http://127.0.0.1:{}/leak', {{ mode: 'no-cors' }});
+            self.postMessage('leaked');
+        }} catch (error) {{
+            self.postMessage('started:' + text + ';blocked:' + error.name);
+        }}
+    }} catch (error) {{
         self.postMessage('blocked:' + error.name);
-    }
-});"#
-                            .to_string(),
+    }}
+}});"#,
+                            port
+                        ),
                         None,
                     )
                 } else if path == "/worker-ping" {
@@ -3070,14 +3083,21 @@ worker.postMessage('go');
         }
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
     }
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
+    let logged = requests.lock().unwrap().clone();
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     assert_success(&resp);
     server.abort();
 
     assert_eq!(
-        worker_result, "started:pong",
-        "Allowed same-origin worker should not be rewritten to a CSP-blocked blob URL"
+        worker_result, "worker:error",
+        "CSP-blocked worker bootstrap must fail closed instead of running an unguarded worker"
+    );
+    assert!(
+        !logged.iter().any(|line| line.contains(" /leak ")),
+        "Blocked CSP fallback worker request reached the server: {:?}",
+        logged
     );
 }
 
