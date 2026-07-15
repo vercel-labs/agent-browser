@@ -1,8 +1,28 @@
 # agent-browser
 
-## 0.31.2
+## 0.32.0
 
 <!-- release:start -->
+### New Features
+
+- **Eve extension** - Added `@agent-browser/eve`, an Eve extension that mounts the agent-browser tool set with namespaced browser tools, sandbox bootstrap helpers, docs, examples, CI, and release packaging (#1547)
+
+### Security
+
+- Hardened **domain allowlists** by blocking WebRTC bypasses, applying network containment across launch modes, workers, popups, restored state, and reused daemon sessions, rejecting unsafe startup arguments, and adding Chrome regression coverage (#1546)
+
+### Bug Fixes
+
+- Fixed **completed-page waits** so load and DOMContentLoaded waits resolve immediately when the current document is already ready, with structured Eve wait timeout handling and focused coverage (#1554)
+
+### Contributors
+
+- @ctate
+- @dnukumamras
+<!-- release:end -->
+
+## 0.31.2
+
 ### New Features
 
 - **WebGPU launch preset** - Added `--webgpu` across the CLI, config, environment, and MCP surfaces, with hardware backends on macOS and Windows, software Vulkan on Linux, automatic Xvfb for displayless headed sessions, and a `doctor --webgpu` render and screenshot probe (#1529)
@@ -14,7 +34,6 @@
 ### Contributors
 
 - @ctate
-<!-- release:end -->
 
 ## 0.31.1
 

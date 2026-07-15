@@ -114,8 +114,8 @@ importers:
   packages/@agent-browser/eve:
     dependencies:
       '@agent-browser/sandbox':
-        specifier: ^0.31.2
-        version: 0.31.2(@vercel/sandbox@2.2.1)
+        specifier: workspace:^
+        version: link:../sandbox
       zod:
         specifier: 4.4.3
         version: 4.4.3
@@ -217,14 +217,6 @@ importers:
         version: 5.9.3
 
 packages:
-
-  '@agent-browser/sandbox@0.31.2':
-    resolution: {integrity: sha512-FSeAuBYBwW/xpDG3uUfdpZbOzHfU7KFnTChvtkixju6YzYWYC22NvHKdWF66aABuzRfm8A3N5EllQKD7dnKy1A==}
-    peerDependencies:
-      '@vercel/sandbox': '>=1.0.0'
-    peerDependenciesMeta:
-      '@vercel/sandbox':
-        optional: true
 
   '@ai-sdk/gateway@3.0.88':
     resolution: {integrity: sha512-AFoj7xdWAtCQcy0jJ235ENSakYM8D28qBX+rB+/rX4r8qe/LXgl0e5UivOqxAlIM5E9jnQdYxIPuj3XFtGk/yg==}
@@ -5687,10 +5679,6 @@ packages:
     resolution: {integrity: sha512-bXE4cR/kVZhKZX/RjPEflHaKVhUVl85noU3v6b8apfQEc1x4A+zBxjZ4lN8LqGd6WZ3dl98pY4o717VFmoPp+A==}
 
 snapshots:
-
-  '@agent-browser/sandbox@0.31.2(@vercel/sandbox@2.2.1)':
-    optionalDependencies:
-      '@vercel/sandbox': 2.2.1
 
   '@ai-sdk/gateway@3.0.88(zod@4.4.3)':
     dependencies:

@@ -1,6 +1,6 @@
 {
   "name": "@agent-browser/eve",
-  "version": "0.31.2",
+  "version": "0.32.0",
   "description": "eve extension that gives agents a full browser automation tool set backed by agent-browser",
   "type": "module",
   "sideEffects": false,
@@ -53,7 +53,7 @@
     "access": "public"
   },
   "dependencies": {
-    "@agent-browser/sandbox": "^0.31.2",
+    "@agent-browser/sandbox": "workspace:^",
     "zod": "4.4.3"
   },
   "peerDependencies": {
