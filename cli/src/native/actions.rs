@@ -19,7 +19,7 @@ use super::cdp::client::CdpClient;
 use super::cdp::types::{
     AttachToTargetParams, AttachToTargetResult, CdpEvent, CreateTargetResult,
     DispatchMouseEventParams, ExceptionThrownEvent, JavascriptDialogOpeningEvent,
-    TargetCreatedEvent, TargetDestroyedEvent, TargetInfoChangedEvent,
+    TargetCreatedEvent, TargetDestroyedEvent, TargetInfo, TargetInfoChangedEvent,
 };
 use super::cookies;
 use super::diff;
@@ -176,8 +176,13 @@ struct DrainedEvents {
     new_targets: Vec<TargetCreatedEvent>,
     changed_targets: Vec<TargetInfoChangedEvent>,
     destroyed_targets: Vec<String>,
+    /// Top-level page/webview targets attached by browser-level auto-attach.
+    attached_page_sessions: Vec<(TargetInfo, String)>,
     /// Cross-origin iframe (frame_id, session_id) pairs from Target.attachedToTarget.
     attached_iframe_sessions: Vec<(String, String)>,
+    /// Attached non-page targets that still need to be resumed when auto-attach
+    /// pauses them, even though agent-browser does not track them as tabs.
+    attached_other_sessions: Vec<String>,
     /// Session IDs from Target.detachedFromTarget.
     detached_iframe_sessions: Vec<String>,
 }
@@ -335,6 +340,9 @@ pub struct DaemonState {
     pub stream_server: Option<Arc<StreamServer>>,
     /// Hash of launch options used for the current browser, for relaunch detection.
     launch_hash: Option<u64>,
+    /// Whether browser-level auto-attach has been enabled for the current
+    /// browser so top-level popups pause before their first request.
+    network_auto_attach_installed: bool,
     /// Browser engine name (e.g. "chrome", "lightpanda") for observability.
     pub engine: String,
     /// Default timeout for wait operations, from AGENT_BROWSER_DEFAULT_TIMEOUT env var.
@@ -412,6 +420,7 @@ impl DaemonState {
             stream_client: None,
             stream_server: None,
             launch_hash: None,
+            network_auto_attach_installed: false,
             engine: env::var("AGENT_BROWSER_ENGINE").unwrap_or_else(|_| "chrome".to_string()),
             // README documents 25s, intentionally below the CLI's 30s IPC
             // read timeout so the daemon reports a proper timeout error
@@ -523,6 +532,55 @@ impl DaemonState {
                                     Some(&sid),
                                 )
                                 .await;
+                        }
+                    }
+                    Ok(event) if event.method == "Target.attachedToTarget" => {
+                        let Some(sid) = event
+                            .params
+                            .get("sessionId")
+                            .and_then(|v| v.as_str())
+                            .map(ToString::to_string)
+                        else {
+                            continue;
+                        };
+                        let target_info = event.params.get("targetInfo").and_then(|value| {
+                            serde_json::from_value::<TargetInfo>(value.clone()).ok()
+                        });
+                        let target_needs_controls = target_info.as_ref().is_some_and(|target| {
+                            target.target_type == "iframe" || should_track_target(target)
+                        });
+
+                        let df = domain_filter.read().await.clone();
+                        let has_proxy_creds = proxy_credentials.read().await.is_some();
+                        let controls_active = df.is_some() || has_proxy_creds;
+                        let controls_result = if controls_active && target_needs_controls {
+                            async {
+                                prepare_auto_attached_session(&client, &sid).await?;
+                                install_network_controls_for_session(
+                                    &client,
+                                    &sid,
+                                    df.as_ref(),
+                                    has_proxy_creds,
+                                )
+                                .await
+                            }
+                            .await
+                        } else {
+                            Ok(())
+                        };
+
+                        if controls_result.is_ok() {
+                            let _ = client
+                                .send_command_no_params(
+                                    "Runtime.runIfWaitingForDebugger",
+                                    Some(&sid),
+                                )
+                                .await;
+                        } else if let Err(error) = controls_result {
+                            eprintln!(
+                                "Failed to apply browser network controls to auto-attached target: {}",
+                                error
+                            );
                         }
                     }
                     Ok(event) if event.method == "Fetch.requestPaused" => {
@@ -758,6 +816,79 @@ impl DaemonState {
                 );
             }
         }
+
+        // Register top-level pages that browser-level auto-attach paused before
+        // their first request. Controls must be installed before resuming.
+        for (target_info, page_sid) in &drained.attached_page_sessions {
+            let filter = self.domain_filter.read().await.clone();
+            let has_proxy_creds = self.proxy_credentials.read().await.is_some();
+            let controls_active = filter.is_some() || has_proxy_creds;
+            let setup_result = if let Some(ref mut mgr) = self.browser {
+                async {
+                    mgr.prepare_domains_pub(page_sid).await?;
+                    if controls_active {
+                        install_network_controls_for_session(
+                            &mgr.client,
+                            page_sid,
+                            filter.as_ref(),
+                            has_proxy_creds,
+                        )
+                        .await?;
+                    }
+
+                    let mut page_url = target_info.url.clone();
+                    if let Some(ref filter) = filter {
+                        if should_blank_existing_url(&page_url, filter) {
+                            let _ = mgr
+                                .client
+                                .send_command(
+                                    "Page.navigate",
+                                    Some(json!({ "url": "about:blank" })),
+                                    Some(page_sid),
+                                )
+                                .await;
+                            page_url = "about:blank".to_string();
+                        }
+                    }
+
+                    if mgr.has_target(&target_info.target_id) {
+                        mgr.update_page_target_info(target_info);
+                    } else {
+                        let tab_id = mgr.assign_tab_id();
+                        mgr.add_page(super::browser::PageInfo {
+                            tab_id,
+                            label: None,
+                            target_id: target_info.target_id.clone(),
+                            session_id: page_sid.clone(),
+                            url: page_url,
+                            title: target_info.title.clone(),
+                            target_type: target_info.target_type.clone(),
+                        });
+                    }
+
+                    mgr.resume_if_waiting_pub(page_sid).await
+                }
+                .await
+            } else {
+                Ok(())
+            };
+            if let Err(error) = setup_result {
+                if controls_active {
+                    return close_after_network_control_failure(self, error).await;
+                }
+                eprintln!(
+                    "Warning: failed to prepare attached page session: {}",
+                    error
+                );
+            }
+        }
+
+        for sid in &drained.attached_other_sessions {
+            if let Some(ref mgr) = self.browser {
+                let _ = mgr.resume_if_waiting_pub(sid).await;
+            }
+        }
+
         for sid in &drained.detached_iframe_sessions {
             self.iframe_sessions.retain(|_, v| v != sid);
         }
@@ -851,7 +982,10 @@ impl DaemonState {
         let mut new_target_ids: HashSet<String> = HashSet::new();
         let mut changed_targets: Vec<TargetInfoChangedEvent> = Vec::new();
         let mut destroyed_targets: Vec<String> = Vec::new();
+        let mut attached_page_sessions: Vec<(TargetInfo, String)> = Vec::new();
+        let mut attached_page_target_ids: HashSet<String> = HashSet::new();
         let mut attached_iframe_sessions: Vec<(String, String)> = Vec::new();
+        let mut attached_other_sessions: Vec<String> = Vec::new();
         let mut detached_iframe_sessions: Vec<String> = Vec::new();
 
         loop {
@@ -912,22 +1046,26 @@ impl DaemonState {
                             continue;
                         }
                         "Target.attachedToTarget" => {
-                            if let (Some(sid), Some(target_info)) = (
+                            if let (Some(sid), Some(target_info_value)) = (
                                 event.params.get("sessionId").and_then(|v| v.as_str()),
                                 event.params.get("targetInfo"),
                             ) {
-                                let target_type = target_info
-                                    .get("type")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("");
-                                if target_type == "iframe" {
-                                    // For OOPIF targets, Chrome uses the frameId as
-                                    // the targetId, so we can key iframe_sessions by it.
-                                    if let Some(target_id) =
-                                        target_info.get("targetId").and_then(|v| v.as_str())
-                                    {
+                                match serde_json::from_value::<TargetInfo>(
+                                    target_info_value.clone(),
+                                ) {
+                                    Ok(target_info) if target_info.target_type == "iframe" => {
+                                        // For OOPIF targets, Chrome uses the frameId as
+                                        // the targetId, so we can key iframe_sessions by it.
                                         attached_iframe_sessions
-                                            .push((target_id.to_string(), sid.to_string()));
+                                            .push((target_info.target_id, sid.to_string()));
+                                    }
+                                    Ok(target_info) if should_track_target(&target_info) => {
+                                        attached_page_target_ids
+                                            .insert(target_info.target_id.clone());
+                                        attached_page_sessions.push((target_info, sid.to_string()));
+                                    }
+                                    _ => {
+                                        attached_other_sessions.push(sid.to_string());
                                     }
                                 }
                             }
@@ -1278,12 +1416,18 @@ impl DaemonState {
             }
         }
 
+        if !attached_page_target_ids.is_empty() {
+            new_targets.retain(|te| !attached_page_target_ids.contains(&te.target_info.target_id));
+        }
+
         DrainedEvents {
             pending_acks,
             new_targets,
             changed_targets,
             destroyed_targets,
+            attached_page_sessions,
             attached_iframe_sessions,
+            attached_other_sessions,
             detached_iframe_sessions,
         }
     }
@@ -1526,6 +1670,7 @@ pub(crate) async fn close_current_browser(state: &mut DaemonState) -> Result<(),
 
     close_active_provider_session(state).await;
     state.launch_hash = None;
+    state.network_auto_attach_installed = false;
     state.screencasting = false;
     state.reset_input_state();
     state.update_stream_client().await;
@@ -2271,6 +2416,30 @@ fn ensure_allowed_domains_supported_for_launch(
     Ok(())
 }
 
+async fn prepare_auto_attached_session(client: &CdpClient, session_id: &str) -> Result<(), String> {
+    client
+        .send_command_no_params("Page.enable", Some(session_id))
+        .await?;
+    client
+        .send_command_no_params("Runtime.enable", Some(session_id))
+        .await?;
+    client
+        .send_command_no_params("Network.enable", Some(session_id))
+        .await?;
+    let _ = client
+        .send_command(
+            "Target.setAutoAttach",
+            Some(json!({
+                "autoAttach": true,
+                "waitForDebuggerOnStart": true,
+                "flatten": true
+            })),
+            Some(session_id),
+        )
+        .await;
+    Ok(())
+}
+
 async fn install_network_controls_for_session(
     client: &CdpClient,
     session_id: &str,
@@ -2293,17 +2462,29 @@ async fn install_network_controls_for_session(
 }
 
 async fn install_active_network_controls(
-    state: &DaemonState,
+    state: &mut DaemonState,
     handle_auth_requests: bool,
 ) -> Result<(), String> {
-    let mgr = state
-        .browser
-        .as_ref()
-        .ok_or("Browser is not available for network control installation")?;
     let filter = state.domain_filter.read().await.clone();
     if !network_controls_required(filter.as_ref(), handle_auth_requests) {
         return Ok(());
     }
+
+    if !state.network_auto_attach_installed {
+        {
+            let mgr = state
+                .browser
+                .as_ref()
+                .ok_or("Browser is not available for network control installation")?;
+            mgr.enable_browser_auto_attach_pub().await?;
+        }
+        state.network_auto_attach_installed = true;
+    }
+
+    let mgr = state
+        .browser
+        .as_ref()
+        .ok_or("Browser is not available for network control installation")?;
     let session_ids = network_control_session_ids(mgr)?;
 
     for session_id in session_ids {
@@ -2365,6 +2546,7 @@ async fn auto_launch(
     let enable_features = launch_enable_features_from_env();
     let init_script_paths = launch_init_script_paths_from_env();
     let allowed_domains = current_allowed_domains(state).await;
+    options.restrict_webrtc = !allowed_domains.is_empty();
 
     // Extract storage_state before options is moved into BrowserManager::launch.
     let storage_state_path = options.storage_state.clone();
@@ -4013,6 +4195,7 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         }
 
         install_network_controls_or_close(state, has_proxy_creds).await?;
+        state.drain_cdp_events_background().await?;
 
         if defer_url_until_controls {
             let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
@@ -5212,6 +5395,7 @@ async fn handle_tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
     };
 
     install_network_controls_or_close(state, has_proxy_creds).await?;
+    state.drain_cdp_events_background().await?;
 
     if defer_url_until_controls {
         if let Some(url) = url {
@@ -5690,6 +5874,7 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
     let has_proxy_creds = state.proxy_credentials.read().await.is_some();
     install_network_controls_or_resume_prepared_session(state, has_proxy_creds, &new_session_id)
         .await?;
+    state.drain_cdp_events_background().await?;
 
     {
         let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
@@ -7968,6 +8153,7 @@ async fn handle_window_new(cmd: &Value, state: &mut DaemonState) -> Result<Value
     let has_proxy_creds = state.proxy_credentials.read().await.is_some();
     install_network_controls_or_resume_prepared_session(state, has_proxy_creds, &session_id)
         .await?;
+    state.drain_cdp_events_background().await?;
 
     if let Some(viewport) = cmd.get("viewport") {
         let width = viewport

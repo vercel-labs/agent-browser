@@ -600,6 +600,21 @@ impl BrowserManager {
         self.resume_if_waiting(session_id).await
     }
 
+    pub async fn enable_browser_auto_attach_pub(&self) -> Result<(), String> {
+        self.client
+            .send_command(
+                "Target.setAutoAttach",
+                Some(json!({
+                    "autoAttach": true,
+                    "waitForDebuggerOnStart": true,
+                    "flatten": true
+                })),
+                None,
+            )
+            .await?;
+        Ok(())
+    }
+
     async fn enable_domains(&self, session_id: &str) -> Result<(), String> {
         self.prepare_domains(session_id).await?;
         self.resume_if_waiting(session_id).await?;

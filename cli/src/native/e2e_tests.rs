@@ -10,6 +10,7 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
 use futures_util::StreamExt;
 use serde_json::{json, Value};
+use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::test_utils::EnvGuard;
@@ -2588,6 +2589,88 @@ async fn e2e_domain_filter() {
             .is_some_and(|value| value.ends_with(":SecurityError"))),
         "Every peer connection constructor should be blocked, got: {:?}",
         results,
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_domain_filter_blocks_page_created_popup_before_first_request() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let requests = Arc::new(Mutex::new(Vec::<String>::new()));
+    let requests_for_server = requests.clone();
+    let _server = tokio::spawn(async move {
+        for _ in 0..20 {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
+            };
+            let requests = requests_for_server.clone();
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 8192];
+                let n = stream.read(&mut buf).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..n]);
+                let request_line = request.lines().next().unwrap_or("").to_string();
+                if let Ok(mut logged) = requests.lock() {
+                    logged.push(request_line);
+                }
+
+                let body = "<!doctype html><title>allowed</title><button id=\"go\">go</button>";
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body,
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.flush().await;
+            });
+        }
+    });
+
+    let mut state = DaemonState::new();
+    {
+        let mut df = state.domain_filter.write().await;
+        *df = Some(super::network::DomainFilter::new("localhost"));
+    }
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "2",
+            "action": "navigate",
+            "url": format!("http://localhost:{}/", port),
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "3",
+            "action": "evaluate",
+            "script": format!("window.open('http://127.0.0.1:{}/leak'); 'done'", port),
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+    let logged = requests.lock().unwrap().clone();
+    assert!(
+        !logged.iter().any(|line| line.contains(" /leak ")),
+        "Blocked popup made a server request: {:?}",
+        logged
     );
 
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
