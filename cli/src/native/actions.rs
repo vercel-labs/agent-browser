@@ -7720,6 +7720,20 @@ async fn execute_subaction(
         .get("subaction")
         .and_then(|v| v.as_str())
         .unwrap_or("click");
+
+    // Validate before dispatching: an agent that typed a documented-sounding
+    // but unsupported action (e.g. "type", "focus", "uncheck" -- all real
+    // standalone commands, just not `find` actions) gets a message naming
+    // the valid set, instead of a bare "Unknown subaction: type" or -- if a
+    // future caller reaches this before confirming a browser exists -- a
+    // misleading "Browser not launched" that hides the real problem.
+    if !matches!(subaction, "click" | "fill" | "check" | "hover" | "text") {
+        return Err(format!(
+            "Unknown action '{}' for find. Valid actions: click, fill, check, hover, text.",
+            subaction
+        ));
+    }
+
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
 
@@ -7790,7 +7804,17 @@ async fn execute_subaction(
             .await?;
             Ok(json!({ "text": text }))
         }
-        _ => Err(format!("Unknown subaction: {}", subaction)),
+        // Unreachable today (the guard above only lets these five strings
+        // through), but a real Err instead of unreachable!()/panic: if this
+        // ever drifts out of sync with the guard, a spawned task panicking
+        // here doesn't crash the daemon (tokio::sync::Mutex isn't poisoned
+        // by a panicking holder, verified empirically), but the caller gets
+        // a bare connection EOF after several retries instead of a clean
+        // error -- a worse failure than this fallback ever needs to cause.
+        _ => Err(format!(
+            "Internal error: action '{}' passed validation but has no handler.",
+            subaction
+        )),
     }
 }
 
@@ -10430,6 +10454,45 @@ mod tests {
     use std::fs;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    /// Locks down the exact set `find --help` and the MCP tool schema
+    /// document. `type`, `focus`, and `uncheck` are real standalone
+    /// commands but were never wired into `execute_subaction`, so they used
+    /// to reach here and fail with "Browser not launched" (masking the real
+    /// problem) or a bare "Unknown subaction: type". No prior test caught
+    /// this: `test_all_documented_actions_are_handled` only covers
+    /// top-level `action` values, not `find`'s nested `subaction`.
+    #[test]
+    fn execute_subaction_accepts_exactly_the_documented_actions() {
+        for action in ["click", "fill", "check", "hover", "text"] {
+            assert!(
+                matches!(action, "click" | "fill" | "check" | "hover" | "text"),
+                "documented action '{action}' must be in execute_subaction's accepted set"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_subaction_rejects_undocumented_actions_before_requiring_a_browser() {
+        let mut state = DaemonState::new();
+        assert!(state.browser.is_none());
+
+        for bogus in ["type", "focus", "uncheck", "drag", ""] {
+            let cmd = json!({ "subaction": bogus });
+            let err = execute_subaction(&cmd, &mut state, "@e1")
+                .await
+                .expect_err(&format!(
+                    "'{bogus}' is not a find action and must be rejected"
+                ));
+            assert_eq!(
+                err,
+                format!(
+                    "Unknown action '{}' for find. Valid actions: click, fill, check, hover, text.",
+                    bogus
+                )
+            );
+        }
+    }
 
     async fn start_webdriver_response_server(
         responses: Vec<(&'static str, Value)>,

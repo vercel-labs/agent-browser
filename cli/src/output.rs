@@ -2065,7 +2065,7 @@ Locators:
   nth <index> <selector>   Nth matching element (0-based)
 
 Actions (default: click):
-  click, fill, type, hover, focus, check, uncheck
+  click, fill, check, hover, text
 
 Options:
   --name <name>        Filter role by accessible name
@@ -2079,10 +2079,11 @@ Examples:
   agent-browser find role button click --name Submit
   agent-browser find text "Sign In" click
   agent-browser find label "Email" fill "user@example.com"
-  agent-browser find placeholder "Search..." type "query"
+  agent-browser find placeholder "Search..." fill "query"
   agent-browser find testid "login-form" click
   agent-browser find first "li.item" click
   agent-browser find nth 2 ".card" hover
+  agent-browser find role heading text --name Welcome
 "##
         }
 

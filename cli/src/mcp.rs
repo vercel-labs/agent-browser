@@ -1035,8 +1035,8 @@ fn parity_tools() -> Vec<Value> {
             json!({
                 "locator": { "type": "string", "enum": ["role", "text", "label", "placeholder", "alt", "title", "testid", "first", "last", "nth"] },
                 "value": { "type": "string", "description": "Role, text, label, selector, or test id." },
-                "action": { "type": "string", "description": "Optional action: click, fill, type, hover, focus, check, uncheck, text." },
-                "text": { "type": "string", "description": "Optional text/value for fill or type actions." },
+                "action": { "type": "string", "description": "Optional action: click, fill, check, hover, text." },
+                "text": { "type": "string", "description": "Optional value for the fill action." },
                 "index": { "type": "integer", "description": "Index for nth locator." },
                 "name": { "type": "string", "description": "Accessible name filter for role locator." },
                 "exact": { "type": "boolean", "default": false }

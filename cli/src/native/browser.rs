@@ -152,11 +152,29 @@ pub fn to_ai_friendly_error(error: &str) -> String {
         return "Operation timed out. The page may still be loading or the element may not exist."
             .to_string();
     }
-    if lower.contains("element not found") || lower.contains("no element") {
-        return "Element not found. Verify the selector is correct and the element exists in the DOM."
-            .to_string();
+    if is_locator_miss(&lower) {
+        let detail = error.trim_end_matches('.');
+        return format!(
+            "{detail}. Verify the selector, role, or name is correct and the element exists in the DOM."
+        );
     }
     error.to_string()
+}
+
+/// True for the "couldn't find a matching element" family of messages
+/// produced by locator code (`find role`, `find text`, CSS/ref resolution,
+/// and friends). Every such message already carries the selector, role, or
+/// name that failed to match, so this only appends actionable advice
+/// instead of discarding that detail.
+///
+/// Deliberately narrower than a bare "no element" substring match, which
+/// would also catch unrelated WebDriver protocol errors like "No element in
+/// response" or "No element ID in response" -- those aren't locator misses,
+/// and "verify the selector is correct" is misleading advice for them.
+fn is_locator_miss(lower: &str) -> bool {
+    lower.starts_with("element not found")
+        || lower.starts_with("no element found")
+        || lower.starts_with("no element at index")
 }
 
 #[derive(Debug, Clone)]
@@ -1993,7 +2011,7 @@ mod tests {
     fn test_to_ai_friendly_error_not_found() {
         assert_eq!(
             to_ai_friendly_error("Element not found"),
-            "Element not found. Verify the selector is correct and the element exists in the DOM."
+            "Element not found. Verify the selector, role, or name is correct and the element exists in the DOM."
         );
     }
 
@@ -2010,11 +2028,43 @@ mod tests {
         assert_eq!(to_ai_friendly_error(err), err);
     }
 
+    /// The specific selector/role/name that failed to match must survive:
+    /// this used to get discarded and replaced with a single indistinguishable
+    /// generic message, which made it impossible to tell a role miss from a
+    /// name miss from an index-out-of-range miss.
     #[test]
-    fn test_to_ai_friendly_error_catches_no_element() {
-        let mapped =
-            "Element not found. Verify the selector is correct and the element exists in the DOM.";
-        assert_eq!(to_ai_friendly_error("No element found for css 'x'"), mapped);
+    fn test_to_ai_friendly_error_preserves_locator_detail() {
+        assert_eq!(
+            to_ai_friendly_error("No element found for css 'x'"),
+            "No element found for css 'x'. Verify the selector, role, or name is correct and the element exists in the DOM."
+        );
+        assert_eq!(
+            to_ai_friendly_error("No element found: getByRole('heading', { name: 'Skillz' })"),
+            "No element found: getByRole('heading', { name: 'Skillz' }). Verify the selector, role, or name is correct and the element exists in the DOM."
+        );
+        assert_eq!(
+            to_ai_friendly_error("No element at index 5 for selector '.card'"),
+            "No element at index 5 for selector '.card'. Verify the selector, role, or name is correct and the element exists in the DOM."
+        );
+        assert_eq!(
+            to_ai_friendly_error("Element not found in the selected frame: iframe#f"),
+            "Element not found in the selected frame: iframe#f. Verify the selector, role, or name is correct and the element exists in the DOM."
+        );
+    }
+
+    /// WebDriver protocol errors happen to contain "element" and "no" but
+    /// are not locator misses -- "verify the selector is correct" would be
+    /// actively misleading advice for a malformed response payload.
+    #[test]
+    fn test_to_ai_friendly_error_does_not_flatten_webdriver_protocol_errors() {
+        assert_eq!(
+            to_ai_friendly_error("No element in response"),
+            "No element in response"
+        );
+        assert_eq!(
+            to_ai_friendly_error("No element ID in response"),
+            "No element ID in response"
+        );
     }
 
     #[test]
