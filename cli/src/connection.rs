@@ -585,7 +585,6 @@ fn daemon_config_fingerprint(opts: &DaemonOptions) -> String {
     opts.debug.hash(&mut hasher);
     opts.action_policy.hash(&mut hasher);
     opts.confirm_actions.hash(&mut hasher);
-    opts.allowed_domains.hash(&mut hasher);
     opts.idle_timeout.hash(&mut hasher);
     opts.default_timeout.hash(&mut hasher);
     opts.no_auto_dialog.hash(&mut hasher);
@@ -1291,9 +1290,10 @@ mod tests {
             daemon_config_fingerprint(&base),
             daemon_config_fingerprint(&dialog_changed)
         );
-        assert_ne!(
+        assert_eq!(
             daemon_config_fingerprint(&base),
-            daemon_config_fingerprint(&domains_changed)
+            daemon_config_fingerprint(&domains_changed),
+            "allowed domains are browser launch state, not daemon identity"
         );
     }
 

@@ -2442,57 +2442,67 @@ fn should_defer_url_until_network_controls(
     Ok(filter.is_some_and(|filter| !filter.allowed_domains.is_empty()) || handle_auth_requests)
 }
 
-fn ensure_allowed_domains_supported_for_launch(
-    allowed_domains: &[String],
-    cdp_url: Option<&str>,
+struct AllowedDomainsLaunchSupport<'a> {
+    allowed_domains: &'a [String],
+    cdp_url: Option<&'a str>,
     cdp_port: Option<u64>,
     auto_connect: bool,
-    profile: Option<&str>,
-    provider_name: Option<&str>,
-    args: &[String],
-    restore_key: Option<&str>,
-    storage_state: Option<&str>,
+    profile: Option<&'a str>,
+    provider_name: Option<&'a str>,
+    args: &'a [String],
+    restore_key: Option<&'a str>,
+    storage_state: Option<&'a str>,
+}
+
+fn ensure_allowed_domains_supported_for_launch(
+    support: AllowedDomainsLaunchSupport<'_>,
 ) -> Result<(), String> {
-    if allowed_domains.is_empty() {
+    if support.allowed_domains.is_empty() {
         return Ok(());
     }
 
-    if restore_key.is_some_and(|key| !key.trim().is_empty()) {
+    if support
+        .restore_key
+        .is_some_and(|key| !key.trim().is_empty())
+    {
         return Err(
             "--allowed-domains is not supported with --restore because saved state can replay origins before agent-browser can verify they are in the allowlist"
                 .to_string(),
         );
     }
 
-    if storage_state.is_some_and(|path| !path.trim().is_empty()) {
+    if support
+        .storage_state
+        .is_some_and(|path| !path.trim().is_empty())
+    {
         return Err(
             "--allowed-domains is not supported with --state/storageState because loading state replays saved origins"
                 .to_string(),
         );
     }
 
-    if cdp_url.is_some() || cdp_port.is_some() {
+    if support.cdp_url.is_some() || support.cdp_port.is_some() {
         return Err(
             "--allowed-domains is not supported with --cdp because WebRTC containment cannot be installed before existing page scripts run"
                 .to_string(),
         );
     }
 
-    if auto_connect {
+    if support.auto_connect {
         return Err(
             "--allowed-domains is not supported with --auto-connect because WebRTC containment cannot be installed before existing page scripts run"
                 .to_string(),
         );
     }
 
-    if profile.is_some() {
+    if support.profile.is_some() {
         return Err(
             "--allowed-domains is not supported with --profile because Chrome may restore existing pages before network containment is installed"
                 .to_string(),
         );
     }
 
-    if let Some(provider) = provider_name {
+    if let Some(provider) = support.provider_name {
         match provider.to_lowercase().as_str() {
             "ios" => {
                 return Err(
@@ -2510,7 +2520,7 @@ fn ensure_allowed_domains_supported_for_launch(
         }
     }
 
-    if let Some(arg) = allowed_domains_disallowed_chrome_arg(args) {
+    if let Some(arg) = allowed_domains_disallowed_chrome_arg(support.args) {
         return Err(format!(
             "--allowed-domains is not supported with --args containing {} because Chrome may restore or open pages before network containment is installed",
             arg
@@ -2808,17 +2818,17 @@ async fn auto_launch(
     write_extensions_file(&state.session_id);
 
     if let Ok(cdp) = env::var("AGENT_BROWSER_CDP") {
-        ensure_allowed_domains_supported_for_launch(
-            &allowed_domains,
-            Some(cdp.as_str()),
-            None,
-            false,
-            options.profile.as_deref(),
-            None,
-            &options.args,
-            restore_key.as_deref(),
+        ensure_allowed_domains_supported_for_launch(AllowedDomainsLaunchSupport {
+            allowed_domains: &allowed_domains,
+            cdp_url: Some(cdp.as_str()),
+            cdp_port: None,
+            auto_connect: false,
+            profile: options.profile.as_deref(),
+            provider_name: None,
+            args: &options.args,
+            restore_key: restore_key.as_deref(),
             storage_state,
-        )?;
+        })?;
         let mgr = BrowserManager::connect_cdp(&cdp).await?;
         let hash = launch_hash(
             &options,
@@ -2845,17 +2855,17 @@ async fn auto_launch(
     }
 
     if env::var("AGENT_BROWSER_AUTO_CONNECT").is_ok() {
-        ensure_allowed_domains_supported_for_launch(
-            &allowed_domains,
-            None,
-            None,
-            true,
-            options.profile.as_deref(),
-            None,
-            &options.args,
-            restore_key.as_deref(),
+        ensure_allowed_domains_supported_for_launch(AllowedDomainsLaunchSupport {
+            allowed_domains: &allowed_domains,
+            cdp_url: None,
+            cdp_port: None,
+            auto_connect: true,
+            profile: options.profile.as_deref(),
+            provider_name: None,
+            args: &options.args,
+            restore_key: restore_key.as_deref(),
             storage_state,
-        )?;
+        })?;
         let hash = launch_hash(
             &options,
             &allowed_domains,
@@ -2886,17 +2896,17 @@ async fn auto_launch(
     // command arriving before an explicit "launch") honours the provider env.
     if let Ok(provider) = env::var("AGENT_BROWSER_PROVIDER") {
         let p = provider.to_lowercase();
-        ensure_allowed_domains_supported_for_launch(
-            &allowed_domains,
-            None,
-            None,
-            false,
-            options.profile.as_deref(),
-            Some(p.as_str()),
-            &options.args,
-            restore_key.as_deref(),
+        ensure_allowed_domains_supported_for_launch(AllowedDomainsLaunchSupport {
+            allowed_domains: &allowed_domains,
+            cdp_url: None,
+            cdp_port: None,
+            auto_connect: false,
+            profile: options.profile.as_deref(),
+            provider_name: Some(p.as_str()),
+            args: &options.args,
+            restore_key: restore_key.as_deref(),
             storage_state,
-        )?;
+        })?;
         // ios/safari are device providers handled via explicit launch command
         if !p.is_empty() && p != "ios" && p != "safari" {
             let conn = providers::connect_provider_with_plugins(&p, &plugins).await?;
@@ -2955,30 +2965,30 @@ async fn auto_launch(
         }
     }
 
-    ensure_allowed_domains_supported_for_launch(
-        &allowed_domains,
-        None,
-        None,
-        false,
-        options.profile.as_deref(),
-        None,
-        &options.args,
-        restore_key.as_deref(),
+    ensure_allowed_domains_supported_for_launch(AllowedDomainsLaunchSupport {
+        allowed_domains: &allowed_domains,
+        cdp_url: None,
+        cdp_port: None,
+        auto_connect: false,
+        profile: options.profile.as_deref(),
+        provider_name: None,
+        args: &options.args,
+        restore_key: restore_key.as_deref(),
         storage_state,
-    )?;
+    })?;
 
     apply_launch_mutator_plugins(state, &mut options, plugins).await?;
-    ensure_allowed_domains_supported_for_launch(
-        &allowed_domains,
-        None,
-        None,
-        false,
-        options.profile.as_deref(),
-        None,
-        &options.args,
-        restore_key.as_deref(),
+    ensure_allowed_domains_supported_for_launch(AllowedDomainsLaunchSupport {
+        allowed_domains: &allowed_domains,
+        cdp_url: None,
+        cdp_port: None,
+        auto_connect: false,
+        profile: options.profile.as_deref(),
+        provider_name: None,
+        args: &options.args,
+        restore_key: restore_key.as_deref(),
         storage_state,
-    )?;
+    })?;
     write_extensions_file_from_paths(&state.session_id, options.extensions.as_deref());
     let hash = launch_hash(
         &options,
@@ -3571,17 +3581,17 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         })
         .unwrap_or_default();
 
-    ensure_allowed_domains_supported_for_launch(
-        &allowed_domains,
+    ensure_allowed_domains_supported_for_launch(AllowedDomainsLaunchSupport {
+        allowed_domains: &allowed_domains,
         cdp_url,
         cdp_port,
         auto_connect,
-        profile.as_deref(),
+        profile: profile.as_deref(),
         provider_name,
-        &launch_args,
-        restore_key.as_deref(),
+        args: &launch_args,
+        restore_key: restore_key.as_deref(),
         storage_state,
-    )?;
+    })?;
 
     let mut launch_options = LaunchOptions {
         headless,
@@ -3653,17 +3663,17 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         apply_launch_mutator_plugins(state, &mut launch_options, plugins_from_command_or_env(cmd))
             .await?;
     }
-    ensure_allowed_domains_supported_for_launch(
-        &allowed_domains,
+    ensure_allowed_domains_supported_for_launch(AllowedDomainsLaunchSupport {
+        allowed_domains: &allowed_domains,
         cdp_url,
         cdp_port,
         auto_connect,
-        launch_options.profile.as_deref(),
+        profile: launch_options.profile.as_deref(),
         provider_name,
-        &launch_options.args,
-        restore_key.as_deref(),
+        args: &launch_options.args,
+        restore_key: restore_key.as_deref(),
         storage_state,
-    )?;
+    })?;
 
     if let Some(domains) = requested_allowed_domains {
         let mut filter = state.domain_filter.write().await;
