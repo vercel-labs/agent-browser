@@ -308,6 +308,9 @@ pub struct BrowserManager {
     /// Origins visited during this session, used by save_state to collect cross-origin localStorage.
     visited_origins: HashSet<String>,
     next_tab_id: u32,
+    /// True when the CDP WebSocket is already scoped to a page target and
+    /// browser-level Target.* commands are not available.
+    direct_page: bool,
 }
 
 const LIGHTPANDA_CDP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -380,6 +383,7 @@ impl BrowserManager {
                 ignore_https_errors,
                 visited_origins: HashSet::new(),
                 next_tab_id: 1,
+                direct_page: false,
             };
             manager.discover_and_attach_targets().await?;
             manager
@@ -469,6 +473,7 @@ impl BrowserManager {
             ignore_https_errors: false,
             visited_origins: HashSet::new(),
             next_tab_id: 1,
+            direct_page,
         };
 
         if direct_page {
@@ -918,6 +923,10 @@ impl BrowserManager {
     /// Returns true if this manager was connected via CDP (as opposed to local launch).
     pub fn is_cdp_connection(&self) -> bool {
         self.browser_process.is_none()
+    }
+
+    pub fn is_direct_page_connection(&self) -> bool {
+        self.direct_page
     }
 
     /// Ensures the browser has at least one page. If `pages` is empty, creates a new
@@ -1654,6 +1663,7 @@ async fn initialize_lightpanda_manager(
             ignore_https_errors: false,
             visited_origins: HashSet::new(),
             next_tab_id: 1,
+            direct_page: false,
         };
 
         match discover_and_attach_lightpanda_targets(&mut manager, deadline).await {

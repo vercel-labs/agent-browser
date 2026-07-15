@@ -2504,6 +2504,16 @@ fn ensure_allowed_domains_supported_for_launch(
     Ok(())
 }
 
+fn direct_page_allowed_domains_error() -> String {
+    "--allowed-domains is not supported with direct-page browser providers because worker and popup containment require browser-level Target auto-attach"
+        .to_string()
+}
+
+async fn restore_domain_filter(state: &mut DaemonState, filter: &Option<DomainFilter>) {
+    let mut current = state.domain_filter.write().await;
+    *current = filter.clone();
+}
+
 fn chrome_switch_name(arg: &str) -> Option<&str> {
     let trimmed = arg.trim();
     trimmed
@@ -2656,7 +2666,18 @@ async fn install_active_network_controls(
         return Ok(());
     }
 
-    if !state.network_auto_attach_installed {
+    let direct_page = {
+        let mgr = state
+            .browser
+            .as_ref()
+            .ok_or("Browser is not available for network control installation")?;
+        mgr.is_direct_page_connection()
+    };
+    if direct_page && filter.is_some() {
+        return Err(direct_page_allowed_domains_error());
+    }
+
+    if !state.network_auto_attach_installed && !direct_page {
         {
             let mgr = state
                 .browser
@@ -2838,6 +2859,12 @@ async fn auto_launch(
         // ios/safari are device providers handled via explicit launch command
         if !p.is_empty() && p != "ios" && p != "safari" {
             let conn = providers::connect_provider_with_plugins(&p, &plugins).await?;
+            if conn.direct_page && !allowed_domains.is_empty() {
+                if let Some(ref ps) = conn.session {
+                    providers::close_provider_session_with_plugins(ps, &plugins).await;
+                }
+                return Err(direct_page_allowed_domains_error());
+            }
             let ws_headers = if p == "agentcore" {
                 providers::take_agentcore_ws_headers()
             } else {
@@ -3476,6 +3503,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         .map(String::from);
 
     let requested_allowed_domains = allowed_domains_from_launch_command(cmd);
+    let previous_domain_filter = state.domain_filter.read().await.clone();
     let existing_allowed_domains = current_allowed_domains(state).await;
     let allowed_domains = requested_allowed_domains
         .clone()
@@ -3713,6 +3741,13 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
                     Some(provider_plugin_launch_options_from_command(cmd)),
                 )
                 .await?;
+                if conn.direct_page && !allowed_domains.is_empty() {
+                    if let Some(ref ps) = conn.session {
+                        providers::close_provider_session_with_plugins(ps, &command_plugins).await;
+                    }
+                    restore_domain_filter(state, &previous_domain_filter).await;
+                    return Err(direct_page_allowed_domains_error());
+                }
                 let provider_metadata = conn.metadata.clone();
 
                 let ws_headers = if provider.eq_ignore_ascii_case("agentcore") {
@@ -12014,6 +12049,61 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"launch":{"arg
         assert!(
             state.browser.is_none(),
             "plugin args should be rejected before launching Chrome"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_allowed_domains_reject_direct_page_provider_plugins() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let guard = EnvGuard::new(&["AGENT_BROWSER_ALLOWED_DOMAINS"]);
+        guard.remove("AGENT_BROWSER_ALLOWED_DOMAINS");
+        let dir = tempfile::tempdir().unwrap();
+        let plugin_path = dir.path().join("mock-direct-page-provider");
+        fs::write(
+            &plugin_path,
+            r#"#!/bin/sh
+cat >/dev/null
+printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cdpUrl":"ws://127.0.0.1:9222/devtools/page/test","directPage":true}}'
+"#,
+        )
+        .unwrap();
+        let mut perms = fs::metadata(&plugin_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&plugin_path, perms).unwrap();
+
+        let mut state = DaemonState::new();
+        let error = handle_launch(
+            &json!({
+                "action": "launch",
+                "provider": "direct-page",
+                "allowedDomains": ["example.com"],
+                "plugins": [
+                    {
+                        "name": "direct-page",
+                        "command": plugin_path.to_string_lossy(),
+                        "capabilities": ["browser.provider"]
+                    }
+                ]
+            }),
+            &mut state,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            error.contains("direct-page browser providers"),
+            "got: {}",
+            error
+        );
+        assert!(
+            state.domain_filter.read().await.is_none(),
+            "rejected direct-page provider should not commit allowedDomains"
+        );
+        assert!(
+            state.browser.is_none(),
+            "direct-page provider should be rejected before CDP connect"
         );
     }
 
