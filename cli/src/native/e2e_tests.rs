@@ -1557,6 +1557,81 @@ async fn e2e_element_queries() {
     assert_success(&resp);
 }
 
+#[tokio::test]
+#[ignore]
+async fn e2e_getbyrole_uses_accessibility_tree_for_implicit_roles() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = concat!(
+        "<html><head>",
+        "<link rel='stylesheet' href='data:text/css,body{}'>",
+        "</head><body>",
+        "<h1 style='text-transform:uppercase'>Welcome</h1>",
+        "<a id='services' href='#services' onclick='window.__clicked = \"services\"'>Services</a>",
+        "<button id='submit'>Submit</button>",
+        "</body></html>"
+    );
+    let url = format!("data:text/html;base64,{}", STANDARD.encode(html));
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Implicit role from a plain HTML tag (<h1> -> heading), matched
+    // case-insensitively against the accessible name despite the CSS
+    // text-transform rendering it as "WELCOME".
+    let resp = execute_command(
+        &json!({
+            "id": "3",
+            "action": "getbyrole",
+            "role": "heading",
+            "name": "welcome",
+            "subaction": "text"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["text"], "WELCOME");
+
+    // A real <a href> must win over the unrelated <link rel="stylesheet">
+    // element, which is not exposed as an AX "link" node at all.
+    let resp = execute_command(
+        &json!({
+            "id": "4",
+            "action": "getbyrole",
+            "role": "link",
+            "name": "Services",
+            "exact": true,
+            "subaction": "click"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "evaluate", "script": "window.__clicked" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], "services");
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 // ---------------------------------------------------------------------------
 // Wait command
 // ---------------------------------------------------------------------------
