@@ -91,6 +91,12 @@ fn attach_script_launch_options(launch_cmd: &mut serde_json::Value, flags: &Flag
     }
 }
 
+fn attach_allowed_domains_to_launch_command(launch_cmd: &mut serde_json::Value, flags: &Flags) {
+    if let Some(ref domains) = flags.allowed_domains {
+        launch_cmd["allowedDomains"] = json!(domains);
+    }
+}
+
 fn attach_plugins_to_command(cmd: &mut serde_json::Value, plugins: &[plugins::PluginConfig]) {
     cmd["plugins"] = json!(plugins);
 }
@@ -147,6 +153,34 @@ fn incompatible_launch_mode_error(flags: &Flags) -> Option<&'static str> {
     }
 
     None
+}
+
+fn should_send_local_launch_config(flags: &Flags) -> bool {
+    (flags.headed
+        || flags.cli_headed
+        || flags.executable_path.is_some()
+        || flags.profile.is_some()
+        || flags.state.is_some()
+        || flags.proxy.is_some()
+        || flags.args.is_some()
+        || flags.user_agent.is_some()
+        || flags.allow_file_access
+        || should_send_hide_scrollbars_launch_option(
+            flags.cli_hide_scrollbars,
+            flags.hide_scrollbars,
+        )
+        || flags.webgpu
+        || flags.cli_webgpu
+        || flags.color_scheme.is_some()
+        || flags.download_path.is_some()
+        || flags.engine.is_some()
+        || flags.allowed_domains.is_some()
+        || !flags.init_scripts.is_empty()
+        || !flags.enable.is_empty()
+        || !flags.extensions.is_empty())
+        && flags.cdp.is_none()
+        && flags.provider.is_none()
+        && !flags.auto_connect
 }
 
 fn attach_restore_config_to_command(cmd: &mut serde_json::Value, flags: &Flags) {
@@ -1274,6 +1308,7 @@ fn main() {
             "autoConnect": true
         });
         attach_script_launch_options(&mut launch_cmd, &flags);
+        attach_allowed_domains_to_launch_command(&mut launch_cmd, &flags);
         attach_restore_config_to_command(&mut launch_cmd, &flags);
 
         if flags.ignore_https_errors {
@@ -1370,6 +1405,7 @@ fn main() {
 
         let mut launch_cmd = launch_cmd;
         attach_script_launch_options(&mut launch_cmd, &flags);
+        attach_allowed_domains_to_launch_command(&mut launch_cmd, &flags);
         attach_restore_config_to_command(&mut launch_cmd, &flags);
 
         if flags.ignore_https_errors {
@@ -1412,6 +1448,7 @@ fn main() {
         });
         launch_cmd["plugins"] = json!(flags.plugins.clone());
         attach_script_launch_options(&mut launch_cmd, &flags);
+        attach_allowed_domains_to_launch_command(&mut launch_cmd, &flags);
         attach_restore_config_to_command(&mut launch_cmd, &flags);
 
         if let Some(ref cs) = flags.color_scheme {
@@ -1438,31 +1475,7 @@ fn main() {
     }
 
     // Launch headed browser or configure browser options (without CDP or provider)
-    if (flags.headed
-        || flags.cli_headed  // User explicitly set --headed (even if false)
-        || flags.executable_path.is_some()
-        || flags.profile.is_some()
-        || flags.state.is_some()
-        || flags.proxy.is_some()
-        || flags.args.is_some()
-        || flags.user_agent.is_some()
-        || flags.allow_file_access
-        || should_send_hide_scrollbars_launch_option(
-            flags.cli_hide_scrollbars,
-            flags.hide_scrollbars,
-        )
-        || flags.webgpu
-        || flags.cli_webgpu
-        || flags.color_scheme.is_some()
-        || flags.download_path.is_some()
-        || flags.engine.is_some()
-        || !flags.init_scripts.is_empty()
-        || !flags.enable.is_empty()
-        || !flags.extensions.is_empty())
-        && flags.cdp.is_none()
-        && flags.provider.is_none()
-        && !flags.auto_connect
-    {
+    if should_send_local_launch_config(&flags) {
         let mut launch_cmd = json!({
             "id": gen_id(),
             "action": "launch",
@@ -1570,9 +1583,7 @@ fn main() {
             launch_cmd["downloadPath"] = json!(dp);
         }
 
-        if let Some(ref domains) = flags.allowed_domains {
-            launch_cmd["allowedDomains"] = json!(domains);
-        }
+        attach_allowed_domains_to_launch_command(&mut launch_cmd, &flags);
 
         if let Some(ref engine) = flags.engine {
             launch_cmd["engine"] = json!(engine);
@@ -1918,6 +1929,60 @@ mod tests {
         let mut cli_true_cmd = json!({ "action": "launch" });
         apply_hide_scrollbars_launch_option(&mut cli_true_cmd, true, true);
         assert_eq!(cli_true_cmd["hideScrollbars"], true);
+    }
+
+    fn neutral_launch_config_flags() -> Flags {
+        let mut flags = parse_flags(&[]);
+        flags.headed = false;
+        flags.cli_headed = false;
+        flags.executable_path = None;
+        flags.profile = None;
+        flags.state = None;
+        flags.proxy = None;
+        flags.args = None;
+        flags.user_agent = None;
+        flags.allow_file_access = false;
+        flags.hide_scrollbars = true;
+        flags.cli_hide_scrollbars = false;
+        flags.webgpu = false;
+        flags.cli_webgpu = false;
+        flags.color_scheme = None;
+        flags.download_path = None;
+        flags.engine = None;
+        flags.allowed_domains = None;
+        flags.init_scripts.clear();
+        flags.enable.clear();
+        flags.extensions.clear();
+        flags.cdp = None;
+        flags.provider = None;
+        flags.auto_connect = false;
+        flags
+    }
+
+    #[test]
+    fn test_attach_allowed_domains_to_launch_command() {
+        let mut flags = neutral_launch_config_flags();
+        flags.allowed_domains = Some(vec!["example.com".to_string(), "*.example.org".to_string()]);
+        let mut cmd = json!({ "action": "launch" });
+
+        attach_allowed_domains_to_launch_command(&mut cmd, &flags);
+
+        assert_eq!(
+            cmd["allowedDomains"],
+            json!(["example.com", "*.example.org"])
+        );
+    }
+
+    #[test]
+    fn test_allowed_domains_requests_local_launch_configuration() {
+        let mut flags = neutral_launch_config_flags();
+        assert!(!should_send_local_launch_config(&flags));
+
+        flags.allowed_domains = Some(vec!["example.com".to_string()]);
+        assert!(should_send_local_launch_config(&flags));
+
+        flags.cdp = Some("9222".to_string());
+        assert!(!should_send_local_launch_config(&flags));
     }
 
     #[test]

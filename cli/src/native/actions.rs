@@ -2450,9 +2450,25 @@ fn ensure_allowed_domains_supported_for_launch(
     profile: Option<&str>,
     provider_name: Option<&str>,
     args: &[String],
+    restore_key: Option<&str>,
+    storage_state: Option<&str>,
 ) -> Result<(), String> {
     if allowed_domains.is_empty() {
         return Ok(());
+    }
+
+    if restore_key.is_some_and(|key| !key.trim().is_empty()) {
+        return Err(
+            "--allowed-domains is not supported with --restore because saved state can replay origins before agent-browser can verify they are in the allowlist"
+                .to_string(),
+        );
+    }
+
+    if storage_state.is_some_and(|path| !path.trim().is_empty()) {
+        return Err(
+            "--allowed-domains is not supported with --state/storageState because loading state replays saved origins"
+                .to_string(),
+        );
     }
 
     if cdp_url.is_some() || cdp_port.is_some() {
@@ -2507,6 +2523,23 @@ fn ensure_allowed_domains_supported_for_launch(
 fn direct_page_allowed_domains_error() -> String {
     "--allowed-domains is not supported with direct-page browser providers because worker and popup containment require browser-level Target auto-attach"
         .to_string()
+}
+
+async fn ensure_state_replay_supported_by_active_domain_filter(
+    state: &DaemonState,
+    source: &str,
+) -> Result<(), String> {
+    let filter = state.domain_filter.read().await;
+    if filter
+        .as_ref()
+        .is_some_and(|filter| !filter.allowed_domains.is_empty())
+    {
+        return Err(format!(
+            "--allowed-domains is not supported with {} because loading state replays saved origins",
+            source
+        ));
+    }
+    Ok(())
 }
 
 async fn restore_domain_filter(state: &mut DaemonState, filter: &Option<DomainFilter>) {
@@ -2757,6 +2790,8 @@ async fn auto_launch(
 
     // Extract storage_state before options is moved into BrowserManager::launch.
     let storage_state_path = options.storage_state.clone();
+    let restore_key = state.session_name.clone();
+    let storage_state = storage_state_path.as_deref();
 
     // Store proxy credentials for Fetch.authRequired handling
     let has_proxy_auth = options.proxy_username.is_some();
@@ -2781,6 +2816,8 @@ async fn auto_launch(
             options.profile.as_deref(),
             None,
             &options.args,
+            restore_key.as_deref(),
+            storage_state,
         )?;
         let mgr = BrowserManager::connect_cdp(&cdp).await?;
         let hash = launch_hash(
@@ -2816,6 +2853,8 @@ async fn auto_launch(
             options.profile.as_deref(),
             None,
             &options.args,
+            restore_key.as_deref(),
+            storage_state,
         )?;
         let hash = launch_hash(
             &options,
@@ -2855,6 +2894,8 @@ async fn auto_launch(
             options.profile.as_deref(),
             Some(p.as_str()),
             &options.args,
+            restore_key.as_deref(),
+            storage_state,
         )?;
         // ios/safari are device providers handled via explicit launch command
         if !p.is_empty() && p != "ios" && p != "safari" {
@@ -2922,6 +2963,8 @@ async fn auto_launch(
         options.profile.as_deref(),
         None,
         &options.args,
+        restore_key.as_deref(),
+        storage_state,
     )?;
 
     apply_launch_mutator_plugins(state, &mut options, plugins).await?;
@@ -2933,6 +2976,8 @@ async fn auto_launch(
         options.profile.as_deref(),
         None,
         &options.args,
+        restore_key.as_deref(),
+        storage_state,
     )?;
     write_extensions_file_from_paths(&state.session_id, options.extensions.as_deref());
     let hash = launch_hash(
@@ -3417,6 +3462,8 @@ pub(crate) async fn auto_save_restore_state(
 /// the returned `Result` and keep their previous behavior.
 async fn load_storage_state(state: &mut DaemonState, path: &Option<String>) -> Result<(), String> {
     if let Some(ref path) = path {
+        ensure_state_replay_supported_by_active_domain_filter(state, "--state/storageState")
+            .await?;
         let mut loaded = false;
         if let Some(ref mgr) = state.browser {
             if let Ok(session_id) = mgr.active_session_id() {
@@ -3509,6 +3556,11 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         .clone()
         .unwrap_or(existing_allowed_domains);
     let restrict_webrtc = !allowed_domains.is_empty();
+    let restore_key = cmd
+        .get("restoreKey")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .or_else(|| state.session_name.clone());
     let launch_args: Vec<String> = cmd
         .get("args")
         .and_then(|v| v.as_array())
@@ -3527,6 +3579,8 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         profile.as_deref(),
         provider_name,
         &launch_args,
+        restore_key.as_deref(),
+        storage_state,
     )?;
 
     let mut launch_options = LaunchOptions {
@@ -3607,6 +3661,8 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         launch_options.profile.as_deref(),
         provider_name,
         &launch_options.args,
+        restore_key.as_deref(),
+        storage_state,
     )?;
 
     if let Some(domains) = requested_allowed_domains {
@@ -5383,6 +5439,7 @@ async fn handle_state_load(cmd: &Value, state: &mut DaemonState) -> Result<Value
         .and_then(|v| v.as_str())
         .ok_or("Missing 'path' parameter")?;
 
+    ensure_state_replay_supported_by_active_domain_filter(state, "state load").await?;
     state::load_state(&mgr.client, &session_id, path).await?;
     mark_explicit_storage_state_loaded(state, path);
     Ok(json!({ "loaded": true, "path": path }))
@@ -11871,6 +11928,83 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         );
     }
 
+    #[tokio::test]
+    async fn test_allowed_domains_reject_restore_state_replay() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_ALLOWED_DOMAINS"]);
+        guard.remove("AGENT_BROWSER_ALLOWED_DOMAINS");
+
+        let mut state = DaemonState::new();
+        let error = handle_launch(
+            &json!({
+                "action": "launch",
+                "restoreKey": "saved-session",
+                "allowedDomains": ["example.com"]
+            }),
+            &mut state,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.contains("--restore"), "got: {}", error);
+        assert!(error.contains("replay origins"), "got: {}", error);
+        assert!(
+            state.domain_filter.read().await.is_none(),
+            "rejected restore replay should not commit allowedDomains"
+        );
+        assert!(
+            state.browser.is_none(),
+            "restore replay should be rejected before launching Chrome"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_allowed_domains_reject_storage_state_replay() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_ALLOWED_DOMAINS"]);
+        guard.remove("AGENT_BROWSER_ALLOWED_DOMAINS");
+
+        let mut state = DaemonState::new();
+        let error = handle_launch(
+            &json!({
+                "action": "launch",
+                "storageState": "/tmp/agent-browser-state.json",
+                "allowedDomains": ["example.com"]
+            }),
+            &mut state,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.contains("--state/storageState"), "got: {}", error);
+        assert!(error.contains("replays saved origins"), "got: {}", error);
+        assert!(
+            state.domain_filter.read().await.is_none(),
+            "rejected storageState replay should not commit allowedDomains"
+        );
+        assert!(
+            state.browser.is_none(),
+            "storageState replay should be rejected before launching Chrome"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_state_replay_rejects_active_domain_filter() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_ALLOWED_DOMAINS"]);
+        guard.remove("AGENT_BROWSER_ALLOWED_DOMAINS");
+
+        let state = DaemonState::new();
+        {
+            let mut df = state.domain_filter.write().await;
+            *df = Some(DomainFilter::new("example.com"));
+        }
+
+        let error = ensure_state_replay_supported_by_active_domain_filter(&state, "state load")
+            .await
+            .unwrap_err();
+
+        assert!(error.contains("state load"), "got: {}", error);
+        assert!(error.contains("replays saved origins"), "got: {}", error);
+    }
+
     #[test]
     fn test_allowed_domains_disallowed_chrome_arg_detects_startup_args() {
         let cases = [
@@ -11976,6 +12110,8 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
             "AGENT_BROWSER_ALLOWED_DOMAINS",
             "AGENT_BROWSER_PROFILE",
             "AGENT_BROWSER_ARGS",
+            "AGENT_BROWSER_STATE",
+            "AGENT_BROWSER_SESSION_NAME",
             "AGENT_BROWSER_CDP",
             "AGENT_BROWSER_AUTO_CONNECT",
             "AGENT_BROWSER_PROVIDER",
@@ -11986,6 +12122,8 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
             "AGENT_BROWSER_ARGS",
             "--user-data-dir=/tmp/agent-browser-profile",
         );
+        guard.remove("AGENT_BROWSER_STATE");
+        guard.remove("AGENT_BROWSER_SESSION_NAME");
         guard.remove("AGENT_BROWSER_CDP");
         guard.remove("AGENT_BROWSER_AUTO_CONNECT");
         guard.remove("AGENT_BROWSER_PROVIDER");
@@ -11998,6 +12136,68 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         assert!(
             state.browser.is_none(),
             "auto_launch should reject raw profile args before launching Chrome"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_allowed_domains_reject_env_restore_during_auto_launch() {
+        let guard = EnvGuard::new(&[
+            "AGENT_BROWSER_ALLOWED_DOMAINS",
+            "AGENT_BROWSER_PROFILE",
+            "AGENT_BROWSER_ARGS",
+            "AGENT_BROWSER_STATE",
+            "AGENT_BROWSER_SESSION_NAME",
+            "AGENT_BROWSER_CDP",
+            "AGENT_BROWSER_AUTO_CONNECT",
+            "AGENT_BROWSER_PROVIDER",
+        ]);
+        guard.set("AGENT_BROWSER_ALLOWED_DOMAINS", "example.com");
+        guard.set("AGENT_BROWSER_SESSION_NAME", "saved-session");
+        guard.remove("AGENT_BROWSER_PROFILE");
+        guard.remove("AGENT_BROWSER_ARGS");
+        guard.remove("AGENT_BROWSER_STATE");
+        guard.remove("AGENT_BROWSER_CDP");
+        guard.remove("AGENT_BROWSER_AUTO_CONNECT");
+        guard.remove("AGENT_BROWSER_PROVIDER");
+
+        let mut state = DaemonState::new();
+        let error = auto_launch(&mut state, Vec::new()).await.unwrap_err();
+
+        assert!(error.contains("--restore"), "got: {}", error);
+        assert!(
+            state.browser.is_none(),
+            "auto_launch should reject restore replay before launching Chrome"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_allowed_domains_reject_env_storage_state_during_auto_launch() {
+        let guard = EnvGuard::new(&[
+            "AGENT_BROWSER_ALLOWED_DOMAINS",
+            "AGENT_BROWSER_PROFILE",
+            "AGENT_BROWSER_ARGS",
+            "AGENT_BROWSER_STATE",
+            "AGENT_BROWSER_SESSION_NAME",
+            "AGENT_BROWSER_CDP",
+            "AGENT_BROWSER_AUTO_CONNECT",
+            "AGENT_BROWSER_PROVIDER",
+        ]);
+        guard.set("AGENT_BROWSER_ALLOWED_DOMAINS", "example.com");
+        guard.set("AGENT_BROWSER_STATE", "/tmp/agent-browser-state.json");
+        guard.remove("AGENT_BROWSER_PROFILE");
+        guard.remove("AGENT_BROWSER_ARGS");
+        guard.remove("AGENT_BROWSER_SESSION_NAME");
+        guard.remove("AGENT_BROWSER_CDP");
+        guard.remove("AGENT_BROWSER_AUTO_CONNECT");
+        guard.remove("AGENT_BROWSER_PROVIDER");
+
+        let mut state = DaemonState::new();
+        let error = auto_launch(&mut state, Vec::new()).await.unwrap_err();
+
+        assert!(error.contains("--state/storageState"), "got: {}", error);
+        assert!(
+            state.browser.is_none(),
+            "auto_launch should reject storage state replay before launching Chrome"
         );
     }
 
