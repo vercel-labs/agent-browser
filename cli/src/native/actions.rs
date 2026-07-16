@@ -10516,7 +10516,7 @@ mod tests {
             &json!({
                 "id": "2",
                 "action": "navigate",
-                "url": "data:text/html,<input id='i' role='textbox' value='x'><button>Go</button>"
+                "url": "data:text/html,<input id='i' role='textbox' value='x'><button>Go</button><input type='checkbox' role='checkbox'>"
             }),
             &mut state,
         )
@@ -10527,17 +10527,25 @@ mod tests {
             let mut cmd = json!({
                 "id": "3",
                 "action": "getbyrole",
-                "role": if *action == "fill" { "textbox" } else { "button" },
+                "role": match *action {
+                    "fill" => "textbox",
+                    "check" => "checkbox",
+                    _ => "button",
+                },
                 "subaction": action,
             });
             if *action == "fill" {
                 cmd["value"] = json!("y");
             }
             let resp = execute_command(&cmd, &mut state).await;
+            // success == true is the only assertion that proves the action
+            // reached a real handler AND that handler worked: a guard-only
+            // check ("not Unknown action") stays green when an entry added
+            // to FIND_ACTIONS falls through to the internal-error fallback.
             let error = resp.get("error").and_then(|v| v.as_str()).unwrap_or("");
             assert!(
-                !error.starts_with("Unknown action"),
-                "action '{action}' must dispatch, not be rejected as unknown: {error}"
+                resp.get("success").and_then(|v| v.as_bool()) == Some(true),
+                "action '{action}' must dispatch to a working handler: {error}"
             );
         }
 
