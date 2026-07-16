@@ -854,7 +854,45 @@ impl BrowserManager {
         wait_until: WaitUntil,
         session_id: &str,
     ) -> Result<(), String> {
+        // Subscribe before probing so a lifecycle event that fires between
+        // the probe and the wait cannot be missed.
         let mut rx = self.client.subscribe();
+
+        // `wait_for_lifecycle` waits for the NEXT lifecycle event, which is
+        // right mid-navigation but wrong for a standalone `wait --load`: a
+        // page that already finished loading (or navigated client-side,
+        // which fires no new load event) never emits another one, so the
+        // wait would burn its entire timeout. Resolve immediately when the
+        // document is already in the requested state.
+        let already_reached = match wait_until {
+            WaitUntil::Load => Some("document.readyState === 'complete'"),
+            // readyState leaves 'loading' when DOMContentLoaded fires.
+            WaitUntil::DomContentLoaded => Some("document.readyState !== 'loading'"),
+            // Network idle is tracked from live network events; its poller
+            // already treats a quiet stream as idle.
+            WaitUntil::NetworkIdle | WaitUntil::None => None,
+        };
+        if let Some(expression) = already_reached {
+            let probe: Result<EvaluateResult, String> = self
+                .client
+                .send_command_typed(
+                    "Runtime.evaluate",
+                    &EvaluateParams {
+                        expression: expression.to_string(),
+                        return_by_value: Some(true),
+                        await_promise: Some(false),
+                    },
+                    Some(session_id),
+                )
+                .await;
+            // A failed probe is not fatal; fall back to waiting for the event.
+            if let Ok(result) = probe {
+                if result.result.value.as_ref().and_then(|v| v.as_bool()) == Some(true) {
+                    return Ok(());
+                }
+            }
+        }
+
         self.wait_for_lifecycle(wait_until, session_id, &mut rx)
             .await
     }

@@ -1256,9 +1256,9 @@ const result = await withAgentBrowserSandbox(async (sandbox) => {
 
 Install `@agent-browser/sandbox` and `@vercel/sandbox` in the consuming app. See the [sandbox helper example](examples/sandbox/) for minimal Vercel Sandbox usage, or the [environments example](examples/environments/) for a full UI demo with a deploy-to-Vercel button.
 
-Fresh Vercel and Eve sandboxes install Chromium system dependencies by default. Pass `installSystemDependencies: false` only when your sandbox image already includes those libraries.
+Fresh Vercel and eve sandboxes install Chromium system dependencies by default. Pass `installSystemDependencies: false` only when your sandbox image already includes those libraries.
 
-### Eve extension
+### eve extension
 
 Give an [eve](https://eve.dev) agent the full browser tool set by mounting the [`@agent-browser/eve`](packages/@agent-browser/eve/) extension:
 
@@ -1269,7 +1269,7 @@ import browser from "@agent-browser/eve";
 export default browser({});
 ```
 
-This composes ~20 namespaced tools into the agent — `browser__navigate`, `browser__snapshot`, `browser__click`, `browser__fill`, `browser__find`, `browser__screenshot`, and more — all running agent-browser inside the agent's sandbox. agent-browser installs automatically on first use; pre-install it in `agent/sandbox.ts` with the `@agent-browser/sandbox/eve` helpers to bake the cost into the sandbox template instead. Configuration (domain allowlists, output limits, session naming) and per-tool overrides are covered in the [package README](packages/@agent-browser/eve/README.md), and the [eve example](examples/eve/) is a complete app with the extension mounted.
+This composes ~20 namespaced tools into the agent — `browser__navigate`, `browser__snapshot`, `browser__click`, `browser__fill`, `browser__find`, `browser__screenshot`, and more — all running agent-browser inside the agent's sandbox. agent-browser installs automatically on first use; pre-install it in `agent/sandbox.ts` with the `@agent-browser/eve/sandbox` helpers to bake the cost into the sandbox template instead. Configuration (domain allowlists, output limits, session naming) and per-tool overrides are covered in the [package README](packages/@agent-browser/eve/README.md), and the [eve example](examples/eve/) is a complete app with the extension mounted.
 
 ### Serverless (AWS Lambda)
 

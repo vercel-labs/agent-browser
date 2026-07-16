@@ -9,7 +9,7 @@ import {
   type AgentBrowserCommandResult,
   type AgentBrowserInstallOptions,
   type BuildShellCommandOptions,
-} from "./shared.js";
+} from "@agent-browser/sandbox";
 
 export {
   AgentBrowserCommandError,
@@ -19,7 +19,7 @@ export {
   resolveAgentBrowserInstallSpec,
   type AgentBrowserCommandResult,
   type AgentBrowserInstallOptions,
-} from "./index.js";
+} from "@agent-browser/sandbox";
 
 export interface EveSandboxCommandResult {
   readonly exitCode?: number;

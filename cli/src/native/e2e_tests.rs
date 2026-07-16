@@ -1620,6 +1620,48 @@ async fn e2e_wait() {
     assert_success(&resp);
 }
 
+// wait --load on a page that already finished loading must resolve
+// immediately instead of waiting for a Page.loadEventFired that will never
+// come (the common case after a click that triggers an SPA navigation).
+#[tokio::test]
+#[ignore]
+async fn e2e_wait_load_state_resolves_immediately_when_already_loaded() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": "data:text/html,<h1>Loaded</h1>" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    for (id, load_state) in [("3", "load"), ("4", "domcontentloaded")] {
+        let start = std::time::Instant::now();
+        let resp = execute_command(
+            &json!({ "id": id, "action": "waitforloadstate", "state": load_state, "timeout": 10000 }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+        assert!(
+            start.elapsed().as_millis() < 3000,
+            "wait --load {} on an already-loaded page should resolve immediately, took {}ms",
+            load_state,
+            start.elapsed().as_millis()
+        );
+    }
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 // ---------------------------------------------------------------------------
 // Same-document navigation regression test
 // ---------------------------------------------------------------------------

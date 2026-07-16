@@ -47,7 +47,7 @@ const sandboxRuntimeVersion = sandboxVersionMatch[1];
 // Read Eve package version
 const evePkg = JSON.parse(readFileSync(join(rootDir, 'packages/@agent-browser/eve/package.json'), 'utf-8'));
 const eveVersion = evePkg.version;
-const eveSandboxRange = evePkg.dependencies?.['@agent-browser/sandbox'];
+const eveSandboxDependency = evePkg.dependencies?.['@agent-browser/sandbox'];
 
 const mismatches = [];
 if (packageVersion !== cargoVersion) {
@@ -65,8 +65,8 @@ if (packageVersion !== sandboxRuntimeVersion) {
 if (packageVersion !== eveVersion) {
   mismatches.push(`  packages/@agent-browser/eve/package.json: ${eveVersion}`);
 }
-if (eveSandboxRange !== `^${packageVersion}`) {
-  mismatches.push(`  packages/@agent-browser/eve dependency @agent-browser/sandbox: ${eveSandboxRange}`);
+if (eveSandboxDependency !== 'workspace:^') {
+  mismatches.push(`  packages/@agent-browser/eve dependency @agent-browser/sandbox: ${eveSandboxDependency}`);
 }
 
 if (mismatches.length > 0) {
