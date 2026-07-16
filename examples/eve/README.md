@@ -1,4 +1,4 @@
-# Agent Browser Eve Example
+# Agent Browser eve Example
 
 This is a scaffold-style [eve](https://eve.dev) app based on `eve init --channel-web-nextjs`. Its agent gets a full browser tool set from the [`@agent-browser/eve`](../../packages/@agent-browser/eve/) extension.
 

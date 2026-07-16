@@ -1,6 +1,6 @@
-# Eve Extension
+# eve Extension
 
-`@agent-browser/eve` mounts the full agent-browser tool set into an [Eve](https://eve.dev) agent. The tools run `agent-browser` inside the agent sandbox, so the browser process, downloads, screenshots, and state stay out of the Next.js runtime.
+`@agent-browser/eve` mounts the full agent-browser tool set into an [eve](https://eve.dev) agent. The tools run `agent-browser` inside the agent sandbox, so the browser process, downloads, screenshots, and state stay out of the Next.js runtime.
 
 ## Install
 
@@ -8,7 +8,7 @@
 pnpm add @agent-browser/eve
 ```
 
-`eve` is a peer dependency and should already be present in an Eve app. The sandbox preinstall helpers shown below ship with the same package, so no other install is needed.
+`eve` is a peer dependency and should already be present in an eve app. The sandbox preinstall helpers shown below ship with the same package, so no other install is needed.
 
 ## Mount
 
@@ -28,7 +28,7 @@ The agent gets namespaced tools such as `browser__navigate`, `browser__snapshot`
 
 ## Sandbox bootstrap
 
-The extension can install `agent-browser`, Chromium, and required Linux libraries on first tool use. For production, install them in the Eve sandbox template so sessions start warm.
+The extension can install `agent-browser`, Chromium, and required Linux libraries on first tool use. For production, install them in the eve sandbox template so sessions start warm.
 
 ```ts
 // agent/sandbox.ts
@@ -71,8 +71,8 @@ For reading articles or docs, prefer `browser__read`. For apps, use `browser__sn
 
 ## Security
 
-Cookie, storage, and saved-auth-state commands are intentionally not exposed by the extension because they can reveal credential material to the model. Use standard Eve extension overrides when you need to disable a tool, add approval requirements, or provide an app-specific guarded tool.
+Cookie, storage, and saved-auth-state commands are intentionally not exposed by the extension because they can reveal credential material to the model. Use standard eve extension overrides when you need to disable a tool, add approval requirements, or provide an app-specific guarded tool.
 
 ## Example
 
-See [`examples/eve`](https://github.com/vercel-labs/agent-browser/tree/main/examples/eve) for a complete Next.js Eve app with the extension mounted.
+See [`examples/eve`](https://github.com/vercel-labs/agent-browser/tree/main/examples/eve) for a complete Next.js eve app with the extension mounted.

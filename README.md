@@ -1256,9 +1256,9 @@ const result = await withAgentBrowserSandbox(async (sandbox) => {
 
 Install `@agent-browser/sandbox` and `@vercel/sandbox` in the consuming app. See the [sandbox helper example](examples/sandbox/) for minimal Vercel Sandbox usage, or the [environments example](examples/environments/) for a full UI demo with a deploy-to-Vercel button.
 
-Fresh Vercel and Eve sandboxes install Chromium system dependencies by default. Pass `installSystemDependencies: false` only when your sandbox image already includes those libraries.
+Fresh Vercel and eve sandboxes install Chromium system dependencies by default. Pass `installSystemDependencies: false` only when your sandbox image already includes those libraries.
 
-### Eve extension
+### eve extension
 
 Give an [eve](https://eve.dev) agent the full browser tool set by mounting the [`@agent-browser/eve`](packages/@agent-browser/eve/) extension:
 

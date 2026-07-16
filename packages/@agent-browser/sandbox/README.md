@@ -4,9 +4,9 @@ Helpers for installing and running `agent-browser` inside sandbox runtimes.
 
 This package does not define model tools. Use it from framework-specific tools, agents, route handlers, or jobs that already decide what the browser should do.
 
-## Eve
+## eve
 
-For Eve agents, use [`@agent-browser/eve`](../eve/) — it mounts the full browser tool set and exposes the sandbox bootstrap helpers from `@agent-browser/eve/sandbox`, with this package as an internal dependency.
+For eve agents, use [`@agent-browser/eve`](../eve/) — it mounts the full browser tool set and exposes the sandbox bootstrap helpers from `@agent-browser/eve/sandbox`, with this package as an internal dependency.
 
 ## Vercel Sandbox
 
