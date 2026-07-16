@@ -10803,8 +10803,11 @@ mod tests {
         .await;
         assert!(resp.get("success").and_then(|v| v.as_bool()) == Some(true));
 
-        for (role, expected) in [("none", "alpha"), ("presentation", "beta"), ("heading", "gamma")]
-        {
+        for (role, expected) in [
+            ("none", "alpha"),
+            ("presentation", "beta"),
+            ("heading", "gamma"),
+        ] {
             let resp = execute_command(
                 &json!({ "id": "3", "action": "getbyrole", "role": role, "subaction": "text" }),
                 &mut state,
