@@ -7864,6 +7864,7 @@ fn find_ax_node_by_role(
     exact: bool,
 ) -> Result<(i64, String), String> {
     let mut matched_without_backend_id = false;
+    let mut names_seen: Vec<String> = Vec::new();
 
     for node in nodes {
         if node.ignored.unwrap_or(false) {
@@ -7871,7 +7872,7 @@ fn find_ax_node_by_role(
         }
 
         let node_role = super::element::extract_ax_string(&node.role);
-        if node_role != role {
+        if !node_role.eq_ignore_ascii_case(role) {
             continue;
         }
 
@@ -7885,6 +7886,9 @@ fn find_ax_node_by_role(
         };
 
         if !matches {
+            if name.is_some() && !names_seen.contains(&node_name) {
+                names_seen.push(node_name);
+            }
             continue;
         }
 
@@ -7898,11 +7902,43 @@ fn find_ax_node_by_role(
     if matched_without_backend_id {
         return Err(match name {
             Some(target_name) => format!(
-                "AX node has no backendDOMNodeId for role={} name={}",
+                "Found role \"{}\" matching name \"{}\" in the accessibility tree, but it has no live DOM element to act on.",
                 role, target_name
             ),
-            None => format!("AX node has no backendDOMNodeId for role={}", role),
+            None => format!(
+                "Found role \"{}\" in the accessibility tree, but it has no live DOM element to act on.",
+                role
+            ),
         });
+    }
+
+    // A role match with no name match is more actionable than a blanket
+    // "not found": show what the query actually saw, so an agent can fix a
+    // typo'd name without a blind retry.
+    if let Some(target_name) = name {
+        if !names_seen.is_empty() {
+            let shown: Vec<String> = names_seen
+                .iter()
+                .take(5)
+                .map(|n| format!("\"{}\"", n))
+                .collect();
+            let more = if names_seen.len() > 5 { ", ..." } else { "" };
+            let (plural, verb) = if names_seen.len() == 1 {
+                ("", "has")
+            } else {
+                ("s", "have")
+            };
+            return Err(format!(
+                "{count} element{plural} {verb} role \"{role}\", but none match name \"{target_name}\". Names seen: {shown}{more}",
+                count = names_seen.len(),
+                plural = plural,
+                verb = verb,
+                role = role,
+                target_name = target_name,
+                shown = shown.join(", "),
+                more = more,
+            ));
+        }
     }
 
     let desc = build_role_selector(role, name, exact);
@@ -10513,10 +10549,19 @@ mod tests {
 
         let err = find_ax_node_by_role(&nodes, "heading", Some("Skills"), true)
             .expect_err("exact matching must not ignore case");
-        assert!(err.contains("getByRole('heading'"));
+        assert!(err.contains("Names seen: \"SKILLS\""));
 
         let (backend_id, _) = find_ax_node_by_role(&nodes, "heading", Some("SKILLS"), true)
             .expect("exact match with identical case should still succeed");
+        assert_eq!(backend_id, 43);
+    }
+
+    #[test]
+    fn find_ax_node_by_role_matches_role_case_insensitively() {
+        let nodes = vec![ax_node("heading", "Skills", Some(43), false)];
+
+        let (backend_id, _) = find_ax_node_by_role(&nodes, "Heading", None, false)
+            .expect("role matching should ignore case, same as name matching");
         assert_eq!(backend_id, 43);
     }
 
@@ -10532,7 +10577,7 @@ mod tests {
 
         let err = find_ax_node_by_role(&nodes, "button", Some("Submit"), true)
             .expect_err("exact matching should reject partial names");
-        assert!(err.contains("getByRole('button'"));
+        assert!(err.contains("Names seen: \"Submit form\""));
     }
 
     #[test]
@@ -10544,7 +10589,7 @@ mod tests {
 
         let err = find_ax_node_by_role(&nodes, "link", Some("Services"), true)
             .expect_err("matching AX nodes must have a backend DOM node id");
-        assert!(err.contains("backendDOMNodeId"));
+        assert!(err.contains("no live DOM element"));
     }
 
     #[test]
@@ -10562,11 +10607,26 @@ mod tests {
     }
 
     #[test]
-    fn find_ax_node_by_role_no_match_reports_role_selector() {
-        let nodes = vec![ax_node("heading", "Skills", Some(43), false)];
+    fn find_ax_node_by_role_name_miss_lists_names_seen() {
+        let nodes = vec![
+            ax_node("heading", "Skills", Some(43), false),
+            ax_node("heading", "Experience", Some(44), false),
+        ];
 
         let err = find_ax_node_by_role(&nodes, "heading", Some("Nope"), false)
             .expect_err("no node should match an unrelated name");
+        assert!(err.contains("2 elements have role \"heading\""));
+        assert!(err.contains("Nope"));
+        assert!(err.contains("\"Skills\""));
+        assert!(err.contains("\"Experience\""));
+    }
+
+    #[test]
+    fn find_ax_node_by_role_no_role_match_reports_role_selector() {
+        let nodes = vec![ax_node("button", "Submit", Some(7), false)];
+
+        let err = find_ax_node_by_role(&nodes, "heading", Some("Nope"), false)
+            .expect_err("no node has this role at all");
         assert!(err.contains("getByRole('heading'"));
         assert!(err.contains("Nope"));
     }
