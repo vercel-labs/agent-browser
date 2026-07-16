@@ -7805,6 +7805,107 @@ fn build_role_selector(role: &str, name: Option<&str>, exact: bool) -> String {
     }
 }
 
+/// role="none" and role="presentation" (ARIA synonyms) exist to strip an
+/// element's semantics, so Chrome prunes such elements from the AX tree
+/// entirely (divs, lists, imgs) or keeps them only as ignored nodes
+/// (tables). The accessibility tree can never answer a query for them.
+fn is_presentational_role(role: &str) -> bool {
+    role.eq_ignore_ascii_case("none") || role.eq_ignore_ascii_case("presentation")
+}
+
+/// Match presentational roles against the explicit `role` attribute in the
+/// DOM, the only place the author's intent survives (see
+/// `is_presentational_role`). Matching is literal per synonym — a query
+/// for "none" only matches role="none" — mirroring both the old CSS path
+/// and Playwright's literal role comparison. Name matching mirrors the AX
+/// path: non-exact is a case-insensitive substring check against
+/// aria-label or textContent, exact is case-sensitive after trimming.
+async fn handle_presentational_getbyrole(
+    cmd: &Value,
+    state: &mut DaemonState,
+    role: &str,
+    name: Option<&str>,
+    exact: bool,
+) -> Result<Value, String> {
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?.to_string();
+
+    let name_check = match name {
+        Some(n) => {
+            let name_json = serde_json::to_string(n).unwrap_or_default();
+            if exact {
+                format!(
+                    "const target = {name_json};
+                    if ((el.getAttribute('aria-label') || '').trim() !== target.trim()
+                        && (el.textContent || '').trim() !== target.trim()) continue;"
+                )
+            } else {
+                format!(
+                    "const target = {name_json}.toLowerCase();
+                    if (!(el.getAttribute('aria-label') || '').toLowerCase().includes(target)
+                        && !(el.textContent || '').toLowerCase().includes(target)) continue;"
+                )
+            }
+        }
+        None => String::new(),
+    };
+
+    let role_json = serde_json::to_string(&role.to_ascii_lowercase()).unwrap_or_default();
+    let query = format!(
+        r#"(() => {{
+            const role = {role_json};
+            for (const el of document.querySelectorAll('[role]')) {{
+                const tokens = (el.getAttribute('role') || '').trim().toLowerCase().split(/\s+/);
+                if (!tokens.includes(role)) continue;
+                {name_check}
+                el.setAttribute('data-agent-browser-located', 'true');
+                return true;
+            }}
+            return false;
+        }})()"#
+    );
+
+    let result: super::cdp::types::EvaluateResult = mgr
+        .client
+        .send_command_typed(
+            "Runtime.evaluate",
+            &super::cdp::types::EvaluateParams {
+                expression: query,
+                return_by_value: Some(true),
+                await_promise: Some(false),
+            },
+            Some(&session_id),
+        )
+        .await?;
+
+    if !result
+        .result
+        .value
+        .as_ref()
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return Err(format!(
+            "No element found: {}",
+            build_role_selector(role, name, exact)
+        ));
+    }
+
+    let selector = "[data-agent-browser-located='true']";
+    let action_result = execute_subaction(cmd, state, selector).await;
+
+    if let Some(ref browser) = state.browser {
+        let _ = browser
+            .evaluate(
+                "document.querySelector('[data-agent-browser-located]')?.removeAttribute('data-agent-browser-located')",
+                None,
+            )
+            .await;
+    }
+
+    action_result
+}
+
 async fn handle_getbyrole(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
@@ -7814,6 +7915,12 @@ async fn handle_getbyrole(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         .ok_or("Missing 'role' parameter")?;
     let name = cmd.get("name").and_then(|v| v.as_str());
     let exact = cmd.get("exact").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    // Presentational roles never appear in the AX tree (their whole point
+    // is removal from it), so they get a syntactic DOM match instead.
+    if is_presentational_role(role) {
+        return handle_presentational_getbyrole(cmd, state, role, name, exact).await;
+    }
 
     // Query the accessibility tree via CDP: the browser engine is the
     // authoritative source for implicit roles (e.g. <h2> -> "heading",
@@ -10656,6 +10763,66 @@ mod tests {
             .expect_err("no node has this role at all");
         assert!(err.contains("getByRole('heading'"));
         assert!(err.contains("Nope"));
+    }
+
+    #[test]
+    fn presentational_roles_are_detected_case_insensitively() {
+        assert!(is_presentational_role("none"));
+        assert!(is_presentational_role("presentation"));
+        assert!(is_presentational_role("None"));
+        assert!(is_presentational_role("PRESENTATION"));
+        assert!(!is_presentational_role("heading"));
+        assert!(!is_presentational_role("generic"));
+    }
+
+    /// Chrome prunes role="none"/"presentation" elements from the AX tree
+    /// (divs, uls, imgs vanish; tables survive only as ignored nodes), so
+    /// these queries must resolve through the DOM-attribute fallback, not
+    /// `find_ax_node_by_role`. Regression test for the review finding on
+    /// #1552: the AX rewrite broke `find role none` / `find role
+    /// presentation`, which the old CSS path matched.
+    #[tokio::test]
+    #[ignore]
+    async fn e2e_presentational_roles_resolve_through_dom_fallback() {
+        let mut state = DaemonState::new();
+        let resp = execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await;
+        assert!(resp.get("success").and_then(|v| v.as_bool()) == Some(true));
+
+        let resp = execute_command(
+            &json!({
+                "id": "2",
+                "action": "navigate",
+                "url": "data:text/html,<div role='none'>alpha</div><div role='presentation'>beta</div><h2>gamma</h2>"
+            }),
+            &mut state,
+        )
+        .await;
+        assert!(resp.get("success").and_then(|v| v.as_bool()) == Some(true));
+
+        for (role, expected) in [("none", "alpha"), ("presentation", "beta"), ("heading", "gamma")]
+        {
+            let resp = execute_command(
+                &json!({ "id": "3", "action": "getbyrole", "role": role, "subaction": "text" }),
+                &mut state,
+            )
+            .await;
+            assert!(
+                resp.get("success").and_then(|v| v.as_bool()) == Some(true),
+                "find role {role} text must succeed: {resp}"
+            );
+            let text = resp
+                .get("data")
+                .and_then(|d| d.get("text"))
+                .and_then(|t| t.as_str())
+                .unwrap_or("");
+            assert_eq!(text, expected, "find role {role} text");
+        }
+
+        let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     }
 
     async fn start_webdriver_response_server(
