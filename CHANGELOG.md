@@ -1,8 +1,23 @@
 # agent-browser
 
-## 0.32.0
+## 0.32.1
 
 <!-- release:start -->
+### Improvements
+
+- Widened **eve compatibility** for `@agent-browser/eve` to accept eve 0.23 and future major releases without peer-resolution warnings (#1563)
+
+### Documentation
+
+- Standardized **eve branding** to use lowercase styling across the docs, examples, package readmes, and release notes (#1557)
+
+### Contributors
+
+- @ctate
+<!-- release:end -->
+
+## 0.32.0
+
 ### New Features
 
 - **eve extension** - Added `@agent-browser/eve`, an eve extension that mounts the agent-browser tool set with namespaced browser tools, sandbox bootstrap helpers, docs, examples, CI, and release packaging (#1547)
@@ -19,7 +34,6 @@
 
 - @ctate
 - @dnukumamras
-<!-- release:end -->
 
 ## 0.31.2
 
