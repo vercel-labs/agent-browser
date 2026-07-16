@@ -204,12 +204,12 @@ agent-browser find nth <n> <sel> <action> [value]     # Nth match
 
 **Actions:** `click`, `fill`, `type`, `hover`, `focus`, `check`, `uncheck`, `text`
 
-**Options:** `--name <name>` (filter role by accessible name), `--exact` (require exact text match)
+**Options:** `--name <name>` (filter role by accessible name), `--exact` (exact accessible-name match, case-sensitive; without it, matching is a case-insensitive substring)
 
 **Examples:**
 
 ```bash
-agent-browser find role button click --name "Submit"
+agent-browser find role button click --name "Submit"     # also matches implicit roles: <h1>-<h6>=heading, <ul>/<ol>=list, <header>=banner
 agent-browser find text "Sign In" click
 agent-browser find label "Email" fill "test@test.com"
 agent-browser find first ".item" click

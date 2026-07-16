@@ -47,7 +47,7 @@ agent-browser click "xpath=//button[@type='submit']"
 Find elements by role, label, or other semantic properties:
 
 ```bash
-agent-browser find role button click --name "Submit"
+agent-browser find role button click --name "Submit"     # also matches implicit roles: <h1>-<h6>=heading, <ul>/<ol>=list, <header>=banner
 agent-browser find label "Email" fill "test@test.com"
 agent-browser find placeholder "Search..." fill "query"
 agent-browser find testid "submit-btn" click
