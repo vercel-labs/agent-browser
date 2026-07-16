@@ -18,6 +18,7 @@ export const PAGE_TITLES: Record<string, string> = {
   webgpu: "WebGPU",
   debugging: "Debugging",
   profiler: "Profiler",
+  memory: "Memory Diagnostics",
   react: "React & Web Vitals",
   files: "Files & Clipboard",
   "init-scripts": "Init Scripts",
