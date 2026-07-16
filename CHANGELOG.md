@@ -1,8 +1,42 @@
 # agent-browser
 
-## 0.31.2
+## 0.32.1
 
 <!-- release:start -->
+### Improvements
+
+- Widened **eve compatibility** for `@agent-browser/eve` to accept eve 0.23 and future major releases without peer-resolution warnings (#1563)
+
+### Documentation
+
+- Standardized **eve branding** to use lowercase styling across the docs, examples, package readmes, and release notes (#1557)
+
+### Contributors
+
+- @ctate
+<!-- release:end -->
+
+## 0.32.0
+
+### New Features
+
+- **eve extension** - Added `@agent-browser/eve`, an eve extension that mounts the agent-browser tool set with namespaced browser tools, sandbox bootstrap helpers, docs, examples, CI, and release packaging (#1547)
+
+### Security
+
+- Hardened **domain allowlists** by blocking WebRTC bypasses, applying network containment across launch modes, workers, popups, restored state, and reused daemon sessions, rejecting unsafe startup arguments, and adding Chrome regression coverage (#1546)
+
+### Bug Fixes
+
+- Fixed **completed-page waits** so load and DOMContentLoaded waits resolve immediately when the current document is already ready, with structured eve wait timeout handling and focused coverage (#1554)
+
+### Contributors
+
+- @ctate
+- @dnukumamras
+
+## 0.31.2
+
 ### New Features
 
 - **WebGPU launch preset** - Added `--webgpu` across the CLI, config, environment, and MCP surfaces, with hardware backends on macOS and Windows, software Vulkan on Linux, automatic Xvfb for displayless headed sessions, and a `doctor --webgpu` render and screenshot probe (#1529)
@@ -14,7 +48,6 @@
 ### Contributors
 
 - @ctate
-<!-- release:end -->
 
 ## 0.31.1
 
@@ -68,7 +101,7 @@
 
 ### Improvements
 
-- Defaulted **sandbox system dependency installs** so the Eve and Vercel sandbox helpers install Chromium's required libraries unless explicitly disabled, making first-run sandbox setup simpler (#1469)
+- Defaulted **sandbox system dependency installs** so the eve and Vercel sandbox helpers install Chromium's required libraries unless explicitly disabled, making first-run sandbox setup simpler (#1469)
 
 ### Contributors
 
@@ -78,7 +111,7 @@
 
 ### New Features
 
-- **Sandbox package** - Added `@agent-browser/sandbox` with shared, Eve, and Vercel Sandbox helpers, example projects, and docs for running agent-browser in hosted sandbox environments (#1465)
+- **Sandbox package** - Added `@agent-browser/sandbox` with shared, eve, and Vercel Sandbox helpers, example projects, and docs for running agent-browser in hosted sandbox environments (#1465)
 
 ### Improvements
 

@@ -4,11 +4,7 @@ import {
   defaultSessionName,
   quoteShellArg,
 } from "@agent-browser/sandbox";
-import {
-  buildAgentBrowserCommand,
-  installAgentBrowser,
-  type EveSandboxSession,
-} from "@agent-browser/sandbox/eve";
+import { buildAgentBrowserCommand, installAgentBrowser, type EveSandboxSession } from "./sandbox";
 
 import extension from "../extension";
 
@@ -121,19 +117,25 @@ async function ensureInstalled(sandbox: EveSandboxSession, abortSignal?: AbortSi
 
 async function installIfMissing(sandbox: EveSandboxSession, abortSignal?: AbortSignal): Promise<void> {
   const config = extension.config;
-  const probe = await sandbox.run({
-    abortSignal,
-    command: `command -v ${quoteShellArg(config.binary)} >/dev/null 2>&1`,
-  });
+  const probe = await withDeadline(
+    sandbox.run({
+      abortSignal,
+      command: `command -v ${quoteShellArg(config.binary)} >/dev/null 2>&1`,
+    }),
+    "The browser install probe",
+  );
   if ((probe.exitCode ?? 0) === 0) {
     return;
   }
-  await installAgentBrowser(sandbox, {
-    abortSignal,
-    installBrowser: config.installBrowser,
-    installSpec: config.installSpec,
-    installSystemDependencies: config.installSystemDependencies,
-  });
+  await withDeadline(
+    installAgentBrowser(sandbox, {
+      abortSignal,
+      installBrowser: config.installBrowser,
+      installSpec: config.installSpec,
+      installSystemDependencies: config.installSystemDependencies,
+    }),
+    "Installing agent-browser",
+  );
 }
 
 function configArgs(): string[] {

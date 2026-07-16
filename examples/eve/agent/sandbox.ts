@@ -1,4 +1,4 @@
-import { agentBrowserRevalidationKey, installAgentBrowser } from "@agent-browser/sandbox/eve";
+import { agentBrowserRevalidationKey, installAgentBrowser } from "@agent-browser/eve/sandbox";
 import { defineSandbox } from "eve/sandbox";
 import { vercel } from "eve/sandbox/vercel";
 

@@ -13,9 +13,6 @@ importers:
       '@agent-browser/eve':
         specifier: link:../../packages/@agent-browser/eve
         version: link:../../packages/@agent-browser/eve
-      '@agent-browser/sandbox':
-        specifier: file:../../packages/@agent-browser/sandbox
-        version: file:../../packages/@agent-browser/sandbox
       '@radix-ui/react-use-controllable-state':
         specifier: 1.2.2
         version: 1.2.2(@types/react@19.2.15)(react@19.2.6)
@@ -115,14 +112,6 @@ importers:
         version: 6.0.3
 
 packages:
-
-  '@agent-browser/sandbox@file:../../packages/@agent-browser/sandbox':
-    resolution: {directory: ../../packages/@agent-browser/sandbox, type: directory}
-    peerDependencies:
-      '@vercel/sandbox': '>=1.0.0'
-    peerDependenciesMeta:
-      '@vercel/sandbox':
-        optional: true
 
   '@ai-sdk/gateway@4.0.0-beta.109':
     resolution: {integrity: sha512-W/1kLlPb6Bgbhwep3CA3R6do0HD7SXV5gyuz2XBLY1YABqgxYkw+IhEcjOYlmn9v+Tifjqy5yJqmWdSHMJhyPQ==}
@@ -3124,8 +3113,6 @@ packages:
     resolution: {integrity: sha512-bXE4cR/kVZhKZX/RjPEflHaKVhUVl85noU3v6b8apfQEc1x4A+zBxjZ4lN8LqGd6WZ3dl98pY4o717VFmoPp+A==}
 
 snapshots:
-
-  '@agent-browser/sandbox@file:../../packages/@agent-browser/sandbox': {}
 
   '@ai-sdk/gateway@4.0.0-beta.109(zod@4.4.3)':
     dependencies:

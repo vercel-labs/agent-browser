@@ -29,7 +29,7 @@ On first tool use in a fresh sandbox, the extension installs agent-browser (and 
 
 ```ts
 // agent/sandbox.ts
-import { agentBrowserRevalidationKey, installAgentBrowser } from "@agent-browser/sandbox/eve";
+import { agentBrowserRevalidationKey, installAgentBrowser } from "@agent-browser/eve/sandbox";
 import { defineSandbox } from "eve/sandbox";
 import { vercel } from "eve/sandbox/vercel";
 
@@ -42,6 +42,8 @@ export default defineSandbox({
   },
 });
 ```
+
+`@agent-browser/eve/sandbox` also exports `runAgentBrowser` for calling agent-browser from a hand-written eve tool. It derives a short, stable session name from the eve sandbox id; pass `session` when multiple independent browser sessions should share one sandbox.
 
 ## Configuration
 

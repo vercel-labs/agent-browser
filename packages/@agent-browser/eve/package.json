@@ -1,6 +1,6 @@
 {
   "name": "@agent-browser/eve",
-  "version": "0.31.2",
+  "version": "0.32.1",
   "description": "eve extension that gives agents a full browser automation tool set backed by agent-browser",
   "type": "module",
   "sideEffects": false,
@@ -20,12 +20,16 @@
     "./tools": {
       "types": "./dist/tools/index.d.ts",
       "default": "./dist/tools/index.mjs"
+    },
+    "./sandbox": {
+      "types": "./dist/sandbox/sandbox.d.ts",
+      "default": "./dist/sandbox/sandbox.js"
     }
   },
   "scripts": {
-    "build": "eve extension build",
-    "prepare": "eve extension build",
-    "test": "pnpm run build && node --test test/*.test.mjs",
+    "build": "eve extension build && tsc -p tsconfig.sandbox.json",
+    "prepare": "pnpm -C ../sandbox run build && pnpm run build",
+    "test": "pnpm -C ../sandbox run build && pnpm run build && node --test test/*.test.mjs",
     "typecheck": "tsc"
   },
   "keywords": [
@@ -49,11 +53,11 @@
     "access": "public"
   },
   "dependencies": {
-    "@agent-browser/sandbox": "^0.31.2",
+    "@agent-browser/sandbox": "workspace:^",
     "zod": "4.4.3"
   },
   "peerDependencies": {
-    "eve": "^0.22.5"
+    "eve": ">=0.22.5"
   },
   "devDependencies": {
     "@types/node": "24.x",
