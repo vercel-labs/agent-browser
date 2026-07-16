@@ -2069,7 +2069,8 @@ Actions (default: click):
 
 Options:
   --name <name>        Filter role by accessible name
-  --exact              Require exact text match
+  --exact              Exact, case-sensitive whole-string match
+                       (default: substring; role names also ignore case)
 
 Global Options:
   --json               Output as JSON

@@ -1039,7 +1039,7 @@ fn parity_tools() -> Vec<Value> {
                 "text": { "type": "string", "description": "Optional text/value for fill or type actions." },
                 "index": { "type": "integer", "description": "Index for nth locator." },
                 "name": { "type": "string", "description": "Accessible name filter for role locator." },
-                "exact": { "type": "boolean", "default": false }
+                "exact": { "type": "boolean", "description": "Exact, case-sensitive whole-string match. Default is substring matching; role accessible names also match case-insensitively.", "default": false }
             }),
             &["locator", "value"],
         ),
