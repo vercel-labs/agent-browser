@@ -329,6 +329,12 @@ pub struct LaunchOptions {
     /// Restrict WebRTC to proxied transports so direct UDP cannot bypass the
     /// HTTP domain filter. Enabled automatically with `--allowed-domains`.
     pub restrict_webrtc: bool,
+    /// When true (default) and launching a real Chrome binary in headed mode,
+    /// pass `--no-startup-window` so Chrome does not open its own NTP tab.
+    /// Without this, the NTP tab is filtered out by `should_track_target` and
+    /// ends up stranded in the window, producing a phantom tab on every
+    /// `open <url>`. Users can opt out via `AGENT_BROWSER_NO_STARTUP_WINDOW=0`.
+    pub no_startup_window: bool,
 }
 
 impl Default for LaunchOptions {
@@ -355,6 +361,7 @@ impl Default for LaunchOptions {
             webgpu: false,
             no_xvfb: false,
             restrict_webrtc: false,
+            no_startup_window: true,
         }
     }
 }
@@ -514,6 +521,22 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
         // direct UDP traffic if page code obtains a native constructor.
         args.retain(|arg| !arg.starts_with("--force-webrtc-ip-handling-policy="));
         args.push("--force-webrtc-ip-handling-policy=disable_non_proxied_udp".to_string());
+    }
+
+    // When a real Chrome binary is launched in headed mode, Chrome would
+    // otherwise open its own New Tab Page tab. That tab is filtered out of
+    // agent-browser's tracked targets (it lives at `chrome://newtab/`) and
+    // therefore remains stranded in the window as a phantom tab on every
+    // `open <url>`. `--no-startup-window` keeps the window empty until the
+    // automation layer creates a tab, so the user only ever sees what the
+    // agent drives. Opt out with `AGENT_BROWSER_NO_STARTUP_WINDOW=0` or by
+    // passing `--no-startup-window=false` in `--args`.
+    if options.no_startup_window
+        && !options.headless
+        && options.executable_path.is_some()
+        && !args.iter().any(|a| a == "--no-startup-window")
+    {
+        args.push("--no-startup-window".to_string());
     }
 
     if should_disable_sandbox(&args) {
@@ -1690,6 +1713,109 @@ mod tests {
         assert!(result.temp_user_data_dir.is_some());
         let dir = result.temp_user_data_dir.unwrap();
         assert!(dir.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_build_args_headed_real_chrome_injects_no_startup_window() {
+        // Regression test for https://github.com/vercel-labs/agent-browser/issues/1544
+        let opts = LaunchOptions {
+            headless: false,
+            executable_path: Some(
+                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome".to_string(),
+            ),
+            ..Default::default()
+        };
+        let result = build_chrome_args(&opts).unwrap();
+        assert!(
+            result.args.iter().any(|a| a == "--no-startup-window"),
+            "headed launch with a real Chrome binary should auto-inject --no-startup-window"
+        );
+        let dir = result.temp_user_data_dir.unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_build_args_headed_chrome_for_testing_skips_no_startup_window() {
+        // Chrome for Testing ships without an NTP startup tab, so the flag
+        // must NOT be injected when no real binary path is configured.
+        let opts = LaunchOptions {
+            headless: false,
+            executable_path: None,
+            ..Default::default()
+        };
+        let result = build_chrome_args(&opts).unwrap();
+        assert!(
+            !result.args.iter().any(|a| a == "--no-startup-window"),
+            "headed launch without a real Chrome binary must not inject --no-startup-window"
+        );
+        let dir = result.temp_user_data_dir.unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_build_args_headless_real_chrome_skips_no_startup_window() {
+        // Headless mode never opens a window, so the flag is unnecessary.
+        let opts = LaunchOptions {
+            headless: true,
+            executable_path: Some(
+                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome".to_string(),
+            ),
+            ..Default::default()
+        };
+        let result = build_chrome_args(&opts).unwrap();
+        assert!(
+            !result.args.iter().any(|a| a == "--no-startup-window"),
+            "headless launch must never inject --no-startup-window"
+        );
+        let dir = result.temp_user_data_dir.unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_build_args_user_supplied_no_startup_window_is_respected() {
+        // If the user already passed the flag via `options.args` we must not
+        // duplicate it, even when our default is enabled.
+        let opts = LaunchOptions {
+            headless: false,
+            executable_path: Some(
+                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome".to_string(),
+            ),
+            args: vec!["--no-startup-window".to_string()],
+            ..Default::default()
+        };
+        let result = build_chrome_args(&opts).unwrap();
+        let occurrences = result
+            .args
+            .iter()
+            .filter(|a| a.as_str() == "--no-startup-window")
+            .count();
+        assert_eq!(
+            occurrences, 1,
+            "user-supplied --no-startup-window must not be duplicated"
+        );
+        let dir = result.temp_user_data_dir.unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_build_args_opt_out_disables_no_startup_window() {
+        // Setting `no_startup_window: false` in LaunchOptions disables the
+        // auto-injection even when other conditions are met.
+        let opts = LaunchOptions {
+            headless: false,
+            executable_path: Some(
+                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome".to_string(),
+            ),
+            no_startup_window: false,
+            ..Default::default()
+        };
+        let result = build_chrome_args(&opts).unwrap();
+        assert!(
+            !result.args.iter().any(|a| a == "--no-startup-window"),
+            "no_startup_window: false must opt out of the auto-injection"
+        );
+        let dir = result.temp_user_data_dir.unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
