@@ -16,6 +16,7 @@ use super::actions::{
     DaemonState,
 };
 use super::cdp::client::CdpClient;
+use super::memory::{self, CaptureKind, MemoryState};
 use super::state;
 use super::stream::StreamServer;
 use crate::connection::INTERNAL_DAEMON_SHUTDOWN_ACTION;
@@ -186,9 +187,10 @@ async fn run_socket_server(
         None
     };
 
-    let state: std::sync::Arc<tokio::sync::Mutex<DaemonState>> = std::sync::Arc::new(
-        tokio::sync::Mutex::new(DaemonState::new_with_stream(stream_client, stream_server)),
-    );
+    let daemon_state = DaemonState::new_with_stream(stream_client, stream_server);
+    let memory_state = daemon_state.memory_state.clone();
+    let state: std::sync::Arc<tokio::sync::Mutex<DaemonState>> =
+        std::sync::Arc::new(tokio::sync::Mutex::new(daemon_state));
 
     let (reset_tx, mut reset_rx) = mpsc::channel::<()>(64);
     let reset_tx = idle_timeout_ms.map(|_| Arc::new(reset_tx));
@@ -213,8 +215,9 @@ async fn run_socket_server(
                         let reset_tx = reset_tx.clone();
                         let sf = stream_file.clone();
                         let cn = close_notify.clone();
+                        let memory_state = memory_state.clone();
                         tokio::spawn(async move {
-                            handle_connection(stream, state, reset_tx, sf, cn).await;
+                            handle_connection(stream, state, memory_state, reset_tx, sf, cn).await;
                         });
                     }
                     Err(e) => {
@@ -249,6 +252,7 @@ async fn run_socket_server(
                     None => std::future::pending::<()>().await,
                 }
             }, if idle_timeout_ms.is_some() => {
+                let _ = memory_state.request_cancel();
                 let mut s = state.lock().await;
                 let _ = auto_save_restore_state(&mut s).await;
                 let _ = close_current_browser(&mut s).await;
@@ -266,6 +270,7 @@ async fn run_socket_server(
                 break;
             }
             _ = shutdown_signal() => {
+                let _ = memory_state.request_cancel();
                 let mut s = state.lock().await;
                 let _ = auto_save_restore_state(&mut s).await;
                 let _ = close_current_browser(&mut s).await;
@@ -312,9 +317,10 @@ async fn run_socket_server(
         None
     };
 
-    let state: std::sync::Arc<tokio::sync::Mutex<DaemonState>> = std::sync::Arc::new(
-        tokio::sync::Mutex::new(DaemonState::new_with_stream(stream_client, stream_server)),
-    );
+    let daemon_state = DaemonState::new_with_stream(stream_client, stream_server);
+    let memory_state = daemon_state.memory_state.clone();
+    let state: std::sync::Arc<tokio::sync::Mutex<DaemonState>> =
+        std::sync::Arc::new(tokio::sync::Mutex::new(daemon_state));
 
     let (reset_tx, mut reset_rx) = mpsc::channel::<()>(64);
     let reset_tx = idle_timeout_ms.map(|_| Arc::new(reset_tx));
@@ -339,8 +345,9 @@ async fn run_socket_server(
                         let reset_tx = reset_tx.clone();
                         let sf = stream_file.clone();
                         let cn = close_notify.clone();
+                        let memory_state = memory_state.clone();
                         tokio::spawn(async move {
-                            handle_connection(stream, state, reset_tx, sf, cn).await;
+                            handle_connection(stream, state, memory_state, reset_tx, sf, cn).await;
                         });
                     }
                     Err(e) => {
@@ -368,6 +375,7 @@ async fn run_socket_server(
                     None => std::future::pending::<()>().await,
                 }
             }, if idle_timeout_ms.is_some() => {
+                let _ = memory_state.request_cancel();
                 let mut s = state.lock().await;
                 let _ = auto_save_restore_state(&mut s).await;
                 let _ = close_current_browser(&mut s).await;
@@ -384,6 +392,7 @@ async fn run_socket_server(
                 break;
             }
             _ = shutdown_signal() => {
+                let _ = memory_state.request_cancel();
                 let mut s = state.lock().await;
                 let _ = auto_save_restore_state(&mut s).await;
                 let _ = close_current_browser(&mut s).await;
@@ -399,6 +408,7 @@ async fn run_socket_server(
 async fn handle_connection<S>(
     stream: S,
     state: std::sync::Arc<tokio::sync::Mutex<DaemonState>>,
+    memory_state: MemoryState,
     idle_reset_tx: Option<Arc<mpsc::Sender<()>>>,
     stream_file_cleanup: Option<PathBuf>,
     close_notify: Arc<Notify>,
@@ -447,7 +457,31 @@ async fn handle_connection<S>(
                     .unwrap_or_default()
                     .to_string();
 
-                let response = {
+                let response = if action == "memory_status" {
+                    serde_json::json!({
+                        "id": cmd.get("id").and_then(Value::as_str).unwrap_or(""),
+                        "success": true,
+                        "data": memory::with_api_version(memory_state.status()),
+                    })
+                } else if action == "memory_cancel"
+                    && memory_state
+                        .active_capture()
+                        .is_some_and(|capture| capture.kind == CaptureKind::Snapshot)
+                {
+                    match memory::snapshot_cancel_response(&memory_state) {
+                        Ok(data) => serde_json::json!({
+                            "id": cmd.get("id").and_then(Value::as_str).unwrap_or(""),
+                            "success": true,
+                            "data": memory::with_api_version(data),
+                        }),
+                        Err(error) => serde_json::json!({
+                            "id": cmd.get("id").and_then(Value::as_str).unwrap_or(""),
+                            "success": false,
+                            "errorCode": memory::error_code(&error),
+                            "error": error,
+                        }),
+                    }
+                } else {
                     let mut s = state.lock().await;
                     execute_command(&cmd, &mut s).await
                 };
@@ -569,6 +603,58 @@ fn get_port_for_session(session: &str) -> u16 {
 mod tests {
     #[allow(unused_imports)]
     use super::*;
+
+    #[tokio::test]
+    async fn memory_status_and_snapshot_cancel_do_not_wait_for_daemon_state_lock() {
+        let daemon_state = DaemonState::new();
+        let memory_state = daemon_state.memory_state.clone();
+        memory_state.begin_test_capture(CaptureKind::Snapshot);
+        let state = Arc::new(tokio::sync::Mutex::new(daemon_state));
+        let state_guard = state.lock().await;
+        let (client, server) = tokio::io::duplex(16 * 1024);
+        let notify = Arc::new(Notify::new());
+        let connection = tokio::spawn(handle_connection(
+            server,
+            state.clone(),
+            memory_state.clone(),
+            None,
+            None,
+            notify,
+        ));
+        let (reader, mut writer) = tokio::io::split(client);
+        let mut reader = BufReader::new(reader);
+
+        writer
+            .write_all(b"{\"id\":\"status\",\"action\":\"memory_status\"}\n")
+            .await
+            .unwrap();
+        let mut line = String::new();
+        tokio::time::timeout(Duration::from_millis(250), reader.read_line(&mut line))
+            .await
+            .expect("memory status should bypass the daemon state lock")
+            .unwrap();
+        let response: Value = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(response["success"], true);
+        assert_eq!(response["data"]["captureType"], "snapshot");
+
+        writer
+            .write_all(b"{\"id\":\"cancel\",\"action\":\"memory_cancel\"}\n")
+            .await
+            .unwrap();
+        line.clear();
+        tokio::time::timeout(Duration::from_millis(250), reader.read_line(&mut line))
+            .await
+            .expect("snapshot cancellation should bypass the daemon state lock")
+            .unwrap();
+        let response: Value = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(response["success"], true);
+        assert_eq!(response["data"]["cancelled"], true);
+        assert_eq!(memory_state.status()["cancelRequested"], true);
+
+        drop(state_guard);
+        connection.abort();
+        let _ = connection.await;
+    }
 
     #[test]
     fn test_daemon_socket_dir_matches_client_namespace() {

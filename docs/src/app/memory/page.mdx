@@ -1,0 +1,91 @@
+# Memory Diagnostics
+
+Capture browser-level evidence for JavaScript heap growth, retained DOM nodes, and allocation call sites without configuring a separate CDP address. Memory diagnostics reuse the active agent-browser Chrome session and are available through both CLI and the MCP `debug` tool profile.
+
+## Quick workflow
+
+```bash
+agent-browser open https://example.com
+agent-browser memory metrics
+
+agent-browser memory sampling start --sampling-interval 65536
+# Repeat and verify the suspected user flow several times
+agent-browser memory sampling stop ./allocations.heapprofile --top 20
+
+agent-browser memory collect-garbage
+agent-browser memory snapshot ./after.heapsnapshot
+```
+
+Use `memory metrics` as a lightweight trend signal. Use allocation sampling to find where retained allocations were created. Use heap snapshots when an external analyzer needs object graphs and retaining paths. agent-browser captures generic browser evidence; source-map analysis and application-specific leak conclusions belong in the calling diagnostic system.
+
+## Commands
+
+<table>
+  <thead>
+    <tr><th>Command</th><th>Purpose</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>memory metrics</code></td><td>Read JavaScript heap and DOM counters for the active page.</td></tr>
+    <tr><td><code>memory status</code></td><td>Show the current capture ID, type, original page, start time, and cancellation state.</td></tr>
+    <tr><td><code>memory sampling start</code></td><td>Start allocation sampling on the active page.</td></tr>
+    <tr><td><code>memory sampling stop [path]</code></td><td>Stop sampling on its original page, save the full profile, and return the largest allocation sites.</td></tr>
+    <tr><td><code>memory snapshot [path]</code></td><td>Stream a heap snapshot directly to a local file and validate it before success.</td></tr>
+    <tr><td><code>memory collect-garbage</code></td><td>Request garbage collection at a diagnostic boundary.</td></tr>
+    <tr><td><code>memory cancel</code></td><td>Cancel the active capture and remove partial output.</td></tr>
+  </tbody>
+</table>
+
+## Capture lifecycle
+
+Only one allocation sampling or heap snapshot capture can be active in a browser session. Sampling records the target page at start and stops that same page even after a tab switch. If the original page closes, the browser restarts, or the daemon exits, agent-browser clears the capture instead of applying the result to another page.
+
+`memory status --json` includes `memoryApiVersion: 1`. Callers should discover support from the available command or MCP tools and this version field, not from a package name.
+
+```bash
+agent-browser memory status --json
+agent-browser memory cancel
+```
+
+Heap snapshots are synchronous, but `memory status` and `memory cancel` remain responsive from another command while snapshot chunks are being written.
+
+## Allocation sampling options
+
+<table>
+  <thead>
+    <tr><th>Option</th><th>Description</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>--sampling-interval &lt;bytes&gt;</code></td><td>Average bytes allocated between samples. Default: 32768.</td></tr>
+    <tr><td><code>--top &lt;count&gt;</code></td><td>Number of largest allocation call sites returned in the summary. Default: 20.</td></tr>
+    <tr><td><code>--max-size &lt;bytes&gt;</code></td><td>Maximum saved profile size. Default: 1 GiB.</td></tr>
+  </tbody>
+</table>
+
+The stop summary includes function name, script URL, line, column, sampled bytes, original page identity, output path, and total file size. The full `.heapprofile` remains on disk for later source-map analysis.
+
+## Heap snapshot options
+
+<table>
+  <thead>
+    <tr><th>Option</th><th>Description</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>--no-gc</code></td><td>Skip the default garbage collection before capture.</td></tr>
+    <tr><td><code>--timeout &lt;ms&gt;</code></td><td>Stop an incomplete capture after this duration. Default: 120000.</td></tr>
+    <tr><td><code>--max-size &lt;bytes&gt;</code></td><td>Cancel and remove the snapshot after this many bytes. Default: 1 GiB.</td></tr>
+  </tbody>
+</table>
+
+Snapshot chunks are appended to the output file as Chrome sends them. agent-browser does not assemble the entire snapshot in its own memory. A successful result confirms that snapshot metadata, nodes, edges, and strings were observed. Cancelled, timed-out, oversized, and incomplete snapshots are removed.
+
+If no path is supplied, artifacts are saved below the runtime temporary directory under `agent-browser-memory/<session>/`. Default artifacts older than 24 hours are cleaned when a new capture starts. Raw profiles and snapshots are never included in terminal or JSON output.
+
+## Engines and errors
+
+Memory diagnostics require Chrome or Chromium. Lightpanda, Safari, iOS, and other unsupported engines return `memory_unsupported_engine` rather than using an unreliable page expression fallback.
+
+JSON errors use stable `errorCode` values for unsupported engines, an already-active capture, missing captures, closed targets, cancellation, timeout, size limit, invalid artifacts, and other command failures.
+
+## Privacy
+
+Heap snapshots and allocation profiles can contain page text, application data, account details, credentials, and tokens. Save them only in a trusted local directory. Do not upload them, commit them, or copy their raw contents into agent context. Delete artifacts when diagnosis is complete.

@@ -322,6 +322,20 @@ agent-browser inspect                 # Open Chrome DevTools for the active page
 
 See [Debugging](/debugging) for console, error, dialog, trace, highlight, and DevTools workflows. See [Video Recording](/recording) for `record` workflows and [Profiler](/profiler) for performance profiles.
 
+## Memory diagnostics
+
+```bash
+agent-browser memory metrics
+agent-browser memory status
+agent-browser memory sampling start [--sampling-interval <bytes>]
+agent-browser memory sampling stop [path] [--top <count>] [--max-size <bytes>]
+agent-browser memory snapshot [path] [--no-gc] [--timeout <ms>] [--max-size <bytes>]
+agent-browser memory collect-garbage
+agent-browser memory cancel
+```
+
+Memory commands reuse the current Chrome session, keep long-running sampling bound to its original page, and save raw artifacts locally instead of printing them. See [Memory Diagnostics](/memory) for the capture lifecycle, output fields, limits, and privacy guidance.
+
 ## Auth vault
 
 ```bash

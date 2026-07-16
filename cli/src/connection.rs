@@ -35,6 +35,8 @@ pub struct Response {
     pub success: bool,
     pub data: Option<Value>,
     pub error: Option<String>,
+    #[serde(rename = "errorCode", skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
 }

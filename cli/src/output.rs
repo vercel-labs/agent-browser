@@ -278,6 +278,122 @@ fn format_vitals_text(data: &serde_json::Value) -> String {
     lines.join("\n")
 }
 
+fn format_memory_text(action: Option<&str>, data: &serde_json::Value) -> Option<String> {
+    let bytes = |key: &str| {
+        data.get(key)
+            .and_then(|value| value.as_f64())
+            .map(|value| format!("{:.2} MB", value / 1024.0 / 1024.0))
+            .unwrap_or_else(|| "unknown".to_string())
+    };
+    match action? {
+        "memory_metrics" => Some(format!(
+            "Memory metrics for {}\n  JS heap used: {}\n  JS heap total: {}\n  DOM nodes: {}\n  Documents: {}\n  Event listeners: {}",
+            data.get("url").and_then(|value| value.as_str()).unwrap_or("current page"),
+            bytes("jsHeapUsedSize"),
+            bytes("jsHeapTotalSize"),
+            data.get("nodes").and_then(|value| value.as_u64()).unwrap_or(0),
+            data.get("documents").and_then(|value| value.as_u64()).unwrap_or(0),
+            data.get("jsEventListeners").and_then(|value| value.as_u64()).unwrap_or(0),
+        )),
+        "memory_status" => {
+            if data.get("active").and_then(|value| value.as_bool()).unwrap_or(false) {
+                Some(format!(
+                    "Memory capture active\n  ID: {}\n  Type: {}\n  Page: {}\n  Started: {}",
+                    data.get("captureId").and_then(|value| value.as_str()).unwrap_or("unknown"),
+                    data.get("captureType").and_then(|value| value.as_str()).unwrap_or("unknown"),
+                    data.get("url").and_then(|value| value.as_str()).unwrap_or("unknown"),
+                    data.get("startedAt").and_then(|value| value.as_str()).unwrap_or("unknown"),
+                ))
+            } else {
+                Some("No memory capture is active".to_string())
+            }
+        }
+        "memory_sampling_start" => Some(format!(
+            "{} Allocation sampling started ({})",
+            color::success_indicator(),
+            data.get("captureId").and_then(|value| value.as_str()).unwrap_or("unknown")
+        )),
+        "memory_sampling_stop" => Some(format!(
+            "{} Allocation profile saved to {} ({} sampled bytes)",
+            color::success_indicator(),
+            data.get("path").and_then(|value| value.as_str()).unwrap_or("unknown"),
+            data.get("allocationBytes").and_then(|value| value.as_u64()).unwrap_or(0)
+        )),
+        "memory_snapshot" => Some(format!(
+            "{} Heap snapshot saved to {} ({} bytes)",
+            color::success_indicator(),
+            data.get("path").and_then(|value| value.as_str()).unwrap_or("unknown"),
+            data.get("fileSize").and_then(|value| value.as_u64()).unwrap_or(0)
+        )),
+        "memory_collect_garbage" => Some(format!(
+            "{} Garbage collection requested for {}",
+            color::success_indicator(),
+            data.get("url").and_then(|value| value.as_str()).unwrap_or("current page")
+        )),
+        "memory_cancel" => Some(format!(
+            "{} Memory capture cancelled ({})",
+            color::success_indicator(),
+            data.get("captureId").and_then(|value| value.as_str()).unwrap_or("unknown")
+        )),
+        _ => None,
+    }
+}
+
+fn format_coverage_text(action: Option<&str>, data: &serde_json::Value) -> Option<String> {
+    match action? {
+        "coverage_status" => {
+            if data
+                .get("active")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false)
+            {
+                Some(format!(
+                    "Code coverage active\n  ID: {}\n  Page: {}\n  Checkpoints: {}",
+                    data.get("captureId")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("unknown"),
+                    data.get("url")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("unknown"),
+                    data.get("checkpointCount")
+                        .and_then(|value| value.as_u64())
+                        .unwrap_or(0),
+                ))
+            } else {
+                Some("No code coverage capture is active".to_string())
+            }
+        }
+        "coverage_start" => Some(format!(
+            "{} Code coverage started ({})",
+            color::success_indicator(),
+            data.get("captureId")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown")
+        )),
+        "coverage_take" | "coverage_stop" => Some(format!(
+            "{} Code coverage checkpoint {} saved to {} ({} scripts)",
+            color::success_indicator(),
+            data.get("checkpoint")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0),
+            data.get("path")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown"),
+            data.get("scriptCount")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0),
+        )),
+        "coverage_cancel" => Some(format!(
+            "{} Code coverage cancelled ({})",
+            color::success_indicator(),
+            data.get("captureId")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown")
+        )),
+        _ => None,
+    }
+}
+
 pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &OutputOptions) {
     if opts.json {
         if opts.content_boundaries {
@@ -354,6 +470,14 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
         }
         if action == Some("vitals") {
             println!("{}", format_vitals_text(data));
+            return;
+        }
+        if let Some(output) = format_memory_text(action, data) {
+            println!("{}", output);
+            return;
+        }
+        if let Some(output) = format_coverage_text(action, data) {
+            println!("{}", output);
             return;
         }
         if action == Some("storage_get") {
@@ -2524,6 +2648,93 @@ The output file can be viewed in:
 "##
         }
 
+        // === Memory diagnostics ===
+        "memory" => {
+            r##"
+agent-browser memory - Capture page memory evidence
+
+Usage: agent-browser memory <operation> [options]
+
+Read lightweight metrics, record allocation call stacks, or stream a Chrome
+heap snapshot directly to a local file. Memory commands use the current
+agent-browser session and do not require a separate CDP address.
+
+Operations:
+  metrics                         Read JS heap and DOM counters
+  status                          Show the active memory capture
+  sampling start                  Start allocation sampling
+  sampling stop [path]            Stop sampling and save the profile
+  snapshot [path]                 Save a heap snapshot
+  collect-garbage                 Request garbage collection
+  cancel                          Cancel the active capture
+
+Sampling options:
+  --sampling-interval <bytes>     Average allocated bytes between samples
+  --top <count>                   Number of top allocation sites to return
+  --max-size <bytes>              Maximum artifact size
+
+Snapshot options:
+  --no-gc                         Skip garbage collection before capture
+  --timeout <ms>                  Capture timeout, default 120000
+  --max-size <bytes>              Maximum artifact size
+
+Global Options:
+  --json                          Output as JSON
+  --session <name>                Use a specific session
+
+Examples:
+  agent-browser memory metrics
+  agent-browser memory sampling start --sampling-interval 65536
+  agent-browser memory sampling stop ./allocations.heapprofile --top 10
+  agent-browser memory snapshot ./page.heapsnapshot
+  agent-browser memory status --json
+
+Memory diagnostics are supported on Chrome and Chromium. Other engines return
+an explicit unsupported-engine error. Heap snapshots can contain page text,
+application data, and credentials. Keep artifacts local and out of source control.
+"##
+        }
+
+        // === JavaScript code coverage ===
+        "coverage" => {
+            r##"
+agent-browser coverage - Record JavaScript code execution
+
+Usage: agent-browser coverage <operation> [options]
+
+Record precise JavaScript execution ranges for the current page. A checkpoint
+resets the counters, so one capture can separate first-screen work from later
+route or interaction work.
+
+Operations:
+  status                          Show the active capture
+  start                           Start recording
+  take [path]                     Save a checkpoint and keep recording
+  stop [path]                     Save the final checkpoint and stop
+  cancel                          Stop without saving another checkpoint
+
+Options:
+  --call-count                    Preserve function call counts when starting
+  --label <name>                  Label a take or stop checkpoint
+  --max-size <bytes>              Maximum artifact size
+
+Global Options:
+  --json                          Output as JSON
+  --session <name>                Use a specific session
+
+Examples:
+  agent-browser coverage start
+  agent-browser goto https://example.com
+  agent-browser coverage take ./first-screen.coverage.json --label first-screen
+  agent-browser click "a[href='/orders']"
+  agent-browser coverage stop ./orders.coverage.json --label orders
+
+Code coverage is supported on Chrome and Chromium. It records generated script
+URLs and byte ranges; source maps can later associate those ranges with project
+files and dependency packages.
+"##
+        }
+
         // === Record (video) ===
         "record" => {
             r##"
@@ -3393,6 +3604,8 @@ Debug:
   trace start                Start Chrome DevTools trace
   trace stop [path]          Stop and save Chrome DevTools trace
   profiler start|stop [path] Record Chrome DevTools profile
+  memory <operation>         Capture page memory metrics and artifacts
+  coverage <operation>       Record JavaScript execution checkpoints
   record start <path> [url]  Start video recording (WebM)
   record stop                Stop and save video
   console [--clear]          View console logs

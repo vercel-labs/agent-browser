@@ -399,6 +399,34 @@ agent-browser profiler start              # Start Chrome DevTools profiling
 agent-browser profiler stop trace.json    # Stop and save profile
 ```
 
+## Memory diagnostics
+
+Memory commands require Chrome or Chromium. They reuse the current browser session and return `memory_unsupported_engine` on Lightpanda, Safari, or other unsupported engines.
+
+```bash
+agent-browser memory metrics
+agent-browser memory status
+agent-browser memory sampling start [--sampling-interval <bytes>]
+agent-browser memory sampling stop [path] [--top <count>] [--max-size <bytes>]
+agent-browser memory snapshot [path] [--no-gc] [--timeout <ms>] [--max-size <bytes>]
+agent-browser memory collect-garbage
+agent-browser memory cancel
+```
+
+`memory metrics` returns the current JavaScript heap used and total sizes plus document, DOM node, and JavaScript event-listener counts. Use it for a cheap trend signal, not as proof of a leak.
+
+`memory sampling start` records allocation call stacks on the current page. The default average sampling interval is 32768 bytes. `memory sampling stop` always stops the original page, saves the full `.heapprofile`, and returns the largest allocation sites with function name, script URL, line, column, and sampled bytes. Switching tabs does not change the capture target.
+
+`memory snapshot` asks for garbage collection by default, then writes each Chrome snapshot chunk directly to a `.heapsnapshot` file. It validates that the artifact contains snapshot metadata, nodes, edges, and strings before reporting success. The default timeout is 120000 milliseconds and the default size limit is 1 GiB. Pass `--no-gc` only when the pre-collection state itself is relevant.
+
+If no output path is supplied, profiles are saved below the runtime temporary directory under `agent-browser-memory/<session>/`. Default artifacts older than 24 hours are cleaned when a new capture starts. Command output contains only summaries and file paths. Raw artifacts are never printed into agent context.
+
+Only one sampling or snapshot task may be active per session. `memory status` includes the capture ID, type, original target, URL, start time, output path when known, and cancellation state. `memory cancel` stops allocation sampling or interrupts a snapshot and removes partial output. Closing the captured page, closing the browser, or stopping the daemon also clears capture state.
+
+JSON failures include a stable `errorCode`: `memory_unsupported_engine`, `memory_capture_active`, `memory_no_capture`, `memory_target_gone`, `memory_capture_cancelled`, `memory_capture_timeout`, `memory_size_limit`, `memory_invalid_artifact`, or `memory_command_failed`.
+
+Heap snapshots and allocation profiles can contain user-visible text, application data, credentials, and tokens. Save them only on trusted local storage, never commit them, and delete them after diagnosis.
+
 ## React / Web Vitals
 
 Requires `--enable react-devtools` at launch for the `react ...` commands. `vitals` and `pushstate` are framework-agnostic.
