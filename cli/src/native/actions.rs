@@ -7865,6 +7865,7 @@ fn find_ax_node_by_role(
 ) -> Result<(i64, String), String> {
     let mut matched_without_backend_id = false;
     let mut names_seen: Vec<String> = Vec::new();
+    let mut role_match_count: usize = 0;
 
     for node in nodes {
         if node.ignored.unwrap_or(false) {
@@ -7886,8 +7887,11 @@ fn find_ax_node_by_role(
         };
 
         if !matches {
-            if name.is_some() && !names_seen.contains(&node_name) {
-                names_seen.push(node_name);
+            if name.is_some() {
+                role_match_count += 1;
+                if !names_seen.contains(&node_name) {
+                    names_seen.push(node_name);
+                }
             }
             continue;
         }
@@ -7923,14 +7927,14 @@ fn find_ax_node_by_role(
                 .map(|n| format!("\"{}\"", n))
                 .collect();
             let more = if names_seen.len() > 5 { ", ..." } else { "" };
-            let (plural, verb) = if names_seen.len() == 1 {
+            let (plural, verb) = if role_match_count == 1 {
                 ("", "has")
             } else {
                 ("s", "have")
             };
             return Err(format!(
                 "{count} element{plural} {verb} role \"{role}\", but none match name \"{target_name}\". Names seen: {shown}{more}",
-                count = names_seen.len(),
+                count = role_match_count,
                 plural = plural,
                 verb = verb,
                 role = role,
@@ -10619,6 +10623,29 @@ mod tests {
         assert!(err.contains("Nope"));
         assert!(err.contains("\"Skills\""));
         assert!(err.contains("\"Experience\""));
+    }
+
+    #[test]
+    fn find_ax_node_by_role_name_miss_count_is_elements_not_unique_names() {
+        let nodes = vec![
+            ax_node("heading", "Skills", Some(43), false),
+            ax_node("heading", "Skills", Some(44), false),
+            ax_node("heading", "Skills", Some(45), false),
+        ];
+
+        let err = find_ax_node_by_role(&nodes, "heading", Some("Nope"), false)
+            .expect_err("no node should match an unrelated name");
+        // 3 elements share the same name, so names_seen dedupes to 1 entry --
+        // the element count must still say 3, not 1.
+        assert!(
+            err.contains("3 elements have role \"heading\""),
+            "expected element count 3, got: {err}"
+        );
+        assert_eq!(
+            err.matches("\"Skills\"").count(),
+            1,
+            "names_seen must dedupe the display list: {err}"
+        );
     }
 
     #[test]
