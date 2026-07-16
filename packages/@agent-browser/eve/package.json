@@ -57,7 +57,7 @@
     "zod": "4.4.3"
   },
   "peerDependencies": {
-    "eve": "^0.22.5"
+    "eve": ">=0.22.5"
   },
   "devDependencies": {
     "@types/node": "24.x",
