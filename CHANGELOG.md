@@ -1,8 +1,19 @@
 # agent-browser
 
-## 0.32.1
+## 0.32.2
 
 <!-- release:start -->
+### Improvements
+
+- Updated **eve extension packaging** for eve 0.25.1, adopting the new source and dist extension manifest format, updating the eve example to stable AI SDK releases, and keeping extension tests aligned with eve's scoped config registry (#1570)
+
+### Contributors
+
+- @AndrewBarba
+<!-- release:end -->
+
+## 0.32.1
+
 ### Improvements
 
 - Widened **eve compatibility** for `@agent-browser/eve` to accept eve 0.23 and future major releases without peer-resolution warnings (#1563)
@@ -14,7 +25,6 @@
 ### Contributors
 
 - @ctate
-<!-- release:end -->
 
 ## 0.32.0
 
