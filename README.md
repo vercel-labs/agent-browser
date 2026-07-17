@@ -1271,7 +1271,7 @@ import browser from "@agent-browser/eve";
 export default browser({});
 ```
 
-This composes ~20 namespaced tools into the agent — `browser__navigate`, `browser__snapshot`, `browser__click`, `browser__fill`, `browser__find`, `browser__screenshot`, and more — all running agent-browser inside the agent's sandbox. agent-browser installs automatically on first use; pre-install it in `agent/sandbox.ts` with the `@agent-browser/eve/sandbox` helpers to bake the cost into the sandbox template instead. Configuration (domain allowlists, output limits, session naming) and per-tool overrides are covered in the [package README](packages/@agent-browser/eve/README.md), and the [eve example](examples/eve/) is a complete app with the extension mounted.
+This composes ~20 namespaced tools into the agent — `browser__navigate`, `browser__snapshot`, `browser__click`, `browser__fill`, `browser__find`, `browser__screenshot`, and more — all running agent-browser inside the agent's sandbox. agent-browser installs automatically on first use; pre-install it in `agent/sandbox.ts` with the `@agent-browser/eve/sandbox` helpers to bake the cost into the sandbox template instead. Configuration (domain allowlists, output limits, session naming) and per-tool overrides are covered in the [package README](packages/@agent-browser/eve/README.md). The [eve example](examples/eve/) is a complete app with the extension mounted; for Browserbase instead of sandbox Chromium, see [examples/providers/eve-browserbase](examples/providers/eve-browserbase/).
 
 ### Serverless (AWS Lambda)
 
@@ -1681,6 +1681,8 @@ agent-browser session info --json
 While active, the JSON includes `provider: "browserbase"` and `providerMetadata` with `sessionId`. A best-effort lookup after CDP connect adds `debuggerUrl` and `debuggerFullscreenUrl`. Treat those URLs as secrets.
 
 Get your API key from the [Browserbase Dashboard](https://browserbase.com/overview).
+
+For a full Next.js eve app that uses Browserbase with Vercel Sandbox credential brokering and a live-view iframe, see [examples/providers/eve-browserbase](examples/providers/eve-browserbase/).
 
 ### Browser Use
 

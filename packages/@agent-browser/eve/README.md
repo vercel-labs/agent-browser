@@ -139,7 +139,7 @@ When `includeProviderMetadata` is enabled, `goto` navigation performs a best-eff
 
 ## Example
 
-See [`examples/eve`](https://github.com/vercel-labs/agent-browser/tree/main/examples/eve) for a complete Next.js eve app with this extension mounted.
+See [`examples/eve`](https://github.com/vercel-labs/agent-browser/tree/main/examples/eve) for a complete Next.js eve app with this extension mounted. For Browserbase instead of sandbox Chromium, see [`examples/providers/eve-browserbase`](https://github.com/vercel-labs/agent-browser/tree/main/examples/providers/eve-browserbase).
 
 ## License
 
