@@ -803,14 +803,15 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 (Some(first), None) => {
                     // One arg: determine if it's a selector or a path
                     let is_relative_path = first.starts_with("./") || first.starts_with("../");
-                    let is_selector = !is_relative_path
-                        && (first.starts_with('.')
-                            || first.starts_with('#')
-                            || first.starts_with('@'));
                     let has_path_extension = first.ends_with(".png")
                         || first.ends_with(".jpg")
                         || first.ends_with(".jpeg")
                         || first.ends_with(".webp");
+                    let is_selector = !is_relative_path
+                        && !has_path_extension
+                        && (first.starts_with('.')
+                            || first.starts_with('#')
+                            || first.starts_with('@'));
                     let is_path = is_relative_path || first.contains('/') || has_path_extension;
                     if is_selector || !is_path {
                         (Some(*first), None)
@@ -4197,6 +4198,14 @@ mod tests {
         assert_eq!(cmd["action"], "screenshot");
         assert_eq!(cmd["selector"], serde_json::Value::Null);
         assert_eq!(cmd["path"], "./output.png");
+    }
+
+    #[test]
+    fn test_screenshot_with_dotfile_path() {
+        let cmd = parse_command(&args("screenshot .capture.png"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "screenshot");
+        assert_eq!(cmd["selector"], serde_json::Value::Null);
+        assert_eq!(cmd["path"], ".capture.png");
     }
 
     #[test]
