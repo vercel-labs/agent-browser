@@ -313,6 +313,11 @@ pub struct BrowserManager {
     direct_page: bool,
 }
 
+/// Default viewport dimensions used at launch (matches the `--window-size`
+/// fallback in `cdp::chrome` and the stream server's initial viewport).
+pub const DEFAULT_VIEWPORT_WIDTH: i32 = 1280;
+pub const DEFAULT_VIEWPORT_HEIGHT: i32 = 720;
+
 const LIGHTPANDA_CDP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const LIGHTPANDA_CDP_CONNECT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const LIGHTPANDA_TARGET_INIT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -1259,6 +1264,31 @@ impl BrowserManager {
 
         // Screencast captures the actual content area, not the emulated CSS
         // viewport, so resize the content area to match.
+        self.resize_content_area(width, height).await;
+
+        Ok(())
+    }
+
+    /// Clear any viewport emulation set via `set_viewport` and restore the
+    /// default content area size, returning pages to the launch-time viewport.
+    pub async fn reset_viewport(&self) -> Result<(), String> {
+        let session_id = self.active_session_id()?;
+        self.client
+            .send_command(
+                "Emulation.clearDeviceMetricsOverride",
+                None,
+                Some(session_id),
+            )
+            .await?;
+
+        self.resize_content_area(DEFAULT_VIEWPORT_WIDTH, DEFAULT_VIEWPORT_HEIGHT)
+            .await;
+
+        Ok(())
+    }
+
+    /// Best-effort resize of the browser window's content area.
+    async fn resize_content_area(&self, width: i32, height: i32) {
         if let Ok(target_id) = self.active_target_id() {
             if let Ok(window_info) = self
                 .client
@@ -1288,8 +1318,6 @@ impl BrowserManager {
                 }
             }
         }
-
-        Ok(())
     }
 
     pub async fn set_user_agent(&self, user_agent: &str) -> Result<(), String> {
