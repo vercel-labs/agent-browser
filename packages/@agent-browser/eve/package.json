@@ -5,7 +5,10 @@
   "type": "module",
   "sideEffects": false,
   "eve": {
-    "extension": "./extension"
+    "extension": {
+      "source": "./extension",
+      "dist": "./dist/extension"
+    }
   },
   "files": [
     "extension",
@@ -57,11 +60,11 @@
     "zod": "4.4.3"
   },
   "peerDependencies": {
-    "eve": ">=0.22.5"
+    "eve": ">=0.25.1"
   },
   "devDependencies": {
     "@types/node": "24.x",
-    "eve": "^0.22.5",
+    "eve": "^0.25.1",
     "typescript": "5.9.3"
   },
   "engines": {

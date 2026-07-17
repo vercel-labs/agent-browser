@@ -8,6 +8,7 @@ minimumReleaseAge: 2880
 # just-released @agent-browser/sandbox without waiting out the release age.
 minimumReleaseAgeExclude:
   - '@agent-browser/sandbox'
+  - eve
 allowBuilds:
   '@mongodb-js/zstd': false
   msw: false
