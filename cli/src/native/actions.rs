@@ -1875,6 +1875,13 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         return error_response(&id, &err);
     }
 
+    // Invalid inputs are rejected before expensive setup: an unsupported
+    // `find` action must fail here, not after a browser launch and a locator
+    // resolution that can mask it with "element not found".
+    if let Err(err) = validate_find_subaction(&action, cmd) {
+        return error_response(&id, &err);
+    }
+
     if action == INTERNAL_DAEMON_SHUTDOWN_ACTION {
         let mut resp = match handle_close(state).await {
             Ok(data) => success_response(&id, data),
@@ -7717,6 +7724,43 @@ async fn handle_mainframe(state: &mut DaemonState) -> Result<Value, String> {
 /// silently reopening the "Unknown subaction: type" bug this fixes.
 const FIND_ACTIONS: &[&str] = &["click", "fill", "check", "hover", "text"];
 
+/// The daemon commands that dispatch a `find` subaction through
+/// `execute_subaction` after resolving their locator.
+const FIND_SUBACTION_COMMANDS: &[&str] = &[
+    "getbyrole",
+    "getbytext",
+    "getbylabel",
+    "getbyplaceholder",
+    "getbyalttext",
+    "getbytitle",
+    "getbytestid",
+    "nth",
+];
+
+/// Reject an unsupported `find` action before any browser launch or locator
+/// resolution. The guard inside `execute_subaction` only runs after both, so
+/// on a missing element it never runs at all: the caller fails first with an
+/// "element not found" error that names the wrong fault, after paying for a
+/// browser launch to say it. Validation order follows the input, not the
+/// setup cost.
+fn validate_find_subaction(action: &str, cmd: &Value) -> Result<(), String> {
+    if !FIND_SUBACTION_COMMANDS.contains(&action) {
+        return Ok(());
+    }
+    let subaction = cmd
+        .get("subaction")
+        .and_then(|v| v.as_str())
+        .unwrap_or("click");
+    if !FIND_ACTIONS.contains(&subaction) {
+        return Err(format!(
+            "Unknown action '{}' for find. Valid actions: {}.",
+            subaction,
+            FIND_ACTIONS.join(", ")
+        ));
+    }
+    Ok(())
+}
+
 async fn execute_subaction(
     cmd: &Value,
     state: &mut DaemonState,
@@ -7728,7 +7772,7 @@ async fn execute_subaction(
         .unwrap_or("click");
 
     // Validate before dispatching: an unsupported action (e.g. "type",
-    // "focus", "uncheck" -- all real standalone commands, just not `find`
+    // "focus", "uncheck", all real standalone commands, just not `find`
     // actions) gets a message naming the valid set here.
     if !FIND_ACTIONS.contains(&subaction) {
         return Err(format!(
@@ -10455,7 +10499,7 @@ mod tests {
     use tokio::net::TcpListener;
 
     /// `find --help`, the MCP tool schema, and the docs/skill references are
-    /// plain text, not generated from `FIND_ACTIONS` -- this pins their
+    /// plain text, not generated from `FIND_ACTIONS`; this pins their
     /// wording to the actual accepted set so an edit to one without the
     /// others fails here instead of drifting silently again.
     #[test]
@@ -10496,8 +10540,39 @@ mod tests {
         }
     }
 
+    /// The dispatch-level validation must reject an unsupported `find`
+    /// action for every find-family command, before any browser launch or
+    /// locator resolution. Without it, a missing element fails the locator
+    /// step first and masks the invalid action with "element not found"
+    /// (after paying for a browser launch to say it).
+    #[test]
+    fn validate_find_subaction_rejects_before_any_browser_work() {
+        for command in FIND_SUBACTION_COMMANDS {
+            let err = validate_find_subaction(command, &json!({ "subaction": "type" }))
+                .expect_err(&format!("'{command}' must validate its find action"));
+            assert_eq!(
+                err,
+                format!(
+                    "Unknown action 'type' for find. Valid actions: {}.",
+                    FIND_ACTIONS.join(", ")
+                )
+            );
+        }
+
+        // The default subaction and every accepted action pass.
+        assert!(validate_find_subaction("getbyrole", &json!({})).is_ok());
+        for accepted in FIND_ACTIONS {
+            assert!(
+                validate_find_subaction("getbytext", &json!({ "subaction": accepted })).is_ok()
+            );
+        }
+
+        // Commands outside the find family carry no subaction contract.
+        assert!(validate_find_subaction("click", &json!({ "subaction": "type" })).is_ok());
+    }
+
     /// Every entry in `FIND_ACTIONS` must actually dispatch in
-    /// `execute_subaction`'s match, not just pass the guard -- this is the
+    /// `execute_subaction`'s match, not just pass the guard; this is the
     /// real lock the guard alone can't provide, since the guard and the
     /// match arms are two separate lists that Rust can't check against each
     /// other at compile time.
