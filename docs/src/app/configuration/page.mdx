@@ -298,8 +298,11 @@ These environment variables configure additional daemon and runtime behavior:
     <tr><td><code>AGENT_BROWSER_COLOR</code></td><td>Enable colored CLI output when truthy.</td><td>(disabled)</td></tr>
     <tr><td><code>NO_COLOR</code></td><td>Disable colored output when present.</td><td>(not set)</td></tr>
     <tr><td><code>AI_GATEWAY_URL</code></td><td>Vercel AI Gateway base URL.</td><td><code>https://ai-gateway.vercel.sh</code></td></tr>
-    <tr><td><code>AI_GATEWAY_API_KEY</code></td><td>API key for the Vercel AI Gateway. Required to enable AI chat.</td><td>(none)</td></tr>
+    <tr><td><code>AI_GATEWAY_API_KEY</code></td><td>API key for the Vercel AI Gateway. Required to enable AI chat unless <code>ATLASCLOUD_API_KEY</code> is set.</td><td>(none)</td></tr>
     <tr><td><code>AI_GATEWAY_MODEL</code></td><td>Default AI model for dashboard chat.</td><td><code>anthropic/claude-sonnet-4.6</code></td></tr>
+    <tr><td><code>ATLASCLOUD_API_KEY</code></td><td>Atlas Cloud API key for the OpenAI-compatible chat backend.</td><td>(none)</td></tr>
+    <tr><td><code>ATLASCLOUD_API_BASE</code></td><td>Atlas Cloud OpenAI-compatible base URL.</td><td><code>https://api.atlascloud.ai</code></td></tr>
+    <tr><td><code>ATLASCLOUD_MODEL</code></td><td>Default Atlas Cloud chat model when <code>AI_GATEWAY_MODEL</code> is not set.</td><td><code>qwen/qwen3.5-flash</code></td></tr>
   </tbody>
 </table>
 

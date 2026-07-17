@@ -957,6 +957,13 @@ export AI_GATEWAY_MODEL=anthropic/claude-sonnet-4.6           # optional, this i
 export AI_GATEWAY_URL=https://ai-gateway.vercel.sh           # optional, this is the default
 ```
 
+Atlas Cloud can also be used as the OpenAI-compatible backend:
+
+```bash
+export ATLASCLOUD_API_KEY=your_atlascloud_key
+export ATLASCLOUD_MODEL=qwen/qwen3.5-flash                   # optional, this is the default
+```
+
 **CLI usage:**
 
 ```bash
@@ -971,7 +978,7 @@ The `chat` command translates natural language instructions into agent-browser c
 
 **Dashboard usage:**
 
-The Chat tab is always visible in the dashboard. When `AI_GATEWAY_API_KEY` is set, the Rust server proxies requests to the gateway and streams responses back using the Vercel AI SDK's UI Message Stream protocol. Without the key, sending a message shows an error inline.
+The Chat tab is always visible in the dashboard. When `AI_GATEWAY_API_KEY` or `ATLASCLOUD_API_KEY` is set, the Rust server proxies requests to the configured OpenAI-compatible backend and streams responses back using the Vercel AI SDK's UI Message Stream protocol. Without a key, sending a message shows an error inline.
 
 ## Configuration
 

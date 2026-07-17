@@ -453,7 +453,7 @@ Exit code is `0` if all checks pass (warnings are fine), `1` if any fail. See th
 
 ## Chat
 
-Use natural language to control the browser via AI. The `chat` command translates instructions into agent-browser commands, executes them, and streams the AI response. Requires `AI_GATEWAY_API_KEY` to be set.
+Use natural language to control the browser via AI. The `chat` command translates instructions into agent-browser commands, executes them, and streams the AI response. Requires `AI_GATEWAY_API_KEY` or `ATLASCLOUD_API_KEY` to be set.
 
 ```bash
 agent-browser chat "open google.com and search for cats"     # Single-shot instruction
@@ -468,7 +468,7 @@ agent-browser --json chat "open example.com"                 # Structured JSON o
 Chat-specific options:
 
 ```bash
---model <name>           # AI model (or AI_GATEWAY_MODEL env, default: anthropic/claude-sonnet-4.6)
+--model <name>           # AI model (or AI_GATEWAY_MODEL/ATLASCLOUD_MODEL env)
 -v, --verbose            # Show tool commands and their raw output
 -q, --quiet              # Show only the AI text response (hide tool calls)
 ```
