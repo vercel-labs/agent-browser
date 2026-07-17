@@ -7815,11 +7815,15 @@ fn is_presentational_role(role: &str) -> bool {
 
 /// Match presentational roles against the explicit `role` attribute in the
 /// DOM, the only place the author's intent survives (see
-/// `is_presentational_role`). Matching is literal per synonym — a query
-/// for "none" only matches role="none" — mirroring both the old CSS path
-/// and Playwright's literal role comparison. Name matching mirrors the AX
-/// path: non-exact is a case-insensitive substring check against
-/// aria-label or textContent, exact is case-sensitive after trimming.
+/// `is_presentational_role`). ARIA treats the role attribute as an ordered
+/// fallback list whose first supported token is the operative role, so
+/// `role="button none"` is a button and must not answer a query for "none",
+/// while `role="none button"` must. Matching is literal per synonym: a query
+/// for "none" only matches an operative "none", mirroring Playwright's
+/// literal role comparison. Name matching approximates accessible-name
+/// precedence (aria-labelledby, then aria-label, then text content) with
+/// whitespace normalized; non-exact is a case-insensitive substring check,
+/// exact is a case-sensitive whole-name comparison.
 async fn handle_presentational_getbyrole(
     cmd: &Value,
     state: &mut DaemonState,
@@ -7834,16 +7838,10 @@ async fn handle_presentational_getbyrole(
         Some(n) => {
             let name_json = serde_json::to_string(n).unwrap_or_default();
             if exact {
-                format!(
-                    "const target = {name_json};
-                    if ((el.getAttribute('aria-label') || '').trim() !== target.trim()
-                        && (el.textContent || '').trim() !== target.trim()) continue;"
-                )
+                format!("if (norm(nameOf(el)) !== norm({name_json})) continue;")
             } else {
                 format!(
-                    "const target = {name_json}.toLowerCase();
-                    if (!(el.getAttribute('aria-label') || '').toLowerCase().includes(target)
-                        && !(el.textContent || '').toLowerCase().includes(target)) continue;"
+                    "if (!norm(nameOf(el)).toLowerCase().includes(norm({name_json}).toLowerCase())) continue;"
                 )
             }
         }
@@ -7853,10 +7851,25 @@ async fn handle_presentational_getbyrole(
     let role_json = serde_json::to_string(&role.to_ascii_lowercase()).unwrap_or_default();
     let query = format!(
         r#"(() => {{
+            const VALID_ROLES = new Set(['alert','alertdialog','application','article','banner','blockquote','button','caption','cell','checkbox','code','columnheader','combobox','complementary','contentinfo','definition','deletion','dialog','directory','document','emphasis','feed','figure','form','generic','grid','gridcell','group','heading','img','insertion','link','list','listbox','listitem','log','main','marquee','math','meter','menu','menubar','menuitem','menuitemcheckbox','menuitemradio','navigation','none','note','option','paragraph','presentation','progressbar','radio','radiogroup','region','row','rowgroup','rowheader','scrollbar','search','searchbox','separator','slider','spinbutton','status','strong','subscript','superscript','switch','tab','table','tablist','tabpanel','term','textbox','time','timer','toolbar','tooltip','tree','treegrid','treeitem']);
+            const norm = s => (s || '').replace(/\s+/g, ' ').trim();
+            const nameOf = el => {{
+                const lb = el.getAttribute('aria-labelledby');
+                if (lb) {{
+                    const t = lb.trim().split(/\s+/)
+                        .map(id => {{ const r = document.getElementById(id); return r ? r.textContent : ''; }})
+                        .join(' ');
+                    if (norm(t)) return t;
+                }}
+                const al = el.getAttribute('aria-label');
+                if (al !== null && norm(al)) return al;
+                return el.textContent || '';
+            }};
             const role = {role_json};
             for (const el of document.querySelectorAll('[role]')) {{
                 const tokens = (el.getAttribute('role') || '').trim().toLowerCase().split(/\s+/);
-                if (!tokens.includes(role)) continue;
+                const operative = tokens.find(t => VALID_ROLES.has(t));
+                if (operative !== role) continue;
                 {name_check}
                 el.setAttribute('data-agent-browser-located', 'true');
                 return true;
@@ -7959,11 +7972,32 @@ async fn handle_getbyrole(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     result
 }
 
+/// Map a Chrome AX tree role to its public ARIA role name. The AX tree
+/// mostly uses ARIA names already; the known divergence is `image`, which
+/// ARIA (and Playwright) call `img`. Queries are normalized through the
+/// same table, so both spellings match either way.
+fn normalize_ax_role(role: &str) -> String {
+    let lower = role.to_ascii_lowercase();
+    match lower.as_str() {
+        "image" => "img".to_string(),
+        _ => lower,
+    }
+}
+
+/// Collapse internal whitespace runs to single spaces and trim, mirroring
+/// Playwright's accessible-name normalization: `"Save   changes"` and
+/// `"Save changes"` are the same accessible name.
+fn normalize_ws(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// Match a role and (optional) accessible name against the AX tree, mirroring
-/// Playwright's getByRole semantics: non-exact name matching is a
-/// case-insensitive substring check, exact matching is case-sensitive after
-/// trimming. Continues past AX nodes without a backendDOMNodeId (virtual
-/// nodes) so a later actionable match still wins.
+/// Playwright's getByRole semantics: role values are compared case-insensitively
+/// after AX-to-ARIA normalization; accessible names are whitespace-normalized on
+/// both sides, then non-exact matching is a case-insensitive substring check and
+/// exact matching is a case-sensitive whole-name comparison. Continues past AX
+/// nodes without a backendDOMNodeId (virtual nodes) so a later actionable match
+/// still wins.
 fn find_ax_node_by_role(
     nodes: &[super::cdp::types::AXNode],
     role: &str,
@@ -7973,6 +8007,7 @@ fn find_ax_node_by_role(
     let mut matched_without_backend_id = false;
     let mut names_seen: Vec<String> = Vec::new();
     let mut role_match_count: usize = 0;
+    let target_role = normalize_ax_role(role);
 
     for node in nodes {
         if node.ignored.unwrap_or(false) {
@@ -7980,16 +8015,16 @@ fn find_ax_node_by_role(
         }
 
         let node_role = super::element::extract_ax_string(&node.role);
-        if !node_role.eq_ignore_ascii_case(role) {
+        if normalize_ax_role(&node_role) != target_role {
             continue;
         }
 
         let node_name = super::element::extract_ax_string(&node.name);
         let matches = match name {
-            Some(target_name) if exact => node_name.trim() == target_name.trim(),
-            Some(target_name) => node_name
+            Some(target_name) if exact => normalize_ws(&node_name) == normalize_ws(target_name),
+            Some(target_name) => normalize_ws(&node_name)
                 .to_lowercase()
-                .contains(&target_name.to_lowercase()),
+                .contains(&normalize_ws(target_name).to_lowercase()),
             None => true,
         };
 
@@ -10676,6 +10711,36 @@ mod tests {
         assert_eq!(backend_id, 43);
     }
 
+    /// Chrome's AX tree reports `<img>` as role "image" while ARIA (and
+    /// Playwright queries) call it "img"; both spellings must find the node.
+    #[test]
+    fn find_ax_node_by_role_normalizes_ax_role_synonyms() {
+        let nodes = vec![ax_node("image", "Logo", Some(51), false)];
+
+        let (backend_id, _) = find_ax_node_by_role(&nodes, "img", Some("Logo"), false)
+            .expect("the ARIA role name must match Chrome's AX role");
+        assert_eq!(backend_id, 51);
+
+        let (backend_id, _) = find_ax_node_by_role(&nodes, "image", Some("Logo"), false)
+            .expect("the AX spelling keeps matching after normalization");
+        assert_eq!(backend_id, 51);
+    }
+
+    /// Accessible names are whitespace-normalized on both sides, so a name
+    /// rendered with a collapsed run of spaces still matches exactly.
+    #[test]
+    fn find_ax_node_by_role_normalizes_whitespace_in_names() {
+        let nodes = vec![ax_node("button", "Save   changes", Some(52), false)];
+
+        let (backend_id, _) = find_ax_node_by_role(&nodes, "button", Some("Save changes"), true)
+            .expect("exact matching must normalize internal whitespace");
+        assert_eq!(backend_id, 52);
+
+        let (backend_id, _) = find_ax_node_by_role(&nodes, "button", Some("save  changes"), false)
+            .expect("substring matching must normalize internal whitespace");
+        assert_eq!(backend_id, 52);
+    }
+
     #[test]
     fn find_ax_node_by_role_supports_substring_matching() {
         let nodes = vec![ax_node("button", "Submit form", Some(7), false)];
@@ -10742,7 +10807,7 @@ mod tests {
 
         let err = find_ax_node_by_role(&nodes, "heading", Some("Nope"), false)
             .expect_err("no node should match an unrelated name");
-        // 3 elements share the same name, so names_seen dedupes to 1 entry --
+        // 3 elements share the same name, so names_seen dedupes to 1 entry;
         // the element count must still say 3, not 1.
         assert!(
             err.contains("3 elements have role \"heading\""),
