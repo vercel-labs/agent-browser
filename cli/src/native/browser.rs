@@ -168,9 +168,13 @@ pub fn to_ai_friendly_error(error: &str) -> String {
 /// instead of discarding that detail.
 ///
 /// Deliberately narrower than a bare "no element" substring match, which
-/// would also catch unrelated WebDriver protocol errors like "No element in
-/// response" or "No element ID in response" -- those aren't locator misses,
-/// and "verify the selector is correct" is misleading advice for them.
+/// would also catch WebDriver protocol errors like "No element in response"
+/// or "No element ID in response"; those indicate a malformed driver
+/// payload, and "verify the selector is correct" is misleading advice for
+/// them. A genuine WebDriver locator miss never reaches this function in
+/// protocol shape: `element_id_from_value` translates the driver's
+/// "no such element" error into the anchored "No element found by ..."
+/// form, which this function classifies like any other miss.
 fn is_locator_miss(lower: &str) -> bool {
     lower.starts_with("element not found")
         || lower.starts_with("no element found")
@@ -2091,8 +2095,11 @@ mod tests {
     }
 
     /// WebDriver protocol errors happen to contain "element" and "no" but
-    /// are not locator misses -- "verify the selector is correct" would be
-    /// actively misleading advice for a malformed response payload.
+    /// are not locator misses; "verify the selector is correct" would be
+    /// actively misleading advice for a malformed response payload. Genuine
+    /// WebDriver misses are translated to the anchored form before they get
+    /// here (see `element_id_from_value`), so only malformed payloads keep
+    /// this protocol shape.
     #[test]
     fn test_to_ai_friendly_error_does_not_flatten_webdriver_protocol_errors() {
         assert_eq!(
