@@ -130,8 +130,8 @@ impl ProviderConnection {
     }
 }
 
-/// Connects to the specified browser provider and returns a CDP WebSocket URL
-/// along with session info for cleanup on failure.
+/// Connects to the specified browser provider and returns a CDP connection
+/// (WebSocket URL, optional headers, metadata, and cleanup state).
 pub async fn connect_provider(provider_name: &str) -> Result<ProviderConnection, String> {
     let plugins = crate::plugins::plugins_from_env();
     connect_provider_with_plugins(provider_name, &plugins).await
@@ -352,7 +352,7 @@ async fn connect_browserbase() -> Result<ProviderConnection, String> {
     let response = client
         .post("https://api.browserbase.com/v1/sessions")
         .header("content-type", "application/json")
-        .header("x-bb-api-key", &api_key)
+        .header("X-BB-API-Key", &api_key)
         .body("{}")
         .send()
         .await
@@ -432,7 +432,7 @@ async fn fetch_browserbase_debug_metadata(
             "https://api.browserbase.com/v1/sessions/{}/debug",
             urlencoding::encode(session_id)
         ))
-        .header("x-bb-api-key", api_key)
+        .header("X-BB-API-Key", api_key)
         .timeout(BROWSERBASE_LIVE_VIEW_TIMEOUT)
         .send()
         .await

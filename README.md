@@ -1678,7 +1678,7 @@ Browserbase sessions expose live-view URLs through session diagnostics. These UR
 agent-browser session info --json
 ```
 
-While the Browserbase session is active, the JSON includes `provider: "browserbase"` and `providerMetadata` with `sessionId`; successful live-view lookup adds `debuggerUrl` and `debuggerFullscreenUrl`. Those live-view URLs come from Browserbase's `GET /v1/sessions/{id}/debug` after CDP connects and event handlers are wired, so session create and CDP connect are never delayed by the lookup. Live-view lookup is best-effort; browsing still works if Browserbase temporarily cannot return debugger URLs, though the launch response may wait up to five seconds for the debug call. A failed lookup becomes eligible for retry through `session info` after a 30-second cooldown, without relaunching the browser.
+While active, the JSON includes `provider: "browserbase"` and `providerMetadata` with `sessionId`. A best-effort lookup after CDP connect adds `debuggerUrl` and `debuggerFullscreenUrl`. Treat those URLs as secrets.
 
 Get your API key from the [Browserbase Dashboard](https://browserbase.com/overview).
 

@@ -2,7 +2,7 @@ import { defineTool } from "eve/tools";
 import { z } from "zod";
 
 import extension from "../extension";
-import { runBrowser } from "../lib/browser";
+import { runBrowser, type BrowserToolContext } from "../lib/browser";
 
 interface SessionInfo {
   readonly provider?: string;
@@ -15,7 +15,7 @@ interface NavigateOutput extends Record<string, unknown> {
 }
 
 async function withProviderMetadata(
-  ctx: Parameters<typeof runBrowser>[0],
+  ctx: BrowserToolContext,
   output: Record<string, unknown>,
 ): Promise<NavigateOutput> {
   if (!extension.config.includeProviderMetadata) {
@@ -48,16 +48,15 @@ export default defineTool({
     url: z.string().optional().describe('Required when action is "goto".'),
   }),
   async execute({ action, url }, ctx) {
-    let output: Record<string, unknown>;
     if (action === "goto") {
       if (url === undefined) {
         throw new Error('The "goto" action requires a url.');
       }
-      output = await runBrowser<Record<string, unknown>>(ctx, ["open", url]);
-      // Live-view URLs are useful when a session starts or changes page; skip
-      // the extra session-info round-trip for history actions.
+      const output = await runBrowser<Record<string, unknown>>(ctx, ["open", url]);
       return await withProviderMetadata(ctx, output);
     }
+    // Skip the extra session-info round-trip for history actions; live-view
+    // URLs are most useful when a session starts or changes page.
     return await runBrowser<Record<string, unknown>>(ctx, [action]);
   },
   // Provider live-view URLs are capability-bearing UI data. Preserve them in

@@ -1740,12 +1740,12 @@ fn provider_launch_response(
     requested_provider: &str,
     relaunched_browser: bool,
 ) -> Value {
+    // Preserve the established launch-response contract by echoing the
+    // caller's provider spelling. Active session diagnostics use the
+    // canonical provider name retained in ActiveProvider.
     let mut response = json!({
         "launched": true,
         "relaunchedBrowser": relaunched_browser,
-        // Preserve the established launch-response contract by echoing the
-        // caller's provider spelling. Active session diagnostics use the
-        // canonical provider name retained in ActiveProvider.
         "provider": requested_provider,
     });
     if let Some(metadata) = &active.provider.metadata {

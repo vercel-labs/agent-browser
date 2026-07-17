@@ -658,12 +658,40 @@ fn print_provider_diagnostics(runtime_data: &Value) {
         return;
     };
     for (key, value) in metadata {
+        let label = provider_metadata_label(key);
         match value {
-            Value::String(text) => println!("{}: {}", key, text),
+            Value::String(text) => println!("{}: {}", label, text),
             Value::Null => {}
-            other => println!("{}: {}", key, other),
+            other => println!("{}: {}", label, other),
         }
     }
+}
+
+fn provider_metadata_label(key: &str) -> String {
+    match key {
+        "sessionId" => "Session ID".to_string(),
+        "debuggerUrl" => "Debugger URL".to_string(),
+        "debuggerFullscreenUrl" => "Debugger fullscreen URL".to_string(),
+        "liveViewUrl" => "Live View URL".to_string(),
+        "browserIdentifier" => "Browser identifier".to_string(),
+        "region" => "Region".to_string(),
+        _ => humanize_camel_case(key),
+    }
+}
+
+fn humanize_camel_case(key: &str) -> String {
+    let mut label = String::new();
+    for (i, ch) in key.chars().enumerate() {
+        if ch.is_uppercase() && i > 0 {
+            label.push(' ');
+        }
+        if i == 0 {
+            label.extend(ch.to_uppercase());
+        } else {
+            label.push(ch);
+        }
+    }
+    label
 }
 
 fn run_session(args: &[String], session: &str, json_mode: bool) {
@@ -2251,5 +2279,17 @@ mod tests {
 
         assert_eq!(data["provider"], "browserbase");
         assert_eq!(data["providerMetadata"]["sessionId"], "sess_123");
+    }
+
+    #[test]
+    fn test_provider_metadata_labels_use_title_case() {
+        assert_eq!(provider_metadata_label("sessionId"), "Session ID");
+        assert_eq!(provider_metadata_label("debuggerUrl"), "Debugger URL");
+        assert_eq!(
+            provider_metadata_label("debuggerFullscreenUrl"),
+            "Debugger fullscreen URL"
+        );
+        assert_eq!(provider_metadata_label("liveViewUrl"), "Live View URL");
+        assert_eq!(provider_metadata_label("dashboardUrl"), "Dashboard Url");
     }
 }

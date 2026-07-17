@@ -135,7 +135,7 @@ export default disableTool();
 
 Each tool shells out to the `agent-browser` CLI inside the sandbox from `ctx.getSandbox()`, using an isolated browser session named after the sandbox id, and returns the parsed `--json` payload. The browser and its state live entirely in the sandbox; the app runtime only relays commands.
 
-When `includeProviderMetadata` is enabled, `goto` navigation performs a best-effort `session info` lookup and attaches the active provider name and opaque provider-owned metadata to the channel result. History actions (`back` / `forward` / `reload`) skip that lookup. The metadata is removed from model-visible output via `toModelOutput`; any other tool that attaches `provider` or `providerMetadata` must do the same. Browserbase uses this path for its `sessionId`, `debuggerUrl`, and `debuggerFullscreenUrl`; applications must authenticate any UI that renders capability-bearing metadata.
+When `includeProviderMetadata` is enabled, `goto` navigation performs a best-effort `session info` lookup and attaches the active provider name and opaque provider-owned metadata to the channel result. History actions (`back` / `forward` / `reload`) skip that lookup. The metadata is removed from model-visible output via `toModelOutput`; any other tool that attaches `provider` or `providerMetadata` must do the same. Authenticate any UI that renders capability-bearing metadata.
 
 ## Example
 

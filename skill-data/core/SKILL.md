@@ -241,7 +241,7 @@ agent-browser --session "$SESSION" --restore --restore-check-text Dashboard open
 agent-browser --session "$SESSION" session info --json
 ```
 
-For active cloud providers, session info may also include `provider` and provider-specific `providerMetadata`. Browserbase always retains its session id and adds capability-bearing debugger URLs after a best-effort lookup; failed lookups can retry through later session-info calls. Do not print or share debugger URLs unless the user explicitly needs an authorized live view.
+For active cloud providers, session info may also include `provider` and provider-specific `providerMetadata`. Treat capability-bearing URLs in that metadata as secrets.
 
 ### Extract data
 
