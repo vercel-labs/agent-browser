@@ -1878,7 +1878,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
     // Invalid inputs are rejected before expensive setup: an unsupported
     // `find` action must fail here, not after a browser launch and a locator
     // resolution that can mask it with "element not found".
-    if let Err(err) = validate_find_subaction(&action, cmd) {
+    if let Err(err) = validate_find_subaction(action, cmd) {
         return error_response(&id, &err);
     }
 
