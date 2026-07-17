@@ -210,7 +210,7 @@ agent-browser find nth <n> <sel> <action> [value]     # Nth match
 
 ```bash
 agent-browser find role button click --name "Submit"
-agent-browser find role heading text --name "Skills"     # implicit roles work: <h2>=heading, <ul>=list, <header>=banner
+agent-browser find role heading text --name "Skills"     # implicit roles work: <h2>=heading, <ul>=list, top-level <header>=banner
 agent-browser find text "Sign In" click
 agent-browser find label "Email" fill "test@test.com"
 agent-browser find first ".item" click
