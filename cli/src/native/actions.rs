@@ -65,9 +65,9 @@ pub struct PendingConfirmation {
     approved_actions: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct ActiveProviderSession {
-    session: providers::ProviderSession,
+    provider: providers::ActiveProvider,
     plugins: Vec<crate::plugins::PluginConfig>,
 }
 
@@ -356,7 +356,7 @@ pub struct DaemonState {
     pub viewport: Option<(i32, i32, f64, bool)>,
     /// Init script sources returned by launch mutator plugins for this launch.
     pub plugin_init_scripts: Vec<String>,
-    /// Provider cleanup metadata for the active external browser session.
+    /// Provider identity, metadata, and cleanup state for the active browser.
     active_provider_session: Option<ActiveProviderSession>,
     /// Actions already approved while replaying a confirmed command.
     confirmed_policy_actions: HashSet<String>,
@@ -1716,20 +1716,51 @@ async fn apply_restore_config_after_confirmation(
     Ok(restore_key_changed && had_browser)
 }
 
-fn remember_active_provider_session(
+fn remember_active_provider(
     state: &mut DaemonState,
-    session: Option<providers::ProviderSession>,
+    connection: providers::ProviderConnection,
     plugins: &[crate::plugins::PluginConfig],
 ) {
-    state.active_provider_session = session.map(|session| ActiveProviderSession {
-        session,
+    state.active_provider_session = Some(ActiveProviderSession {
+        provider: connection.into_active(),
         plugins: plugins.to_vec(),
     });
 }
 
+/// Enrich provider-owned metadata after CDP handlers are subscribed so a slow
+/// observability lookup cannot delay the initial connection or miss events.
+async fn enrich_active_provider_metadata(state: &mut DaemonState) {
+    if let Some(active) = state.active_provider_session.as_mut() {
+        active.provider.enrich_metadata_after_connect().await;
+    }
+}
+
+fn provider_launch_response(
+    active: &ActiveProviderSession,
+    requested_provider: &str,
+    relaunched_browser: bool,
+) -> Value {
+    let mut response = json!({
+        "launched": true,
+        "relaunchedBrowser": relaunched_browser,
+        // Preserve the established launch-response contract by echoing the
+        // caller's provider spelling. Active session diagnostics use the
+        // canonical provider name retained in ActiveProvider.
+        "provider": requested_provider,
+    });
+    if let Some(metadata) = &active.provider.metadata {
+        response["providerMetadata"] = metadata.clone();
+        if active.provider.name == "agentcore" {
+            response["agentCoreSessionId"] = metadata["sessionId"].clone();
+            response["agentCoreLiveViewUrl"] = metadata["liveViewUrl"].clone();
+        }
+    }
+    response
+}
+
 async fn close_active_provider_session(state: &mut DaemonState) {
     if let Some(active) = state.active_provider_session.take() {
-        providers::close_provider_session_with_plugins(&active.session, &active.plugins).await;
+        active.provider.close(&active.plugins).await;
     }
 }
 
@@ -2911,20 +2942,14 @@ async fn auto_launch(
         if !p.is_empty() && p != "ios" && p != "safari" {
             let conn = providers::connect_provider_with_plugins(&p, &plugins).await?;
             if conn.direct_page && !allowed_domains.is_empty() {
-                if let Some(ref ps) = conn.session {
-                    providers::close_provider_session_with_plugins(ps, &plugins).await;
-                }
+                conn.close(&plugins).await;
                 return Err(direct_page_allowed_domains_error());
             }
-            let ws_headers = if p == "agentcore" {
-                providers::take_agentcore_ws_headers()
-            } else {
-                None
-            };
             let connect_result = if conn.direct_page {
                 BrowserManager::connect_cdp_direct(&conn.ws_url).await
-            } else if ws_headers.is_some() {
-                BrowserManager::connect_cdp_with_headers(&conn.ws_url, ws_headers).await
+            } else if conn.ws_headers.is_some() {
+                BrowserManager::connect_cdp_with_headers(&conn.ws_url, conn.ws_headers.clone())
+                    .await
             } else {
                 BrowserManager::connect_cdp(&conn.ws_url).await
             };
@@ -2943,7 +2968,7 @@ async fn auto_launch(
                     state.reset_input_state();
                     state.browser = Some(mgr);
                     state.launch_hash = Some(hash);
-                    remember_active_provider_session(state, conn.session.clone(), &plugins);
+                    remember_active_provider(state, conn, &plugins);
                     state.subscribe_to_browser_events();
                     state.start_fetch_handler();
                     state.start_dialog_handler();
@@ -2953,12 +2978,11 @@ async fn auto_launch(
                     apply_launch_init_scripts(state, &enable_features, &init_script_paths).await;
                     try_auto_restore_state(state).await;
                     try_load_storage_state(state, &storage_state_path).await;
+                    enrich_active_provider_metadata(state).await;
                     return Ok(());
                 }
                 Err(e) => {
-                    if let Some(ref ps) = conn.session {
-                        providers::close_provider_session_with_plugins(ps, &plugins).await;
-                    }
+                    conn.close(&plugins).await;
                     return Err(format!("Provider '{}' connection failed: {}", p, e));
                 }
             }
@@ -3808,24 +3832,16 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
                 )
                 .await?;
                 if conn.direct_page && !allowed_domains.is_empty() {
-                    if let Some(ref ps) = conn.session {
-                        providers::close_provider_session_with_plugins(ps, &command_plugins).await;
-                    }
+                    conn.close(&command_plugins).await;
                     restore_domain_filter(state, &previous_domain_filter).await;
                     return Err(direct_page_allowed_domains_error());
                 }
-                let provider_metadata = conn.metadata.clone();
-
-                let ws_headers = if provider.eq_ignore_ascii_case("agentcore") {
-                    providers::take_agentcore_ws_headers()
-                } else {
-                    None
-                };
 
                 let connect_result = if conn.direct_page {
                     BrowserManager::connect_cdp_direct(&conn.ws_url).await
-                } else if ws_headers.is_some() {
-                    BrowserManager::connect_cdp_with_headers(&conn.ws_url, ws_headers).await
+                } else if conn.ws_headers.is_some() {
+                    BrowserManager::connect_cdp_with_headers(&conn.ws_url, conn.ws_headers.clone())
+                        .await
                 } else {
                     BrowserManager::connect_cdp(&conn.ws_url).await
                 };
@@ -3834,11 +3850,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
                         state.reset_input_state();
                         state.browser = Some(mgr);
                         state.launch_hash = Some(new_hash);
-                        remember_active_provider_session(
-                            state,
-                            conn.session.clone(),
-                            &command_plugins,
-                        );
+                        remember_active_provider(state, conn, &command_plugins);
                         state.subscribe_to_browser_events();
                         state.start_fetch_handler();
                         state.start_dialog_handler();
@@ -3849,35 +3861,16 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
                             .await;
                         try_auto_restore_state(state).await;
                         load_storage_state_or_rollback(state, &storage_state_owned).await?;
+                        enrich_active_provider_metadata(state).await;
 
-                        if let Some(info) = providers::get_agentcore_info() {
-                            return Ok(json!({
-                                "launched": true,
-                                "relaunchedBrowser": had_browser_before_launch,
-                                "provider": provider,
-                                "agentCoreSessionId": info.session_id,
-                                "agentCoreLiveViewUrl": info.live_view_url
-                            }));
-                        }
-
-                        if let Some(metadata) = provider_metadata {
-                            return Ok(json!({
-                                "launched": true,
-                                "relaunchedBrowser": had_browser_before_launch,
-                                "provider": provider,
-                                "providerMetadata": metadata
-                            }));
-                        }
-
-                        return Ok(
-                            json!({ "launched": true, "relaunchedBrowser": had_browser_before_launch, "provider": provider }),
-                        );
+                        return Ok(provider_launch_response(
+                            state.active_provider_session.as_ref().unwrap(),
+                            provider,
+                            had_browser_before_launch,
+                        ));
                     }
                     Err(e) => {
-                        if let Some(ref ps) = conn.session {
-                            providers::close_provider_session_with_plugins(ps, &command_plugins)
-                                .await;
-                        }
+                        conn.close(&command_plugins).await;
                         return Err(e);
                     }
                 }
@@ -5393,8 +5386,11 @@ async fn handle_errors(state: &DaemonState) -> Result<Value, String> {
     Ok(state.event_tracker.get_errors_json())
 }
 
-async fn handle_session_info(state: &DaemonState) -> Result<Value, String> {
-    Ok(json!({
+async fn handle_session_info(state: &mut DaemonState) -> Result<Value, String> {
+    // Retry best-effort provider metadata after its cooldown. This lets a
+    // transient observability outage recover without relaunching the browser.
+    enrich_active_provider_metadata(state).await;
+    let mut info = json!({
         "session": state.session_id,
         "namespace": env::var("AGENT_BROWSER_NAMESPACE").ok(),
         "socketDir": get_socket_dir().to_string_lossy(),
@@ -5420,7 +5416,14 @@ async fn handle_session_info(state: &DaemonState) -> Result<Value, String> {
         "restoreCheckUrl": state.restore_check_url,
         "restoreCheckText": state.restore_check_text,
         "restoreCheckFn": state.restore_check_fn,
-    }))
+    });
+    if let Some(active_provider) = &state.active_provider_session {
+        info["provider"] = json!(active_provider.provider.name);
+        if let Some(metadata) = &active_provider.provider.metadata {
+            info["providerMetadata"] = metadata.clone();
+        }
+    }
+    Ok(info)
 }
 
 async fn handle_state_save(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
@@ -11240,6 +11243,106 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"credential":{
         assert!(!marker_path.exists());
     }
 
+    #[tokio::test]
+    async fn test_session_info_includes_active_provider_metadata() {
+        let mut state = DaemonState::new();
+        state.active_provider_session = Some(ActiveProviderSession {
+            provider: providers::ActiveProvider::new(
+                "cloud-browser",
+                Some(json!({
+                    "sessionId": "sess_123",
+                    "dashboard": { "url": "https://provider.example/session" }
+                })),
+            ),
+            plugins: Vec::new(),
+        });
+
+        let info = handle_session_info(&mut state).await.unwrap();
+        assert_eq!(info["provider"], "cloud-browser");
+        assert_eq!(info["providerMetadata"]["sessionId"], "sess_123");
+        assert_eq!(
+            info["providerMetadata"]["dashboard"]["url"],
+            "https://provider.example/session"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_enrich_provider_metadata_preserves_immediate_metadata() {
+        let mut state = DaemonState::new();
+        state.active_provider_session = Some(ActiveProviderSession {
+            provider: providers::ActiveProvider::new(
+                "cloud-browser",
+                Some(json!({ "sessionId": "from-plugin" })),
+            ),
+            plugins: Vec::new(),
+        });
+
+        enrich_active_provider_metadata(&mut state).await;
+
+        assert_eq!(
+            state
+                .active_provider_session
+                .as_ref()
+                .unwrap()
+                .provider
+                .metadata
+                .as_ref()
+                .unwrap()["sessionId"],
+            "from-plugin"
+        );
+    }
+
+    #[test]
+    fn test_agentcore_launch_response_keeps_legacy_and_generic_metadata() {
+        let active = ActiveProviderSession {
+            provider: providers::ActiveProvider::new(
+                "agentcore",
+                Some(json!({
+                    "sessionId": "agentcore-session",
+                    "liveViewUrl": "https://console.aws.amazon.com/live-view",
+                    "region": "us-east-1"
+                })),
+            ),
+            plugins: Vec::new(),
+        };
+
+        let response = provider_launch_response(&active, "agentcore", false);
+        assert_eq!(response["provider"], "agentcore");
+        assert_eq!(response["providerMetadata"]["region"], "us-east-1");
+        assert_eq!(response["agentCoreSessionId"], "agentcore-session");
+        assert_eq!(
+            response["agentCoreLiveViewUrl"],
+            "https://console.aws.amazon.com/live-view"
+        );
+    }
+
+    #[test]
+    fn test_provider_launch_response_preserves_requested_provider_spelling() {
+        let active = ActiveProviderSession {
+            provider: providers::ActiveProvider::new("browser-use", None),
+            plugins: Vec::new(),
+        };
+
+        let response = provider_launch_response(&active, "BrowserUse", false);
+        assert_eq!(response["provider"], "BrowserUse");
+    }
+
+    #[tokio::test]
+    async fn test_close_current_browser_clears_provider_info_without_cleanup_session() {
+        let mut state = DaemonState::new();
+        state.active_provider_session = Some(ActiveProviderSession {
+            provider: providers::ActiveProvider::new("browserbase", None),
+            plugins: Vec::new(),
+        });
+
+        close_current_browser(&mut state).await.unwrap();
+
+        assert!(state.active_provider_session.is_none());
+        let info = handle_session_info(&mut state).await.unwrap();
+        assert!(info.get("provider").is_none());
+        assert!(info.get("providerMetadata").is_none());
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn test_close_current_browser_closes_active_provider_plugin_session() {
@@ -11262,10 +11365,12 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
 
         let mut state = DaemonState::new();
         state.active_provider_session = Some(ActiveProviderSession {
-            session: providers::ProviderSession {
-                provider: "plugin:cloud-browser".to_string(),
-                session_id: r#"{"sessionId":"s1"}"#.to_string(),
-            },
+            provider: providers::ActiveProvider::new("cloud-browser", None).with_cleanup(
+                providers::ProviderCleanup::Plugin {
+                    provider: "cloud-browser".to_string(),
+                    data: json!({ "sessionId": "s1" }),
+                },
+            ),
             plugins: vec![crate::plugins::PluginConfig {
                 name: "cloud-browser".to_string(),
                 command: plugin_path.to_string_lossy().to_string(),

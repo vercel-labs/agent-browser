@@ -21,4 +21,14 @@ The `-p` flag takes precedence over `AGENT_BROWSER_PROVIDER`.
 
 When enabled, agent-browser connects to a Browserbase session instead of launching a local browser. All commands work identically.
 
+## Live view
+
+Inspect the active session to retrieve Browserbase live-view URLs:
+
+```bash
+agent-browser session info --json
+```
+
+The response includes `provider: "browserbase"` and a `providerMetadata` object with `sessionId` while a Browserbase session is active. Successful live-view lookup adds `debuggerUrl` and `debuggerFullscreenUrl`. Those URLs come from Browserbase's [`GET /v1/sessions/{id}/debug`](https://docs.browserbase.com/reference/api/session-live-urls) after CDP connects and event handlers are wired, so session create and CDP connect are never delayed by the lookup. Live-view lookup is best-effort; browsing still works if Browserbase temporarily cannot return debugger URLs, though the launch response may wait up to five seconds for the debug call. A failed lookup becomes eligible for retry through `session info` after a 30-second cooldown, without relaunching the browser. Treat debugger URLs as capability-bearing secrets and expose them only to authorized users.
+
 Get your API key from the [Browserbase Dashboard](https://browserbase.com/overview).

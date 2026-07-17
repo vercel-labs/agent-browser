@@ -71,6 +71,8 @@ Use `agent-browser session info --json` for diagnostics:
 agent-browser --session "$SESSION" session info --json
 ```
 
+For an active provider session, diagnostics may include `provider` and `providerMetadata`. Browserbase retains `sessionId` immediately and adds `debuggerUrl` and `debuggerFullscreenUrl` from `GET /v1/sessions/{id}/debug` after CDP connects and event handlers are wired. A failed lookup becomes eligible for retry through `session info` after a 30-second cooldown. Treat debugger URLs as capability-bearing secrets and only surface them to authorized users.
+
 ### Manual State Files
 
 Use `state save`, `state load`, and `--state <path>` when you need an explicit portable JSON file. Do not make agents construct paths under `~/.agent-browser/sessions/`; prefer `--restore` for reusable agent sessions.

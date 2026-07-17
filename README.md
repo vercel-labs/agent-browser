@@ -800,6 +800,8 @@ Use a browser provider plugin:
 agent-browser --provider cloud-browser open https://example.com
 ```
 
+Browser provider plugins may return opaque `metadata` from `browser.launch`. agent-browser exposes it as `providerMetadata` in the launch response and `session info --json` without interpreting provider-specific keys.
+
 Use a launch mutator plugin for stealth or local launch customization. The plugin can append Chrome args, extensions, and init scripts before the browser starts:
 
 ```bash
@@ -1670,6 +1672,14 @@ agent-browser open https://example.com
 
 When enabled, agent-browser connects to a Browserbase session instead of launching a local browser. All commands work identically.
 
+Browserbase sessions expose live-view URLs through session diagnostics. These URLs are capability-bearing and should only be shown to authorized users:
+
+```bash
+agent-browser session info --json
+```
+
+While the Browserbase session is active, the JSON includes `provider: "browserbase"` and `providerMetadata` with `sessionId`; successful live-view lookup adds `debuggerUrl` and `debuggerFullscreenUrl`. Those live-view URLs come from Browserbase's `GET /v1/sessions/{id}/debug` after CDP connects and event handlers are wired, so session create and CDP connect are never delayed by the lookup. Live-view lookup is best-effort; browsing still works if Browserbase temporarily cannot return debugger URLs, though the launch response may wait up to five seconds for the debug call. A failed lookup becomes eligible for retry through `session info` after a 30-second cooldown, without relaunching the browser.
+
 Get your API key from the [Browserbase Dashboard](https://browserbase.com/overview).
 
 ### Browser Use
@@ -1761,6 +1771,8 @@ Optional configuration via environment variables:
 **Browser profiles:** When `AGENTCORE_PROFILE_ID` is set, browser state (cookies, localStorage) is persisted across sessions automatically.
 
 When enabled, agent-browser connects to an AgentCore cloud browser session instead of launching a local browser. All commands work identically.
+
+AgentCore launch and session diagnostics expose generic `providerMetadata` containing `sessionId`, `browserIdentifier`, `region`, and `liveViewUrl`. Existing `agentCoreSessionId` and `agentCoreLiveViewUrl` launch fields remain available for compatibility.
 
 ## License
 

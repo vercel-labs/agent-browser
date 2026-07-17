@@ -16,7 +16,7 @@ mod test_utils;
 mod upgrade;
 mod validation;
 
-use serde_json::json;
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::env;
 use std::fs;
@@ -585,18 +585,21 @@ fn run_session_info(session: &str, json_mode: bool) {
     });
 
     if json_mode {
+        let mut data = json!({
+            "session": session,
+            "namespace": env::var("AGENT_BROWSER_NAMESPACE").ok(),
+            "socketDir": get_socket_dir().to_string_lossy(),
+            "active": active.is_some(),
+            "pid": active.map(|s| s.pid),
+            "version": active.and_then(|s| s.version.clone()),
+            "runtime": runtime_data,
+            "runtimeError": runtime_error,
+        });
+        let runtime_diagnostics = data.get("runtime").cloned();
+        copy_provider_diagnostics(&mut data, runtime_diagnostics.as_ref());
         print_json_value(json!({
             "success": true,
-            "data": {
-                "session": session,
-                "namespace": env::var("AGENT_BROWSER_NAMESPACE").ok(),
-                "socketDir": get_socket_dir().to_string_lossy(),
-                "active": active.is_some(),
-                "pid": active.map(|s| s.pid),
-                "version": active.and_then(|s| s.version.clone()),
-                "runtime": runtime_data,
-                "runtimeError": runtime_error,
-            }
+            "data": data,
         }));
         return;
     }
@@ -627,8 +630,39 @@ fn run_session_info(session: &str, json_mode: bool) {
         if let Some(launched) = data.get("browserLaunched").and_then(|v| v.as_bool()) {
             println!("Browser launched: {}", launched);
         }
+        print_provider_diagnostics(&data);
     } else if let Some(err) = runtime_error {
         println!("Runtime info unavailable: {}", err);
+    }
+}
+
+fn copy_provider_diagnostics(data: &mut Value, runtime_data: Option<&Value>) {
+    let Some(runtime_data) = runtime_data else {
+        return;
+    };
+    for key in ["provider", "providerMetadata"] {
+        if let Some(value) = runtime_data.get(key) {
+            data[key] = value.clone();
+        }
+    }
+}
+
+fn print_provider_diagnostics(runtime_data: &Value) {
+    if let Some(provider) = runtime_data.get("provider").and_then(|v| v.as_str()) {
+        println!("Provider: {}", provider);
+    }
+    let Some(metadata) = runtime_data
+        .get("providerMetadata")
+        .and_then(|v| v.as_object())
+    else {
+        return;
+    };
+    for (key, value) in metadata {
+        match value {
+            Value::String(text) => println!("{}: {}", key, text),
+            Value::Null => {}
+            other => println!("{}: {}", key, other),
+        }
     }
 }
 
@@ -2200,5 +2234,22 @@ mod tests {
         assert_eq!(prompt.action, "plugin:stealth:launch.mutate");
         assert_eq!(prompt.description, "plugin:stealth:launch.mutate");
         assert_eq!(prompt.confirmation_id, "original-command");
+    }
+
+    #[test]
+    fn test_session_info_promotes_provider_diagnostics_from_runtime() {
+        let runtime = json!({
+            "provider": "browserbase",
+            "providerMetadata": {
+                "sessionId": "sess_123",
+                "debuggerUrl": "https://debugger.example/session"
+            }
+        });
+        let mut data = json!({ "runtime": runtime.clone() });
+
+        copy_provider_diagnostics(&mut data, Some(&runtime));
+
+        assert_eq!(data["provider"], "browserbase");
+        assert_eq!(data["providerMetadata"]["sessionId"], "sess_123");
     }
 }

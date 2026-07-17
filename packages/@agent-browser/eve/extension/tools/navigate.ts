@@ -1,7 +1,41 @@
 import { defineTool } from "eve/tools";
 import { z } from "zod";
 
+import extension from "../extension";
 import { runBrowser } from "../lib/browser";
+
+interface SessionInfo {
+  readonly provider?: string;
+  readonly providerMetadata?: unknown;
+}
+
+interface NavigateOutput extends Record<string, unknown> {
+  readonly provider?: string;
+  readonly providerMetadata?: unknown;
+}
+
+async function withProviderMetadata(
+  ctx: Parameters<typeof runBrowser>[0],
+  output: Record<string, unknown>,
+): Promise<NavigateOutput> {
+  if (!extension.config.includeProviderMetadata) {
+    return output;
+  }
+  try {
+    const info = await runBrowser<SessionInfo>(ctx, ["session", "info"]);
+    return {
+      ...output,
+      ...(info.provider === undefined ? {} : { provider: info.provider }),
+      ...(info.providerMetadata === undefined
+        ? {}
+        : { providerMetadata: info.providerMetadata }),
+    };
+  } catch {
+    // Provider metadata is for channel observability only. Navigation remains
+    // usable with older CLIs or providers that do not expose session details.
+    return output;
+  }
+}
 
 export default defineTool({
   description:
@@ -14,12 +48,23 @@ export default defineTool({
     url: z.string().optional().describe('Required when action is "goto".'),
   }),
   async execute({ action, url }, ctx) {
+    let output: Record<string, unknown>;
     if (action === "goto") {
       if (url === undefined) {
         throw new Error('The "goto" action requires a url.');
       }
-      return await runBrowser(ctx, ["open", url]);
+      output = await runBrowser<Record<string, unknown>>(ctx, ["open", url]);
+      // Live-view URLs are useful when a session starts or changes page; skip
+      // the extra session-info round-trip for history actions.
+      return await withProviderMetadata(ctx, output);
     }
-    return await runBrowser(ctx, [action]);
+    return await runBrowser<Record<string, unknown>>(ctx, [action]);
+  },
+  // Provider live-view URLs are capability-bearing UI data. Preserve them in
+  // the channel result while keeping the model-facing result unchanged. Any
+  // other tool that attaches provider/providerMetadata must strip them here too.
+  toModelOutput(output) {
+    const { provider: _provider, providerMetadata: _providerMetadata, ...visible } = output;
+    return { type: "json", value: visible };
   },
 });
