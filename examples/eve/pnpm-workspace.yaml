@@ -1,10 +1,10 @@
 allowBuilds:
   sharp: false
 minimumReleaseAgeExclude:
-  - eve@0.25.1
-  - '@ai-sdk/gateway@4.0.23'
-  - '@ai-sdk/provider-utils@5.0.11'
-  - ai@7.0.31
+  - eve
+  - '@ai-sdk/gateway'
+  - '@ai-sdk/provider-utils'
+  - ai
 # Compatibility for eve releases with an incomplete runtime manifest.
 packageExtensions:
   "eve@>=0.6.0-beta.13 <=0.7.0":
