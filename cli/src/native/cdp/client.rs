@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
@@ -17,6 +18,7 @@ type PendingMap = Arc<Mutex<HashMap<u64, oneshot::Sender<CdpMessage>>>>;
 /// Interval between WebSocket ping frames sent to keep the connection alive
 /// through intermediate proxies (reverse proxies, load balancers, service meshes).
 const WS_KEEPALIVE_INTERVAL_SECS: u64 = 30;
+const DEFAULT_CDP_COMMAND_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Raw incoming CDP message (text) broadcast to all subscribers.
 /// Used by the inspect proxy to forward responses and events to DevTools.
@@ -209,6 +211,22 @@ impl CdpClient {
         params: Option<Value>,
         session_id: Option<&str>,
     ) -> Result<Value, String> {
+        self.send_command_with_timeout(
+            method,
+            params,
+            session_id,
+            DEFAULT_CDP_COMMAND_RESPONSE_TIMEOUT,
+        )
+        .await
+    }
+
+    pub async fn send_command_with_timeout(
+        &self,
+        method: &str,
+        params: Option<Value>,
+        session_id: Option<&str>,
+        response_timeout: Duration,
+    ) -> Result<Value, String> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
 
         let cmd = CdpCommand {
@@ -236,7 +254,7 @@ impl CdpClient {
                 .map_err(|e| format!("Failed to send CDP command: {}", e))?;
         }
 
-        let response = match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
+        let response = match tokio::time::timeout(response_timeout, rx).await {
             Ok(Ok(resp)) => resp,
             Ok(Err(_)) => return Err("CDP response channel closed".to_string()),
             Err(_) => {
@@ -387,4 +405,53 @@ fn enable_tcp_keepalive(stream: &tokio_tungstenite::MaybeTlsStream<tokio::net::T
     let keepalive = keepalive.with_interval(std::time::Duration::from_secs(10));
 
     let _ = sock.set_tcp_keepalive(&keepalive);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures_util::StreamExt;
+    use tokio::net::TcpListener;
+    use tokio::sync::oneshot;
+    use tokio_tungstenite::tungstenite::Message;
+
+    #[tokio::test]
+    async fn send_command_with_timeout_cleans_pending_request() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (seen_tx, seen_rx) = oneshot::channel();
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            if let Some(Ok(Message::Text(text))) = ws.next().await {
+                let sent: Value = serde_json::from_str(&text).unwrap();
+                assert_eq!(sent["method"], "Browser.close");
+                let _ = seen_tx.send(());
+            }
+            std::future::pending::<()>().await
+        });
+
+        let client = CdpClient::connect(&format!("ws://{addr}/devtools/browser/test"))
+            .await
+            .unwrap();
+        let err = tokio::time::timeout(
+            Duration::from_secs(2),
+            client.send_command_with_timeout(
+                "Browser.close",
+                None,
+                None,
+                Duration::from_millis(100),
+            ),
+        )
+        .await
+        .expect("custom CDP timeout should fire before the outer timeout")
+        .unwrap_err();
+
+        assert_eq!(err, "CDP command timed out: Browser.close");
+        seen_rx.await.unwrap();
+        assert!(client.pending.lock().await.is_empty());
+
+        server.abort();
+    }
 }
