@@ -64,6 +64,39 @@ async fn spawn_static_html_server(body: String) -> (String, tokio::task::JoinHan
     (origin, server)
 }
 
+async fn spawn_stalled_html_server(body: String) -> (String, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind stalled HTML server");
+    let origin = format!(
+        "http://127.0.0.1:{}",
+        listener
+            .local_addr()
+            .expect("stalled server address")
+            .port()
+    );
+    let body = Arc::new(body);
+    let server = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let body = body.clone();
+            tokio::spawn(async move {
+                let mut request = vec![0u8; 4096];
+                let _ = stream.read(&mut request).await;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len() + 1024,
+                    body,
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.flush().await;
+                tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+            });
+        }
+    });
+
+    (origin, server)
+}
+
 fn native_test_fixture_html(name: &str) -> &'static str {
     match name {
         "drag_probe" => include_str!("test_fixtures/drag_probe.html"),
@@ -6716,6 +6749,68 @@ async fn e2e_restore_key_switch_reloads_instead_of_reusing_live_browser() {
     let _ = std::fs::remove_file(format!("{}.previous", path_a));
     let _ = std::fs::remove_file(&path_b);
     let _ = std::fs::remove_file(format!("{}.previous", path_b));
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_state_load_does_not_wait_for_stalled_page_load() {
+    let (app_origin, app_server) =
+        spawn_stalled_html_server("<title>still loading</title>".to_string()).await;
+    let temp_dir = tempfile::tempdir().expect("create state temp directory");
+    let state_path = temp_dir.path().join("stalled-state.json");
+    std::fs::write(
+        &state_path,
+        serde_json::to_vec_pretty(&json!({
+            "cookies": [],
+            "origins": [{
+                "origin": app_origin,
+                "localStorage": [],
+                "sessionStorage": [{
+                    "name": "auth-state",
+                    "value": "restored"
+                }]
+            }]
+        }))
+        .expect("serialize state fixture"),
+    )
+    .expect("write state fixture");
+
+    let mut state = DaemonState::new();
+    let launch_resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&launch_resp);
+
+    let started = std::time::Instant::now();
+    let load_resp = execute_command(
+        &json!({ "id": "2", "action": "state_load", "path": state_path }),
+        &mut state,
+    )
+    .await;
+    let elapsed = started.elapsed();
+
+    let storage_resp = execute_command(
+        &json!({
+            "id": "3",
+            "action": "storage_get",
+            "type": "session",
+            "key": "auth-state"
+        }),
+        &mut state,
+    )
+    .await;
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    app_server.abort();
+
+    assert_success(&load_resp);
+    assert!(
+        elapsed < tokio::time::Duration::from_secs(5),
+        "state load should finish after the restore script runs, not after page load: {elapsed:?}"
+    );
+    assert_success(&storage_resp);
+    assert_eq!(get_data(&storage_resp)["value"], "restored");
 }
 
 #[tokio::test]

@@ -6,10 +6,11 @@ use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::cdp::client::CdpClient;
 use super::cdp::types::{
-    AttachToTargetParams, AttachToTargetResult, CdpEvent, CloseTargetParams, CreateTargetParams,
+    AttachToTargetParams, AttachToTargetResult, CloseTargetParams, CreateTargetParams,
     CreateTargetResult, EvaluateParams,
 };
 use super::cookies::{self, Cookie};
@@ -460,9 +461,13 @@ pub fn validate_state_file(path: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn storage_restore_init_script(origin: &OriginStorage) -> Result<String, String> {
+static NEXT_STORAGE_RESTORE_MARKER: AtomicU64 = AtomicU64::new(1);
+
+fn storage_restore_init_script(origin: &OriginStorage, marker: &str) -> Result<String, String> {
     let expected_origin = serde_json::to_string(&origin.origin)
         .map_err(|e| format!("Failed to serialize storage origin: {}", e))?;
+    let marker = serde_json::to_string(marker)
+        .map_err(|e| format!("Failed to serialize storage restore marker: {}", e))?;
     let local_entries = serde_json::to_string(&origin.local_storage)
         .map_err(|e| format!("Failed to serialize localStorage entries: {}", e))?;
     let session_entries = serde_json::to_string(&origin.session_storage)
@@ -477,6 +482,11 @@ fn storage_restore_init_script(origin: &OriginStorage) -> Result<String, String>
             for (const entry of {session_entries}) {{
                 sessionStorage.setItem(entry.name, entry.value);
             }}
+            Object.defineProperty(globalThis, {marker}, {{
+                value: true,
+                configurable: true,
+                enumerable: false,
+            }});
         }})()"#
     ))
 }
@@ -497,41 +507,45 @@ async fn remove_storage_restore_init_script(
 }
 
 async fn wait_for_storage_restore_document(
-    event_rx: &mut tokio::sync::broadcast::Receiver<CdpEvent>,
+    client: &CdpClient,
     session_id: &str,
-    loader_id: &str,
+    expected_origin: &str,
+    marker: &str,
 ) -> Result<(), String> {
+    let expected_origin = serde_json::to_string(expected_origin)
+        .map_err(|e| format!("Failed to serialize storage origin: {}", e))?;
+    let marker = serde_json::to_string(marker)
+        .map_err(|e| format!("Failed to serialize storage restore marker: {}", e))?;
+    let expression = format!(
+        r#"(() => {{
+            if (location.origin !== {expected_origin} || globalThis[{marker}] !== true) {{
+                return false;
+            }}
+            delete globalThis[{marker}];
+            return true;
+        }})()"#
+    );
     let wait = async {
-        let mut saw_expected_document = false;
         loop {
-            match event_rx.recv().await {
-                Ok(event)
-                    if event.session_id.as_deref() == Some(session_id)
-                        && event.method == "Page.frameNavigated"
-                        && event
-                            .params
-                            .get("frame")
-                            .and_then(|frame| frame.get("loaderId"))
-                            .and_then(|value| value.as_str())
-                            == Some(loader_id) =>
-                {
-                    saw_expected_document = true;
-                }
-                Ok(event)
-                    if event.session_id.as_deref() == Some(session_id)
-                        && saw_expected_document
-                        && matches!(
-                            event.method.as_str(),
-                            "Page.domContentEventFired" | "Page.loadEventFired"
-                        ) =>
+            if let Ok(result) = client
+                .send_command_typed::<_, super::cdp::types::EvaluateResult>(
+                    "Runtime.evaluate",
+                    &EvaluateParams {
+                        expression: expression.clone(),
+                        return_by_value: Some(true),
+                        await_promise: Some(false),
+                    },
+                    Some(session_id),
+                )
+                .await
+            {
+                if result.exception_details.is_none()
+                    && result.result.value.as_ref().and_then(Value::as_bool) == Some(true)
                 {
                     return Ok(());
                 }
-                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                    return Err("CDP event channel closed during storage restore".to_string());
-                }
             }
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
         }
     };
 
@@ -564,7 +578,11 @@ pub async fn load_state(client: &CdpClient, session_id: &str, path: &str) -> Res
 
         // Seed storage before application scripts run. The post-navigation writes
         // below remain as a compatibility pass for the loaded document.
-        let init_source = storage_restore_init_script(origin)?;
+        let marker = format!(
+            "__agent_browser_storage_restore_{}",
+            NEXT_STORAGE_RESTORE_MARKER.fetch_add(1, Ordering::Relaxed)
+        );
+        let init_source = storage_restore_init_script(origin, &marker)?;
         let init_result = client
             .send_command(
                 "Page.addScriptToEvaluateOnNewDocument",
@@ -578,7 +596,6 @@ pub async fn load_state(client: &CdpClient, session_id: &str, path: &str) -> Res
             .filter(|value| !value.is_empty())
             .ok_or("Storage restore init script did not return an identifier")?;
 
-        let mut event_rx = client.subscribe();
         let navigate_url = format!("{}/", origin.origin.trim_end_matches('/'));
         let staging_result = match client
             .send_command(
@@ -589,8 +606,9 @@ pub async fn load_state(client: &CdpClient, session_id: &str, path: &str) -> Res
             .await
         {
             Ok(result) => match result.get("loaderId").and_then(|value| value.as_str()) {
-                Some(loader_id) => {
-                    wait_for_storage_restore_document(&mut event_rx, session_id, loader_id).await
+                Some(_) => {
+                    wait_for_storage_restore_document(client, session_id, &origin.origin, &marker)
+                        .await
                 }
                 None => Err("Storage restore navigation did not create a document".to_string()),
             },
@@ -1031,13 +1049,15 @@ mod tests {
             }],
         };
 
-        let script = storage_restore_init_script(&origin).expect("build restore init script");
+        let script = storage_restore_init_script(&origin, "restore-ready")
+            .expect("build restore init script");
 
         assert!(script.contains(r#"location.origin !== "https://example.test""#));
         assert!(script.contains(r#"[{"name":"local-key","value":"local-value"}]"#));
         assert!(script.contains(r#"[{"name":"session-key","value":"session-value"}]"#));
         assert!(script.contains("localStorage.setItem"));
         assert!(script.contains("sessionStorage.setItem"));
+        assert!(script.contains("restore-ready"));
     }
 
     #[test]
