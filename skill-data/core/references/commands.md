@@ -191,6 +191,11 @@ agent-browser network route <url> --body '{}'  # Mock response
 agent-browser network unroute [url]            # Remove routes
 agent-browser network requests                 # View tracked requests
 agent-browser network requests --filter api    # Filter requests
+agent-browser network request <requestId>      # Full request/response detail incl. body
+agent-browser network har start                # Record traffic (embeds text response bodies)
+agent-browser network har start --content all  # Embed all bodies (binary as base64)
+agent-browser network har start --content none # Sizes and headers only
+agent-browser network har stop [output.har]    # Stop and save HAR
 ```
 
 ## Tabs and Windows

@@ -1151,8 +1151,8 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_NETWORK_HAR_START,
             "HAR start",
-            "Start HAR capture.",
-            json!({}),
+            "Start HAR capture. Embeds text response bodies by default; content controls which bodies are embedded.",
+            json!({ "content": { "type": "string", "enum": ["all", "text", "none"] } }),
             &[],
         ),
         tool(
@@ -2121,7 +2121,19 @@ fn call_tool(params: Option<&Value>, config: &McpConfig) -> Result<Value, Protoc
         TOOL_NETWORK_UNROUTE => call_optional_one(arguments, &["network", "unroute"], "url"),
         TOOL_NETWORK_REQUESTS => call_network_requests(arguments),
         TOOL_NETWORK_REQUEST => call_one_string(arguments, "network request", "requestId"),
-        TOOL_NETWORK_HAR_START => call_literal(arguments, &["network", "har", "start"]),
+        TOOL_NETWORK_HAR_START => {
+            let mut args: Vec<String> = ["network", "har", "start"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            if let Some(content) = optional_string(arguments, "content")? {
+                if !content.is_empty() {
+                    args.push("--content".to_string());
+                    args.push(content);
+                }
+            }
+            call_cli_tool(arguments, args, None)
+        }
         TOOL_NETWORK_HAR_STOP => call_optional_one(arguments, &["network", "har", "stop"], "path"),
         TOOL_STORAGE_GET => call_storage_get(arguments),
         TOOL_STORAGE_SET => call_storage_set(arguments),
@@ -4103,6 +4115,20 @@ mod tests {
             open["inputSchema"]["properties"]["allowedDomains"]["type"],
             "array"
         );
+    }
+
+    #[test]
+    fn tool_schema_har_start_content_matches_cli_modes() {
+        let tools = tools();
+        let har_start = tools
+            .iter()
+            .find(|t| t["name"].as_str() == Some(TOOL_NETWORK_HAR_START))
+            .unwrap();
+        let modes = har_start["inputSchema"]["properties"]["content"]["enum"]
+            .as_array()
+            .unwrap();
+        // Must stay in sync with the CLI parser's accepted --content values.
+        assert_eq!(modes, &vec![json!("all"), json!("text"), json!("none")]);
     }
 
     #[test]

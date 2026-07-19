@@ -2173,6 +2173,7 @@ Subcommands:
     --status <code>          Filter by status (200, 2xx, 400-499)
   request <requestId>        View full request/response detail (including body)
   har <start|stop> [path]    Record and export a HAR file
+    --content <mode>         Response bodies to embed on start: text (default), all, none
 
 Global Options:
   --json               Output as JSON
@@ -2189,6 +2190,7 @@ Examples:
   agent-browser network requests --clear
   agent-browser network request 1234.5
   agent-browser network har start
+  agent-browser network har start --content all
   agent-browser network har stop ./capture.har
 "##
         }

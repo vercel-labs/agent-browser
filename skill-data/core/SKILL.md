@@ -310,6 +310,10 @@ agent-browser network requests                                     # inspect wha
 agent-browser network har start                                    # record all traffic
 # ... perform actions ...
 agent-browser network har stop /tmp/trace.har
+
+# HAR files embed text response bodies (JSON/HTML/JS) by default, so the
+# recording alone is enough to study a site's API offline. Use
+# `--content all` to include binary bodies or `--content none` to disable.
 ```
 
 ### Record a video of the workflow

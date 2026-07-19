@@ -63,6 +63,7 @@ This design solves the version drift problem: the installed SKILL.md rarely chan
 
 - **core** — Core browser automation: navigation, snapshots, forms, screenshots, data extraction, sessions, authentication, diffing, and the full command reference. Start here for most browser tasks.
 - **dogfood** — Systematic exploratory testing. Navigates an app like a real user, finds bugs and UX issues, and produces a structured report with screenshots and repro videos.
+- **derive-client** — Reverse-engineer a site's internal API. Records network traffic into a HAR (with response bodies embedded), identifies the real endpoints, and generates a standalone client or CLI that skips the browser entirely.
 - **electron** — Automate any Electron app (VS Code, Slack, Discord, Figma, etc.) by connecting to its built-in Chrome DevTools Protocol port.
 - **slack** — Browser-based Slack automation. Check unreads, navigate channels, search conversations, send messages, and extract data.
 - **vercel-sandbox** — Run agent-browser + headless Chrome inside ephemeral Vercel Sandbox microVMs.
