@@ -899,7 +899,7 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 | `--hide-scrollbars <bool>` | Hide native scrollbars in headless Chromium screenshots, enabled by default (or `AGENT_BROWSER_HIDE_SCROLLBARS` env) |
 | `-p, --provider <name>` | Browser provider, including configured `browser.provider` plugins (or `AGENT_BROWSER_PROVIDER` env) |
 | `--device <name>` | iOS device name, e.g. "iPhone 15 Pro" (or `AGENT_BROWSER_IOS_DEVICE` env) |
-| `--json` | JSON output (for agents) |
+| `--json` | JSON output for commands and startup errors, including invalid explicit config files |
 | `--annotate` | Annotated screenshot with numbered element labels (or `AGENT_BROWSER_ANNOTATE` env) |
 | `--screenshot-dir <path>` | Default screenshot output directory (or `AGENT_BROWSER_SCREENSHOT_DIR` env) |
 | `--screenshot-quality <n>` | JPEG quality 0-100 (or `AGENT_BROWSER_SCREENSHOT_QUALITY` env) |
@@ -1110,6 +1110,8 @@ agent-browser snapshot --json
 agent-browser get text @e1 --json
 agent-browser is visible @e2 --json
 ```
+
+Errors that occur before daemon dispatch also honor `--json`, including missing or malformed explicit config files and invalid standalone subcommands. They return a nonzero exit code with a typed payload such as `{"success":false,"error":"...","type":"config_error"}` on stdout.
 
 ### Optimal AI Workflow
 

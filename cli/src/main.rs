@@ -33,7 +33,9 @@ use connection::{
     cleanup_stale_files, daemon_unreachable, ensure_daemon, get_socket_dir, is_pid_alive,
     send_command, walk_daemons, DaemonOptions, Response,
 };
-use flags::{clean_args, parse_flags, Flags};
+#[cfg(test)]
+use flags::parse_flags;
+use flags::{clean_args, json_output_requested, try_parse_flags, Flags};
 use install::run_install;
 use output::{
     print_command_help, print_help, print_response_with_opts, print_version, OutputOptions,
@@ -964,7 +966,17 @@ fn main() {
     }
 
     let args: Vec<String> = env::args().skip(1).collect();
-    let mut flags = parse_flags(&args);
+    let mut flags = match try_parse_flags(&args) {
+        Ok(flags) => flags,
+        Err(error) => {
+            if json_output_requested(&args) {
+                print_json_error_with_type(error, "config_error");
+            } else {
+                eprintln!("{} {}", color::warning_indicator(), error);
+            }
+            exit(1);
+        }
+    };
     if flags.restore_uses_session {
         flags.restore = Some(flags.session.clone());
     }
@@ -1047,11 +1059,12 @@ fn main() {
                 return;
             }
             Some(unknown) => {
-                eprintln!(
-                    "{} Unknown dashboard subcommand: {}",
-                    color::error_indicator(),
-                    unknown
-                );
+                let error = format!("Unknown dashboard subcommand: {}", unknown);
+                if flags.json {
+                    print_json_error_with_type(error, "unknown_subcommand");
+                } else {
+                    eprintln!("{} {}", color::error_indicator(), error);
+                }
                 exit(1);
             }
         }

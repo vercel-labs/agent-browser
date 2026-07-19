@@ -369,7 +369,7 @@ Tool calls use the same config files and environment variables as the CLI. Each 
 
 ```bash
 agent-browser --session <name> ...    # Isolated browser session
-agent-browser --json ...              # JSON output for parsing
+agent-browser --json ...              # JSON output for commands and startup errors
 agent-browser --headed ...            # Show browser window (not headless; on displayless Linux an Xvfb display starts automatically)
 agent-browser --webgpu ...            # Enable WebGPU (SwiftShader software Vulkan on Linux, no GPU needed)
 agent-browser --cdp <port> ...        # Connect via Chrome DevTools Protocol
@@ -385,6 +385,8 @@ agent-browser --help                  # Show help (-h)
 agent-browser --version               # Show version (-V)
 agent-browser <command> --help        # Show detailed help for a command
 ```
+
+`--json` also covers failures before daemon dispatch, including missing or malformed explicit config files and invalid standalone subcommands. Expect a nonzero exit code and a typed `{"success":false,"error":"...","type":"..."}` payload on stdout.
 
 ## Debugging
 
