@@ -104,6 +104,72 @@ pub(crate) fn should_track_target(target: &TargetInfo) -> bool {
         && (target.url.is_empty() || !is_internal_chrome_target(&target.url))
 }
 
+async fn add_script_to_session(
+    client: &CdpClient,
+    session_id: &str,
+    source: &str,
+) -> Result<String, String> {
+    let result = client
+        .send_command(
+            "Page.addScriptToEvaluateOnNewDocument",
+            Some(json!({ "source": source })),
+            Some(session_id),
+        )
+        .await?;
+    Ok(result
+        .get("identifier")
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+        .to_string())
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct LaunchInitScriptRegistry {
+    state: Arc<Mutex<LaunchInitScriptState>>,
+}
+
+#[derive(Default)]
+struct LaunchInitScriptState {
+    scripts: Vec<String>,
+    installed_targets: HashSet<String>,
+}
+
+impl LaunchInitScriptRegistry {
+    async fn replace(&self, scripts: Vec<String>) {
+        let mut state = self.state.lock().await;
+        state.scripts = scripts;
+        state.installed_targets.clear();
+    }
+
+    pub(crate) async fn is_empty(&self) -> bool {
+        self.state.lock().await.scripts.is_empty()
+    }
+
+    pub(crate) async fn forget_target(&self, target_id: &str) {
+        self.state.lock().await.installed_targets.remove(target_id);
+    }
+
+    pub(crate) async fn install(
+        &self,
+        client: &CdpClient,
+        target_id: &str,
+        session_id: &str,
+    ) -> Result<(), String> {
+        let mut state = self.state.lock().await;
+        if state.installed_targets.contains(target_id) {
+            return Ok(());
+        }
+
+        for source in &state.scripts {
+            add_script_to_session(client, session_id, source).await?;
+        }
+        if !state.scripts.is_empty() {
+            state.installed_targets.insert(target_id.to_string());
+        }
+        Ok(())
+    }
+}
+
 fn update_page_target_info_in_pages(pages: &mut [PageInfo], target: &TargetInfo) -> bool {
     if let Some(page) = pages.iter_mut().find(|p| p.target_id == target.target_id) {
         page.url = target.url.clone();
@@ -311,6 +377,8 @@ pub struct BrowserManager {
     /// True when the CDP WebSocket is already scoped to a page target and
     /// browser-level Target.* commands are not available.
     direct_page: bool,
+    /// Launch-time scripts replayed into every page target created by this manager.
+    launch_init_scripts: LaunchInitScriptRegistry,
 }
 
 const LIGHTPANDA_CDP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -384,6 +452,7 @@ impl BrowserManager {
                 visited_origins: HashSet::new(),
                 next_tab_id: 1,
                 direct_page: false,
+                launch_init_scripts: LaunchInitScriptRegistry::default(),
             };
             manager.discover_and_attach_targets().await?;
             manager
@@ -474,6 +543,7 @@ impl BrowserManager {
             visited_origins: HashSet::new(),
             next_tab_id: 1,
             direct_page,
+            launch_init_scripts: LaunchInitScriptRegistry::default(),
         };
 
         if direct_page {
@@ -999,6 +1069,12 @@ impl BrowserManager {
 
         let tab_id = self.next_tab_id;
         self.next_tab_id += 1;
+        self.prepare_domains(&attach_result.session_id).await?;
+        self.launch_init_scripts
+            .install(&self.client, &result.target_id, &attach_result.session_id)
+            .await?;
+        self.resume_if_waiting(&attach_result.session_id).await?;
+
         self.pages.push(PageInfo {
             tab_id,
             label: None,
@@ -1009,8 +1085,6 @@ impl BrowserManager {
             target_type: "page".to_string(),
         });
         self.active_page_index = 0;
-        self.enable_domains(&attach_result.session_id).await?;
-
         Ok(())
     }
 
@@ -1111,13 +1185,18 @@ impl BrowserManager {
         }
 
         let target_url = url.unwrap_or("about:blank");
+        let create_url = if self.launch_init_scripts.is_empty().await {
+            target_url
+        } else {
+            "about:blank"
+        };
 
         let result: CreateTargetResult = self
             .client
             .send_command_typed(
                 "Target.createTarget",
                 &CreateTargetParams {
-                    url: target_url.to_string(),
+                    url: create_url.to_string(),
                 },
                 None,
             )
@@ -1135,7 +1214,11 @@ impl BrowserManager {
             )
             .await?;
 
-        self.enable_domains(&attach.session_id).await?;
+        self.prepare_domains(&attach.session_id).await?;
+        self.launch_init_scripts
+            .install(&self.client, &result.target_id, &attach.session_id)
+            .await?;
+        self.resume_if_waiting(&attach.session_id).await?;
 
         let tab_id = self.next_tab_id;
         self.next_tab_id += 1;
@@ -1146,11 +1229,15 @@ impl BrowserManager {
             label: label.clone(),
             target_id: result.target_id,
             session_id: attach.session_id,
-            url: target_url.to_string(),
+            url: create_url.to_string(),
             title: String::new(),
             target_type: "page".to_string(),
         });
         self.active_page_index = index;
+
+        if create_url != target_url {
+            self.navigate(target_url, WaitUntil::Load).await?;
+        }
 
         Ok(json!({
             "tabId": format_tab_id(tab_id),
@@ -1455,19 +1542,21 @@ impl BrowserManager {
 
     pub async fn add_script_to_evaluate(&self, source: &str) -> Result<String, String> {
         let session_id = self.active_session_id()?;
-        let result = self
-            .client
-            .send_command(
-                "Page.addScriptToEvaluateOnNewDocument",
-                Some(json!({ "source": source })),
-                Some(session_id),
-            )
+        add_script_to_session(&self.client, session_id, source).await
+    }
+
+    pub async fn set_launch_init_scripts(&self, scripts: Vec<String>) -> Result<(), String> {
+        let target_id = self.active_target_id()?.to_string();
+        let session_id = self.active_session_id()?.to_string();
+        self.launch_init_scripts.replace(scripts).await;
+        self.launch_init_scripts
+            .install(&self.client, &target_id, &session_id)
             .await?;
-        Ok(result
-            .get("identifier")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string())
+        Ok(())
+    }
+
+    pub(crate) fn launch_init_script_registry(&self) -> LaunchInitScriptRegistry {
+        self.launch_init_scripts.clone()
     }
 
     pub async fn remove_script_to_evaluate(&self, identifier: &str) -> Result<(), String> {
@@ -1702,6 +1791,7 @@ async fn initialize_lightpanda_manager(
             visited_origins: HashSet::new(),
             next_tab_id: 1,
             direct_page: false,
+            launch_init_scripts: LaunchInitScriptRegistry::default(),
         };
 
         match discover_and_attach_lightpanda_targets(&mut manager, deadline).await {

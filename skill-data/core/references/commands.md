@@ -430,6 +430,8 @@ agent-browser addinitscript <js>                    # Register at runtime (retur
 agent-browser removeinitscript <identifier>         # Remove a previously registered init script
 ```
 
+Scripts supplied at launch through `--init-script`, `AGENT_BROWSER_INIT_SCRIPTS`, `--enable`, or launch mutator plugins are installed on the initial page and new page targets for the lifetime of the browser session. Runtime `addinitscript` and `removeinitscript` operate on the active page session.
+
 ## cURL cookie import
 
 ```bash

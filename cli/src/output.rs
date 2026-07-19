@@ -1272,8 +1272,8 @@ Global Options:
   --session <name>     Use specific session
   --headers <json>     Set HTTP headers (scoped to this origin)
   --headed             Show browser window
-  --enable react-devtools   Inject the React DevTools hook before any page JS
-  --init-script <path>      Register a page init script (repeatable)
+  --enable react-devtools   Inject the React DevTools hook into initial and new pages
+  --init-script <path>      Register an init script for initial and new pages (repeatable)
 
 Examples:
   agent-browser open                     # Launch, no nav
@@ -3510,9 +3510,10 @@ Options:
                              (or AGENT_BROWSER_NAMESPACE env)
   --executable-path <path>   Custom browser executable (or AGENT_BROWSER_EXECUTABLE_PATH)
   --extension <path>         Load browser extensions (repeatable)
-  --init-script <path>       Register a page init script before the first navigation (repeatable)
+  --init-script <path>       Register an init script for the initial page and new page targets (repeatable)
                              (or AGENT_BROWSER_INIT_SCRIPTS env, comma-separated)
-  --enable <feature>         Built-in init scripts: react-devtools (repeatable or comma-separated)
+  --enable <feature>         Built-in init scripts for initial and new pages: react-devtools
+                             (repeatable or comma-separated)
                              (or AGENT_BROWSER_ENABLE env)
   --args <args>              Browser launch args, comma or newline separated (or AGENT_BROWSER_ARGS)
                              e.g., --args "--no-sandbox,--disable-blink-features=AutomationControlled"
@@ -3590,8 +3591,8 @@ Environment:
   AGENT_BROWSER_STATE_EXPIRE_DAYS Auto-delete states older than N days (default: 30)
   AGENT_BROWSER_EXECUTABLE_PATH  Custom browser executable path
   AGENT_BROWSER_EXTENSIONS       Comma-separated browser extension paths
-  AGENT_BROWSER_INIT_SCRIPTS     Comma-separated paths to page init scripts
-  AGENT_BROWSER_ENABLE           Comma-separated built-in init script features (e.g. react-devtools)
+  AGENT_BROWSER_INIT_SCRIPTS     Comma-separated init scripts for initial and new pages
+  AGENT_BROWSER_ENABLE           Built-in init scripts for initial and new pages (e.g. react-devtools)
   AGENT_BROWSER_HEADED           Show browser window (not headless)
   AGENT_BROWSER_NO_XVFB          Disable automatic Xvfb for headed mode on displayless Linux hosts
   AGENT_BROWSER_WEBGPU           Enable WebGPU (SwiftShader software Vulkan on Linux)

@@ -454,6 +454,8 @@ agent-browser addinitscript <js>                  # Register at runtime (returns
 agent-browser removeinitscript <identifier>       # Remove a previously registered init script
 ```
 
+Launch-time scripts from `--init-script`, `AGENT_BROWSER_INIT_SCRIPTS`, `--enable`, and launch mutator plugins are retained for the browser session. They are registered on new tabs and auto-attached page targets before those targets resume. Runtime `addinitscript` and `removeinitscript` commands continue to operate on the active page session.
+
 ### Setup
 
 ```bash
@@ -888,8 +890,8 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 | `--headers <json>` | Set HTTP headers scoped to the URL's origin |
 | `--executable-path <path>` | Custom browser executable (or `AGENT_BROWSER_EXECUTABLE_PATH` env) |
 | `--extension <path>` | Load browser extension (repeatable; or `AGENT_BROWSER_EXTENSIONS` env) |
-| `--init-script <path>` | Register a page init script before the first navigation (repeatable; or `AGENT_BROWSER_INIT_SCRIPTS` env) |
-| `--enable <feature>` | Built-in init scripts: `react-devtools` (repeatable or comma-list; or `AGENT_BROWSER_ENABLE` env) |
+| `--init-script <path>` | Register a page init script on the initial page and new page targets (repeatable; or `AGENT_BROWSER_INIT_SCRIPTS` env) |
+| `--enable <feature>` | Built-in init scripts for the initial page and new page targets: `react-devtools` (repeatable or comma-list; or `AGENT_BROWSER_ENABLE` env) |
 | `--args <args>` | Browser launch args, comma or newline separated (or `AGENT_BROWSER_ARGS` env) |
 | `--user-agent <ua>` | Custom User-Agent string (or `AGENT_BROWSER_USER_AGENT` env) |
 | `--proxy <url>` | Proxy server URL with optional auth (or `AGENT_BROWSER_PROXY` env) |

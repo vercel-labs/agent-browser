@@ -7052,6 +7052,200 @@ async fn e2e_pushstate_changes_url() {
 
 #[tokio::test]
 #[ignore]
+async fn e2e_launch_builtin_init_script_runs_before_page_code_in_new_tab() {
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({
+            "id": "1",
+            "action": "launch",
+            "headless": true,
+            "enable": ["react-devtools"]
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let page_url = format!(
+        "data:text/html;base64,{}",
+        STANDARD.encode(
+            "<script>window.__PAGE_SAW_REACT_HOOK__ = typeof window.__REACT_DEVTOOLS_GLOBAL_HOOK__ === 'object';</script>"
+        )
+    );
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "tab_new", "url": page_url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "3",
+            "action": "evaluate",
+            "script": "window.__PAGE_SAW_REACT_HOOK__ === true"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], true);
+
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_launch_init_script_runs_before_page_code_in_new_tab() {
+    let temp_dir = tempfile::tempdir().expect("create init script temp directory");
+    let init_script_path = temp_dir.path().join("launch-init.js");
+    std::fs::write(
+        &init_script_path,
+        "window.__AGENT_BROWSER_LAUNCH_INIT__ = true;",
+    )
+    .expect("write launch init script");
+
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({
+            "id": "1",
+            "action": "launch",
+            "headless": true,
+            "initScripts": [init_script_path.to_string_lossy()]
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let page_url = format!(
+        "data:text/html;base64,{}",
+        STANDARD.encode(
+            "<script>window.__PAGE_SAW_LAUNCH_INIT__ = window.__AGENT_BROWSER_LAUNCH_INIT__ === true;</script>"
+        )
+    );
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "tab_new", "url": page_url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "3",
+            "action": "evaluate",
+            "script": "window.__PAGE_SAW_LAUNCH_INIT__ === true"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], true);
+
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_launch_init_script_runs_before_page_code_in_popup() {
+    let temp_dir = tempfile::tempdir().expect("create init script temp directory");
+    let init_script_path = temp_dir.path().join("launch-init.js");
+    std::fs::write(
+        &init_script_path,
+        "window.__AGENT_BROWSER_LAUNCH_INIT__ = true;",
+    )
+    .expect("write launch init script");
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind popup server");
+    let port = listener.local_addr().expect("popup server address").port();
+    let server = tokio::spawn(async move {
+        for _ in 0..5 {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                let mut request = vec![0u8; 4096];
+                let _ = stream.read(&mut request).await;
+                let body = "<script>window.__PAGE_SAW_LAUNCH_INIT__ = window.__AGENT_BROWSER_LAUNCH_INIT__ === true;</script><title>init-popup</title>";
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body,
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.flush().await;
+            });
+        }
+    });
+
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({
+            "id": "1",
+            "action": "launch",
+            "headless": true,
+            "initScripts": [init_script_path.to_string_lossy()]
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let popup_url = format!("http://127.0.0.1:{port}/popup");
+    let resp = execute_command(
+        &json!({
+            "id": "2",
+            "action": "evaluate",
+            "script": format!("window.open({}); 'opened'", serde_json::to_string(&popup_url).unwrap())
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let resp = execute_command(&json!({ "id": "3", "action": "tab_list" }), &mut state).await;
+    assert_success(&resp);
+    let tabs = get_data(&resp)["tabs"].as_array().expect("tab list array");
+    let popup = tabs
+        .iter()
+        .find(|tab| tab["tabId"] != "t1")
+        .unwrap_or_else(|| panic!("popup should appear in tab list: {tabs:?}"));
+    let popup_tab_id = popup["tabId"].as_str().expect("popup tab id");
+
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "tab_switch", "tabId": popup_tab_id }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "5",
+            "action": "evaluate",
+            "script": "({ pageSawInit: window.__PAGE_SAW_LAUNCH_INIT__ === true, initPresent: window.__AGENT_BROWSER_LAUNCH_INIT__ === true })"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["result"]["pageSawInit"],
+        true,
+        "popup launch init timing: {:?}",
+        get_data(&resp)["result"]
+    );
+
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    server.abort();
+}
+
+#[tokio::test]
+#[ignore]
 async fn e2e_removeinitscript_roundtrip() {
     let mut state = DaemonState::new();
 

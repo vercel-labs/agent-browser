@@ -391,8 +391,8 @@ pub struct DaemonState {
     /// Hash of launch options used for the current browser, for relaunch detection.
     launch_hash: Option<u64>,
     /// Whether browser-level auto-attach has been enabled for the current
-    /// browser so top-level popups pause before their first request.
-    network_auto_attach_installed: bool,
+    /// browser so top-level popups pause for network controls and init scripts.
+    browser_auto_attach_installed: bool,
     /// Browser engine name (e.g. "chrome", "lightpanda") for observability.
     pub engine: String,
     /// Default timeout for wait operations, from AGENT_BROWSER_DEFAULT_TIMEOUT env var.
@@ -472,7 +472,7 @@ impl DaemonState {
             stream_client: None,
             stream_server: None,
             launch_hash: None,
-            network_auto_attach_installed: false,
+            browser_auto_attach_installed: false,
             engine: env::var("AGENT_BROWSER_ENGINE").unwrap_or_else(|_| "chrome".to_string()),
             // README documents 25s, intentionally below the CLI's 30s IPC
             // read timeout so the daemon reports a proper timeout error
@@ -523,9 +523,9 @@ impl DaemonState {
         }
     }
 
-    /// Start the background task that processes Fetch.requestPaused and
-    /// Fetch.authRequired events in real-time (domain filtering, route
-    /// interception, origin-scoped headers, proxy authentication).
+    /// Start the background task that prepares auto-attached targets and
+    /// processes Fetch events in real time. Page targets receive launch init
+    /// scripts before they resume; Fetch events enforce network controls.
     /// Must be called after the browser is set and events are subscribed.
     fn start_fetch_handler(&mut self) {
         // Abort any existing handler.
@@ -543,6 +543,7 @@ impl DaemonState {
         let routes = self.routes.clone();
         let origin_headers = self.origin_headers.clone();
         let proxy_credentials = self.proxy_credentials.clone();
+        let launch_init_scripts = browser.launch_init_script_registry();
 
         self.fetch_handler_task = Some(tokio::spawn(async move {
             loop {
@@ -601,17 +602,31 @@ impl DaemonState {
                         let target_needs_controls = target_info
                             .as_ref()
                             .is_some_and(target_supports_network_controls);
+                        let target_needs_init_scripts =
+                            target_info.as_ref().is_some_and(should_track_target)
+                                && !launch_init_scripts.is_empty().await;
 
                         let df = domain_filter.read().await.clone();
                         let has_proxy_creds = proxy_credentials.read().await.is_some();
                         let controls_active = df.is_some() || has_proxy_creds;
-                        let controls_result = if controls_active && target_needs_controls {
-                            async {
+                        let setup_result = async {
+                            if target_needs_init_scripts {
                                 if let Some(ref target) = target_info {
-                                    prepare_network_control_target_session(&client, &sid, target)
+                                    prepare_auto_attached_session(&client, &sid).await?;
+                                    launch_init_scripts
+                                        .install(&client, &target.target_id, &sid)
                                         .await?;
                                 }
+                            }
+
+                            if controls_active && target_needs_controls {
                                 if let Some(ref target) = target_info {
+                                    if !target_needs_init_scripts {
+                                        prepare_network_control_target_session(
+                                            &client, &sid, target,
+                                        )
+                                        .await?;
+                                    }
                                     if target_is_worker_like(target) {
                                         install_worker_network_controls_for_session(
                                             &client,
@@ -633,13 +648,13 @@ impl DaemonState {
                                 } else {
                                     Ok(())
                                 }
+                            } else {
+                                Ok(())
                             }
-                            .await
-                        } else {
-                            Ok(())
-                        };
+                        }
+                        .await;
 
-                        if controls_result.is_ok() {
+                        if setup_result.is_ok() {
                             let _ = client
                                 .send_command_no_wait(
                                     "Runtime.runIfWaitingForDebugger",
@@ -647,11 +662,17 @@ impl DaemonState {
                                     Some(&sid),
                                 )
                                 .await;
-                        } else if let Err(error) = controls_result {
-                            eprintln!(
-                                "Failed to apply browser network controls to auto-attached target: {}",
-                                error
-                            );
+                        } else if let Err(error) = setup_result {
+                            eprintln!("Failed to prepare auto-attached target: {}", error);
+                            if !controls_active {
+                                let _ = client
+                                    .send_command_no_wait(
+                                        "Runtime.runIfWaitingForDebugger",
+                                        None,
+                                        Some(&sid),
+                                    )
+                                    .await;
+                            }
                         }
                     }
                     Ok(event) if event.method == "Fetch.requestPaused" => {
@@ -840,6 +861,9 @@ impl DaemonState {
         // Remove destroyed targets
         for target_id in &drained.destroyed_targets {
             if let Some(ref mut mgr) = self.browser {
+                mgr.launch_init_script_registry()
+                    .forget_target(target_id)
+                    .await;
                 mgr.remove_page_by_target_id(target_id);
             }
         }
@@ -897,6 +921,9 @@ impl DaemonState {
             let setup_result = if let Some(ref mut mgr) = self.browser {
                 async {
                     mgr.prepare_domains_pub(page_sid).await?;
+                    mgr.launch_init_script_registry()
+                        .install(&mgr.client, &target_info.target_id, page_sid)
+                        .await?;
                     if controls_active {
                         install_network_controls_for_session(
                             &mgr.client,
@@ -951,6 +978,9 @@ impl DaemonState {
                     "Warning: failed to prepare attached page session: {}",
                     error
                 );
+                if let Some(ref mgr) = self.browser {
+                    let _ = mgr.resume_if_waiting_pub(page_sid).await;
+                }
             }
         }
 
@@ -1026,6 +1056,9 @@ impl DaemonState {
                         )
                         .await?;
                     mgr.prepare_domains_pub(&attach.session_id).await?;
+                    mgr.launch_init_script_registry()
+                        .install(&mgr.client, &te.target_info.target_id, &attach.session_id)
+                        .await?;
                     if controls_active {
                         install_network_controls_for_session(
                             &mgr.client,
@@ -1873,7 +1906,7 @@ pub(crate) async fn close_current_browser(state: &mut DaemonState) -> Result<(),
 
     close_active_provider_session(state).await;
     state.launch_hash = None;
-    state.network_auto_attach_installed = false;
+    state.browser_auto_attach_installed = false;
     state.screencasting = false;
     state.reset_input_state();
     state.update_stream_client().await;
@@ -2851,7 +2884,7 @@ async fn install_active_network_controls(
         return Err(direct_page_allowed_domains_error());
     }
 
-    if !state.network_auto_attach_installed && !direct_page {
+    if !state.browser_auto_attach_installed && !direct_page {
         {
             let mgr = state
                 .browser
@@ -2859,7 +2892,7 @@ async fn install_active_network_controls(
                 .ok_or("Browser is not available for network control installation")?;
             mgr.enable_browser_auto_attach_pub().await?;
         }
-        state.network_auto_attach_installed = true;
+        state.browser_auto_attach_installed = true;
     }
 
     let mgr = state
@@ -3201,18 +3234,16 @@ fn allowed_domains_from_launch_command(cmd: &Value) -> Option<Vec<String>> {
 }
 
 async fn apply_launch_init_scripts(
-    state: &DaemonState,
+    state: &mut DaemonState,
     enable_features: &[String],
     init_script_paths: &[String],
 ) {
-    let Some(mgr) = state.browser.as_ref() else {
-        return;
-    };
+    let mut sources = Vec::new();
 
     for feature in enable_features {
         match feature.as_str() {
             "react-devtools" | "react" => {
-                let _ = mgr.add_script_to_evaluate(react::INSTALL_HOOK_JS).await;
+                sources.push(react::INSTALL_HOOK_JS.to_string());
             }
             other => {
                 eprintln!("warning: unknown --enable feature '{}'", other);
@@ -3223,7 +3254,7 @@ async fn apply_launch_init_scripts(
     for path in init_script_paths {
         match fs::read_to_string(path) {
             Ok(source) => {
-                let _ = mgr.add_script_to_evaluate(&source).await;
+                sources.push(source);
             }
             Err(e) => {
                 eprintln!("warning: failed to read --init-script '{}': {}", path, e);
@@ -3231,8 +3262,33 @@ async fn apply_launch_init_scripts(
         }
     }
 
-    for source in &state.plugin_init_scripts {
-        let _ = mgr.add_script_to_evaluate(source).await;
+    sources.extend(state.plugin_init_scripts.iter().cloned());
+
+    let should_enable_auto_attach = if let Some(mgr) = state.browser.as_ref() {
+        let has_sources = !sources.is_empty();
+        if let Err(error) = mgr.set_launch_init_scripts(sources).await {
+            eprintln!("warning: failed to install launch init scripts: {}", error);
+            return;
+        }
+        has_sources && !mgr.is_direct_page_connection()
+    } else {
+        false
+    };
+
+    if should_enable_auto_attach && !state.browser_auto_attach_installed {
+        let enable_result = state
+            .browser
+            .as_ref()
+            .expect("browser checked above")
+            .enable_browser_auto_attach_pub()
+            .await;
+        match enable_result {
+            Ok(()) => state.browser_auto_attach_installed = true,
+            Err(error) => eprintln!(
+                "warning: failed to enable init scripts for new page targets: {}",
+                error
+            ),
+        }
     }
 }
 
@@ -6270,6 +6326,9 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
 
         let new_session_id = attach_result.session_id.clone();
         mgr.prepare_domains_pub(&new_session_id).await?;
+        mgr.launch_init_script_registry()
+            .install(&mgr.client, &create_result.target_id, &new_session_id)
+            .await?;
 
         // Re-apply download behavior to the recording context.
         // Without this, downloads in the recording context are silently dropped
@@ -8599,6 +8658,9 @@ async fn handle_window_new(cmd: &Value, state: &mut DaemonState) -> Result<Value
             .await?;
 
         mgr.prepare_domains_pub(&attach.session_id).await?;
+        mgr.launch_init_script_registry()
+            .install(&mgr.client, &create_result.target_id, &attach.session_id)
+            .await?;
 
         let tab_id = mgr.assign_tab_id();
         mgr.add_page(super::browser::PageInfo {
