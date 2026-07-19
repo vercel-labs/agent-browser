@@ -1,8 +1,20 @@
 # agent-browser
 
-## 0.32.2
+## 0.32.3
 
 <!-- release:start -->
+### New Features
+
+- Added **HAR response body capture** with text bodies embedded by default and configurable `all`, `text`, and `none` content modes across the CLI and MCP surfaces (#1578)
+- Added a **derive-client skill** for recording browser traffic and generating reusable API clients from HAR request and response data (#1578)
+
+### Contributors
+
+- @ctate
+<!-- release:end -->
+
+## 0.32.2
+
 ### Improvements
 
 - Updated **eve extension packaging** for eve 0.25.1, adopting the new source and dist extension manifest format, updating the eve example to stable AI SDK releases, and keeping extension tests aligned with eve's scoped config registry (#1570)
@@ -10,7 +22,6 @@
 ### Contributors
 
 - @AndrewBarba
-<!-- release:end -->
 
 ## 0.32.1
 
