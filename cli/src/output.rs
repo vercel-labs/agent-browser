@@ -2675,6 +2675,10 @@ Automatic State Persistence:
   agent-browser --session myapp --restore open https://example.com
   Or set AGENT_BROWSER_RESTORE environment variable.
 
+Restore Ordering:
+  localStorage and sessionStorage are staged before application scripts run at
+  each saved origin. The temporary staging script is removed after navigation.
+
 State Encryption:
   Set AGENT_BROWSER_ENCRYPTION_KEY (64-char hex) for AES-256-GCM encryption.
   Generate a key: openssl rand -hex 32

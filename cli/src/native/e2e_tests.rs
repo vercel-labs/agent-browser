@@ -32,6 +32,38 @@ fn get_data(resp: &Value) -> &Value {
     resp.get("data").expect("Missing 'data' in response")
 }
 
+async fn spawn_static_html_server(body: String) -> (String, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind static HTML server");
+    let origin = format!(
+        "http://127.0.0.1:{}",
+        listener.local_addr().expect("static server address").port()
+    );
+    let body = Arc::new(body);
+    let server = tokio::spawn(async move {
+        for _ in 0..20 {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
+            };
+            let body = body.clone();
+            tokio::spawn(async move {
+                let mut request = vec![0u8; 4096];
+                let _ = stream.read(&mut request).await;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body,
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.flush().await;
+            });
+        }
+    });
+
+    (origin, server)
+}
+
 fn native_test_fixture_html(name: &str) -> &'static str {
     match name {
         "drag_probe" => include_str!("test_fixtures/drag_probe.html"),
@@ -6684,6 +6716,156 @@ async fn e2e_restore_key_switch_reloads_instead_of_reusing_live_browser() {
     let _ = std::fs::remove_file(format!("{}.previous", path_a));
     let _ = std::fs::remove_file(&path_b);
     let _ = std::fs::remove_file(format!("{}.previous", path_b));
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_state_load_restores_large_session_storage_before_page_scripts() {
+    let (login_origin, login_server) =
+        spawn_static_html_server("<title>login</title>".to_string()).await;
+    let expected_login_origin = login_origin.clone();
+    let app_body = format!(
+        r#"<script>
+            const auth = sessionStorage.getItem('large-auth-state');
+            if (auth && auth.length === 24576) {{
+                document.title = 'authenticated';
+            }} else {{
+                location.replace({});
+            }}
+        </script>"#,
+        serde_json::to_string(&login_origin).expect("serialize login origin"),
+    );
+    let (app_origin, app_server) = spawn_static_html_server(app_body).await;
+
+    let temp_dir = tempfile::tempdir().expect("create state temp directory");
+    let state_path = temp_dir.path().join("large-state.json");
+    std::fs::write(
+        &state_path,
+        serde_json::to_vec_pretty(&json!({
+            "cookies": [],
+            "origins": [{
+                "origin": app_origin,
+                "localStorage": [],
+                "sessionStorage": [{
+                    "name": "large-auth-state",
+                    "value": "x".repeat(24 * 1024)
+                }]
+            }]
+        }))
+        .expect("serialize state fixture"),
+    )
+    .expect("write state fixture");
+
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "state_load", "path": state_path }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let transported_resp = execute_command(
+        &json!({
+            "id": "transported",
+            "action": "storage_get",
+            "type": "session",
+            "key": "large-auth-state"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&transported_resp);
+    assert_eq!(
+        get_data(&transported_resp)["value"]
+            .as_str()
+            .expect("transported session value")
+            .len(),
+        24 * 1024,
+        "the 24 KB value should survive CDP transport"
+    );
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "navigate", "url": app_origin }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
+    let url_resp = execute_command(&json!({ "id": "4", "action": "url" }), &mut state).await;
+
+    let clear_resp = execute_command(
+        &json!({ "id": "5", "action": "storage_clear", "type": "session" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&clear_resp);
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "navigate", "url": app_origin }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    let cleared_url_resp =
+        execute_command(&json!({ "id": "7", "action": "url" }), &mut state).await;
+
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+
+    let mut launch_state = DaemonState::new();
+    let launch_resp = execute_command(
+        &json!({
+            "id": "launch-state",
+            "action": "launch",
+            "headless": true,
+            "storageState": state_path
+        }),
+        &mut launch_state,
+    )
+    .await;
+    assert_success(&launch_resp);
+    let resp = execute_command(
+        &json!({ "id": "launch-navigate", "action": "navigate", "url": app_origin }),
+        &mut launch_state,
+    )
+    .await;
+    assert_success(&resp);
+    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    let launch_url_resp = execute_command(
+        &json!({ "id": "launch-url", "action": "url" }),
+        &mut launch_state,
+    )
+    .await;
+    let _ = execute_command(
+        &json!({ "id": "launch-close", "action": "close" }),
+        &mut launch_state,
+    )
+    .await;
+
+    app_server.abort();
+    login_server.abort();
+
+    assert_success(&url_resp);
+    assert_eq!(get_data(&url_resp)["url"], format!("{app_origin}/"));
+    assert_success(&cleared_url_resp);
+    assert_eq!(
+        get_data(&cleared_url_resp)["url"],
+        format!("{expected_login_origin}/"),
+        "the temporary restore script must not reapply cleared state"
+    );
+    assert_success(&launch_url_resp);
+    assert_eq!(
+        get_data(&launch_url_resp)["url"],
+        format!("{app_origin}/"),
+        "launch-time storage state should use the same pre-document restore path"
+    );
 }
 
 /// Verify that explicit `state_load` restores cookies into an existing

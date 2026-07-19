@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use super::cdp::client::CdpClient;
 use super::cdp::types::{
-    AttachToTargetParams, AttachToTargetResult, CloseTargetParams, CreateTargetParams,
+    AttachToTargetParams, AttachToTargetResult, CdpEvent, CloseTargetParams, CreateTargetParams,
     CreateTargetResult, EvaluateParams,
 };
 use super::cookies::{self, Cookie};
@@ -460,6 +460,86 @@ pub fn validate_state_file(path: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn storage_restore_init_script(origin: &OriginStorage) -> Result<String, String> {
+    let expected_origin = serde_json::to_string(&origin.origin)
+        .map_err(|e| format!("Failed to serialize storage origin: {}", e))?;
+    let local_entries = serde_json::to_string(&origin.local_storage)
+        .map_err(|e| format!("Failed to serialize localStorage entries: {}", e))?;
+    let session_entries = serde_json::to_string(&origin.session_storage)
+        .map_err(|e| format!("Failed to serialize sessionStorage entries: {}", e))?;
+
+    Ok(format!(
+        r#"(() => {{
+            if (location.origin !== {expected_origin}) return;
+            for (const entry of {local_entries}) {{
+                localStorage.setItem(entry.name, entry.value);
+            }}
+            for (const entry of {session_entries}) {{
+                sessionStorage.setItem(entry.name, entry.value);
+            }}
+        }})()"#
+    ))
+}
+
+async fn remove_storage_restore_init_script(
+    client: &CdpClient,
+    session_id: &str,
+    identifier: &str,
+) -> Result<(), String> {
+    client
+        .send_command(
+            "Page.removeScriptToEvaluateOnNewDocument",
+            Some(json!({ "identifier": identifier })),
+            Some(session_id),
+        )
+        .await?;
+    Ok(())
+}
+
+async fn wait_for_storage_restore_document(
+    event_rx: &mut tokio::sync::broadcast::Receiver<CdpEvent>,
+    session_id: &str,
+    loader_id: &str,
+) -> Result<(), String> {
+    let wait = async {
+        let mut saw_expected_document = false;
+        loop {
+            match event_rx.recv().await {
+                Ok(event)
+                    if event.session_id.as_deref() == Some(session_id)
+                        && event.method == "Page.frameNavigated"
+                        && event
+                            .params
+                            .get("frame")
+                            .and_then(|frame| frame.get("loaderId"))
+                            .and_then(|value| value.as_str())
+                            == Some(loader_id) =>
+                {
+                    saw_expected_document = true;
+                }
+                Ok(event)
+                    if event.session_id.as_deref() == Some(session_id)
+                        && saw_expected_document
+                        && matches!(
+                            event.method.as_str(),
+                            "Page.domContentEventFired" | "Page.loadEventFired"
+                        ) =>
+                {
+                    return Ok(());
+                }
+                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    return Err("CDP event channel closed during storage restore".to_string());
+                }
+            }
+        }
+    };
+
+    tokio::time::timeout(tokio::time::Duration::from_secs(10), wait)
+        .await
+        .map_err(|_| "Timed out waiting for storage restore navigation".to_string())?
+}
+
 pub async fn load_state(client: &CdpClient, session_id: &str, path: &str) -> Result<(), String> {
     let json_str = read_state_json(path)?;
 
@@ -482,18 +562,60 @@ pub async fn load_state(client: &CdpClient, session_id: &str, path: &str) -> Res
             continue;
         }
 
-        // Navigate to origin to set storage
+        // Seed storage before application scripts run. The post-navigation writes
+        // below remain as a compatibility pass for the loaded document.
+        let init_source = storage_restore_init_script(origin)?;
+        let init_result = client
+            .send_command(
+                "Page.addScriptToEvaluateOnNewDocument",
+                Some(json!({ "source": init_source })),
+                Some(session_id),
+            )
+            .await?;
+        let init_identifier = init_result
+            .get("identifier")
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.is_empty())
+            .ok_or("Storage restore init script did not return an identifier")?;
+
+        let mut event_rx = client.subscribe();
         let navigate_url = format!("{}/", origin.origin.trim_end_matches('/'));
-        client
+        let staging_result = match client
             .send_command(
                 "Page.navigate",
                 Some(json!({ "url": navigate_url })),
                 Some(session_id),
             )
-            .await?;
+            .await
+        {
+            Ok(result) => match result.get("loaderId").and_then(|value| value.as_str()) {
+                Some(loader_id) => {
+                    wait_for_storage_restore_document(&mut event_rx, session_id, loader_id).await
+                }
+                None => Err("Storage restore navigation did not create a document".to_string()),
+            },
+            Err(error) => Err(error),
+        };
 
-        // Brief wait for navigation
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        // Never retain state-bearing source beyond this origin's staging navigation.
+        let cleanup_result =
+            remove_storage_restore_init_script(client, session_id, init_identifier).await;
+        match (staging_result, cleanup_result) {
+            (Ok(()), Ok(())) => {}
+            (Err(error), Ok(())) => return Err(error),
+            (Ok(()), Err(cleanup_error)) => {
+                return Err(format!(
+                    "Failed to remove temporary storage restore script: {}",
+                    cleanup_error
+                ));
+            }
+            (Err(error), Err(cleanup_error)) => {
+                return Err(format!(
+                    "{}; also failed to remove temporary storage restore script: {}",
+                    error, cleanup_error
+                ));
+            }
+        }
 
         for entry in &origin.local_storage {
             let js = format!(
@@ -893,6 +1015,29 @@ mod tests {
         let parsed: StorageState = serde_json::from_str(&json).unwrap();
         assert!(parsed.cookies.is_empty());
         assert!(parsed.origins.is_empty());
+    }
+
+    #[test]
+    fn test_storage_restore_init_script_is_origin_scoped() {
+        let origin = OriginStorage {
+            origin: "https://example.test".to_string(),
+            local_storage: vec![StorageEntry {
+                name: "local-key".to_string(),
+                value: "local-value".to_string(),
+            }],
+            session_storage: vec![StorageEntry {
+                name: "session-key".to_string(),
+                value: "session-value".to_string(),
+            }],
+        };
+
+        let script = storage_restore_init_script(&origin).expect("build restore init script");
+
+        assert!(script.contains(r#"location.origin !== "https://example.test""#));
+        assert!(script.contains(r#"[{"name":"local-key","value":"local-value"}]"#));
+        assert!(script.contains(r#"[{"name":"session-key","value":"session-value"}]"#));
+        assert!(script.contains("localStorage.setItem"));
+        assert!(script.contains("sessionStorage.setItem"));
     }
 
     #[test]
