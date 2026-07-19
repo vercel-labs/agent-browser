@@ -2112,6 +2112,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         "close" => handle_close(state).await,
         "snapshot" => handle_snapshot(cmd, state).await,
         "screenshot" => handle_screenshot(cmd, state).await,
+        "annotate_overlay" => handle_annotate_overlay(cmd, state).await,
         "click" => handle_click(cmd, state).await,
         "dblclick" => handle_dblclick(cmd, state).await,
         "fill" => handle_fill(cmd, state).await,
@@ -4289,6 +4290,44 @@ async fn handle_close(state: &mut DaemonState) -> Result<Value, String> {
 // ---------------------------------------------------------------------------
 // Phase 2 handlers
 // ---------------------------------------------------------------------------
+
+/// Toggle the live element-annotation overlay in the active page so the dashboard
+/// stream shows numbered boxes (same labels as `screenshot --annotate`).
+async fn handle_annotate_overlay(
+    cmd: &Value,
+    state: &mut DaemonState,
+) -> Result<Value, String> {
+    let on = cmd.get("on").and_then(|v| v.as_bool()).unwrap_or(true);
+
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?.to_string();
+
+    if on {
+        // Refresh ref_map so the overlay numbers match the current DOM.
+        state.ref_map.clear();
+        let options = SnapshotOptions {
+            selector: None,
+            interactive: true,
+            compact: false,
+            depth: None,
+            urls: false,
+        };
+        snapshot::take_snapshot(
+            &mgr.client,
+            &session_id,
+            &options,
+            &mut state.ref_map,
+            state.active_frame_id.as_deref(),
+            &state.iframe_sessions,
+        )
+        .await?;
+    }
+
+    let count =
+        screenshot::set_live_annotation(&mgr.client, &session_id, &state.ref_map, on).await?;
+
+    Ok(json!({ "on": on, "count": count }))
+}
 
 async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
