@@ -323,25 +323,7 @@ pub async fn take_snapshot(
     // When a selector is given, find AX nodes whose backendDOMNodeId falls
     // within the target DOM subtree and pick the top-level ones as roots.
     let effective_roots = if let Some(ref id_set) = selector_backend_ids {
-        // Mark which tree_nodes belong to the target DOM subtree.
-        let in_subtree: Vec<bool> = tree_nodes
-            .iter()
-            .map(|n| n.backend_node_id.is_some_and(|bid| id_set.contains(&bid)))
-            .collect();
-
-        // An AX node is a "top-level" match if it is in the subtree but its
-        // parent (in the AX tree) is not.
-        let mut roots = Vec::new();
-        for (idx, node) in tree_nodes.iter().enumerate() {
-            if !in_subtree[idx] {
-                continue;
-            }
-            let parent_in_subtree = node.parent_idx.is_some_and(|pidx| in_subtree[pidx]);
-            if !parent_in_subtree {
-                roots.push(idx);
-            }
-        }
-
+        let roots = select_scoped_roots(&tree_nodes, id_set);
         if roots.is_empty() {
             return Err(format!(
                 "No accessibility node found for selector '{}'",
@@ -938,6 +920,69 @@ fn promote_hidden_inputs(
     }
 }
 
+/// Select the AX nodes to use as snapshot roots when scoping to a selector's
+/// DOM subtree. `id_set` is the set of backendNodeIds under the matched DOM
+/// element. Returns the top-level matching AX nodes (the roots to render from).
+fn select_scoped_roots(
+    tree_nodes: &[TreeNode],
+    id_set: &std::collections::HashSet<i64>,
+) -> Vec<usize> {
+    let n = tree_nodes.len();
+
+    // Rebuild child lists from `parent_idx`, the single source of truth.
+    // `tree_nodes.children` can be desymmetrized from `parent_idx` — StaticText
+    // aggregation clears a node's `parent_idx` without removing it from its old
+    // parent's `children` — and reading both views would let such a stale child
+    // be flooded into the subtree and promoted to a phantom root.
+    let mut children: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for (idx, node) in tree_nodes.iter().enumerate() {
+        if let Some(pidx) = node.parent_idx {
+            children[pidx].push(idx);
+        }
+    }
+
+    // A node is inside the target subtree if its own backendDOMNodeId is in the
+    // set, OR any ancestor's is. Seed each node with its own membership, then
+    // flood that membership down from the forest roots. Flooding downward keeps
+    // virtual nodes (e.g. a <select>'s MenuListPopup) that carry no
+    // backendDOMNodeId from breaking the chain and stranding their children as
+    // false roots (issue #1338). The reachable parent forest is acyclic, so the
+    // sweep visits each node once and needs no separate cycle guard.
+    let mut in_subtree: Vec<bool> = tree_nodes
+        .iter()
+        .map(|node| {
+            node.backend_node_id
+                .is_some_and(|bid| id_set.contains(&bid))
+        })
+        .collect();
+    let mut stack: Vec<usize> = (0..n)
+        .filter(|&i| tree_nodes[i].parent_idx.is_none())
+        .collect();
+    while let Some(idx) = stack.pop() {
+        let parent_in = in_subtree[idx];
+        for &child in &children[idx] {
+            if parent_in {
+                in_subtree[child] = true;
+            }
+            stack.push(child);
+        }
+    }
+
+    // A root is a node in the subtree whose parent is not — i.e. the topmost
+    // matched node(s).
+    let mut roots = Vec::new();
+    for (idx, node) in tree_nodes.iter().enumerate() {
+        if !in_subtree[idx] {
+            continue;
+        }
+        let parent_in_subtree = node.parent_idx.is_some_and(|pidx| in_subtree[pidx]);
+        if !parent_in_subtree {
+            roots.push(idx);
+        }
+    }
+    roots
+}
+
 fn build_tree(nodes: &[AXNode]) -> (Vec<TreeNode>, Vec<usize>) {
     let mut tree_nodes: Vec<TreeNode> = Vec::with_capacity(nodes.len());
     let mut id_to_idx: HashMap<String, usize> = HashMap::new();
@@ -1412,6 +1457,110 @@ mod tests {
         assert_eq!(count_indent("- heading"), 0);
         assert_eq!(count_indent("  - link"), 1);
         assert_eq!(count_indent("    - text"), 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // Scoped-snapshot root selection (Issue #1338 regression guard)
+    // Virtual AX nodes (e.g. <select>'s MenuListPopup) have no
+    // backendDOMNodeId and must not break subtree containment, or their
+    // children get wrongly promoted to roots and render twice.
+    // -----------------------------------------------------------------------
+
+    // Build a tree from `(role, backend_id, parent_idx)` rows. `select_scoped_roots`
+    // derives child links from `parent_idx` itself, so fixtures only set parent_idx;
+    // tests that need a desymmetrized `children` set it explicitly.
+    fn scoped_tree(rows: Vec<(&str, Option<i64>, Option<usize>)>) -> Vec<TreeNode> {
+        rows.iter()
+            .map(|&(role, backend, parent)| TreeNode {
+                role: role.to_string(),
+                backend_node_id: backend,
+                parent_idx: parent,
+                ..TreeNode::empty()
+            })
+            .collect()
+    }
+
+    fn id_set(ids: &[i64]) -> std::collections::HashSet<i64> {
+        ids.iter().copied().collect()
+    }
+
+    #[test]
+    fn test_scoped_roots_skips_virtual_nodes() {
+        // Mirrors `<main><div role=group><div><button/><select>...</select></div></div></main>`
+        // alongside a sibling `<header><button/></header>` that is OUTSIDE the
+        // `main` selector (its backend ids are absent from id_set). The <select>
+        // yields a virtual MenuListPopup AX node with no backendDOMNodeId
+        // between the combobox and its options.
+        let tree = scoped_tree(vec![
+            ("main", Some(1), None),          // 0
+            ("group", Some(2), Some(0)),      // 1
+            ("generic", Some(3), Some(1)),    // 2
+            ("button", Some(4), Some(2)),     // 3
+            ("combobox", Some(5), Some(2)),   // 4
+            ("MenuListPopup", None, Some(4)), // 5  virtual: no backend id
+            ("option", Some(6), Some(5)),     // 6
+            ("option", Some(7), Some(5)),     // 7
+            ("banner", Some(20), None),       // 8  out of scope (top-level sibling)
+            ("button", Some(21), Some(8)),    // 9  out of scope
+        ]);
+        // id_set holds only the backend ids under <main>; the banner subtree is excluded.
+        let roots = select_scoped_roots(&tree, &id_set(&[1, 2, 3, 4, 5, 6, 7]));
+
+        // Only <main> is a root: options under the virtual MenuListPopup must not
+        // be promoted (they would render twice), and the out-of-scope banner must
+        // not appear at all.
+        assert_eq!(roots, vec![0]);
+    }
+
+    #[test]
+    fn test_scoped_roots_terminates_on_parent_cycle() {
+        // A malformed parent_idx cycle (1 <-> 2) has no path to a real root, so
+        // it is never reached by the downward flood; the sweep terminates and the
+        // cycle nodes are excluded.
+        let tree = scoped_tree(vec![
+            ("main", Some(1), None),  // 0  matched root
+            ("a", Some(50), Some(2)), // 1  parent_idx -> 2
+            ("b", Some(51), Some(1)), // 2  parent_idx -> 1 (cycle)
+        ]);
+
+        assert_eq!(select_scoped_roots(&tree, &id_set(&[1])), vec![0]);
+    }
+
+    #[test]
+    fn test_scoped_roots_ignores_desymmetrized_children() {
+        // build_tree's StaticText aggregation can clear a node's `parent_idx`
+        // while leaving it listed in its old parent's `children`. Membership is
+        // derived from `parent_idx`, so such a stale child is neither flooded into
+        // the subtree nor promoted to a phantom root.
+        let mut tree = scoped_tree(vec![
+            ("main", Some(1), None),      // 0  matched root
+            ("button", Some(2), Some(0)), // 1
+            ("cleared", None, None),      // 2  parent_idx cleared, no backend id
+        ]);
+        // main still lists node 2 in `children` though node 2's parent_idx is None.
+        tree[0].children = vec![1, 2];
+
+        assert_eq!(select_scoped_roots(&tree, &id_set(&[1, 2])), vec![0]);
+    }
+
+    #[test]
+    fn test_scoped_roots_returns_multiple_disjoint_roots() {
+        // Two matched subtrees sharing an UNMATCHED parent must each be a root.
+        // Exercises the roots.len() > 1 path that the other tests don't.
+        let tree = scoped_tree(vec![
+            ("body", Some(99), None),      // 0  unmatched container
+            ("section", Some(1), Some(0)), // 1  matched root A
+            ("button", Some(2), Some(1)),  // 2
+            ("section", Some(3), Some(0)), // 3  matched root B
+            ("button", Some(4), Some(3)),  // 4
+        ]);
+
+        // Both sections are top-level matches (their parent is unmatched); the
+        // container itself is excluded.
+        assert_eq!(
+            select_scoped_roots(&tree, &id_set(&[1, 2, 3, 4])),
+            vec![1, 3]
+        );
     }
 
     #[test]
