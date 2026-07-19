@@ -2675,6 +2675,11 @@ Automatic State Persistence:
   agent-browser --session myapp --restore open https://example.com
   Or set AGENT_BROWSER_RESTORE environment variable.
 
+Restore Failures:
+  Storage write failures stop the restore and report the storage type, origin,
+  entry position, and byte lengths without exposing keys or values. Cookies and
+  earlier storage entries may already be applied when an error is returned.
+
 State Encryption:
   Set AGENT_BROWSER_ENCRYPTION_KEY (64-char hex) for AES-256-GCM encryption.
   Generate a key: openssl rand -hex 32

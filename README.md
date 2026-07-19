@@ -401,6 +401,8 @@ agent-browser state clear --all       # Clear all saved states
 agent-browser state clean --older-than <days>  # Delete old states
 ```
 
+State restoration fails immediately if a `localStorage` or `sessionStorage` entry cannot be written. The error identifies the storage type, origin, entry position, and key/value byte lengths without including the stored key or value. Cookies and earlier storage entries may already have been applied, so retry from a fresh browser context after correcting the failure.
+
 ### Navigation
 
 ```bash
