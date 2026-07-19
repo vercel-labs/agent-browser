@@ -473,6 +473,15 @@ Chat-specific options:
 -q, --quiet              # Show only the AI text response (hide tool calls)
 ```
 
+### Exa web search
+
+When `EXA_API_KEY` is set, the AI gains an `exa_web_search` tool. It uses [Exa](https://exa.ai) to search the web instead of navigating to a search engine, returning clean results with titles and text snippets.
+
+```bash
+export EXA_API_KEY=your_key
+agent-browser chat "search for the latest news about AI agents"
+```
+
 ## Navigation
 
 ```bash

@@ -3121,6 +3121,20 @@ Examples:
   agent-browser -v chat "fill in the login form with test@example.com"
   agent-browser --model openai/gpt-4o chat "navigate to hacker news"
   agent-browser chat
+
+Exa Web Search:
+  When EXA_API_KEY is set, the AI can search the web using Exa instead of
+  navigating to a search engine. This is faster and returns cleaner results
+  with titles and text snippets.
+
+  agent-browser chat "search for the latest news about AI agents"
+  agent-browser chat "find me some good rust CLI libraries"
+
+Environment:
+  AI_GATEWAY_API_KEY             Required. AI gateway key
+  AI_GATEWAY_URL                 AI gateway URL (default: ai-gateway.vercel.sh)
+  AI_GATEWAY_MODEL               AI model override
+  EXA_API_KEY                    Exa API key for web search in chat
 "##
         }
 
