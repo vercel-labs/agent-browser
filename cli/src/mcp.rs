@@ -3751,21 +3751,26 @@ fn response_text(value: &Value) -> Option<String> {
         }
 
         if let Some(data) = obj.get("data") {
-            if let Some(observation) = data.get("observation") {
-                return Some(crate::output::format_post_action_observation(observation));
-            }
-            for key in [
+            let primary = [
                 "snapshot", "text", "html", "report", "value", "content", "title", "url", "path",
-            ] {
-                if let Some(s) = data.get(key).and_then(|v| v.as_str()) {
-                    return Some(s.to_string());
-                }
+            ]
+            .into_iter()
+            .find_map(|key| data.get(key).and_then(|value| value.as_str()))
+            .map(ToString::to_string)
+            .or_else(|| {
+                data.get("result").map(|result| {
+                    serde_json::to_string_pretty(result).unwrap_or_else(|_| result.to_string())
+                })
+            });
+
+            if let Some(observation) = data.get("observation") {
+                let observation = crate::output::format_post_action_observation(observation);
+                return Some(match primary {
+                    Some(primary) => format!("{}\n\n{}", primary, observation),
+                    None => observation,
+                });
             }
-            if let Some(result) = data.get("result") {
-                return Some(
-                    serde_json::to_string_pretty(result).unwrap_or_else(|_| result.to_string()),
-                );
-            }
+            return primary;
         }
     }
 
@@ -4093,6 +4098,26 @@ mod tests {
         .unwrap();
 
         assert_eq!(text, "# Docs\n\nReadable content.");
+    }
+
+    #[test]
+    fn response_text_keeps_primary_metadata_with_observation() {
+        let text = response_text(&json!({
+            "success": true,
+            "data": {
+                "url": "https://example.com/next",
+                "observation": {
+                    "mode": "diff",
+                    "changed": false
+                }
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(
+            text,
+            "https://example.com/next\n\nPost-action observation: no accessibility changes"
+        );
     }
 
     #[test]
