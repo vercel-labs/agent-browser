@@ -2477,6 +2477,12 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         );
     }
 
+    // The caller never received this explicit snapshot if final event
+    // processing failed, so it cannot be a valid baseline for a later diff.
+    if action == "snapshot" && resp.get("success").and_then(|value| value.as_bool()) != Some(true) {
+        state.last_observation = None;
+    }
+
     // Capture only after the action's CDP events have been applied. This
     // avoids racing a navigation or dynamic render and lets us skip a
     // renderer-blocking JavaScript dialog without changing the successful
