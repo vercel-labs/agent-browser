@@ -88,8 +88,9 @@ impl IdleActivity {
     }
 }
 
-/// Keeps the idle timer paused for the complete lifetime of a command,
-/// including time spent queued behind another command and writing its reply.
+/// Keeps the idle timer paused while a command is queued or executing. The
+/// lease ends before socket delivery so a client that stops reading cannot
+/// keep an abandoned browser alive indefinitely through backpressure.
 struct CommandLease {
     activity: Option<Arc<IdleActivity>>,
 }
@@ -681,9 +682,8 @@ async fn handle_connection<S>(
 
                 let mut resp = serde_json::to_string(&response).unwrap_or_default();
                 resp.push('\n');
-                let write_failed = writer.write_all(resp.as_bytes()).await.is_err();
                 drop(command_lease);
-                if write_failed {
+                if writer.write_all(resp.as_bytes()).await.is_err() {
                     break;
                 }
 
@@ -836,11 +836,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_handle_connection_holds_lease_through_queue_and_response_write() {
+    async fn test_handle_connection_releases_lease_before_response_backpressure() {
         use tokio::io::AsyncReadExt;
 
-        // A one-byte transport buffer lets the test observe the handler after
-        // response writing starts but before write_all can complete.
+        // A one-byte transport buffer keeps write_all backpressured after the
+        // serialized response releases its activity lease.
         let (mut client, server) = tokio::io::duplex(1);
         let state = Arc::new(tokio::sync::Mutex::new(DaemonState::new()));
         let queued_state_guard = state.lock().await;
@@ -870,6 +870,15 @@ mod tests {
 
         drop(queued_state_guard);
 
+        tokio::time::timeout(Duration::from_secs(1), activity.notify.notified())
+            .await
+            .expect("serialized response should release the command lease");
+        assert_eq!(
+            activity.snapshot().active_leases,
+            0,
+            "a client that stops reading must not keep the daemon active"
+        );
+
         let mut first_response_byte = [0_u8; 1];
         tokio::time::timeout(
             Duration::from_secs(1),
@@ -879,11 +888,6 @@ mod tests {
         .expect("handler should begin writing its response")
         .expect("response byte should be readable");
         assert_eq!(first_response_byte[0], b'{');
-        assert_eq!(
-            activity.snapshot().active_leases,
-            1,
-            "the lease must remain active while response delivery is blocked"
-        );
 
         let mut response = first_response_byte.to_vec();
         loop {
@@ -898,11 +902,6 @@ mod tests {
         }
         let response: Value = serde_json::from_slice(&response).expect("valid JSON response");
         assert_eq!(response["success"], true);
-
-        tokio::time::timeout(Duration::from_secs(1), activity.notify.notified())
-            .await
-            .expect("completed response should release the lease");
-        assert_eq!(activity.snapshot().active_leases, 0);
 
         drop(client);
         tokio::time::timeout(Duration::from_secs(1), handler)

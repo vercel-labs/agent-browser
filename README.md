@@ -1458,7 +1458,7 @@ agent-browser uses a client-daemon architecture:
 1. **Rust CLI** - Parses commands, communicates with daemon
 2. **Rust Daemon** - Pure Rust daemon using direct CDP, no Node.js required
 
-The daemon starts automatically on first command and persists between commands for fast subsequent operations. Abandoned daemons close the browser and exit after four hours of inactivity by default. Every command holds an activity lease for its complete lifetime, so queued or long-running work is never treated as idle. Set `AGENT_BROWSER_IDLE_TIMEOUT_MS` to a custom duration in milliseconds, or set it to `0` for an intentionally indefinite session.
+The daemon starts automatically on first command and persists between commands for fast subsequent operations. Abandoned daemons close the browser and exit after four hours of inactivity by default. Queued and executing commands hold activity leases, so long-running work is never treated as idle. Response delivery is not leased, which prevents a client that stops reading from keeping the browser alive indefinitely. Set `AGENT_BROWSER_IDLE_TIMEOUT_MS` to a custom duration in milliseconds, or set it to `0` for an intentionally indefinite session.
 
 **Browser Engine:** Uses Chrome (from Chrome for Testing) by default. The `--engine` flag selects between `chrome` and `lightpanda`. Supported browsers: Chromium/Chrome (via CDP) and Safari (via WebDriver for iOS).
 

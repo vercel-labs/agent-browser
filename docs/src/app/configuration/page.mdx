@@ -277,7 +277,7 @@ These environment variables configure additional daemon and runtime behavior:
     <tr><td><code>AGENT_BROWSER_ANNOTATE</code></td><td>Enable annotated screenshots by default.</td><td>(disabled)</td></tr>
     <tr><td><code>AGENT_BROWSER_CDP</code></td><td>Connect the daemon to a CDP port or WebSocket URL.</td><td>(none)</td></tr>
     <tr><td><code>AGENT_BROWSER_STREAM_PORT</code></td><td>Override the WebSocket streaming port. By default, an OS-assigned port is used. Set this to bind to a specific port (e.g., <code>9223</code>).</td><td>OS-assigned</td></tr>
-    <tr><td><code>AGENT_BROWSER_IDLE_TIMEOUT_MS</code></td><td>Auto-shutdown the daemon after N ms of inactivity. Queued and running commands hold an activity lease. Set to <code>0</code> to disable.</td><td><code>14400000</code> (4 hours)</td></tr>
+    <tr><td><code>AGENT_BROWSER_IDLE_TIMEOUT_MS</code></td><td>Auto-shutdown the daemon after N ms of inactivity. Queued and running commands hold an activity lease; response backpressure does not. Set to <code>0</code> to disable.</td><td><code>14400000</code> (4 hours)</td></tr>
     <tr><td><code>AGENT_BROWSER_IOS_DEVICE</code></td><td>Default iOS device name for the <code>ios</code> provider.</td><td>(none)</td></tr>
     <tr><td><code>AGENT_BROWSER_IOS_UDID</code></td><td>Default iOS device UDID for the <code>ios</code> provider.</td><td>(none)</td></tr>
     <tr><td><code>AGENT_BROWSER_DEBUG</code></td><td>Enable debug output (<code>1</code> to enable).</td><td>(disabled)</td></tr>

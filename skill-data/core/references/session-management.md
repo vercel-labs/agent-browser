@@ -78,7 +78,7 @@ Use `state save`, `state load`, and `--state <path>` when you need an explicit p
 
 ## Idle Lifecycle
 
-The daemon closes an abandoned browser after four hours without commands. The idle window starts only after the last queued or running command completes, including response delivery, so long actions do not expire their own session. Eligible restore state is saved before the browser closes. Configure another duration with `--idle-timeout 30m` or `AGENT_BROWSER_IDLE_TIMEOUT_MS`. Set the value to `0` only when the caller owns reliable lifecycle cleanup and intentionally needs an indefinite session.
+The daemon closes an abandoned browser after four hours without commands. The idle window starts only after the last queued or running command completes, so long actions do not expire their own session. Response backpressure is not considered activity, preventing a client that stops reading from retaining the browser forever. Eligible restore state is saved before the browser closes. Configure another duration with `--idle-timeout 30m` or `AGENT_BROWSER_IDLE_TIMEOUT_MS`. Set the value to `0` only when the caller owns reliable lifecycle cleanup and intentionally needs an indefinite session.
 
 ## Common Patterns
 
