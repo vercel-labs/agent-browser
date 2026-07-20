@@ -8357,13 +8357,10 @@ async fn handle_multiselect(cmd: &Value, state: &DaemonState) -> Result<Value, S
         .unwrap_or_default();
 
     let values_json = serde_json::to_string(&values).unwrap_or("[]".to_string());
-    // A locator miss returns a sentinel object rather than throwing, so the miss
-    // is detected structurally in Rust and normalized to the anchored
-    // "No element found: ..." shape the find path emits. Throwing would surface as
-    // "Evaluation error: ...", which is_locator_miss does not classify (no
-    // canonical prefix), so the miss would reach the caller raw. Detecting via a
-    // sentinel (not a substring of the thrown text) also avoids misclassifying an
-    // invalid-selector SyntaxError, whose message echoes the user's selector.
+    // A locator miss returns a sentinel instead of throwing, so it is detected in
+    // Rust and normalized to the anchored "No element found: ..." shape. A thrown
+    // error surfaces as "Evaluation error: ...", which is_locator_miss skips, and
+    // a sentinel avoids misclassifying an invalid-selector error too.
     let js = format!(
         r#"(() => {{
             const select = document.querySelector({sel});
@@ -8387,10 +8384,7 @@ async fn handle_multiselect(cmd: &Value, state: &DaemonState) -> Result<Value, S
     {
         return Err(format!("No element found: {selector}"));
     }
-    let selected = result
-        .get("selected")
-        .cloned()
-        .unwrap_or_else(|| json!([]));
+    let selected = result.get("selected").cloned().unwrap_or_else(|| json!([]));
     Ok(json!({ "selected": selected }))
 }
 
