@@ -602,10 +602,8 @@ pub(crate) async fn execute_batch_command(cmd: &Value, state: &mut DaemonState) 
     // This is intentionally not an implicit network-idle wait: there is no
     // generic settle condition that is correct for every command, and callers
     // should include an explicit `wait` child when their workflow needs one.
-    let mut final_drain_attempted = false;
     if executed_child && !closed {
         tokio::task::yield_now().await;
-        final_drain_attempted = true;
         if let Err(error) = state.drain_cdp_events_background().await {
             had_error = true;
             results.push(serde_json::json!({
@@ -634,10 +632,8 @@ pub(crate) async fn execute_batch_command(cmd: &Value, state: &mut DaemonState) 
         "success": !had_error,
         "data": {
             "results": results,
-            "stopped": stop_reason.is_some(),
             "stopReason": stop_reason,
             "closed": closed,
-            "finalDrainAttempted": final_drain_attempted,
         },
     })
 }
@@ -860,7 +856,6 @@ mod tests {
             serde_json::json!(["bad-three"])
         );
         assert_eq!(continued["success"], false);
-        assert_eq!(continued["data"]["finalDrainAttempted"], true);
 
         let bailed = execute_batch_command(
             &serde_json::json!({
@@ -874,7 +869,6 @@ mod tests {
         .await;
         assert_eq!(bailed["data"]["results"].as_array().unwrap().len(), 1);
         assert_eq!(bailed["data"]["stopReason"], "error");
-        assert_eq!(bailed["data"]["finalDrainAttempted"], false);
     }
 
     #[tokio::test]
@@ -918,7 +912,6 @@ mod tests {
             serde_json::json!(true)
         );
         assert_eq!(response["data"]["stopReason"], "confirmation");
-        assert_eq!(response["data"]["finalDrainAttempted"], true);
     }
 
     #[tokio::test]
@@ -951,7 +944,6 @@ mod tests {
         assert_eq!(response["success"], true);
         assert_eq!(response["data"]["results"].as_array().unwrap().len(), 1);
         assert_eq!(response["data"]["stopReason"], "confirmation");
-        assert_eq!(response["data"]["finalDrainAttempted"], true);
         assert_eq!(
             response["data"]["results"][0]["result"]["confirmation_required"],
             true
@@ -984,7 +976,6 @@ mod tests {
         assert_eq!(response["success"], false);
         assert_eq!(response["data"]["stopReason"], "close");
         assert_eq!(response["data"]["closed"], true);
-        assert_eq!(response["data"]["finalDrainAttempted"], false);
         assert!(close_completed_response("batch", &response));
     }
 
