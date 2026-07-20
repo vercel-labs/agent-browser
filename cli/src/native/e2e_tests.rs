@@ -7170,3 +7170,101 @@ async fn e2e_removeinitscript_roundtrip() {
 
     let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
 }
+
+/// An earlier valid ARIA token in a multi-token role attribute is the operative
+/// role, so `role="mark none"` is a mark and must not answer `find role none`.
+/// Force-red: drop `mark` from the presentational VALID_ROLES set and the query
+/// matches this element, so the miss assertion fails.
+#[tokio::test]
+#[ignore]
+async fn e2e_presentational_role_respects_earlier_operative_token() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = "<html><body><span role='mark none'>marked</span></body></html>";
+    let url = format!("data:text/html;base64,{}", STANDARD.encode(html));
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "getbyrole", "role": "none", "subaction": "text" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(
+        resp.get("success").and_then(|v| v.as_bool()),
+        Some(false),
+        "operative role is `mark`, so `find role none` must not match: {}",
+        serde_json::to_string_pretty(&resp).unwrap_or_default()
+    );
+
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+/// `find role directory` must match an explicit `role="directory"` element but
+/// not an ordinary list. Chrome collapses `directory` into the `list` AX role,
+/// so this goes through the DOM-attribute path, not the AX tree. Force-red:
+/// route `directory` back through the AX tree and the explicit element is missed
+/// (its AX role is `list`), so the found-text assertion fails.
+#[tokio::test]
+#[ignore]
+async fn e2e_find_role_directory_matches_only_explicit_attribute() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // A plain list must not be matched by `find role directory`.
+    let plain = "data:text/html;base64,".to_string()
+        + &STANDARD.encode("<html><body><ul><li>item</li></ul></body></html>");
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": plain }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "getbyrole", "role": "directory", "subaction": "text" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(
+        resp.get("success").and_then(|v| v.as_bool()),
+        Some(false),
+        "a plain <ul> must not match `find role directory`: {}",
+        serde_json::to_string_pretty(&resp).unwrap_or_default()
+    );
+
+    // An explicit role="directory" element is found.
+    let explicit = "data:text/html;base64,".to_string()
+        + &STANDARD.encode("<html><body><div role='directory'>DIR</div></body></html>");
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "navigate", "url": explicit }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "getbyrole", "role": "directory", "subaction": "text" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["text"], "DIR");
+
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}

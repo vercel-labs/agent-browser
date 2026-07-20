@@ -204,7 +204,7 @@ agent-browser find nth <n> <sel> <action> [value]     # Nth match
 
 **Actions:** `click`, `fill`, `type`, `hover`, `focus`, `check`, `uncheck`, `text`
 
-**Options:** `--name <name>` (filter role by accessible name), `--exact` (exact accessible-name match, case-sensitive; without it, matching is a case-insensitive substring)
+**Options:** `--name <name>` (filter role by accessible name), `--exact` (exact, case-sensitive match; for `role` it applies to the accessible name, whose default is a case-insensitive substring)
 
 **Examples:**
 

@@ -2069,9 +2069,9 @@ Actions (default: click):
 
 Options:
   --name <name>        Filter role by accessible name
-  --exact              Exact, case-sensitive accessible-name match
-                       (default: substring, ignoring case; the role value
-                       itself always ignores case)
+  --exact              Exact, case-sensitive match. For role it applies to
+                       the accessible name, whose default is a case-insensitive
+                       substring. The role value itself always ignores case.
 
 Global Options:
   --json               Output as JSON

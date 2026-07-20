@@ -9,7 +9,12 @@ export default defineTool({
   inputSchema: z.object({
     action: z.enum(["click", "fill", "type", "hover", "focus", "check", "uncheck", "text"]),
     by: z.enum(["role", "text", "label", "placeholder", "alt", "title", "testid", "first", "last"]),
-    exact: z.boolean().default(false).describe("Require an exact text match."),
+    exact: z
+      .boolean()
+      .default(false)
+      .describe(
+        'Exact, case-sensitive match. For "role" it applies to the accessible name, whose default is a case-insensitive substring.',
+      ),
     name: z
       .string()
       .optional()

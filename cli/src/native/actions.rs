@@ -7849,9 +7849,12 @@ async fn handle_presentational_getbyrole(
     };
 
     let role_json = serde_json::to_string(&role.to_ascii_lowercase()).unwrap_or_default();
+    // ARIA roles Playwright recognizes (WAI-ARIA 1.2). The operative role is the
+    // first token that is a defined role, so omitting one (e.g. `mark`) lets a
+    // later presentational token wrongly win.
     let query = format!(
         r#"(() => {{
-            const VALID_ROLES = new Set(['alert','alertdialog','application','article','banner','blockquote','button','caption','cell','checkbox','code','columnheader','combobox','complementary','contentinfo','definition','deletion','dialog','directory','document','emphasis','feed','figure','form','generic','grid','gridcell','group','heading','img','insertion','link','list','listbox','listitem','log','main','marquee','math','meter','menu','menubar','menuitem','menuitemcheckbox','menuitemradio','navigation','none','note','option','paragraph','presentation','progressbar','radio','radiogroup','region','row','rowgroup','rowheader','scrollbar','search','searchbox','separator','slider','spinbutton','status','strong','subscript','superscript','switch','tab','table','tablist','tabpanel','term','textbox','time','timer','toolbar','tooltip','tree','treegrid','treeitem']);
+            const VALID_ROLES = new Set(['alert','alertdialog','application','article','banner','blockquote','button','caption','cell','checkbox','code','columnheader','combobox','complementary','contentinfo','definition','deletion','dialog','directory','document','emphasis','feed','figure','form','generic','grid','gridcell','group','heading','img','insertion','link','list','listbox','listitem','log','main','mark','marquee','math','meter','menu','menubar','menuitem','menuitemcheckbox','menuitemradio','navigation','none','note','option','paragraph','presentation','progressbar','radio','radiogroup','region','row','rowgroup','rowheader','scrollbar','search','searchbox','separator','slider','spinbutton','status','strong','subscript','superscript','switch','tab','table','tablist','tabpanel','term','textbox','time','timer','toolbar','tooltip','tree','treegrid','treeitem']);
             const norm = s => (s || '').replace(/\s+/g, ' ').trim();
             const nameOf = el => {{
                 const lb = el.getAttribute('aria-labelledby');
@@ -7929,9 +7932,10 @@ async fn handle_getbyrole(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     let name = cmd.get("name").and_then(|v| v.as_str());
     let exact = cmd.get("exact").and_then(|v| v.as_bool()).unwrap_or(false);
 
-    // Presentational roles never appear in the AX tree (their whole point
-    // is removal from it), so they get a syntactic DOM match instead.
-    if is_presentational_role(role) {
+    // The AX tree cannot answer these, so they fall back to a DOM match on the
+    // explicit `role` attribute: none/presentation are pruned from the tree, and
+    // Chrome collapses `directory` into `list` (only the attribute tells them apart).
+    if is_presentational_role(role) || role.eq_ignore_ascii_case("directory") {
         return handle_presentational_getbyrole(cmd, state, role, name, exact).await;
     }
 
@@ -7972,10 +7976,10 @@ async fn handle_getbyrole(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     result
 }
 
-/// Map a Chrome AX tree role to its public ARIA role name. The AX tree
-/// mostly uses ARIA names already; the known divergence is `image`, which
-/// ARIA (and Playwright) call `img`. Queries are normalized through the
-/// same table, so both spellings match either way.
+/// Map a Chrome AX tree role to its ARIA name. The only divergence is `image`,
+/// which ARIA and Playwright call `img`; queries pass through the same table so
+/// both spellings match. `directory` is not mapped here (Chrome collapses it
+/// into `list`); it is matched on the DOM attribute instead, see handle_getbyrole.
 fn normalize_ax_role(role: &str) -> String {
     let lower = role.to_ascii_lowercase();
     match lower.as_str() {
