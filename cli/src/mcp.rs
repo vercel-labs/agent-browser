@@ -3746,6 +3746,76 @@ fn write_json_line(stdout: &mut io::Stdout, value: &Value) -> io::Result<()> {
 mod tests {
     use super::*;
 
+    /// Top-level CLI aliases share the canonical command's MCP tools. The MCP
+    /// server command itself cannot be exposed recursively through its own
+    /// tool surface.
+    const INTENTIONAL_MCP_TOP_LEVEL_OMISSIONS: &[(&str, &str)] = &[
+        ("goto", "alias of the open tool"),
+        ("navigate", "alias of the open tool"),
+        ("key", "alias of the press tool"),
+        ("quit", "alias of the close tool"),
+        ("exit", "alias of the close tool"),
+        ("scrollinto", "alias of the scroll-into-view tool"),
+        ("web-vitals", "alias of the vitals tool"),
+        ("plugins", "alias of the plugin tools"),
+        (
+            "mcp",
+            "starts this MCP server and cannot be called recursively",
+        ),
+    ];
+
+    fn top_level_command_for_tool(tool_name: &str) -> Option<&str> {
+        let suffix = tool_name.strip_prefix("agent_browser_")?;
+        match suffix {
+            "scroll_into_view" => Some("scrollintoview"),
+            "remove_init_script" => Some("removeinitscript"),
+            _ => suffix.split('_').next(),
+        }
+    }
+
+    #[test]
+    fn registered_cli_commands_have_mcp_tools_or_reviewed_omissions() {
+        let tool_definitions = tools();
+        let exposed: std::collections::BTreeSet<_> = tool_definitions
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .filter(|tool_name| *tool_name != TOOL_TOOLS_PROFILES)
+            .filter_map(top_level_command_for_tool)
+            .filter(|command| crate::commands::TOP_LEVEL_COMMANDS.contains(command))
+            .collect();
+        let omissions: std::collections::BTreeMap<_, _> = INTENTIONAL_MCP_TOP_LEVEL_OMISSIONS
+            .iter()
+            .copied()
+            .collect();
+        assert_eq!(
+            omissions.len(),
+            INTENTIONAL_MCP_TOP_LEVEL_OMISSIONS.len(),
+            "MCP omission list contains duplicate commands"
+        );
+
+        for (command, reason) in INTENTIONAL_MCP_TOP_LEVEL_OMISSIONS {
+            assert!(
+                crate::commands::TOP_LEVEL_COMMANDS.contains(command),
+                "MCP omission '{command}' is not a registered CLI command"
+            );
+            assert!(
+                !exposed.contains(command),
+                "CLI command '{command}' now has a dedicated MCP tool; remove its omission"
+            );
+            assert!(
+                !reason.trim().is_empty(),
+                "MCP omission '{command}' needs a review rationale"
+            );
+        }
+
+        for command in crate::commands::TOP_LEVEL_COMMANDS {
+            assert!(
+                exposed.contains(command) || omissions.contains_key(command),
+                "registered CLI command '{command}' has no dedicated MCP tool or reviewed omission"
+            );
+        }
+    }
+
     #[test]
     fn tools_list_contains_typed_tools() {
         let tools = tools();
