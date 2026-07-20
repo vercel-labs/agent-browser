@@ -3427,6 +3427,7 @@ SPA:
                              history.pushState + popstate/navigate events for other frameworks
 
 Init scripts:
+  addinitscript <script>     Register a script to run before page JS on future navigations
   removeinitscript <id>      Remove a script registered via --init-script or addinitscript
 
 Batch:

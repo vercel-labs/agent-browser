@@ -144,6 +144,7 @@ pub fn is_top_level_command(value: &str) -> bool {
             | "vitals"
             | "web-vitals"
             | "pushstate"
+            | "addinitscript"
             | "removeinitscript"
             | "session"
             | "mcp"
@@ -1938,6 +1939,20 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
             Ok(json!({ "id": id, "action": "pushstate", "url": url }))
         }
 
+        // === Add init script ===
+        "addinitscript" => {
+            // Whole tail is the source, so scripts with spaces work quoted or
+            // not (like `eval`).
+            let script = rest.join(" ");
+            if script.is_empty() {
+                return Err(ParseError::MissingArguments {
+                    context: "addinitscript".to_string(),
+                    usage: "addinitscript <script>",
+                });
+            }
+            Ok(json!({ "id": id, "action": "addinitscript", "script": script }))
+        }
+
         // === Remove init script ===
         "removeinitscript" => {
             let identifier = rest.first().ok_or_else(|| ParseError::MissingArguments {
@@ -3368,6 +3383,22 @@ mod tests {
         let cmd = parse_command(&args("pushstate /foo"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "pushstate");
         assert_eq!(cmd["url"], "/foo");
+    }
+
+    #[test]
+    fn test_addinitscript_command() {
+        let cmd = parse_command(
+            &args("addinitscript window.__testMode = true"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "addinitscript");
+        assert_eq!(cmd["script"], "window.__testMode = true");
+    }
+
+    #[test]
+    fn test_addinitscript_requires_script() {
+        assert!(parse_command(&args("addinitscript"), &default_flags()).is_err());
     }
 
     #[test]
