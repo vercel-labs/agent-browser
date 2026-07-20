@@ -441,19 +441,94 @@ pub async fn select_option(
     // Matching nothing must be an error, not a silent success: an agent that
     // selects a misspelled option otherwise sees "Done", and only discovers
     // the page state is wrong after more commands. List what was available.
-    let js = r#"function(vals) {
-            const options = Array.from(this.options);
-            let matched = 0;
-            for (const opt of options) {
-                opt.selected = vals.includes(opt.value) || vals.includes(opt.textContent.trim());
-                if (opt.selected) matched += 1;
+    //
+    // Native <select> is handled inline. For a div-based ARIA combobox/listbox
+    // (Radix, Headless UI, etc.) there is no `this.options`, so emulate a human:
+    // open the widget, wait for its role=option items, and click the match.
+    let js = r#"async function(vals) {
+            const norm = (s) => (s || '').trim();
+
+            // Native <select>: unchanged behavior.
+            if (this instanceof HTMLSelectElement) {
+                const options = Array.from(this.options);
+                let matched = 0;
+                for (const opt of options) {
+                    opt.selected = vals.includes(opt.value) || vals.includes(norm(opt.textContent));
+                    if (opt.selected) matched += 1;
+                }
+                if (matched === 0) {
+                    const available = options.map(o => o.value + ' ("' + norm(o.textContent) + '")').join(', ');
+                    return { error: 'No option matched ' + JSON.stringify(vals) + '. Available options: ' + available };
+                }
+                this.dispatchEvent(new Event('change', { bubbles: true }));
+                return { matched };
             }
-            if (matched === 0) {
-                const available = options.map(o => o.value + ' ("' + o.textContent.trim() + '")').join(', ');
+
+            // Custom ARIA combobox/listbox widget.
+            const role = this.getAttribute('role');
+            if (role !== 'combobox' && role !== 'listbox') {
+                return { error: 'select target <' + this.tagName.toLowerCase() + '> is not a <select> or a role=combobox/listbox element' };
+            }
+
+            const realClick = (el) => {
+                const r = el.getBoundingClientRect();
+                const o = { bubbles: true, cancelable: true, composed: true,
+                            clientX: r.left + r.width / 2, clientY: r.top + r.height / 2,
+                            button: 0, pointerId: 1, isPrimary: true };
+                el.dispatchEvent(new PointerEvent('pointerdown', o));
+                el.dispatchEvent(new MouseEvent('mousedown', o));
+                el.dispatchEvent(new PointerEvent('pointerup', o));
+                el.dispatchEvent(new MouseEvent('mouseup', o));
+                el.dispatchEvent(new MouseEvent('click', o));
+            };
+
+            // Open the listbox, unless it is already open: clicking an open
+            // combobox toggles it shut. A role=listbox target is already open.
+            if (role === 'combobox' && this.getAttribute('aria-expanded') !== 'true') {
+                realClick(this);
+            }
+
+            const collect = () => {
+                // A role=listbox holds its own options; a combobox points at them
+                // via aria-controls, or portals them (then fall back to the document).
+                let scope = role === 'listbox' ? this : null;
+                if (!scope) {
+                    const controls = this.getAttribute('aria-controls');
+                    if (controls) { const byId = document.getElementById(controls); if (byId) scope = byId; }
+                }
+                const nodes = Array.from((scope || document).querySelectorAll('[role=option]'));
+                return nodes.filter(o => o.getClientRects().length > 0);
+            };
+
+            // Options may be injected or shown asynchronously after opening.
+            let options = collect();
+            for (let i = 0; i < 40 && options.length === 0; i++) {
+                await new Promise((r) => setTimeout(r, 50));
+                options = collect();
+            }
+            if (options.length === 0) {
+                return { error: 'combobox opened but no visible role=option elements were found' };
+            }
+
+            // Exact match on the option's accessible name (aria-label or trimmed text)
+            // or an explicit value attribute, mirroring the native path's semantics.
+            // Select every requested value, like the native <select multiple> path,
+            // and error only if none match (no silent partial success).
+            const wanted = options.filter((o) => {
+                const name = norm(o.getAttribute('aria-label')) || norm(o.textContent);
+                const val = norm(o.getAttribute('data-value')) || norm(o.getAttribute('value'));
+                return vals.includes(name) || (val && vals.includes(val));
+            });
+            if (wanted.length === 0) {
+                const available = options.map((o) => '"' + norm(o.textContent) + '"').join(', ');
                 return { error: 'No option matched ' + JSON.stringify(vals) + '. Available options: ' + available };
             }
-            this.dispatchEvent(new Event('change', { bubbles: true }));
-            return { matched };
+
+            for (const opt of wanted) {
+                opt.scrollIntoView({ block: 'nearest' });
+                realClick(opt);
+            }
+            return { matched: wanted.length };
         }"#
     .to_string();
 
@@ -468,11 +543,24 @@ pub async fn select_option(
                     object_id: None,
                 }]),
                 return_by_value: Some(true),
-                await_promise: Some(false),
+                await_promise: Some(true),
             },
             Some(&effective_session_id),
         )
         .await?;
+
+    // A thrown script error must surface, not silently succeed. Previously a
+    // non-<select> element hit `Array.from(this.options)`, threw, and the
+    // exception was ignored, so the caller saw "Done" while nothing happened.
+    if let Some(exc) = result.get("exceptionDetails") {
+        let msg = exc
+            .get("exception")
+            .and_then(|e| e.get("description"))
+            .and_then(|d| d.as_str())
+            .or_else(|| exc.get("text").and_then(|t| t.as_str()))
+            .unwrap_or("select failed: script error");
+        return Err(msg.to_string());
+    }
 
     if let Some(error) = result
         .get("result")
