@@ -1898,6 +1898,16 @@ fn tool(name: &str, title: &str, description: &str, properties: Value, required:
             "description": "Maximum time to wait for this tool call."
         }),
     );
+    if supports_snapshot_after_tool(name) {
+        props.insert(
+            "snapshotAfter".to_string(),
+            json!({
+                "type": "boolean",
+                "default": false,
+                "description": "Return a post-action snapshot diff and current element refs."
+            }),
+        );
+    }
 
     let mut schema = serde_json::Map::new();
     schema.insert("type".to_string(), json!("object"));
@@ -1914,6 +1924,45 @@ fn tool(name: &str, title: &str, description: &str, properties: Value, required:
         "inputSchema": Value::Object(schema),
         "annotations": tool_annotations(name),
     })
+}
+
+fn supports_snapshot_after_tool(name: &str) -> bool {
+    matches!(
+        name,
+        TOOL_OPEN
+            | TOOL_CLICK
+            | TOOL_BACK
+            | TOOL_FORWARD
+            | TOOL_RELOAD
+            | TOOL_DBLCLICK
+            | TOOL_FILL
+            | TOOL_TYPE
+            | TOOL_PRESS
+            | TOOL_KEYDOWN
+            | TOOL_KEYUP
+            | TOOL_KEYBOARD_TYPE
+            | TOOL_KEYBOARD_INSERT_TEXT
+            | TOOL_HOVER
+            | TOOL_FOCUS
+            | TOOL_CHECK
+            | TOOL_UNCHECK
+            | TOOL_SELECT
+            | TOOL_DRAG
+            | TOOL_UPLOAD
+            | TOOL_SCROLL
+            | TOOL_SCROLL_INTO_VIEW
+            | TOOL_WAIT_MS
+            | TOOL_WAIT_FOR_SELECTOR
+            | TOOL_WAIT_FOR_TEXT
+            | TOOL_WAIT_FOR_URL
+            | TOOL_WAIT_FOR_LOAD
+            | TOOL_WAIT_FOR_FUNCTION
+            | TOOL_DIALOG_ACCEPT
+            | TOOL_DIALOG_DISMISS
+            | TOOL_TAP
+            | TOOL_SWIPE
+            | TOOL_FIND
+    )
 }
 
 fn tool_annotations(name: &str) -> Value {
@@ -3519,6 +3568,10 @@ fn append_common_global_args(
             args.push(domains.join(","));
         }
     }
+    if let Some(enabled) = optional_bool(arguments, "snapshotAfter")? {
+        args.push("--snapshot-after-action".to_string());
+        args.push(enabled.to_string());
+    }
 
     Ok(())
 }
@@ -3680,6 +3733,9 @@ fn response_text(value: &Value) -> Option<String> {
         }
 
         if let Some(data) = obj.get("data") {
+            if let Some(observation) = data.get("observation") {
+                return Some(crate::output::format_post_action_observation(observation));
+            }
             for key in [
                 "snapshot", "text", "html", "report", "value", "content", "title", "url", "path",
             ] {
@@ -3767,6 +3823,36 @@ mod tests {
         assert!(names.contains(&TOOL_SESSION_ID));
         assert!(names.contains(&TOOL_SESSION_INFO));
         assert!(!names.contains(&"agent_browser_frame_list"));
+    }
+
+    #[test]
+    fn mutating_tools_expose_snapshot_after_without_adding_it_to_snapshot() {
+        let tools = tools();
+        let click = tools
+            .iter()
+            .find(|tool| tool["name"] == TOOL_CLICK)
+            .unwrap();
+        let snapshot = tools
+            .iter()
+            .find(|tool| tool["name"] == TOOL_SNAPSHOT)
+            .unwrap();
+
+        assert_eq!(
+            click["inputSchema"]["properties"]["snapshotAfter"]["type"],
+            "boolean"
+        );
+        assert!(snapshot["inputSchema"]["properties"]
+            .get("snapshotAfter")
+            .is_none());
+
+        let find = tools
+            .iter()
+            .find(|tool| tool["name"].as_str() == Some(TOOL_FIND))
+            .unwrap();
+        assert_eq!(
+            find["inputSchema"]["properties"]["snapshotAfter"]["type"],
+            "boolean"
+        );
     }
 
     #[test]
@@ -4090,6 +4176,15 @@ mod tests {
         .unwrap();
 
         assert_eq!(args, vec!["--allowed-domains", "example.com,*.example.org"]);
+    }
+
+    #[test]
+    fn common_global_args_forward_snapshot_after_explicitly() {
+        let mut args = Vec::new();
+
+        append_common_global_args(&mut args, &json!({ "snapshotAfter": true }), None).unwrap();
+
+        assert_eq!(args, vec!["--snapshot-after-action", "true"]);
     }
 
     #[test]

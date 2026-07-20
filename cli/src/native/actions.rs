@@ -208,6 +208,15 @@ pub struct MouseState {
     pub buttons: i32,
 }
 
+/// Snapshot text and options used as the baseline for an opt-in post-action
+/// observation. Keeping this in daemon state lets separate CLI and MCP calls
+/// receive a lightweight diff instead of requesting another full snapshot.
+#[derive(Clone)]
+struct ObservationBaseline {
+    snapshot: String,
+    options: SnapshotOptions,
+}
+
 #[derive(Default)]
 struct DrainedEvents {
     pending_acks: Vec<i64>,
@@ -318,6 +327,9 @@ pub struct DaemonState {
     pub webdriver_backend: Option<super::webdriver::backend::WebDriverBackend>,
     pub backend_type: BackendType,
     pub ref_map: RefMap,
+    /// Most recent explicit or post-action snapshot for diffing the next
+    /// `--snapshot-after-action` observation.
+    last_observation: Option<ObservationBaseline>,
     pub domain_filter: Arc<RwLock<Option<DomainFilter>>>,
     pub event_tracker: EventTracker,
     pub session_name: Option<String>,
@@ -417,6 +429,7 @@ impl DaemonState {
             webdriver_backend: None,
             backend_type: BackendType::Cdp,
             ref_map: RefMap::new(),
+            last_observation: None,
             domain_filter: Arc::new(RwLock::new(
                 env::var("AGENT_BROWSER_ALLOWED_DOMAINS")
                     .ok()
@@ -1875,6 +1888,7 @@ pub(crate) async fn close_current_browser(state: &mut DaemonState) -> Result<(),
     state.launch_hash = None;
     state.network_auto_attach_installed = false;
     state.screencasting = false;
+    state.last_observation = None;
     state.reset_input_state();
     state.update_stream_client().await;
 
@@ -2402,6 +2416,36 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         validate_restore_if_pending(state).await;
     }
 
+    // An explicit snapshot establishes the baseline for a later opt-in
+    // post-action diff, even when the next command arrives through a separate
+    // CLI process or MCP tool call.
+    if action == "snapshot" {
+        state.last_observation = match &result {
+            Ok(data) => data
+                .get("snapshot")
+                .and_then(|v| v.as_str())
+                .map(|snapshot| ObservationBaseline {
+                    snapshot: snapshot.to_string(),
+                    options: snapshot_options_from_command(cmd),
+                }),
+            // A failed explicit snapshot may have raced a context change. Do
+            // not retain an older baseline that the caller could mistake for
+            // the attempted observation.
+            Err(_) => None,
+        };
+    }
+
+    // A baseline is scoped to the active browsing context. Do not diff a
+    // later action against a snapshot from a different tab, window, or frame.
+    if result.is_ok()
+        && matches!(
+            action,
+            "tab_new" | "tab_switch" | "tab_close" | "window_new" | "frame" | "mainframe"
+        )
+    {
+        state.last_observation = None;
+    }
+
     // Stamp browser-touching commands so periodic autosave waits for an
     // active command burst to settle before collecting state. Stamped even on
     // error: a failed click can still have navigated.
@@ -2432,6 +2476,46 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
             lifecycle_launched,
             lifecycle_relaunched_browser,
         );
+    }
+
+    // Capture only after the action's CDP events have been applied. This
+    // avoids racing a navigation or dynamic render and lets us skip a
+    // renderer-blocking JavaScript dialog without changing the successful
+    // action result into an error.
+    if cmd
+        .get("snapshotAfter")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+        && crate::commands::supports_snapshot_after_command(cmd)
+        && resp.get("success").and_then(|v| v.as_bool()) == Some(true)
+    {
+        let observation = if let Some(dialog) = state.pending_dialog.as_ref() {
+            Err(format!(
+                "A JavaScript {} dialog is blocking the page. Resolve it, then take a snapshot.",
+                dialog.dialog_type
+            ))
+        } else {
+            capture_post_action_observation(state).await
+        };
+
+        let observation = match observation {
+            Ok(value) => value,
+            Err(error) => {
+                // The page may have changed even though optional observation
+                // capture failed, so the old baseline must not be reused.
+                state.last_observation = None;
+                json!({ "mode": "error", "error": error })
+            }
+        };
+
+        if let Some(data) = resp.get_mut("data") {
+            if let Some(obj) = data.as_object_mut() {
+                obj.insert("observation".to_string(), observation);
+            } else {
+                let result = std::mem::replace(data, Value::Null);
+                *data = json!({ "result": result, "observation": observation });
+            }
+        }
     }
 
     // Auto-report pending JavaScript dialog so agents know why commands may hang
@@ -4471,6 +4555,102 @@ async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         .collect();
 
     Ok(json!({ "snapshot": tree, "origin": url, "refs": refs }))
+}
+
+fn snapshot_options_from_command(cmd: &Value) -> SnapshotOptions {
+    SnapshotOptions {
+        selector: cmd
+            .get("selector")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        interactive: cmd
+            .get("interactive")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        compact: cmd
+            .get("compact")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        depth: cmd
+            .get("maxDepth")
+            .and_then(|v| v.as_u64())
+            .map(|d| d as usize),
+        urls: cmd.get("urls").and_then(|v| v.as_bool()).unwrap_or(false),
+    }
+}
+
+fn snapshot_command_from_options(options: &SnapshotOptions) -> Value {
+    let mut cmd = json!({
+        "action": "snapshot",
+        "interactive": options.interactive,
+        "compact": options.compact,
+        "urls": options.urls,
+    });
+    if let Some(ref selector) = options.selector {
+        cmd["selector"] = json!(selector);
+    }
+    if let Some(depth) = options.depth {
+        cmd["maxDepth"] = json!(depth);
+    }
+    cmd
+}
+
+/// Capture the post-action observation requested by
+/// `--snapshot-after-action`. When an explicit snapshot established a
+/// baseline, only its unified diff is returned. The complete current ref map
+/// is always included so agents can continue without a separate snapshot
+/// turn. If there is no baseline, the first observation contains the full
+/// compact interactive snapshot and becomes the baseline for the next action.
+async fn capture_post_action_observation(state: &mut DaemonState) -> Result<Value, String> {
+    let baseline = state.last_observation.clone();
+    let options = baseline
+        .as_ref()
+        .map(|baseline| baseline.options.clone())
+        .unwrap_or(SnapshotOptions {
+            interactive: true,
+            compact: true,
+            ..SnapshotOptions::default()
+        });
+
+    // Delegate through the canonical snapshot handler. Besides avoiding two
+    // subtly different snapshot paths, this composes with stable-ref work in
+    // upstream PR #1444 without copying or superseding that contribution.
+    let snapshot_cmd = snapshot_command_from_options(&options);
+    let captured = handle_snapshot(&snapshot_cmd, state).await?;
+    let current = captured
+        .get("snapshot")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let origin = captured.get("origin").cloned().unwrap_or(Value::Null);
+    let refs = captured.get("refs").cloned().unwrap_or_else(|| json!({}));
+
+    state.last_observation = Some(ObservationBaseline {
+        snapshot: current.clone(),
+        options,
+    });
+
+    if let Some(baseline) = baseline {
+        let result = diff::diff_snapshots(&baseline.snapshot, &current);
+        Ok(json!({
+            "mode": "diff",
+            "origin": origin,
+            "diff": result.diff,
+            "changed": result.changed,
+            "additions": result.additions,
+            "removals": result.removals,
+            "unchanged": result.unchanged,
+            "refs": refs,
+        }))
+    } else {
+        Ok(json!({
+            "mode": "full",
+            "origin": origin,
+            "snapshot": current,
+            "changed": true,
+            "refs": refs,
+        }))
+    }
 }
 
 async fn handle_screenshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -10662,6 +10842,20 @@ mod tests {
         assert!(!should_validate_restore_after_action("launch"));
         assert!(should_validate_restore_after_action("navigate"));
         assert!(should_validate_restore_after_action("click"));
+    }
+
+    #[test]
+    fn test_post_action_snapshot_options_round_trip() {
+        let options = SnapshotOptions {
+            selector: Some("#main".to_string()),
+            interactive: true,
+            compact: true,
+            depth: Some(4),
+            urls: true,
+        };
+
+        let command = snapshot_command_from_options(&options);
+        assert_eq!(snapshot_options_from_command(&command), options);
     }
 
     #[test]

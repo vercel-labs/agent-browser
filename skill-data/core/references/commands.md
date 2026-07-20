@@ -50,6 +50,13 @@ agent-browser snapshot -d 3       # Limit depth to 3
 agent-browser snapshot -s "#main" # Scope to CSS selector
 ```
 
+Add `--snapshot-after-action` to a page-changing command to return its snapshot diff and current refs in the same response. With MCP tools, use `snapshotAfter: true`:
+
+```bash
+agent-browser snapshot -i
+agent-browser click @e1 --snapshot-after-action
+```
+
 ## Interactions (use @refs from snapshot)
 
 ```bash

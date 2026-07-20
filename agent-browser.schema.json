@@ -149,6 +149,10 @@
       "type": "boolean",
       "description": "Wrap page output in boundary markers for LLM safety."
     },
+    "snapshotAfterAction": {
+      "type": "boolean",
+      "description": "Return a post-action snapshot diff and current element refs after page-changing commands."
+    },
     "maxOutput": {
       "type": "integer",
       "minimum": 0,

@@ -848,6 +848,28 @@ agent-browser snapshot -i -c -d 5         # Combine options
 | `-d, --depth <n>`      | Limit tree depth                                                        |
 | `-s, --selector <sel>` | Scope to CSS selector                                                   |
 
+## Post-action Snapshot Diffs
+
+Use `--snapshot-after-action` on page-changing commands to receive the resulting accessibility change and current element refs in the same response. This removes the extra model turn normally spent requesting another snapshot:
+
+```bash
+agent-browser open https://example.com
+agent-browser snapshot -i
+agent-browser click @e1 --snapshot-after-action
+# ✓ Done
+# Post-action observation diff (+2, -1):
+# ...
+# Current refs:
+#   @e1 button "Continue"
+#   @e2 link "Account"
+```
+
+When an explicit snapshot exists, agent-browser reuses its options and returns a unified diff against it. Without a baseline, the first page-changing command returns a full compact interactive observation. Successful observations become the next baseline. JSON responses expose the same data under `data.observation`, and mutating MCP tools accept `snapshotAfter: true`.
+
+The observation always includes the complete current ref map when the page changed. Snapshot collection still uses the canonical snapshot engine, so this feature reduces model turns and response size rather than browser-side snapshot work. Set `snapshotAfterAction: true` in `agent-browser.json` or `AGENT_BROWSER_SNAPSHOT_AFTER_ACTION=1` to enable it persistently. Pass `--snapshot-after-action false` to override a persistent setting for one command.
+
+This feature does not redefine ref identity or stale-ref safety. That separate work remains covered by [PR #1444](https://github.com/vercel-labs/agent-browser/pull/1444), contributed by [@iddogino](https://github.com/iddogino), and is designed to compose with these observation diffs.
+
 ## Annotated Screenshots
 
 The `--annotate` flag overlays numbered labels on interactive elements in the screenshot. Each label `[N]` corresponds to ref `@eN`, so the same refs work for both visual and text-based workflows.
@@ -911,6 +933,7 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 | `--color-scheme <scheme>` | Color scheme: `dark`, `light`, `no-preference` (or `AGENT_BROWSER_COLOR_SCHEME` env) |
 | `--download-path <path>` | Default download directory (or `AGENT_BROWSER_DOWNLOAD_PATH` env) |
 | `--content-boundaries` | Wrap page output in boundary markers for LLM safety (or `AGENT_BROWSER_CONTENT_BOUNDARIES` env) |
+| `--snapshot-after-action` | Return a snapshot diff and current refs after page-changing commands (or `AGENT_BROWSER_SNAPSHOT_AFTER_ACTION` env) |
 | `--max-output <chars>` | Truncate page output to N characters (or `AGENT_BROWSER_MAX_OUTPUT` env) |
 | `--allowed-domains <list>` | Comma-separated allowed domain patterns; also disables WebRTC peer connections in supported Chromium sessions and rejects CDP, auto-connect, Chrome profiles, restore/state replay, direct-page provider plugins, unsafe startup `--args`, iOS, and Safari (or `AGENT_BROWSER_ALLOWED_DOMAINS` env) |
 | `--action-policy <path>` | Path to action policy JSON file (or `AGENT_BROWSER_ACTION_POLICY` env) |
@@ -995,6 +1018,7 @@ Create an `agent-browser.json` file to set persistent defaults instead of repeat
   "profile": "./browser-data",
   "userAgent": "my-agent/1.0",
   "hideScrollbars": false,
+  "snapshotAfterAction": true,
   "ignoreHttpsErrors": true,
   "plugins": [
     {
