@@ -71,92 +71,98 @@ pub fn gen_id() -> String {
     )
 }
 
+/// Every token accepted as a top-level CLI command.
+///
+/// Keep aliases and commands dispatched directly by `main` in this list. The
+/// command-surface contract tests below require every entry to be reachable by
+/// the normal parser or explicitly identified as a standalone command.
+pub const TOP_LEVEL_COMMANDS: &[&str] = &[
+    "open",
+    "goto",
+    "navigate",
+    "back",
+    "forward",
+    "reload",
+    "read",
+    "click",
+    "dblclick",
+    "fill",
+    "type",
+    "hover",
+    "focus",
+    "check",
+    "uncheck",
+    "select",
+    "drag",
+    "upload",
+    "download",
+    "press",
+    "key",
+    "keydown",
+    "keyup",
+    "keyboard",
+    "scroll",
+    "scrollintoview",
+    "scrollinto",
+    "wait",
+    "screenshot",
+    "pdf",
+    "snapshot",
+    "eval",
+    "close",
+    "quit",
+    "exit",
+    "inspect",
+    "auth",
+    "confirm",
+    "deny",
+    "connect",
+    "stream",
+    "get",
+    "is",
+    "find",
+    "mouse",
+    "set",
+    "network",
+    "storage",
+    "cookies",
+    "tab",
+    "window",
+    "frame",
+    "dialog",
+    "trace",
+    "profiler",
+    "record",
+    "console",
+    "errors",
+    "highlight",
+    "clipboard",
+    "state",
+    "tap",
+    "swipe",
+    "device",
+    "diff",
+    "batch",
+    "react",
+    "vitals",
+    "web-vitals",
+    "pushstate",
+    "removeinitscript",
+    "session",
+    "mcp",
+    "doctor",
+    "install",
+    "upgrade",
+    "profiles",
+    "skills",
+    "dashboard",
+    "plugin",
+    "plugins",
+    "chat",
+];
+
 pub fn is_top_level_command(value: &str) -> bool {
-    matches!(
-        value,
-        "open"
-            | "goto"
-            | "navigate"
-            | "back"
-            | "forward"
-            | "reload"
-            | "read"
-            | "click"
-            | "dblclick"
-            | "fill"
-            | "type"
-            | "hover"
-            | "focus"
-            | "check"
-            | "uncheck"
-            | "select"
-            | "drag"
-            | "upload"
-            | "download"
-            | "press"
-            | "key"
-            | "keydown"
-            | "keyup"
-            | "keyboard"
-            | "scroll"
-            | "scrollintoview"
-            | "scrollinto"
-            | "wait"
-            | "screenshot"
-            | "pdf"
-            | "snapshot"
-            | "eval"
-            | "close"
-            | "quit"
-            | "exit"
-            | "inspect"
-            | "auth"
-            | "confirm"
-            | "deny"
-            | "connect"
-            | "stream"
-            | "get"
-            | "is"
-            | "find"
-            | "mouse"
-            | "set"
-            | "network"
-            | "storage"
-            | "cookies"
-            | "tab"
-            | "window"
-            | "frame"
-            | "dialog"
-            | "trace"
-            | "profiler"
-            | "record"
-            | "console"
-            | "errors"
-            | "highlight"
-            | "clipboard"
-            | "state"
-            | "tap"
-            | "swipe"
-            | "device"
-            | "diff"
-            | "batch"
-            | "react"
-            | "vitals"
-            | "web-vitals"
-            | "pushstate"
-            | "removeinitscript"
-            | "session"
-            | "mcp"
-            | "doctor"
-            | "install"
-            | "upgrade"
-            | "profiles"
-            | "skills"
-            | "dashboard"
-            | "plugin"
-            | "plugins"
-            | "chat"
-    )
+    TOP_LEVEL_COMMANDS.contains(&value)
 }
 
 /// Parse a cookies file in one of three auto-detected formats:
@@ -334,6 +340,14 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
     }
 
     let cmd = args[0].as_str();
+    // The registry is the executable command-surface contract. A new parser
+    // arm is intentionally unreachable until its token is registered, which
+    // prevents parse_command and global-flag cleanup from drifting apart.
+    if !is_top_level_command(cmd) {
+        return Err(ParseError::UnknownCommand {
+            command: cmd.to_string(),
+        });
+    }
     let rest: Vec<&str> = args[1..].iter().map(|s| s.as_str()).collect();
     let id = gen_id();
 
@@ -3081,10 +3095,15 @@ pub fn shell_words_split(s: &str) -> Vec<String> {
 }
 
 #[cfg(test)]
+pub(crate) fn command_contract_flags() -> Flags {
+    tests::default_flags()
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
-    fn default_flags() -> Flags {
+    pub(super) fn default_flags() -> Flags {
         Flags {
             session: "test".to_string(),
             json: false,
@@ -3160,6 +3179,75 @@ mod tests {
 
     fn args(s: &str) -> Vec<String> {
         s.split_whitespace().map(String::from).collect()
+    }
+
+    /// Commands routed by `main` before `parse_command` intentionally have no
+    /// parser arm. Keeping this allowlist test-owned makes those exceptions
+    /// visible without turning dispatch metadata into a second runtime router.
+    const STANDALONE_TOP_LEVEL_COMMANDS: &[(&str, &str)] = &[
+        ("session", "handled by the session lifecycle entrypoint"),
+        ("mcp", "starts the MCP stdio server"),
+        ("doctor", "runs diagnostics without a session daemon"),
+        ("install", "runs the browser installer"),
+        ("upgrade", "runs the package upgrade flow"),
+        ("profiles", "lists local Chrome profiles"),
+        ("skills", "manages bundled skills"),
+        ("dashboard", "manages the standalone dashboard process"),
+        ("plugin", "manages the plugin registry"),
+        ("plugins", "aliases the plugin registry command"),
+        ("chat", "runs the AI chat entrypoint"),
+    ];
+
+    #[test]
+    fn top_level_commands_are_unique_and_nonempty() {
+        let commands: std::collections::BTreeSet<_> = TOP_LEVEL_COMMANDS.iter().copied().collect();
+        assert_eq!(
+            commands.len(),
+            TOP_LEVEL_COMMANDS.len(),
+            "top-level command registry contains duplicate tokens"
+        );
+        assert!(
+            TOP_LEVEL_COMMANDS.iter().all(|command| !command.is_empty()),
+            "top-level command registry contains an empty token"
+        );
+    }
+
+    #[test]
+    fn top_level_commands_reach_parser_or_reviewed_standalone_dispatch() {
+        let flags = default_flags();
+        let standalone: std::collections::BTreeMap<_, _> =
+            STANDALONE_TOP_LEVEL_COMMANDS.iter().copied().collect();
+        assert_eq!(
+            standalone.len(),
+            STANDALONE_TOP_LEVEL_COMMANDS.len(),
+            "standalone command allowlist contains duplicate tokens"
+        );
+
+        for (command, reason) in STANDALONE_TOP_LEVEL_COMMANDS {
+            assert!(
+                TOP_LEVEL_COMMANDS.contains(command),
+                "standalone command '{command}' is missing from the top-level registry"
+            );
+            assert!(
+                !reason.trim().is_empty(),
+                "standalone command '{command}' needs a review rationale"
+            );
+        }
+
+        for command in TOP_LEVEL_COMMANDS {
+            let result = parse_command(&[command.to_string()], &flags);
+            if standalone.contains_key(command) {
+                assert!(
+                    matches!(result, Err(ParseError::UnknownCommand { .. })),
+                    "standalone command '{command}' is now parser-reachable; remove its reviewed exception"
+                );
+            } else {
+                assert!(
+                    !matches!(result, Err(ParseError::UnknownCommand { .. })),
+                    "registered command '{command}' is unreachable through parse_command"
+                );
+            }
+        }
     }
 
     // === Cookies Tests ===

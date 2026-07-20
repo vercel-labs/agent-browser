@@ -7,6 +7,8 @@
 
 use serde_json::{json, Value};
 
+use crate::commands::{parse_command, shell_words_split};
+
 use super::actions::{execute_command, DaemonState};
 
 const ENCRYPTION_KEY_ENV: &str = "AGENT_BROWSER_ENCRYPTION_KEY";
@@ -388,6 +390,45 @@ fn minimal_command(action: &str, id: &str) -> Value {
 // ---------------------------------------------------------------------------
 // 1. Action dispatch coverage
 // ---------------------------------------------------------------------------
+
+#[test]
+fn test_representative_cli_commands_reach_native_dispatch_contract() {
+    let samples = [
+        ("open https://example.com", "navigate"),
+        ("read", "read"),
+        ("snapshot -i", "snapshot"),
+        ("click body", "click"),
+        ("network requests", "requests"),
+        ("cookies get", "cookies_get"),
+        ("storage local get key", "storage_get"),
+        ("state list", "state_list"),
+        ("auth list", "auth_list"),
+        ("tab list", "tab_list"),
+        ("dialog status", "dialog"),
+        ("trace start", "trace_start"),
+        ("diff snapshot", "diff_snapshot"),
+        ("device list", "device_list"),
+        ("confirm confirmation-1", "confirm"),
+    ];
+    let flags = crate::commands::command_contract_flags();
+
+    for (invocation, expected_action) in samples {
+        let command = parse_command(&shell_words_split(invocation), &flags)
+            .unwrap_or_else(|error| panic!("'{invocation}' did not parse: {}", error.format()));
+        let action = command["action"]
+            .as_str()
+            .unwrap_or_else(|| panic!("'{invocation}' did not produce a daemon action"));
+
+        assert_eq!(
+            action, expected_action,
+            "unexpected action for '{invocation}'"
+        );
+        assert!(
+            DOCUMENTED_ACTIONS.contains(&action),
+            "'{invocation}' parsed to '{action}', which is absent from the native dispatch contract"
+        );
+    }
+}
 
 #[tokio::test]
 async fn test_all_documented_actions_are_handled() {
