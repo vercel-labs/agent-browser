@@ -7,6 +7,9 @@ use tokio::io::AsyncWriteExt;
 use super::http::cors_headers_for_origin;
 
 pub(crate) const DEFAULT_AI_GATEWAY_URL: &str = "https://ai-gateway.vercel.sh";
+pub(crate) const DEFAULT_ATLASCLOUD_URL: &str = "https://api.atlascloud.ai";
+pub(crate) const DEFAULT_AI_GATEWAY_MODEL: &str = "anthropic/claude-sonnet-4.6";
+pub(crate) const DEFAULT_ATLASCLOUD_MODEL: &str = "qwen/qwen3.5-flash";
 
 static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
@@ -14,17 +17,51 @@ pub(crate) fn http_client() -> &'static reqwest::Client {
     HTTP_CLIENT.get_or_init(reqwest::Client::new)
 }
 
+pub(crate) fn configured_chat_base_url() -> String {
+    if let Ok(url) = std::env::var("AI_GATEWAY_URL") {
+        return url.trim_end_matches('/').to_string();
+    }
+    if std::env::var("ATLASCLOUD_API_KEY").is_ok() {
+        return std::env::var("ATLASCLOUD_API_BASE")
+            .unwrap_or_else(|_| DEFAULT_ATLASCLOUD_URL.to_string())
+            .trim_end_matches('/')
+            .to_string();
+    }
+    DEFAULT_AI_GATEWAY_URL.to_string()
+}
+
+pub(crate) fn configured_chat_api_key() -> Option<String> {
+    std::env::var("AI_GATEWAY_API_KEY")
+        .ok()
+        .or_else(|| std::env::var("ATLASCLOUD_API_KEY").ok())
+}
+
+pub(crate) fn default_chat_model() -> String {
+    if let Ok(model) = std::env::var("AI_GATEWAY_MODEL") {
+        return model;
+    }
+    if let Ok(model) = std::env::var("ATLASCLOUD_MODEL") {
+        return model;
+    }
+    if std::env::var("ATLASCLOUD_API_KEY").is_ok() {
+        return DEFAULT_ATLASCLOUD_MODEL.to_string();
+    }
+    DEFAULT_AI_GATEWAY_MODEL.to_string()
+}
+
+pub(crate) fn missing_api_key_message() -> &'static str {
+    "AI_GATEWAY_API_KEY or ATLASCLOUD_API_KEY not set. Set one of these environment variables to enable AI chat."
+}
+
 pub(crate) fn is_chat_enabled() -> bool {
-    std::env::var("AI_GATEWAY_API_KEY").is_ok()
+    configured_chat_api_key().is_some()
 }
 
 pub(super) fn chat_status_json() -> String {
     let enabled = is_chat_enabled();
     let mut obj = json!({ "enabled": enabled });
     if enabled {
-        if let Ok(model) = std::env::var("AI_GATEWAY_MODEL") {
-            obj["model"] = Value::String(model);
-        }
+        obj["model"] = Value::String(default_chat_model());
     }
     obj.to_string()
 }
@@ -34,13 +71,10 @@ pub(super) async fn handle_models_request(
     origin: Option<&str>,
 ) {
     let cors = cors_headers_for_origin(origin);
-    let gateway_url = std::env::var("AI_GATEWAY_URL")
-        .unwrap_or_else(|_| DEFAULT_AI_GATEWAY_URL.to_string())
-        .trim_end_matches('/')
-        .to_string();
-    let api_key = match std::env::var("AI_GATEWAY_API_KEY") {
-        Ok(k) => k,
-        Err(_) => {
+    let gateway_url = configured_chat_base_url();
+    let api_key = match configured_chat_api_key() {
+        Some(k) => k,
+        None => {
             let body = r#"{"data":[]}"#;
             let resp = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n{cors}\r\n",
@@ -670,14 +704,11 @@ pub(super) async fn handle_chat_request(
     origin: Option<&str>,
 ) {
     let cors = cors_headers_for_origin(origin);
-    let gateway_url = std::env::var("AI_GATEWAY_URL")
-        .unwrap_or_else(|_| DEFAULT_AI_GATEWAY_URL.to_string())
-        .trim_end_matches('/')
-        .to_string();
-    let api_key = match std::env::var("AI_GATEWAY_API_KEY") {
-        Ok(k) => k,
-        Err(_) => {
-            let err = r#"{"error":"AI_GATEWAY_API_KEY not set. Set the AI_GATEWAY_API_KEY environment variable to enable AI chat."}"#;
+    let gateway_url = configured_chat_base_url();
+    let api_key = match configured_chat_api_key() {
+        Some(k) => k,
+        None => {
+            let err = format!(r#"{{"error":"{}"}}"#, missing_api_key_message());
             let resp = format!(
                 "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n{cors}\r\n",
                 err.len()
@@ -688,8 +719,7 @@ pub(super) async fn handle_chat_request(
         }
     };
 
-    let default_model = std::env::var("AI_GATEWAY_MODEL")
-        .unwrap_or_else(|_| "anthropic/claude-sonnet-4.6".to_string());
+    let default_model = default_chat_model();
 
     let parsed: Value = match serde_json::from_str(body) {
         Ok(v) => v,
@@ -967,4 +997,78 @@ pub(super) async fn handle_chat_request(
     let _ = stream.write_all(finish_ev.as_bytes()).await;
     let done_ev = "data: [DONE]\n\n";
     let _ = stream.write_all(done_ev.as_bytes()).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::EnvGuard;
+
+    const CHAT_ENV: &[&str] = &[
+        "AI_GATEWAY_API_KEY",
+        "AI_GATEWAY_URL",
+        "AI_GATEWAY_MODEL",
+        "ATLASCLOUD_API_KEY",
+        "ATLASCLOUD_API_BASE",
+        "ATLASCLOUD_MODEL",
+    ];
+
+    #[test]
+    fn chat_config_uses_vercel_gateway_by_default() {
+        let env = EnvGuard::new(CHAT_ENV);
+        for name in CHAT_ENV {
+            env.remove(name);
+        }
+
+        assert!(!is_chat_enabled());
+        assert_eq!(configured_chat_api_key(), None);
+        assert_eq!(configured_chat_base_url(), DEFAULT_AI_GATEWAY_URL);
+        assert_eq!(default_chat_model(), DEFAULT_AI_GATEWAY_MODEL);
+    }
+
+    #[test]
+    fn chat_config_accepts_atlascloud_as_openai_compatible_backend() {
+        let env = EnvGuard::new(CHAT_ENV);
+        for name in CHAT_ENV {
+            env.remove(name);
+        }
+        env.set("ATLASCLOUD_API_KEY", "atlas-test-key");
+
+        assert!(is_chat_enabled());
+        assert_eq!(configured_chat_api_key().as_deref(), Some("atlas-test-key"));
+        assert_eq!(configured_chat_base_url(), DEFAULT_ATLASCLOUD_URL);
+        assert_eq!(default_chat_model(), DEFAULT_ATLASCLOUD_MODEL);
+    }
+
+    #[test]
+    fn chat_config_keeps_ai_gateway_env_precedence() {
+        let env = EnvGuard::new(CHAT_ENV);
+        for name in CHAT_ENV {
+            env.remove(name);
+        }
+        env.set("AI_GATEWAY_API_KEY", "gateway-key");
+        env.set("AI_GATEWAY_URL", "https://gateway.example/v1/");
+        env.set("AI_GATEWAY_MODEL", "openai/o3");
+        env.set("ATLASCLOUD_API_KEY", "atlas-key");
+        env.set("ATLASCLOUD_API_BASE", "https://api.atlascloud.ai");
+        env.set("ATLASCLOUD_MODEL", DEFAULT_ATLASCLOUD_MODEL);
+
+        assert_eq!(configured_chat_api_key().as_deref(), Some("gateway-key"));
+        assert_eq!(configured_chat_base_url(), "https://gateway.example/v1");
+        assert_eq!(default_chat_model(), "openai/o3");
+    }
+
+    #[test]
+    fn chat_config_allows_atlascloud_overrides() {
+        let env = EnvGuard::new(CHAT_ENV);
+        for name in CHAT_ENV {
+            env.remove(name);
+        }
+        env.set("ATLASCLOUD_API_KEY", "atlas-test-key");
+        env.set("ATLASCLOUD_API_BASE", "https://proxy.example/atlas/");
+        env.set("ATLASCLOUD_MODEL", "deepseek-ai/deepseek-v4-pro");
+
+        assert_eq!(configured_chat_base_url(), "https://proxy.example/atlas");
+        assert_eq!(default_chat_model(), "deepseek-ai/deepseek-v4-pro");
+    }
 }

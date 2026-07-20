@@ -7,8 +7,6 @@ use crate::color;
 use crate::flags::Flags;
 use crate::native::stream::chat;
 
-const DEFAULT_MODEL: &str = "anthropic/claude-sonnet-4.6";
-
 #[derive(Clone, Copy, PartialEq)]
 enum Verbosity {
     Quiet,
@@ -21,12 +19,13 @@ pub fn run_chat(flags: &Flags, message: Option<String>) {
         if flags.json {
             println!(
                 "{}",
-                json!({"success": false, "error": "AI_GATEWAY_API_KEY not set. Set the AI_GATEWAY_API_KEY environment variable to enable chat."})
+                json!({"success": false, "error": chat::missing_api_key_message()})
             );
         } else {
             eprintln!(
-                "{} AI_GATEWAY_API_KEY not set. Set the AI_GATEWAY_API_KEY environment variable to enable chat.",
-                color::error_indicator()
+                "{} {}",
+                color::error_indicator(),
+                chat::missing_api_key_message()
             );
         }
         exit(1);
@@ -40,10 +39,7 @@ pub fn run_chat(flags: &Flags, message: Option<String>) {
         Verbosity::Normal
     };
 
-    let model = flags
-        .model
-        .clone()
-        .unwrap_or_else(|| DEFAULT_MODEL.to_string());
+    let model = flags.model.clone().unwrap_or_else(chat::default_chat_model);
 
     let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
 
@@ -124,11 +120,8 @@ async fn run_interactive(session: &str, model: &str, verbosity: Verbosity, json_
     let mut openai_messages: Vec<Value> =
         vec![json!({"role": "system", "content": chat::get_system_prompt()})];
 
-    let gateway_url = std::env::var("AI_GATEWAY_URL")
-        .unwrap_or_else(|_| chat::DEFAULT_AI_GATEWAY_URL.to_string())
-        .trim_end_matches('/')
-        .to_string();
-    let api_key = std::env::var("AI_GATEWAY_API_KEY").unwrap_or_default();
+    let gateway_url = chat::configured_chat_base_url();
+    let api_key = chat::configured_chat_api_key().unwrap_or_default();
     let url = format!("{}/v1/chat/completions", gateway_url);
     let client = chat::http_client();
 
@@ -199,20 +192,21 @@ async fn run_chat_turn(
     verbosity: Verbosity,
     json_mode: bool,
 ) -> bool {
-    let gateway_url = std::env::var("AI_GATEWAY_URL")
-        .unwrap_or_else(|_| chat::DEFAULT_AI_GATEWAY_URL.to_string())
-        .trim_end_matches('/')
-        .to_string();
-    let api_key = match std::env::var("AI_GATEWAY_API_KEY") {
-        Ok(k) => k,
-        Err(_) => {
+    let gateway_url = chat::configured_chat_base_url();
+    let api_key = match chat::configured_chat_api_key() {
+        Some(k) => k,
+        None => {
             if json_mode {
                 println!(
                     "{}",
-                    json!({"success": false, "error": "AI_GATEWAY_API_KEY not set"})
+                    json!({"success": false, "error": chat::missing_api_key_message()})
                 );
             } else {
-                eprintln!("{} AI_GATEWAY_API_KEY not set", color::error_indicator());
+                eprintln!(
+                    "{} {}",
+                    color::error_indicator(),
+                    chat::missing_api_key_message()
+                );
             }
             return false;
         }
