@@ -414,6 +414,35 @@ EOF
 
 **Authentication expires mid-workflow** Use `--session <id> --restore` so your session survives browser restarts. Check `agent-browser session info --json` if restore fails. See [references/session-management.md](references/session-management.md) and [references/authentication.md](references/authentication.md).
 
+**Private network host fails with `ERR_ADDRESS_UNREACHABLE` on macOS** If `agent-browser open <url>` fails for an intranet or private-IP host, but terminal tools or the user's normal desktop Chrome can reach the same URL, do not report a product login, GitLab, or resource authorization failure. Treat it as a browser access mismatch: Chrome for Testing (`com.google.chrome.for.testing`) may not have the same Local Network/private-route permission as the user's desktop Chrome.
+
+Verify the split first:
+
+```bash
+dig +short <host>
+route -n get <private-ip>
+nc -vz -G 5 <host> 443
+curl -L -sS -o /tmp/page.html -w '%{http_code} %{url_effective} %{content_type}\n' <url>
+agent-browser --session private-net-check open <url>
+agent-browser --session private-net-check --headed open <url>
+```
+
+If terminal checks pass and Chrome for Testing still fails, use a visible, task-scoped desktop Chrome with a CDP port, approve any macOS "Local Network" prompt, then attach agent-browser to that browser:
+
+```bash
+open -na "/Applications/Google Chrome.app" --args \
+  --user-data-dir=/tmp/agent-browser-private-net \
+  --remote-debugging-port=9222 \
+  --no-first-run \
+  --no-default-browser-check \
+  --no-proxy-server \
+  "<url>"
+
+agent-browser --cdp 9222 snapshot -i
+```
+
+Use the attached browser for DOM, screenshot, login, and interaction evidence. Only call access blocked after the terminal checks fail too, or after a visible CDP-connected Chrome also cannot load the URL with the OS prompt handled.
+
 ## Global flags worth knowing
 
 ```bash
