@@ -558,7 +558,23 @@ fn save_screenshot(
     output_dir: Option<&str>,
 ) -> Result<String, String> {
     let save_path = match explicit_path {
-        Some(path) => path.to_string(),
+        Some(path) => {
+            // An explicit output path was supplied. Its parent directory must
+            // already exist: we do not create it, and we must never silently
+            // redirect to the tmp screenshot dir. Falling back there would
+            // report a false success for an agent that relies on the returned
+            // path as evidence (see issue #1534). The tmp fallback below is
+            // reserved for the no-path case.
+            if let Some(parent) = std::path::Path::new(path).parent() {
+                if !parent.as_os_str().is_empty() && !parent.exists() {
+                    return Err(format!(
+                        "Screenshot path parent directory does not exist: {}",
+                        parent.display()
+                    ));
+                }
+            }
+            path.to_string()
+        }
         None => {
             let dir = match output_dir {
                 Some(d) => PathBuf::from(d),
@@ -600,6 +616,54 @@ fn get_screenshot_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn unique_tmp_dir(tag: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "agent-browser-test-{}-{}-{}",
+            tag,
+            std::process::id(),
+            nanos
+        ))
+    }
+
+    #[test]
+    fn save_screenshot_errors_when_explicit_parent_dir_missing() {
+        // An explicit path whose parent directory does not exist must error
+        // rather than silently redirecting to the tmp dir (issue #1534).
+        let base = unique_tmp_dir("missing-parent");
+        let target = base.join("does-not-exist").join("shot.png");
+        let target_str = target.to_string_lossy().to_string();
+
+        let err = save_screenshot("aGVsbG8=", Some(&target_str), "png", None)
+            .expect_err("expected an error when the explicit path parent dir is missing");
+        assert!(
+            err.contains("parent directory does not exist"),
+            "unexpected error message: {err}"
+        );
+        // The tmp fallback must not have been used.
+        assert!(!get_screenshot_dir().join("shot.png").exists());
+    }
+
+    #[test]
+    fn save_screenshot_writes_to_explicit_path_when_parent_exists() {
+        // When the parent directory exists, the file is written exactly there
+        // and the returned path matches the requested path (no tmp fallback).
+        let dir = unique_tmp_dir("explicit-ok");
+        std::fs::create_dir_all(&dir).expect("failed to create test dir");
+        let target = dir.join("shot.png");
+        let target_str = target.to_string_lossy().to_string();
+
+        let out = save_screenshot("aGVsbG8=", Some(&target_str), "png", None)
+            .expect("explicit path with an existing parent dir should succeed");
+        assert_eq!(out, target_str);
+        assert!(target.exists());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn filters_annotations_to_target_overlap() {
