@@ -704,6 +704,25 @@ fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<Chro
         }
     };
 
+    // Drain Chrome's stderr forever on a detached thread. The pipe is only
+    // consumed by the stderr-scrape FALLBACK above; on the happy path
+    // (DevToolsActivePort found) it was previously never read and never
+    // closed, so once Chrome had logged ~64KB the kernel pipe buffer filled
+    // and Chrome's next stderr write BLOCKED — freezing the entire browser
+    // (observed on a long-lived macOS session: CrBrowserMain stuck in
+    // write(2) for hours, UI beachball + CDP unresponsive, recurring every
+    // 1-2 days). On the fallback path stderr was already taken and its
+    // reader dropped (read end closed → Chrome's writes fail fast with
+    // EPIPE, which Chrome tolerates), so take() returning None is fine.
+    if let Some(stderr) = child.stderr.take() {
+        let _ = std::thread::Builder::new()
+            .name("chrome-stderr-drain".into())
+            .spawn(move || {
+                let mut stderr = stderr;
+                let _ = std::io::copy(&mut stderr, &mut std::io::sink());
+            });
+    }
+
     #[cfg(unix)]
     let pgid = {
         let pid = child.id() as i32;
